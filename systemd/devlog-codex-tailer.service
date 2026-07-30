@@ -1,0 +1,7 @@
+[Unit]
+Description=Export new Codex session records to local devlog
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/devlog-codex-tailer

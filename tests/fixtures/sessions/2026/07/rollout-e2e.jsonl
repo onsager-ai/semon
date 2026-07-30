@@ -1,0 +1,3 @@
+{"timestamp":"2026-07-31T00:00:00Z","type":"session_meta","payload":{"session_id":"devlog-e2e","cwd":"/workspace/devlog","git":{"repository_url":"git@github.com:onsager-ai/devlog.git"}}}
+{"timestamp":"2026-07-31T00:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"devlog end-to-end test"}}
+{"timestamp":"2026-07-31T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":12,"output_tokens":5,"reasoning_output_tokens":3}}}}

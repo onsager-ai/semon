@@ -1,0 +1,11 @@
+[Unit]
+Description=Export Codex telemetry to devlog every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

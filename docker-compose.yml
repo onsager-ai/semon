@@ -1,0 +1,76 @@
+name: devlog
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8.11.66-alpine
+    environment:
+      CLICKHOUSE_DB: otel
+      CLICKHOUSE_USER: devlog
+      CLICKHOUSE_PASSWORD: devlog-local
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "clickhouse-client",
+          "--user",
+          "devlog",
+          "--password",
+          "devlog-local",
+          "--query",
+          "SELECT 1",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.153.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - otelcol-data:/var/lib/otelcol
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      otel-storage-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  otel-storage-init:
+    image: clickhouse/clickhouse-server:25.8.11.66-alpine
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 10001:10001 /var/lib/otelcol"]
+    volumes:
+      - otelcol-data:/var/lib/otelcol
+    restart: "no"
+
+  schema-init:
+    image: clickhouse/clickhouse-server:25.8.11.66-alpine
+    entrypoint: ["/bin/sh", "/schema/install.sh"]
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: devlog
+      CLICKHOUSE_PASSWORD: devlog-local
+    volumes:
+      - ./clickhouse:/schema:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    restart: "no"
+
+volumes:
+  clickhouse-data:
+  otelcol-data:
