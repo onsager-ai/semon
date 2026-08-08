@@ -1,0 +1,65 @@
+# Guards crates/semon-store, the content-addressed two-region trace store.
+# Its correctness claim -- "two captures of the same semantics converge on
+# one identity" -- has no protection besides this workflow: there is no other
+# CI in this repository. Runs fmt, clippy, and the test suite on every pull
+# request and on every push to main.
+name: Rust CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # dtolnay/rust-toolchain is used per its documented convention: the ref
+      # itself ("stable") selects the toolchain channel, so it is left
+      # unpinned to a commit SHA on purpose -- pinning would freeze today's
+      # stable Rust release instead of tracking the current one. Stable
+      # already supports edition 2024 (needs Rust 1.85+; current stable is
+      # 1.95.x), so no nightly toolchain is needed.
+      - name: Install Rust toolchain
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # rusqlite is vendored with the "bundled" feature, which compiles
+      # SQLite from C source on every cold build. Cache the registry (crate
+      # downloads) and target/ (build artifacts, including that compiled
+      # SQLite) keyed on Cargo.lock so an unchanged dependency set restores
+      # instead of rebuilding from scratch. target/ is also compiler-version
+      # specific, so the key includes the toolchain's cachekey output --
+      # otherwise stable rolling to a new release could restore a target/
+      # built by the previous compiler. restore-keys keeps that toolchain
+      # component (dropping only the Cargo.lock hash) so a fallback restore
+      # still matches the current compiler instead of an older one.
+      - name: Cache cargo registry and target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --locked

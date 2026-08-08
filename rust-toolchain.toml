@@ -1,0 +1,8 @@
+# Pins local `cargo`/`rustup` invocations to the same channel CI uses
+# (dtolnay/rust-toolchain@stable), so a contributor's toolchain and CI's
+# never quietly diverge. The workspace declares edition = "2024", which
+# needs Rust 1.85+; "stable" always clears that bar without hard-pinning an
+# exact version that would need periodic bumping.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
