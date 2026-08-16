@@ -108,10 +108,9 @@ fn parse_iso_timestamp(input: &str) -> Option<i64> {
     let zone = &remainder[zone_start..];
     let fractional_ns = if fraction.is_empty() {
         0
-    } else if let Some(digits) = fraction.strip_prefix(['.', ',']) {
-        fraction_to_ns(digits)?
     } else {
-        return None;
+        let digits = fraction.strip_prefix(['.', ','])?;
+        fraction_to_ns(digits)?
     };
     let offset_seconds = parse_offset(zone)?;
     let day_seconds = i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second);
@@ -191,6 +190,16 @@ fn parse_i64(value: &str) -> Option<i64> {
 
 fn parse_u32(value: &str) -> Option<u32> {
     value.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_iso_timestamp;
+
+    #[test]
+    fn rejects_fraction_without_decimal_separator() {
+        assert_eq!(parse_iso_timestamp("2026-07-31T01:02:03xZ"), None);
+    }
 }
 
 /// Renders a JSON value as compact UTF-8 text, preserving strings directly.
