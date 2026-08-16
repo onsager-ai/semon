@@ -1,0 +1,12 @@
+[package]
+name = "semon-codex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Incremental Codex session capture adapter for Semon."
+
+[dependencies]
+semon-store = { path = "../semon-store" }
+serde_json.workspace = true
+thiserror.workspace = true

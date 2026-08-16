@@ -7,8 +7,14 @@ bin_dir=${XDG_BIN_HOME:-"$HOME/.local/bin"}
 unit_dir=${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user
 
 install -d "$bin_dir" "$unit_dir"
-install -m 0755 "$project_dir/scripts/codex_tailer.py" \
-  "$bin_dir/devlog-codex-tailer"
+(cd "$project_dir" && cargo build --release --locked --bin semon-codex)
+target_dir=${CARGO_TARGET_DIR:-"$project_dir/target"}
+case "$target_dir" in
+  /*) ;;
+  *) target_dir="$project_dir/$target_dir" ;;
+esac
+install -m 0755 "$target_dir/release/semon-codex" \
+  "$bin_dir/semon-codex"
 install -m 0644 "$project_dir/systemd/devlog-codex-tailer.service" \
   "$unit_dir/devlog-codex-tailer.service"
 install -m 0644 "$project_dir/systemd/devlog-codex-tailer.timer" \

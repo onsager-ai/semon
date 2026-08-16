@@ -1,5 +1,5 @@
 [Unit]
-Description=Export Codex telemetry to devlog every minute
+Description=Capture Codex session records into Semon every minute
 
 [Timer]
 OnBootSec=30s
