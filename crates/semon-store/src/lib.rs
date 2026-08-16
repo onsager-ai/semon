@@ -51,11 +51,13 @@
 
 mod canonical;
 mod model;
+mod replication;
 mod store;
 
 pub use model::{
     CanonicalTrace, CaptureResult, NewRawCarrierRecord, RawCarrierRecord, SemanticCore, TraceId,
 };
+pub use replication::{REPLICATION_ENDPOINT_ENV, ReplicationError, ShipReport, ship};
 pub use store::{StoreError, TraceStore};
 
 #[cfg(test)]

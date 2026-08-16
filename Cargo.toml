@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/semon-store"]
+members = ["crates/semon-codex", "crates/semon-store"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 hex = "0.4.3"
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 serde_json_canonicalizer = "0.3.2"
 sha2 = "0.10.9"
