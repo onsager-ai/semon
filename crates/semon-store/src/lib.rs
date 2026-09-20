@@ -1,18 +1,34 @@
 //! A local, content-addressed trace store with a structural forensic boundary.
 //!
-//! The database has two storage regions:
+//! The database has three storage regions:
 //!
 //! - `canonical_traces` contains only transferable semantic JSON. Ordinary
 //!   [`TraceStore::fetch_trace`] and [`TraceStore::list_traces`] reads return
 //!   [`CanonicalTrace`], a type with no raw-record field.
+//! - `occurrences` records, for each time a trace was observed, where and
+//!   when: carrier, session, a deterministic per-session sequence, timestamp,
+//!   repository attribution (with its basis), a parent-occurrence edge, and
+//!   who or what authored it. It carries no foreign key to
+//!   `raw_carrier_records` and no read path here reconstructs it from raw, so
+//!   it survives deletion of the forensic region intact. [`TraceStore::log`]
+//!   is the ordinary read over this region, joined to `canonical_traces`.
 //! - `raw_carrier_records` contains opaque carrier bytes and minimal carrier
 //!   provenance. They are available only through the deliberately separate
 //!   [`TraceStore::fetch_raw_carrier_records`] call. Raw bytes and carrier names
 //!   are never inputs to identity or ordinary retrieval.
 //!
-//! A capture inserts into both regions in one SQLite transaction. Repeated
-//! captures of the same semantics retain one canonical row and append one raw
-//! row per successful capture, including byte-identical captures.
+//! See `docs/design/trace-identity-and-occurrences.md` for why identity stays
+//! content-addressed over `canonical_traces` alone while provenance and order
+//! live in the separate `occurrences` region.
+//!
+//! A capture inserts into all three regions in one SQLite transaction.
+//! Repeated captures of the same semantics retain one canonical row and
+//! append one raw row per successful capture, including byte-identical
+//! captures. The occurrence write is instead an UPSERT keyed on
+//! `(carrier, session, sequence)`, because an occurrence is one row per time a
+//! trace was *seen*, so "already recorded" cannot be expressed by content —
+//! two occurrences of one trace are the region's entire purpose, not a
+//! duplicate.
 //!
 //! # Canonical semantic form
 //!
@@ -51,12 +67,15 @@
 
 mod canonical;
 mod model;
+mod render;
 mod replication;
 mod store;
 
 pub use model::{
-    CanonicalTrace, CaptureResult, NewRawCarrierRecord, RawCarrierRecord, SemanticCore, TraceId,
+    AuthoredBy, CanonicalTrace, CaptureResult, LogFilter, NewOccurrence, NewRawCarrierRecord,
+    OccurrenceRecord, RawCarrierRecord, RepoSource, SemanticCore, TraceId,
 };
+pub use render::{day_bounds_ns, format_timestamp_ns, render_occurrence_line};
 pub use replication::{REPLICATION_ENDPOINT_ENV, ReplicationError, ShipReport, ship};
 pub use store::{StoreError, TraceStore};
 

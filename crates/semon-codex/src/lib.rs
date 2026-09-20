@@ -16,13 +16,17 @@ use std::{
     fs::{self, File},
     io::{self, BufRead, BufReader, Seek},
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 pub use normalize::{
     NormalizeContext, history_event, infer_success, json_text, message_text, normalize_record,
     parse_timestamp, repo_from_cwd, repo_from_url, token_usage,
 };
-use semon_store::{CaptureResult, NewRawCarrierRecord, SemanticCore, StoreError, TraceStore};
+use semon_store::{
+    AuthoredBy, CaptureResult, NewOccurrence, NewRawCarrierRecord, RepoSource, SemanticCore,
+    StoreError, TraceStore,
+};
 use serde_json::{Value, json};
 pub use state::{CursorState, load_state, save_state};
 use thiserror::Error;
@@ -164,6 +168,14 @@ pub fn process_file(
         saved = state::FileCursor::default();
     }
     let mut context = saved.context();
+    // Local, per-batch-committed mirrors of the occurrence derivation state
+    // that lives in `saved` between calls (see `FileCursor::next_line_ordinal`
+    // and `FileCursor::last_projected_sequence`). Mirrored the same way
+    // `context` is: read from `saved` once, threaded through every line in
+    // every batch, and written back into `saved` only at each batch boundary
+    // alongside `saved.update_context(&context)`.
+    let mut next_line_ordinal = saved.next_line_ordinal;
+    let mut last_projected_sequence = saved.last_projected_sequence.clone();
     let mut consumed = 0;
     let history_source = same_path(path, options.history_path)?;
     // Whether this file carries the `item_completed` item stream decides
@@ -204,6 +216,14 @@ pub fn process_file(
             pending_bytes += line.len();
             batch_count += 1;
 
+            // `sequence` is the zero-based ordinal of this source line within
+            // its session file — never a write-time or autoincrement
+            // counter — so a re-read of the same bytes always regenerates
+            // the same value. It is assigned to every complete line, whether
+            // or not that line goes on to project an occurrence.
+            let this_line_ordinal = next_line_ordinal;
+            next_line_ordinal += 1;
+
             match serde_json::from_slice::<Value>(&line) {
                 Ok(record) if record.is_object() => {
                     let event = if history_source {
@@ -211,7 +231,42 @@ pub fn process_file(
                     } else {
                         normalize_record(&record, &mut context, options.repo_override)
                     };
-                    capture_event(store, &event, &line)?;
+                    let session = event
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    let repo = event
+                        .get("repo")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    let repo_source = event
+                        .get("repo_source")
+                        .and_then(Value::as_str)
+                        .and_then(|value| RepoSource::from_str(value).ok())
+                        .unwrap_or(RepoSource::None);
+                    let timestamp = event.get("ts").and_then(Value::as_i64).unwrap_or(0);
+                    // The previous *projected* record in this session, never
+                    // a locally tracked "last row written" value: this map
+                    // is itself fully re-derivable by replaying the file
+                    // from its start (see `FileCursor::last_projected_sequence`).
+                    let parent_sequence = last_projected_sequence.get(&session).copied();
+                    let occurrence = NewOccurrence {
+                        session: &session,
+                        sequence: this_line_ordinal as i64,
+                        timestamp,
+                        repo: &repo,
+                        repo_source,
+                        parent_sequence,
+                        agent: None,
+                        authored_by: authored_by_for_kind(
+                            event.get("kind").and_then(Value::as_str).unwrap_or(""),
+                        ),
+                    };
+                    if capture_event(store, &event, &line, occurrence)?.is_some() {
+                        last_projected_sequence.insert(session, this_line_ordinal as i64);
+                    }
                 }
                 Ok(_) => {
                     // Python classified a non-object JSON value as a parse error.
@@ -229,8 +284,10 @@ pub fn process_file(
 
         saved.offset = batch_end;
         saved.update_context(&context);
+        saved.next_line_ordinal = next_line_ordinal;
+        saved.last_projected_sequence = last_projected_sequence.clone();
         if !context.session_id().is_empty() && !context.repo().is_empty() {
-            state.remember_repo(context.session_id(), context.repo());
+            state.remember_repo(context.session_id(), context.repo(), context.repo_source());
         }
         state.put_file(key.clone(), saved.clone());
         save_state(options.state_path, state)?;
@@ -253,6 +310,7 @@ pub fn capture_event(
     store: &mut TraceStore,
     normalized: &Value,
     original_record: &[u8],
+    occurrence: NewOccurrence<'_>,
 ) -> Result<Option<CaptureResult>, AdapterError> {
     let Some(core) = semantic_core(normalized)? else {
         return Ok(None);
@@ -260,6 +318,7 @@ pub fn capture_event(
     Ok(Some(store.capture(
         &core,
         NewRawCarrierRecord::new(CARRIER, original_record),
+        occurrence,
     )?))
 }
 
@@ -273,6 +332,26 @@ fn semantic_core(event: &Value) -> Result<Option<SemanticCore>, StoreError> {
         "item_command_execution" => command_execution_core(event),
         "item_file_change" => file_change_core(event),
         _ => Ok(None),
+    }
+}
+
+/// Maps a normalized event's `kind` to who or what authored it, per the
+/// occurrence region's `authored_by` vocabulary. Only `kind`s that
+/// [`semantic_core`] actually projects matter here; anything else is
+/// classified but discarded along with the rest of the occurrence facts
+/// when [`semantic_core`] returns `None`.
+///
+/// `agent` is always `None` for Codex, which has no subagent concept — the
+/// column exists for a future carrier (e.g. the Claude adapter) that does.
+fn authored_by_for_kind(kind: &str) -> AuthoredBy {
+    match kind {
+        "item_user_message" | "user_prompt" | "history_entry" => AuthoredBy::Human,
+        "item_agent_message"
+        | "assistant_response"
+        | "turn_complete"
+        | "item_command_execution"
+        | "item_file_change" => AuthoredBy::Agent,
+        _ => AuthoredBy::Unknown,
     }
 }
 
