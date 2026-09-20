@@ -301,6 +301,235 @@ fn checked_in_fixture_captures_canonical_and_raw_regions() {
 }
 
 #[test]
+fn item_stream_projects_actions_and_excludes_harness_boilerplate() {
+    let root = TestDir::new();
+    let path = write_session(
+        root.path(),
+        &[
+            json!({
+                "timestamp": "2026-09-19T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "session_id": "item-stream-session",
+                    "cwd": "/work/repo",
+                    "git": {"repository_url": "git@github.com:onsager-ai/repo.git"}
+                }
+            }),
+            // Harness-injected framing that Codex itself labels `developer`.
+            json!({
+                "timestamp": "2026-09-19T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "<skills_instructions>...</skills_instructions>"}]
+                }
+            }),
+            // A harness injection that exists ONLY in the legacy mirror
+            // (role `user`, no item-stream counterpart at all) — this is
+            // the shape of the real `<recommended_plugins>` contamination.
+            json!({
+                "timestamp": "2026-09-19T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "<recommended_plugins>...</recommended_plugins>"}]
+                }
+            }),
+            // The real user turn, mirrored in both the legacy channel and
+            // the item stream, in that file order (as Codex emits it).
+            json!({
+                "timestamp": "2026-09-19T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "please fix the bug"}]
+                }
+            }),
+            json!({
+                "timestamp": "2026-09-19T00:00:04Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "UserMessage",
+                        "content": [{"type": "text", "text": "please fix the bug"}]
+                    }
+                }
+            }),
+            json!({
+                "timestamp": "2026-09-19T00:00:05Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "CommandExecution",
+                        "command": ["/bin/zsh", "-lc", "sed -n '1,20p' /work/repo/src/main.rs"],
+                        "cwd": "file:///work/repo",
+                        "parsed_cmd": [
+                            {"type": "read", "cmd": "sed -n '1,20p' src/main.rs", "name": "main.rs", "path": "src/main.rs"}
+                        ],
+                        "status": "completed",
+                        "stdout": "fn main() {}\n",
+                        "stderr": "",
+                        "exit_code": 0
+                    }
+                }
+            }),
+            json!({
+                "timestamp": "2026-09-19T00:00:06Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "FileChange",
+                        "changes": {
+                            "/work/repo/src/main.rs": {"type": "update", "content": "fn main() { fixed(); }\n"},
+                            "/tmp/scratch-note.txt": {"type": "add", "content": "scratch\n"}
+                        },
+                        "status": "completed",
+                        "stdout": "",
+                        "stderr": ""
+                    }
+                }
+            }),
+            json!({
+                "timestamp": "2026-09-19T00:00:07Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {"type": "Reasoning", "summary_text": [], "raw_content": []}
+                }
+            }),
+            json!({
+                "timestamp": "2026-09-19T00:00:08Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "AgentMessage",
+                        "content": [{"type": "Text", "text": "fixed it"}],
+                        "phase": "commentary"
+                    }
+                }
+            }),
+            json!({
+                "timestamp": "2026-09-19T00:00:09Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "fixed it"}]
+                }
+            }),
+        ],
+    );
+    let history = root.path().join("history.jsonl");
+    let state_path = root.path().join("state.json");
+    let mut state = load_state(&state_path).unwrap();
+    let mut store = TraceStore::open_in_memory().unwrap();
+
+    let consumed = process_file(
+        &path,
+        &mut state,
+        &mut store,
+        &options(&state_path, &history),
+    )
+    .unwrap();
+    assert_eq!(consumed, 10, "every complete record advances the cursor");
+
+    // Re-running from the saved cursor consumes nothing further.
+    let mut reloaded = load_state(&state_path).unwrap();
+    assert_eq!(
+        process_file(
+            &path,
+            &mut reloaded,
+            &mut store,
+            &options(&state_path, &history),
+        )
+        .unwrap(),
+        0
+    );
+
+    let traces = store
+        .list_traces(None, 10)
+        .unwrap()
+        .into_iter()
+        .map(|trace| trace.semantic_core().value().clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        traces.len(),
+        4,
+        "expected exactly intent + outcome + 2 action traces, got {traces:?}"
+    );
+
+    // No harness boilerplate of any kind projected: not the `developer`-role
+    // framing, and not the `user`-role injection that exists only in the
+    // legacy mirror once this file is known to carry the item stream.
+    for boilerplate in ["skills_instructions", "recommended_plugins"] {
+        assert!(
+            !traces
+                .iter()
+                .any(|trace| trace.to_string().contains(boilerplate)),
+            "found {boilerplate} in a captured trace"
+        );
+    }
+
+    // The real turn is captured exactly once (from the item stream), not
+    // twice (item stream + legacy mirror).
+    let intent_count = traces
+        .iter()
+        .filter(|trace| trace["kind"] == "intent" && trace["content"] == "please fix the bug")
+        .count();
+    assert_eq!(intent_count, 1);
+    let outcome_count = traces
+        .iter()
+        .filter(|trace| trace["kind"] == "outcome" && trace["content"] == "fixed it")
+        .count();
+    assert_eq!(outcome_count, 1);
+
+    // CommandExecution and FileChange both project `action` traces, with
+    // paths under cwd rewritten relative and paths outside cwd redacted.
+    assert!(traces.contains(&json!({
+        "kind": "action",
+        "action": "read",
+        "path": "src/main.rs",
+        "exit_code": 0,
+    })));
+    assert!(traces.contains(&json!({
+        "kind": "action",
+        "action": "file_change",
+        "changes": [
+            {"path": "src/main.rs", "change": "modify"},
+            {"path": "<external>", "change": "add"},
+        ],
+    })));
+
+    // No absolute machine path, raw command string, or file content ever
+    // reached the semantic region.
+    let canonical_text = traces
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for incidental in [
+        "/work/repo",
+        "/tmp/scratch-note.txt",
+        "sed -n",
+        "fn main",
+        "scratch\\n",
+    ] {
+        assert!(
+            !canonical_text.contains(incidental),
+            "found {incidental} in captured traces"
+        );
+    }
+}
+
+#[test]
 fn helper_variants_and_call_correlation_match_python_behavior() {
     assert_eq!(
         parse_timestamp(&json!("2026-07-31T01:02:03Z")),

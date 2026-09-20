@@ -166,6 +166,21 @@ pub fn process_file(
     let mut context = saved.context();
     let mut consumed = 0;
     let history_source = same_path(path, options.history_path)?;
+    // Whether this file carries the `item_completed` item stream decides
+    // whether the legacy `response_item`/`message` mirror still projects
+    // (see `NormalizeContext::has_item_stream`). That decision has to be
+    // known for the *whole* file before any of its lines are normalized:
+    // Codex writes a harness-injected mirror message (role `user`, no item
+    // stream counterpart at all, e.g. `<recommended_plugins>`) before the
+    // first `item_completed` line of the same session, so a flag latched
+    // only once that first line is reached would miss it. A history file
+    // never carries this stream and is skipped; once latched true the flag
+    // is never rechecked, and once a file is fully consumed there is no new
+    // line left for the flag to change the outcome of, so neither case pays
+    // for a rescan.
+    if !history_source && !context.has_item_stream && saved.offset < size {
+        context.has_item_stream = file_uses_item_stream(path)?;
+    }
     let mut reader = BufReader::new(File::open(path)?);
     reader.seek(io::SeekFrom::Start(saved.offset))?;
 
@@ -250,11 +265,22 @@ pub fn capture_event(
 
 fn semantic_core(event: &Value) -> Result<Option<SemanticCore>, StoreError> {
     let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
-    let (semantic_kind, field) = match kind {
-        "user_prompt" | "history_entry" => ("intent", "prompt"),
-        "assistant_response" | "turn_complete" => ("outcome", "response"),
-        _ => return Ok(None),
-    };
+    match kind {
+        "user_prompt" | "history_entry" => text_core("intent", event, "prompt"),
+        "assistant_response" | "turn_complete" => text_core("outcome", event, "response"),
+        "item_user_message" => text_core("intent", event, "content"),
+        "item_agent_message" => text_core("outcome", event, "content"),
+        "item_command_execution" => command_execution_core(event),
+        "item_file_change" => file_change_core(event),
+        _ => Ok(None),
+    }
+}
+
+fn text_core(
+    semantic_kind: &str,
+    event: &Value,
+    field: &str,
+) -> Result<Option<SemanticCore>, StoreError> {
     let content = event.get(field).and_then(Value::as_str).unwrap_or("");
     if content.is_empty() {
         return Ok(None);
@@ -264,6 +290,79 @@ fn semantic_core(event: &Value) -> Result<Option<SemanticCore>, StoreError> {
         "content": content,
     }))
     .map(Some)
+}
+
+// `action` is a new third `kind` value alongside `intent` and `outcome`. It
+// needs no `semon-store` change: the semantic core is unconstrained JSON.
+//
+// Unlike the text kinds above, an action core is captured even when it is
+// near-contentless (an unparsed command projects `action: "unknown"`,
+// `path: null`). That cost — roughly half of observed commands, per issue
+// #9's census — was accepted deliberately: the alternative is silently
+// dropping half of all command activity.
+fn command_execution_core(event: &Value) -> Result<Option<SemanticCore>, StoreError> {
+    let action = event
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let path = event.get("path").cloned().unwrap_or(Value::Null);
+    let exit_code = event.get("exit_code").and_then(Value::as_i64).unwrap_or(-1);
+    SemanticCore::from_value(json!({
+        "kind": "action",
+        "action": action,
+        "path": path,
+        "exit_code": exit_code,
+    }))
+    .map(Some)
+}
+
+fn file_change_core(event: &Value) -> Result<Option<SemanticCore>, StoreError> {
+    let changes = event
+        .get("changes")
+        .cloned()
+        .unwrap_or(Value::Array(Vec::new()));
+    if changes.as_array().is_none_or(Vec::is_empty) {
+        return Ok(None);
+    }
+    SemanticCore::from_value(json!({
+        "kind": "action",
+        "action": "file_change",
+        "changes": changes,
+    }))
+    .map(Some)
+}
+
+/// Scans a session file from its start for the first `event_msg`/
+/// `item_completed` record, without holding more than one line in memory.
+///
+/// This intentionally reads independently of any saved cursor offset: the
+/// question is whether the *file* carries the item stream at all, not
+/// whether the unconsumed remainder does.
+fn file_uses_item_stream(path: &Path) -> Result<bool, AdapterError> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(false);
+        }
+        let Ok(record) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        let Some(object) = record.as_object() else {
+            continue;
+        };
+        let is_item_completed = object.get("type").and_then(Value::as_str) == Some("event_msg")
+            && object
+                .get("payload")
+                .and_then(Value::as_object)
+                .and_then(|payload| payload.get("type"))
+                .and_then(Value::as_str)
+                == Some("item_completed");
+        if is_item_completed {
+            return Ok(true);
+        }
+    }
 }
 
 fn same_path(first: &Path, second: &Path) -> Result<bool, io::Error> {

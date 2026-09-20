@@ -111,6 +111,9 @@ pub(crate) struct FileCursor {
     repo: String,
     cwd: String,
     calls: Map<String, Value>,
+    /// Latched once this file is seen to carry the `item_completed` item
+    /// stream; never reset back to `false` (see `NormalizeContext`).
+    has_item_stream: bool,
 }
 
 impl FileCursor {
@@ -120,6 +123,7 @@ impl FileCursor {
             self.repo.clone(),
             self.cwd.clone(),
             self.calls.clone(),
+            self.has_item_stream,
         )
     }
 
@@ -128,6 +132,7 @@ impl FileCursor {
         self.repo.clone_from(&context.repo);
         self.cwd.clone_from(&context.cwd);
         self.calls.clone_from(&context.calls);
+        self.has_item_stream = context.has_item_stream;
     }
 
     fn from_value(value: &Value) -> Result<Self, AdapterError> {
@@ -147,12 +152,17 @@ impl FileCursor {
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        let has_item_stream = object
+            .get("has_item_stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         Ok(Self {
             offset,
             session_id: string("session_id"),
             repo: string("repo"),
             cwd: string("cwd"),
             calls,
+            has_item_stream,
         })
     }
 
@@ -160,6 +170,7 @@ impl FileCursor {
         Value::Object(Map::from_iter([
             ("calls".into(), sort_json(Value::Object(self.calls.clone()))),
             ("cwd".into(), Value::String(self.cwd.clone())),
+            ("has_item_stream".into(), Value::Bool(self.has_item_stream)),
             ("offset".into(), Value::Number(self.offset.into())),
             ("repo".into(), Value::String(self.repo.clone())),
             ("session_id".into(), Value::String(self.session_id.clone())),
