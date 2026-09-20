@@ -28,7 +28,7 @@ Codex/Claude record parsers survive, re-scoped as carrier adapters.**
 | **OPEN** | **Cue matching mechanism.** Lexical full-text may suffice for v1; semantic retrieval needs embeddings and a model dependency. Undecided, and it materially changes the dependency surface. |
 | **OPEN** | **Implementation language.** Python keeps the surviving parsers as they are; Rust matches the rest of the portfolio and yields one distributable binary. Depends on whether Semon ships to others or stays local tooling. |
 | **OPEN** | **Whether reactivation writes or proposes.** Injecting memory into a live carrier session versus emitting a document its operator applies. Materially different blast radius. |
-| **OPEN** | **Trace granularity.** One trace per session, per task, or per decision. Existing data is session-shaped; the useful unit is probably smaller, but there is no evidence yet. |
+| **DECIDED** | **Trace granularity — closed 2026-09-20.** Identity does not range over session, time, repository or order; those are *occurrence* facts, recorded in a separate ordered region. A trace stays content-addressed over its semantic core alone, and the log renders by joining occurrences to traces. See [trace-identity-and-occurrences.md](trace-identity-and-occurrences.md). |
 | **NOT** | Not an observability or cost-analytics product. Token counts, latency, and spend are carrier-incidental. |
 | **NOT** | Not a memory store *about users*. That is Mem0, Letta, Zep, and Engram's problem, and taking it would force a user entity into the schema. |
 | **NOT** | Not a distributed or hosted service in v1. Local-first, single-file store, no daemon. |
