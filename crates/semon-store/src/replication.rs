@@ -177,10 +177,21 @@ mod tests {
             "content": "synthetic replication test"
         }))
         .unwrap();
+        let occurrence = |session: &'static str| crate::NewOccurrence {
+            session,
+            sequence: 0,
+            timestamp: 0,
+            repo: "",
+            repo_source: crate::RepoSource::None,
+            parent_sequence: None,
+            agent: None,
+            authored_by: crate::AuthoredBy::Unknown,
+        };
         let trace_id = store
             .capture(
                 &semantic,
                 NewRawCarrierRecord::new("synthetic-carrier", b"forensic-one"),
+                occurrence("session-a"),
             )
             .unwrap()
             .trace_id()
@@ -189,6 +200,7 @@ mod tests {
             .capture(
                 &semantic,
                 NewRawCarrierRecord::new("different-carrier", b"forensic-two"),
+                occurrence("session-b"),
             )
             .unwrap();
 

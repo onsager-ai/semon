@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use semon_store::TraceStore;
+use semon_store::{AuthoredBy, LogFilter, RepoSource, TraceStore};
 use serde_json::{Value, json};
 
 use super::*;
@@ -71,6 +71,40 @@ fn load_state_returns_empty_state_when_file_is_absent() {
     let state = load_state(&root.path().join("missing.json")).unwrap();
 
     assert_eq!(state, CursorState::default());
+}
+
+/// An existing installation upgraded to this build still has its old
+/// (version-1) cursor file on disk. That must reset to a fresh cursor
+/// rather than error: the occurrence upsert on `(carrier, session,
+/// sequence)` and content-addressed traces make a from-scratch replay safe,
+/// so this is a one-time re-read cost, not a correctness risk.
+#[test]
+fn load_state_resets_to_a_fresh_cursor_for_an_older_version() {
+    let root = TestDir::new();
+    let path = root.path().join("state.json");
+    fs::write(
+        &path,
+        br#"{"version":1,"files":{"some-file":{"offset":123}},"session_repos":{}}"#,
+    )
+    .unwrap();
+
+    let state = load_state(&path).unwrap();
+
+    assert_eq!(state, CursorState::default());
+}
+
+/// The asymmetric case: a version *newer* than this build understands must
+/// still be a hard error, because a future build may have written shapes
+/// this build cannot correctly interpret.
+#[test]
+fn load_state_errors_for_a_newer_version() {
+    let root = TestDir::new();
+    let path = root.path().join("state.json");
+    fs::write(&path, br#"{"version":3,"files":{},"session_repos":{}}"#).unwrap();
+
+    let error = load_state(&path).unwrap_err();
+
+    assert!(matches!(error, AdapterError::State(_)));
 }
 
 #[test]
@@ -582,6 +616,200 @@ fn helper_variants_and_call_correlation_match_python_behavior() {
     assert_eq!(result["tool"], "local.shell");
     assert_eq!(result["tool_input"], r#"{"command":"true"}"#);
     assert_eq!(result["tool_output"], r#"{"exit_code":0}"#);
+}
+
+fn trunc_session_records(include_second_turn: bool) -> Vec<Value> {
+    let mut items = vec![
+        json!({
+            "timestamp": "2026-09-19T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "session_id": "trunc-session",
+                "cwd": "/work/repo",
+                "git": {"repository_url": "git@github.com:onsager-ai/repo.git"}
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-19T00:00:01Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "UserMessage", "content": [{"type": "text", "text": "first request"}]}
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-19T00:00:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "AgentMessage", "content": [{"type": "Text", "text": "first reply"}]}
+            }
+        }),
+    ];
+    if include_second_turn {
+        items.push(json!({
+            "timestamp": "2026-09-19T00:00:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "UserMessage", "content": [{"type": "text", "text": "second request"}]}
+            }
+        }));
+        items.push(json!({
+            "timestamp": "2026-09-19T00:00:04Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "AgentMessage", "content": [{"type": "Text", "text": "second reply"}]}
+            }
+        }));
+    }
+    items
+}
+
+/// Test 2 from the occurrence-region spec: capture a file, truncate it, and
+/// capture again. The occurrence rows for the surviving lines must be
+/// identical *field for field* to a from-scratch capture of exactly that
+/// truncated content — not merely unchanged in count, which is the failure
+/// the `(carrier, session, sequence)` natural key exists to prevent.
+#[test]
+fn truncate_and_recapture_regenerates_identical_occurrence_fields() {
+    let full_records = trunc_session_records(true);
+    let truncated_records = trunc_session_records(false);
+
+    // Store A: a full capture, then the file shrinks on disk and is
+    // recaptured with the SAME (non-fresh) cursor state and store. This is
+    // exactly the `saved.offset > size` reset path in `process_file`.
+    let root_a = TestDir::new();
+    let path_a = write_session(root_a.path(), &full_records);
+    let history_a = root_a.path().join("history.jsonl");
+    let state_path_a = root_a.path().join("state.json");
+    let mut state_a = load_state(&state_path_a).unwrap();
+    let mut store_a = TraceStore::open_in_memory().unwrap();
+    assert_eq!(
+        process_file(
+            &path_a,
+            &mut state_a,
+            &mut store_a,
+            &options(&state_path_a, &history_a),
+        )
+        .unwrap(),
+        5
+    );
+
+    // Truncate: overwrite the same file with only its first three lines.
+    write_session(root_a.path(), &truncated_records);
+    assert_eq!(
+        process_file(
+            &path_a,
+            &mut state_a,
+            &mut store_a,
+            &options(&state_path_a, &history_a),
+        )
+        .unwrap(),
+        3,
+        "truncation must reset the cursor and replay the surviving lines"
+    );
+
+    // Store B: an independent, from-scratch capture of exactly the
+    // truncated content, for comparison.
+    let root_b = TestDir::new();
+    let path_b = write_session(root_b.path(), &truncated_records);
+    let history_b = root_b.path().join("history.jsonl");
+    let state_path_b = root_b.path().join("state.json");
+    let mut state_b = load_state(&state_path_b).unwrap();
+    let mut store_b = TraceStore::open_in_memory().unwrap();
+    assert_eq!(
+        process_file(
+            &path_b,
+            &mut state_b,
+            &mut store_b,
+            &options(&state_path_b, &history_b),
+        )
+        .unwrap(),
+        3
+    );
+
+    let mut rows_a = store_a.log(&LogFilter::default()).unwrap();
+    rows_a.retain(|row| row.session() == "trunc-session" && row.sequence() < 3);
+    let rows_b = store_b.log(&LogFilter::default()).unwrap();
+
+    assert_eq!(rows_b.len(), 2, "only the two item_completed lines project");
+    assert_eq!(
+        rows_a, rows_b,
+        "occurrence rows must match field for field after truncate-and-recapture"
+    );
+    assert_eq!(rows_b[0].parent_sequence(), None);
+    assert_eq!(rows_b[1].parent_sequence(), Some(rows_b[0].sequence()));
+}
+
+/// Test 3 from the occurrence-region spec: a second capture of the same
+/// source position upserts rather than duplicating.
+#[test]
+fn recapturing_the_same_line_upserts_the_occurrence() {
+    let root = TestDir::new();
+    let path = write_session(root.path(), &trunc_session_records(false));
+    let history = root.path().join("history.jsonl");
+    let state_path = root.path().join("state.json");
+    let mut store = TraceStore::open_in_memory().unwrap();
+
+    // Two independent full passes over the same unmodified file, each with
+    // its own fresh cursor state, so both fully replay from the start.
+    for _ in 0..2 {
+        let mut state = CursorState::default();
+        process_file(
+            &path,
+            &mut state,
+            &mut store,
+            &options(&state_path, &history),
+        )
+        .unwrap();
+    }
+
+    let rows = store.log(&LogFilter::default()).unwrap();
+    let projected = rows
+        .iter()
+        .filter(|row| row.session() == "trunc-session")
+        .count();
+    assert_eq!(projected, 2, "the upsert must not duplicate rows");
+}
+
+/// Test 4 from the occurrence-region spec: every `authored_by` classification
+/// this adapter derives is reachable, and Codex's occurrences always carry a
+/// `None` `agent` (no subagent concept).
+#[test]
+fn authored_by_classification_covers_human_and_agent_kinds() {
+    let root = TestDir::new();
+    let path = write_session(root.path(), &trunc_session_records(true));
+    let history = root.path().join("history.jsonl");
+    let state_path = root.path().join("state.json");
+    let mut state = CursorState::default();
+    let mut store = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut state,
+        &mut store,
+        &options(&state_path, &history),
+    )
+    .unwrap();
+
+    let rows = store.log(&LogFilter::default()).unwrap();
+    assert!(rows.iter().all(|row| row.agent().is_none()));
+    assert!(
+        rows.iter()
+            .any(|row| row.authored_by() == AuthoredBy::Human)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.authored_by() == AuthoredBy::Agent)
+    );
+
+    // The one occurrence with `repo_source` git-remote confirms the basis
+    // this adapter attaches when `session_meta` carries a git remote URL.
+    assert!(
+        rows.iter()
+            .all(|row| row.repo_source() == RepoSource::GitRemote)
+    );
 }
 
 #[test]

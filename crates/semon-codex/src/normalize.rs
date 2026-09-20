@@ -1,12 +1,20 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use semon_store::RepoSource;
 use serde_json::{Map, Number, Value};
 
 /// Correlation and attribution carried between Codex session records.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizeContext {
     pub(crate) session_id: String,
     pub(crate) repo: String,
+    /// The basis for `repo`, maintained alongside it: set whenever `repo` is
+    /// set from a git remote URL or a cwd basename, and reset to `None` when
+    /// `repo` is empty. `--repo`/`SEMON_REPO` always wins independently of
+    /// this field (see `normalize_record`'s final `repo`/`repo_source`
+    /// computation), so this field only needs to track the two inferred
+    /// bases.
+    pub(crate) repo_source: RepoSource,
     pub(crate) cwd: String,
     pub(crate) calls: Map<String, Value>,
     /// Whether this session file has been seen to carry the `item_completed`
@@ -16,6 +24,19 @@ pub struct NormalizeContext {
     /// message content for this file, so it no longer projects into the
     /// semantic region.
     pub(crate) has_item_stream: bool,
+}
+
+impl Default for NormalizeContext {
+    fn default() -> Self {
+        Self {
+            session_id: String::new(),
+            repo: String::new(),
+            repo_source: RepoSource::None,
+            cwd: String::new(),
+            calls: Map::new(),
+            has_item_stream: false,
+        }
+    }
 }
 
 impl NormalizeContext {
@@ -29,9 +50,15 @@ impl NormalizeContext {
         &self.repo
     }
 
+    /// Returns the basis for [`NormalizeContext::repo`].
+    pub fn repo_source(&self) -> RepoSource {
+        self.repo_source
+    }
+
     pub(crate) fn from_parts(
         session_id: String,
         repo: String,
+        repo_source: RepoSource,
         cwd: String,
         calls: Map<String, Value>,
         has_item_stream: bool,
@@ -39,6 +66,7 @@ impl NormalizeContext {
         Self {
             session_id,
             repo,
+            repo_source,
             cwd,
             calls,
             has_item_stream,
@@ -341,6 +369,7 @@ fn normalized_event(
     timestamp: &Value,
     session_id: &str,
     repo: &str,
+    repo_source: RepoSource,
     kind: &str,
     source: &Value,
     fields: EventFields,
@@ -357,6 +386,10 @@ fn normalized_event(
     );
     event.insert("session_id".into(), Value::String(session_id.to_owned()));
     event.insert("repo".into(), Value::String(repo.to_owned()));
+    event.insert(
+        "repo_source".into(),
+        Value::String(repo_source.as_str().to_owned()),
+    );
     event.insert("kind".into(), Value::String(kind.to_owned()));
     event.insert("tool".into(), Value::String(fields.tool));
     event.insert("decision".into(), Value::String(fields.decision));
@@ -432,21 +465,24 @@ pub fn normalize_record(
             .and_then(Value::as_object)
             .and_then(|git| git.get("repository_url"))
             .unwrap_or(&Value::Null);
-        context.repo = if !repo_override.is_empty() {
-            repo_override.to_owned()
-        } else {
+        if repo_override.is_empty() {
             let from_url = repo_from_url(git_url);
             if !from_url.is_empty() {
-                from_url
+                context.repo = from_url;
+                context.repo_source = RepoSource::GitRemote;
             } else {
                 let from_cwd = repo_from_cwd(&Value::String(context.cwd.clone()));
-                if from_cwd.is_empty() {
-                    context.repo.clone()
-                } else {
-                    from_cwd
+                if !from_cwd.is_empty() {
+                    context.repo = from_cwd;
+                    context.repo_source = RepoSource::CwdBasename;
                 }
+                // Otherwise `context.repo`/`context.repo_source` are left
+                // exactly as they were: neither source yielded anything new.
             }
-        };
+        } else {
+            context.repo = repo_override.to_owned();
+            context.repo_source = RepoSource::ExplicitOverride;
+        }
     } else if top_type == "turn_context" {
         context.cwd = payload
             .get("cwd")
@@ -455,18 +491,32 @@ pub fn normalize_record(
             .or_else(|| (!context.cwd.is_empty()).then(|| context.cwd.clone()))
             .unwrap_or_default();
         if repo_override.is_empty() && context.repo.is_empty() {
-            context.repo = repo_from_cwd(&Value::String(context.cwd.clone()));
+            let from_cwd = repo_from_cwd(&Value::String(context.cwd.clone()));
+            if !from_cwd.is_empty() {
+                context.repo = from_cwd;
+                context.repo_source = RepoSource::CwdBasename;
+            }
         }
     }
 
     let session_id = context.session_id.clone();
-    let repo = if repo_override.is_empty() {
-        context.repo.clone()
+    let (repo, repo_source) = if !repo_override.is_empty() {
+        (repo_override.to_owned(), RepoSource::ExplicitOverride)
+    } else if context.repo.is_empty() {
+        (String::new(), RepoSource::None)
     } else {
-        repo_override.to_owned()
+        (context.repo.clone(), context.repo_source)
     };
     let base = |kind: &str, fields: EventFields| {
-        normalized_event(timestamp, &session_id, &repo, kind, record, fields)
+        normalized_event(
+            timestamp,
+            &session_id,
+            &repo,
+            repo_source,
+            kind,
+            record,
+            fields,
+        )
     };
 
     if top_type == "event_msg" && payload_type == "user_message" {
@@ -711,7 +761,14 @@ pub fn normalize_record(
             .get("item")
             .and_then(Value::as_object)
             .unwrap_or(&empty_item);
-        return item_completed_event(timestamp, &session_id, &repo, &context.cwd, item);
+        return item_completed_event(
+            timestamp,
+            &session_id,
+            &repo,
+            repo_source,
+            &context.cwd,
+            item,
+        );
     }
 
     base(&payload_type, EventFields::default())
@@ -730,6 +787,7 @@ fn item_completed_event(
     timestamp: &Value,
     session_id: &str,
     repo: &str,
+    repo_source: RepoSource,
     cwd: &str,
     item: &Map<String, Value>,
 ) -> Value {
@@ -746,6 +804,10 @@ fn item_completed_event(
     );
     event.insert("session_id".into(), Value::String(session_id.to_owned()));
     event.insert("repo".into(), Value::String(repo.to_owned()));
+    event.insert(
+        "repo_source".into(),
+        Value::String(repo_source.as_str().to_owned()),
+    );
 
     match item_type.as_str() {
         "UserMessage" => {
@@ -880,7 +942,7 @@ fn apply_path_rule(raw_path: &str, cwd: &str) -> String {
 /// Normalizes one entry from Codex's separate history file.
 pub fn history_event(
     record: &Value,
-    session_repos: &std::collections::BTreeMap<String, String>,
+    session_repos: &std::collections::BTreeMap<String, (String, RepoSource)>,
     repo_override: &str,
 ) -> Value {
     let object = record.as_object();
@@ -888,10 +950,13 @@ pub fn history_event(
         .and_then(|value| value.get("session_id"))
         .map(py_string)
         .unwrap_or_default();
-    let repo = if repo_override.is_empty() {
-        session_repos.get(&session_id).cloned().unwrap_or_default()
+    let (repo, repo_source) = if !repo_override.is_empty() {
+        (repo_override.to_owned(), RepoSource::ExplicitOverride)
     } else {
-        repo_override.to_owned()
+        session_repos
+            .get(&session_id)
+            .cloned()
+            .unwrap_or((String::new(), RepoSource::None))
     };
     normalized_event(
         object
@@ -899,6 +964,7 @@ pub fn history_event(
             .unwrap_or(&Value::Null),
         &session_id,
         &repo,
+        repo_source,
         "history_entry",
         record,
         EventFields {
