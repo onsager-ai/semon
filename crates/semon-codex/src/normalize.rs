@@ -9,6 +9,13 @@ pub struct NormalizeContext {
     pub(crate) repo: String,
     pub(crate) cwd: String,
     pub(crate) calls: Map<String, Value>,
+    /// Whether this session file has been seen to carry the `item_completed`
+    /// stream, decided once per file (see `lib::file_uses_item_stream`) and
+    /// then held fixed for the rest of that file's processing. When set, the
+    /// legacy `response_item`/`message` mirror is no longer the source of
+    /// message content for this file, so it no longer projects into the
+    /// semantic region.
+    pub(crate) has_item_stream: bool,
 }
 
 impl NormalizeContext {
@@ -27,12 +34,14 @@ impl NormalizeContext {
         repo: String,
         cwd: String,
         calls: Map<String, Value>,
+        has_item_stream: bool,
     ) -> Self {
         Self {
             session_id,
             repo,
             cwd,
             calls,
+            has_item_stream,
         }
     }
 }
@@ -667,6 +676,16 @@ pub fn normalize_record(
 
     if top_type == "response_item" && payload_type == "message" {
         let role = payload.get("role").map(py_string).unwrap_or_default();
+        // Harness boilerplate is never transferable work: `developer`-role
+        // messages are Codex's own label for framing it injects, never the
+        // agent's or the user's. And once a session file is known to carry
+        // the `item_completed` item stream, that stream — not this legacy
+        // mirror — is the source of message content, so the mirror (which
+        // also carries injections, such as `<recommended_plugins>`, that
+        // never appear in the item stream at all) is no longer projected.
+        if role == "developer" || context.has_item_stream {
+            return base("legacy_message", EventFields::default());
+        }
         let content = message_text(payload.get("content").unwrap_or(&Value::Null));
         if role == "user" {
             return base(
@@ -686,7 +705,176 @@ pub fn normalize_record(
         );
     }
 
+    if top_type == "event_msg" && payload_type == "item_completed" {
+        let empty_item = Map::new();
+        let item = payload
+            .get("item")
+            .and_then(Value::as_object)
+            .unwrap_or(&empty_item);
+        return item_completed_event(timestamp, &session_id, &repo, &context.cwd, item);
+    }
+
     base(&payload_type, EventFields::default())
+}
+
+/// Builds a normalized event from one `event_msg`/`item_completed` item.
+///
+/// Current Codex sessions carry real work almost entirely through this
+/// stream (see issue #9's two-day census). Only `UserMessage` and
+/// `AgentMessage` project text content; `CommandExecution` and `FileChange`
+/// project a machine-independent `action` core; `Reasoning`, `Extension`, and
+/// `ContextCompaction` are deliberately not projected (consumed for cursor
+/// purposes only, exactly like any other unrecognized kind falling through
+/// to the generic `base` branch).
+fn item_completed_event(
+    timestamp: &Value,
+    session_id: &str,
+    repo: &str,
+    cwd: &str,
+    item: &Map<String, Value>,
+) -> Value {
+    let item_type = item
+        .get("type")
+        .filter(|value| truthy(value))
+        .map(py_string)
+        .unwrap_or_default();
+
+    let mut event = Map::new();
+    event.insert(
+        "ts".into(),
+        Value::Number(parse_timestamp(timestamp).into()),
+    );
+    event.insert("session_id".into(), Value::String(session_id.to_owned()));
+    event.insert("repo".into(), Value::String(repo.to_owned()));
+
+    match item_type.as_str() {
+        "UserMessage" => {
+            event.insert("kind".into(), Value::String("item_user_message".into()));
+            event.insert(
+                "content".into(),
+                Value::String(message_text(item.get("content").unwrap_or(&Value::Null))),
+            );
+        }
+        "AgentMessage" => {
+            event.insert("kind".into(), Value::String("item_agent_message".into()));
+            event.insert(
+                "content".into(),
+                Value::String(message_text(item.get("content").unwrap_or(&Value::Null))),
+            );
+        }
+        "CommandExecution" => {
+            event.insert(
+                "kind".into(),
+                Value::String("item_command_execution".into()),
+            );
+            let first_parsed = item
+                .get("parsed_cmd")
+                .and_then(Value::as_array)
+                .and_then(|entries| entries.first())
+                .and_then(Value::as_object);
+            let action = first_parsed
+                .and_then(|entry| entry.get("type"))
+                .filter(|value| truthy(value))
+                .map(py_string)
+                .unwrap_or_else(|| "unknown".to_owned());
+            let path = first_parsed
+                .and_then(|entry| entry.get("path"))
+                .and_then(Value::as_str)
+                .map(|raw_path| Value::String(apply_path_rule(raw_path, cwd)))
+                .unwrap_or(Value::Null);
+            event.insert("action".into(), Value::String(action));
+            event.insert("path".into(), path);
+            // Codex has emitted `exit_code` on every observed CommandExecution
+            // item; -1 marks the (unobserved) absent case distinctly from a
+            // genuine zero (success) exit code.
+            event.insert(
+                "exit_code".into(),
+                Value::Number(int_value(item.get("exit_code")).unwrap_or(-1).into()),
+            );
+        }
+        "FileChange" => {
+            event.insert("kind".into(), Value::String("item_file_change".into()));
+            let changes = item
+                .get("changes")
+                .and_then(Value::as_object)
+                .map(|changes| {
+                    changes
+                        .iter()
+                        .map(|(raw_path, change)| {
+                            let change_kind = change
+                                .get("type")
+                                .and_then(Value::as_str)
+                                .map(map_file_change_kind)
+                                .unwrap_or_else(|| "modify".to_owned());
+                            Value::Object(Map::from_iter([
+                                ("path".into(), Value::String(apply_path_rule(raw_path, cwd))),
+                                ("change".into(), Value::String(change_kind)),
+                            ]))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            event.insert("changes".into(), Value::Array(changes));
+        }
+        "Reasoning" => {
+            event.insert("kind".into(), Value::String("item_reasoning".into()));
+        }
+        "Extension" => {
+            event.insert("kind".into(), Value::String("item_extension".into()));
+        }
+        "ContextCompaction" => {
+            event.insert(
+                "kind".into(),
+                Value::String("item_context_compaction".into()),
+            );
+        }
+        _ => {
+            event.insert("kind".into(), Value::String("item_unrecognized".into()));
+        }
+    }
+
+    Value::Object(event)
+}
+
+/// Maps a Codex `FileChange` entry's own `type` word to the semantic
+/// region's vocabulary. Codex spells an edit `"update"`; the semantic core
+/// spells it `"modify"`. Unrecognized words pass through unchanged rather
+/// than being silently discarded.
+fn map_file_change_kind(value: &str) -> String {
+    match value {
+        "update" => "modify",
+        other => other,
+    }
+    .to_owned()
+}
+
+/// Applies the semantic region's path rule to one absolute or relative path.
+///
+/// The semantic region is content-addressed and must stay machine
+/// independent, so an absolute path can never enter it as-is:
+///
+/// - A path already relative (as Codex's own `parsed_cmd` paths are) is kept
+///   unchanged — it carries no machine-specific prefix to strip.
+/// - An absolute path under `cwd` is rewritten relative to `cwd`.
+/// - An absolute path outside `cwd` (or when `cwd` itself is unknown) becomes
+///   the literal string `"<external>"` — never a basename, which would still
+///   leak the file's name.
+fn apply_path_rule(raw_path: &str, cwd: &str) -> String {
+    if !raw_path.starts_with('/') {
+        return raw_path.to_owned();
+    }
+    if cwd.is_empty() {
+        return "<external>".to_owned();
+    }
+    let cwd = cwd.trim_end_matches('/');
+    if raw_path == cwd {
+        return String::new();
+    }
+    let prefix = format!("{cwd}/");
+    raw_path
+        .strip_prefix(prefix.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| "<external>".to_owned())
 }
 
 /// Normalizes one entry from Codex's separate history file.
@@ -778,5 +966,284 @@ fn float_value(value: Option<&Value>) -> Option<f64> {
         Value::String(value) => value.parse().ok(),
         Value::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod item_stream_tests {
+    use serde_json::json;
+
+    use super::{NormalizeContext, apply_path_rule, normalize_record};
+
+    #[test]
+    fn path_rule_rewrites_a_path_under_cwd_as_relative() {
+        assert_eq!(
+            apply_path_rule("/work/repo/src/main.rs", "/work/repo"),
+            "src/main.rs"
+        );
+    }
+
+    #[test]
+    fn path_rule_marks_a_path_outside_cwd_as_external() {
+        assert_eq!(
+            apply_path_rule("/tmp/scratch.cpp", "/work/repo"),
+            "<external>"
+        );
+    }
+
+    #[test]
+    fn path_rule_rejects_a_same_prefix_sibling_directory() {
+        // "/work/repo-other" is not under "/work/repo": a naive string
+        // prefix check without a separator boundary would wrongly accept it.
+        assert_eq!(
+            apply_path_rule("/work/repo-other/file.rs", "/work/repo"),
+            "<external>"
+        );
+    }
+
+    #[test]
+    fn path_rule_leaves_an_already_relative_path_unchanged() {
+        assert_eq!(
+            apply_path_rule("src/tolmap/multi.py", "/work/repo"),
+            "src/tolmap/multi.py"
+        );
+    }
+
+    #[test]
+    fn path_rule_treats_an_unknown_cwd_as_external() {
+        assert_eq!(apply_path_rule("/work/repo/file.rs", ""), "<external>");
+    }
+
+    fn context_with_cwd(cwd: &str) -> NormalizeContext {
+        NormalizeContext {
+            cwd: cwd.to_owned(),
+            ..NormalizeContext::default()
+        }
+    }
+
+    #[test]
+    fn user_message_item_projects_as_intent() {
+        let mut context = context_with_cwd("/work/repo");
+        let event = normalize_record(
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "UserMessage",
+                        "content": [{"type": "text", "text": "do the thing"}]
+                    }
+                }
+            }),
+            &mut context,
+            "",
+        );
+        assert_eq!(event["kind"], "item_user_message");
+        assert_eq!(event["content"], "do the thing");
+    }
+
+    #[test]
+    fn agent_message_item_projects_as_outcome() {
+        let mut context = context_with_cwd("/work/repo");
+        let event = normalize_record(
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "AgentMessage",
+                        "content": [{"type": "Text", "text": "done"}],
+                        "phase": "commentary"
+                    }
+                }
+            }),
+            &mut context,
+            "",
+        );
+        assert_eq!(event["kind"], "item_agent_message");
+        assert_eq!(event["content"], "done");
+    }
+
+    #[test]
+    fn command_execution_item_projects_action_path_and_exit_code() {
+        let mut context = context_with_cwd("/work/repo");
+        let event = normalize_record(
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "CommandExecution",
+                        "command": ["/bin/zsh", "-lc", "sed -n '1,10p' src/main.rs"],
+                        "cwd": "file:///work/repo",
+                        "parsed_cmd": [
+                            {"type": "read", "cmd": "sed -n '1,10p' src/main.rs", "name": "main.rs", "path": "src/main.rs"}
+                        ],
+                        "status": "completed",
+                        "stdout": "fn main() {}\n",
+                        "stderr": "",
+                        "exit_code": 0
+                    }
+                }
+            }),
+            &mut context,
+            "",
+        );
+        assert_eq!(event["kind"], "item_command_execution");
+        assert_eq!(event["action"], "read");
+        assert_eq!(event["path"], "src/main.rs");
+        assert_eq!(event["exit_code"], 0);
+    }
+
+    #[test]
+    fn command_execution_item_without_parsed_cmd_yields_unknown_and_no_path() {
+        let mut context = context_with_cwd("/work/repo");
+        let event = normalize_record(
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "CommandExecution",
+                        "command": ["/bin/zsh", "-lc", "some || compound && thing"],
+                        "cwd": "file:///work/repo",
+                        "parsed_cmd": [{"type": "unknown", "cmd": "some || compound && thing"}],
+                        "status": "completed",
+                        "stdout": "",
+                        "stderr": "",
+                        "exit_code": 1
+                    }
+                }
+            }),
+            &mut context,
+            "",
+        );
+        assert_eq!(event["kind"], "item_command_execution");
+        assert_eq!(event["action"], "unknown");
+        assert!(event["path"].is_null());
+        assert_eq!(event["exit_code"], 1);
+    }
+
+    #[test]
+    fn file_change_item_projects_add_and_modify_with_relative_paths() {
+        let mut context = context_with_cwd("/work/repo");
+        let event = normalize_record(
+            &json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "FileChange",
+                        "changes": {
+                            "/work/repo/src/new.rs": {"type": "add", "content": "fn a() {}\n"},
+                            "/work/repo/src/old.rs": {"type": "update", "content": "fn b() {}\n"},
+                            "/tmp/scratch.rs": {"type": "add", "content": "fn c() {}\n"}
+                        },
+                        "status": "completed",
+                        "stdout": "",
+                        "stderr": ""
+                    }
+                }
+            }),
+            &mut context,
+            "",
+        );
+        assert_eq!(event["kind"], "item_file_change");
+        let changes = event["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 3);
+        let by_path = |path: &str| {
+            changes
+                .iter()
+                .find(|entry| entry["path"] == path)
+                .unwrap_or_else(|| panic!("missing change for {path}"))
+        };
+        assert_eq!(by_path("src/new.rs")["change"], "add");
+        assert_eq!(by_path("src/old.rs")["change"], "modify");
+        assert_eq!(by_path("<external>")["change"], "add");
+    }
+
+    #[test]
+    fn reasoning_extension_and_compaction_items_do_not_project() {
+        for (item_type, extra) in [
+            ("Reasoning", json!({"summary_text": [], "raw_content": []})),
+            (
+                "Extension",
+                json!({"kind": "web.search", "query": "q", "results": []}),
+            ),
+            ("ContextCompaction", json!({})),
+        ] {
+            let mut item = extra.as_object().cloned().unwrap();
+            item.insert("type".into(), json!(item_type));
+            let mut context = context_with_cwd("/work/repo");
+            let event = normalize_record(
+                &json!({
+                    "type": "event_msg",
+                    "payload": {"type": "item_completed", "item": item}
+                }),
+                &mut context,
+                "",
+            );
+            let kind = event["kind"].as_str().unwrap().to_owned();
+            assert!(
+                kind.starts_with("item_") && kind != "item_user_message",
+                "unexpected kind for {item_type}: {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn developer_role_message_is_never_projected() {
+        let mut context = context_with_cwd("/work/repo");
+        let event = normalize_record(
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "<skills_instructions>secret framing</skills_instructions>"}]
+                }
+            }),
+            &mut context,
+            "",
+        );
+        assert_eq!(event["kind"], "legacy_message");
+    }
+
+    #[test]
+    fn legacy_message_mirror_is_suppressed_once_item_stream_is_flagged() {
+        let mut context = context_with_cwd("/work/repo");
+        context.has_item_stream = true;
+        let event = normalize_record(
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "<recommended_plugins>..."}]
+                }
+            }),
+            &mut context,
+            "",
+        );
+        assert_eq!(event["kind"], "legacy_message");
+    }
+
+    #[test]
+    fn legacy_message_mirror_still_projects_without_an_item_stream() {
+        let mut context = context_with_cwd("/work/repo");
+        let event = normalize_record(
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}]
+                }
+            }),
+            &mut context,
+            "",
+        );
+        assert_eq!(event["kind"], "user_prompt");
+        assert_eq!(event["prompt"], "hello");
     }
 }
