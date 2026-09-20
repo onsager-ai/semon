@@ -14,8 +14,15 @@
 //!   is the ordinary read over this region, joined to `canonical_traces`.
 //! - `raw_carrier_records` contains opaque carrier bytes and minimal carrier
 //!   provenance. They are available only through the deliberately separate
-//!   [`TraceStore::fetch_raw_carrier_records`] call. Raw bytes and carrier names
-//!   are never inputs to identity or ordinary retrieval.
+//!   [`TraceStore::fetch_raw_carrier_records`] and
+//!   [`TraceStore::fetch_raw_carrier_records_for_occurrences`] calls, which
+//!   the `semon forensic` command is the sole CLI path to. Raw bytes and
+//!   carrier names are never inputs to identity or ordinary retrieval. This
+//!   region is retained in full and indefinitely — no pruning, no opt-out, no
+//!   sampling — so it is the only region whose exposure is governed
+//!   separately: the store file is created and re-opened with owner-only
+//!   permissions (see [`TraceStore::open`]). See
+//!   `docs/design/forensic-retention-and-exposure.md`.
 //!
 //! See `docs/design/trace-identity-and-occurrences.md` for why identity stays
 //! content-addressed over `canonical_traces` alone while provenance and order
@@ -77,7 +84,7 @@ pub use model::{
 };
 pub use render::{day_bounds_ns, format_timestamp_ns, render_occurrence_line};
 pub use replication::{REPLICATION_ENDPOINT_ENV, ReplicationError, ShipReport, ship};
-pub use store::{StoreError, TraceStore};
+pub use store::{OccurrenceSelector, StoreError, TraceStore};
 
 #[cfg(test)]
 mod boundary_tests {

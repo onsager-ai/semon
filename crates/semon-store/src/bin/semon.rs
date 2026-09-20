@@ -1,15 +1,23 @@
-use std::{env, path::PathBuf, process::ExitCode};
+use std::{
+    env,
+    fs::OpenOptions,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::ExitCode,
+    str::FromStr,
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use semon_store::{
-    LogFilter, REPLICATION_ENDPOINT_ENV, TraceStore, day_bounds_ns, render_occurrence_line, ship,
+    LogFilter, OccurrenceSelector, REPLICATION_ENDPOINT_ENV, TraceId, TraceStore, day_bounds_ns,
+    render_occurrence_line, ship,
 };
 
 fn main() -> ExitCode {
     match parse_args().and_then(run) {
-        Ok(message) => {
-            println!("{message}");
-            ExitCode::SUCCESS
-        }
+        Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("semon: {error}");
             ExitCode::FAILURE
@@ -20,6 +28,7 @@ fn main() -> ExitCode {
 enum Command {
     Ship(ShipArgs),
     Log(LogArgs),
+    Forensic(ForensicArgs),
 }
 
 struct ShipArgs {
@@ -34,11 +43,23 @@ struct LogArgs {
     limit: Option<u32>,
 }
 
+/// Arguments for `semon forensic`. Exactly one of `trace`, `session`, `day`
+/// is `Some` by the time parsing succeeds — enforced in
+/// [`parse_forensic_args`], not left to `run_forensic` to discover.
+struct ForensicArgs {
+    store: PathBuf,
+    trace: Option<String>,
+    session: Option<String>,
+    day: Option<String>,
+    out: Option<PathBuf>,
+}
+
 fn parse_args() -> Result<Command, String> {
     let mut arguments = env::args().skip(1);
     match arguments.next().as_deref() {
         Some("ship") => parse_ship_args(arguments).map(Command::Ship),
         Some("log") => parse_log_args(arguments).map(Command::Log),
+        Some("forensic") => parse_forensic_args(arguments).map(Command::Forensic),
         Some("-h" | "--help") => Err(usage()),
         Some(command) => Err(format!("unknown command: {command}\n{}", usage())),
         None => Err(usage()),
@@ -100,10 +121,57 @@ fn parse_log_args(mut arguments: impl Iterator<Item = String>) -> Result<LogArgs
     })
 }
 
-fn run(command: Command) -> Result<String, String> {
+fn parse_forensic_args(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<ForensicArgs, String> {
+    let mut store = default_store_path();
+    let mut trace = None;
+    let mut session = None;
+    let mut day = None;
+    let mut out = None;
+    while let Some(argument) = arguments.next() {
+        let mut value = || {
+            arguments
+                .next()
+                .ok_or_else(|| format!("{argument} requires a value"))
+        };
+        match argument.as_str() {
+            "--store" => store = value()?.into(),
+            "--trace" => trace = Some(value()?),
+            "--session" => session = Some(value()?),
+            "--day" => day = Some(value()?),
+            "--out" => out = Some(value()?.into()),
+            "-h" | "--help" => return Err(usage()),
+            _ => return Err(format!("unknown argument: {argument}")),
+        }
+    }
+
+    let selected = [trace.is_some(), session.is_some(), day.is_some()]
+        .into_iter()
+        .filter(|is_set| *is_set)
+        .count();
+    if selected != 1 {
+        return Err(format!(
+            "forensic: exactly one of --trace, --session, or --day is required (got {selected})\n\
+             {}",
+            usage()
+        ));
+    }
+
+    Ok(ForensicArgs {
+        store,
+        trace,
+        session,
+        day,
+        out,
+    })
+}
+
+fn run(command: Command) -> Result<(), String> {
     match command {
-        Command::Ship(args) => run_ship(args),
-        Command::Log(args) => run_log(args),
+        Command::Ship(args) => run_ship(args).map(|message| println!("{message}")),
+        Command::Log(args) => run_log(args).map(|message| println!("{message}")),
+        Command::Forensic(args) => run_forensic(args),
     }
 }
 
@@ -151,6 +219,91 @@ fn run_log(args: LogArgs) -> Result<String, String> {
         .join("\n"))
 }
 
+/// The one-line stderr warning `semon forensic` writes before any output —
+/// on every invocation, before touching stdout or `--out`, so redirecting
+/// stdout to a file still shows it (see
+/// `docs/design/forensic-retention-and-exposure.md`, Decision 3).
+const FORENSIC_WARNING: &str = "semon forensic: raw output may contain prompts, responses, \
+     source code, credentials, and machine paths captured verbatim.";
+
+/// The only CLI path that reads `raw_carrier_records`, directly or via
+/// [`semon_store::TraceStore::fetch_raw_carrier_records_for_occurrences`].
+/// `run_log` and `run_ship` must never gain such a call — behaviorally
+/// enforced (drop the table, and only the raw-reading calls this delegates
+/// to may fail) by `semon-store`'s own
+/// `raw_reads_fail_but_log_and_canonical_reads_survive_dropping_the_raw_region`;
+/// see the comment on this file's (test-only) trailing note for why that
+/// check has to live at the store layer rather than here.
+fn run_forensic(args: ForensicArgs) -> Result<(), String> {
+    eprintln!("{FORENSIC_WARNING}");
+
+    let store = TraceStore::open(&args.store).map_err(|error| error.to_string())?;
+    let records = if let Some(trace) = args.trace.as_deref() {
+        let trace_id = TraceId::from_str(trace).map_err(|error| error.to_string())?;
+        store
+            .fetch_raw_carrier_records(&trace_id)
+            .map_err(|error| error.to_string())?
+    } else if let Some(session) = args.session.as_deref() {
+        store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(session))
+            .map_err(|error| error.to_string())?
+    } else if let Some(day) = args.day.as_deref() {
+        let (start, end) = parse_day(day)?;
+        store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::TimestampRange(
+                start, end,
+            ))
+            .map_err(|error| error.to_string())?
+    } else {
+        // Unreachable: parse_forensic_args requires exactly one selector.
+        return Err("no selector given".to_owned());
+    };
+
+    write_forensic_records(&records, args.out.as_deref())
+}
+
+/// Writes one raw record's verbatim bytes per line, to `out` (created
+/// `0600`) when given, otherwise to stdout — bulk selection to stdout must
+/// work without `--out` (see the policy doc, Decision 3: `--out` is an
+/// option, not a requirement).
+fn write_forensic_records(
+    records: &[semon_store::RawCarrierRecord],
+    out: Option<&Path>,
+) -> Result<(), String> {
+    let mut writer: Box<dyn Write> = match out {
+        Some(path) => {
+            let mut options = OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let file = options.open(path).map_err(|error| error.to_string())?;
+            // `mode()` only governs permissions at creation; re-assert them
+            // in case `path` already existed with looser ones, for the same
+            // reason the store file re-asserts on open rather than trusting
+            // what it finds.
+            #[cfg(unix)]
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+            Box::new(file)
+        }
+        None => Box::new(io::stdout()),
+    };
+
+    for record in records {
+        let bytes = record.bytes();
+        writer.write_all(bytes).map_err(|error| error.to_string())?;
+        // Captured lines already end in the newline `read_until(b'\n')` kept
+        // at capture time; only add one when the stored bytes lack it, so
+        // "one raw record per line" doesn't become one record plus one blank
+        // line — which it did before this fix, doubling every line count.
+        if !bytes.ends_with(b"\n") {
+            writer.write_all(b"\n").map_err(|error| error.to_string())?;
+        }
+    }
+    writer.flush().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 /// Parses a `YYYY-MM-DD` UTC calendar date into `[start, end)` nanoseconds
 /// since the Unix epoch.
 fn parse_day(date: &str) -> Result<(i64, i64), String> {
@@ -188,7 +341,12 @@ fn usage() -> String {
          Endpoint defaults to ${REPLICATION_ENDPOINT_ENV}; when unset, ship succeeds without reading the store.\n\
          \n\
          Usage: semon log [--store PATH] [--repo NAME] [--day YYYY-MM-DD] [--limit N]\n\
-         Renders the occurrence log. Never reads raw_carrier_records."
+         Renders the occurrence log. Never reads raw_carrier_records.\n\
+         \n\
+         Usage: semon forensic [--store PATH] (--trace ID | --session ID | --day YYYY-MM-DD) [--out FILE]\n\
+         Reads raw_carrier_records — the only command that does. Exactly one\n\
+         of --trace, --session, --day is required. Without --out, writes to\n\
+         stdout; with it, writes to FILE created 0600 instead."
     )
 }
 
@@ -290,4 +448,204 @@ mod tests {
         let (start, end) = parse_day("2026-09-19").unwrap();
         assert_eq!(end - start, 86_400 * 1_000_000_000);
     }
+
+    fn unique_temp_path(label: &str, extension: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "semon-cli-test-{label}-{}-{unique}.{extension}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn forensic_rejects_zero_or_multiple_selectors() {
+        let zero = parse_forensic_args(std::iter::empty());
+        assert!(zero.is_err(), "zero selectors must be rejected");
+
+        let two = parse_forensic_args(
+            [
+                "--trace".to_owned(),
+                "a".repeat(64),
+                "--session".to_owned(),
+                "session-a".to_owned(),
+            ]
+            .into_iter(),
+        );
+        assert!(two.is_err(), "two selectors must be rejected");
+
+        let one = parse_forensic_args(["--session".to_owned(), "session-a".to_owned()].into_iter());
+        assert!(one.is_ok(), "exactly one selector must be accepted");
+    }
+
+    /// Captures one trace with a known raw record, returning the store path
+    /// and trace id for forensic-command tests.
+    fn store_with_one_capture(label: &str, session: &str, timestamp: i64) -> (PathBuf, String) {
+        let path = unique_temp_db_path(label);
+        let mut store = TraceStore::open(&path).unwrap();
+        let core =
+            SemanticCore::from_value(json!({"kind": "intent", "content": format!("{label} body")}))
+                .unwrap();
+        let trace_id = core.trace_id().unwrap().as_str().to_owned();
+        store
+            .capture(
+                &core,
+                NewRawCarrierRecord::new("codex", b"raw-forensic-bytes"),
+                NewOccurrence {
+                    session,
+                    sequence: 0,
+                    timestamp,
+                    repo: "semon",
+                    repo_source: RepoSource::GitRemote,
+                    parent_sequence: None,
+                    agent: None,
+                    authored_by: AuthoredBy::Human,
+                },
+            )
+            .unwrap();
+        drop(store);
+        (path, trace_id)
+    }
+
+    #[test]
+    fn forensic_by_trace_writes_verbatim_bytes_to_an_out_file_created_0600() {
+        let (store_path, trace_id) = store_with_one_capture("forensic-trace", "session-a", 0);
+        let out_path = unique_temp_path("forensic-trace", "out");
+
+        run_forensic(ForensicArgs {
+            store: store_path.clone(),
+            trace: Some(trace_id),
+            session: None,
+            day: None,
+            out: Some(out_path.clone()),
+        })
+        .unwrap();
+
+        let contents = std::fs::read(&out_path).unwrap();
+        assert_eq!(contents, b"raw-forensic-bytes\n");
+
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(&out_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "--out file must be created 0600, got {mode:o}");
+        }
+
+        let _ = std::fs::remove_file(&store_path);
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn forensic_by_session_selects_only_that_sessions_records() {
+        let (store_path, _) = store_with_one_capture("forensic-session-a", "session-a", 0);
+        {
+            // Add a second capture, under a different session, into the same store.
+            let mut store = TraceStore::open(&store_path).unwrap();
+            let core =
+                SemanticCore::from_value(json!({"kind": "intent", "content": "other"})).unwrap();
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"other-session-bytes"),
+                    NewOccurrence {
+                        session: "session-b",
+                        sequence: 0,
+                        timestamp: 0,
+                        repo: "semon",
+                        repo_source: RepoSource::GitRemote,
+                        parent_sequence: None,
+                        agent: None,
+                        authored_by: AuthoredBy::Human,
+                    },
+                )
+                .unwrap();
+        }
+        let out_path = unique_temp_path("forensic-session", "out");
+
+        run_forensic(ForensicArgs {
+            store: store_path.clone(),
+            trace: None,
+            session: Some("session-a".to_owned()),
+            day: None,
+            out: Some(out_path.clone()),
+        })
+        .unwrap();
+
+        let contents = std::fs::read_to_string(&out_path).unwrap();
+        assert!(contents.contains("raw-forensic-bytes"));
+        assert!(!contents.contains("other-session-bytes"));
+
+        let _ = std::fs::remove_file(&store_path);
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn forensic_by_day_selects_only_that_days_records() {
+        let (year, month, day) = (2026, 9, 18);
+        let (start, _) = day_bounds_ns(year, month, day);
+        let (store_path, _) = store_with_one_capture("forensic-day-in", "session-a", start + 1);
+        {
+            let mut store = TraceStore::open(&store_path).unwrap();
+            let core =
+                SemanticCore::from_value(json!({"kind": "intent", "content": "next day"})).unwrap();
+            let (next_start, _) = day_bounds_ns(year, month, day + 1);
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"next-day-bytes"),
+                    NewOccurrence {
+                        session: "session-a",
+                        sequence: 1,
+                        timestamp: next_start + 1,
+                        repo: "semon",
+                        repo_source: RepoSource::GitRemote,
+                        parent_sequence: Some(0),
+                        agent: None,
+                        authored_by: AuthoredBy::Human,
+                    },
+                )
+                .unwrap();
+        }
+        let out_path = unique_temp_path("forensic-day", "out");
+
+        run_forensic(ForensicArgs {
+            store: store_path.clone(),
+            trace: None,
+            session: None,
+            day: Some(format!("{year:04}-{month:02}-{day:02}")),
+            out: Some(out_path.clone()),
+        })
+        .unwrap();
+
+        let contents = std::fs::read_to_string(&out_path).unwrap();
+        assert!(contents.contains("raw-forensic-bytes"));
+        assert!(!contents.contains("next-day-bytes"));
+
+        let _ = std::fs::remove_file(&store_path);
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    // The behavioral mirror of `log_renders_identically_after_the_raw_region_is_dropped`
+    // — that `run_log`/`run_ship` never depend on `raw_carrier_records`
+    // while `run_forensic` fails hard once it's gone — lives in
+    // `semon-store`'s own tests as
+    // `raw_reads_fail_but_log_and_canonical_reads_survive_dropping_the_raw_region`,
+    // not here. `run_log`, `run_ship`, and `run_forensic` are thin wrappers
+    // over `TraceStore::log`, `ship`, and
+    // `TraceStore::fetch_raw_carrier_records[_for_occurrences]` respectively
+    // (each opens the store, delegates to exactly one of those, and maps
+    // the error) — so a test pinning which of *those* touch raw already
+    // pins this boundary. It has to live there and not here for a concrete
+    // reason: proving a `DROP TABLE` sticks requires never reopening the
+    // store afterward, and every one of these CLI entry points calls
+    // `TraceStore::open`, which unconditionally re-runs the additive schema
+    // (`CREATE TABLE IF NOT EXISTS raw_carrier_records ...`) on every open —
+    // silently recreating an externally-dropped table, empty, the moment
+    // *any* command (including `run_forensic` itself) next opens the store.
+    // A CLI-process-level version of this test — drop the table, then call
+    // `run_log`/`run_ship`/`run_forensic` as if they were separate `semon`
+    // invocations against the same file — was tried and does not fail as
+    // expected: the first such call's own `TraceStore::open` heals the
+    // table before its query runs, so `run_forensic` observes an empty
+    // table rather than a missing one and returns an empty success instead
+    // of an error.
 }
