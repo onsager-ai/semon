@@ -126,6 +126,11 @@ pub enum StoreError {
         /// The highest version this build understands.
         supported: u32,
     },
+
+    /// A filesystem operation on the store file failed, e.g. tightening its
+    /// permissions.
+    #[error("store file I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// A single-file SQLite trace store.
@@ -133,10 +138,33 @@ pub struct TraceStore {
     connection: Connection,
 }
 
+/// Selects occurrences only to find which traces have forensic records worth
+/// reading. Backs [`TraceStore::fetch_raw_carrier_records_for_occurrences`],
+/// which in turn backs `semon forensic`'s `--session` and `--day` selectors.
+#[derive(Clone, Copy, Debug)]
+pub enum OccurrenceSelector<'a> {
+    /// Every occurrence recorded under this session id.
+    Session(&'a str),
+    /// Every occurrence with `timestamp` in `[start, end)`, nanoseconds
+    /// since the Unix epoch.
+    TimestampRange(i64, i64),
+}
+
 impl TraceStore {
     /// Opens or creates a store at `path` and initializes its schema.
+    ///
+    /// The forensic region can hold prompts, responses, source code,
+    /// credentials, and machine paths (see
+    /// `docs/design/forensic-retention-and-exposure.md`), so the store file
+    /// is tightened to owner-only permissions (`0600` on Unix) every time it
+    /// is opened — at first creation and on every subsequent open — rather
+    /// than trusting whatever permissions it already carries on disk.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        Self::from_connection(Connection::open(path)?)
+        let path = path.as_ref();
+        let connection = Connection::open(path)?;
+        #[cfg(unix)]
+        secure_store_permissions(path)?;
+        Self::from_connection(connection)
     }
 
     /// Creates an in-memory store, primarily useful to callers' tests.
@@ -350,6 +378,96 @@ impl TraceStore {
         Ok(records)
     }
 
+    /// Explicitly fetches forensic records for every trace with at least one
+    /// occurrence matched by `selector`.
+    ///
+    /// This is the bulk counterpart to [`TraceStore::fetch_raw_carrier_records`]:
+    /// it goes through `occurrences` only to *find which traces* to fetch —
+    /// the occurrence facts themselves (session, sequence, timestamp, ...)
+    /// are not returned here, only the raw bytes. It backs `semon forensic`'s
+    /// `--session` and `--day` selectors (see
+    /// `docs/design/forensic-retention-and-exposure.md`, Decision 3).
+    ///
+    /// Emitted records are ordered by ascending `raw_record_id` — capture
+    /// (insertion) order — across *all* selected traces together, not
+    /// grouped by trace. Grouping by trace was this method's first
+    /// implementation and was a bug: selecting distinct trace ids and then
+    /// fetching each trace's records as a contiguous block dumps every
+    /// occurrence of a repeated trace at the position of its *first*
+    /// appearance, which reorders (and, for a trace occurring many times,
+    /// badly reorders) anything captured in between. `raw_record_id` order
+    /// does not have that failure mode, because it never groups at all.
+    ///
+    /// `raw_record_id` order is an *approximation* of true occurrence order,
+    /// not an exact match, and that limit is structural rather than a bug to
+    /// fix here: `occurrences` and `raw_carrier_records` carry no explicit
+    /// link to each other — both are written in the same capture
+    /// transaction, but neither references the other's row id — so there is
+    /// no way to emit exactly one raw record per matching occurrence, in
+    /// that occurrence's own order, without a schema change.
+    /// `docs/design/trace-identity-and-occurrences.md` lists this overlap as
+    /// an open question (whether occurrences derive from, parallel, or
+    /// displace raw records); until that is settled, capture order is the
+    /// best available stand-in, and it is exact for the common case of one
+    /// capture pass over one session with no repeated content.
+    pub fn fetch_raw_carrier_records_for_occurrences(
+        &self,
+        selector: OccurrenceSelector<'_>,
+    ) -> Result<Vec<RawCarrierRecord>, StoreError> {
+        let trace_ids: Vec<String> = match selector {
+            OccurrenceSelector::Session(session) => {
+                let mut statement = self
+                    .connection
+                    .prepare("SELECT DISTINCT trace_id FROM occurrences WHERE session = ?1")?;
+                statement
+                    .query_map([session], |row| row.get::<_, String>(0))?
+                    .collect::<Result<_, _>>()?
+            }
+            OccurrenceSelector::TimestampRange(start, end) => {
+                let mut statement = self.connection.prepare(
+                    "SELECT DISTINCT trace_id FROM occurrences \
+                     WHERE timestamp >= ?1 AND timestamp < ?2",
+                )?;
+                statement
+                    .query_map(params![start, end], |row| row.get::<_, String>(0))?
+                    .collect::<Result<_, _>>()?
+            }
+        };
+
+        if trace_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = vec!["?"; trace_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT raw_record_id, trace_id, carrier, raw_bytes \
+             FROM raw_carrier_records WHERE trace_id IN ({placeholders}) \
+             ORDER BY raw_record_id ASC"
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let bindings: Vec<&dyn ToSql> = trace_ids.iter().map(|id| id as &dyn ToSql).collect();
+        let mapped = statement.query_map(bindings.as_slice(), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+
+        let mut records = Vec::new();
+        for row in mapped {
+            let (id, stored_trace_id, carrier, bytes) = row?;
+            records.push(RawCarrierRecord::new(
+                id,
+                TraceId::from_str(&stored_trace_id)?,
+                carrier,
+                bytes,
+            ));
+        }
+        Ok(records)
+    }
+
     /// Renders the occurrence log: occurrences joined to canonical traces,
     /// ordered by `(session, sequence)`.
     ///
@@ -431,6 +549,19 @@ impl TraceStore {
     }
 }
 
+/// Tightens the store file to owner-only read/write (`0600`), regardless of
+/// whatever permissions it already had — including looser ones left by an
+/// older build or an external tool. Called on every [`TraceStore::open`],
+/// not only at first creation, so an existing store is tightened rather than
+/// trusted (see `docs/design/forensic-retention-and-exposure.md`, Decision 2).
+#[cfg(unix)]
+fn secure_store_permissions(path: &Path) -> Result<(), StoreError> {
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
 fn decode_canonical_trace(row: (String, Vec<u8>)) -> Result<CanonicalTrace, StoreError> {
     let (trace_id, canonical_json) = row;
     Ok(CanonicalTrace {
@@ -444,6 +575,7 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::*;
+    use crate::ship;
 
     fn semantic(json: &str) -> SemanticCore {
         SemanticCore::from_json_slice(json.as_bytes()).unwrap()
@@ -732,6 +864,53 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn store_file_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = unique_temp_db_path("perms-created");
+        let store = TraceStore::open(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "store file must be created 0600, got {mode:o}");
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loosened_store_permissions_are_retightened_on_reopen() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = unique_temp_db_path("perms-retightened");
+        {
+            let store = TraceStore::open(&path).unwrap();
+            drop(store);
+        }
+
+        // Simulate an existing store with looser permissions than this
+        // policy requires — e.g. one created before this fix, or loosened by
+        // some external tool.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let loosened = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            loosened, 0o644,
+            "test setup did not actually loosen permissions"
+        );
+
+        let store = TraceStore::open(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "reopening must re-tighten permissions rather than trust them, got {mode:o}"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn fresh_database_is_stamped_with_current_schema_version() {
         let path = unique_temp_db_path("fresh-version");
@@ -930,6 +1109,132 @@ mod tests {
     }
 
     #[test]
+    fn fetch_raw_carrier_records_for_occurrences_selects_by_session() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        store
+            .capture(
+                &semantic(r#"{"kind":"intent","content":"session a, seq 0"}"#),
+                NewRawCarrierRecord::new("codex", b"a-0"),
+                occurrence("session-a", 0),
+            )
+            .unwrap();
+        store
+            .capture(
+                &semantic(r#"{"kind":"intent","content":"session b, seq 0"}"#),
+                NewRawCarrierRecord::new("codex", b"b-0"),
+                occurrence("session-b", 0),
+            )
+            .unwrap();
+
+        let records = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("session-a"))
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].bytes(), b"a-0");
+    }
+
+    #[test]
+    fn fetch_raw_carrier_records_for_occurrences_selects_by_timestamp_range() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        for (sequence, timestamp) in [(0, 10), (1, 20), (2, 30)] {
+            store
+                .capture(
+                    &semantic(&format!(
+                        r#"{{"kind":"intent","content":"seq {sequence}"}}"#
+                    )),
+                    NewRawCarrierRecord::new("codex", format!("bytes-{sequence}").as_bytes()),
+                    NewOccurrence {
+                        timestamp,
+                        ..occurrence("session-a", sequence)
+                    },
+                )
+                .unwrap();
+        }
+
+        let records = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::TimestampRange(10, 30))
+            .unwrap();
+
+        let bytes: Vec<&[u8]> = records.iter().map(RawCarrierRecord::bytes).collect();
+        assert_eq!(bytes, vec![b"bytes-0".as_slice(), b"bytes-1".as_slice()]);
+    }
+
+    #[test]
+    fn fetch_raw_carrier_records_for_occurrences_emits_by_capture_order_not_grouped_by_trace() {
+        // A trace ("alpha") occurs twice, interleaved with two other traces,
+        // in this capture order: alpha, beta, alpha (again), gamma. This is
+        // the shape that breaks a "select distinct trace ids, then fetch
+        // each trace's records as a block" implementation: grouping by
+        // trace would emit alpha's two records back to back at the position
+        // of its first occurrence, silently moving beta's record to after
+        // both of them. Emission must instead follow raw_record_id
+        // (capture) order exactly — which is what makes alpha's own two
+        // records land apart, with beta's record between them, rather than
+        // adjacent.
+        let mut store = TraceStore::open_in_memory().unwrap();
+        let alpha = semantic(r#"{"kind":"intent","content":"alpha content"}"#);
+        store
+            .capture(
+                &alpha,
+                NewRawCarrierRecord::new("codex", b"alpha-first"),
+                occurrence("session-a", 0),
+            )
+            .unwrap();
+        store
+            .capture(
+                &semantic(r#"{"kind":"intent","content":"beta content"}"#),
+                NewRawCarrierRecord::new("codex", b"beta"),
+                occurrence("session-a", 1),
+            )
+            .unwrap();
+        store
+            .capture(
+                &alpha,
+                NewRawCarrierRecord::new("codex", b"alpha-second"),
+                occurrence("session-a", 2),
+            )
+            .unwrap();
+        store
+            .capture(
+                &semantic(r#"{"kind":"intent","content":"gamma content"}"#),
+                NewRawCarrierRecord::new("codex", b"gamma"),
+                occurrence("session-a", 3),
+            )
+            .unwrap();
+
+        let records = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("session-a"))
+            .unwrap();
+
+        let bytes: Vec<&[u8]> = records.iter().map(RawCarrierRecord::bytes).collect();
+        assert_eq!(
+            bytes,
+            vec![
+                b"alpha-first".as_slice(),
+                b"beta".as_slice(),
+                b"alpha-second".as_slice(),
+                b"gamma".as_slice(),
+            ],
+            "emission must follow capture order, not group each trace's records together"
+        );
+
+        let first = bytes
+            .iter()
+            .position(|value| *value == b"alpha-first".as_slice())
+            .unwrap();
+        let second = bytes
+            .iter()
+            .position(|value| *value == b"alpha-second".as_slice())
+            .unwrap();
+        assert_ne!(
+            second,
+            first + 1,
+            "alpha's two records must not be contiguous: beta's record belongs between them"
+        );
+    }
+
+    #[test]
     fn log_renders_identically_after_the_raw_region_is_dropped() {
         let mut store = TraceStore::open_in_memory().unwrap();
         for index in 0..3 {
@@ -981,6 +1286,75 @@ mod tests {
         assert_eq!(
             before, after,
             "the log must render byte-for-byte identically once raw is dropped"
+        );
+    }
+
+    /// The mirror of the test above: `log` (and, by the same read, `ship`,
+    /// which only ever reads `canonical_traces`) must survive dropping
+    /// `raw_carrier_records` intact, while both of the store's raw-reading
+    /// methods — the ones `semon forensic` is built on — must fail hard
+    /// rather than silently return nothing.
+    ///
+    /// This has to run against a single, never-reopened connection, exactly
+    /// like the test above: [`TraceStore::open`] unconditionally re-runs the
+    /// additive schema (every statement is `CREATE ... IF NOT EXISTS`) on
+    /// every open, so a `DROP TABLE` made through a separate connection —
+    /// which is what happens if this were driven through `semon log` /
+    /// `semon ship` / `semon forensic` as three separate process-level
+    /// invocations — gets silently healed (as an empty table) the moment
+    /// the *next* command opens the store, before that command's own query
+    /// ever runs. That is a real, load-bearing property of `open` (it is
+    /// what lets an older on-disk schema upgrade in place), not a test bug;
+    /// it just means this boundary can only be observed within one
+    /// connection's lifetime, same as the test above.
+    #[test]
+    fn raw_reads_fail_but_log_and_canonical_reads_survive_dropping_the_raw_region() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        let core = semantic(r#"{"kind":"intent","content":"boundary case"}"#);
+        let trace_id = store
+            .capture(
+                &core,
+                NewRawCarrierRecord::new("codex", b"boundary-bytes"),
+                NewOccurrence {
+                    repo: "repo-a",
+                    repo_source: RepoSource::GitRemote,
+                    authored_by: AuthoredBy::Human,
+                    ..occurrence("session-a", 0)
+                },
+            )
+            .unwrap()
+            .trace_id()
+            .clone();
+
+        let before_log = store.log(&LogFilter::default()).unwrap();
+        assert_eq!(before_log.len(), 1);
+        let before_canonical = store.list_traces(None, 10).unwrap();
+        assert_eq!(before_canonical.len(), 1);
+
+        store
+            .connection
+            .execute("DROP TABLE raw_carrier_records", [])
+            .unwrap();
+
+        // The ordinary reads `semon log` and `semon ship` are built on stay
+        // exactly as they were.
+        let after_log = store.log(&LogFilter::default()).unwrap();
+        assert_eq!(before_log, after_log);
+        let after_canonical = store.list_traces(None, 10).unwrap();
+        assert_eq!(before_canonical, after_canonical);
+        assert!(ship(&store, None).unwrap().shipped() == 0);
+
+        // Both of the reads `semon forensic` is built on must fail loudly —
+        // not return an empty, silently-wrong result.
+        assert!(
+            store.fetch_raw_carrier_records(&trace_id).is_err(),
+            "fetch_raw_carrier_records must fail once its table is dropped"
+        );
+        assert!(
+            store
+                .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("session-a"))
+                .is_err(),
+            "fetch_raw_carrier_records_for_occurrences must fail once its table is dropped"
         );
     }
 }

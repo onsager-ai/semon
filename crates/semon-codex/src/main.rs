@@ -1,5 +1,8 @@
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use semon_codex::{
     ProcessOptions, candidate_files, default_state_path, default_store_path, load_state,
     process_file,
@@ -27,13 +30,7 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Args) -> Result<(), String> {
-    if let Some(parent) = args
-        .store
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
+    ensure_store_dir(&args.store)?;
     let mut store = TraceStore::open(&args.store).map_err(|error| error.to_string())?;
     let mut state = load_state(&args.state).map_err(|error| error.to_string())?;
     let mut total = 0;
@@ -46,6 +43,26 @@ fn run(args: Args) -> Result<(), String> {
     if args.verbose {
         eprintln!("processed {total} record(s)");
     }
+    Ok(())
+}
+
+/// Creates the store's parent directory and keeps it owner-only (`0700` on
+/// Unix), re-asserted on every run rather than trusted from a prior one —
+/// the store this directory holds can carry prompts, responses, source
+/// code, credentials, and machine paths (see
+/// `docs/design/forensic-retention-and-exposure.md`); the store file itself
+/// is separately tightened by `TraceStore::open`.
+fn ensure_store_dir(store: &std::path::Path) -> Result<(), String> {
+    let Some(parent) = store
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -85,4 +102,55 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     Ok(result)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "semon-codex-test-{label}-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn store_dir_is_created_owner_only() {
+        let dir = unique_temp_dir("created");
+        let store = dir.join("traces.sqlite3");
+
+        ensure_store_dir(&store).unwrap();
+
+        let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "store dir must be created 0700, got {mode:o}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loosened_store_dir_permissions_are_retightened() {
+        let dir = unique_temp_dir("retightened");
+        let store = dir.join("traces.sqlite3");
+        ensure_store_dir(&store).unwrap();
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let loosened = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            loosened, 0o755,
+            "test setup did not actually loosen permissions"
+        );
+
+        ensure_store_dir(&store).unwrap();
+
+        let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "reopening must re-tighten the store dir rather than trust it, got {mode:o}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

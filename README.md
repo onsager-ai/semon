@@ -15,9 +15,13 @@ intentionally gone. Semon is local-first and does not configure or assume a
 central endpoint.
 
 Raw forensic records can contain prompts, responses, source code, credentials,
-commercial data, and machine paths. Keep the database local and access
-controlled; a private repository is not a safe destination for captured
-session data, and no real session fixture should be committed.
+commercial data, and machine paths. They are retained in full and
+indefinitely — no pruning, no opt-out, no sampling — so the store file is
+created `0600` and its parent directory `0700`, and both are re-tightened on
+every open rather than trusted from a prior run. That access control is the
+only remaining protection; keep the database local, and a private repository
+is not a safe destination for captured session data. No real session fixture
+should be committed.
 
 ## Capture Codex sessions
 
@@ -73,6 +77,53 @@ Each canonical semantic document is sent as JSON with its existing trace ID in
 the `X-Semon-Content-Hash` header. An endpoint can therefore upsert by content
 hash, making repeated replication idempotent. The replication path never reads
 or transmits raw forensic records or carrier labels.
+
+## Read the log
+
+`semon log` renders the occurrence log — what was captured, joined to its
+semantics, in session/sequence order:
+
+```sh
+cargo run --locked -p semon-store --bin semon -- log \
+  --store /path/to/traces.sqlite3 \
+  --repo repository-name \
+  --day 2026-09-20 \
+  --limit 100
+```
+
+`--repo`, `--day`, and `--limit` are all optional filters; an unfiltered call
+renders everything. This is an ordinary read: it queries only `occurrences`
+joined to `canonical_traces`, and is structurally unable to reach
+`raw_carrier_records` — enforced by a test that drops that table entirely and
+checks the output is byte-for-byte unchanged.
+
+## Read forensic records
+
+`semon forensic` is the only command that reads `raw_carrier_records` — the
+verbatim carrier bytes, including whatever prompts, responses, source code,
+credentials, and machine paths passed through a captured session. Every
+invocation writes a one-line warning to stderr before any output, so
+redirecting stdout to a file still shows it.
+
+Select exactly one of `--trace`, `--session`, or `--day`:
+
+```sh
+cargo run --locked -p semon-store --bin semon -- forensic \
+  --store /path/to/traces.sqlite3 \
+  --day 2026-09-20
+
+cargo run --locked -p semon-store --bin semon -- forensic \
+  --store /path/to/traces.sqlite3 \
+  --session codex-session-id \
+  --out /path/to/forensic-excerpt.txt
+```
+
+Output is one raw record per line, verbatim bytes as stored. `--out FILE`
+writes to a file created (and re-tightened) `0600` instead of stdout; it is
+an option, not a requirement — bulk selection to stdout works without it,
+by design, so the command's honest bulk capability isn't fenced off behind a
+narrower one nobody chose. See
+`docs/design/forensic-retention-and-exposure.md` for the full reasoning.
 
 ## Periodic capture
 
