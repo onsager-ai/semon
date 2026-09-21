@@ -17,11 +17,29 @@ CREATE TABLE IF NOT EXISTS canonical_traces (
     canonical_json BLOB NOT NULL
 ) STRICT;
 
+-- `session` and `sequence` (schema version 3) copy the natural key of the
+-- occurrence written in the same `capture()` transaction, so a raw record
+-- can be selected by its *own* session or reachable-through-occurrence
+-- timestamp, exactly rather than by widening to every raw record sharing
+-- its trace_id (see issue #20's follow-up: trace-scoped selection over-reads
+-- and, worse, over-*deletes* whenever one trace recurs across sessions).
+-- Nullable because a v1/v2 database's existing rows predate this link and
+-- cannot be backfilled reliably (raw_carrier_records carried no session or
+-- sequence before now, and trace_id alone cannot recover which occurrence a
+-- given raw row belonged to when a trace has more than one). Deliberately a
+-- plain column pair, not a foreign key to `occurrences`: the reference runs
+-- raw -> occurrence only, in this direction, so that direction is
+-- unenforceable is a feature — enforcing it would require occurrences to
+-- exist first, which is one more thing that could make an occurrence
+-- unwritable because of a forensic-region problem, exactly the coupling
+-- docs/design/trace-identity-and-occurrences.md rejects.
 CREATE TABLE IF NOT EXISTS raw_carrier_records (
     raw_record_id INTEGER PRIMARY KEY AUTOINCREMENT,
     trace_id      TEXT NOT NULL REFERENCES canonical_traces(trace_id),
     carrier       TEXT NOT NULL CHECK(length(trim(carrier)) > 0),
-    raw_bytes     BLOB NOT NULL
+    raw_bytes     BLOB NOT NULL,
+    session       TEXT,
+    sequence      INTEGER
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS raw_carrier_records_by_trace
@@ -52,6 +70,20 @@ CREATE INDEX IF NOT EXISTS occurrences_by_repo_timestamp
     ON occurrences(repo, timestamp);
 "#;
 
+/// Creates the index over `raw_carrier_records`' link columns.
+///
+/// Run separately from [`SCHEMA`], and always *after*
+/// [`ensure_raw_carrier_link_columns`]: an older on-disk database's
+/// `raw_carrier_records` table predates `session`/`sequence`, and those
+/// columns are added by an `ALTER TABLE`, not by the `CREATE TABLE IF NOT
+/// EXISTS` above (which no-ops against an already-existing table). Creating
+/// this index before that `ALTER TABLE` has run would fail outright against
+/// such a database, since the columns it names would not yet exist.
+const RAW_CARRIER_LINK_INDEX: &str = r#"
+CREATE INDEX IF NOT EXISTS raw_carrier_records_by_carrier_session_sequence
+    ON raw_carrier_records(carrier, session, sequence);
+"#;
+
 /// The `PRAGMA user_version` this build understands, and the version it
 /// stamps onto a newly created (or additively migrated) database.
 ///
@@ -61,20 +93,27 @@ CREATE INDEX IF NOT EXISTS occurrences_by_repo_timestamp
 /// to this constant (instead of anything derived from a caller or the
 /// database) is what keeps that `format!` call safe.
 ///
-/// Two schema shapes exist now (1: `canonical_traces` + `raw_carrier_records`
-/// only; 2: adds `occurrences`), and read behavior genuinely depends on which
-/// one is on disk — [`TraceStore::log`] requires the `occurrences` table.
-/// Opening a database stamped with a version *higher* than this build knows
-/// (i.e. written by a future build) is therefore a hard error rather than
-/// being silently accepted: this build cannot know what version-dependent
-/// behavior that future schema implies, so proceeding could silently give
-/// wrong answers instead of failing loudly. A version from 1 up to and
-/// including `SCHEMA_VERSION` is migrated forward additively (every DDL
-/// statement above is `CREATE ... IF NOT EXISTS`, so it only ever adds
-/// structure) and the marker is advanced to `SCHEMA_VERSION`. A fresh
-/// database (`user_version` 0, SQLite's default) is stamped with
-/// `SCHEMA_VERSION` directly.
-const SCHEMA_VERSION: u32 = 2;
+/// Three schema shapes exist now (1: `canonical_traces` + `raw_carrier_records`
+/// only; 2: adds `occurrences`; 3: adds nullable `session`/`sequence` link
+/// columns and an index to `raw_carrier_records`), and read behavior
+/// genuinely depends on which one is on disk — [`TraceStore::log`] requires
+/// the `occurrences` table, and [`TraceStore::forget_forensic`]'s `Session`
+/// and `Before` selectors require the link columns to select exactly rather
+/// than by over-broad trace_id. Opening a database stamped with a version
+/// *higher* than this build knows (i.e. written by a future build) is
+/// therefore a hard error rather than being silently accepted: this build
+/// cannot know what version-dependent behavior that future schema implies,
+/// so proceeding could silently give wrong answers instead of failing
+/// loudly. A version from 1 up to and including `SCHEMA_VERSION` is migrated
+/// forward additively — every DDL statement in [`SCHEMA`] is `CREATE ... IF
+/// NOT EXISTS`, and the version-3 link columns are added to an
+/// already-existing `raw_carrier_records` table by
+/// [`ensure_raw_carrier_link_columns`] instead, since SQLite has no
+/// conditional `ALTER TABLE ADD COLUMN` — so migration only ever adds
+/// structure, never removes or renames it — and the marker is advanced to
+/// `SCHEMA_VERSION`. A fresh database (`user_version` 0, SQLite's default)
+/// is stamped with `SCHEMA_VERSION` directly.
+const SCHEMA_VERSION: u32 = 3;
 
 /// Errors returned by the trace store.
 #[derive(Debug, Error)]
@@ -150,6 +189,74 @@ pub enum OccurrenceSelector<'a> {
     TimestampRange(i64, i64),
 }
 
+/// Selects `raw_carrier_records` rows to permanently delete via
+/// [`TraceStore::forget_forensic`] (backing `semon forget --forensic`).
+///
+/// Unlike [`OccurrenceSelector`], which only narrows an ordinary read, a
+/// value of this type drives an irreversible delete, so there is
+/// deliberately no "everything" variant: the CLI layer must always supply
+/// exactly one of these, never none (see `docs/design/forensic-retention-and-exposure.md`
+/// and issue #20 — a selector is mandatory).
+#[derive(Clone, Copy, Debug)]
+pub enum ForgetSelector<'a> {
+    /// Every raw record for exactly this trace.
+    Trace(&'a TraceId),
+    /// Every raw record for any trace observed at least once in this
+    /// session. A trace's raw records are keyed by `trace_id` alone (raw
+    /// records carry no session column), so — exactly as for
+    /// [`OccurrenceSelector::Session`] on the read side — a trace that also
+    /// occurred under a *different* session loses all of its raw records
+    /// too, not just the ones captured under the named session.
+    Session(&'a str),
+    /// Every raw record for a trace whose occurrences are *all* strictly
+    /// before this many nanoseconds since the Unix epoch (a UTC day
+    /// boundary, computed with [`crate::day_bounds_ns`]). A trace with even
+    /// one occurrence at or after the cutoff is left alone entirely: its raw
+    /// records stay, because deleting them would remove forensic evidence of
+    /// a still-in-scope occurrence just because the same content was also
+    /// seen further in the past.
+    Before(i64),
+}
+
+/// Builds the `raw_carrier_records` WHERE-clause fragment and bindings for
+/// `selector`, shared between [`TraceStore::count_forensic_forget`] (a dry
+/// read) and [`TraceStore::forget_forensic`] (the actual delete), so the two
+/// can never drift apart on what counts as "matching".
+///
+/// `Session` and `Before` select through each raw row's *own* `session` /
+/// `sequence` link columns (schema version 3), not through `trace_id`. A
+/// trace-scoped selection over-deletes the moment one trace recurs across
+/// sessions — measured on a real week of capture: selecting a session's raw
+/// records by trace pulled in raw rows from 41 *other* sessions, and
+/// selecting "before a cutoff" by trace left every raw row of a
+/// still-recurring trace untouched, cutoff or not. `Trace` alone stays
+/// trace-scoped deliberately: the caller named the content itself, and
+/// removing every capture of it, in every session, is what naming a trace
+/// means. A raw row with no link (written before schema version 3, `session
+/// IS NULL`) matches neither `Session` nor `Before` — see
+/// [`TraceStore::count_unlinked_raw_records`], which the CLI consults so a
+/// `--session`/`--before` forget never *silently* leaves such a row
+/// unreported.
+fn forget_where_clause(selector: ForgetSelector<'_>) -> (&'static str, Vec<Box<dyn ToSql>>) {
+    match selector {
+        ForgetSelector::Trace(trace_id) => (
+            "trace_id = ?1",
+            vec![Box::new(trace_id.as_str().to_owned())],
+        ),
+        ForgetSelector::Session(session) => ("session = ?1", vec![Box::new(session.to_owned())]),
+        ForgetSelector::Before(cutoff) => (
+            "raw_record_id IN (\
+                 SELECT r.raw_record_id FROM raw_carrier_records r \
+                 JOIN occurrences o \
+                     ON o.carrier = r.carrier AND o.session = r.session \
+                        AND o.sequence = r.sequence \
+                 WHERE o.timestamp < ?1\
+             )",
+            vec![Box::new(cutoff)],
+        ),
+    }
+}
+
 impl TraceStore {
     /// Opens or creates a store at `path` and initializes its schema.
     ///
@@ -189,8 +296,17 @@ impl TraceStore {
         // Every statement in `SCHEMA` is additive (`CREATE ... IF NOT
         // EXISTS`), so running it against a fresh database, an already
         // up-to-date one, or one still at an older known version is always
-        // safe: it only ever adds structure.
+        // safe: it only ever adds structure. A fresh database's
+        // `raw_carrier_records` already has the version-3 link columns
+        // (they're in `CREATE TABLE`'s own definition above); an
+        // already-existing v1/v2 table does not, `CREATE TABLE IF NOT
+        // EXISTS` no-ops against it, and `ensure_raw_carrier_link_columns`
+        // is what adds them there instead. That must run *before* the
+        // version-3 index, which names those columns and would fail against
+        // a table that doesn't have them yet.
         connection.execute_batch(SCHEMA)?;
+        ensure_raw_carrier_link_columns(&connection)?;
+        connection.execute_batch(RAW_CARRIER_LINK_INDEX)?;
         if user_version < SCHEMA_VERSION {
             connection.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         }
@@ -240,10 +356,22 @@ impl TraceStore {
             }
         }
 
+        // `session`/`sequence` copy this same capture's occurrence natural
+        // key onto the raw row (schema version 3), so the raw row can later
+        // be selected by its own session or (joined to `occurrences`) its
+        // own timestamp, rather than by trace_id — trace_id alone widens to
+        // every raw row sharing that trace's content, across every session
+        // it was ever seen in. See `forget_where_clause`'s doc comment.
         transaction.execute(
-            "INSERT INTO raw_carrier_records (trace_id, carrier, raw_bytes) \
-             VALUES (?1, ?2, ?3)",
-            params![trace_id.as_str(), raw_record.carrier, raw_record.bytes],
+            "INSERT INTO raw_carrier_records (trace_id, carrier, raw_bytes, session, sequence) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                trace_id.as_str(),
+                raw_record.carrier,
+                raw_record.bytes,
+                occurrence.session,
+                occurrence.sequence,
+            ],
         )?;
         let raw_record_id = transaction.last_insert_rowid();
 
@@ -378,75 +506,62 @@ impl TraceStore {
         Ok(records)
     }
 
-    /// Explicitly fetches forensic records for every trace with at least one
-    /// occurrence matched by `selector`.
+    /// Explicitly fetches forensic records for every raw record whose own
+    /// link matches `selector`.
     ///
-    /// This is the bulk counterpart to [`TraceStore::fetch_raw_carrier_records`]:
-    /// it goes through `occurrences` only to *find which traces* to fetch —
-    /// the occurrence facts themselves (session, sequence, timestamp, ...)
-    /// are not returned here, only the raw bytes. It backs `semon forensic`'s
-    /// `--session` and `--day` selectors (see
+    /// This is the bulk counterpart to [`TraceStore::fetch_raw_carrier_records`].
+    /// It backs `semon forensic`'s `--session` and `--day` selectors (see
     /// `docs/design/forensic-retention-and-exposure.md`, Decision 3).
     ///
-    /// Emitted records are ordered by ascending `raw_record_id` — capture
-    /// (insertion) order — across *all* selected traces together, not
-    /// grouped by trace. Grouping by trace was this method's first
-    /// implementation and was a bug: selecting distinct trace ids and then
-    /// fetching each trace's records as a contiguous block dumps every
-    /// occurrence of a repeated trace at the position of its *first*
-    /// appearance, which reorders (and, for a trace occurring many times,
-    /// badly reorders) anything captured in between. `raw_record_id` order
-    /// does not have that failure mode, because it never groups at all.
+    /// This selects through each raw row's own `session`/`sequence` link
+    /// columns (schema version 3) — `Session` matches a raw row's own
+    /// `session` directly, and `TimestampRange` joins to the one occurrence
+    /// that link identifies and checks *its* timestamp — not by first
+    /// collecting matching traces and then fetching every raw row that
+    /// shares one's `trace_id`. That older approach over-read: a trace
+    /// captured under two sessions would have `--session A` return its raw
+    /// record from session B too, since both rows share one `trace_id`.
+    /// Reading too much is not the same failure as forgetting too much, but
+    /// it is the same bug, on the read side of the exact code path
+    /// [`TraceStore::forget_forensic`]'s delete side had (see that method's
+    /// selector, [`ForgetSelector`], and `forget_where_clause`'s doc
+    /// comment for the measurement that caught it).
     ///
-    /// `raw_record_id` order is an *approximation* of true occurrence order,
-    /// not an exact match, and that limit is structural rather than a bug to
-    /// fix here: `occurrences` and `raw_carrier_records` carry no explicit
-    /// link to each other — both are written in the same capture
-    /// transaction, but neither references the other's row id — so there is
-    /// no way to emit exactly one raw record per matching occurrence, in
-    /// that occurrence's own order, without a schema change.
-    /// `docs/design/trace-identity-and-occurrences.md` lists this overlap as
-    /// an open question (whether occurrences derive from, parallel, or
-    /// displace raw records); until that is settled, capture order is the
-    /// best available stand-in, and it is exact for the common case of one
-    /// capture pass over one session with no repeated content.
+    /// A raw row written before schema version 3 has no link (`session IS
+    /// NULL`) and matches neither selector here, the same as in
+    /// `forget_where_clause` — see
+    /// [`TraceStore::count_unlinked_raw_records`].
+    ///
+    /// Emitted records are ordered by ascending `raw_record_id` — capture
+    /// (insertion) order.
     pub fn fetch_raw_carrier_records_for_occurrences(
         &self,
         selector: OccurrenceSelector<'_>,
     ) -> Result<Vec<RawCarrierRecord>, StoreError> {
-        let trace_ids: Vec<String> = match selector {
+        let (clause, bindings): (&str, Vec<Box<dyn ToSql>>) = match selector {
             OccurrenceSelector::Session(session) => {
-                let mut statement = self
-                    .connection
-                    .prepare("SELECT DISTINCT trace_id FROM occurrences WHERE session = ?1")?;
-                statement
-                    .query_map([session], |row| row.get::<_, String>(0))?
-                    .collect::<Result<_, _>>()?
+                ("r.session = ?1", vec![Box::new(session.to_owned())])
             }
-            OccurrenceSelector::TimestampRange(start, end) => {
-                let mut statement = self.connection.prepare(
-                    "SELECT DISTINCT trace_id FROM occurrences \
-                     WHERE timestamp >= ?1 AND timestamp < ?2",
-                )?;
-                statement
-                    .query_map(params![start, end], |row| row.get::<_, String>(0))?
-                    .collect::<Result<_, _>>()?
-            }
+            OccurrenceSelector::TimestampRange(start, end) => (
+                "r.raw_record_id IN (\
+                     SELECT r2.raw_record_id FROM raw_carrier_records r2 \
+                     JOIN occurrences o \
+                         ON o.carrier = r2.carrier AND o.session = r2.session \
+                            AND o.sequence = r2.sequence \
+                     WHERE o.timestamp >= ?1 AND o.timestamp < ?2\
+                 )",
+                vec![Box::new(start), Box::new(end)],
+            ),
         };
 
-        if trace_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let placeholders = vec!["?"; trace_ids.len()].join(", ");
         let sql = format!(
-            "SELECT raw_record_id, trace_id, carrier, raw_bytes \
-             FROM raw_carrier_records WHERE trace_id IN ({placeholders}) \
-             ORDER BY raw_record_id ASC"
+            "SELECT r.raw_record_id, r.trace_id, r.carrier, r.raw_bytes \
+             FROM raw_carrier_records r WHERE {clause} \
+             ORDER BY r.raw_record_id ASC"
         );
         let mut statement = self.connection.prepare(&sql)?;
-        let bindings: Vec<&dyn ToSql> = trace_ids.iter().map(|id| id as &dyn ToSql).collect();
-        let mapped = statement.query_map(bindings.as_slice(), |row| {
+        let params: Vec<&dyn ToSql> = bindings.iter().map(AsRef::as_ref).collect();
+        let mapped = statement.query_map(params.as_slice(), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -547,6 +662,119 @@ impl TraceStore {
         }
         Ok(records)
     }
+
+    /// Counts how many `raw_carrier_records` rows match `selector`, without
+    /// deleting anything.
+    ///
+    /// This is a dry read used to build the confirmation prompt for `semon
+    /// forget --forensic` before anything irreversible happens — the
+    /// operator sees the exact count [`TraceStore::forget_forensic`] would
+    /// delete, computed by the identical WHERE clause.
+    pub fn count_forensic_forget(&self, selector: ForgetSelector<'_>) -> Result<u64, StoreError> {
+        let (clause, bindings) = forget_where_clause(selector);
+        let sql = format!("SELECT COUNT(*) FROM raw_carrier_records WHERE {clause}");
+        let params: Vec<&dyn ToSql> = bindings.iter().map(AsRef::as_ref).collect();
+        let count: i64 = self
+            .connection
+            .query_row(&sql, params.as_slice(), |row| row.get(0))?;
+        Ok(count.max(0) as u64)
+    }
+
+    /// Permanently deletes `raw_carrier_records` rows matching `selector`.
+    ///
+    /// `canonical_traces` and `occurrences` are never touched by this
+    /// method — it is the deletion counterpart to
+    /// [`TraceStore::fetch_raw_carrier_records`] and
+    /// [`TraceStore::fetch_raw_carrier_records_for_occurrences`], and its
+    /// purpose is to make reachable the state
+    /// `docs/design/trace-identity-and-occurrences.md` designed the
+    /// occurrence region around: a store whose forensic region is gone but
+    /// whose log is intact.
+    ///
+    /// A plain SQLite `DELETE` does not remove bytes from the file: deleted
+    /// rows go onto the freelist and stay byte-for-byte readable on disk
+    /// until their pages are reused or the file is vacuumed, which would be
+    /// theatre for a command whose entire purpose is removing credentials
+    /// and source text. So this method runs the delete under `PRAGMA
+    /// secure_delete = ON` — SQLite overwrites deleted content with zeroes
+    /// before the page is freed — and then `VACUUM`s the connection, which
+    /// rewrites the database file from scratch without the freed pages at
+    /// all. Either alone would already remove the bytes from the live file;
+    /// doing both is defense in depth against relying on one mechanism's
+    /// fine print.
+    ///
+    /// Returns the number of rows deleted.
+    pub fn forget_forensic(&mut self, selector: ForgetSelector<'_>) -> Result<u64, StoreError> {
+        let (clause, bindings) = forget_where_clause(selector);
+
+        // Not wrapped in an explicit transaction: VACUUM refuses to run
+        // inside one, and a single DELETE statement is already atomic on
+        // its own in SQLite's default autocommit mode.
+        self.connection
+            .execute_batch("PRAGMA secure_delete = ON;")?;
+        let sql = format!("DELETE FROM raw_carrier_records WHERE {clause}");
+        let params: Vec<&dyn ToSql> = bindings.iter().map(AsRef::as_ref).collect();
+        let deleted = self.connection.execute(&sql, params.as_slice())?;
+        self.connection.execute_batch("VACUUM;")?;
+
+        Ok(deleted as u64)
+    }
+
+    /// Counts `raw_carrier_records` rows with no `session`/`sequence` link —
+    /// rows written by a build before schema version 3, which
+    /// [`ForgetSelector::Session`] and [`ForgetSelector::Before`] cannot
+    /// select (only [`ForgetSelector::Trace`] can still reach them, since it
+    /// matches on `trace_id` rather than the link).
+    ///
+    /// This exists so `semon forget --forensic --session`/`--before` can
+    /// report such rows rather than silently completing as though nothing
+    /// was missed: a v1/v2 database's existing raw rows cannot be
+    /// backfilled with a link, because `trace_id` alone cannot recover which
+    /// occurrence a given raw row belonged to once a trace has more than
+    /// one.
+    pub fn count_unlinked_raw_records(&self) -> Result<u64, StoreError> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM raw_carrier_records WHERE session IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+}
+
+/// Adds the schema-version-3 `session`/`sequence` link columns to an
+/// existing `raw_carrier_records` table that predates them.
+///
+/// A fresh database's `raw_carrier_records` already has these columns —
+/// they're part of [`SCHEMA`]'s own `CREATE TABLE` — so this only ever does
+/// anything against a v1/v2 database, where `CREATE TABLE IF NOT EXISTS`
+/// no-ops because the table already exists. SQLite has no conditional `ALTER
+/// TABLE ADD COLUMN IF NOT EXISTS`, so this checks each column's presence
+/// via `PRAGMA table_info` first and only runs the `ALTER TABLE` that column
+/// is actually missing — making the whole operation idempotent across
+/// repeated opens, the same guarantee every other statement in [`SCHEMA`]
+/// already has via its own `IF NOT EXISTS`.
+fn ensure_raw_carrier_link_columns(connection: &Connection) -> Result<(), StoreError> {
+    let mut has_session = false;
+    let mut has_sequence = false;
+    {
+        let mut statement = connection.prepare("PRAGMA table_info(raw_carrier_records)")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            match row.get::<_, String>(1)?.as_str() {
+                "session" => has_session = true,
+                "sequence" => has_sequence = true,
+                _ => {}
+            }
+        }
+    }
+    if !has_session {
+        connection.execute_batch("ALTER TABLE raw_carrier_records ADD COLUMN session TEXT;")?;
+    }
+    if !has_sequence {
+        connection.execute_batch("ALTER TABLE raw_carrier_records ADD COLUMN sequence INTEGER;")?;
+    }
+    Ok(())
 }
 
 /// Tightens the store file to owner-only read/write (`0600`), regardless of
@@ -966,6 +1194,102 @@ mod tests {
     }
 
     #[test]
+    fn migrating_a_pre_v3_database_reports_its_unlinked_raw_rows_rather_than_hiding_them() {
+        let path = unique_temp_db_path("pre-v3-unlinked");
+
+        // Simulate a version-2 database: occurrences already exist, but
+        // raw_carrier_records predates the session/sequence link columns —
+        // exactly the shape every real store had before this schema
+        // version, and the shape `ensure_raw_carrier_link_columns` exists
+        // to add columns to via `ALTER TABLE`, since `CREATE TABLE IF NOT
+        // EXISTS` no-ops against an already-existing table.
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE canonical_traces ( \
+                         trace_id TEXT PRIMARY KEY NOT NULL, \
+                         canonical_json BLOB NOT NULL \
+                     );
+                     CREATE TABLE raw_carrier_records ( \
+                         raw_record_id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                         trace_id TEXT NOT NULL, \
+                         carrier TEXT NOT NULL, \
+                         raw_bytes BLOB NOT NULL \
+                     );
+                     CREATE TABLE occurrences ( \
+                         occurrence_id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                         trace_id TEXT NOT NULL, \
+                         carrier TEXT NOT NULL, \
+                         session TEXT NOT NULL, \
+                         sequence INTEGER NOT NULL, \
+                         timestamp INTEGER NOT NULL, \
+                         repo TEXT NOT NULL, \
+                         repo_source TEXT NOT NULL, \
+                         parent_sequence INTEGER, \
+                         agent TEXT, \
+                         authored_by TEXT NOT NULL, \
+                         UNIQUE (carrier, session, sequence) \
+                     );
+                     INSERT INTO canonical_traces VALUES ('aa11223344556677889900112233445566778899001122334455667788990011', X'7b7d');
+                     INSERT INTO raw_carrier_records (trace_id, carrier, raw_bytes) \
+                         VALUES ('aa11223344556677889900112233445566778899001122334455667788990011', 'codex', X'6c6567616379');
+                     PRAGMA user_version = 2;",
+                )
+                .unwrap();
+        }
+
+        let mut store = TraceStore::open(&path).unwrap();
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
+
+        // The pre-existing raw row cannot be backfilled with a link (its
+        // trace_id alone can't tell us which occurrence it belonged to), so
+        // it must show up as unlinked rather than silently vanish from
+        // both counts.
+        assert_eq!(store.count_unlinked_raw_records().unwrap(), 1);
+        assert_eq!(raw_record_count(&store), 1);
+
+        // Neither --session nor --before can reach it...
+        assert_eq!(
+            store
+                .count_forensic_forget(ForgetSelector::Session("any-session"))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .count_forensic_forget(ForgetSelector::Before(i64::MAX))
+                .unwrap(),
+            0
+        );
+        // ...but --trace still can, since it matches by trace_id, not the link.
+        let legacy_id =
+            TraceId::from_str("aa11223344556677889900112233445566778899001122334455667788990011")
+                .unwrap();
+        assert_eq!(
+            store
+                .count_forensic_forget(ForgetSelector::Trace(&legacy_id))
+                .unwrap(),
+            1
+        );
+
+        // A fresh capture after migration is linked immediately, and is not
+        // counted as unlinked.
+        store
+            .capture(
+                &semantic(r#"{"kind":"intent","content":"post-migration, linked"}"#),
+                NewRawCarrierRecord::new("codex", b"linked bytes"),
+                occurrence("session-a", 0),
+            )
+            .unwrap();
+        assert_eq!(store.count_unlinked_raw_records().unwrap(), 1);
+        assert_eq!(raw_record_count(&store), 2);
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn opening_a_database_with_an_unsupported_higher_version_is_an_error() {
         let path = unique_temp_db_path("future-version");
 
@@ -1356,5 +1680,272 @@ mod tests {
                 .is_err(),
             "fetch_raw_carrier_records_for_occurrences must fail once its table is dropped"
         );
+    }
+
+    fn raw_record_count(store: &TraceStore) -> i64 {
+        store
+            .connection
+            .query_row("SELECT count(*) FROM raw_carrier_records", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn forget_forensic_by_trace_deletes_only_that_traces_raw_rows() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        let kept = semantic(r#"{"kind":"intent","content":"kept trace"}"#);
+        let forgotten = semantic(r#"{"kind":"intent","content":"forgotten trace"}"#);
+        let forgotten_id = forgotten.trace_id().unwrap();
+        store
+            .capture(
+                &kept,
+                NewRawCarrierRecord::new("codex", b"kept bytes"),
+                occurrence("session-a", 0),
+            )
+            .unwrap();
+        store
+            .capture(
+                &forgotten,
+                NewRawCarrierRecord::new("codex", b"forgotten bytes"),
+                occurrence("session-a", 1),
+            )
+            .unwrap();
+
+        let count = store
+            .count_forensic_forget(ForgetSelector::Trace(&forgotten_id))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let deleted = store
+            .forget_forensic(ForgetSelector::Trace(&forgotten_id))
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        assert_eq!(raw_record_count(&store), 1);
+        assert!(
+            store
+                .fetch_raw_carrier_records(&forgotten_id)
+                .unwrap()
+                .is_empty()
+        );
+        // canonical_traces and occurrences are untouched by forget.
+        assert_eq!(counts(&store), (2, 1));
+        assert_eq!(occurrence_count(&store), 2);
+        assert_eq!(store.log(&LogFilter::default()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn forget_forensic_by_session_leaves_the_same_trace_in_another_session_intact() {
+        // The failure this test is shaped around: a trace shared between two
+        // sessions used to be selected by trace_id, so forgetting one
+        // session's raw records also deleted the *other* session's raw
+        // record for that same content — measured on a real week of capture
+        // as a 4.5x over-delete. `session`/`sequence` link each raw row to
+        // its own capture, so this must no longer happen.
+        let shared = semantic(r#"{"kind":"intent","content":"shared across two sessions"}"#);
+        let mut store = TraceStore::open_in_memory().unwrap();
+        store
+            .capture(
+                &shared,
+                NewRawCarrierRecord::new("codex", b"session-a's own bytes"),
+                occurrence("session-a", 0),
+            )
+            .unwrap();
+        store
+            .capture(
+                &shared,
+                NewRawCarrierRecord::new("codex", b"session-b's own bytes"),
+                occurrence("session-b", 0),
+            )
+            .unwrap();
+        // An unrelated trace in session-a, to prove the whole session is
+        // reachable, not just the shared one.
+        store
+            .capture(
+                &semantic(r#"{"kind":"intent","content":"session-a only"}"#),
+                NewRawCarrierRecord::new("codex", b"session-a-only bytes"),
+                occurrence("session-a", 1),
+            )
+            .unwrap();
+
+        let count = store
+            .count_forensic_forget(ForgetSelector::Session("session-a"))
+            .unwrap();
+        assert_eq!(count, 2, "exactly session-a's own two raw rows");
+
+        let deleted = store
+            .forget_forensic(ForgetSelector::Session("session-a"))
+            .unwrap();
+        assert_eq!(deleted, 2);
+
+        // Session-b's raw record for the shared trace must survive, field
+        // for field — not merely "some row remains".
+        let shared_id = shared.trace_id().unwrap();
+        let remaining = store.fetch_raw_carrier_records(&shared_id).unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "session-b's copy of the shared trace's raw record must survive"
+        );
+        assert_eq!(remaining[0].bytes(), b"session-b's own bytes");
+        assert_eq!(remaining[0].trace_id(), &shared_id);
+
+        assert_eq!(raw_record_count(&store), 1);
+        // occurrences and canonical traces are never touched by forget.
+        assert_eq!(occurrence_count(&store), 3);
+        assert_eq!(counts(&store).0, 2);
+    }
+
+    #[test]
+    fn forget_forensic_before_deletes_the_pre_cutoff_capture_and_leaves_the_later_one() {
+        // The failure this test is shaped around: "before" used to require
+        // *every* occurrence of a trace to predate the cutoff, so a trace
+        // that recurred after the cutoff kept its raw record from *before*
+        // the cutoff too — measured on a real week as 52% of eligible
+        // captures surviving while the command reported success. Deletion
+        // must be per capture (the raw row's own linked occurrence), not
+        // per trace.
+        let recurring = semantic(r#"{"kind":"intent","content":"recurring content"}"#);
+        let cutoff = 1_000;
+        let mut store = TraceStore::open_in_memory().unwrap();
+        store
+            .capture(
+                &recurring,
+                NewRawCarrierRecord::new("codex", b"pre-cutoff capture"),
+                NewOccurrence {
+                    timestamp: cutoff - 1,
+                    ..occurrence("session-a", 0)
+                },
+            )
+            .unwrap();
+        store
+            .capture(
+                &recurring,
+                NewRawCarrierRecord::new("codex", b"post-cutoff capture"),
+                NewOccurrence {
+                    timestamp: cutoff,
+                    ..occurrence("session-a", 1)
+                },
+            )
+            .unwrap();
+
+        let count = store
+            .count_forensic_forget(ForgetSelector::Before(cutoff))
+            .unwrap();
+        assert_eq!(count, 1, "only the pre-cutoff capture counts");
+
+        let deleted = store
+            .forget_forensic(ForgetSelector::Before(cutoff))
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        let recurring_id = recurring.trace_id().unwrap();
+        let remaining = store.fetch_raw_carrier_records(&recurring_id).unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the post-cutoff capture of the same trace must survive"
+        );
+        assert_eq!(remaining[0].bytes(), b"post-cutoff capture");
+
+        // occurrences and canonical traces are never touched by forget.
+        assert_eq!(occurrence_count(&store), 2);
+        assert_eq!(counts(&store).0, 1);
+    }
+
+    #[test]
+    fn fetch_raw_carrier_records_for_occurrences_by_session_excludes_a_shared_traces_other_session()
+    {
+        // The read-side mirror of the over-delete bug above: `semon
+        // forensic --session` used to widen to every raw row sharing a
+        // matched trace's trace_id, so it over-*read* another session's
+        // forensic bytes. Same shared-trace fixture, this time checking the
+        // read path.
+        let shared = semantic(r#"{"kind":"intent","content":"shared for forensic read"}"#);
+        let mut store = TraceStore::open_in_memory().unwrap();
+        store
+            .capture(
+                &shared,
+                NewRawCarrierRecord::new("codex", b"session-a's forensic bytes"),
+                occurrence("session-a", 0),
+            )
+            .unwrap();
+        store
+            .capture(
+                &shared,
+                NewRawCarrierRecord::new("codex", b"session-b's forensic bytes"),
+                occurrence("session-b", 0),
+            )
+            .unwrap();
+
+        let session_a_records = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("session-a"))
+            .unwrap();
+        assert_eq!(session_a_records.len(), 1);
+        assert_eq!(session_a_records[0].bytes(), b"session-a's forensic bytes");
+
+        let session_b_records = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("session-b"))
+            .unwrap();
+        assert_eq!(session_b_records.len(), 1);
+        assert_eq!(session_b_records[0].bytes(), b"session-b's forensic bytes");
+    }
+
+    #[test]
+    fn forget_forensic_overwrites_deleted_bytes_on_disk() {
+        // The representation that matters is the bytes of the file, not a
+        // row count: a row-count assertion would pass even if the deleted
+        // content merely sat, still readable, on SQLite's freelist. This
+        // test captures a record containing a unique sentinel, forgets it,
+        // closes the store, and asserts the sentinel is absent from the raw
+        // database file bytes — proving `PRAGMA secure_delete = ON` plus
+        // `VACUUM` actually removed it from disk rather than just from the
+        // active b-tree.
+        const SENTINEL: &[u8] = b"SEMON-FORGET-SENTINEL-8f3a";
+
+        let path = unique_temp_db_path("forget-sentinel");
+        let trace_id = {
+            let mut store = TraceStore::open(&path).unwrap();
+            let core = semantic(r#"{"kind":"intent","content":"sentinel-bearing capture"}"#);
+            let trace_id = core.trace_id().unwrap();
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", SENTINEL),
+                    occurrence("session-a", 0),
+                )
+                .unwrap();
+            drop(store);
+            trace_id
+        };
+
+        let before_bytes = std::fs::read(&path).unwrap();
+        assert!(
+            before_bytes
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL),
+            "test setup failure: sentinel must be present in the raw file bytes before forget"
+        );
+
+        {
+            let mut store = TraceStore::open(&path).unwrap();
+            let deleted = store
+                .forget_forensic(ForgetSelector::Trace(&trace_id))
+                .unwrap();
+            assert_eq!(deleted, 1);
+            drop(store);
+        }
+
+        let after_bytes = std::fs::read(&path).unwrap();
+        assert!(
+            !after_bytes
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL),
+            "sentinel must be absent from the raw file bytes after forget: a plain DELETE \
+             would leave it readable in a freed page"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }

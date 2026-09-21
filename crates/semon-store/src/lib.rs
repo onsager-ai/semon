@@ -84,7 +84,7 @@ pub use model::{
 };
 pub use render::{day_bounds_ns, format_timestamp_ns, render_occurrence_line};
 pub use replication::{REPLICATION_ENDPOINT_ENV, ReplicationError, ShipReport, ship};
-pub use store::{OccurrenceSelector, StoreError, TraceStore};
+pub use store::{ForgetSelector, OccurrenceSelector, StoreError, TraceStore};
 
 #[cfg(test)]
 mod boundary_tests {

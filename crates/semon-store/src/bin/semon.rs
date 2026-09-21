@@ -1,7 +1,7 @@
 use std::{
     env,
     fs::OpenOptions,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::ExitCode,
     str::FromStr,
@@ -11,8 +11,8 @@ use std::{
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use semon_store::{
-    LogFilter, OccurrenceSelector, REPLICATION_ENDPOINT_ENV, TraceId, TraceStore, day_bounds_ns,
-    render_occurrence_line, ship,
+    ForgetSelector, LogFilter, OccurrenceSelector, REPLICATION_ENDPOINT_ENV, TraceId, TraceStore,
+    day_bounds_ns, render_occurrence_line, ship,
 };
 
 fn main() -> ExitCode {
@@ -29,6 +29,7 @@ enum Command {
     Ship(ShipArgs),
     Log(LogArgs),
     Forensic(ForensicArgs),
+    Forget(ForgetArgs),
 }
 
 struct ShipArgs {
@@ -54,12 +55,31 @@ struct ForensicArgs {
     out: Option<PathBuf>,
 }
 
+/// Arguments for `semon forget --forensic`. Exactly one of `trace`,
+/// `session`, `before` is `Some` by the time parsing succeeds — enforced in
+/// [`parse_forget_args`], not left to `run_forget` to discover.
+///
+/// There is no `forensic` field: `--forensic` is a required flag (see issue
+/// #20 — required so the command reads as what it does in a shell history,
+/// and so other targets can be added later without a breaking change), but
+/// once [`parse_forget_args`] has confirmed it was given, its value carries
+/// no further information for `run_forget` to act on.
+#[derive(Debug)]
+struct ForgetArgs {
+    store: PathBuf,
+    trace: Option<String>,
+    session: Option<String>,
+    before: Option<String>,
+    yes: bool,
+}
+
 fn parse_args() -> Result<Command, String> {
     let mut arguments = env::args().skip(1);
     match arguments.next().as_deref() {
         Some("ship") => parse_ship_args(arguments).map(Command::Ship),
         Some("log") => parse_log_args(arguments).map(Command::Log),
         Some("forensic") => parse_forensic_args(arguments).map(Command::Forensic),
+        Some("forget") => parse_forget_args(arguments).map(Command::Forget),
         Some("-h" | "--help") => Err(usage()),
         Some(command) => Err(format!("unknown command: {command}\n{}", usage())),
         None => Err(usage()),
@@ -167,11 +187,68 @@ fn parse_forensic_args(
     })
 }
 
+fn parse_forget_args(mut arguments: impl Iterator<Item = String>) -> Result<ForgetArgs, String> {
+    let mut store = default_store_path();
+    let mut forensic = false;
+    let mut trace = None;
+    let mut session = None;
+    let mut before = None;
+    let mut yes = false;
+    while let Some(argument) = arguments.next() {
+        let mut value = || {
+            arguments
+                .next()
+                .ok_or_else(|| format!("{argument} requires a value"))
+        };
+        match argument.as_str() {
+            "--store" => store = value()?.into(),
+            "--forensic" => forensic = true,
+            "--trace" => trace = Some(value()?),
+            "--session" => session = Some(value()?),
+            "--before" => before = Some(value()?),
+            "--yes" => yes = true,
+            "-h" | "--help" => return Err(usage()),
+            _ => return Err(format!("unknown argument: {argument}")),
+        }
+    }
+
+    // Required as a flag even though it is currently the only target: a
+    // reader of a shell history should be able to see what this command
+    // does, and this leaves room for other forget targets later without a
+    // breaking change (issue #20).
+    if !forensic {
+        return Err(format!("forget: --forensic is required\n{}", usage()));
+    }
+
+    let selected = [trace.is_some(), session.is_some(), before.is_some()]
+        .into_iter()
+        .filter(|is_set| *is_set)
+        .count();
+    if selected != 1 {
+        return Err(format!(
+            "forget: exactly one of --trace, --session, or --before is required (got {selected}); \
+             this is the first destructive, irreversible command in the tool, and a bare \
+             invocation must not silently empty the forensic region\n\
+             {}",
+            usage()
+        ));
+    }
+
+    Ok(ForgetArgs {
+        store,
+        trace,
+        session,
+        before,
+        yes,
+    })
+}
+
 fn run(command: Command) -> Result<(), String> {
     match command {
         Command::Ship(args) => run_ship(args).map(|message| println!("{message}")),
         Command::Log(args) => run_log(args).map(|message| println!("{message}")),
         Command::Forensic(args) => run_forensic(args),
+        Command::Forget(args) => run_forget(args),
     }
 }
 
@@ -304,6 +381,97 @@ fn write_forensic_records(
     Ok(())
 }
 
+/// Permanently deletes forensic (`raw_carrier_records`) rows matching one
+/// selector. `canonical_traces` and `occurrences` are never touched, so
+/// `semon log` is unaffected by this command (see
+/// `docs/design/trace-identity-and-occurrences.md`).
+///
+/// This is the first destructive, irreversible command in the tool, so it
+/// carries two guards beyond `parse_forget_args`'s mandatory-selector check:
+/// without `--yes` it prompts interactively, stating the exact row count and
+/// that the action cannot be undone, and if stdin is not a TTY and `--yes`
+/// is absent it errors instead of silently proceeding non-interactively.
+///
+/// `--session`/`--before` select through each raw row's own session/sequence
+/// link (schema version 3), which a raw row written before that schema
+/// version does not have. Rather than let such a row silently sit outside
+/// what `--session`/`--before` can ever reach, this reports how many exist
+/// and that only `--trace` reaches them — `--trace` alone still matches by
+/// `trace_id`, so it is unaffected by whether the link is present.
+fn run_forget(args: ForgetArgs) -> Result<(), String> {
+    let mut store = TraceStore::open(&args.store).map_err(|error| error.to_string())?;
+
+    // Declared outside the branch below so `ForgetSelector::Trace`'s
+    // borrow can outlive the `if`/`else if` that constructs it.
+    let trace_id;
+    let selector = if let Some(trace) = args.trace.as_deref() {
+        trace_id = TraceId::from_str(trace).map_err(|error| error.to_string())?;
+        ForgetSelector::Trace(&trace_id)
+    } else if let Some(session) = args.session.as_deref() {
+        ForgetSelector::Session(session)
+    } else if let Some(before) = args.before.as_deref() {
+        let (start, _end) = parse_day(before)?;
+        ForgetSelector::Before(start)
+    } else {
+        // Unreachable: parse_forget_args requires exactly one selector.
+        return Err("no selector given".to_owned());
+    };
+
+    if !matches!(selector, ForgetSelector::Trace(_)) {
+        let unlinked = store
+            .count_unlinked_raw_records()
+            .map_err(|error| error.to_string())?;
+        if unlinked > 0 {
+            eprintln!(
+                "forget --forensic: {unlinked} raw record(s) predate this store's \
+                 session/sequence link and cannot be reached by --session or --before; \
+                 use --trace to remove them individually."
+            );
+        }
+    }
+
+    let count = store
+        .count_forensic_forget(selector)
+        .map_err(|error| error.to_string())?;
+    if count == 0 {
+        println!("forget --forensic: no matching raw records; nothing to do");
+        return Ok(());
+    }
+
+    if !args.yes {
+        if !io::stdin().is_terminal() {
+            return Err(
+                "forget --forensic: stdin is not a terminal and --yes was not given; \
+                 refusing to delete forensic data non-interactively without explicit consent"
+                    .to_owned(),
+            );
+        }
+
+        eprint!(
+            "forget --forensic: this will permanently delete {count} raw record(s) from \
+             raw_carrier_records. This cannot be undone. canonical_traces and occurrences \
+             (the log) are not affected. Proceed? [y/N] "
+        );
+        io::stderr().flush().map_err(|error| error.to_string())?;
+
+        let mut answer = String::new();
+        io::stdin()
+            .read_line(&mut answer)
+            .map_err(|error| error.to_string())?;
+        let answer = answer.trim().to_ascii_lowercase();
+        if answer != "y" && answer != "yes" {
+            println!("forget --forensic: aborted; no records deleted");
+            return Ok(());
+        }
+    }
+
+    let deleted = store
+        .forget_forensic(selector)
+        .map_err(|error| error.to_string())?;
+    println!("forget --forensic: permanently deleted {deleted} raw record(s)");
+    Ok(())
+}
+
 /// Parses a `YYYY-MM-DD` UTC calendar date into `[start, end)` nanoseconds
 /// since the Unix epoch.
 fn parse_day(date: &str) -> Result<(i64, i64), String> {
@@ -346,7 +514,18 @@ fn usage() -> String {
          Usage: semon forensic [--store PATH] (--trace ID | --session ID | --day YYYY-MM-DD) [--out FILE]\n\
          Reads raw_carrier_records — the only command that does. Exactly one\n\
          of --trace, --session, --day is required. Without --out, writes to\n\
-         stdout; with it, writes to FILE created 0600 instead."
+         stdout; with it, writes to FILE created 0600 instead.\n\
+         \n\
+         Usage: semon forget --forensic [--store PATH] (--before YYYY-MM-DD | --session ID | --trace ID) [--yes]\n\
+         Permanently deletes matching rows from raw_carrier_records only;\n\
+         canonical_traces and occurrences (the log) are never touched.\n\
+         Irreversible. --forensic is required. Exactly one selector is\n\
+         required — a bare invocation is refused rather than deleting\n\
+         everything. Without --yes, prompts interactively and errors if\n\
+         stdin is not a terminal.\n\
+         --session and --before match a raw record's own session/capture\n\
+         only. --trace matches by content instead: it removes that trace's\n\
+         captures from every session it was ever seen in, not just one."
     )
 }
 
@@ -648,4 +827,362 @@ mod tests {
     // table before its query runs, so `run_forensic` observes an empty
     // table rather than a missing one and returns an empty success instead
     // of an error.
+
+    #[test]
+    fn forget_rejects_missing_forensic_flag() {
+        let error =
+            parse_forget_args(["--trace".to_owned(), "a".repeat(64)].into_iter()).unwrap_err();
+        assert!(error.contains("--forensic is required"), "{error}");
+    }
+
+    #[test]
+    fn forget_rejects_zero_or_multiple_selectors() {
+        let zero = parse_forget_args(["--forensic".to_owned()].into_iter());
+        assert!(zero.is_err(), "zero selectors must be rejected");
+
+        let two = parse_forget_args(
+            [
+                "--forensic".to_owned(),
+                "--trace".to_owned(),
+                "a".repeat(64),
+                "--session".to_owned(),
+                "session-a".to_owned(),
+            ]
+            .into_iter(),
+        );
+        assert!(two.is_err(), "two selectors must be rejected");
+
+        let one = parse_forget_args(
+            [
+                "--forensic".to_owned(),
+                "--session".to_owned(),
+                "session-a".to_owned(),
+            ]
+            .into_iter(),
+        );
+        assert!(one.is_ok(), "exactly one selector must be accepted");
+    }
+
+    #[test]
+    fn forget_by_trace_deletes_only_that_trace_and_leaves_others_intact() {
+        let (store_path, target_trace_id) =
+            store_with_one_capture("forget-trace-target", "session-a", 0);
+        let other_trace_id;
+        {
+            let mut store = TraceStore::open(&store_path).unwrap();
+            let core =
+                SemanticCore::from_value(json!({"kind": "intent", "content": "other trace"}))
+                    .unwrap();
+            other_trace_id = core.trace_id().unwrap().as_str().to_owned();
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"other-trace-bytes"),
+                    NewOccurrence {
+                        session: "session-b",
+                        sequence: 0,
+                        timestamp: 0,
+                        repo: "semon",
+                        repo_source: RepoSource::GitRemote,
+                        parent_sequence: None,
+                        agent: None,
+                        authored_by: AuthoredBy::Human,
+                    },
+                )
+                .unwrap();
+        }
+
+        run_forget(ForgetArgs {
+            store: store_path.clone(),
+            trace: Some(target_trace_id.clone()),
+            session: None,
+            before: None,
+            yes: true,
+        })
+        .unwrap();
+
+        let store = TraceStore::open(&store_path).unwrap();
+        let target_id = TraceId::from_str(&target_trace_id).unwrap();
+        let other_id = TraceId::from_str(&other_trace_id).unwrap();
+        assert!(
+            store
+                .fetch_raw_carrier_records(&target_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.fetch_raw_carrier_records(&other_id).unwrap().len(),
+            1,
+            "the other trace's raw record must survive"
+        );
+        // The log is unaffected: forget never touches occurrences or
+        // canonical_traces.
+        assert_eq!(store.log(&LogFilter::default()).unwrap().len(), 2);
+
+        let _ = std::fs::remove_file(&store_path);
+    }
+
+    #[test]
+    fn forget_by_session_leaves_a_shared_traces_other_session_intact() {
+        // Shaped around the failure this had: forgetting one session used
+        // to widen to every raw row sharing a trace_id, so a trace shared
+        // between two sessions lost *both* sessions' raw rows when only one
+        // was named. The fixture below shares one trace across two
+        // sessions specifically to catch that.
+        let store_path = unique_temp_db_path("forget-session-shared-trace");
+        let shared = json!({"kind": "intent", "content": "captured in both sessions"});
+        {
+            let mut store = TraceStore::open(&store_path).unwrap();
+            let core = SemanticCore::from_value(shared).unwrap();
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"session-a-bytes"),
+                    NewOccurrence {
+                        session: "session-a",
+                        sequence: 0,
+                        timestamp: 0,
+                        repo: "semon",
+                        repo_source: RepoSource::GitRemote,
+                        parent_sequence: None,
+                        agent: None,
+                        authored_by: AuthoredBy::Human,
+                    },
+                )
+                .unwrap();
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"session-b-bytes"),
+                    NewOccurrence {
+                        session: "session-b",
+                        sequence: 0,
+                        timestamp: 0,
+                        repo: "semon",
+                        repo_source: RepoSource::GitRemote,
+                        parent_sequence: None,
+                        agent: None,
+                        authored_by: AuthoredBy::Human,
+                    },
+                )
+                .unwrap();
+        }
+
+        run_forget(ForgetArgs {
+            store: store_path.clone(),
+            trace: None,
+            session: Some("session-a".to_owned()),
+            before: None,
+            yes: true,
+        })
+        .unwrap();
+
+        let store = TraceStore::open(&store_path).unwrap();
+        let remaining = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("session-b"))
+            .unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "session-b's copy of the shared trace must survive"
+        );
+        assert_eq!(remaining[0].bytes(), b"session-b-bytes");
+        let forgotten = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("session-a"))
+            .unwrap();
+        assert!(forgotten.is_empty());
+
+        let _ = std::fs::remove_file(&store_path);
+    }
+
+    #[test]
+    fn forensic_by_session_on_a_shared_trace_returns_only_that_sessions_capture() {
+        // The read-side counterpart to the test above: `semon forensic
+        // --session` used to widen to every raw row sharing a matched
+        // trace's trace_id, over-reading the other session's forensic
+        // bytes.
+        let store_path = unique_temp_db_path("forensic-session-shared-trace");
+        let shared = json!({"kind": "intent", "content": "shared for forensic read"});
+        {
+            let mut store = TraceStore::open(&store_path).unwrap();
+            let core = SemanticCore::from_value(shared).unwrap();
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"session-a-forensic-bytes"),
+                    NewOccurrence {
+                        session: "session-a",
+                        sequence: 0,
+                        timestamp: 0,
+                        repo: "semon",
+                        repo_source: RepoSource::GitRemote,
+                        parent_sequence: None,
+                        agent: None,
+                        authored_by: AuthoredBy::Human,
+                    },
+                )
+                .unwrap();
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"session-b-forensic-bytes"),
+                    NewOccurrence {
+                        session: "session-b",
+                        sequence: 0,
+                        timestamp: 0,
+                        repo: "semon",
+                        repo_source: RepoSource::GitRemote,
+                        parent_sequence: None,
+                        agent: None,
+                        authored_by: AuthoredBy::Human,
+                    },
+                )
+                .unwrap();
+        }
+        let out_path = unique_temp_path("forensic-session-shared", "out");
+
+        run_forensic(ForensicArgs {
+            store: store_path.clone(),
+            trace: None,
+            session: Some("session-a".to_owned()),
+            day: None,
+            out: Some(out_path.clone()),
+        })
+        .unwrap();
+
+        let contents = std::fs::read_to_string(&out_path).unwrap();
+        assert!(contents.contains("session-a-forensic-bytes"));
+        assert!(!contents.contains("session-b-forensic-bytes"));
+
+        let _ = std::fs::remove_file(&store_path);
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn forget_without_yes_on_non_tty_stdin_errors() {
+        let (store_path, target_trace_id) =
+            store_with_one_capture("forget-non-tty", "session-a", 0);
+
+        let error = run_forget(ForgetArgs {
+            store: store_path.clone(),
+            trace: Some(target_trace_id),
+            session: None,
+            before: None,
+            yes: false,
+        })
+        .unwrap_err();
+
+        assert!(
+            error.contains("not a terminal"),
+            "expected a non-TTY refusal, got: {error}"
+        );
+
+        // And nothing was actually deleted.
+        let store = TraceStore::open(&store_path).unwrap();
+        assert_eq!(store.log(&LogFilter::default()).unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(&store_path);
+    }
+
+    #[test]
+    fn forget_with_no_matching_records_is_a_no_op() {
+        let (store_path, _) = store_with_one_capture("forget-no-match", "session-a", 0);
+
+        // Selecting a session with no captures at all matches zero raw
+        // records, so this must succeed without requiring confirmation
+        // (there's a TTY check inside that branch that this path never
+        // reaches) and without deleting anything.
+        run_forget(ForgetArgs {
+            store: store_path.clone(),
+            trace: None,
+            session: Some("no-such-session".to_owned()),
+            before: None,
+            yes: false,
+        })
+        .unwrap();
+
+        let store = TraceStore::open(&store_path).unwrap();
+        assert_eq!(store.log(&LogFilter::default()).unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(&store_path);
+    }
+
+    #[test]
+    fn forget_before_deletes_the_pre_cutoff_capture_of_a_recurring_trace_and_leaves_the_later_one()
+    {
+        // Shaped around the failure this had: "before" used to require
+        // *every* occurrence of a trace to predate the cutoff, so a trace
+        // that recurred after the cutoff kept its pre-cutoff raw record too
+        // — measured on a real week as 52% of eligible captures surviving
+        // while the command reported success. The fixture below captures
+        // the *same* trace once before the cutoff and once after, so a
+        // per-trace implementation and a per-capture one disagree on it.
+        let (year, month, day) = (2026, 9, 18);
+        let (start, _) = day_bounds_ns(year, month, day);
+        let store_path = unique_temp_db_path("forget-before-recurring-trace");
+        let recurring = json!({"kind": "intent", "content": "recurring content"});
+        {
+            let mut store = TraceStore::open(&store_path).unwrap();
+            let core = SemanticCore::from_value(recurring).unwrap();
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"pre-cutoff-bytes"),
+                    NewOccurrence {
+                        session: "session-a",
+                        sequence: 0,
+                        timestamp: start - 1,
+                        repo: "semon",
+                        repo_source: RepoSource::GitRemote,
+                        parent_sequence: None,
+                        agent: None,
+                        authored_by: AuthoredBy::Human,
+                    },
+                )
+                .unwrap();
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"post-cutoff-bytes"),
+                    NewOccurrence {
+                        session: "session-a",
+                        sequence: 1,
+                        timestamp: start,
+                        repo: "semon",
+                        repo_source: RepoSource::GitRemote,
+                        parent_sequence: Some(0),
+                        agent: None,
+                        authored_by: AuthoredBy::Human,
+                    },
+                )
+                .unwrap();
+        }
+
+        run_forget(ForgetArgs {
+            store: store_path.clone(),
+            trace: None,
+            session: None,
+            before: Some(format!("{year:04}-{month:02}-{day:02}")),
+            yes: true,
+        })
+        .unwrap();
+
+        let store = TraceStore::open(&store_path).unwrap();
+        let recurring_id =
+            SemanticCore::from_value(json!({"kind": "intent", "content": "recurring content"}))
+                .unwrap()
+                .trace_id()
+                .unwrap();
+        let remaining = store.fetch_raw_carrier_records(&recurring_id).unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the post-cutoff capture of the same trace must survive"
+        );
+        assert_eq!(remaining[0].bytes(), b"post-cutoff-bytes");
+        // The log itself is unaffected either way.
+        assert_eq!(store.log(&LogFilter::default()).unwrap().len(), 2);
+
+        let _ = std::fs::remove_file(&store_path);
+    }
 }
