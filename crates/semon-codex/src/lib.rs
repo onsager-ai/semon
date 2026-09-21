@@ -20,8 +20,8 @@ use std::{
 };
 
 pub use normalize::{
-    NormalizeContext, history_event, infer_success, json_text, message_text, normalize_record,
-    parse_timestamp, repo_from_cwd, repo_from_url, token_usage,
+    NormalizeContext, apply_path_rule, history_event, infer_success, json_text, message_text,
+    normalize_record, parse_timestamp, repo_from_cwd, repo_from_url, token_usage,
 };
 use semon_store::{
     AuthoredBy, CaptureResult, NewOccurrence, NewRawCarrierRecord, RepoSource, SemanticCore,

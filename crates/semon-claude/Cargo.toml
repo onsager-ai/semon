@@ -1,0 +1,13 @@
+[package]
+name = "semon-claude"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Incremental Claude Code session capture adapter for Semon."
+
+[dependencies]
+semon-codex = { path = "../semon-codex" }
+semon-store = { path = "../semon-store" }
+serde_json.workspace = true
+thiserror.workspace = true
