@@ -921,7 +921,7 @@ fn map_file_change_kind(value: &str) -> String {
 /// - An absolute path outside `cwd` (or when `cwd` itself is unknown) becomes
 ///   the literal string `"<external>"` — never a basename, which would still
 ///   leak the file's name.
-fn apply_path_rule(raw_path: &str, cwd: &str) -> String {
+pub fn apply_path_rule(raw_path: &str, cwd: &str) -> String {
     if !raw_path.starts_with('/') {
         return raw_path.to_owned();
     }
