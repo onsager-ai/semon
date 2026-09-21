@@ -125,6 +125,63 @@ by design, so the command's honest bulk capability isn't fenced off behind a
 narrower one nobody chose. See
 `docs/design/forensic-retention-and-exposure.md` for the full reasoning.
 
+## Forget forensic records
+
+`semon forget --forensic` permanently deletes rows from `raw_carrier_records`
+— the only supported way to remove forensic data. `canonical_traces` and
+`occurrences` (the log) are never touched, so `semon log` renders
+byte-for-byte identically before and after, including after the store is
+reopened. This is what makes the occurrence region's whole point reachable:
+see `docs/design/trace-identity-and-occurrences.md` on why the log is
+designed to survive forensic deletion.
+
+`--forensic` is required, and so is exactly one selector:
+
+```sh
+cargo run --locked -p semon-store --bin semon -- forget --forensic \
+  --store /path/to/traces.sqlite3 \
+  --before 2026-01-01
+
+cargo run --locked -p semon-store --bin semon -- forget --forensic \
+  --store /path/to/traces.sqlite3 \
+  --session codex-session-id \
+  --yes
+```
+
+A bare `semon forget --forensic` with no selector is refused rather than
+deleting everything — this is the first destructive, irreversible command in
+the tool, so it never defaults to the maximal action.
+
+`--session` and `--before` select through each raw record's own
+session/sequence link, not by content: `--session ID` deletes exactly that
+session's own raw records, and `--before YYYY-MM-DD` deletes exactly the
+captures whose own occurrence timestamp is strictly before that UTC day's
+start, per capture rather than per trace — a trace that recurs after the
+cutoff keeps only its later capture, not its earlier one too. `--trace ID`
+is the exception: it matches by content, so it removes that trace's raw
+records from *every* session it was ever captured in, not just one — naming
+a trace means removing all of its captures. A raw record written before this
+link existed (schema version 3) cannot be reached by `--session` or
+`--before`; the command reports how many such records exist and that only
+`--trace` can remove them.
+
+Without `--yes`, the command prompts interactively, stating exactly how many
+raw records will be deleted and that it cannot be undone. If stdin is not a
+terminal and `--yes` is absent, it errors instead of proceeding
+non-interactively.
+
+The delete itself runs under `PRAGMA secure_delete = ON` (deleted content is
+overwritten with zeroes before its page is freed) and is followed by
+`VACUUM` (which rewrites the file without the freed pages at all), because a
+plain SQLite `DELETE` leaves deleted bytes readable on disk until the page is
+reused — theatre for a command whose purpose is removing credentials and
+source text.
+
+This does not change retention policy: nothing calls this automatically, and
+`docs/design/forensic-retention-and-exposure.md` Decision 1 still retains
+everything indefinitely by default. This adds a deliberate operator action,
+not a schedule.
+
 ## Periodic capture
 
 The existing systemd user-timer installer now builds and installs the Rust

@@ -67,13 +67,36 @@ Three consequences follow from putting provenance in a second region. Two resolv
 
 A raw carrier record is, in effect, an occurrence that also carries the bytes, so there are three ways to relate them: derive occurrences from raw at read time, let raw displace them, or persist them independently.
 
-The first two are foreclosed by P4. That phase decides whether the forensic region is retained past N days, and given what it holds — prompts, responses, source, credentials, machine paths — the honest answer is very likely "no, not indefinitely". Under either of the first two options, purging forensics destroys the log: the user's history evaporates as a side effect of a privacy control. **That is the worst available coupling, because it makes doing the right thing cost the user their history, and so it makes the right thing not get done.**
+The first two are foreclosed by the need to delete forensic data at all. Under either of them, purging forensics destroys the log: the user's history evaporates as a side effect of a privacy control. **That is the worst available coupling, because it makes doing the right thing cost the user their history, and so it makes the right thing not get done.**
+
+*Amended 2026-09-21.* As first written, this section expected P4 to bound retention — "very likely no, not indefinitely". P4 decided the opposite: [`forensic-retention-and-exposure.md`](forensic-retention-and-exposure.md) retains the forensic region in full and indefinitely. The conclusion survives the changed premise, because the argument never depended on *automatic* deletion. It depends on deletion being possible at all — an operator removing a credential that landed in the store — and #20 made that a supported operation. Independent persistence is what lets that deletion leave the log intact.
 
 So: **occurrences are written alongside raw records, persisted independently, and must survive raw deletion intact.**
 
 This is testable, and should be tested rather than asserted: **the log must render correctly on a store whose `raw_carrier_records` region is empty.** Stating it now matters because the derived version is less code, and P1 would otherwise reach for it for that reason alone.
 
 **The test must assert correct rendering, not a zero exit code.** A `semon log` that silently yields fewer lines when raw is empty passes an exit-code check and fails the actual claim — the same failure to discriminate, one level down. Pin it to a known store: the same fixture rendered with and without the raw region, and the two outputs identical byte for byte.
+
+### How raw records link to occurrences — decided
+
+*(measured, 2026-09-21; resolves the question this section's first draft left open)*
+
+Independent persistence settled that the two regions do not derive from each other. It left open how they relate — and the first deletion command showed that "not at all" was wrong.
+
+Raw records were linked only to `trace_id`. But a trace is per *content* and a raw record is per *capture*, and content recurs: across one real week of 42 sessions, 152 traces appear in more than one session, and the unparsed-command trace appears in all 42. Selecting raw records by trace therefore reached the wrong rows in both directions. Measured on that week:
+
+- deleting one session's forensic data would have removed **2,386 rows from 41 other sessions** — 4.5x its own 672;
+- deleting everything before a cutoff would have left **52% of the targeted rows in place** (2,186 of 4,222), because their content recurred after the cutoff — while reporting success.
+
+The read path in `semon forensic --session/--day` had the same flaw, over-reading other sessions. It went unnoticed there because extra rows on a read do no damage; on an irreversible delete the same selection destroys data.
+
+**The link:** each raw record carries its occurrence's natural key `(carrier, session, sequence)`. Schema v3.
+
+- The reference runs **raw → occurrence only**. Occurrences still carry nothing that points at raw, so the log still survives forensic deletion — the property above, and the reason the direction matters.
+- `TraceStore::capture` already receives the occurrence, so the store copies the key onto the raw row itself. No adapter supplies it; none can get it wrong.
+- Rows written before v3 have no link and cannot be backfilled, since `trace_id` was the only connection and it is exactly what is ambiguous. Selections that depend on the link report such rows rather than silently skipping them.
+
+Re-measured on the same week after the change: one session's deletion removes exactly its 672 rows with **zero collateral**, and the cutoff deletion removes all 4,222 with **zero survivors**.
 
 ### Inferred occurrence facts record their basis — decided
 
