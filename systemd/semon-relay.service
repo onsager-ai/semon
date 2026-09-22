@@ -1,0 +1,10 @@
+[Unit]
+Description=Replicate Claude Code session streams to the local Semon receiver
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/semon-relay send --once
+Nice=19
+IOSchedulingClass=idle
+CPUQuota=5%
+MemoryMax=128M

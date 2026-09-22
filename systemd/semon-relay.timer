@@ -1,0 +1,11 @@
+[Unit]
+Description=Replicate Claude Code session streams every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

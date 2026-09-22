@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/semon-claude", "crates/semon-codex", "crates/semon-store"]
+members = [
+    "crates/semon-claude",
+    "crates/semon-codex",
+    "crates/semon-relay",
+    "crates/semon-store",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,3 +20,4 @@ serde_json = { version = "1.0.150", features = ["preserve_order"] }
 serde_json_canonicalizer = "0.3.2"
 sha2 = "0.10.9"
 thiserror = "2"
+tiny_http = "=0.12.0"
