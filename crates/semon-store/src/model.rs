@@ -385,13 +385,13 @@ pub struct LogFilter {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawCarrierRecord {
     id: i64,
-    trace_id: TraceId,
+    trace_id: Option<TraceId>,
     carrier: String,
     bytes: Vec<u8>,
 }
 
 impl RawCarrierRecord {
-    pub(crate) fn new(id: i64, trace_id: TraceId, carrier: String, bytes: Vec<u8>) -> Self {
+    pub(crate) fn new(id: i64, trace_id: Option<TraceId>, carrier: String, bytes: Vec<u8>) -> Self {
         Self {
             id,
             trace_id,
@@ -405,9 +405,10 @@ impl RawCarrierRecord {
         self.id
     }
 
-    /// Returns the canonical trace identity this record archives.
-    pub fn trace_id(&self) -> &TraceId {
-        &self.trace_id
+    /// Returns the canonical trace identity this record archives, or `None`
+    /// when the complete source line had no semantic projection.
+    pub fn trace_id(&self) -> Option<&TraceId> {
+        self.trace_id.as_ref()
     }
 
     /// Returns the label of the producing carrier.

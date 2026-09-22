@@ -173,6 +173,26 @@ fn seed_shared_trace_store(store_path: &Path) {
     drop(store);
 }
 
+fn seed_raw_only_store(store_path: &Path) -> String {
+    let mut store = TraceStore::open(store_path).unwrap();
+    let (start, _) = semon_store::day_bounds_ns(2026, 9, 20);
+    store
+        .capture_raw_only(
+            "codex",
+            b"synthetic unprojected raw line\n",
+            "raw-only-session",
+            12,
+            start + 1,
+        )
+        .unwrap();
+    drop(store);
+
+    semantic("projected content absent from this store")
+        .trace_id()
+        .unwrap()
+        .to_string()
+}
+
 #[test]
 fn forget_forensic_makes_the_raw_dropped_state_reachable_through_the_cli() {
     const SENTINEL: &[u8] = b"SEMON-FORGET-SENTINEL-8f3a";
@@ -464,6 +484,114 @@ fn forensic_by_session_on_a_shared_trace_returns_only_that_sessions_capture_via_
     let contents = std::fs::read_to_string(&out_path).unwrap();
     assert!(contents.contains("session-a's own capture"));
     assert!(!contents.contains("session-b's own capture"));
+
+    let _ = std::fs::remove_file(&store_path);
+    let _ = std::fs::remove_file(&out_path);
+}
+
+#[test]
+fn forensic_day_and_forget_before_reach_an_unprojected_raw_row_via_the_cli() {
+    let store_path = unique_store_path("raw-only-time-selectors");
+    seed_raw_only_store(&store_path);
+    let out_path = std::env::temp_dir().join(format!(
+        "semon-forget-cli-test-raw-only-{}.out",
+        std::process::id()
+    ));
+
+    let forensic = run_semon(
+        &store_path,
+        &[
+            "forensic",
+            "--day",
+            "2026-09-20",
+            "--out",
+            out_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        forensic.status.success(),
+        "forensic by raw timestamp failed: {}",
+        String::from_utf8_lossy(&forensic.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&out_path).unwrap(),
+        b"synthetic unprojected raw line\n"
+    );
+
+    let forget = run_semon(
+        &store_path,
+        &["forget", "--forensic", "--before", "2026-09-21", "--yes"],
+    );
+    assert!(
+        forget.status.success(),
+        "forget by raw timestamp failed: {}",
+        String::from_utf8_lossy(&forget.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&forget.stdout).contains("permanently deleted 1 raw record(s)")
+    );
+
+    let store = TraceStore::open(&store_path).unwrap();
+    assert!(
+        store
+            .fetch_raw_carrier_records_for_occurrences(semon_store::OccurrenceSelector::Session(
+                "raw-only-session"
+            ))
+            .unwrap()
+            .is_empty()
+    );
+
+    let _ = std::fs::remove_file(&store_path);
+    let _ = std::fs::remove_file(&out_path);
+}
+
+#[test]
+fn trace_selectors_explain_that_unprojected_rows_are_out_of_scope() {
+    let store_path = unique_store_path("raw-only-trace-selector");
+    let absent_trace = seed_raw_only_store(&store_path);
+    let out_path = std::env::temp_dir().join(format!(
+        "semon-forget-cli-test-raw-only-trace-{}.out",
+        std::process::id()
+    ));
+
+    let forensic = run_semon(
+        &store_path,
+        &[
+            "forensic",
+            "--trace",
+            &absent_trace,
+            "--out",
+            out_path.to_str().unwrap(),
+        ],
+    );
+    assert!(forensic.status.success());
+    assert!(std::fs::read(&out_path).unwrap().is_empty());
+    assert!(
+        String::from_utf8_lossy(&forensic.stderr)
+            .contains("unprojected raw records have no trace id")
+    );
+
+    let forget = run_semon(
+        &store_path,
+        &["forget", "--forensic", "--trace", &absent_trace, "--yes"],
+    );
+    assert!(forget.status.success());
+    assert!(
+        String::from_utf8_lossy(&forget.stderr)
+            .contains("unprojected raw records have no trace id")
+    );
+    assert!(String::from_utf8_lossy(&forget.stdout).contains("no matching raw records"));
+
+    let store = TraceStore::open(&store_path).unwrap();
+    assert_eq!(
+        store
+            .fetch_raw_carrier_records_for_occurrences(semon_store::OccurrenceSelector::Session(
+                "raw-only-session"
+            ))
+            .unwrap()
+            .len(),
+        1
+    );
 
     let _ = std::fs::remove_file(&store_path);
     let _ = std::fs::remove_file(&out_path);

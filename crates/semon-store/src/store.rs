@@ -18,28 +18,25 @@ CREATE TABLE IF NOT EXISTS canonical_traces (
 ) STRICT;
 
 -- `session` and `sequence` (schema version 3) copy the natural key of the
--- occurrence written in the same `capture()` transaction, so a raw record
--- can be selected by its *own* session or reachable-through-occurrence
--- timestamp, exactly rather than by widening to every raw record sharing
--- its trace_id (see issue #20's follow-up: trace-scoped selection over-reads
--- and, worse, over-*deletes* whenever one trace recurs across sessions).
--- Nullable because a v1/v2 database's existing rows predate this link and
--- cannot be backfilled reliably (raw_carrier_records carried no session or
--- sequence before now, and trace_id alone cannot recover which occurrence a
--- given raw row belonged to when a trace has more than one). Deliberately a
--- plain column pair, not a foreign key to `occurrences`: the reference runs
--- raw -> occurrence only, in this direction, so that direction is
--- unenforceable is a feature — enforcing it would require occurrences to
--- exist first, which is one more thing that could make an occurrence
--- unwritable because of a forensic-region problem, exactly the coupling
--- docs/design/trace-identity-and-occurrences.md rejects.
+-- occurrence written in the same `capture()` transaction. Schema version 4
+-- adds the raw row's own `timestamp`, so session and time selectors remain
+-- exact even for a complete source line that projects no occurrence.
+-- `session`/`sequence` remain nullable because a v1/v2 database's existing
+-- rows predate this link and cannot be backfilled reliably (trace_id alone
+-- cannot recover which occurrence a raw row belonged to when a trace has
+-- more than one). `timestamp` is likewise nullable only for those legacy
+-- unlinked rows. The link is deliberately not a foreign key to
+-- `occurrences`: enforcing it would prevent the raw-only rows schema v4
+-- exists to retain, and would also couple occurrence survival to the
+-- forensic region in the direction the design rejects.
 CREATE TABLE IF NOT EXISTS raw_carrier_records (
     raw_record_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    trace_id      TEXT NOT NULL REFERENCES canonical_traces(trace_id),
+    trace_id      TEXT REFERENCES canonical_traces(trace_id),
     carrier       TEXT NOT NULL CHECK(length(trim(carrier)) > 0),
     raw_bytes     BLOB NOT NULL,
     session       TEXT,
-    sequence      INTEGER
+    sequence      INTEGER,
+    timestamp     INTEGER
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS raw_carrier_records_by_trace
@@ -72,13 +69,10 @@ CREATE INDEX IF NOT EXISTS occurrences_by_repo_timestamp
 
 /// Creates the index over `raw_carrier_records`' link columns.
 ///
-/// Run separately from [`SCHEMA`], and always *after*
-/// [`ensure_raw_carrier_link_columns`]: an older on-disk database's
-/// `raw_carrier_records` table predates `session`/`sequence`, and those
-/// columns are added by an `ALTER TABLE`, not by the `CREATE TABLE IF NOT
-/// EXISTS` above (which no-ops against an already-existing table). Creating
-/// this index before that `ALTER TABLE` has run would fail outright against
-/// such a database, since the columns it names would not yet exist.
+/// Run separately from [`SCHEMA`]. For a pre-v4 database, the v4 table
+/// rebuild creates it after the replacement table is renamed. For a v4
+/// database, this statement also restores the index if the raw table was
+/// deliberately dropped and recreated by [`TraceStore::open`].
 const RAW_CARRIER_LINK_INDEX: &str = r#"
 CREATE INDEX IF NOT EXISTS raw_carrier_records_by_carrier_session_sequence
     ON raw_carrier_records(carrier, session, sequence);
@@ -93,9 +87,10 @@ CREATE INDEX IF NOT EXISTS raw_carrier_records_by_carrier_session_sequence
 /// to this constant (instead of anything derived from a caller or the
 /// database) is what keeps that `format!` call safe.
 ///
-/// Three schema shapes exist now (1: `canonical_traces` + `raw_carrier_records`
+/// Four schema shapes exist now (1: `canonical_traces` + `raw_carrier_records`
 /// only; 2: adds `occurrences`; 3: adds nullable `session`/`sequence` link
-/// columns and an index to `raw_carrier_records`), and read behavior
+/// columns and an index to `raw_carrier_records`; 4: makes `trace_id`
+/// nullable and adds the raw row's own `timestamp`), and read behavior
 /// genuinely depends on which one is on disk — [`TraceStore::log`] requires
 /// the `occurrences` table, and [`TraceStore::forget_forensic`]'s `Session`
 /// and `Before` selectors require the link columns to select exactly rather
@@ -105,15 +100,13 @@ CREATE INDEX IF NOT EXISTS raw_carrier_records_by_carrier_session_sequence
 /// cannot know what version-dependent behavior that future schema implies,
 /// so proceeding could silently give wrong answers instead of failing
 /// loudly. A version from 1 up to and including `SCHEMA_VERSION` is migrated
-/// forward additively — every DDL statement in [`SCHEMA`] is `CREATE ... IF
-/// NOT EXISTS`, and the version-3 link columns are added to an
-/// already-existing `raw_carrier_records` table by
-/// [`ensure_raw_carrier_link_columns`] instead, since SQLite has no
-/// conditional `ALTER TABLE ADD COLUMN` — so migration only ever adds
-/// structure, never removes or renames it — and the marker is advanced to
-/// `SCHEMA_VERSION`. A fresh database (`user_version` 0, SQLite's default)
-/// is stamped with `SCHEMA_VERSION` directly.
-const SCHEMA_VERSION: u32 = 3;
+/// forward. Version 3's link columns are first added to older tables, then
+/// version 4 rebuilds the raw table transactionally because SQLite cannot
+/// remove `trace_id`'s `NOT NULL` constraint in place. The marker advances
+/// in the same transaction as that rebuild. A fresh database (`user_version`
+/// 0, SQLite's default) is created in the v4 shape and stamped through the
+/// same idempotent migration path.
+const SCHEMA_VERSION: u32 = 4;
 
 /// Errors returned by the trace store.
 #[derive(Debug, Error)]
@@ -177,15 +170,15 @@ pub struct TraceStore {
     connection: Connection,
 }
 
-/// Selects occurrences only to find which traces have forensic records worth
-/// reading. Backs [`TraceStore::fetch_raw_carrier_records_for_occurrences`],
-/// which in turn backs `semon forensic`'s `--session` and `--day` selectors.
+/// Selects forensic rows by their own provenance. Backs
+/// [`TraceStore::fetch_raw_carrier_records_for_occurrences`], which in turn
+/// backs `semon forensic`'s `--session` and `--day` selectors.
 #[derive(Clone, Copy, Debug)]
 pub enum OccurrenceSelector<'a> {
-    /// Every occurrence recorded under this session id.
+    /// Every raw record captured under this session id.
     Session(&'a str),
-    /// Every occurrence with `timestamp` in `[start, end)`, nanoseconds
-    /// since the Unix epoch.
+    /// Every raw record with `timestamp` in `[start, end)`, nanoseconds since
+    /// the Unix epoch.
     TimestampRange(i64, i64),
 }
 
@@ -201,20 +194,11 @@ pub enum OccurrenceSelector<'a> {
 pub enum ForgetSelector<'a> {
     /// Every raw record for exactly this trace.
     Trace(&'a TraceId),
-    /// Every raw record for any trace observed at least once in this
-    /// session. A trace's raw records are keyed by `trace_id` alone (raw
-    /// records carry no session column), so — exactly as for
-    /// [`OccurrenceSelector::Session`] on the read side — a trace that also
-    /// occurred under a *different* session loses all of its raw records
-    /// too, not just the ones captured under the named session.
+    /// Every raw record captured under this session id.
     Session(&'a str),
-    /// Every raw record for a trace whose occurrences are *all* strictly
-    /// before this many nanoseconds since the Unix epoch (a UTC day
-    /// boundary, computed with [`crate::day_bounds_ns`]). A trace with even
-    /// one occurrence at or after the cutoff is left alone entirely: its raw
-    /// records stay, because deleting them would remove forensic evidence of
-    /// a still-in-scope occurrence just because the same content was also
-    /// seen further in the past.
+    /// Every raw record whose own timestamp is strictly before this many
+    /// nanoseconds since the Unix epoch (a UTC day boundary, computed with
+    /// [`crate::day_bounds_ns`]).
     Before(i64),
 }
 
@@ -223,17 +207,15 @@ pub enum ForgetSelector<'a> {
 /// read) and [`TraceStore::forget_forensic`] (the actual delete), so the two
 /// can never drift apart on what counts as "matching".
 ///
-/// `Session` and `Before` select through each raw row's *own* `session` /
-/// `sequence` link columns (schema version 3), not through `trace_id`. A
-/// trace-scoped selection over-deletes the moment one trace recurs across
-/// sessions — measured on a real week of capture: selecting a session's raw
-/// records by trace pulled in raw rows from 41 *other* sessions, and
-/// selecting "before a cutoff" by trace left every raw row of a
-/// still-recurring trace untouched, cutoff or not. `Trace` alone stays
-/// trace-scoped deliberately: the caller named the content itself, and
-/// removing every capture of it, in every session, is what naming a trace
-/// means. A raw row with no link (written before schema version 3, `session
-/// IS NULL`) matches neither `Session` nor `Before` — see
+/// `Session` and `Before` select each raw row's *own* `session` and
+/// `timestamp`, not through `trace_id`. A trace-scoped selection over-deletes
+/// the moment one trace recurs across sessions. `Trace` alone stays
+/// trace-scoped deliberately: the caller named the projected content itself,
+/// and removing every capture of it, in every session, is what naming a
+/// trace means. An unprojected raw row has no trace id and therefore cannot
+/// match `Trace`. A raw row with no link (written before schema version 3,
+/// `session IS NULL`) and no backfilled timestamp matches neither `Session`
+/// nor `Before` — see
 /// [`TraceStore::count_unlinked_raw_records`], which the CLI consults so a
 /// `--session`/`--before` forget never *silently* leaves such a row
 /// unreported.
@@ -244,16 +226,7 @@ fn forget_where_clause(selector: ForgetSelector<'_>) -> (&'static str, Vec<Box<d
             vec![Box::new(trace_id.as_str().to_owned())],
         ),
         ForgetSelector::Session(session) => ("session = ?1", vec![Box::new(session.to_owned())]),
-        ForgetSelector::Before(cutoff) => (
-            "raw_record_id IN (\
-                 SELECT r.raw_record_id FROM raw_carrier_records r \
-                 JOIN occurrences o \
-                     ON o.carrier = r.carrier AND o.session = r.session \
-                        AND o.sequence = r.sequence \
-                 WHERE o.timestamp < ?1\
-             )",
-            vec![Box::new(cutoff)],
-        ),
+        ForgetSelector::Before(cutoff) => ("timestamp < ?1", vec![Box::new(cutoff)]),
     }
 }
 
@@ -279,7 +252,7 @@ impl TraceStore {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
-    fn from_connection(connection: Connection) -> Result<Self, StoreError> {
+    fn from_connection(mut connection: Connection) -> Result<Self, StoreError> {
         // Check the on-disk marker *before* touching schema: a version this
         // build does not understand is a hard error, and it must be one
         // that runs no DDL and leaves the file exactly as found (see the
@@ -293,22 +266,15 @@ impl TraceStore {
             });
         }
 
-        // Every statement in `SCHEMA` is additive (`CREATE ... IF NOT
-        // EXISTS`), so running it against a fresh database, an already
-        // up-to-date one, or one still at an older known version is always
-        // safe: it only ever adds structure. A fresh database's
-        // `raw_carrier_records` already has the version-3 link columns
-        // (they're in `CREATE TABLE`'s own definition above); an
-        // already-existing v1/v2 table does not, `CREATE TABLE IF NOT
-        // EXISTS` no-ops against it, and `ensure_raw_carrier_link_columns`
-        // is what adds them there instead. That must run *before* the
-        // version-3 index, which names those columns and would fail against
-        // a table that doesn't have them yet.
+        // `SCHEMA` creates missing regions and indexes. Against an existing
+        // raw table its `CREATE TABLE IF NOT EXISTS` is a no-op, so a
+        // pre-v4 table still needs the migration below to change trace_id's
+        // nullability and add the raw row's timestamp.
         connection.execute_batch(SCHEMA)?;
-        ensure_raw_carrier_link_columns(&connection)?;
-        connection.execute_batch(RAW_CARRIER_LINK_INDEX)?;
         if user_version < SCHEMA_VERSION {
-            connection.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            migrate_raw_carrier_records_v4(&mut connection)?;
+        } else {
+            connection.execute_batch(RAW_CARRIER_LINK_INDEX)?;
         }
 
         Ok(Self { connection })
@@ -356,21 +322,21 @@ impl TraceStore {
             }
         }
 
-        // `session`/`sequence` copy this same capture's occurrence natural
-        // key onto the raw row (schema version 3), so the raw row can later
-        // be selected by its own session or (joined to `occurrences`) its
-        // own timestamp, rather than by trace_id — trace_id alone widens to
-        // every raw row sharing that trace's content, across every session
-        // it was ever seen in. See `forget_where_clause`'s doc comment.
+        // The raw row copies this capture's occurrence provenance, including
+        // its timestamp. Keeping that timestamp on the raw row lets the same
+        // selectors reach rows with no occurrence at all, while trace_id
+        // remains only the optional link to projected content.
         transaction.execute(
-            "INSERT INTO raw_carrier_records (trace_id, carrier, raw_bytes, session, sequence) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO raw_carrier_records \
+                 (trace_id, carrier, raw_bytes, session, sequence, timestamp) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 trace_id.as_str(),
                 raw_record.carrier,
                 raw_record.bytes,
                 occurrence.session,
                 occurrence.sequence,
+                occurrence.timestamp,
             ],
         )?;
         let raw_record_id = transaction.last_insert_rowid();
@@ -409,6 +375,38 @@ impl TraceStore {
             canonical_inserted,
             raw_record_id,
         ))
+    }
+
+    /// Captures one complete carrier record that has no transferable
+    /// semantic projection.
+    ///
+    /// This writes exactly one forensic row with a null `trace_id`. It does
+    /// not write `canonical_traces` or `occurrences`, so ordinary trace and
+    /// log reads remain unable to observe the line. `session`, `sequence`,
+    /// and `timestamp` are stored on the raw row itself so the forensic
+    /// session/day selectors and their `forget` counterparts can still reach
+    /// it.
+    ///
+    /// Returns the newly appended forensic record's local row identifier.
+    pub fn capture_raw_only(
+        &mut self,
+        carrier: &str,
+        raw_bytes: &[u8],
+        session: &str,
+        sequence: i64,
+        timestamp: i64,
+    ) -> Result<i64, StoreError> {
+        if carrier.trim().is_empty() {
+            return Err(StoreError::BlankCarrier);
+        }
+
+        self.connection.execute(
+            "INSERT INTO raw_carrier_records \
+                 (trace_id, carrier, raw_bytes, session, sequence, timestamp) \
+             VALUES (NULL, ?1, ?2, ?3, ?4, ?5)",
+            params![carrier, raw_bytes, session, sequence, timestamp],
+        )?;
+        Ok(self.connection.last_insert_rowid())
     }
 
     /// Fetches a canonical trace by semantic content hash.
@@ -487,7 +485,7 @@ impl TraceStore {
         let mapped = statement.query_map([trace_id.as_str()], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Vec<u8>>(3)?,
             ))
@@ -498,7 +496,9 @@ impl TraceStore {
             let (id, stored_trace_id, carrier, bytes) = row?;
             records.push(RawCarrierRecord::new(
                 id,
-                TraceId::from_str(&stored_trace_id)?,
+                stored_trace_id
+                    .map(|trace_id| TraceId::from_str(&trace_id))
+                    .transpose()?,
                 carrier,
                 bytes,
             ));
@@ -506,19 +506,17 @@ impl TraceStore {
         Ok(records)
     }
 
-    /// Explicitly fetches forensic records for every raw record whose own
-    /// link matches `selector`.
+    /// Explicitly fetches forensic records whose own provenance matches
+    /// `selector`.
     ///
     /// This is the bulk counterpart to [`TraceStore::fetch_raw_carrier_records`].
     /// It backs `semon forensic`'s `--session` and `--day` selectors (see
     /// `docs/design/forensic-retention-and-exposure.md`, Decision 3).
     ///
-    /// This selects through each raw row's own `session`/`sequence` link
-    /// columns (schema version 3) — `Session` matches a raw row's own
-    /// `session` directly, and `TimestampRange` joins to the one occurrence
-    /// that link identifies and checks *its* timestamp — not by first
-    /// collecting matching traces and then fetching every raw row that
-    /// shares one's `trace_id`. That older approach over-read: a trace
+    /// This selects each raw row's own `session` or `timestamp` directly,
+    /// including rows that have no trace or occurrence. It never first
+    /// collects matching traces and then fetches every raw row that shares
+    /// one's `trace_id`. That older approach over-read: a trace
     /// captured under two sessions would have `--session A` return its raw
     /// record from session B too, since both rows share one `trace_id`.
     /// Reading too much is not the same failure as forgetting too much, but
@@ -543,13 +541,7 @@ impl TraceStore {
                 ("r.session = ?1", vec![Box::new(session.to_owned())])
             }
             OccurrenceSelector::TimestampRange(start, end) => (
-                "r.raw_record_id IN (\
-                     SELECT r2.raw_record_id FROM raw_carrier_records r2 \
-                     JOIN occurrences o \
-                         ON o.carrier = r2.carrier AND o.session = r2.session \
-                            AND o.sequence = r2.sequence \
-                     WHERE o.timestamp >= ?1 AND o.timestamp < ?2\
-                 )",
+                "r.timestamp >= ?1 AND r.timestamp < ?2",
                 vec![Box::new(start), Box::new(end)],
             ),
         };
@@ -564,7 +556,7 @@ impl TraceStore {
         let mapped = statement.query_map(params.as_slice(), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Vec<u8>>(3)?,
             ))
@@ -575,7 +567,9 @@ impl TraceStore {
             let (id, stored_trace_id, carrier, bytes) = row?;
             records.push(RawCarrierRecord::new(
                 id,
-                TraceId::from_str(&stored_trace_id)?,
+                stored_trace_id
+                    .map(|trace_id| TraceId::from_str(&trace_id))
+                    .transpose()?,
                 carrier,
                 bytes,
             ));
@@ -721,7 +715,8 @@ impl TraceStore {
     }
 
     /// Counts `raw_carrier_records` rows with no `session`/`sequence` link —
-    /// rows written by a build before schema version 3, which
+    /// rows written by a build before schema version 3, which also have no
+    /// timestamp after the schema-v4 backfill and which
     /// [`ForgetSelector::Session`] and [`ForgetSelector::Before`] cannot
     /// select (only [`ForgetSelector::Trace`] can still reach them, since it
     /// matches on `trace_id` rather than the link).
@@ -742,6 +737,52 @@ impl TraceStore {
     }
 }
 
+/// Migrates the forensic region to schema version 4 in one transaction.
+///
+/// SQLite cannot remove `trace_id`'s `NOT NULL` constraint in place, so the
+/// migration creates the replacement table, copies every row with its local
+/// id intact, backfills each linked row's timestamp from its exact occurrence,
+/// drops the old table, renames the replacement, recreates both indexes, and
+/// advances `user_version` before committing. A failure at any step leaves
+/// the v3 table and version marker intact.
+fn migrate_raw_carrier_records_v4(connection: &mut Connection) -> Result<(), StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+    // A v1/v2 table lacks the link columns named by the copy and backfill.
+    // Add them inside the same transaction before rebuilding. On a fresh or
+    // v3 database this is an idempotent no-op.
+    ensure_raw_carrier_link_columns(&transaction)?;
+    transaction.execute_batch(
+        "CREATE TABLE raw_carrier_records_v4 ( \
+             raw_record_id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             trace_id      TEXT REFERENCES canonical_traces(trace_id), \
+             carrier       TEXT NOT NULL CHECK(length(trim(carrier)) > 0), \
+             raw_bytes     BLOB NOT NULL, \
+             session       TEXT, \
+             sequence      INTEGER, \
+             timestamp     INTEGER \
+         ) STRICT; \
+         INSERT INTO raw_carrier_records_v4 \
+             (raw_record_id, trace_id, carrier, raw_bytes, session, sequence, timestamp) \
+         SELECT raw_record_id, trace_id, carrier, raw_bytes, session, sequence, NULL \
+         FROM raw_carrier_records; \
+         UPDATE raw_carrier_records_v4 AS r \
+         SET timestamp = o.timestamp \
+         FROM occurrences AS o \
+         WHERE o.carrier = r.carrier \
+           AND o.session = r.session \
+           AND o.sequence = r.sequence; \
+         DROP TABLE raw_carrier_records; \
+         ALTER TABLE raw_carrier_records_v4 RENAME TO raw_carrier_records; \
+         CREATE INDEX raw_carrier_records_by_trace \
+             ON raw_carrier_records(trace_id, raw_record_id);",
+    )?;
+    transaction.execute_batch(RAW_CARRIER_LINK_INDEX)?;
+    transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+    transaction.commit()?;
+    Ok(())
+}
+
 /// Adds the schema-version-3 `session`/`sequence` link columns to an
 /// existing `raw_carrier_records` table that predates them.
 ///
@@ -751,9 +792,8 @@ impl TraceStore {
 /// no-ops because the table already exists. SQLite has no conditional `ALTER
 /// TABLE ADD COLUMN IF NOT EXISTS`, so this checks each column's presence
 /// via `PRAGMA table_info` first and only runs the `ALTER TABLE` that column
-/// is actually missing — making the whole operation idempotent across
-/// repeated opens, the same guarantee every other statement in [`SCHEMA`]
-/// already has via its own `IF NOT EXISTS`.
+/// is actually missing, making the operation safe if a migration attempt is
+/// retried.
 fn ensure_raw_carrier_link_columns(connection: &Connection) -> Result<(), StoreError> {
     let mut has_session = false;
     let mut has_sequence = false;
@@ -1000,6 +1040,60 @@ mod tests {
     }
 
     #[test]
+    fn raw_only_capture_writes_no_trace_or_occurrence_and_uses_its_own_selectors() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        let raw_record_id = store
+            .capture_raw_only("codex", b"unprojected metadata\n", "session-raw", 7, 150)
+            .unwrap();
+
+        assert!(raw_record_id > 0);
+        assert_eq!(counts(&store), (0, 1));
+        assert_eq!(occurrence_count(&store), 0);
+        assert!(store.list_traces(None, 10).unwrap().is_empty());
+        assert!(store.log(&LogFilter::default()).unwrap().is_empty());
+
+        let by_session = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("session-raw"))
+            .unwrap();
+        assert_eq!(by_session.len(), 1);
+        assert_eq!(by_session[0].trace_id(), None);
+        assert_eq!(by_session[0].bytes(), b"unprojected metadata\n");
+
+        let by_time = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::TimestampRange(100, 200))
+            .unwrap();
+        assert_eq!(by_time, by_session);
+
+        let unrelated_trace =
+            TraceId::from_str("aa11223344556677889900112233445566778899001122334455667788990011")
+                .unwrap();
+        assert!(
+            store
+                .fetch_raw_carrier_records(&unrelated_trace)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .count_forensic_forget(ForgetSelector::Trace(&unrelated_trace))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .count_forensic_forget(ForgetSelector::Session("session-raw"))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_forensic_forget(ForgetSelector::Before(151))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn ordinary_reads_return_semantics_and_raw_requires_explicit_fetch() {
         let core = semantic(r#"{"subject":"synthetic work","state":"complete"}"#);
         let mut store = TraceStore::open_in_memory().unwrap();
@@ -1151,7 +1245,156 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_database_with_an_older_known_version_migrates_it_additively() {
+    fn v3_migration_rebuilds_raw_without_row_loss_and_is_idempotent() {
+        let path = unique_temp_db_path("v3-to-v4");
+        let linked_trace = "aa11223344556677889900112233445566778899001122334455667788990011";
+        let unlinked_trace = "bb11223344556677889900112233445566778899001122334455667788990011";
+
+        // Build the fixture in the test itself using the exact v3 shape:
+        // trace_id is NOT NULL and raw rows have no timestamp column.
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "PRAGMA foreign_keys = ON; \
+                     CREATE TABLE canonical_traces ( \
+                         trace_id TEXT PRIMARY KEY NOT NULL CHECK(length(trace_id) = 64), \
+                         canonical_json BLOB NOT NULL \
+                     ) STRICT; \
+                     CREATE TABLE raw_carrier_records ( \
+                         raw_record_id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                         trace_id TEXT NOT NULL REFERENCES canonical_traces(trace_id), \
+                         carrier TEXT NOT NULL CHECK(length(trim(carrier)) > 0), \
+                         raw_bytes BLOB NOT NULL, \
+                         session TEXT, \
+                         sequence INTEGER \
+                     ) STRICT; \
+                     CREATE INDEX raw_carrier_records_by_trace \
+                         ON raw_carrier_records(trace_id, raw_record_id); \
+                     CREATE INDEX raw_carrier_records_by_carrier_session_sequence \
+                         ON raw_carrier_records(carrier, session, sequence); \
+                     CREATE TABLE occurrences ( \
+                         occurrence_id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                         trace_id TEXT NOT NULL REFERENCES canonical_traces(trace_id), \
+                         carrier TEXT NOT NULL CHECK(length(trim(carrier)) > 0), \
+                         session TEXT NOT NULL, \
+                         sequence INTEGER NOT NULL CHECK(sequence >= 0), \
+                         timestamp INTEGER NOT NULL, \
+                         repo TEXT NOT NULL, \
+                         repo_source TEXT NOT NULL, \
+                         parent_sequence INTEGER, \
+                         agent TEXT, \
+                         authored_by TEXT NOT NULL, \
+                         UNIQUE (carrier, session, sequence) \
+                     ) STRICT; \
+                     CREATE INDEX occurrences_by_repo_timestamp \
+                         ON occurrences(repo, timestamp); \
+                     INSERT INTO canonical_traces VALUES \
+                         ('{linked_trace}', X'7b7d'), \
+                         ('{unlinked_trace}', X'7b7d'); \
+                     INSERT INTO occurrences \
+                         (trace_id, carrier, session, sequence, timestamp, repo, repo_source, \
+                          parent_sequence, agent, authored_by) \
+                     VALUES ('{linked_trace}', 'codex', 'linked-session', 4, 987654321, '', \
+                             'none', NULL, NULL, 'unknown'); \
+                     INSERT INTO raw_carrier_records \
+                         (raw_record_id, trace_id, carrier, raw_bytes, session, sequence) \
+                     VALUES (3, '{linked_trace}', 'codex', X'6c696e6b6564', \
+                             'linked-session', 4), \
+                            (8, '{unlinked_trace}', 'codex', X'756e6c696e6b6564', NULL, NULL); \
+                     PRAGMA user_version = 3;"
+                ))
+                .unwrap();
+        }
+
+        let store = TraceStore::open(&path).unwrap();
+        assert_eq!(user_version(&store), SCHEMA_VERSION);
+        assert_eq!(raw_record_count(&store), 2, "migration must lose no rows");
+
+        let migrated_rows = {
+            let mut statement = store
+                .connection
+                .prepare(
+                    "SELECT raw_record_id, trace_id, session, sequence, timestamp, raw_bytes \
+                     FROM raw_carrier_records ORDER BY raw_record_id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(migrated_rows.len(), 2);
+        assert_eq!(migrated_rows[0].0, 3);
+        assert_eq!(migrated_rows[0].4, Some(987654321));
+        assert_eq!(migrated_rows[0].5, b"linked");
+        assert_eq!(migrated_rows[1].0, 8);
+        assert_eq!(migrated_rows[1].4, None);
+        assert_eq!(migrated_rows[1].5, b"unlinked");
+
+        let columns = {
+            let mut statement = store
+                .connection
+                .prepare("PRAGMA table_info(raw_carrier_records)")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(columns.contains(&("trace_id".to_owned(), 0)));
+        assert!(columns.iter().any(|(name, _)| name == "timestamp"));
+
+        drop(store);
+
+        // A second open sees user_version 4 and leaves every migrated field
+        // byte-for-byte unchanged.
+        let reopened = TraceStore::open(&path).unwrap();
+        assert_eq!(user_version(&reopened), SCHEMA_VERSION);
+        let reopened_rows = {
+            let mut statement = reopened
+                .connection
+                .prepare(
+                    "SELECT raw_record_id, trace_id, session, sequence, timestamp, raw_bytes \
+                     FROM raw_carrier_records ORDER BY raw_record_id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(reopened_rows, migrated_rows);
+
+        drop(reopened);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn opening_a_database_with_an_older_known_version_migrates_it_forward() {
         let path = unique_temp_db_path("older-version");
 
         // Simulate a version-1 database: only the pre-occurrence tables,
@@ -1175,8 +1418,9 @@ mod tests {
                 .unwrap();
         }
 
-        // Opening with this build must additively add `occurrences` and
-        // advance the marker, without disturbing the existing tables.
+        // Opening with this build must add `occurrences`, rebuild the raw
+        // table into its v4 shape, and advance the marker without disturbing
+        // the existing tables.
         let mut store = TraceStore::open(&path).unwrap();
         assert_eq!(user_version(&store), SCHEMA_VERSION);
         let core = semantic(r#"{"kind":"intent","content":"post-migration capture"}"#);
@@ -1579,6 +1823,17 @@ mod tests {
                 )
                 .unwrap();
         }
+        store
+            .capture_raw_only(
+                "codex",
+                b"raw-only line with no occurrence",
+                "session-a",
+                99,
+                99,
+            )
+            .unwrap();
+        assert_eq!(raw_record_count(&store), 4);
+        assert_eq!(occurrence_count(&store), 3);
 
         let render = |store: &TraceStore| -> String {
             store
@@ -1789,7 +2044,7 @@ mod tests {
             "session-b's copy of the shared trace's raw record must survive"
         );
         assert_eq!(remaining[0].bytes(), b"session-b's own bytes");
-        assert_eq!(remaining[0].trace_id(), &shared_id);
+        assert_eq!(remaining[0].trace_id(), Some(&shared_id));
 
         assert_eq!(raw_record_count(&store), 1);
         // occurrences and canonical traces are never touched by forget.

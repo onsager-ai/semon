@@ -303,6 +303,9 @@ fn run_log(args: LogArgs) -> Result<String, String> {
 const FORENSIC_WARNING: &str = "semon forensic: raw output may contain prompts, responses, \
      source code, credentials, and machine paths captured verbatim.";
 
+const TRACE_SELECTOR_NOTE: &str = "--trace selects projected lines by content; unprojected raw \
+     records have no trace id and must be selected by session or time.";
+
 /// The only CLI path that reads `raw_carrier_records`, directly or via
 /// [`semon_store::TraceStore::fetch_raw_carrier_records_for_occurrences`].
 /// `run_log` and `run_ship` must never gain such a call — behaviorally
@@ -316,6 +319,7 @@ fn run_forensic(args: ForensicArgs) -> Result<(), String> {
 
     let store = TraceStore::open(&args.store).map_err(|error| error.to_string())?;
     let records = if let Some(trace) = args.trace.as_deref() {
+        eprintln!("semon forensic: {TRACE_SELECTOR_NOTE}");
         let trace_id = TraceId::from_str(trace).map_err(|error| error.to_string())?;
         store
             .fetch_raw_carrier_records(&trace_id)
@@ -392,12 +396,12 @@ fn write_forensic_records(
 /// that the action cannot be undone, and if stdin is not a TTY and `--yes`
 /// is absent it errors instead of silently proceeding non-interactively.
 ///
-/// `--session`/`--before` select through each raw row's own session/sequence
-/// link (schema version 3), which a raw row written before that schema
-/// version does not have. Rather than let such a row silently sit outside
-/// what `--session`/`--before` can ever reach, this reports how many exist
-/// and that only `--trace` reaches them — `--trace` alone still matches by
-/// `trace_id`, so it is unaffected by whether the link is present.
+/// `--session`/`--before` select each raw row's own session/timestamp. A raw
+/// row written before the session/sequence link existed has neither value
+/// after migration. Rather than let such a row silently sit outside what
+/// those selectors can reach, this reports how many exist and that only
+/// `--trace` reaches them. Conversely, an unprojected v4 row has no trace id,
+/// so a trace selector cannot reach it and the command reports that limit.
 fn run_forget(args: ForgetArgs) -> Result<(), String> {
     let mut store = TraceStore::open(&args.store).map_err(|error| error.to_string())?;
 
@@ -416,6 +420,10 @@ fn run_forget(args: ForgetArgs) -> Result<(), String> {
         // Unreachable: parse_forget_args requires exactly one selector.
         return Err("no selector given".to_owned());
     };
+
+    if matches!(selector, ForgetSelector::Trace(_)) {
+        eprintln!("forget --forensic: {TRACE_SELECTOR_NOTE}");
+    }
 
     if !matches!(selector, ForgetSelector::Trace(_)) {
         let unlinked = store
@@ -523,9 +531,10 @@ fn usage() -> String {
          required — a bare invocation is refused rather than deleting\n\
          everything. Without --yes, prompts interactively and errors if\n\
          stdin is not a terminal.\n\
-         --session and --before match a raw record's own session/capture\n\
-         only. --trace matches by content instead: it removes that trace's\n\
-         captures from every session it was ever seen in, not just one."
+         --session and --before match a raw record's own session/timestamp.\n\
+         --trace matches projected content instead: it removes that trace's\n\
+         captures from every session it was ever seen in. Unprojected raw\n\
+         records have no trace id, so --trace cannot select them."
     )
 }
 

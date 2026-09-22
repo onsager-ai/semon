@@ -282,6 +282,53 @@ fn partial_line_waits_for_completion_like_python_tailer() {
 }
 
 #[test]
+fn malformed_and_non_object_complete_lines_are_retained_raw() {
+    let root = TestDir::new();
+    let directory = root.path().join("sessions/2026/07");
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("rollout-non-object.jsonl");
+    let meta = json!({
+        "timestamp": "2026-07-31T01:02:03Z",
+        "type": "session_meta",
+        "payload": {"session_id": "raw-line-session", "cwd": "/work/repo"}
+    });
+    let contents = format!(
+        "{}\n42\n{{malformed\n",
+        serde_json::to_string(&meta).unwrap()
+    );
+    fs::write(&path, &contents).unwrap();
+
+    let history = root.path().join("history.jsonl");
+    let state_path = root.path().join("state.json");
+    let mut state = CursorState::default();
+    let mut store = TraceStore::open_in_memory().unwrap();
+
+    assert_eq!(
+        process_file(
+            &path,
+            &mut state,
+            &mut store,
+            &options(&state_path, &history),
+        )
+        .unwrap(),
+        3
+    );
+    assert!(store.log(&LogFilter::default()).unwrap().is_empty());
+
+    let raw = store
+        .fetch_raw_carrier_records_for_occurrences(semon_store::OccurrenceSelector::Session(
+            "raw-line-session",
+        ))
+        .unwrap();
+    assert_eq!(raw.len(), 3);
+    let retained = raw
+        .iter()
+        .flat_map(|record| record.bytes().iter().copied())
+        .collect::<Vec<_>>();
+    assert_eq!(retained, contents.as_bytes());
+}
+
+#[test]
 fn checked_in_fixture_captures_canonical_and_raw_regions() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/sessions/2026/07/rollout-e2e.jsonl");
@@ -486,6 +533,22 @@ fn item_stream_projects_actions_and_excludes_harness_boilerplate() {
         .unwrap(),
         0
     );
+
+    // This synthetic rollout intentionally covers metadata, both legacy
+    // message roles, each projected item kind, and a non-projecting
+    // reasoning item. Every complete source line has exactly one raw row,
+    // in source order, whether or not it produced a trace.
+    let raw = store
+        .fetch_raw_carrier_records_for_occurrences(semon_store::OccurrenceSelector::Session(
+            "item-stream-session",
+        ))
+        .unwrap();
+    assert_eq!(raw.len(), consumed);
+    let retained = raw
+        .iter()
+        .flat_map(|record| record.bytes().iter().copied())
+        .collect::<Vec<_>>();
+    assert_eq!(retained, fs::read(&path).unwrap());
 
     let traces = store
         .list_traces(None, 10)

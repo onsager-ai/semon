@@ -18,12 +18,12 @@ central endpoint.
 
 Raw forensic records can contain prompts, responses, source code, credentials,
 commercial data, and machine paths. They are retained in full and
-indefinitely — no pruning, no opt-out, no sampling — so the store file is
-created `0600` and its parent directory `0700`, and both are re-tightened on
-every open rather than trusted from a prior run. That access control is the
-only remaining protection; keep the database local, and a private repository
-is not a safe destination for captured session data. No real session fixture
-should be committed.
+indefinitely — every complete source line, with no pruning, opt-out, or
+sampling — so the store file is created `0600` and its parent directory
+`0700`, and both are re-tightened on every open rather than trusted from a
+prior run. That access control is the only remaining protection; keep the
+database local, and a private repository is not a safe destination for
+captured session data. No real session fixture should be committed.
 
 ## Capture Codex sessions
 
@@ -261,6 +261,12 @@ by design, so the command's honest bulk capability isn't fenced off behind a
 narrower one nobody chose. See
 `docs/design/forensic-retention-and-exposure.md` for the full reasoning.
 
+`--session` and `--day` select each raw row's own session and timestamp, so
+they include complete lines that produced no semantic trace or occurrence.
+When a line has no source timestamp, capture time is used. `--trace` selects
+by projected content and therefore cannot select unprojected raw rows, which
+have no trace id; the command states that limit when the selector is used.
+
 ## Forget forensic records
 
 `semon forget --forensic` permanently deletes rows from `raw_carrier_records`
@@ -288,18 +294,18 @@ A bare `semon forget --forensic` with no selector is refused rather than
 deleting everything — this is the first destructive, irreversible command in
 the tool, so it never defaults to the maximal action.
 
-`--session` and `--before` select through each raw record's own
-session/sequence link, not by content: `--session ID` deletes exactly that
-session's own raw records, and `--before YYYY-MM-DD` deletes exactly the
-captures whose own occurrence timestamp is strictly before that UTC day's
-start, per capture rather than per trace — a trace that recurs after the
-cutoff keeps only its later capture, not its earlier one too. `--trace ID`
-is the exception: it matches by content, so it removes that trace's raw
-records from *every* session it was ever captured in, not just one — naming
-a trace means removing all of its captures. A raw record written before this
-link existed (schema version 3) cannot be reached by `--session` or
-`--before`; the command reports how many such records exist and that only
-`--trace` can remove them.
+`--session` and `--before` select each raw record's own provenance, not by
+content: `--session ID` deletes exactly that session's own raw records, and
+`--before YYYY-MM-DD` deletes exactly the raw rows whose own timestamp is
+strictly before that UTC day's start, including unprojected lines. A trace
+that recurs after the cutoff keeps only its later capture. `--trace ID` is
+the exception: it matches projected content, so it removes that trace's raw
+records from *every* session it was captured in. It cannot remove
+unprojected rows because they have no trace id. A raw record written before
+the schema-v3 session/sequence link existed cannot have its timestamp
+backfilled during the schema-v4 migration and cannot be reached by
+`--session` or `--before`; the command reports how many such records exist
+and that only `--trace` can remove them individually.
 
 Without `--yes`, the command prompts interactively, stating exactly how many
 raw records will be deleted and that it cannot be undone. If stdin is not a

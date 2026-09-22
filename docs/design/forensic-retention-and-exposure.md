@@ -37,6 +37,10 @@ No pruning by age or size, no opt-out, no sampling. Capture writes every source 
 
 **Consequence that follows and is not optional.** Because retention is unbounded, retention is no longer a mitigation. The entire remaining protection is file access and the shape of the read path, which the next two decisions govern. They carry more weight than they would under a pruning policy, and must not be traded away later on the grounds that "it is only local".
 
+*Implemented by schema v4, 2026-09-22.* "Every source line" now means every complete line an adapter consumes, including a line with no transferable semantic projection. Such a raw row has a nullable `trace_id` and creates no canonical trace or occurrence. Its own session, sequence and timestamp stay on the raw row so forensic selection and deliberate deletion can still reach it; a missing source timestamp falls back to capture time. The v4 migration rebuilds the raw table transactionally and backfills existing timestamps from each row's exact `(carrier, session, sequence)` occurrence link. Pre-v3 rows with no link retain a null timestamp and continue to be reported as unlinked.
+
+The accepted storage cost is larger than the earlier measurement above implied. On the corpus measured for this ruling, retaining every line increased raw row count by about **6.7x** (128,890 complete lines versus at most 19,295 projectable lines across 283 Codex rollouts). Byte growth is greater because tool outputs are among the largest lines.
+
 ## Decision 2 — the store is private to its owner
 
 The database file is created `0600` and its directory `0700`.
@@ -48,6 +52,8 @@ Permissions are set at creation and re-asserted on open, so an existing store wi
 ## Decision 3 — one named command, bulk-capable
 
 `semon forensic` is the only path from the CLI to raw records. It selects by trace, by session, or by day.
+
+Session and day selection use the raw row's own provenance and therefore include unprojected lines. Trace selection is content selection: it reaches only projected lines, because an unprojected raw row has no trace id. The command states this limit when `--trace` is used.
 
 **Bulk selection is deliberate.** Reconstructing an incident means reading a whole session, and a tool that can only return one record at a time forces whoever needs that into `sqlite3` — an unaudited path with no guardrails at all. Honest capability beats a bar that is theatre against anyone who knows SQL.
 
