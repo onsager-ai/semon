@@ -7,6 +7,7 @@ mod identity;
 mod lease;
 mod protocol;
 mod receiver;
+mod restore;
 mod sender;
 mod state;
 
@@ -26,10 +27,17 @@ pub use lease::{
     Clock, LEASE_DURATION_MS, LEASE_RENEW_INTERVAL_MS, LeaseRow, LeaseStatus, OrphanSummary,
     StreamTip, SystemClock, TakeoverRecord, TakeoverResult,
 };
-pub use protocol::{Frame, FrameContent, FrameKey, FrameMode, ZERO_CHAIN, chain_line};
+pub use protocol::{
+    FRAME_BATCH_MAX_BYTES, FRAME_BATCH_MAX_FRAMES, FRAME_PAGE_MAX_BYTES, FRAME_PAGE_MAX_FRAMES,
+    Frame, FrameContent, FrameKey, FrameMode, FramePage, ZERO_CHAIN, chain_line,
+};
 pub use receiver::{
     EnvelopeOutcome, MAX_REQUEST_BODY_BYTES, ReceiveError, ReceiveOutcome, Receiver, ServeConfig,
     TlsFiles, serve, serve_configured, validate_loopback, validate_serve_config,
+};
+pub use restore::{
+    GitBranchCheck, RestoreError, RestoreReport, RestoredStream, UnfinishedToolCall,
+    restore_session, restore_session_encrypted,
 };
 pub use sender::{
     HttpTransport, LagSummary, PassReport, RelayError, Sender, StreamReport, TakeoverCommandError,

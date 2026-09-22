@@ -202,8 +202,7 @@ cargo run --locked -p semon-relay -- keys decrypt-envelope \
   --endpoint https://relay.example.test:8734/v1/frames --tls-ca relay-cert.pem
 ```
 
-Restore remains future M4 work. Live-session data-key rotation is also not
-implemented.
+Live-session data-key rotation is not implemented.
 
 Remote HTTP is refused, and HTTPS without `--tls-ca` is refused. Loopback HTTP
 remains available for encrypted, signed traffic during local development.
@@ -267,12 +266,72 @@ successful compare-and-swap records the previous holder and whether it was
 forced, then initializes local sender watermarks from the verified tips.
 
 There is one unavoidable race between that read-only check and the compare-and-
-swap: the old holder can append another frame before it is fenced. The command
-checks the tips returned by the successful takeover again. If the local copy is
-then behind, the epoch has already advanced, but sender state is not written and
-the command exits non-zero with the stream and missing frame count. Bring the
-copy up to date through the future M4 restore before starting the sender. Writing
-restored files back is not implemented here.
+swap: the old holder can append another frame before it is fenced. A bare
+`lease takeover` reports that post-CAS condition without writing sender state.
+The restore workflow below closes it automatically: after fencing the old
+holder, it fetches and verifies the now-stable suffix, appends it, and only then
+initializes sender state at the new epoch.
+
+### Taking over a session
+
+When a node dies, first stop or isolate its Claude Code process if that is
+possible, then make sure the receiver is reachable from the replacement node.
+On the replacement node, use the intended checkout as `--cwd`:
+
+```sh
+cargo run --locked -p semon-relay -- restore \
+  --session SESSION_ID --cwd /path/to/target-worktree \
+  --projects /path/to/claude/projects --state /path/to/relay.json \
+  --endpoint https://relay.example.test:8734/v1/frames \
+  --tls-ca relay-cert.pem
+```
+
+`--projects` defaults to `~/.claude/projects`; `--state` uses the same
+`$XDG_STATE_HOME/semon/relay.json` (or `~/.local/state/semon/relay.json`)
+default as `send` and `lease takeover`.
+
+Restore downloads the highest live generation of every main and subagent
+stream, unwraps the session key with this machine's identity, decrypts and
+checks every frame and chain, and writes through to private staging files
+beneath the target cwd's Claude project slug. Frame retrieval is paginated per
+stream and generation: requests carry `after_seq`, `limit_bytes`, and
+`limit_frames`, and responses carry a `next` sequence cursor. The client
+verifies across page boundaries without buffering a complete stream. It then
+takes over the lease and initializes the local sender watermark. If the old
+holder appended between the fetch and the lease compare-and-swap, restore
+fetches and appends that suffix after fencing it.
+
+Restore never overwrites existing content. An existing target must be an exact
+byte prefix, in which case only its missing suffix is appended. Any differing
+file is refused, as is the same session id under another project slug, because
+Claude's non-interactive resume lookup is global by session id. New files are
+created atomically with mode `0600`; restore directories use mode `0700`.
+
+Takeover normally waits for the three-minute lease to expire. Use `--force`
+only when an earlier manual takeover is intended. A gap or chain break refuses
+the restore and names the stream and sequence. `--allow-gaps` salvages only the
+verified prefix before each first gap, but deliberately does not take over the
+lease or print resume guidance; nothing after a hole is written. JSON reporting
+is available with `--json`. The explicit loopback-only plaintext deployment can
+restore with `--insecure-plaintext` (and the same synthetic `--machine` override
+as the other plaintext commands).
+
+Review the report before continuing. It includes restored stream and line
+counts, the new epoch, the transcript's last recorded `cwd` and `gitBranch`, a
+read-only branch warning from `git rev-parse`, every `tool_use` id and name that
+has no matching `tool_result`, and retained orphan groups by fenced epoch. It
+never prints prompts, responses, tool inputs, or tool results. Check real state
+before retrying any unfinished tool call. The final report line is the command
+to run manually:
+
+```sh
+cd /path/to/target-worktree && claude --resume SESSION_ID
+```
+
+Semon never starts Claude or switches branches. Uncommitted worktree changes
+are not restored; the old agent may still be running; and its git side effects
+are not fenced. Memory and sidecar snapshots remain out of scope, so
+`*.meta.json` and `custom-title.json` are not restored.
 
 The receiver cannot verify encrypted chain values because each chain value is
 inside its frame ciphertext. It still enforces session mode, holder and epoch,

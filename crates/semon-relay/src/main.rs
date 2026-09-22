@@ -12,7 +12,8 @@ use semon_relay::{
     HttpTransport, MachineIdentity, PassReport, RECIPIENTS_FILE, RequestSigner, Sender,
     ServeConfig, TlsFiles, Transport, decrypt_envelope, encrypt_envelope, enroll_machine,
     enroll_recipient, init, load_age_identity, load_recipients, read_machine_identity,
-    serve_configured, takeover_session, takeover_session_encrypted, verify_encrypted_session,
+    restore_session, restore_session_encrypted, serve_configured, takeover_session,
+    takeover_session_encrypted, verify_encrypted_session,
 };
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8734/v1/frames";
@@ -35,6 +36,7 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         Some("orphans") => run_orphans(arguments),
         Some("keys") => run_keys(arguments),
         Some("verify") => run_verify(arguments),
+        Some("restore") => run_restore(arguments),
         Some("-h" | "--help") => Err(usage()),
         Some(command) => Err(format!("unknown command: {command}\n{}", usage())),
         None => Err(usage()),
@@ -559,6 +561,78 @@ fn run_verify(mut arguments: impl Iterator<Item = String>) -> Result<(), String>
     Ok(())
 }
 
+fn run_restore(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut config = default_config()?;
+    let mut endpoint = DEFAULT_ENDPOINT.to_owned();
+    let mut tls_ca = None;
+    let mut session = None;
+    let mut cwd = None;
+    let mut projects = None;
+    let mut state = None;
+    let mut force = false;
+    let mut allow_gaps = false;
+    let mut json = false;
+    let mut insecure_plaintext = false;
+    let mut machine = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--config" => config = value(&mut arguments, "--config")?.into(),
+            "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
+            "--tls-ca" => tls_ca = Some(PathBuf::from(value(&mut arguments, "--tls-ca")?)),
+            "--session" => session = Some(value(&mut arguments, "--session")?),
+            "--cwd" => cwd = Some(PathBuf::from(value(&mut arguments, "--cwd")?)),
+            "--projects" => projects = Some(PathBuf::from(value(&mut arguments, "--projects")?)),
+            "--state" => state = Some(PathBuf::from(value(&mut arguments, "--state")?)),
+            "--force" => force = true,
+            "--allow-gaps" => allow_gaps = true,
+            "--json" => json = true,
+            "--insecure-plaintext" => insecure_plaintext = true,
+            "--machine" => machine = Some(value(&mut arguments, "--machine")?),
+            "-h" | "--help" => return Err(usage()),
+            _ => return Err(format!("unknown restore argument: {argument}\n{}", usage())),
+        }
+    }
+    let session = session.ok_or_else(|| "restore requires --session".to_owned())?;
+    let cwd = cwd.ok_or_else(|| "restore requires --cwd".to_owned())?;
+    let projects = projects.map_or_else(default_projects, Ok)?;
+    let state = state.map_or_else(default_state, Ok)?;
+    let (transport, machine, identity) = transport_context(
+        endpoint,
+        &config,
+        tls_ca.as_deref(),
+        insecure_plaintext,
+        machine,
+    )?;
+    let report = if let Some(identity) = identity {
+        restore_session_encrypted(
+            &projects,
+            &state,
+            &cwd,
+            &session,
+            &machine,
+            force,
+            allow_gaps,
+            &identity.age,
+            &transport,
+        )
+    } else {
+        restore_session(
+            &projects, &state, &cwd, &session, &machine, force, allow_gaps, &transport,
+        )
+    }
+    .map_err(|error| error.to_string())?;
+    if json {
+        println!("{}", report.to_json());
+    } else {
+        println!("{}", report.to_text());
+    }
+    if report.incomplete {
+        Err("restore is incomplete because one or more streams contain a gap".into())
+    } else {
+        Ok(())
+    }
+}
+
 fn transport_context(
     endpoint: String,
     config: &std::path::Path,
@@ -705,6 +779,8 @@ fn usage() -> String {
      Usage: semon-relay keys rewrap [--session S] [--force] [--endpoint URL] [--tls-ca CERT]\n\
      Usage: semon-relay keys decrypt-envelope --session S --identity PATH [--endpoint URL] [--tls-ca CERT]\n\
      Usage: semon-relay verify --session S [--endpoint URL] [--config PATH] [--tls-ca CERT]\n\
+     Usage: semon-relay restore --session S --cwd PATH [--projects PATH] [--state PATH] [--force] [--allow-gaps] [--json] \
+     [--endpoint URL] [--config PATH] [--tls-ca CERT] [--insecure-plaintext --machine ID]\n\
      Encrypted signed requests are the default; plaintext requires an explicit loopback-only flag."
         .into()
 }

@@ -17,9 +17,10 @@ use tiny_http::{Header, Method, Request, Response, Server, SslConfig, StatusCode
 use std::os::unix::fs::OpenOptionsExt;
 
 use crate::{
-    AuthError, Clock, Frame, FrameContent, FrameMode, LEASE_DURATION_MS, LeaseRow, LeaseStatus,
-    MACHINES_FILE, OrphanSummary, RequestVerifier, SignedHeaders, StreamTip, SystemClock,
-    TakeoverRecord, TakeoverResult, ZERO_CHAIN, chain_line,
+    AuthError, Clock, FRAME_PAGE_MAX_BYTES, FRAME_PAGE_MAX_FRAMES, Frame, FrameContent, FrameMode,
+    FramePage, LEASE_DURATION_MS, LeaseRow, LeaseStatus, MACHINES_FILE, OrphanSummary,
+    RequestVerifier, SignedHeaders, StreamTip, SystemClock, TakeoverRecord, TakeoverResult,
+    ZERO_CHAIN, chain_line,
     lease::{LeaseValueError, rows_from_value, rows_to_value},
     load_machines,
     protocol::FrameError,
@@ -178,6 +179,8 @@ pub enum ReceiveError {
     RequestField(&'static str),
     #[error("request body exceeds the {limit}-byte limit")]
     BodyTooLarge { limit: usize },
+    #[error("frame page {field} must be between 1 and {maximum}")]
+    FramePageLimit { field: &'static str, maximum: usize },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -667,6 +670,100 @@ impl Receiver {
         Ok(frames)
     }
 
+    /// Reads one bounded page from exactly one stream generation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_frame_page(
+        &self,
+        session: &str,
+        stream: &str,
+        generation: u64,
+        after_seq: Option<u64>,
+        limit_bytes: usize,
+        limit_frames: usize,
+    ) -> Result<FramePage, ReceiveError> {
+        if !(1..=FRAME_PAGE_MAX_BYTES).contains(&limit_bytes) {
+            return Err(ReceiveError::FramePageLimit {
+                field: "limit_bytes",
+                maximum: FRAME_PAGE_MAX_BYTES,
+            });
+        }
+        if !(1..=FRAME_PAGE_MAX_FRAMES).contains(&limit_frames) {
+            return Err(ReceiveError::FramePageLimit {
+                field: "limit_frames",
+                maximum: FRAME_PAGE_MAX_FRAMES,
+            });
+        }
+
+        let generation_dir = generation_dir(&self.root, session, stream, generation);
+        if !generation_dir.is_dir() {
+            return Ok(FramePage {
+                frames: Vec::new(),
+                next: None,
+            });
+        }
+
+        let mut epochs = Vec::new();
+        for epoch_entry in sorted_entries(&generation_dir)? {
+            let Some(epoch) = parse_number(&epoch_entry.file_name(), "epoch-") else {
+                continue;
+            };
+            let frames_dir = epoch_entry.path().join("frames");
+            if frames_dir.is_dir() {
+                epochs.push((epoch, frames_dir));
+            }
+        }
+
+        let Some(mut seq) = after_seq.map_or(Some(0), |after| after.checked_add(1)) else {
+            return Ok(FramePage {
+                frames: Vec::new(),
+                next: None,
+            });
+        };
+        let mut frames = Vec::with_capacity(limit_frames);
+        let mut encoded_bytes = 0usize;
+        let mut more = false;
+        while frames.len() < limit_frames {
+            let Some((epoch, path)) = sequence_path(&epochs, seq)? else {
+                break;
+            };
+            let frame = read_frame_path(&path)?.ok_or_else(|| {
+                ReceiveError::Inconsistent(format!(
+                    "frame disappeared while listing {}",
+                    path.display()
+                ))
+            })?;
+            if frame.key.session != session
+                || frame.key.stream != stream
+                || frame.key.generation != generation
+                || frame.key.epoch != epoch
+                || frame.key.seq != seq
+            {
+                return Err(ReceiveError::Inconsistent(format!(
+                    "stored key at {} does not match its path",
+                    path.display()
+                )));
+            }
+            let frame_bytes = serde_json::to_vec(&frame.to_value())?.len();
+            if !frames.is_empty() && encoded_bytes.saturating_add(frame_bytes) > limit_bytes {
+                more = true;
+                break;
+            }
+            encoded_bytes = encoded_bytes.saturating_add(frame_bytes);
+            frames.push(frame);
+            let Some(next) = seq.checked_add(1) else {
+                break;
+            };
+            seq = next;
+        }
+        if !more && frames.len() == limit_frames {
+            more = sequence_path(&epochs, seq)?.is_some();
+        }
+        let next = more
+            .then(|| frames.last().map(|frame| frame.key.seq))
+            .flatten();
+        Ok(FramePage { frames, next })
+    }
+
     /// Reads a stored live frame. This also verifies retained generations.
     pub fn read_frame(
         &self,
@@ -999,6 +1096,8 @@ fn handle_request(receiver: &Receiver, route: &str, value: &Value) -> Result<Val
                 frame.key.seq.into(),
             )])))
         }
+        "/v1/frames/batch" => handle_frame_batch(receiver, value, false),
+        "/v1/orphans/batch" => handle_frame_batch(receiver, value, true),
         "/v1/lease/acquire" => {
             let object = request_object(value)?;
             Ok(receiver
@@ -1056,13 +1155,18 @@ fn handle_request(receiver: &Receiver, route: &str, value: &Value) -> Result<Val
         "/v1/frames/list" => {
             let object = request_object(value)?;
             let _machine = required_string(object, "machine")?;
-            Ok(Value::Array(
-                receiver
-                    .list_frames(required_string(object, "session")?)?
-                    .iter()
-                    .map(Frame::to_value)
-                    .collect(),
-            ))
+            Ok(receiver
+                .list_frame_page(
+                    required_string(object, "session")?,
+                    required_string(object, "stream")?,
+                    required_integer(object, "generation")?,
+                    optional_integer(object, "after_seq")?,
+                    usize::try_from(required_integer(object, "limit_bytes")?)
+                        .map_err(|_| ReceiveError::RequestField("limit_bytes"))?,
+                    usize::try_from(required_integer(object, "limit_frames")?)
+                        .map_err(|_| ReceiveError::RequestField("limit_frames"))?,
+                )?
+                .to_value())
         }
         "/v1/keys/list" => {
             let object = request_object(value)?;
@@ -1114,6 +1218,37 @@ fn handle_request(receiver: &Receiver, route: &str, value: &Value) -> Result<Val
     }
 }
 
+fn handle_frame_batch(
+    receiver: &Receiver,
+    value: &Value,
+    orphan: bool,
+) -> Result<Value, ReceiveError> {
+    let object = request_object(value)?;
+    let machine = required_string(object, "machine")?;
+    let values = object
+        .get("frames")
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .ok_or(ReceiveError::RequestField("frames"))?;
+    let mut acked = None;
+    for value in values {
+        let frame = Frame::from_value(value)?;
+        if frame.machine != machine {
+            return Err(ReceiveError::Auth(AuthError::MachineMismatch));
+        }
+        if orphan {
+            receiver.accept_orphan(&frame)?;
+        } else {
+            receiver.accept(&frame)?;
+        }
+        acked = Some(frame.key.seq);
+    }
+    Ok(Value::Object(Map::from_iter([(
+        "acked".into(),
+        acked.expect("non-empty batch checked above").into(),
+    )])))
+}
+
 fn request_object(value: &Value) -> Result<&Map<String, Value>, ReceiveError> {
     value.as_object().ok_or(ReceiveError::RequestField("body"))
 }
@@ -1136,6 +1271,19 @@ fn optional_string<'a>(
         None | Some(Value::Null) => Ok(None),
         Some(value) => value
             .as_str()
+            .map(Some)
+            .ok_or(ReceiveError::RequestField(field)),
+    }
+}
+
+fn optional_integer(
+    object: &Map<String, Value>,
+    field: &'static str,
+) -> Result<Option<u64>, ReceiveError> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
             .map(Some)
             .ok_or(ReceiveError::RequestField(field)),
     }
@@ -1199,6 +1347,7 @@ fn error_status(error: &ReceiveError) -> u16 {
         | ReceiveError::Json(_)
         | ReceiveError::PlaintextDisabled
         | ReceiveError::EncryptedDisabled
+        | ReceiveError::FramePageLimit { .. }
         | ReceiveError::RequestField(_) => 400,
         ReceiveError::Auth(_) | ReceiveError::AuthHeader(_) => 401,
         _ => 500,
@@ -1236,6 +1385,27 @@ fn generation_dir(root: &Path, session: &str, stream: &str, generation: u64) -> 
     root.join(hex::encode(session.as_bytes()))
         .join(hex::encode(stream.as_bytes()))
         .join(format!("generation-{generation}"))
+}
+
+fn sequence_path(
+    epochs: &[(u64, PathBuf)],
+    seq: u64,
+) -> Result<Option<(u64, PathBuf)>, ReceiveError> {
+    let mut found = None;
+    for (epoch, directory) in epochs {
+        let path = directory.join(format!("{seq:020}.json"));
+        match fs::metadata(&path) {
+            Ok(_) if found.is_none() => found = Some((*epoch, path)),
+            Ok(_) => {
+                return Err(ReceiveError::Inconsistent(format!(
+                    "sequence {seq} is stored in more than one epoch"
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(found)
 }
 
 fn epoch_dir(generation_dir: &Path, epoch: u64) -> PathBuf {

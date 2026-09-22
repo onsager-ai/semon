@@ -15,22 +15,53 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    CryptoError, DataKey, DiscoveredStream, Frame, FrameKey, FrameMode, LEASE_RENEW_INTERVAL_MS,
-    LeaseRow, LeaseStatus, OrphanSummary, RelayState, RequestSigner, StreamState, StreamTip,
-    TakeoverResult, ZERO_CHAIN, chain_line, decrypt_envelope, decrypt_frame, discover_streams,
-    discovery::DiscoveryError, encrypt_envelope, encrypt_frame, generate_data_key,
-    lease::LeaseValueError, load_state, save_state, state::StateError,
+    CryptoError, DataKey, DiscoveredStream, FRAME_BATCH_MAX_BYTES, FRAME_BATCH_MAX_FRAMES,
+    FRAME_PAGE_MAX_BYTES, FRAME_PAGE_MAX_FRAMES, Frame, FrameContent, FrameKey, FrameMode,
+    FramePage, LEASE_RENEW_INTERVAL_MS, LeaseRow, LeaseStatus, OrphanSummary, RelayState,
+    RequestSigner, StreamState, StreamTip, TakeoverResult, ZERO_CHAIN, chain_line,
+    decrypt_envelope, decrypt_frame, discover_streams, discovery::DiscoveryError, encrypt_envelope,
+    encrypt_frame, generate_data_key, lease::LeaseValueError, load_state, save_state,
+    state::StateError,
 };
 
 type StreamKey = (String, String);
 type ObservationKey = (String, String, u64);
 
-/// A deliberately single-frame seam: the source file, not memory, is the queue.
+const ERROR_RESPONSE_EXCERPT_BYTES: usize = 4096;
+/// A page normally targets 256 KiB, but one accepted request can contain a
+/// nearly 64 MiB frame. This cap admits that largest single-frame page plus
+/// JSON wrapper headroom while bounding every other successful response too.
+pub const MAX_SUCCESS_RESPONSE_BYTES: usize = 65 * 1024 * 1024;
+
+/// Delivery seam. The source file remains the queue; transports may opt into
+/// small bounded batches without turning the full backlog into an in-memory queue.
 pub trait Transport {
     fn send(&self, frame: &Frame) -> Result<u64, TransportError>;
 
+    /// Delivery batching is opt-in so single-frame test and embedded
+    /// transports retain their acknowledgement behavior.
+    fn frame_batch_limits(&self) -> (usize, usize) {
+        (1, usize::MAX)
+    }
+
+    fn send_batch(&self, frames: &[Frame]) -> Result<u64, TransportError> {
+        let mut acked = None;
+        for frame in frames {
+            acked = Some(self.send(frame)?);
+        }
+        acked.ok_or_else(|| TransportError::InvalidAck("empty frame batch".into()))
+    }
+
     fn send_orphan(&self, frame: &Frame) -> Result<u64, TransportError> {
         self.send(frame)
+    }
+
+    fn send_orphan_batch(&self, frames: &[Frame]) -> Result<u64, TransportError> {
+        let mut acked = None;
+        for frame in frames {
+            acked = Some(self.send_orphan(frame)?);
+        }
+        acked.ok_or_else(|| TransportError::InvalidAck("empty orphan batch".into()))
     }
 
     fn lease_status(
@@ -114,6 +145,30 @@ pub trait Transport {
         Err(TransportError::Unavailable(
             "transport does not implement frame reads".into(),
         ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn list_frame_page(
+        &self,
+        session: &str,
+        machine: &str,
+        stream: &str,
+        generation: u64,
+        after_seq: Option<u64>,
+        limit_bytes: usize,
+        limit_frames: usize,
+    ) -> Result<FramePage, TransportError> {
+        let mut frames = self
+            .list_frames(session, machine)?
+            .into_iter()
+            .filter(|frame| {
+                frame.key.stream == stream
+                    && frame.key.generation == generation
+                    && after_seq.is_none_or(|after| frame.key.seq > after)
+            })
+            .collect::<Vec<_>>();
+        frames.sort_by_key(|frame| (frame.key.seq, frame.key.epoch));
+        Ok(page_from_frames(frames, limit_bytes, limit_frames))
     }
 }
 
@@ -213,16 +268,38 @@ impl HttpTransport {
         }
         let response = request.send()?;
         let status = response.status();
-        let mut body = response.text().unwrap_or_default();
-        body.truncate(4096);
         if !status.is_success() {
-            return Err(rejection(status, &body));
+            let mut bytes = Vec::new();
+            response
+                .take((ERROR_RESPONSE_EXCERPT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(TransportError::ResponseIo)?;
+            return Err(rejection(status, &error_body_excerpt(&bytes)));
         }
-        Ok(serde_json::from_str(&body)?)
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .unwrap_or(0)
+                .min(MAX_SUCCESS_RESPONSE_BYTES as u64) as usize,
+        );
+        response
+            .take((MAX_SUCCESS_RESPONSE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(TransportError::ResponseIo)?;
+        if bytes.len() > MAX_SUCCESS_RESPONSE_BYTES {
+            return Err(TransportError::ResponseTooLarge {
+                limit: MAX_SUCCESS_RESPONSE_BYTES,
+            });
+        }
+        Ok(serde_json::from_slice(&bytes)?)
     }
 }
 
 impl Transport for HttpTransport {
+    fn frame_batch_limits(&self) -> (usize, usize) {
+        (FRAME_BATCH_MAX_FRAMES, FRAME_BATCH_MAX_BYTES)
+    }
+
     fn send(&self, frame: &Frame) -> Result<u64, TransportError> {
         let value = self.post("/v1/frames", &frame.to_value())?;
         value
@@ -231,8 +308,44 @@ impl Transport for HttpTransport {
             .ok_or_else(|| TransportError::InvalidAck(value.to_string()))
     }
 
+    fn send_batch(&self, frames: &[Frame]) -> Result<u64, TransportError> {
+        let machine = batch_machine(frames)?;
+        let value = self.post(
+            "/v1/frames/batch",
+            &Value::Object(Map::from_iter([
+                (
+                    "frames".into(),
+                    Value::Array(frames.iter().map(Frame::to_value).collect()),
+                ),
+                ("machine".into(), Value::String(machine.to_owned())),
+            ])),
+        )?;
+        value
+            .get("acked")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| TransportError::InvalidAck(value.to_string()))
+    }
+
     fn send_orphan(&self, frame: &Frame) -> Result<u64, TransportError> {
         let value = self.post("/v1/orphans", &frame.to_value())?;
+        value
+            .get("acked")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| TransportError::InvalidAck(value.to_string()))
+    }
+
+    fn send_orphan_batch(&self, frames: &[Frame]) -> Result<u64, TransportError> {
+        let machine = batch_machine(frames)?;
+        let value = self.post(
+            "/v1/orphans/batch",
+            &Value::Object(Map::from_iter([
+                (
+                    "frames".into(),
+                    Value::Array(frames.iter().map(Frame::to_value).collect()),
+                ),
+                ("machine".into(), Value::String(machine.to_owned())),
+            ])),
+        )?;
         value
             .get("acked")
             .and_then(Value::as_u64)
@@ -374,14 +487,103 @@ impl Transport for HttpTransport {
     }
 
     fn list_frames(&self, session: &str, machine: &str) -> Result<Vec<Frame>, TransportError> {
-        let value = self.post("/v1/frames/list", &lease_request(session, machine, []))?;
-        value
-            .as_array()
-            .ok_or_else(|| TransportError::InvalidResponse(value.to_string()))?
-            .iter()
-            .map(|value| Frame::from_value(value).map_err(TransportError::Frame))
-            .collect()
+        let tips = self.lease_tips(session, machine)?.tips;
+        let mut frames = Vec::new();
+        for tip in tips {
+            let mut after_seq = None;
+            loop {
+                let page = self.list_frame_page(
+                    session,
+                    machine,
+                    &tip.stream,
+                    tip.generation,
+                    after_seq,
+                    FRAME_PAGE_MAX_BYTES,
+                    FRAME_PAGE_MAX_FRAMES,
+                )?;
+                let next = page.next;
+                frames.extend(page.frames);
+                match next {
+                    Some(next) if after_seq.is_none_or(|after| next > after) => {
+                        after_seq = Some(next);
+                    }
+                    Some(_) => {
+                        return Err(TransportError::InvalidResponse(
+                            "frame page cursor did not advance".into(),
+                        ));
+                    }
+                    None => break,
+                }
+            }
+        }
+        frames.sort_by(|left, right| left.key.cmp(&right.key));
+        Ok(frames)
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn list_frame_page(
+        &self,
+        session: &str,
+        machine: &str,
+        stream: &str,
+        generation: u64,
+        after_seq: Option<u64>,
+        limit_bytes: usize,
+        limit_frames: usize,
+    ) -> Result<FramePage, TransportError> {
+        let value = self.post(
+            "/v1/frames/list",
+            &Value::Object(Map::from_iter([
+                (
+                    "after_seq".into(),
+                    after_seq.map_or(Value::Null, Value::from),
+                ),
+                ("generation".into(), generation.into()),
+                ("limit_bytes".into(), (limit_bytes as u64).into()),
+                ("limit_frames".into(), (limit_frames as u64).into()),
+                ("machine".into(), Value::String(machine.to_owned())),
+                ("session".into(), Value::String(session.to_owned())),
+                ("stream".into(), Value::String(stream.to_owned())),
+            ])),
+        )?;
+        FramePage::from_value(&value).map_err(TransportError::Frame)
+    }
+}
+
+fn batch_machine(frames: &[Frame]) -> Result<&str, TransportError> {
+    let first = frames
+        .first()
+        .ok_or_else(|| TransportError::InvalidAck("empty frame batch".into()))?;
+    if frames.iter().any(|frame| frame.machine != first.machine) {
+        return Err(TransportError::InvalidResponse(
+            "frame batch contains multiple machines".into(),
+        ));
+    }
+    Ok(&first.machine)
+}
+
+fn page_from_frames(frames: Vec<Frame>, limit_bytes: usize, limit_frames: usize) -> FramePage {
+    let mut page = Vec::new();
+    let mut bytes = 0_usize;
+    let total = frames.len();
+    for frame in frames {
+        let frame_bytes = serde_json::to_vec(&frame.to_value()).map_or(0, |value| value.len());
+        if !page.is_empty()
+            && (page.len() >= limit_frames || bytes.saturating_add(frame_bytes) > limit_bytes)
+        {
+            break;
+        }
+        bytes = bytes.saturating_add(frame_bytes);
+        page.push(frame);
+    }
+    let next = (page.len() < total)
+        .then(|| page.last().map(|frame| frame.key.seq))
+        .flatten();
+    FramePage { frames: page, next }
+}
+
+fn error_body_excerpt(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(&bytes[..bytes.len().min(ERROR_RESPONSE_EXCERPT_BYTES)]).into_owned()
 }
 
 fn lease_request<const N: usize>(session: &str, machine: &str, extra: [(&str, Value); N]) -> Value {
@@ -422,6 +624,10 @@ fn rejection(status: StatusCode, body: &str) -> TransportError {
 pub enum TransportError {
     #[error("receiver request failed: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("cannot read receiver response: {0}")]
+    ResponseIo(#[source] io::Error),
+    #[error("receiver response exceeds the {limit}-byte success limit")]
+    ResponseTooLarge { limit: usize },
     #[error("cannot encode or decode receiver JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("cannot decode lease response: {0}")]
@@ -555,6 +761,8 @@ pub enum VerifyError {
         session: String,
         source: TransportError,
     },
+    #[error("invalid paginated frame response: {0}")]
+    Page(String),
     #[error("frame for session {actual} was returned while verifying {expected}")]
     Session { expected: String, actual: String },
     #[error("plaintext frame found while verifying encrypted session {0}")]
@@ -829,14 +1037,14 @@ pub fn verify_encrypted_session(
         .ok_or_else(|| VerifyError::EnvelopeMissing(session.to_owned()))?;
     let key = decrypt_envelope(&envelope, identity)
         .map_err(|error| VerifyError::Envelope(Box::new(error)))?;
-    let frames =
+    let receiver =
         transport
-            .list_frames(session, machine)
+            .lease_tips(session, machine)
             .map_err(|source| VerifyError::FrameTransport {
                 session: session.to_owned(),
                 source,
             })?;
-    let tips = verify_encrypted_frames(session, frames, &key)?;
+    let tips = verify_encrypted_pages(session, machine, &key, &receiver.tips, transport)?;
     Ok(VerifyReport {
         frames: tips.iter().map(|tip| tip.seq.saturating_add(1)).sum(),
         streams: tips.len() as u64,
@@ -864,65 +1072,158 @@ pub fn verify_encrypted_frames(
     });
     let mut tips = BTreeMap::<(String, u64), StreamTip>::new();
     for frame in frames {
-        if frame.key.session != session {
-            return Err(VerifyError::Session {
-                expected: session.to_owned(),
-                actual: frame.key.session,
-            });
-        }
-        let payload = frame
-            .encrypted_payload()
-            .ok_or_else(|| VerifyError::Plaintext(session.to_owned()))?;
-        let content_tag = payload.tag;
         let tip_key = (frame.key.stream.clone(), frame.key.generation);
-        let previous = tips.get(&tip_key);
-        let expected = previous.map_or(0, |tip| tip.seq.saturating_add(1));
-        if frame.key.seq != expected {
-            return Err(VerifyError::Gap {
-                stream: frame.key.stream,
-                generation: frame.key.generation,
-                expected,
-                actual: frame.key.seq,
-            });
-        }
-        if previous.is_some_and(|tip| frame.key.epoch < tip.epoch) {
-            return Err(VerifyError::Epoch {
-                stream: frame.key.stream,
-                generation: frame.key.generation,
-                seq: frame.key.seq,
-            });
-        }
-        let (chain, line) =
-            decrypt_frame(key, &frame.key, &frame.machine, payload).map_err(|source| {
-                VerifyError::Decrypt {
-                    stream: frame.key.stream.clone(),
-                    generation: frame.key.generation,
-                    seq: frame.key.seq,
-                    source: Box::new(source),
-                }
-            })?;
-        let previous_chain = previous.and_then(|tip| tip.chain).unwrap_or(ZERO_CHAIN);
-        if chain != chain_line(&previous_chain, &line) {
-            return Err(VerifyError::Chain {
-                stream: frame.key.stream,
-                generation: frame.key.generation,
-                seq: frame.key.seq,
-            });
-        }
-        tips.insert(
-            tip_key,
-            StreamTip {
-                stream: frame.key.stream,
-                generation: frame.key.generation,
-                epoch: frame.key.epoch,
-                seq: frame.key.seq,
-                mode: FrameMode::Encrypted,
-                chain: Some(chain),
-                tag: Some(content_tag),
-            },
-        );
+        let mut tip = tips.remove(&tip_key);
+        verify_encrypted_frame(session, key, &mut tip, frame)?;
+        tips.insert(tip_key, tip.expect("a verified frame produces a tip"));
     }
     Ok(tips.into_values().collect())
+}
+
+pub(crate) fn verify_encrypted_frame(
+    session: &str,
+    key: &DataKey,
+    previous: &mut Option<StreamTip>,
+    frame: Frame,
+) -> Result<Vec<u8>, VerifyError> {
+    if frame.key.session != session {
+        return Err(VerifyError::Session {
+            expected: session.to_owned(),
+            actual: frame.key.session,
+        });
+    }
+    if let Some(tip) = previous.as_ref()
+        && (frame.key.stream != tip.stream || frame.key.generation != tip.generation)
+    {
+        return Err(VerifyError::Page(format!(
+            "frame page changed from {} generation {} to {} generation {}",
+            tip.stream, tip.generation, frame.key.stream, frame.key.generation
+        )));
+    }
+    let payload = frame
+        .encrypted_payload()
+        .ok_or_else(|| VerifyError::Plaintext(session.to_owned()))?;
+    let content_tag = payload.tag;
+    let expected = previous.as_ref().map_or(0, |tip| tip.seq.saturating_add(1));
+    if frame.key.seq != expected {
+        return Err(VerifyError::Gap {
+            stream: frame.key.stream,
+            generation: frame.key.generation,
+            expected,
+            actual: frame.key.seq,
+        });
+    }
+    if previous
+        .as_ref()
+        .is_some_and(|tip| frame.key.epoch < tip.epoch)
+    {
+        return Err(VerifyError::Epoch {
+            stream: frame.key.stream,
+            generation: frame.key.generation,
+            seq: frame.key.seq,
+        });
+    }
+    let (chain, line) =
+        decrypt_frame(key, &frame.key, &frame.machine, payload).map_err(|source| {
+            VerifyError::Decrypt {
+                stream: frame.key.stream.clone(),
+                generation: frame.key.generation,
+                seq: frame.key.seq,
+                source: Box::new(source),
+            }
+        })?;
+    let previous_chain = previous
+        .as_ref()
+        .and_then(|tip| tip.chain)
+        .unwrap_or(ZERO_CHAIN);
+    if chain != chain_line(&previous_chain, &line) {
+        return Err(VerifyError::Chain {
+            stream: frame.key.stream,
+            generation: frame.key.generation,
+            seq: frame.key.seq,
+        });
+    }
+    *previous = Some(StreamTip {
+        stream: frame.key.stream,
+        generation: frame.key.generation,
+        epoch: frame.key.epoch,
+        seq: frame.key.seq,
+        mode: FrameMode::Encrypted,
+        chain: Some(chain),
+        tag: Some(content_tag),
+    });
+    Ok(line)
+}
+
+fn verify_encrypted_pages(
+    session: &str,
+    machine: &str,
+    key: &DataKey,
+    receiver_tips: &[StreamTip],
+    transport: &impl Transport,
+) -> Result<Vec<StreamTip>, VerifyError> {
+    let mut verified = Vec::with_capacity(receiver_tips.len());
+    for receiver_tip in receiver_tips {
+        let mut cursor = None;
+        let mut tip = None;
+        loop {
+            let page = transport
+                .list_frame_page(
+                    session,
+                    machine,
+                    &receiver_tip.stream,
+                    receiver_tip.generation,
+                    cursor,
+                    FRAME_PAGE_MAX_BYTES,
+                    FRAME_PAGE_MAX_FRAMES,
+                )
+                .map_err(|source| VerifyError::FrameTransport {
+                    session: session.to_owned(),
+                    source,
+                })?;
+            let mut reached_tip = false;
+            for frame in page.frames {
+                if frame.key.stream != receiver_tip.stream
+                    || frame.key.generation != receiver_tip.generation
+                {
+                    return Err(VerifyError::Page(format!(
+                        "requested {} generation {}, got {} generation {}",
+                        receiver_tip.stream,
+                        receiver_tip.generation,
+                        frame.key.stream,
+                        frame.key.generation
+                    )));
+                }
+                let seq = frame.key.seq;
+                verify_encrypted_frame(session, key, &mut tip, frame)?;
+                if seq == receiver_tip.seq {
+                    reached_tip = true;
+                    break;
+                }
+            }
+            if reached_tip {
+                break;
+            }
+            match page.next {
+                Some(next)
+                    if tip.as_ref().is_some_and(|tip| tip.seq == next)
+                        && cursor.is_none_or(|cursor| next > cursor) =>
+                {
+                    cursor = Some(next);
+                }
+                Some(_) => {
+                    return Err(VerifyError::Page(
+                        "receiver returned a non-advancing frame cursor".into(),
+                    ));
+                }
+                None => break,
+            }
+        }
+        if let Some(tip) = tip {
+            verified.push(tip);
+        }
+    }
+    match_verified_tips(receiver_tips, &verified)
 }
 
 pub fn takeover_session_encrypted(
@@ -945,12 +1246,10 @@ pub fn takeover_session_encrypted(
         })?;
     let key = decrypt_envelope(&envelope, identity)
         .map_err(|source| TakeoverCommandError::Precheck(RelayError::Crypto(source)))?;
-    let frames = transport
-        .list_frames(session, machine)
-        .map_err(TakeoverCommandError::Tips)?;
-    let verified = verify_encrypted_frames(session, frames, &key).map_err(|error| {
-        TakeoverCommandError::Precheck(RelayError::Verification(error.to_string()))
-    })?;
+    let verified = verify_encrypted_pages(session, machine, &key, &snapshot.tips, transport)
+        .map_err(|error| {
+            TakeoverCommandError::Precheck(RelayError::Verification(error.to_string()))
+        })?;
     let precheck_tips = match_verified_tips(&snapshot.tips, &verified).map_err(|error| {
         TakeoverCommandError::Precheck(RelayError::Verification(error.to_string()))
     })?;
@@ -959,18 +1258,11 @@ pub fn takeover_session_encrypted(
     let takeover = transport
         .takeover(session, machine, snapshot.row.epoch, force)
         .map_err(TakeoverCommandError::Cas)?;
-    let frames = transport.list_frames(session, machine).map_err(|source| {
-        TakeoverCommandError::PostCommit {
-            epoch: takeover.row.epoch,
-            source: RelayError::Verification(source.to_string()),
-        }
-    })?;
-    let verified = verify_encrypted_frames(session, frames, &key).map_err(|error| {
-        TakeoverCommandError::PostCommit {
+    let verified = verify_encrypted_pages(session, machine, &key, &takeover.tips, transport)
+        .map_err(|error| TakeoverCommandError::PostCommit {
             epoch: takeover.row.epoch,
             source: RelayError::Verification(error.to_string()),
-        }
-    })?;
+        })?;
     let post_tips = match_verified_tips(&takeover.tips, &verified).map_err(|error| {
         TakeoverCommandError::PostCommit {
             epoch: takeover.row.epoch,
@@ -1680,88 +1972,142 @@ fn send_stream<T: Transport>(
             entry.epoch
         )
     });
+    let mut carried = None;
+    let mut source_done = false;
+    let (batch_max_frames, batch_max_bytes) = transport.frame_batch_limits();
+    let batch_max_frames = batch_max_frames.max(1);
+    let batch_max_bytes = batch_max_bytes.max(1);
 
     loop {
-        let line_start = position;
-        let line = match read_line(&mut reader, &stream.path)? {
-            LineRead::Complete(line) => line,
-            LineRead::Incomplete(count) => {
-                source_bytes_read += count;
+        let mut frames = Vec::with_capacity(batch_max_frames);
+        let mut pending = Vec::with_capacity(batch_max_frames);
+        let mut batch_bytes = 0_usize;
+        while frames.len() < batch_max_frames {
+            let (frame, line, wire_bytes) = if let Some(carried) = carried.take() {
+                carried
+            } else {
+                let line_start = position;
+                let line = match read_line(&mut reader, &stream.path)? {
+                    LineRead::Complete(line) => line,
+                    LineRead::Incomplete(count) => {
+                        source_bytes_read += count;
+                        source_done = true;
+                        break;
+                    }
+                    LineRead::End => {
+                        source_done = true;
+                        break;
+                    }
+                };
+                source_bytes_read += line.len() as u64;
+                position += line.len() as u64;
+                chain = chain_line(&chain, &line);
+
+                let observed = if let Some(observation) =
+                    observations.get(&observation_key).and_then(|windows| {
+                        windows
+                            .iter()
+                            .find(|window| position <= window.through_offset)
+                    }) {
+                    observation.observation.clone()
+                } else if position <= prepared.observed_size {
+                    pass_observation.clone()
+                } else {
+                    Observation::now(&pass_observation.boot_id)?
+                };
+                let frame_key = FrameKey {
+                    session: stream.session.clone(),
+                    stream: stream.stream.clone(),
+                    generation: entry.generation,
+                    epoch: entry.epoch,
+                    seq,
+                };
+                let frame = if let Some(data_key) = data_key {
+                    Frame::encrypted(
+                        frame_key.clone(),
+                        machine.to_owned(),
+                        observed.wall_ns,
+                        observed.mono_ns,
+                        observed.boot_id.clone(),
+                        encrypt_frame(data_key, &frame_key, machine, &chain, &line)?,
+                    )
+                } else {
+                    Frame::plaintext(
+                        frame_key,
+                        machine.to_owned(),
+                        chain,
+                        observed.wall_ns,
+                        observed.mono_ns,
+                        observed.boot_id.clone(),
+                        line.clone(),
+                    )
+                };
+                seq = seq.saturating_add(1);
+                let wire_bytes = estimated_frame_wire_bytes(&frame);
+                (
+                    frame,
+                    PendingLine {
+                        line,
+                        line_start,
+                        line_end: position,
+                        chain,
+                        observed,
+                    },
+                    wire_bytes,
+                )
+            };
+            if !frames.is_empty() && batch_bytes.saturating_add(wire_bytes) > batch_max_bytes {
+                carried = Some((frame, line, wire_bytes));
                 break;
             }
-            LineRead::End => break,
-        };
-        source_bytes_read += line.len() as u64;
-        position += line.len() as u64;
-        chain = chain_line(&chain, &line);
+            batch_bytes = batch_bytes.saturating_add(wire_bytes);
+            frames.push(frame);
+            pending.push(line);
+            if batch_bytes >= batch_max_bytes {
+                break;
+            }
+        }
+        if frames.is_empty() {
+            if source_done {
+                break;
+            }
+            continue;
+        }
 
-        let observed = if let Some(pending) =
-            observations.get(&observation_key).and_then(|windows| {
-                windows
-                    .iter()
-                    .find(|window| position <= window.through_offset)
-            }) {
-            pending.observation.clone()
-        } else if position <= prepared.observed_size {
-            pass_observation.clone()
-        } else {
-            Observation::now(&pass_observation.boot_id)?
-        };
-        let frame_key = FrameKey {
-            session: stream.session.clone(),
-            stream: stream.stream.clone(),
-            generation: entry.generation,
-            epoch: entry.epoch,
-            seq,
-        };
-        let frame = if let Some(data_key) = data_key {
-            Frame::encrypted(
-                frame_key.clone(),
-                machine.to_owned(),
-                observed.wall_ns,
-                observed.mono_ns,
-                observed.boot_id.clone(),
-                encrypt_frame(data_key, &frame_key, machine, &chain, &line)?,
-            )
-        } else {
-            Frame::plaintext(
-                frame_key,
-                machine.to_owned(),
-                chain,
-                observed.wall_ns,
-                observed.mono_ns,
-                observed.boot_id.clone(),
-                line.clone(),
-            )
-        };
-
+        let expected = frames.last().expect("frame batch is non-empty").key.seq;
         if delivering {
-            match transport.send(&frame) {
-                Ok(acked) if acked == seq => {
-                    let acknowledged_after = observed.instant.elapsed();
-                    entry.acked = Some(seq);
-                    entry.chain = chain;
-                    entry.offset = position;
-                    entry.last_line_start = Some(line_start);
-                    entry.last_line_hash = Some(line_hash(&line));
-                    lines_acked += 1;
-                    bytes_acked += line.len() as u64;
-                    lags.record(acknowledged_after);
+            match transport.send_batch(&frames) {
+                Ok(acked) if acked == expected => {
+                    let last = pending.last().expect("frame metadata is non-empty");
+                    entry.acked = Some(expected);
+                    entry.chain = last.chain;
+                    entry.offset = last.line_end;
+                    entry.last_line_start = Some(last.line_start);
+                    entry.last_line_hash = Some(line_hash(&last.line));
+                    lines_acked += pending.len() as u64;
+                    bytes_acked += pending
+                        .iter()
+                        .map(|line| line.line.len() as u64)
+                        .sum::<u64>();
+                    for line in &pending {
+                        lags.record(line.observed.instant.elapsed());
+                    }
                     clear_acknowledged_observations(observations, &observation_key, entry.offset);
                 }
                 Ok(acked) => {
+                    let last = pending.last().expect("frame metadata is non-empty");
                     remember_failed_pass(
                         observations,
                         observation_key.clone(),
                         entry.offset,
                         prepared.observed_size,
                         pass_observation,
-                        position,
-                        &observed,
+                        last.line_end,
+                        &last.observed,
                     );
                     delivering = false;
                     failure = Some(format!(
-                        "receiver acknowledged sequence {acked}, expected {seq}"
+                        "receiver acknowledged sequence {acked}, expected {expected}"
                     ));
                 }
                 Err(TransportError::Fenced { current_epoch })
@@ -1779,43 +2125,57 @@ fn send_stream<T: Transport>(
                     ));
                 }
                 Err(error) => {
+                    let last = pending.last().expect("frame metadata is non-empty");
                     remember_failed_pass(
                         observations,
                         observation_key.clone(),
                         entry.offset,
                         prepared.observed_size,
                         pass_observation,
-                        position,
-                        &observed,
+                        last.line_end,
+                        &last.observed,
                     );
                     delivering = false;
                     failure = Some(error.to_string());
                 }
             }
         }
-        if orphaning && entry.orphaned.is_none_or(|orphaned| seq > orphaned) {
-            match transport.send_orphan(&frame) {
-                Ok(acked) if acked == seq => {
-                    entry.orphaned = Some(seq);
-                    orphan_lines_acked += 1;
-                }
-                Ok(acked) => {
-                    orphaning = false;
-                    failure = Some(format!(
-                        "orphan receiver acknowledged sequence {acked}, expected {seq}"
-                    ));
-                }
-                Err(error) => {
-                    orphaning = false;
-                    failure = Some(format!("orphan upload failed: {error}"));
+        if orphaning {
+            let first = frames
+                .iter()
+                .position(|frame| entry.orphaned.is_none_or(|seq| frame.key.seq > seq))
+                .unwrap_or(frames.len());
+            let orphan_frames = &frames[first..];
+            if !orphan_frames.is_empty() {
+                let orphan_expected = orphan_frames
+                    .last()
+                    .expect("orphan batch is non-empty")
+                    .key
+                    .seq;
+                match transport.send_orphan_batch(orphan_frames) {
+                    Ok(acked) if acked == orphan_expected => {
+                        entry.orphaned = Some(orphan_expected);
+                        orphan_lines_acked += orphan_frames.len() as u64;
+                    }
+                    Ok(acked) => {
+                        orphaning = false;
+                        failure = Some(format!(
+                            "orphan receiver acknowledged sequence {acked}, expected {orphan_expected}"
+                        ));
+                    }
+                    Err(error) => {
+                        orphaning = false;
+                        failure = Some(format!("orphan upload failed: {error}"));
+                    }
                 }
             }
         }
-        if position > entry.offset {
-            backlog_lines += 1;
-            backlog_bytes += line.len() as u64;
+        for line in &pending {
+            if line.line_end > entry.offset {
+                backlog_lines += 1;
+                backlog_bytes += line.line.len() as u64;
+            }
         }
-        seq = seq.saturating_add(1);
     }
 
     state.streams.insert(key, entry.clone());
@@ -1842,6 +2202,24 @@ fn send_stream<T: Transport>(
         failure,
     };
     Ok((report, lags))
+}
+
+struct PendingLine {
+    line: Vec<u8>,
+    line_start: u64,
+    line_end: u64,
+    chain: [u8; 32],
+    observed: Observation,
+}
+
+fn estimated_frame_wire_bytes(frame: &Frame) -> usize {
+    let content = match &frame.content {
+        FrameContent::Plaintext { line, .. } => line.len(),
+        FrameContent::Encrypted(payload) => payload.ciphertext.len(),
+    };
+    // Line/ciphertext bytes are hex encoded. This fixed allowance covers the
+    // metadata fields and batch separators without serializing twice.
+    content.saturating_mul(2).saturating_add(2048)
 }
 
 fn remember_failed_pass(
@@ -2117,6 +2495,16 @@ mod tests {
             read_complete_line(&mut reader, Path::new("synthetic")).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn error_excerpt_is_safe_when_utf8_crosses_the_byte_limit() {
+        let mut body = vec![b'a'; ERROR_RESPONSE_EXCERPT_BYTES - 1];
+        body.extend_from_slice("界".as_bytes());
+        body.extend_from_slice(b"tail");
+        let excerpt = error_body_excerpt(&body);
+        assert!(excerpt.starts_with(&"a".repeat(ERROR_RESPONSE_EXCERPT_BYTES - 1)));
+        assert!(excerpt.ends_with('\u{fffd}'));
     }
 
     #[test]
