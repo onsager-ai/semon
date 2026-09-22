@@ -12,8 +12,11 @@
 //!   `raw_carrier_records` and no read path here reconstructs it from raw, so
 //!   it survives deletion of the forensic region intact. [`TraceStore::log`]
 //!   is the ordinary read over this region, joined to `canonical_traces`.
-//! - `raw_carrier_records` contains opaque carrier bytes and minimal carrier
-//!   provenance. They are available only through the deliberately separate
+//! - `raw_carrier_records` contains every complete source line as opaque
+//!   carrier bytes with its own session, sequence, and timestamp. Its
+//!   `trace_id` is nullable because a line with no transferable projection
+//!   has no canonical trace or occurrence. Raw rows are available only
+//!   through the deliberately separate
 //!   [`TraceStore::fetch_raw_carrier_records`] and
 //!   [`TraceStore::fetch_raw_carrier_records_for_occurrences`] calls, which
 //!   the `semon forensic` command is the sole CLI path to. Raw bytes and
@@ -28,10 +31,11 @@
 //! content-addressed over `canonical_traces` alone while provenance and order
 //! live in the separate `occurrences` region.
 //!
-//! A capture inserts into all three regions in one SQLite transaction.
-//! Repeated captures of the same semantics retain one canonical row and
-//! append one raw row per successful capture, including byte-identical
-//! captures. The occurrence write is instead an UPSERT keyed on
+//! A projected capture inserts into all three regions in one SQLite
+//! transaction. A raw-only capture inserts only its forensic row. Repeated
+//! captures of the same semantics retain one canonical row and append one
+//! raw row per successful capture, including byte-identical captures. The
+//! occurrence write is instead an UPSERT keyed on
 //! `(carrier, session, sequence)`, because an occurrence is one row per time a
 //! trace was *seen*, so "already recorded" cannot be expressed by content —
 //! two occurrences of one trace are the region's entire purpose, not a

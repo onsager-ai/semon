@@ -148,8 +148,8 @@ fn collect_jsonl(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), io::E
 ///
 /// The returned count is the number of complete source records consumed, not
 /// the number of canonical traces inserted. Metadata and token telemetry still
-/// advance the cursor, matching the original incremental surface, but they do
-/// not have reactivation value and therefore do not enter the trace store.
+/// advance the cursor and are retained in the raw region, but they have no
+/// reactivation value and therefore create no trace or occurrence.
 pub fn process_file(
     path: &Path,
     state: &mut CursorState,
@@ -269,11 +269,28 @@ pub fn process_file(
                     }
                 }
                 Ok(_) => {
-                    // Python classified a non-object JSON value as a parse error.
+                    // A complete non-object line has no transferable
+                    // semantics, but Decision 1 retains the source line.
+                    store.capture_raw_only(
+                        CARRIER,
+                        &line,
+                        context.session_id(),
+                        this_line_ordinal as i64,
+                        parse_timestamp(&Value::Null),
+                    )?;
                 }
                 Err(_) => {
-                    // A malformed *complete* line is consumed just as before.
-                    // It has no transferable semantics, so it is not captured.
+                    // A malformed complete line still belongs in the raw
+                    // region. It has no source timestamp, so capture time is
+                    // used by the same parser fallback as a valid record
+                    // whose timestamp is absent.
+                    store.capture_raw_only(
+                        CARRIER,
+                        &line,
+                        context.session_id(),
+                        this_line_ordinal as i64,
+                        parse_timestamp(&Value::Null),
+                    )?;
                 }
             }
         }
@@ -298,14 +315,15 @@ pub fn process_file(
     Ok(consumed)
 }
 
-/// Captures one already-normalized event when it carries transferable work.
+/// Captures one already-normalized event.
 ///
 /// The projection intentionally does not inspect `extras`: that field contains
 /// the complete Codex source record, including machine paths and format words.
 /// It also omits session/repository/timestamp/token/tool framing fields. Text
 /// authored as the work's intent or outcome is kept verbatim; redacting words
 /// inside that content would alter the semantics rather than remove an
-/// envelope.
+/// envelope. An event with no semantic core is retained only in the raw
+/// region and returns `None`.
 pub fn capture_event(
     store: &mut TraceStore,
     normalized: &Value,
@@ -313,6 +331,13 @@ pub fn capture_event(
     occurrence: NewOccurrence<'_>,
 ) -> Result<Option<CaptureResult>, AdapterError> {
     let Some(core) = semantic_core(normalized)? else {
+        store.capture_raw_only(
+            CARRIER,
+            original_record,
+            occurrence.session,
+            occurrence.sequence,
+            occurrence.timestamp,
+        )?;
         return Ok(None);
     };
     Ok(Some(store.capture(

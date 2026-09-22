@@ -291,11 +291,18 @@ pub fn process_file(
                     options.repo_override,
                     &mut ancestor_sequence,
                 )?;
+            } else {
+                // A malformed or non-object complete line has no blocks,
+                // but it is still retained once in the raw region. Block 0
+                // is unused because no occurrence was projected.
+                store.capture_raw_only(
+                    CARRIER,
+                    &line,
+                    &session,
+                    sequence_for(this_line_ordinal, 0),
+                    semon_codex::parse_timestamp(&Value::Null),
+                )?;
             }
-            // A malformed complete line, or a complete line that parses to a
-            // non-object JSON value, is consumed just like any other
-            // record: it has no transferable semantics, so it advances the
-            // cursor without being captured.
         }
 
         if batch_end == saved.offset {
@@ -452,12 +459,23 @@ fn process_record(
     ancestor_sequence: &mut BTreeMap<String, Option<i64>>,
 ) -> Result<(), AdapterError> {
     let (blocks, ancestor_for_first) = resolve_record(record, line_ordinal, ancestor_sequence)?;
+    let timestamp = semon_codex::parse_timestamp(record.get("timestamp").unwrap_or(&Value::Null));
     if blocks.is_empty() {
+        // Block 0 cannot collide with an occurrence for this line because
+        // no block projected. Keeping the same per-line sequence encoding
+        // preserves the raw-to-occurrence key convention without creating
+        // an occurrence.
+        store.capture_raw_only(
+            CARRIER,
+            raw_line,
+            session,
+            sequence_for(line_ordinal, 0),
+            timestamp,
+        )?;
         return Ok(());
     }
 
     let (repo, repo_source) = record_repo(record, repo_override);
-    let timestamp = semon_codex::parse_timestamp(record.get("timestamp").unwrap_or(&Value::Null));
 
     for (index, block) in blocks.iter().enumerate() {
         let sequence = sequence_for(line_ordinal, block.block_index);

@@ -172,6 +172,47 @@ fn principal_and_subagent_files_do_not_collide_on_the_same_line_number() {
     assert_eq!(principal_row.agent(), None);
 }
 
+#[test]
+fn record_with_no_projected_blocks_writes_one_raw_only_row() {
+    let root = TestDir::new();
+    let path = root.path().join("session-raw-only.jsonl");
+    write_jsonl(
+        &path,
+        &[json!({
+            "type": "user",
+            "uuid": "meta-uuid",
+            "parentUuid": Value::Null,
+            "isMeta": true,
+            "cwd": "/work/repo",
+            "timestamp": "2026-09-20T00:00:00Z",
+            "message": {"role": "user", "content": "harness metadata"},
+        })],
+    );
+    let state_path = root.path().join("state.json");
+    let mut state = CursorState::default();
+    let mut store = TraceStore::open_in_memory().unwrap();
+
+    assert_eq!(
+        process_file(&path, &mut state, &mut store, &options(&state_path)).unwrap(),
+        1
+    );
+    assert!(store.log(&LogFilter::default()).unwrap().is_empty());
+    assert!(store.list_traces(None, 10).unwrap().is_empty());
+
+    let raw = store
+        .fetch_raw_carrier_records_for_occurrences(semon_store::OccurrenceSelector::Session(
+            "session-raw-only",
+        ))
+        .unwrap();
+    assert_eq!(raw.len(), 1);
+    assert_eq!(raw[0].trace_id(), None);
+    assert!(
+        std::str::from_utf8(raw[0].bytes())
+            .unwrap()
+            .contains("harness metadata")
+    );
+}
+
 /// Test 2 from the spec: per-block sequence. An assistant record with `text`
 /// and `tool_use` blocks projects two occurrences with sequences
 /// `L * 1024 + 0` and `L * 1024 + 1`, and the second's parent is the first.
