@@ -9,6 +9,8 @@ The workspace currently contains:
 
 - `semon-store`, the two-region trace store
 - `semon-codex`, an incremental adapter for Codex session and history JSONL
+- `semon-claude`, an incremental adapter for Claude Code session JSONL
+- `semon-relay`, loopback failover replication for complete Claude Code streams
 
 The former OTLP, OpenTelemetry Collector, ClickHouse, and analytics pipeline is
 intentionally gone. Semon is local-first and does not configure or assume a
@@ -77,6 +79,87 @@ Each canonical semantic document is sent as JSON with its existing trace ID in
 the `X-Semon-Content-Hash` header. An endpoint can therefore upsert by content
 hash, making repeated replication idempotent. The replication path never reads
 or transmits raw forensic records or carrier labels.
+
+## Relay Claude Code session files
+
+`semon-relay` is a separate failover path for the carrier's complete session
+files. It does not read the Semon store or use `semon ship`. M1 is deliberately
+**loopback-only**: frames contain unencrypted transcript bytes, so both the
+receiver bind address and sender endpoint must be literal loopback IP addresses.
+Nothing may be sent to another machine until client-side encryption exists.
+
+Start a receiver with an explicit private storage directory:
+
+```sh
+cargo run --locked -p semon-relay -- \
+  receive --listen 127.0.0.1:8734 --dir /path/to/private/relay-receiver
+```
+
+That directory contains plaintext transcript frames. The receiver creates its
+root with private permissions, but it should still be treated as sensitive
+local state and never placed in a repository.
+
+Run one sender pass, or poll continuously:
+
+```sh
+cargo run --locked -p semon-relay -- send --once
+cargo run --locked -p semon-relay -- send --follow
+```
+
+The sender reads `~/.claude/projects` by default and writes its atomic ack
+watermarks to `$XDG_STATE_HOME/semon/relay.json`, falling back to
+`~/.local/state/semon/relay.json`. Use `--projects`, `--state`, and `--endpoint`
+to override those locations. Only complete newline-terminated records are
+framed. State includes the byte offset after each stream's watermark, its file
+identity, and the start and hash of its last acknowledged line. Every process
+start re-hashes the complete acknowledged prefix. Later resident follow passes
+check identity, length, and that last line, then seek directly to the saved
+offset instead of re-reading retained history.
+
+The source files remain the spool when the receiver is unavailable; the sender
+holds one frame at a time and retains one observation range per failed pass,
+not one entry per queued line, while retrying without advancing past a hole.
+Lines complete at the start of a pass are observed at pass start, so a large
+backfill or receiver outage includes the time each line waits behind earlier
+frames. Each pass or follow interval reports acknowledged lines and bytes,
+p50/p95/max observation-to-ack lag, remaining backlog, and pass wall duration.
+
+The conservative loss bound for timer mode is roughly the timer interval plus
+pass duration plus reported lag. For follow mode it is the configured sleep
+interval plus pass duration plus lag: a line appended during sleep cannot be
+observed until the next pass begins. A known M1 limit is that a same-inode,
+in-place rewrite inside the already-acknowledged prefix which does not shrink
+the file and leaves the last acknowledged line unchanged is detected only by
+the full re-hash at the next process start.
+
+The user units are provided for manual installation; the repository does not
+install or enable them automatically:
+
+```sh
+cargo build --locked --release -p semon-relay
+install -Dm755 target/release/semon-relay ~/.local/bin/semon-relay
+install -Dm644 systemd/semon-relay.service \
+  ~/.config/systemd/user/semon-relay.service
+install -Dm644 systemd/semon-relay.timer \
+  ~/.config/systemd/user/semon-relay.timer
+install -Dm644 systemd/semon-relay-follow.service \
+  ~/.config/systemd/user/semon-relay-follow.service
+systemctl --user daemon-reload
+```
+
+The recommended installation is `semon-relay-follow.service`. After starting
+the loopback receiver separately, enable the resident mode with
+`systemctl --user enable --now semon-relay-follow.service`. Resident `--follow`
+is the supported relay mode, targeting an RPO of about 2 seconds. Its measured
+idle cost is about 6 ms of CPU per pass, while every `--once` process start
+re-hashes acknowledged history and took 0.42 seconds on the measured corpus;
+that one-shot cost grows with retained history.
+
+The `semon-relay.service` and `semon-relay.timer` units remain available for
+one-shot or manual use, but do not enable the timer alongside the follow
+service. Both sender modes run at nice level 19 with idle I/O scheduling, a 5%
+CPU quota, and a 128 MiB memory limit. The earlier no-daemon statement applies
+only to `semon ship`; the relay is a resident process by decision.
 
 ## Read the log
 
