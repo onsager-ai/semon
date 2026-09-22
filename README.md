@@ -83,28 +83,149 @@ or transmits raw forensic records or carrier labels.
 ## Relay Claude Code session files
 
 `semon-relay` is a separate failover path for the carrier's complete session
-files. It does not read the Semon store or use `semon ship`. The relay remains
-**loopback-only**: frames contain unencrypted transcript bytes, so both the
-receiver bind address and sender endpoint must be literal loopback IP addresses.
-Nothing may be sent to another machine until client-side encryption exists.
+files. It does not read the Semon store or use `semon ship`. Encryption and
+signed requests are the default. The receiver stores age-encrypted session data
+keys and XChaCha20-Poly1305 frame ciphertext; it never receives a private key or
+plaintext transcript line.
 
-Start a receiver with an explicit private storage directory:
+Create this machine's age/X25519 and Ed25519 identities. Existing files are
+never overwritten:
+
+```sh
+cargo run --locked -p semon-relay -- keys init
+cargo run --locked -p semon-relay -- keys show
+```
+
+They live at `$XDG_CONFIG_HOME/semon/identity.age` and
+`$XDG_CONFIG_HOME/semon/signing.key`, falling back to `~/.config/semon`, with
+private file and directory permissions. `keys show` prints the age recipient,
+signing public key, and signing-key fingerprint. The fingerprint is the machine
+id in encrypted mode.
+
+Create an age identity on each machine, plus a separate offline recovery age
+identity. Keep the recovery secret offline. On every sending machine, explicitly
+enroll every machine recipient and the recovery recipient:
+
+```sh
+cargo run --locked -p semon-relay -- \
+  keys enroll age1... --name laptop
+cargo run --locked -p semon-relay -- \
+  keys enroll age1... --name workstation
+cargo run --locked -p semon-relay -- \
+  keys enroll age1... --name offline-recovery
+```
+
+These commands append to `$XDG_CONFIG_HOME/semon/recipients.txt`. Semon never
+adds, removes, or changes a recipient unless `keys enroll` is run explicitly.
+Each session gets a random 32-byte data key, wrapped with age to all listed
+recipients. Enrolling credentials is a user action.
+
+Enroll each machine's Ed25519 public key at the receiver. This is also an
+explicit credentials action, and the receiver must be restarted after an
+allowlist change:
+
+```sh
+cargo run --locked -p semon-relay -- \
+  receive enroll SIGNING_PUBLIC_KEY --name laptop \
+  --dir /path/to/private/relay-receiver
+```
+
+Only `receive enroll` edits `<receiver-dir>/machines.txt`. Signed requests bind
+the method, path, body hash, timestamp, and random nonce. The receiver rejects
+unknown keys, invalid signatures, timestamps outside five minutes, reused
+nonces, and a signed fingerprint that differs from the request body's machine.
+It checks enrollment, timestamp, and nonce and signature encoding before reading
+the body. Request bodies are capped at 64 MiB, which accommodates multi-megabyte
+Claude Code tool-output lines while bounding each worker's allocation.
+
+Start an encrypted receiver on loopback with its private storage directory:
 
 ```sh
 cargo run --locked -p semon-relay -- \
   receive --listen 127.0.0.1:8734 --dir /path/to/private/relay-receiver
 ```
 
-That directory contains plaintext transcript frames. The receiver creates its
-root with private permissions, but it should still be treated as sensitive
-local state and never placed in a repository.
+The default listen address is `127.0.0.1:8734`. The directory contains
+ciphertext, lease state, session modes, and allowlists. It still should not be
+placed in a repository.
+
+For a remote receiver, supply a certificate and key. Semon does not create or
+renew certificates. This example creates a self-signed certificate with both
+loopback SANs; replace the names and addresses with the receiver's real ones:
+
+```sh
+openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 365 \
+  -keyout relay-key.pem -out relay-cert.pem \
+  -subj '/CN=relay.example.test' \
+  -addext 'subjectAltName=DNS:relay.example.test,IP:127.0.0.1' \
+  -addext 'basicConstraints=critical,CA:FALSE' \
+  -addext 'keyUsage=critical,digitalSignature,keyEncipherment' \
+  -addext 'extendedKeyUsage=serverAuth'
+
+cargo run --locked -p semon-relay -- receive \
+  --listen 0.0.0.0:8734 --dir /path/to/private/relay-receiver \
+  --tls-cert relay-cert.pem --tls-key relay-key.pem
+```
+
+A non-loopback bind is refused unless TLS is configured, `machines.txt` is
+non-empty, and signed-request enforcement is active. Plaintext mode is always
+refused there. Choosing a reachable host, opening ports, DNS, certificate
+custody, and hosting remain manual operator actions; Semon never changes network
+reachability and never binds publicly by default.
+
+Point a sender at HTTPS and pin that exact supplied certificate as its sole
+trust root. Built-in roots, proxies, and redirects are disabled:
+
+```sh
+cargo run --locked -p semon-relay -- send --follow \
+  --endpoint https://relay.example.test:8734/v1/frames \
+  --tls-ca relay-cert.pem
+```
+
+After enrolling a new age recipient, rewrap existing session data keys from a
+machine that can decrypt them. Omit `--session` to process every envelope. The
+receiver logs each replacement with old and new envelope hashes. Rewrap requires
+the current lease holder unless the explicit `--force` option is used:
+
+```sh
+cargo run --locked -p semon-relay -- keys rewrap --session SESSION_ID \
+  --endpoint https://relay.example.test:8734/v1/frames --tls-ca relay-cert.pem
+```
+
+To test offline recovery custody without restoring a session, use a temporary
+mounted path to the recovery identity. The command reports only success and
+never prints the data key:
+
+```sh
+cargo run --locked -p semon-relay -- keys decrypt-envelope \
+  --session SESSION_ID --identity /media/offline/recovery.age \
+  --endpoint https://relay.example.test:8734/v1/frames --tls-ca relay-cert.pem
+```
+
+Restore remains future M4 work. Live-session data-key rotation is also not
+implemented.
+
+Remote HTTP is refused, and HTTPS without `--tls-ca` is refused. Loopback HTTP
+remains available for encrypted, signed traffic during local development.
+
+### Relay threat model
+
+| Attacker | Receiver behavior and remaining risk |
+|---|---|
+| Unenrolled client | Header prechecks reject the request before its body is read. A declared body over 64 MiB is also rejected before reading, and chunked or undeclared bodies are read through a 64 MiB plus one-byte bound. |
+| Replayer | A nonce is retained for the full five-minute timestamp window. The cache holds 262,144 verified requests; if all entries are still live, the receiver fails closed with retryable HTTP 503 `replay_cache_full` until an entry expires. |
+| Slow client | Four fixed application workers prevent one slow body from serializing all requests. `tiny_http` exposes no per-request header or body read deadline, so slow header connections can consume its internal connection threads and four simultaneous slow bodies can occupy the whole application worker pool; an Internet-facing deployment still needs connection and read timeouts at its network boundary. |
+
+The receiver operator can still delete, withhold, reorder, or corrupt ciphertext
+and cause denial of service. Envelope decryption, frame AEAD, and client-side
+chain verification make stored-byte changes detectable, but do not provide
+availability against the storage operator.
 
 The receiver also owns one lease row per session: the current epoch, holder
 machine, and expiry. It uses only its own clock for the three-minute lease;
 sender wall time never decides expiry. A holder renews about once per minute in
-resident follow mode. The machine identity defaults to `/etc/machine-id` and
-can be overridden with `--machine` for synthetic tests. Every frame and lease
-request carries that identity.
+resident follow mode. Every encrypted frame, key, orphan, and lease request uses
+the signing-key fingerprint and carries a matching signature.
 
 Run one sender pass, or poll continuously:
 
@@ -112,6 +233,20 @@ Run one sender pass, or poll continuously:
 cargo run --locked -p semon-relay -- send --once
 cargo run --locked -p semon-relay -- send --follow
 ```
+
+Without an identity and at least one recipient, encrypted sending refuses to
+start. The original plaintext M1 path is retained only for explicit loopback
+use on both sides:
+
+```sh
+cargo run --locked -p semon-relay -- receive \
+  --dir /path/to/private/plaintext-receiver --insecure-plaintext
+cargo run --locked -p semon-relay -- send --once --insecure-plaintext
+```
+
+Plaintext mode uses `/etc/machine-id`; `--machine` exists for synthetic tests.
+The receiver records a session's mode on its first frame and refuses to mix
+plaintext and encrypted frames in that session.
 
 Inspect the register and its append-only takeover log, or take over an expired
 lease with a compare-and-swap:
@@ -124,12 +259,12 @@ cargo run --locked -p semon-relay -- \
 ```
 
 Takeover before expiry is refused unless `--force` is supplied. Before changing
-the register, the command reads the current receiver tips and verifies that the
-local carrier files contain every acknowledged prefix with matching chains. A
-missing, behind, or mismatched stream refuses the takeover without incrementing
-the epoch. A successful compare-and-swap records the previous holder and whether
-it was forced, then initializes local sender watermarks from the receiver's
-contiguous tips.
+the register, the encrypted command downloads the session envelope and
+ciphertext frames, decrypts them locally, verifies every chain, and checks that
+the local carrier files contain each acknowledged prefix. A missing, behind, or
+mismatched stream refuses the takeover without incrementing the epoch. A
+successful compare-and-swap records the previous holder and whether it was
+forced, then initializes local sender watermarks from the verified tips.
 
 There is one unavoidable race between that read-only check and the compare-and-
 swap: the old holder can append another frame before it is fenced. The command
@@ -138,6 +273,17 @@ then behind, the epoch has already advanced, but sender state is not written and
 the command exits non-zero with the stream and missing frame count. Bring the
 copy up to date through the future M4 restore before starting the sender. Writing
 restored files back is not implemented here.
+
+The receiver cannot verify encrypted chain values because each chain value is
+inside its frame ciphertext. It still enforces session mode, holder and epoch,
+sequence contiguity, gaps, duplicate tags, collisions, and orphan separation.
+Run a full client-side decryption and chain check at any time with:
+
+```sh
+cargo run --locked -p semon-relay -- \
+  verify --session SESSION_ID --endpoint https://relay.example.test:8734/v1/frames \
+  --tls-ca relay-cert.pem
+```
 
 The sender reads `~/.claude/projects` by default and writes its atomic ack
 watermarks to `$XDG_STATE_HOME/semon/relay.json`, falling back to
@@ -148,6 +294,14 @@ identity, and the start and hash of its last acknowledged line. Every process
 start re-hashes the complete acknowledged prefix. Later resident follow passes
 check identity, length, and that last line, then seek directly to the saved
 offset instead of re-reading retained history.
+
+Each encrypted frame uses XChaCha20-Poly1305 with a fresh random nonce. Its
+plaintext is the complete source line plus the new chain value. The frame key
+`(session, stream, generation, epoch, seq)` and machine fingerprint are AEAD
+associated data, so moving ciphertext to another position fails authentication.
+A visible HMAC-SHA256 content tag, under a key derived from the session data key,
+lets the receiver distinguish a retry from a collision without learning the
+line. A retry may have different ciphertext because it uses a fresh nonce.
 
 The sender checks the register before its first frame for every known session.
 Frames below the current epoch are rejected with a distinct fencing response,

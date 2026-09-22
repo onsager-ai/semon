@@ -1,36 +1,70 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    thread,
 };
 
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tiny_http::{Header, Method, Response, Server, StatusCode};
+use tiny_http::{Header, Method, Request, Response, Server, SslConfig, StatusCode};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
 use crate::{
-    Clock, Frame, LEASE_DURATION_MS, LeaseRow, LeaseStatus, OrphanSummary, StreamTip, SystemClock,
+    AuthError, Clock, Frame, FrameContent, FrameMode, LEASE_DURATION_MS, LeaseRow, LeaseStatus,
+    MACHINES_FILE, OrphanSummary, RequestVerifier, SignedHeaders, StreamTip, SystemClock,
     TakeoverRecord, TakeoverResult, ZERO_CHAIN, chain_line,
     lease::{LeaseValueError, rows_from_value, rows_to_value},
+    load_machines,
     protocol::FrameError,
     state::{StateError, write_atomic},
 };
 
 const REGISTER_FILE: &str = "lease-register.json";
 const TAKEOVER_LOG: &str = "takeovers.jsonl";
+const SESSION_MODES_DIR: &str = "session-modes";
+const ENVELOPES_DIR: &str = "keys";
+const REWRAP_LOG: &str = "rewraps.jsonl";
 const RECEIPT_CHECKPOINT_INTERVAL: u64 = 256;
+/// Maximum accepted HTTP request body size.
+///
+/// Claude Code lines can contain multi-megabyte tool results. This bounds each
+/// request while leaving substantial headroom above observed legitimate frames.
+pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+// A slow body can occupy one worker because tiny_http exposes no read timeout.
+// Four workers keep one such client from serializing all receiver traffic.
+const REQUEST_WORKERS: usize = 4;
 
 /// Whether an accepted frame was newly stored or already present unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReceiveOutcome {
     Stored,
     Duplicate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnvelopeOutcome {
+    Stored,
+    Duplicate,
+    Replaced,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TlsFiles {
+    pub certificate: PathBuf,
+    pub private_key: PathBuf,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ServeConfig {
+    pub tls: Option<TlsFiles>,
+    pub insecure_plaintext: bool,
 }
 
 /// A receiver rejection or local storage failure.
@@ -86,6 +120,26 @@ pub enum ReceiveError {
     Gap { expected: u64, actual: u64 },
     #[error("chain break at sequence {seq}")]
     Chain { seq: u64 },
+    #[error("session {session} is already {existing}; cannot accept a {incoming} frame")]
+    MixedMode {
+        session: String,
+        existing: &'static str,
+        incoming: &'static str,
+    },
+    #[error("plaintext frames are disabled on this receiver")]
+    PlaintextDisabled,
+    #[error("encrypted frames are disabled on an insecure-plaintext receiver")]
+    EncryptedDisabled,
+    #[error("session {session} has no encrypted data-key envelope")]
+    EnvelopeMissing { session: String },
+    #[error("session {session} already has a different data-key envelope")]
+    EnvelopeConflict { session: String },
+    #[error("machine {machine} cannot rewrap session {session}; holder is {holder}")]
+    RewrapNotHolder {
+        session: String,
+        machine: String,
+        holder: String,
+    },
     #[error("receiver storage is inconsistent: {0}")]
     Inconsistent(String),
     #[error("cannot access receiver storage: {0}")]
@@ -100,19 +154,39 @@ pub enum ReceiveError {
     State(#[from] StateError),
     #[error("refusing non-loopback listen address {0}")]
     NonLoopback(SocketAddr),
+    #[error("non-loopback receiver requires --tls-cert and --tls-key")]
+    NonLoopbackTls,
+    #[error("non-loopback receiver requires at least one enrolled machine in {0}")]
+    NonLoopbackMachines(PathBuf),
+    #[error("non-loopback receiver cannot enable --insecure-plaintext")]
+    NonLoopbackPlaintext,
+    #[error("TLS requires both --tls-cert and --tls-key")]
+    TlsPair,
+    #[error("cannot read TLS file {path}: {source}")]
+    TlsFile { path: PathBuf, source: io::Error },
+    #[error("invalid machine allowlist: {0}")]
+    Machines(#[from] crate::IdentityError),
+    #[error("signed request authentication failed: {0}")]
+    Auth(#[from] AuthError),
+    #[error("signed request header {0} is missing or invalid")]
+    AuthHeader(&'static str),
     #[error("cannot start HTTP receiver: {0}")]
     HttpServer(String),
     #[error("receiver state lock was poisoned")]
     Poisoned,
     #[error("request field {0} is missing or has the wrong type")]
     RequestField(&'static str),
+    #[error("request body exceeds the {limit}-byte limit")]
+    BodyTooLarge { limit: usize },
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Receipt {
     epoch: u64,
     acked: Option<u64>,
+    mode: Option<FrameMode>,
     chain: [u8; 32],
+    tag: Option<[u8; 32]>,
 }
 
 #[derive(Default)]
@@ -127,17 +201,36 @@ pub struct Receiver {
     root: PathBuf,
     clock: Arc<dyn Clock>,
     state: Mutex<ReceiverState>,
+    allow_plaintext: bool,
+    allow_encrypted: bool,
 }
 
 impl Receiver {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ReceiveError> {
-        Self::open_with_clock(root, Arc::new(SystemClock))
+        Self::open_with_modes(root, Arc::new(SystemClock), true, true)
     }
 
     /// Opens a receiver with an injected clock for deterministic lease tests.
     pub fn open_with_clock(
         root: impl Into<PathBuf>,
         clock: Arc<dyn Clock>,
+    ) -> Result<Self, ReceiveError> {
+        Self::open_with_modes(root, clock, true, true)
+    }
+
+    pub fn open_with_policy(
+        root: impl Into<PathBuf>,
+        clock: Arc<dyn Clock>,
+        allow_plaintext: bool,
+    ) -> Result<Self, ReceiveError> {
+        Self::open_with_modes(root, clock, allow_plaintext, true)
+    }
+
+    fn open_with_modes(
+        root: impl Into<PathBuf>,
+        clock: Arc<dyn Clock>,
+        allow_plaintext: bool,
+        allow_encrypted: bool,
     ) -> Result<Self, ReceiveError> {
         let root = root.into();
         fs::create_dir_all(&root)?;
@@ -150,6 +243,8 @@ impl Receiver {
             }),
             root,
             clock,
+            allow_plaintext,
+            allow_encrypted,
         })
     }
 
@@ -303,6 +398,7 @@ impl Receiver {
     /// Accepts exactly the next live frame across epoch boundaries.
     pub fn accept(&self, frame: &Frame) -> Result<ReceiveOutcome, ReceiveError> {
         let mut state = self.state.lock().map_err(|_| ReceiveError::Poisoned)?;
+        self.validate_frame_mode(frame)?;
         let row = state
             .rows
             .get(&frame.key.session)
@@ -357,15 +453,10 @@ impl Receiver {
             )));
         }
         let accepted = existing.as_ref().unwrap_or(frame);
-        if accepted.chain != chain_line(&receipt.chain, &accepted.line) {
-            return Err(ReceiveError::Chain { seq: frame.key.seq });
-        }
+        advance_receipt(&mut receipt, accepted)?;
         if existing.is_none() {
             store_frame(&frame_path, frame)?;
         }
-        receipt.epoch = frame.key.epoch;
-        receipt.acked = Some(frame.key.seq);
-        receipt.chain = accepted.chain;
         state.receipts.insert(receipt_key, receipt);
         // Frame files are authoritative and synced before acknowledgement.
         // This cross-epoch receipt only bounds restart work.
@@ -382,6 +473,7 @@ impl Receiver {
     /// Stores a frame from an epoch that has already been fenced.
     pub fn accept_orphan(&self, frame: &Frame) -> Result<ReceiveOutcome, ReceiveError> {
         let state = self.state.lock().map_err(|_| ReceiveError::Poisoned)?;
+        self.validate_frame_mode(frame)?;
         let row = state
             .rows
             .get(&frame.key.session)
@@ -448,6 +540,133 @@ impl Receiver {
         list_orphans(&self.root)
     }
 
+    pub fn put_envelope(
+        &self,
+        session: &str,
+        machine: &str,
+        envelope: &[u8],
+        replace: bool,
+        force: bool,
+    ) -> Result<EnvelopeOutcome, ReceiveError> {
+        let state = self.state.lock().map_err(|_| ReceiveError::Poisoned)?;
+        let path = envelope_path(&self.root, session);
+        match fs::read(&path) {
+            Ok(existing) if existing == envelope => Ok(EnvelopeOutcome::Duplicate),
+            Ok(_existing) if !replace => Err(ReceiveError::EnvelopeConflict {
+                session: session.to_owned(),
+            }),
+            Ok(existing) => {
+                if !force {
+                    let holder = state
+                        .rows
+                        .get(session)
+                        .map(|row| row.holder_machine.as_str())
+                        .ok_or_else(|| ReceiveError::LeaseMissing {
+                            session: session.to_owned(),
+                        })?;
+                    if holder != machine {
+                        return Err(ReceiveError::RewrapNotHolder {
+                            session: session.to_owned(),
+                            machine: machine.to_owned(),
+                            holder: holder.to_owned(),
+                        });
+                    }
+                }
+                write_atomic(&path, envelope)?;
+                append_rewrap(
+                    &self.root.join(REWRAP_LOG),
+                    session,
+                    machine,
+                    force,
+                    &existing,
+                    envelope,
+                    self.clock.now_ms(),
+                )?;
+                Ok(EnvelopeOutcome::Replaced)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let holder = state
+                    .rows
+                    .get(session)
+                    .map(|row| row.holder_machine.as_str())
+                    .ok_or_else(|| ReceiveError::LeaseMissing {
+                        session: session.to_owned(),
+                    })?;
+                if holder != machine {
+                    return Err(ReceiveError::RewrapNotHolder {
+                        session: session.to_owned(),
+                        machine: machine.to_owned(),
+                        holder: holder.to_owned(),
+                    });
+                }
+                write_atomic(&path, envelope)?;
+                Ok(EnvelopeOutcome::Stored)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn get_envelope(&self, session: &str) -> Result<Option<Vec<u8>>, ReceiveError> {
+        match fs::read(envelope_path(&self.root, session)) {
+            Ok(envelope) => Ok(Some(envelope)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn list_envelope_sessions(&self) -> Result<Vec<String>, ReceiveError> {
+        let root = self.root.join(ENVELOPES_DIR);
+        if !root.is_dir() {
+            return Ok(Vec::new());
+        }
+        sorted_entries(&root)?
+            .into_iter()
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|value| value.to_str()) == Some("age"))
+                    .then(|| path.file_stem().map(std::ffi::OsStr::to_owned))
+                    .flatten()
+            })
+            .map(|stem| decode_component(&stem))
+            .collect()
+    }
+
+    pub fn list_frames(&self, session: &str) -> Result<Vec<Frame>, ReceiveError> {
+        let session_dir = self.root.join(hex::encode(session.as_bytes()));
+        if !session_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut frames = Vec::new();
+        for stream_entry in sorted_entries(&session_dir)? {
+            if !stream_entry.path().is_dir() {
+                continue;
+            }
+            for generation_entry in sorted_entries(&stream_entry.path())? {
+                if parse_number(&generation_entry.file_name(), "generation-").is_none() {
+                    continue;
+                }
+                for epoch_entry in sorted_entries(&generation_entry.path())? {
+                    if parse_number(&epoch_entry.file_name(), "epoch-").is_none() {
+                        continue;
+                    }
+                    let frames_dir = epoch_entry.path().join("frames");
+                    if !frames_dir.is_dir() {
+                        continue;
+                    }
+                    for entry in sorted_entries(&frames_dir)? {
+                        if entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+                            && let Some(frame) = read_frame_path(&entry.path())?
+                        {
+                            frames.push(frame);
+                        }
+                    }
+                }
+            }
+        }
+        frames.sort_by(|left, right| left.key.cmp(&right.key));
+        Ok(frames)
+    }
+
     /// Reads a stored live frame. This also verifies retained generations.
     pub fn read_frame(
         &self,
@@ -481,6 +700,57 @@ impl Receiver {
                 .join(format!("{seq:020}.json")),
         )
     }
+
+    fn validate_frame_mode(&self, frame: &Frame) -> Result<(), ReceiveError> {
+        let mode = frame.mode();
+        if mode == FrameMode::Plaintext && !self.allow_plaintext {
+            return Err(ReceiveError::PlaintextDisabled);
+        }
+        if mode == FrameMode::Encrypted && !self.allow_encrypted {
+            return Err(ReceiveError::EncryptedDisabled);
+        }
+        if mode == FrameMode::Encrypted && !envelope_path(&self.root, &frame.key.session).is_file()
+        {
+            return Err(ReceiveError::EnvelopeMissing {
+                session: frame.key.session.clone(),
+            });
+        }
+        ensure_session_mode(&self.root, &frame.key.session, mode)
+    }
+}
+
+fn advance_receipt(receipt: &mut Receipt, frame: &Frame) -> Result<(), ReceiveError> {
+    match &frame.content {
+        FrameContent::Plaintext { chain, line } => {
+            if receipt.mode == Some(FrameMode::Encrypted) {
+                return Err(ReceiveError::MixedMode {
+                    session: frame.key.session.clone(),
+                    existing: FrameMode::Encrypted.as_str(),
+                    incoming: FrameMode::Plaintext.as_str(),
+                });
+            }
+            if *chain != chain_line(&receipt.chain, line) {
+                return Err(ReceiveError::Chain { seq: frame.key.seq });
+            }
+            receipt.chain = *chain;
+            receipt.tag = None;
+            receipt.mode = Some(FrameMode::Plaintext);
+        }
+        FrameContent::Encrypted(payload) => {
+            if receipt.mode == Some(FrameMode::Plaintext) {
+                return Err(ReceiveError::MixedMode {
+                    session: frame.key.session.clone(),
+                    existing: FrameMode::Plaintext.as_str(),
+                    incoming: FrameMode::Encrypted.as_str(),
+                });
+            }
+            receipt.tag = Some(payload.tag);
+            receipt.mode = Some(FrameMode::Encrypted);
+        }
+    }
+    receipt.epoch = frame.key.epoch;
+    receipt.acked = Some(frame.key.seq);
+    Ok(())
 }
 
 fn validate_holder(row: &LeaseRow, machine: &str, epoch: u64) -> Result<(), ReceiveError> {
@@ -509,31 +779,170 @@ fn validate_holder(row: &LeaseRow, machine: &str, epoch: u64) -> Result<(), Rece
 
 /// Runs the blocking HTTP receiver until its process is stopped.
 pub fn serve(listen: SocketAddr, root: &Path) -> Result<(), ReceiveError> {
-    validate_loopback(listen)?;
-    let receiver = Receiver::open(root)?;
-    let server =
-        Server::http(listen).map_err(|error| ReceiveError::HttpServer(error.to_string()))?;
+    serve_configured(
+        listen,
+        root,
+        ServeConfig {
+            tls: None,
+            insecure_plaintext: true,
+        },
+    )
+}
+
+pub fn serve_configured(
+    listen: SocketAddr,
+    root: &Path,
+    config: ServeConfig,
+) -> Result<(), ReceiveError> {
+    validate_serve_config(listen, root, &config)?;
+    let machines = load_machines(&root.join(MACHINES_FILE))?;
+    let verifier =
+        (!config.insecure_plaintext).then(|| Arc::new(Mutex::new(RequestVerifier::new(machines))));
+    let receiver = Arc::new(Receiver::open_with_modes(
+        root,
+        Arc::new(SystemClock),
+        config.insecure_plaintext,
+        !config.insecure_plaintext,
+    )?);
+    let server = match &config.tls {
+        Some(tls) => Server::https(
+            listen,
+            SslConfig {
+                certificate: read_tls_file(&tls.certificate)?,
+                private_key: read_tls_file(&tls.private_key)?,
+            },
+        ),
+        None => Server::http(listen),
+    }
+    .map_err(|error| ReceiveError::HttpServer(error.to_string()))?;
+    let server = Arc::new(server);
     eprintln!("semon-relay receiver listening on {listen}");
-    for mut request in server.incoming_requests() {
-        let route = request.url().to_owned();
-        if request.method() != &Method::Post {
-            respond_text(request, 404, "not found");
-            continue;
+    for worker in 1..REQUEST_WORKERS {
+        let server = Arc::clone(&server);
+        let receiver = Arc::clone(&receiver);
+        let verifier = verifier.clone();
+        thread::Builder::new()
+            .name(format!("semon-relay-http-{worker}"))
+            .spawn(move || {
+                if let Err(error) = request_loop(&server, &receiver, verifier.as_deref()) {
+                    eprintln!("semon-relay receiver worker stopped: {error}");
+                }
+            })?;
+    }
+    request_loop(&server, &receiver, verifier.as_deref())
+}
+
+fn request_loop(
+    server: &Server,
+    receiver: &Receiver,
+    verifier: Option<&Mutex<RequestVerifier>>,
+) -> Result<(), ReceiveError> {
+    loop {
+        let request = server.recv().map_err(ReceiveError::Io)?;
+        handle_http_request(request, receiver, verifier);
+    }
+}
+
+fn handle_http_request(
+    mut request: Request,
+    receiver: &Receiver,
+    verifier: Option<&Mutex<RequestVerifier>>,
+) {
+    if request.method() != &Method::Post {
+        respond_text(request, 404, "not found");
+        return;
+    }
+    let result = process_http_request(&mut request, receiver, verifier);
+    match result {
+        Ok(value) => respond_json(request, 200, &value),
+        Err(error) => {
+            let status = error_status(&error);
+            respond_json(request, status, &error_value(&error));
         }
-        let mut body = Vec::new();
-        let result = request
-            .as_reader()
-            .read_to_end(&mut body)
-            .map_err(ReceiveError::Io)
-            .and_then(|_| serde_json::from_slice(&body).map_err(ReceiveError::Json))
-            .and_then(|value| handle_request(&receiver, &route, &value));
-        match result {
-            Ok(value) => respond_json(request, 200, &value),
-            Err(error) => {
-                let status = error_status(&error);
-                respond_json(request, status, &error_value(&error));
-            }
-        }
+    }
+}
+
+fn process_http_request(
+    request: &mut Request,
+    receiver: &Receiver,
+    verifier: Option<&Mutex<RequestVerifier>>,
+) -> Result<Value, ReceiveError> {
+    let route = request.url().to_owned();
+    let signed_headers = if let Some(verifier) = verifier {
+        let headers = request_headers(request)?;
+        verifier
+            .lock()
+            .map_err(|_| ReceiveError::Poisoned)?
+            .precheck(&headers, receiver.clock.now_ms())?;
+        Some(headers)
+    } else {
+        None
+    };
+    let body = read_request_body(request)?;
+    let value = serde_json::from_slice::<Value>(&body)?;
+    if let (Some(verifier), Some(headers)) = (verifier, signed_headers) {
+        let machine = value
+            .as_object()
+            .and_then(|object| object.get("machine"))
+            .and_then(Value::as_str)
+            .ok_or(ReceiveError::RequestField("machine"))?;
+        verifier
+            .lock()
+            .map_err(|_| ReceiveError::Poisoned)?
+            .verify(
+                "POST",
+                &route,
+                &body,
+                &headers,
+                machine,
+                receiver.clock.now_ms(),
+            )?;
+    }
+    handle_request(receiver, &route, &value)
+}
+
+fn read_request_body(request: &mut Request) -> Result<Vec<u8>, ReceiveError> {
+    let declared = request.body_length();
+    read_bounded_body(request.as_reader(), declared)
+}
+
+fn read_bounded_body(
+    reader: &mut dyn Read,
+    declared: Option<usize>,
+) -> Result<Vec<u8>, ReceiveError> {
+    if declared.is_some_and(|length| length > MAX_REQUEST_BODY_BYTES) {
+        return Err(ReceiveError::BodyTooLarge {
+            limit: MAX_REQUEST_BODY_BYTES,
+        });
+    }
+    let mut body = Vec::with_capacity(declared.unwrap_or(0).min(MAX_REQUEST_BODY_BYTES));
+    reader
+        .take((MAX_REQUEST_BODY_BYTES + 1) as u64)
+        .read_to_end(&mut body)?;
+    if body.len() > MAX_REQUEST_BODY_BYTES {
+        return Err(ReceiveError::BodyTooLarge {
+            limit: MAX_REQUEST_BODY_BYTES,
+        });
+    }
+    Ok(body)
+}
+
+pub fn validate_serve_config(
+    listen: SocketAddr,
+    root: &Path,
+    config: &ServeConfig,
+) -> Result<(), ReceiveError> {
+    if listen.ip().is_loopback() {
+        return Ok(());
+    }
+    if config.insecure_plaintext {
+        return Err(ReceiveError::NonLoopbackPlaintext);
+    }
+    if config.tls.is_none() {
+        return Err(ReceiveError::NonLoopbackTls);
+    }
+    if load_machines(&root.join(MACHINES_FILE))?.is_empty() {
+        return Err(ReceiveError::NonLoopbackMachines(root.join(MACHINES_FILE)));
     }
     Ok(())
 }
@@ -544,6 +953,32 @@ pub fn validate_loopback(listen: SocketAddr) -> Result<(), ReceiveError> {
     } else {
         Err(ReceiveError::NonLoopback(listen))
     }
+}
+
+fn read_tls_file(path: &Path) -> Result<Vec<u8>, ReceiveError> {
+    fs::read(path).map_err(|source| ReceiveError::TlsFile {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn request_headers(request: &tiny_http::Request) -> Result<SignedHeaders, ReceiveError> {
+    let value = |name: &'static str| {
+        request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv(name))
+            .map(|header| header.value.as_str().to_owned())
+            .ok_or(ReceiveError::AuthHeader(name))
+    };
+    Ok(SignedHeaders {
+        machine: value("X-Semon-Machine")?,
+        timestamp: value("X-Semon-Timestamp")?
+            .parse()
+            .map_err(|_| ReceiveError::AuthHeader("X-Semon-Timestamp"))?,
+        nonce: value("X-Semon-Nonce")?,
+        signature: value("X-Semon-Signature")?,
+    })
 }
 
 fn handle_request(receiver: &Receiver, route: &str, value: &Value) -> Result<Value, ReceiveError> {
@@ -618,6 +1053,63 @@ fn handle_request(receiver: &Receiver, route: &str, value: &Value) -> Result<Val
                     .collect(),
             ))
         }
+        "/v1/frames/list" => {
+            let object = request_object(value)?;
+            let _machine = required_string(object, "machine")?;
+            Ok(Value::Array(
+                receiver
+                    .list_frames(required_string(object, "session")?)?
+                    .iter()
+                    .map(Frame::to_value)
+                    .collect(),
+            ))
+        }
+        "/v1/keys/list" => {
+            let object = request_object(value)?;
+            let _machine = required_string(object, "machine")?;
+            Ok(Value::Array(
+                receiver
+                    .list_envelope_sessions()?
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ))
+        }
+        route if route.starts_with("/v1/keys/") && route.ends_with("/get") => {
+            let object = request_object(value)?;
+            let _machine = required_string(object, "machine")?;
+            let session = required_string(object, "session")?;
+            validate_route_session(route, "/v1/keys/", "/get", session)?;
+            Ok(Value::Object(Map::from_iter([(
+                "envelope".into(),
+                receiver
+                    .get_envelope(session)?
+                    .map_or(Value::Null, |envelope| Value::String(hex::encode(envelope))),
+            )])))
+        }
+        route if route.starts_with("/v1/keys/") => {
+            let object = request_object(value)?;
+            let session = required_string(object, "session")?;
+            validate_route_session(route, "/v1/keys/", "", session)?;
+            let outcome = receiver.put_envelope(
+                session,
+                required_string(object, "machine")?,
+                &required_hex(object, "envelope")?,
+                required_bool(object, "replace")?,
+                required_bool(object, "force")?,
+            )?;
+            Ok(Value::Object(Map::from_iter([(
+                "outcome".into(),
+                Value::String(
+                    match outcome {
+                        EnvelopeOutcome::Stored => "stored",
+                        EnvelopeOutcome::Duplicate => "duplicate",
+                        EnvelopeOutcome::Replaced => "replaced",
+                    }
+                    .into(),
+                ),
+            )])))
+        }
         _ => Err(ReceiveError::RequestField("route")),
     }
 }
@@ -663,8 +1155,32 @@ fn required_bool(object: &Map<String, Value>, field: &'static str) -> Result<boo
         .ok_or(ReceiveError::RequestField(field))
 }
 
+fn required_hex(object: &Map<String, Value>, field: &'static str) -> Result<Vec<u8>, ReceiveError> {
+    let value = required_string(object, field)?;
+    hex::decode(value).map_err(|_| ReceiveError::RequestField(field))
+}
+
+fn validate_route_session(
+    route: &str,
+    prefix: &str,
+    suffix: &str,
+    session: &str,
+) -> Result<(), ReceiveError> {
+    let encoded = route
+        .strip_prefix(prefix)
+        .and_then(|route| route.strip_suffix(suffix))
+        .ok_or(ReceiveError::RequestField("route"))?;
+    if encoded == hex::encode(session.as_bytes()) {
+        Ok(())
+    } else {
+        Err(ReceiveError::RequestField("session"))
+    }
+}
+
 fn error_status(error: &ReceiveError) -> u16 {
     match error {
+        ReceiveError::Auth(AuthError::ReplayCacheFull) => 503,
+        ReceiveError::BodyTooLarge { .. } => 413,
         ReceiveError::LeaseActive { .. }
         | ReceiveError::TakeoverConflict { .. }
         | ReceiveError::Fenced { .. }
@@ -672,18 +1188,27 @@ fn error_status(error: &ReceiveError) -> u16 {
         | ReceiveError::NotHolder { .. }
         | ReceiveError::OrphanMachine { .. }
         | ReceiveError::Collision
+        | ReceiveError::EnvelopeConflict { .. }
+        | ReceiveError::RewrapNotHolder { .. }
+        | ReceiveError::MixedMode { .. }
+        | ReceiveError::EnvelopeMissing { .. }
         | ReceiveError::Gap { .. }
         | ReceiveError::Chain { .. } => 409,
         ReceiveError::LeaseMissing { .. }
         | ReceiveError::Frame(_)
         | ReceiveError::Json(_)
+        | ReceiveError::PlaintextDisabled
+        | ReceiveError::EncryptedDisabled
         | ReceiveError::RequestField(_) => 400,
+        ReceiveError::Auth(_) | ReceiveError::AuthHeader(_) => 401,
         _ => 500,
     }
 }
 
 fn error_value(error: &ReceiveError) -> Value {
     let (code, current_epoch) = match error {
+        ReceiveError::Auth(AuthError::ReplayCacheFull) => ("replay_cache_full", None),
+        ReceiveError::BodyTooLarge { .. } => ("body_too_large", None),
         ReceiveError::Fenced { current_epoch, .. } => ("fenced", Some(*current_epoch)),
         ReceiveError::NotHolder { current_epoch, .. } => ("not_holder", Some(*current_epoch)),
         ReceiveError::FutureEpoch { current_epoch, .. } => ("future_epoch", Some(*current_epoch)),
@@ -735,12 +1260,22 @@ fn read_existing(path: &Path, frame: &Frame) -> Result<Option<Frame>, ReceiveErr
             path.display()
         )));
     }
-    // Observation timestamps can change after a sender process restart. The
-    // source bytes and their derived chain are the idempotent payload.
-    if stored.line != frame.line
-        || stored.chain != frame.chain
-        || (!stored.machine.is_empty() && stored.machine != frame.machine)
-    {
+    // Observation timestamps and encrypted nonces can change on a resend. The
+    // plaintext line and chain, or the keyed content tag, define idempotence.
+    let same_content = match (&stored.content, &frame.content) {
+        (
+            FrameContent::Plaintext {
+                chain: stored_chain,
+                line: stored_line,
+            },
+            FrameContent::Plaintext { chain, line },
+        ) => stored_chain == chain && stored_line == line,
+        (FrameContent::Encrypted(stored), FrameContent::Encrypted(incoming)) => {
+            stored.tag == incoming.tag
+        }
+        _ => false,
+    };
+    if !same_content || (!stored.machine.is_empty() && stored.machine != frame.machine) {
         return Err(ReceiveError::Collision);
     }
     Ok(Some(stored))
@@ -786,7 +1321,11 @@ fn reconcile_receipt(
             || stored.key.generation != generation
             || stored.key.epoch != receipt.epoch
             || stored.key.seq != acked
-            || stored.chain != receipt.chain
+            || stored.mode() != receipt.mode.unwrap_or(stored.mode())
+            || match &stored.content {
+                FrameContent::Plaintext { chain, .. } => *chain != receipt.chain,
+                FrameContent::Encrypted(payload) => Some(payload.tag) != receipt.tag,
+            }
         {
             return Err(ReceiveError::Inconsistent(format!(
                 "receipt does not match {}",
@@ -837,14 +1376,9 @@ fn reconcile_receipt(
                 path.display()
             )));
         }
-        if frame.chain != chain_line(&receipt.chain, &frame.line) {
-            return Err(ReceiveError::Inconsistent(format!(
-                "stored chain is broken at sequence {seq}"
-            )));
-        }
-        receipt.epoch = epoch;
-        receipt.acked = Some(seq);
-        receipt.chain = frame.chain;
+        advance_receipt(&mut receipt, &frame).map_err(|error| {
+            ReceiveError::Inconsistent(format!("invalid stored frame at sequence {seq}: {error}"))
+        })?;
     }
     Ok(receipt)
 }
@@ -856,7 +1390,9 @@ fn load_receipt(path: &Path) -> Result<Receipt, ReceiveError> {
             return Ok(Receipt {
                 epoch: 0,
                 acked: None,
+                mode: None,
                 chain: ZERO_CHAIN,
+                tag: None,
             });
         }
         Err(error) => return Err(error.into()),
@@ -873,19 +1409,53 @@ fn load_receipt(path: &Path) -> Result<Receipt, ReceiveError> {
         .get("acked")
         .and_then(Value::as_u64)
         .ok_or_else(|| ReceiveError::Inconsistent("receipt acked is missing".into()))?;
-    let encoded = object
-        .get("chain")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ReceiveError::Inconsistent("receipt chain is missing".into()))?;
-    let chain = hex::decode(encoded)
-        .map_err(|error| ReceiveError::Inconsistent(format!("invalid receipt chain: {error}")))?;
-    let length = chain.len();
+    let mode = match object.get("mode").and_then(Value::as_str) {
+        None | Some("plaintext") => Some(FrameMode::Plaintext),
+        Some("encrypted") => Some(FrameMode::Encrypted),
+        Some(mode) => {
+            return Err(ReceiveError::Inconsistent(format!(
+                "unsupported receipt mode {mode}"
+            )));
+        }
+    };
+    let chain = match object.get("chain") {
+        None | Some(Value::Null) if mode == Some(FrameMode::Encrypted) => ZERO_CHAIN,
+        Some(Value::String(encoded)) => {
+            let bytes = hex::decode(encoded).map_err(|error| {
+                ReceiveError::Inconsistent(format!("invalid receipt chain: {error}"))
+            })?;
+            let length = bytes.len();
+            bytes.try_into().map_err(|_| {
+                ReceiveError::Inconsistent(format!(
+                    "receipt chain has {length} bytes instead of 32"
+                ))
+            })?
+        }
+        _ => {
+            return Err(ReceiveError::Inconsistent(
+                "receipt chain is missing".into(),
+            ));
+        }
+    };
+    let tag = match object.get("tag") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(encoded)) => {
+            let bytes = hex::decode(encoded).map_err(|error| {
+                ReceiveError::Inconsistent(format!("invalid receipt tag: {error}"))
+            })?;
+            let length = bytes.len();
+            Some(bytes.try_into().map_err(|_| {
+                ReceiveError::Inconsistent(format!("receipt tag has {length} bytes instead of 32"))
+            })?)
+        }
+        _ => return Err(ReceiveError::Inconsistent("receipt tag is invalid".into())),
+    };
     Ok(Receipt {
         epoch,
         acked: Some(acked),
-        chain: chain.try_into().map_err(|_| {
-            ReceiveError::Inconsistent(format!("receipt chain has {length} bytes instead of 32"))
-        })?,
+        mode,
+        chain,
+        tag,
     })
 }
 
@@ -895,8 +1465,25 @@ fn save_receipt(path: &Path, receipt: Receipt) -> Result<(), ReceiveError> {
         .ok_or_else(|| ReceiveError::Inconsistent("cannot save an empty receipt".into()))?;
     let value = Value::Object(Map::from_iter([
         ("acked".into(), acked.into()),
-        ("chain".into(), Value::String(hex::encode(receipt.chain))),
+        (
+            "chain".into(),
+            if receipt.mode == Some(FrameMode::Plaintext) {
+                Value::String(hex::encode(receipt.chain))
+            } else {
+                Value::Null
+            },
+        ),
         ("epoch".into(), receipt.epoch.into()),
+        (
+            "mode".into(),
+            Value::String(receipt.mode.unwrap_or(FrameMode::Plaintext).as_str().into()),
+        ),
+        (
+            "tag".into(),
+            receipt
+                .tag
+                .map_or(Value::Null, |tag| Value::String(hex::encode(tag))),
+        ),
     ]));
     write_atomic(path, &serde_json::to_vec(&value)?)?;
     Ok(())
@@ -923,12 +1510,60 @@ fn stream_tips(root: &Path, session: &str) -> Result<Vec<StreamTip>, ReceiveErro
                     generation,
                     epoch: receipt.epoch,
                     seq,
-                    chain: receipt.chain,
+                    mode: receipt.mode.unwrap_or(FrameMode::Plaintext),
+                    chain: (receipt.mode != Some(FrameMode::Encrypted)).then_some(receipt.chain),
+                    tag: receipt.tag,
                 });
             }
         }
     }
     Ok(tips)
+}
+
+fn session_mode_path(root: &Path, session: &str) -> PathBuf {
+    root.join(SESSION_MODES_DIR)
+        .join(hex::encode(session.as_bytes()))
+}
+
+fn envelope_path(root: &Path, session: &str) -> PathBuf {
+    root.join(ENVELOPES_DIR)
+        .join(format!("{}.age", hex::encode(session.as_bytes())))
+}
+
+fn ensure_session_mode(
+    root: &Path,
+    session: &str,
+    incoming: FrameMode,
+) -> Result<(), ReceiveError> {
+    let path = session_mode_path(root, session);
+    match fs::read_to_string(&path) {
+        Ok(value) => {
+            let existing = match value.trim() {
+                "plaintext" => FrameMode::Plaintext,
+                "encrypted" => FrameMode::Encrypted,
+                value => {
+                    return Err(ReceiveError::Inconsistent(format!(
+                        "unsupported session mode {value} in {}",
+                        path.display()
+                    )));
+                }
+            };
+            if existing == incoming {
+                Ok(())
+            } else {
+                Err(ReceiveError::MixedMode {
+                    session: session.to_owned(),
+                    existing: existing.as_str(),
+                    incoming: incoming.as_str(),
+                })
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            write_atomic(&path, format!("{}\n", incoming.as_str()).as_bytes())?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn list_orphans(root: &Path) -> Result<Vec<OrphanSummary>, ReceiveError> {
@@ -1048,6 +1683,41 @@ fn append_takeover(path: &Path, record: &TakeoverRecord) -> Result<(), ReceiveEr
     Ok(())
 }
 
+fn append_rewrap(
+    path: &Path,
+    session: &str,
+    machine: &str,
+    forced: bool,
+    previous: &[u8],
+    replacement: &[u8],
+    replaced_at_ms: u64,
+) -> Result<(), ReceiveError> {
+    let value = Value::Object(Map::from_iter([
+        ("forced".into(), forced.into()),
+        ("machine".into(), Value::String(machine.to_owned())),
+        (
+            "previous_sha256".into(),
+            Value::String(hex::encode(Sha256::digest(previous))),
+        ),
+        ("replaced_at_ms".into(), replaced_at_ms.into()),
+        (
+            "replacement_sha256".into(),
+            Value::String(hex::encode(Sha256::digest(replacement))),
+        ),
+        ("session".into(), Value::String(session.to_owned())),
+    ]));
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path)?;
+    serde_json::to_writer(&mut file, &value)?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    file.sync_all()?;
+    Ok(())
+}
+
 fn respond_json(request: tiny_http::Request, status: u16, body: &Value) {
     respond_text(request, status, &body.to_string());
 }
@@ -1071,4 +1741,26 @@ fn set_private_dir(path: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn set_private_dir(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_reader_accepts_a_request_at_the_64_mib_limit() {
+        let mut reader = io::repeat(0).take(MAX_REQUEST_BODY_BYTES as u64);
+        let body = read_bounded_body(&mut reader, Some(MAX_REQUEST_BODY_BYTES)).unwrap();
+        assert_eq!(body.len(), MAX_REQUEST_BODY_BYTES);
+    }
+
+    #[test]
+    fn replay_cache_capacity_is_a_retryable_service_error() {
+        let error = ReceiveError::Auth(AuthError::ReplayCacheFull);
+        assert_eq!(error_status(&error), 503);
+        assert_eq!(
+            error_value(&error).get("error").and_then(Value::as_str),
+            Some("replay_cache_full")
+        );
+    }
 }

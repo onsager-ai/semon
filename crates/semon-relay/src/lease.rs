@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, time::SystemTime};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::FrameMode;
+
 /// Receiver-owned lease duration: three minutes.
 pub const LEASE_DURATION_MS: u64 = 3 * 60 * 1_000;
 /// Sender renewal cadence: one third of the lease duration.
@@ -61,7 +63,9 @@ pub struct StreamTip {
     pub generation: u64,
     pub epoch: u64,
     pub seq: u64,
-    pub chain: [u8; 32],
+    pub mode: FrameMode,
+    pub chain: Option<[u8; 32]>,
+    pub tag: Option<[u8; 32]>,
 }
 
 /// A successful takeover and the watermarks the new holder must adopt.
@@ -96,6 +100,12 @@ pub enum LeaseValueError {
     ChainHex(hex::FromHexError),
     #[error("stream tip chain has {0} bytes, expected 32")]
     ChainLength(usize),
+    #[error("stream tip content tag is not valid hex: {0}")]
+    TagHex(hex::FromHexError),
+    #[error("stream tip content tag has {0} bytes, expected 32")]
+    TagLength(usize),
+    #[error("unsupported stream tip mode {0}")]
+    Mode(String),
     #[error("unsupported lease register version {0}")]
     Version(u64),
     #[error("duplicate lease row for session {0}")]
@@ -198,29 +208,74 @@ impl LeaseStatus {
 
 impl StreamTip {
     pub(crate) fn to_value(&self) -> Value {
-        Value::Object(Map::from_iter([
-            ("chain".into(), Value::String(hex::encode(self.chain))),
+        let mut object = Map::from_iter([
             ("epoch".into(), self.epoch.into()),
             ("generation".into(), self.generation.into()),
+            ("mode".into(), Value::String(self.mode.as_str().into())),
             ("seq".into(), self.seq.into()),
             ("stream".into(), Value::String(self.stream.clone())),
-        ]))
+        ]);
+        object.insert(
+            "chain".into(),
+            self.chain
+                .map_or(Value::Null, |chain| Value::String(hex::encode(chain))),
+        );
+        object.insert(
+            "tag".into(),
+            self.tag
+                .map_or(Value::Null, |tag| Value::String(hex::encode(tag))),
+        );
+        Value::Object(object)
     }
 
     pub(crate) fn from_value(value: &Value) -> Result<Self, LeaseValueError> {
         let object = object(value, "stream tip")?;
-        let chain = hex::decode(string(object, "stream tip", "chain")?)
-            .map_err(LeaseValueError::ChainHex)?;
-        let length = chain.len();
+        let mode = match object.get("mode").and_then(Value::as_str) {
+            None | Some("plaintext") => FrameMode::Plaintext,
+            Some("encrypted") => FrameMode::Encrypted,
+            Some(mode) => return Err(LeaseValueError::Mode(mode.to_owned())),
+        };
+        let chain = optional_bytes(object, "chain", LeaseValueError::ChainHex)?;
+        let chain_length = chain.as_ref().map_or(0, Vec::len);
+        let chain = chain
+            .map(|chain| {
+                chain
+                    .try_into()
+                    .map_err(|_| LeaseValueError::ChainLength(chain_length))
+            })
+            .transpose()?;
+        let tag = optional_bytes(object, "tag", LeaseValueError::TagHex)?;
+        let tag_length = tag.as_ref().map_or(0, Vec::len);
+        let tag = tag
+            .map(|tag| {
+                tag.try_into()
+                    .map_err(|_| LeaseValueError::TagLength(tag_length))
+            })
+            .transpose()?;
         Ok(Self {
             stream: string(object, "stream tip", "stream")?,
             generation: integer(object, "stream tip", "generation")?,
             epoch: integer(object, "stream tip", "epoch")?,
             seq: integer(object, "stream tip", "seq")?,
-            chain: chain
-                .try_into()
-                .map_err(|_| LeaseValueError::ChainLength(length))?,
+            mode,
+            chain,
+            tag,
         })
+    }
+}
+
+fn optional_bytes(
+    object: &Map<String, Value>,
+    name: &'static str,
+    invalid: fn(hex::FromHexError) -> LeaseValueError,
+) -> Result<Option<Vec<u8>>, LeaseValueError> {
+    match object.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => hex::decode(value).map(Some).map_err(invalid),
+        Some(_) => Err(LeaseValueError::Field {
+            kind: "stream tip",
+            field: name,
+        }),
     }
 }
 

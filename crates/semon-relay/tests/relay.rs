@@ -11,10 +11,10 @@ use std::{
 };
 
 use semon_relay::{
-    Clock, Frame, FrameKey, LeaseRow, LeaseStatus, OrphanSummary, ReceiveError, ReceiveOutcome,
-    Receiver, RelayError, Sender, TakeoverCommandError, TakeoverResult, Transport, TransportError,
-    ZERO_CHAIN, chain_line, discover_streams, initialize_takeover_state, load_state, run_pass,
-    takeover_session, validate_loopback,
+    Clock, Frame, FrameContent, FrameKey, LeaseRow, LeaseStatus, OrphanSummary, ReceiveError,
+    ReceiveOutcome, Receiver, RelayError, Sender, TakeoverCommandError, TakeoverResult, Transport,
+    TransportError, ZERO_CHAIN, chain_line, discover_streams, initialize_takeover_state,
+    load_state, run_pass, takeover_session, validate_loopback,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -83,21 +83,29 @@ fn source_file(temp: &TempDir, bytes: &[u8]) -> (PathBuf, PathBuf, PathBuf) {
 }
 
 fn frame(seq: u64, previous: &[u8; 32], line: &[u8]) -> Frame {
-    Frame {
-        key: FrameKey {
+    Frame::plaintext(
+        FrameKey {
             session: "synthetic-session".into(),
             stream: "main".into(),
             generation: 0,
             epoch: 0,
             seq,
         },
-        machine: "machine-a".into(),
-        chain: chain_line(previous, line),
-        sender_wall_ns: 1,
-        sender_mono_ns: 2,
-        boot_id: "synthetic-boot".into(),
-        line: line.to_vec(),
-    }
+        "machine-a".into(),
+        chain_line(previous, line),
+        1,
+        2,
+        "synthetic-boot".into(),
+        line.to_vec(),
+    )
+}
+
+fn frame_chain(frame: &Frame) -> [u8; 32] {
+    *frame.plaintext_content().unwrap().0
+}
+
+fn frame_line(frame: &Frame) -> &[u8] {
+    frame.plaintext_content().unwrap().1
 }
 
 #[derive(Default)]
@@ -250,7 +258,7 @@ fn frames_complete_line_verbatim_and_waits_on_partial_line() {
     assert_eq!(report.totals().0, 1);
     let frames = transport.frames.lock().unwrap();
     assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].line, complete);
+    assert_eq!(frame_line(&frames[0]), complete);
     assert_eq!(frames[0].key.seq, 0);
 }
 
@@ -292,7 +300,7 @@ fn receiver_reports_the_first_sequence_hole() {
     let mut previous = ZERO_CHAIN;
     for seq in 0..=5 {
         let current = frame(seq, &previous, format!("line-{seq}\n").as_bytes());
-        previous = current.chain;
+        previous = frame_chain(&current);
         receiver.accept(&current).unwrap();
     }
     let sequence_seven = frame(7, &previous, b"line-7\n");
@@ -311,7 +319,9 @@ fn receiver_rejects_a_chain_break() {
     let receiver = Receiver::open(temp.path().join("receiver")).unwrap();
     receiver.acquire("synthetic-session", "machine-a").unwrap();
     let mut broken = frame(0, &ZERO_CHAIN, b"one\n");
-    broken.chain = [9; 32];
+    if let FrameContent::Plaintext { chain, .. } = &mut broken.content {
+        *chain = [9; 32];
+    }
     assert!(matches!(
         receiver.accept(&broken),
         Err(ReceiveError::Chain { seq: 0 })
@@ -330,7 +340,7 @@ fn receiver_reconstructs_an_uncheckpointed_receipt_after_restart() {
     first_receiver.accept(&first).unwrap();
 
     let receiver = Receiver::open(&root).unwrap();
-    let second = frame(1, &first.chain, b"two\n");
+    let second = frame(1, &frame_chain(&first), b"two\n");
     assert_eq!(receiver.accept(&second).unwrap(), ReceiveOutcome::Stored);
 }
 
@@ -348,10 +358,10 @@ fn receiver_continues_from_m1_frame_files_without_machine_metadata() {
         path,
         serde_json::to_vec(&serde_json::json!({
             "boot_id": first.boot_id,
-            "chain": hex::encode(first.chain),
+            "chain": hex::encode(frame_chain(&first)),
             "epoch": 0,
             "generation": 0,
-            "line": hex::encode(&first.line),
+            "line": hex::encode(frame_line(&first)),
             "sender_mono_ns": first.sender_mono_ns,
             "sender_wall_ns": first.sender_wall_ns,
             "seq": 0,
@@ -364,7 +374,7 @@ fn receiver_continues_from_m1_frame_files_without_machine_metadata() {
 
     let receiver = Receiver::open(root).unwrap();
     receiver.acquire("synthetic-session", "machine-a").unwrap();
-    let second = frame(1, &first.chain, b"two\n");
+    let second = frame(1, &frame_chain(&first), b"two\n");
     assert_eq!(receiver.accept(&second).unwrap(), ReceiveOutcome::Stored);
 }
 
@@ -711,7 +721,7 @@ fn assert_new_generation(kind: Rewrite, label: &str) {
         .read_frame("session-a", "main", 0, 0, 2)
         .unwrap()
         .unwrap();
-    assert_eq!(old.line, b"two\n");
+    assert_eq!(frame_line(&old), b"two\n");
     assert!(
         receiver
             .read_frame("session-a", "main", 1, 0, 0)
@@ -948,18 +958,18 @@ fn takeover_race_reports_behind_after_cas_without_writing_sender_state() {
         .read_frame("session-a", "main", 0, 0, 0)
         .unwrap()
         .unwrap();
-    let injected = Frame {
-        key: FrameKey {
+    let injected = Frame::plaintext(
+        FrameKey {
             seq: 1,
             ..first.key.clone()
         },
-        machine: "machine-a".into(),
-        chain: chain_line(&first.chain, b"raced\n"),
-        sender_wall_ns: first.sender_wall_ns.saturating_add(1),
-        sender_mono_ns: first.sender_mono_ns.saturating_add(1),
-        boot_id: first.boot_id,
-        line: b"raced\n".to_vec(),
-    };
+        "machine-a".into(),
+        chain_line(&frame_chain(&first), b"raced\n"),
+        first.sender_wall_ns.saturating_add(1),
+        first.sender_mono_ns.saturating_add(1),
+        first.boot_id,
+        b"raced\n".to_vec(),
+    );
     let transport = AppendBeforeTakeover {
         receiver: &receiver,
         frame: Mutex::new(Some(injected)),
@@ -1024,14 +1034,11 @@ fn fenced_sender_moves_its_unacknowledged_tail_to_orphans() {
             .unwrap()
             .is_none()
     );
-    assert_eq!(
-        receiver
-            .read_orphan("session-a", "main", 0, 0, 1)
-            .unwrap()
-            .unwrap()
-            .line,
-        b"one\n"
-    );
+    let orphan = receiver
+        .read_orphan("session-a", "main", 0, 0, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(frame_line(&orphan), b"one\n");
     assert_eq!(receiver.list_orphans().unwrap()[0].frames, 2);
     let state = load_state(&state_path).unwrap();
     let stream = state
@@ -1075,22 +1082,22 @@ fn new_epoch_continues_sequence_and_chain_from_the_live_tip() {
         .read_frame("session-a", "main", 0, 1, 2)
         .unwrap()
         .unwrap();
-    assert_eq!(continued.line, b"two\n");
-    let gap = Frame {
-        key: FrameKey {
+    assert_eq!(frame_line(&continued), b"two\n");
+    let gap = Frame::plaintext(
+        FrameKey {
             session: "session-a".into(),
             stream: "main".into(),
             generation: 0,
             epoch: 1,
             seq: 4,
         },
-        machine: "machine-b".into(),
-        chain: chain_line(&continued.chain, b"four\n"),
-        sender_wall_ns: 0,
-        sender_mono_ns: 0,
-        boot_id: "synthetic".into(),
-        line: b"four\n".to_vec(),
-    };
+        "machine-b".into(),
+        chain_line(&frame_chain(&continued), b"four\n"),
+        0,
+        0,
+        "synthetic".into(),
+        b"four\n".to_vec(),
+    );
     assert!(matches!(
         receiver.accept(&gap),
         Err(ReceiveError::Gap {
@@ -1105,19 +1112,19 @@ fn receiver_reconstructs_continuity_across_epochs_after_restart() {
     let temp = TempDir::new("epoch-restart");
     let root = temp.path().join("receiver");
     let first = frame(0, &ZERO_CHAIN, b"zero\n");
-    let second = Frame {
-        key: FrameKey {
+    let second = Frame::plaintext(
+        FrameKey {
             epoch: 1,
             seq: 1,
             ..first.key.clone()
         },
-        machine: "machine-b".into(),
-        chain: chain_line(&first.chain, b"one\n"),
-        sender_wall_ns: 2,
-        sender_mono_ns: 2,
-        boot_id: "synthetic".into(),
-        line: b"one\n".to_vec(),
-    };
+        "machine-b".into(),
+        chain_line(&frame_chain(&first), b"one\n"),
+        2,
+        2,
+        "synthetic".into(),
+        b"one\n".to_vec(),
+    );
     let receiver = Receiver::open(&root).unwrap();
     receiver.acquire("synthetic-session", "machine-a").unwrap();
     receiver.accept(&first).unwrap();
@@ -1128,17 +1135,18 @@ fn receiver_reconstructs_continuity_across_epochs_after_restart() {
     drop(receiver);
 
     let receiver = Receiver::open(&root).unwrap();
-    let third = Frame {
-        key: FrameKey {
+    let third = Frame::plaintext(
+        FrameKey {
             seq: 2,
             ..second.key.clone()
         },
-        chain: chain_line(&second.chain, b"two\n"),
-        sender_wall_ns: 3,
-        sender_mono_ns: 3,
-        line: b"two\n".to_vec(),
-        ..second
-    };
+        second.machine.clone(),
+        chain_line(&frame_chain(&second), b"two\n"),
+        3,
+        3,
+        second.boot_id.clone(),
+        b"two\n".to_vec(),
+    );
     assert_eq!(receiver.accept(&third).unwrap(), ReceiveOutcome::Stored);
 }
 
@@ -1169,14 +1177,11 @@ fn restarted_stale_sender_checks_the_register_before_live_shipping() {
 
     assert_eq!(restarted_transport.live_calls.load(Ordering::Relaxed), 0);
     assert!(report.streams[0].fenced);
-    assert_eq!(
-        receiver
-            .read_orphan("session-a", "main", 0, 0, 1)
-            .unwrap()
-            .unwrap()
-            .line,
-        b"late\n"
-    );
+    let orphan = receiver
+        .read_orphan("session-a", "main", 0, 0, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(frame_line(&orphan), b"late\n");
 }
 
 #[test]

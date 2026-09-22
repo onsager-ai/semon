@@ -9,7 +9,10 @@ use std::{
 };
 
 use semon_relay::{
-    HttpTransport, PassReport, Sender, Transport, read_machine_identity, serve, takeover_session,
+    HttpTransport, MachineIdentity, PassReport, RECIPIENTS_FILE, RequestSigner, Sender,
+    ServeConfig, TlsFiles, Transport, decrypt_envelope, encrypt_envelope, enroll_machine,
+    enroll_recipient, init, load_age_identity, load_recipients, read_machine_identity,
+    serve_configured, takeover_session, takeover_session_encrypted, verify_encrypted_session,
 };
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8734/v1/frames";
@@ -30,6 +33,8 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         Some("receive") => run_receive(arguments),
         Some("lease") => run_lease(arguments),
         Some("orphans") => run_orphans(arguments),
+        Some("keys") => run_keys(arguments),
+        Some("verify") => run_verify(arguments),
         Some("-h" | "--help") => Err(usage()),
         Some(command) => Err(format!("unknown command: {command}\n{}", usage())),
         None => Err(usage()),
@@ -48,6 +53,9 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
     let mut state = default_state()?;
     let mut endpoint = DEFAULT_ENDPOINT.to_owned();
     let mut machine = None;
+    let mut config = default_config()?;
+    let mut tls_ca = None;
+    let mut insecure_plaintext = false;
     let mut interval = Duration::from_secs(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -57,6 +65,9 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
             "--state" => state = value(&mut arguments, "--state")?.into(),
             "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
             "--machine" => machine = Some(value(&mut arguments, "--machine")?),
+            "--config" => config = value(&mut arguments, "--config")?.into(),
+            "--tls-ca" => tls_ca = Some(PathBuf::from(value(&mut arguments, "--tls-ca")?)),
+            "--insecure-plaintext" => insecure_plaintext = true,
             "--interval-ms" => {
                 let raw = value(&mut arguments, "--interval-ms")?;
                 let milliseconds = raw
@@ -72,10 +83,33 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         }
     }
     let mode = mode.ok_or_else(|| format!("send requires --once or --follow\n{}", usage()))?;
-    let transport =
-        HttpTransport::new(endpoint, Duration::from_secs(10)).map_err(|error| error.to_string())?;
-    let machine = machine_identity(machine)?;
-    let mut sender = Sender::with_machine(machine);
+    let (transport, machine, mut sender) = if insecure_plaintext {
+        if tls_ca.is_some() {
+            return Err("--insecure-plaintext does not accept --tls-ca".into());
+        }
+        let machine = machine_identity(machine)?;
+        let transport = HttpTransport::new(endpoint, Duration::from_secs(10))
+            .map_err(|error| error.to_string())?;
+        (transport, machine.clone(), Sender::with_machine(machine))
+    } else {
+        if machine.is_some() {
+            return Err("--machine is available only with --insecure-plaintext".into());
+        }
+        let identity = MachineIdentity::load(&config).map_err(|error| error.to_string())?;
+        let machine = identity.fingerprint();
+        let transport = HttpTransport::secure(
+            endpoint,
+            Duration::from_secs(10),
+            RequestSigner::new(identity.signing.clone()),
+            tls_ca.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        let recipients =
+            load_recipients(&config.join(RECIPIENTS_FILE)).map_err(|error| error.to_string())?;
+        let sender = Sender::encrypted(machine.clone(), identity.age, recipients);
+        (transport, machine, sender)
+    };
+    let _ = machine;
     match mode {
         SendMode::Once => {
             let report = sender
@@ -117,6 +151,9 @@ fn run_lease(mut arguments: impl Iterator<Item = String>) -> Result<(), String> 
     let mut state = None;
     let mut endpoint = DEFAULT_ENDPOINT.to_owned();
     let mut machine = None;
+    let mut config = default_config()?;
+    let mut tls_ca = None;
+    let mut insecure_plaintext = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--session" => session = Some(value(&mut arguments, "--session")?),
@@ -125,13 +162,20 @@ fn run_lease(mut arguments: impl Iterator<Item = String>) -> Result<(), String> 
             "--state" => state = Some(value(&mut arguments, "--state")?.into()),
             "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
             "--machine" => machine = Some(value(&mut arguments, "--machine")?),
+            "--config" => config = value(&mut arguments, "--config")?.into(),
+            "--tls-ca" => tls_ca = Some(PathBuf::from(value(&mut arguments, "--tls-ca")?)),
+            "--insecure-plaintext" => insecure_plaintext = true,
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown lease argument: {argument}\n{}", usage())),
         }
     }
-    let machine = machine_identity(machine)?;
-    let transport =
-        HttpTransport::new(endpoint, Duration::from_secs(10)).map_err(|error| error.to_string())?;
+    let (transport, machine, identity) = transport_context(
+        endpoint,
+        &config,
+        tls_ca.as_deref(),
+        insecure_plaintext,
+        machine,
+    )?;
     match command.as_str() {
         "status" => {
             if force {
@@ -164,9 +208,20 @@ fn run_lease(mut arguments: impl Iterator<Item = String>) -> Result<(), String> 
             let session = session.ok_or_else(|| "lease takeover requires --session".to_owned())?;
             let projects = projects.map_or_else(default_projects, Ok)?;
             let state = state.map_or_else(default_state, Ok)?;
-            let takeover =
+            let takeover = if let Some(identity) = identity {
+                takeover_session_encrypted(
+                    &projects,
+                    &state,
+                    &session,
+                    &machine,
+                    force,
+                    &identity.age,
+                    &transport,
+                )
+            } else {
                 takeover_session(&projects, &state, &session, &machine, force, &transport)
-                    .map_err(|error| error.to_string())?;
+            }
+            .map_err(|error| error.to_string())?;
             println!(
                 "takeover session={} epoch={} holder={} forced={} streams={}",
                 session,
@@ -189,17 +244,27 @@ fn run_orphans(mut arguments: impl Iterator<Item = String>) -> Result<(), String
     }
     let mut endpoint = DEFAULT_ENDPOINT.to_owned();
     let mut machine = None;
+    let mut config = default_config()?;
+    let mut tls_ca = None;
+    let mut insecure_plaintext = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
             "--machine" => machine = Some(value(&mut arguments, "--machine")?),
+            "--config" => config = value(&mut arguments, "--config")?.into(),
+            "--tls-ca" => tls_ca = Some(PathBuf::from(value(&mut arguments, "--tls-ca")?)),
+            "--insecure-plaintext" => insecure_plaintext = true,
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown orphans argument: {argument}\n{}", usage())),
         }
     }
-    let machine = machine_identity(machine)?;
-    let transport =
-        HttpTransport::new(endpoint, Duration::from_secs(10)).map_err(|error| error.to_string())?;
+    let (transport, machine, _) = transport_context(
+        endpoint,
+        &config,
+        tls_ca.as_deref(),
+        insecure_plaintext,
+        machine,
+    )?;
     for orphan in transport
         .list_orphans(&machine)
         .map_err(|error| error.to_string())?
@@ -219,27 +284,311 @@ fn run_orphans(mut arguments: impl Iterator<Item = String>) -> Result<(), String
 }
 
 fn run_receive(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
-    let mut listen = None;
+    let arguments = arguments.by_ref().collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "enroll")
+    {
+        return run_receive_enroll(arguments.into_iter().skip(1));
+    }
+    let mut arguments = arguments.into_iter();
+    let mut listen = "127.0.0.1:8734"
+        .parse::<SocketAddr>()
+        .expect("default listen address is valid");
     let mut directory = None;
+    let mut tls_cert = None;
+    let mut tls_key = None;
+    let mut insecure_plaintext = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--listen" => {
                 let raw = value(&mut arguments, "--listen")?;
-                listen = Some(
-                    raw.parse::<SocketAddr>()
-                        .map_err(|error| format!("invalid --listen address {raw}: {error}"))?,
-                );
+                listen = raw
+                    .parse::<SocketAddr>()
+                    .map_err(|error| format!("invalid --listen address {raw}: {error}"))?;
             }
             "--dir" => directory = Some(PathBuf::from(value(&mut arguments, "--dir")?)),
+            "--tls-cert" => tls_cert = Some(PathBuf::from(value(&mut arguments, "--tls-cert")?)),
+            "--tls-key" => tls_key = Some(PathBuf::from(value(&mut arguments, "--tls-key")?)),
+            "--insecure-plaintext" => insecure_plaintext = true,
             "-h" | "--help" => return Err(usage()),
             _ => {
                 return Err(format!("unknown receive argument: {argument}\n{}", usage()));
             }
         }
     }
-    let listen = listen.ok_or_else(|| "receive requires --listen".to_owned())?;
     let directory = directory.ok_or_else(|| "receive requires --dir".to_owned())?;
-    serve(listen, &directory).map_err(|error| error.to_string())
+    let tls = match (tls_cert, tls_key) {
+        (Some(certificate), Some(private_key)) => Some(TlsFiles {
+            certificate,
+            private_key,
+        }),
+        (None, None) => None,
+        _ => return Err("receive requires --tls-cert and --tls-key together".into()),
+    };
+    serve_configured(
+        listen,
+        &directory,
+        ServeConfig {
+            tls,
+            insecure_plaintext,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn run_receive_enroll(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let public_key = arguments
+        .next()
+        .ok_or_else(|| "receive enroll requires a signing public key".to_owned())?;
+    let mut directory = None;
+    let mut name = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--dir" => directory = Some(PathBuf::from(value(&mut arguments, "--dir")?)),
+            "--name" => name = Some(value(&mut arguments, "--name")?),
+            _ => {
+                return Err(format!(
+                    "unknown receive enroll argument: {argument}\n{}",
+                    usage()
+                ));
+            }
+        }
+    }
+    let directory = directory.ok_or_else(|| "receive enroll requires --dir".to_owned())?;
+    let name = name.ok_or_else(|| "receive enroll requires --name".to_owned())?;
+    let fingerprint =
+        enroll_machine(&directory, &public_key, &name).map_err(|error| error.to_string())?;
+    println!("enrolled machine name={name} fingerprint={fingerprint}");
+    Ok(())
+}
+
+fn run_keys(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let command = arguments.next().ok_or_else(|| {
+        format!(
+            "keys requires init, show, enroll, rewrap, or decrypt-envelope\n{}",
+            usage()
+        )
+    })?;
+    match command.as_str() {
+        "init" => {
+            let mut config = default_config()?;
+            while let Some(argument) = arguments.next() {
+                match argument.as_str() {
+                    "--config" => config = value(&mut arguments, "--config")?.into(),
+                    _ => {
+                        return Err(format!(
+                            "unknown keys init argument: {argument}\n{}",
+                            usage()
+                        ));
+                    }
+                }
+            }
+            let outcome = init(&config).map_err(|error| error.to_string())?;
+            println!(
+                "keys initialized config={} age_created={} signing_created={}",
+                config.display(),
+                outcome.age_created,
+                outcome.signing_created
+            );
+            Ok(())
+        }
+        "show" => {
+            let mut config = default_config()?;
+            while let Some(argument) = arguments.next() {
+                match argument.as_str() {
+                    "--config" => config = value(&mut arguments, "--config")?.into(),
+                    _ => {
+                        return Err(format!(
+                            "unknown keys show argument: {argument}\n{}",
+                            usage()
+                        ));
+                    }
+                }
+            }
+            let identity = MachineIdentity::load(&config).map_err(|error| error.to_string())?;
+            println!("age {}", identity.age.to_public());
+            println!(
+                "signing {}",
+                hex::encode(identity.signing.verifying_key().as_bytes())
+            );
+            println!("machine {}", identity.fingerprint());
+            Ok(())
+        }
+        "enroll" => {
+            let public_key = arguments
+                .next()
+                .ok_or_else(|| "keys enroll requires an age public key".to_owned())?;
+            let mut config = default_config()?;
+            let mut name = None;
+            while let Some(argument) = arguments.next() {
+                match argument.as_str() {
+                    "--config" => config = value(&mut arguments, "--config")?.into(),
+                    "--name" => name = Some(value(&mut arguments, "--name")?),
+                    _ => {
+                        return Err(format!(
+                            "unknown keys enroll argument: {argument}\n{}",
+                            usage()
+                        ));
+                    }
+                }
+            }
+            let name = name.ok_or_else(|| "keys enroll requires --name".to_owned())?;
+            enroll_recipient(&config, &public_key, &name).map_err(|error| error.to_string())?;
+            println!("enrolled recipient name={name}");
+            Ok(())
+        }
+        "rewrap" => run_rewrap(arguments),
+        "decrypt-envelope" => run_decrypt_envelope(arguments),
+        _ => Err(format!("unknown keys command: {command}\n{}", usage())),
+    }
+}
+
+fn run_rewrap(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut config = default_config()?;
+    let mut endpoint = DEFAULT_ENDPOINT.to_owned();
+    let mut tls_ca = None;
+    let mut session = None;
+    let mut force = false;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--config" => config = value(&mut arguments, "--config")?.into(),
+            "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
+            "--tls-ca" => tls_ca = Some(PathBuf::from(value(&mut arguments, "--tls-ca")?)),
+            "--session" => session = Some(value(&mut arguments, "--session")?),
+            "--force" => force = true,
+            _ => {
+                return Err(format!(
+                    "unknown keys rewrap argument: {argument}\n{}",
+                    usage()
+                ));
+            }
+        }
+    }
+    let (transport, machine, identity) =
+        transport_context(endpoint, &config, tls_ca.as_deref(), false, None)?;
+    let identity = identity.expect("secure transport loads a machine identity");
+    let recipients =
+        load_recipients(&config.join(RECIPIENTS_FILE)).map_err(|error| error.to_string())?;
+    let sessions = match session {
+        Some(session) => vec![session],
+        None => transport
+            .list_envelope_sessions(&machine)
+            .map_err(|error| error.to_string())?,
+    };
+    for session in &sessions {
+        let envelope = transport
+            .get_envelope(session, &machine)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("session {session} has no data-key envelope"))?;
+        let key = decrypt_envelope(&envelope, &identity.age).map_err(|error| error.to_string())?;
+        let replacement = encrypt_envelope(&key, &recipients).map_err(|error| error.to_string())?;
+        transport
+            .put_envelope(session, &machine, &replacement, true, force)
+            .map_err(|error| error.to_string())?;
+        println!("rewrapped session={session} forced={force}");
+    }
+    Ok(())
+}
+
+fn run_decrypt_envelope(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut config = default_config()?;
+    let mut endpoint = DEFAULT_ENDPOINT.to_owned();
+    let mut tls_ca = None;
+    let mut session = None;
+    let mut recovery_identity = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--config" => config = value(&mut arguments, "--config")?.into(),
+            "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
+            "--tls-ca" => tls_ca = Some(PathBuf::from(value(&mut arguments, "--tls-ca")?)),
+            "--session" => session = Some(value(&mut arguments, "--session")?),
+            "--identity" => {
+                recovery_identity = Some(PathBuf::from(value(&mut arguments, "--identity")?))
+            }
+            _ => {
+                return Err(format!(
+                    "unknown keys decrypt-envelope argument: {argument}\n{}",
+                    usage()
+                ));
+            }
+        }
+    }
+    let session = session.ok_or_else(|| "keys decrypt-envelope requires --session".to_owned())?;
+    let recovery_identity =
+        recovery_identity.ok_or_else(|| "keys decrypt-envelope requires --identity".to_owned())?;
+    let (transport, machine, _) =
+        transport_context(endpoint, &config, tls_ca.as_deref(), false, None)?;
+    let envelope = transport
+        .get_envelope(&session, &machine)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("session {session} has no data-key envelope"))?;
+    let identity = load_age_identity(&recovery_identity).map_err(|error| error.to_string())?;
+    decrypt_envelope(&envelope, &identity).map_err(|error| error.to_string())?;
+    println!(
+        "envelope decrypted session={session} identity={}",
+        recovery_identity.display()
+    );
+    Ok(())
+}
+
+fn run_verify(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut config = default_config()?;
+    let mut endpoint = DEFAULT_ENDPOINT.to_owned();
+    let mut tls_ca = None;
+    let mut session = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--config" => config = value(&mut arguments, "--config")?.into(),
+            "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
+            "--tls-ca" => tls_ca = Some(PathBuf::from(value(&mut arguments, "--tls-ca")?)),
+            "--session" => session = Some(value(&mut arguments, "--session")?),
+            _ => return Err(format!("unknown verify argument: {argument}\n{}", usage())),
+        }
+    }
+    let session = session.ok_or_else(|| "verify requires --session".to_owned())?;
+    let (transport, machine, identity) =
+        transport_context(endpoint, &config, tls_ca.as_deref(), false, None)?;
+    let identity = identity.expect("secure transport loads a machine identity");
+    let report = verify_encrypted_session(&session, &identity.age, &machine, &transport)
+        .map_err(|error| error.to_string())?;
+    println!(
+        "verified session={} streams={} frames={}",
+        session, report.streams, report.frames
+    );
+    Ok(())
+}
+
+fn transport_context(
+    endpoint: String,
+    config: &std::path::Path,
+    tls_ca: Option<&std::path::Path>,
+    insecure_plaintext: bool,
+    machine_override: Option<String>,
+) -> Result<(HttpTransport, String, Option<MachineIdentity>), String> {
+    if insecure_plaintext {
+        if tls_ca.is_some() {
+            return Err("--insecure-plaintext does not accept --tls-ca".into());
+        }
+        let machine = machine_identity(machine_override)?;
+        let transport = HttpTransport::new(endpoint, Duration::from_secs(10))
+            .map_err(|error| error.to_string())?;
+        Ok((transport, machine, None))
+    } else {
+        if machine_override.is_some() {
+            return Err("--machine is available only with --insecure-plaintext".into());
+        }
+        let identity = MachineIdentity::load(config).map_err(|error| error.to_string())?;
+        let machine = identity.fingerprint();
+        let transport = HttpTransport::secure(
+            endpoint,
+            Duration::from_secs(10),
+            RequestSigner::new(identity.signing.clone()),
+            tls_ca,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok((transport, machine, Some(identity)))
+    }
 }
 
 fn print_report(report: &PassReport) -> io::Result<()> {
@@ -317,6 +666,14 @@ fn default_state() -> Result<PathBuf, String> {
     Ok(root.join("semon/relay.json"))
 }
 
+fn default_config() -> Result<PathBuf, String> {
+    let root = match env::var_os("XDG_CONFIG_HOME") {
+        Some(root) if !root.is_empty() => PathBuf::from(root),
+        _ => home()?.join(".config"),
+    };
+    Ok(root.join("semon"))
+}
+
 fn home() -> Result<PathBuf, String> {
     env::var_os("HOME")
         .filter(|home| !home.is_empty())
@@ -334,13 +691,21 @@ fn machine_identity(override_value: Option<String>) -> Result<String, String> {
 
 fn usage() -> String {
     "Usage: semon-relay send (--once | --follow) [--projects PATH] [--state PATH] \
-     [--endpoint http://127.0.0.1:PORT/v1/frames] [--machine ID] [--interval-ms N]\n\
-     Usage: semon-relay receive --listen 127.0.0.1:PORT --dir PATH\n\
-     Usage: semon-relay lease status [--session S] [--endpoint URL] [--machine ID]\n\
+     [--endpoint URL] [--config PATH] [--tls-ca CERT] [--interval-ms N] \
+     [--insecure-plaintext --machine ID]\n\
+     Usage: semon-relay receive [--listen 127.0.0.1:8734] --dir PATH \
+     [--tls-cert CERT --tls-key KEY] [--insecure-plaintext]\n\
+     Usage: semon-relay receive enroll SIGNING_PUBKEY --name NAME --dir PATH\n\
+     Usage: semon-relay lease status [--session S] [--endpoint URL] [--config PATH] [--tls-ca CERT]\n\
      Usage: semon-relay lease takeover --session S [--force] [--projects PATH] [--state PATH] \
-     [--endpoint URL] [--machine ID]\n\
-     Usage: semon-relay orphans list [--endpoint URL] [--machine ID]\n\
-     The relay sends plaintext and therefore accepts loopback IP endpoints only."
+     [--endpoint URL] [--config PATH] [--tls-ca CERT]\n\
+     Usage: semon-relay orphans list [--endpoint URL] [--config PATH] [--tls-ca CERT]\n\
+     Usage: semon-relay keys init|show [--config PATH]\n\
+     Usage: semon-relay keys enroll AGE_RECIPIENT --name NAME [--config PATH]\n\
+     Usage: semon-relay keys rewrap [--session S] [--force] [--endpoint URL] [--tls-ca CERT]\n\
+     Usage: semon-relay keys decrypt-envelope --session S --identity PATH [--endpoint URL] [--tls-ca CERT]\n\
+     Usage: semon-relay verify --session S [--endpoint URL] [--config PATH] [--tls-ca CERT]\n\
+     Encrypted signed requests are the default; plaintext requires an explicit loopback-only flag."
         .into()
 }
 
