@@ -9,13 +9,15 @@ use std::{
 };
 
 use reqwest::{StatusCode, blocking::Client};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    DiscoveredStream, Frame, FrameKey, RelayState, StreamState, ZERO_CHAIN, chain_line,
-    discover_streams, discovery::DiscoveryError, load_state, save_state, state::StateError,
+    DiscoveredStream, Frame, FrameKey, LEASE_RENEW_INTERVAL_MS, LeaseRow, LeaseStatus,
+    OrphanSummary, RelayState, StreamState, StreamTip, TakeoverResult, ZERO_CHAIN, chain_line,
+    discover_streams, discovery::DiscoveryError, lease::LeaseValueError, load_state, save_state,
+    state::StateError,
 };
 
 type StreamKey = (String, String);
@@ -24,12 +26,64 @@ type ObservationKey = (String, String, u64);
 /// A deliberately single-frame seam: the source file, not memory, is the queue.
 pub trait Transport {
     fn send(&self, frame: &Frame) -> Result<u64, TransportError>;
+
+    fn send_orphan(&self, frame: &Frame) -> Result<u64, TransportError> {
+        self.send(frame)
+    }
+
+    fn lease_status(
+        &self,
+        _session: Option<&str>,
+        _machine: &str,
+    ) -> Result<LeaseStatus, TransportError> {
+        Ok(LeaseStatus::default())
+    }
+
+    fn acquire(&self, session: &str, machine: &str) -> Result<LeaseRow, TransportError> {
+        Ok(LeaseRow {
+            session: session.to_owned(),
+            epoch: 0,
+            holder_machine: machine.to_owned(),
+            lease_expires_at_ms: u64::MAX,
+        })
+    }
+
+    fn renew(&self, session: &str, machine: &str, epoch: u64) -> Result<LeaseRow, TransportError> {
+        Ok(LeaseRow {
+            session: session.to_owned(),
+            epoch,
+            holder_machine: machine.to_owned(),
+            lease_expires_at_ms: u64::MAX,
+        })
+    }
+
+    fn takeover(
+        &self,
+        _session: &str,
+        _machine: &str,
+        _expected_epoch: u64,
+        _force: bool,
+    ) -> Result<TakeoverResult, TransportError> {
+        Err(TransportError::Unavailable(
+            "transport does not implement takeover".into(),
+        ))
+    }
+
+    fn lease_tips(&self, _session: &str, _machine: &str) -> Result<TakeoverResult, TransportError> {
+        Err(TransportError::Unavailable(
+            "transport does not implement lease tips".into(),
+        ))
+    }
+
+    fn list_orphans(&self, _machine: &str) -> Result<Vec<OrphanSummary>, TransportError> {
+        Ok(Vec::new())
+    }
 }
 
 /// The blocking HTTP transport used by the command-line sender.
 pub struct HttpTransport {
     client: Client,
-    endpoint: String,
+    endpoint: reqwest::Url,
 }
 
 impl HttpTransport {
@@ -50,33 +104,152 @@ impl HttpTransport {
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
-            endpoint,
+            endpoint: url,
         })
+    }
+
+    fn post(&self, path: &str, value: &Value) -> Result<Value, TransportError> {
+        let mut endpoint = self.endpoint.clone();
+        endpoint.set_path(path);
+        endpoint.set_query(None);
+        let response = self
+            .client
+            .post(endpoint)
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(value)?)
+            .send()?;
+        let status = response.status();
+        let mut body = response.text().unwrap_or_default();
+        body.truncate(4096);
+        if !status.is_success() {
+            return Err(rejection(status, &body));
+        }
+        Ok(serde_json::from_str(&body)?)
     }
 }
 
 impl Transport for HttpTransport {
     fn send(&self, frame: &Frame) -> Result<u64, TransportError> {
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .header("content-type", "application/json")
-            .body(serde_json::to_vec(&frame.to_value())?)
-            .send()?;
-        let status = response.status();
-        let mut body = response.text().unwrap_or_default();
-        body.truncate(1024);
-        if !status.is_success() {
-            return Err(TransportError::Rejected {
-                status,
-                body: body.trim().to_owned(),
-            });
-        }
-        let value: Value = serde_json::from_str(&body)?;
+        let value = self.post("/v1/frames", &frame.to_value())?;
         value
             .get("acked")
             .and_then(Value::as_u64)
-            .ok_or_else(|| TransportError::InvalidAck(body))
+            .ok_or_else(|| TransportError::InvalidAck(value.to_string()))
+    }
+
+    fn send_orphan(&self, frame: &Frame) -> Result<u64, TransportError> {
+        let value = self.post("/v1/orphans", &frame.to_value())?;
+        value
+            .get("acked")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| TransportError::InvalidAck(value.to_string()))
+    }
+
+    fn lease_status(
+        &self,
+        session: Option<&str>,
+        machine: &str,
+    ) -> Result<LeaseStatus, TransportError> {
+        let value = self.post(
+            "/v1/lease/status",
+            &Value::Object(Map::from_iter([
+                ("machine".into(), Value::String(machine.to_owned())),
+                (
+                    "session".into(),
+                    session.map_or(Value::Null, |value| Value::String(value.to_owned())),
+                ),
+            ])),
+        )?;
+        Ok(LeaseStatus::from_value(&value)?)
+    }
+
+    fn acquire(&self, session: &str, machine: &str) -> Result<LeaseRow, TransportError> {
+        let value = self.post("/v1/lease/acquire", &lease_request(session, machine, []))?;
+        Ok(LeaseRow::from_value(&value)?)
+    }
+
+    fn renew(&self, session: &str, machine: &str, epoch: u64) -> Result<LeaseRow, TransportError> {
+        let value = self.post(
+            "/v1/lease/renew",
+            &lease_request(session, machine, [("epoch", epoch.into())]),
+        )?;
+        Ok(LeaseRow::from_value(&value)?)
+    }
+
+    fn takeover(
+        &self,
+        session: &str,
+        machine: &str,
+        expected_epoch: u64,
+        force: bool,
+    ) -> Result<TakeoverResult, TransportError> {
+        let value = self.post(
+            "/v1/lease/takeover",
+            &lease_request(
+                session,
+                machine,
+                [
+                    ("expected_epoch", expected_epoch.into()),
+                    ("force", force.into()),
+                ],
+            ),
+        )?;
+        Ok(TakeoverResult::from_value(&value)?)
+    }
+
+    fn lease_tips(&self, session: &str, machine: &str) -> Result<TakeoverResult, TransportError> {
+        let value = self.post("/v1/lease/tips", &lease_request(session, machine, []))?;
+        Ok(TakeoverResult::from_value(&value)?)
+    }
+
+    fn list_orphans(&self, machine: &str) -> Result<Vec<OrphanSummary>, TransportError> {
+        let value = self.post(
+            "/v1/orphans/list",
+            &Value::Object(Map::from_iter([(
+                "machine".into(),
+                Value::String(machine.to_owned()),
+            )])),
+        )?;
+        value
+            .as_array()
+            .ok_or_else(|| TransportError::InvalidResponse(value.to_string()))?
+            .iter()
+            .map(OrphanSummary::from_value)
+            .collect::<Result<_, _>>()
+            .map_err(TransportError::LeaseValue)
+    }
+}
+
+fn lease_request<const N: usize>(session: &str, machine: &str, extra: [(&str, Value); N]) -> Value {
+    let mut object = Map::from_iter([
+        ("machine".into(), Value::String(machine.to_owned())),
+        ("session".into(), Value::String(session.to_owned())),
+    ]);
+    object.extend(
+        extra
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value)),
+    );
+    Value::Object(object)
+}
+
+fn rejection(status: StatusCode, body: &str) -> TransportError {
+    let value = serde_json::from_str::<Value>(body).ok();
+    let code = value
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(Value::as_str);
+    let current_epoch = value
+        .as_ref()
+        .and_then(|value| value.get("current_epoch"))
+        .and_then(Value::as_u64);
+    match (code, current_epoch) {
+        (Some("fenced"), Some(current_epoch)) => TransportError::Fenced { current_epoch },
+        (Some("not_holder"), Some(current_epoch)) => TransportError::NotHolder { current_epoch },
+        _ => TransportError::Rejected {
+            status,
+            body: body.trim().to_owned(),
+        },
     }
 }
 
@@ -87,15 +260,23 @@ pub enum TransportError {
     Http(#[from] reqwest::Error),
     #[error("cannot encode or decode receiver JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("cannot decode lease response: {0}")]
+    LeaseValue(#[from] LeaseValueError),
+    #[error("receiver fenced this sender; current epoch is {current_epoch}")]
+    Fenced { current_epoch: u64 },
+    #[error("receiver says another machine holds the current epoch {current_epoch}")]
+    NotHolder { current_epoch: u64 },
     #[error("receiver answered {status}: {body}")]
     Rejected { status: StatusCode, body: String },
     #[error("receiver returned an invalid acknowledgement: {0}")]
     InvalidAck(String),
+    #[error("receiver returned an invalid response: {0}")]
+    InvalidResponse(String),
     #[error("receiver unavailable: {0}")]
     Unavailable(String),
     #[error("invalid receiver endpoint: {0}")]
     InvalidEndpoint(String),
-    #[error("M1 receiver endpoint must be an HTTP loopback IP URL: {0}")]
+    #[error("receiver endpoint must be an HTTP loopback IP URL: {0}")]
     NonLoopbackEndpoint(String),
 }
 
@@ -120,6 +301,60 @@ pub enum RelayError {
     InvalidMonotonic(String),
     #[error("stream generation overflowed for {session}/{stream}")]
     GenerationOverflow { session: String, stream: String },
+    #[error("cannot read machine identity {path}: {source}")]
+    MachineIdentity { path: PathBuf, source: io::Error },
+    #[error("machine identity {0} is empty")]
+    EmptyMachineIdentity(PathBuf),
+    #[error("lease request failed for session {session}: {source}")]
+    Lease {
+        session: String,
+        source: TransportError,
+    },
+    #[error("takeover state cannot find local stream {session}/{stream}")]
+    TakeoverStreamMissing { session: String, stream: String },
+    #[error(
+        "local stream {session}/{stream} does not match receiver tip generation {generation} sequence {seq}"
+    )]
+    TakeoverPrefix {
+        session: String,
+        stream: String,
+        generation: u64,
+        seq: u64,
+    },
+    #[error(
+        "local copy is {behind} frames behind the receiver tip for stream {session}/{stream} (local frames: {local_frames}, receiver tip sequence: {tip_seq})"
+    )]
+    TakeoverBehind {
+        session: String,
+        stream: String,
+        local_frames: u64,
+        tip_seq: u64,
+        behind: u64,
+    },
+}
+
+/// Failure while performing the preflight, CAS, and post-CAS takeover checks.
+#[derive(Debug, Error)]
+pub enum TakeoverCommandError {
+    #[error("cannot read receiver tips before takeover: {0}")]
+    Tips(#[source] TransportError),
+    #[error("takeover refused before changing the epoch: {0}")]
+    Precheck(#[source] RelayError),
+    #[error("takeover compare-and-swap failed: {0}")]
+    Cas(#[source] TransportError),
+    #[error(
+        "local copy is {behind} frames behind the receiver tip for stream {session}/{stream}; the epoch is now {epoch}; bring the copy up to date (M4 restore) before starting the sender"
+    )]
+    PostCommitBehind {
+        session: String,
+        stream: String,
+        behind: u64,
+        epoch: u64,
+    },
+    #[error(
+        "takeover committed epoch {epoch}, but sender state was not written: {source}; bring the copy up to date (M4 restore) before starting the sender"
+    )]
+    PostCommit { epoch: u64, source: RelayError },
 }
 
 /// Distribution of observation-to-acknowledgement latency.
@@ -137,7 +372,10 @@ pub struct StreamReport {
     pub session: String,
     pub stream: String,
     pub generation: u64,
+    pub epoch: u64,
+    pub fenced: bool,
     pub lines_acked: u64,
+    pub orphan_lines_acked: u64,
     pub bytes_acked: u64,
     pub backlog_lines: u64,
     pub backlog_bytes: u64,
@@ -161,6 +399,19 @@ pub struct Sender {
     observations: BTreeMap<ObservationKey, VecDeque<ObservationWindow>>,
     /// A stream receives a full prefix re-hash the first time this process sees it.
     startup_validated: BTreeSet<StreamKey>,
+    machine: Option<String>,
+    leases: BTreeMap<String, HeldLease>,
+}
+
+struct HeldLease {
+    epoch: u64,
+    renewed_at: Instant,
+}
+
+enum LeaseDecision {
+    Held(u64),
+    Fenced(u64),
+    Unavailable(String),
 }
 
 #[derive(Clone)]
@@ -201,6 +452,20 @@ struct PrefixCheck {
     bytes_read: u64,
 }
 
+struct PrefixScan {
+    check: Option<PrefixCheck>,
+    complete_lines: u64,
+}
+
+struct SendContext<'a, T> {
+    state_path: &'a Path,
+    transport: &'a T,
+    machine: &'a str,
+    pass_observation: &'a Observation,
+    observations: &'a mut BTreeMap<ObservationKey, VecDeque<ObservationWindow>>,
+    fenced_notice: Option<u64>,
+}
+
 impl PassReport {
     pub fn had_failures(&self) -> bool {
         self.streams.iter().any(|stream| stream.failure.is_some())
@@ -234,13 +499,181 @@ pub fn run_pass(
     Sender::default().run_pass(projects_root, state_path, transport)
 }
 
+/// Reads the stable local machine identity used by frames and lease calls.
+pub fn read_machine_identity() -> Result<String, RelayError> {
+    let path = PathBuf::from("/etc/machine-id");
+    let value = fs::read_to_string(&path).map_err(|source| RelayError::MachineIdentity {
+        path: path.clone(),
+        source,
+    })?;
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        Err(RelayError::EmptyMachineIdentity(path))
+    } else {
+        Ok(value)
+    }
+}
+
+/// Verifies that local carrier files contain every receiver tip.
+pub fn verify_takeover_source(
+    projects_root: &Path,
+    session: &str,
+    tips: &[StreamTip],
+) -> Result<(), RelayError> {
+    verified_takeover_streams(projects_root, session, tips, 0).map(drop)
+}
+
+/// Runs a read-only preflight, performs the CAS, then verifies and saves state.
+pub fn takeover_session(
+    projects_root: &Path,
+    state_path: &Path,
+    session: &str,
+    machine: &str,
+    force: bool,
+    transport: &impl Transport,
+) -> Result<TakeoverResult, TakeoverCommandError> {
+    let snapshot = transport
+        .lease_tips(session, machine)
+        .map_err(TakeoverCommandError::Tips)?;
+    verify_takeover_source(projects_root, session, &snapshot.tips)
+        .map_err(TakeoverCommandError::Precheck)?;
+    let takeover = transport
+        .takeover(session, machine, snapshot.row.epoch, force)
+        .map_err(TakeoverCommandError::Cas)?;
+    if let Err(error) = initialize_takeover_state(projects_root, state_path, session, &takeover) {
+        return match error {
+            RelayError::TakeoverBehind {
+                session,
+                stream,
+                behind,
+                ..
+            } => Err(TakeoverCommandError::PostCommitBehind {
+                session,
+                stream,
+                behind,
+                epoch: takeover.row.epoch,
+            }),
+            source => Err(TakeoverCommandError::PostCommit {
+                epoch: takeover.row.epoch,
+                source,
+            }),
+        };
+    }
+    Ok(takeover)
+}
+
+/// Adopts already verified receiver watermarks after a successful takeover.
+pub fn initialize_takeover_state(
+    projects_root: &Path,
+    state_path: &Path,
+    session: &str,
+    takeover: &TakeoverResult,
+) -> Result<(), RelayError> {
+    let verified =
+        verified_takeover_streams(projects_root, session, &takeover.tips, takeover.row.epoch)?;
+    let mut state = load_state(state_path)?;
+    state
+        .streams
+        .retain(|(known_session, _), _| known_session != session);
+    state.streams.extend(verified);
+    save_state(state_path, &state)?;
+    Ok(())
+}
+
+fn verified_takeover_streams(
+    projects_root: &Path,
+    session: &str,
+    receiver_tips: &[StreamTip],
+    epoch: u64,
+) -> Result<BTreeMap<(String, String), StreamState>, RelayError> {
+    let streams = discover_streams(projects_root)?
+        .into_iter()
+        .filter(|stream| stream.session == session)
+        .map(|stream| (stream.stream.clone(), stream))
+        .collect::<BTreeMap<_, _>>();
+    let mut tips = BTreeMap::<String, &StreamTip>::new();
+    for tip in receiver_tips {
+        if tips
+            .get(&tip.stream)
+            .is_none_or(|known| tip.generation > known.generation)
+        {
+            tips.insert(tip.stream.clone(), tip);
+        }
+    }
+    for stream in tips.keys() {
+        if !streams.contains_key(stream) {
+            return Err(RelayError::TakeoverStreamMissing {
+                session: session.to_owned(),
+                stream: stream.clone(),
+            });
+        }
+    }
+
+    let mut verified = BTreeMap::new();
+    for (name, stream) in streams {
+        let mut file = File::open(&stream.path).map_err(|source| RelayError::Source {
+            path: stream.path.clone(),
+            source,
+        })?;
+        let metadata = file.metadata().map_err(|source| RelayError::Source {
+            path: stream.path.clone(),
+            source,
+        })?;
+        let identity = file_identity(&metadata);
+        let mut entry = StreamState::new(stream.path.clone());
+        entry.epoch = epoch;
+        entry.device = identity.device;
+        entry.inode = identity.inode;
+        if let Some(tip) = tips.get(&name) {
+            let scan = scan_prefix(&mut file, &stream.path, tip.seq)?;
+            let Some(check) = scan.check else {
+                let receiver_frames = tip.seq.saturating_add(1);
+                return Err(RelayError::TakeoverBehind {
+                    session: session.to_owned(),
+                    stream: name,
+                    local_frames: scan.complete_lines,
+                    tip_seq: tip.seq,
+                    behind: receiver_frames.saturating_sub(scan.complete_lines),
+                });
+            };
+            if check.chain != tip.chain {
+                return Err(RelayError::TakeoverPrefix {
+                    session: session.to_owned(),
+                    stream: name,
+                    generation: tip.generation,
+                    seq: tip.seq,
+                });
+            }
+            entry.acked = Some(tip.seq);
+            entry.chain = tip.chain;
+            entry.generation = tip.generation;
+            entry.offset = check.offset;
+            entry.last_line_start = Some(check.last_line_start);
+            entry.last_line_hash = Some(check.last_line_hash);
+        }
+        verified.insert((session.to_owned(), stream.stream), entry);
+    }
+    Ok(verified)
+}
+
 impl Sender {
+    pub fn with_machine(machine: impl Into<String>) -> Self {
+        Self {
+            machine: Some(machine.into()),
+            ..Self::default()
+        }
+    }
+
     pub fn run_pass(
         &mut self,
         projects_root: &Path,
         state_path: &Path,
         transport: &impl Transport,
     ) -> Result<PassReport, RelayError> {
+        if self.machine.is_none() {
+            self.machine = Some(read_machine_identity()?);
+        }
+        let machine = self.machine.clone().expect("machine identity was set");
         let pass_started = Instant::now();
         let pass_observation = Observation {
             instant: pass_started,
@@ -275,6 +708,18 @@ impl Sender {
         });
 
         let mut state = load_state(state_path)?;
+        let sessions = streams
+            .iter()
+            .map(|(stream, _)| stream.session.clone())
+            .collect::<BTreeSet<_>>();
+        self.leases.retain(|session, _| sessions.contains(session));
+        let decisions = sessions
+            .into_iter()
+            .map(|session| {
+                let decision = self.ensure_session_lease(&session, &state, transport, &machine);
+                (session, decision)
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut reports = Vec::with_capacity(streams.len());
         let mut all_lags = LagAccumulator::default();
         for (stream, snapshot) in streams {
@@ -288,6 +733,41 @@ impl Sender {
                 require_full_check,
             )?;
             self.startup_validated.insert(stream_key.clone());
+            let decision = decisions
+                .get(&stream.session)
+                .expect("every discovered session has a lease decision");
+            let mut fenced_now = None;
+            {
+                let entry = state
+                    .streams
+                    .get_mut(&stream_key)
+                    .expect("prepare_stream inserted state");
+                match decision {
+                    LeaseDecision::Held(epoch) if !entry.fenced && entry.acked.is_none() => {
+                        entry.epoch = *epoch;
+                    }
+                    LeaseDecision::Held(epoch) if !entry.fenced && entry.epoch < *epoch => {
+                        entry.fenced = true;
+                        fenced_now = Some(*epoch);
+                    }
+                    LeaseDecision::Fenced(current_epoch) if !entry.fenced => {
+                        entry.fenced = true;
+                        fenced_now = Some(*current_epoch);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(current_epoch) = fenced_now {
+                let entry = state
+                    .streams
+                    .get(&stream_key)
+                    .expect("stream state still exists");
+                eprintln!(
+                    "semon-relay FENCED session={} stream={} old_epoch={} current_epoch={}; the old agent may still be running and its git side effects are not fenced",
+                    stream.session, stream.stream, entry.epoch, current_epoch
+                );
+                save_state(state_path, &state)?;
+            }
             let current_generation = state
                 .streams
                 .get(&stream_key)
@@ -298,15 +778,45 @@ impl Sender {
                     || name != &stream.stream
                     || *generation == current_generation
             });
-            let (report, lags) = send_stream(
-                &stream,
-                prepared,
-                &mut state,
-                state_path,
-                transport,
-                &pass_observation,
-                &mut self.observations,
-            )?;
+            let (report, lags) = match decision {
+                LeaseDecision::Unavailable(failure) => {
+                    let entry = state
+                        .streams
+                        .get(&stream_key)
+                        .expect("prepare_stream inserted state");
+                    (
+                        StreamReport {
+                            session: stream.session.clone(),
+                            stream: stream.stream.clone(),
+                            generation: entry.generation,
+                            epoch: entry.epoch,
+                            fenced: entry.fenced,
+                            lines_acked: 0,
+                            orphan_lines_acked: 0,
+                            bytes_acked: 0,
+                            backlog_lines: 0,
+                            backlog_bytes: 0,
+                            source_bytes_read: prepared.validation_bytes_read,
+                            lag: LagSummary::default(),
+                            failure: Some(failure.clone()),
+                        },
+                        LagAccumulator::default(),
+                    )
+                }
+                LeaseDecision::Held(_) | LeaseDecision::Fenced(_) => send_stream(
+                    &stream,
+                    prepared,
+                    &mut state,
+                    SendContext {
+                        state_path,
+                        transport,
+                        machine: &machine,
+                        pass_observation: &pass_observation,
+                        observations: &mut self.observations,
+                        fenced_notice: fenced_now,
+                    },
+                )?,
+            };
             reports.push(report);
             all_lags.merge(&lags);
         }
@@ -315,6 +825,75 @@ impl Sender {
             lag: all_lags.summary(),
             pass_duration: pass_started.elapsed(),
         })
+    }
+
+    fn ensure_session_lease(
+        &mut self,
+        session: &str,
+        state: &RelayState,
+        transport: &impl Transport,
+        machine: &str,
+    ) -> LeaseDecision {
+        if let Some(held) = self.leases.get(session) {
+            if held.renewed_at.elapsed() < Duration::from_millis(LEASE_RENEW_INTERVAL_MS) {
+                return LeaseDecision::Held(held.epoch);
+            }
+            return match transport.renew(session, machine, held.epoch) {
+                Ok(row) => {
+                    self.leases.insert(
+                        session.to_owned(),
+                        HeldLease {
+                            epoch: row.epoch,
+                            renewed_at: Instant::now(),
+                        },
+                    );
+                    LeaseDecision::Held(row.epoch)
+                }
+                Err(TransportError::Fenced { current_epoch })
+                | Err(TransportError::NotHolder { current_epoch }) => {
+                    self.leases.remove(session);
+                    LeaseDecision::Fenced(current_epoch)
+                }
+                Err(error) => LeaseDecision::Unavailable(error.to_string()),
+            };
+        }
+
+        let status = match transport.lease_status(Some(session), machine) {
+            Ok(status) => status,
+            Err(error) => return LeaseDecision::Unavailable(error.to_string()),
+        };
+        let row = match status.rows.into_iter().next() {
+            Some(row) if row.holder_machine != machine => row,
+            _ => match transport.acquire(session, machine) {
+                Ok(row) => row,
+                Err(error) => return LeaseDecision::Unavailable(error.to_string()),
+            },
+        };
+        let local_is_stale = state.streams.iter().any(|((known_session, _), stream)| {
+            known_session == session
+                && (stream.fenced || (stream.acked.is_some() && stream.epoch < row.epoch))
+        });
+        if row.holder_machine != machine {
+            return if local_is_stale {
+                LeaseDecision::Fenced(row.epoch)
+            } else {
+                LeaseDecision::Unavailable(format!(
+                    "lease is held by machine {} at epoch {}",
+                    row.holder_machine, row.epoch
+                ))
+            };
+        }
+        if local_is_stale {
+            return LeaseDecision::Fenced(row.epoch);
+        }
+        self.leases.insert(
+            session.to_owned(),
+            HeldLease {
+                epoch: row.epoch,
+                renewed_at: Instant::now(),
+            },
+        );
+        LeaseDecision::Held(row.epoch)
     }
 }
 
@@ -432,6 +1011,10 @@ fn hash_prefix(
     path: &Path,
     watermark: u64,
 ) -> Result<Option<PrefixCheck>, RelayError> {
+    Ok(scan_prefix(file, path, watermark)?.check)
+}
+
+fn scan_prefix(file: &mut File, path: &Path, watermark: u64) -> Result<PrefixScan, RelayError> {
     file.seek(SeekFrom::Start(0))
         .map_err(|source| source_error(path, source))?;
     let mut reader = BufReader::new(file);
@@ -442,23 +1025,33 @@ fn hash_prefix(
         let start = offset;
         let line = match read_line(&mut reader, path)? {
             LineRead::Complete(line) => line,
-            LineRead::Incomplete(_) => return Ok(None),
-            LineRead::End => return Ok(None),
+            LineRead::Incomplete(_) | LineRead::End => {
+                return Ok(PrefixScan {
+                    check: None,
+                    complete_lines: seq,
+                });
+            }
         };
         bytes_read += line.len() as u64;
         offset += line.len() as u64;
         chain = chain_line(&chain, &line);
         if seq == watermark {
-            return Ok(Some(PrefixCheck {
-                chain,
-                offset,
-                last_line_start: start,
-                last_line_hash: line_hash(&line),
-                bytes_read,
-            }));
+            return Ok(PrefixScan {
+                check: Some(PrefixCheck {
+                    chain,
+                    offset,
+                    last_line_start: start,
+                    last_line_hash: line_hash(&line),
+                    bytes_read,
+                }),
+                complete_lines: seq.saturating_add(1),
+            });
         }
     }
-    Ok(None)
+    Ok(PrefixScan {
+        check: None,
+        complete_lines: 0,
+    })
 }
 
 fn reset_generation(
@@ -481,18 +1074,24 @@ fn reset_generation(
     state.inode = identity.inode;
     state.last_line_start = None;
     state.last_line_hash = None;
+    state.orphaned = None;
     Ok(())
 }
 
-fn send_stream(
+fn send_stream<T: Transport>(
     stream: &DiscoveredStream,
     prepared: PreparedStream,
     state: &mut RelayState,
-    state_path: &Path,
-    transport: &impl Transport,
-    pass_observation: &Observation,
-    observations: &mut BTreeMap<ObservationKey, VecDeque<ObservationWindow>>,
+    context: SendContext<'_, T>,
 ) -> Result<(StreamReport, LagAccumulator), RelayError> {
+    let SendContext {
+        state_path,
+        transport,
+        machine,
+        pass_observation,
+        observations,
+        fenced_notice,
+    } = context;
     let key = (stream.session.clone(), stream.stream.clone());
     let mut entry = state
         .streams
@@ -514,14 +1113,21 @@ fn send_stream(
         .map_or(0, |watermark| watermark.saturating_add(1));
     let mut chain = entry.chain;
     let mut position = entry.offset;
-    let mut delivering = true;
+    let mut delivering = !entry.fenced;
+    let mut orphaning = entry.fenced;
     let mut lines_acked = 0_u64;
+    let mut orphan_lines_acked = 0_u64;
     let mut bytes_acked = 0_u64;
     let mut backlog_lines = 0_u64;
     let mut backlog_bytes = 0_u64;
     let mut source_bytes_read = prepared.validation_bytes_read;
     let mut lags = LagAccumulator::default();
-    let mut failure = None;
+    let mut failure = fenced_notice.map(|current_epoch| {
+        format!(
+            "sender fenced at epoch {}; current epoch is {current_epoch}; tail is being retained as orphan data",
+            entry.epoch
+        )
+    });
 
     loop {
         let line_start = position;
@@ -537,33 +1143,35 @@ fn send_stream(
         position += line.len() as u64;
         chain = chain_line(&chain, &line);
 
+        let observed = if let Some(pending) =
+            observations.get(&observation_key).and_then(|windows| {
+                windows
+                    .iter()
+                    .find(|window| position <= window.through_offset)
+            }) {
+            pending.observation.clone()
+        } else if position <= prepared.observed_size {
+            pass_observation.clone()
+        } else {
+            Observation::now(&pass_observation.boot_id)?
+        };
+        let frame = Frame {
+            key: FrameKey {
+                session: stream.session.clone(),
+                stream: stream.stream.clone(),
+                generation: entry.generation,
+                epoch: entry.epoch,
+                seq,
+            },
+            machine: machine.to_owned(),
+            chain,
+            sender_wall_ns: observed.wall_ns,
+            sender_mono_ns: observed.mono_ns,
+            boot_id: observed.boot_id.clone(),
+            line: line.clone(),
+        };
+
         if delivering {
-            let observed = if let Some(pending) =
-                observations.get(&observation_key).and_then(|windows| {
-                    windows
-                        .iter()
-                        .find(|window| position <= window.through_offset)
-                }) {
-                pending.observation.clone()
-            } else if position <= prepared.observed_size {
-                pass_observation.clone()
-            } else {
-                Observation::now(&pass_observation.boot_id)?
-            };
-            let frame = Frame {
-                key: FrameKey {
-                    session: stream.session.clone(),
-                    stream: stream.stream.clone(),
-                    generation: entry.generation,
-                    epoch: 0,
-                    seq,
-                },
-                chain,
-                sender_wall_ns: observed.wall_ns,
-                sender_mono_ns: observed.mono_ns,
-                boot_id: observed.boot_id.clone(),
-                line: line.clone(),
-            };
             match transport.send(&frame) {
                 Ok(acked) if acked == seq => {
                     let acknowledged_after = observed.instant.elapsed();
@@ -592,6 +1200,20 @@ fn send_stream(
                         "receiver acknowledged sequence {acked}, expected {seq}"
                     ));
                 }
+                Err(TransportError::Fenced { current_epoch })
+                | Err(TransportError::NotHolder { current_epoch }) => {
+                    entry.fenced = true;
+                    delivering = false;
+                    orphaning = true;
+                    eprintln!(
+                        "semon-relay FENCED session={} stream={} old_epoch={} current_epoch={}; the old agent may still be running and its git side effects are not fenced",
+                        stream.session, stream.stream, entry.epoch, current_epoch
+                    );
+                    failure = Some(format!(
+                        "sender fenced at epoch {}; current epoch is {current_epoch}; tail is being retained as orphan data",
+                        entry.epoch
+                    ));
+                }
                 Err(error) => {
                     remember_failed_pass(
                         observations,
@@ -604,6 +1226,24 @@ fn send_stream(
                     );
                     delivering = false;
                     failure = Some(error.to_string());
+                }
+            }
+        }
+        if orphaning && entry.orphaned.is_none_or(|orphaned| seq > orphaned) {
+            match transport.send_orphan(&frame) {
+                Ok(acked) if acked == seq => {
+                    entry.orphaned = Some(seq);
+                    orphan_lines_acked += 1;
+                }
+                Ok(acked) => {
+                    orphaning = false;
+                    failure = Some(format!(
+                        "orphan receiver acknowledged sequence {acked}, expected {seq}"
+                    ));
+                }
+                Err(error) => {
+                    orphaning = false;
+                    failure = Some(format!("orphan upload failed: {error}"));
                 }
             }
         }
@@ -626,7 +1266,10 @@ fn send_stream(
         session: stream.session.clone(),
         stream: stream.stream.clone(),
         generation: entry.generation,
+        epoch: entry.epoch,
+        fenced: entry.fenced,
         lines_acked,
+        orphan_lines_acked,
         bytes_acked,
         backlog_lines,
         backlog_bytes,
