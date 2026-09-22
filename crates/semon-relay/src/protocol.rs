@@ -7,6 +7,18 @@ use crate::EncryptedPayload;
 /// The chain value before sequence zero.
 pub const ZERO_CHAIN: [u8; 32] = [0; 32];
 
+/// Maximum requested payload represented by one frame-list page. A single
+/// frame larger than this limit is still returned alone so pagination always
+/// makes progress.
+pub const FRAME_PAGE_MAX_BYTES: usize = 256 * 1024;
+/// Maximum frames represented by one frame-list page.
+pub const FRAME_PAGE_MAX_FRAMES: usize = 64;
+/// Maximum frames sent under one HTTP request signature.
+pub const FRAME_BATCH_MAX_FRAMES: usize = 32;
+/// Target serialized size for one frame batch. A larger single frame is sent
+/// alone and remains subject to the receiver's request-body limit.
+pub const FRAME_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
+
 /// The stable identity of one source frame.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FrameKey {
@@ -48,6 +60,14 @@ pub struct Frame {
     pub sender_mono_ns: u64,
     pub boot_id: String,
     pub content: FrameContent,
+}
+
+/// One bounded page of a single stream generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FramePage {
+    pub frames: Vec<Frame>,
+    /// Pass this sequence back as `after_seq` to fetch the next page.
+    pub next: Option<u64>,
 }
 
 /// Errors in a wire frame.
@@ -252,6 +272,34 @@ impl Frame {
             boot_id: string("boot_id")?,
             content,
         })
+    }
+}
+
+impl FramePage {
+    pub(crate) fn to_value(&self) -> Value {
+        Value::Object(Map::from_iter([
+            (
+                "frames".into(),
+                Value::Array(self.frames.iter().map(Frame::to_value).collect()),
+            ),
+            ("next".into(), self.next.map_or(Value::Null, Value::from)),
+        ]))
+    }
+
+    pub(crate) fn from_value(value: &Value) -> Result<Self, FrameError> {
+        let object = value.as_object().ok_or(FrameError::NotObject)?;
+        let frames = object
+            .get("frames")
+            .and_then(Value::as_array)
+            .ok_or(FrameError::Field("frames"))?
+            .iter()
+            .map(Frame::from_value)
+            .collect::<Result<_, _>>()?;
+        let next = match object.get("next") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.as_u64().ok_or(FrameError::Field("next"))?),
+        };
+        Ok(Self { frames, next })
     }
 }
 

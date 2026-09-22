@@ -603,6 +603,43 @@ fn https_round_trip_covers_encryption_takeover_and_orphans() {
     assert_eq!(tips[0].epoch, 1);
 }
 
+#[test]
+fn http_transport_parses_lease_status_larger_than_four_kibibytes() {
+    let temp = TempDir::new("large-lease-status");
+    let root = temp.path().join("receiver");
+    let signing = signing(31);
+    enroll_machine(
+        &root,
+        &hex::encode(signing.verifying_key().as_bytes()),
+        "machine-a",
+    )
+    .unwrap();
+    let signer = RequestSigner::new(signing);
+    let machine = signer.machine().to_owned();
+    let receiver = Receiver::open(&root).unwrap();
+    for index in 0..120 {
+        receiver
+            .acquire(
+                &format!("synthetic-session-{index:03}-with-a-long-name"),
+                &machine,
+            )
+            .unwrap();
+    }
+    drop(receiver);
+
+    let port = start_http_receiver(root);
+    let transport = HttpTransport::secure(
+        format!("http://127.0.0.1:{port}/v1/frames"),
+        Duration::from_secs(5),
+        signer,
+        None,
+    )
+    .unwrap();
+    let status = transport.lease_status(None, &machine).unwrap();
+    assert_eq!(status.rows.len(), 120);
+    assert!(format!("{status:?}").len() > 4096);
+}
+
 fn collect_files(path: &Path, output: &mut Vec<Vec<u8>>) {
     for entry in fs::read_dir(path).unwrap() {
         let entry = entry.unwrap();
