@@ -4,10 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Loopback replication for append-only Claude Code session streams."
+description = "Encrypted failover replication for append-only Claude Code session streams."
 
 [dependencies]
+age.workspace = true
+chacha20poly1305.workspace = true
+ed25519-dalek.workspace = true
 hex.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

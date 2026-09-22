@@ -8,16 +8,18 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use reqwest::{StatusCode, blocking::Client};
+use age::x25519;
+use reqwest::{Certificate, StatusCode, blocking::Client};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    DiscoveredStream, Frame, FrameKey, LEASE_RENEW_INTERVAL_MS, LeaseRow, LeaseStatus,
-    OrphanSummary, RelayState, StreamState, StreamTip, TakeoverResult, ZERO_CHAIN, chain_line,
-    discover_streams, discovery::DiscoveryError, lease::LeaseValueError, load_state, save_state,
-    state::StateError,
+    CryptoError, DataKey, DiscoveredStream, Frame, FrameKey, FrameMode, LEASE_RENEW_INTERVAL_MS,
+    LeaseRow, LeaseStatus, OrphanSummary, RelayState, RequestSigner, StreamState, StreamTip,
+    TakeoverResult, ZERO_CHAIN, chain_line, decrypt_envelope, decrypt_frame, discover_streams,
+    discovery::DiscoveryError, encrypt_envelope, encrypt_frame, generate_data_key,
+    lease::LeaseValueError, load_state, save_state, state::StateError,
 };
 
 type StreamKey = (String, String);
@@ -78,12 +80,48 @@ pub trait Transport {
     fn list_orphans(&self, _machine: &str) -> Result<Vec<OrphanSummary>, TransportError> {
         Ok(Vec::new())
     }
+
+    fn put_envelope(
+        &self,
+        _session: &str,
+        _machine: &str,
+        _envelope: &[u8],
+        _replace: bool,
+        _force: bool,
+    ) -> Result<(), TransportError> {
+        Err(TransportError::Unavailable(
+            "transport does not implement data-key envelopes".into(),
+        ))
+    }
+
+    fn get_envelope(
+        &self,
+        _session: &str,
+        _machine: &str,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
+        Err(TransportError::Unavailable(
+            "transport does not implement data-key envelopes".into(),
+        ))
+    }
+
+    fn list_envelope_sessions(&self, _machine: &str) -> Result<Vec<String>, TransportError> {
+        Err(TransportError::Unavailable(
+            "transport does not implement data-key envelopes".into(),
+        ))
+    }
+
+    fn list_frames(&self, _session: &str, _machine: &str) -> Result<Vec<Frame>, TransportError> {
+        Err(TransportError::Unavailable(
+            "transport does not implement frame reads".into(),
+        ))
+    }
 }
 
 /// The blocking HTTP transport used by the command-line sender.
 pub struct HttpTransport {
     client: Client,
     endpoint: reqwest::Url,
+    signer: Option<RequestSigner>,
 }
 
 impl HttpTransport {
@@ -105,6 +143,51 @@ impl HttpTransport {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             endpoint: url,
+            signer: None,
+        })
+    }
+
+    pub fn secure(
+        endpoint: impl Into<String>,
+        timeout: Duration,
+        signer: RequestSigner,
+        tls_ca: Option<&Path>,
+    ) -> Result<Self, TransportError> {
+        let endpoint = endpoint.into();
+        let url = reqwest::Url::parse(&endpoint)
+            .map_err(|error| TransportError::InvalidEndpoint(error.to_string()))?;
+        let literal_loopback = url
+            .host_str()
+            .and_then(|host| host.parse::<IpAddr>().ok())
+            .is_some_and(|address| address.is_loopback());
+        match url.scheme() {
+            "http" if literal_loopback => {}
+            "http" => return Err(TransportError::InsecureRemoteEndpoint(endpoint)),
+            "https" if tls_ca.is_none() => {
+                return Err(TransportError::MissingTlsPin(endpoint));
+            }
+            "https" => {}
+            _ => return Err(TransportError::InvalidEndpoint(endpoint)),
+        }
+        let mut builder = Client::builder()
+            .timeout(timeout)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(path) = tls_ca {
+            let bytes = fs::read(path).map_err(|source| TransportError::TlsCa {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let certificate = Certificate::from_pem(&bytes)
+                .map_err(|error| TransportError::InvalidTlsCa(error.to_string()))?;
+            builder = builder
+                .tls_built_in_root_certs(false)
+                .add_root_certificate(certificate);
+        }
+        Ok(Self {
+            client: builder.build()?,
+            endpoint: url,
+            signer: Some(signer),
         })
     }
 
@@ -112,12 +195,23 @@ impl HttpTransport {
         let mut endpoint = self.endpoint.clone();
         endpoint.set_path(path);
         endpoint.set_query(None);
-        let response = self
+        let body = serde_json::to_vec(value)?;
+        let mut request = self
             .client
             .post(endpoint)
             .header("content-type", "application/json")
-            .body(serde_json::to_vec(value)?)
-            .send()?;
+            .body(body.clone());
+        if let Some(signer) = &self.signer {
+            let signed = signer
+                .sign("POST", path, &body)
+                .map_err(|error| TransportError::Signing(error.to_string()))?;
+            request = request
+                .header("X-Semon-Machine", signed.machine)
+                .header("X-Semon-Timestamp", signed.timestamp)
+                .header("X-Semon-Nonce", signed.nonce)
+                .header("X-Semon-Signature", signed.signature);
+        }
+        let response = request.send()?;
         let status = response.status();
         let mut body = response.text().unwrap_or_default();
         body.truncate(4096);
@@ -218,6 +312,76 @@ impl Transport for HttpTransport {
             .collect::<Result<_, _>>()
             .map_err(TransportError::LeaseValue)
     }
+
+    fn put_envelope(
+        &self,
+        session: &str,
+        machine: &str,
+        envelope: &[u8],
+        replace: bool,
+        force: bool,
+    ) -> Result<(), TransportError> {
+        self.post(
+            &format!("/v1/keys/{}", hex::encode(session.as_bytes())),
+            &Value::Object(Map::from_iter([
+                ("envelope".into(), Value::String(hex::encode(envelope))),
+                ("force".into(), force.into()),
+                ("machine".into(), Value::String(machine.to_owned())),
+                ("replace".into(), replace.into()),
+                ("session".into(), Value::String(session.to_owned())),
+            ])),
+        )?;
+        Ok(())
+    }
+
+    fn get_envelope(
+        &self,
+        session: &str,
+        machine: &str,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
+        let value = self.post(
+            &format!("/v1/keys/{}/get", hex::encode(session.as_bytes())),
+            &lease_request(session, machine, []),
+        )?;
+        match value.get("envelope") {
+            Some(Value::Null) | None => Ok(None),
+            Some(Value::String(value)) => hex::decode(value)
+                .map(Some)
+                .map_err(|error| TransportError::InvalidResponse(error.to_string())),
+            Some(_) => Err(TransportError::InvalidResponse(value.to_string())),
+        }
+    }
+
+    fn list_envelope_sessions(&self, machine: &str) -> Result<Vec<String>, TransportError> {
+        let value = self.post(
+            "/v1/keys/list",
+            &Value::Object(Map::from_iter([(
+                "machine".into(),
+                Value::String(machine.to_owned()),
+            )])),
+        )?;
+        value
+            .as_array()
+            .ok_or_else(|| TransportError::InvalidResponse(value.to_string()))?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| TransportError::InvalidResponse(value.to_string()))
+            })
+            .collect()
+    }
+
+    fn list_frames(&self, session: &str, machine: &str) -> Result<Vec<Frame>, TransportError> {
+        let value = self.post("/v1/frames/list", &lease_request(session, machine, []))?;
+        value
+            .as_array()
+            .ok_or_else(|| TransportError::InvalidResponse(value.to_string()))?
+            .iter()
+            .map(|value| Frame::from_value(value).map_err(TransportError::Frame))
+            .collect()
+    }
 }
 
 fn lease_request<const N: usize>(session: &str, machine: &str, extra: [(&str, Value); N]) -> Value {
@@ -262,6 +426,8 @@ pub enum TransportError {
     Json(#[from] serde_json::Error),
     #[error("cannot decode lease response: {0}")]
     LeaseValue(#[from] LeaseValueError),
+    #[error("cannot decode receiver frame: {0}")]
+    Frame(#[from] crate::protocol::FrameError),
     #[error("receiver fenced this sender; current epoch is {current_epoch}")]
     Fenced { current_epoch: u64 },
     #[error("receiver says another machine holds the current epoch {current_epoch}")]
@@ -278,6 +444,16 @@ pub enum TransportError {
     InvalidEndpoint(String),
     #[error("receiver endpoint must be an HTTP loopback IP URL: {0}")]
     NonLoopbackEndpoint(String),
+    #[error("remote receiver endpoint must use HTTPS: {0}")]
+    InsecureRemoteEndpoint(String),
+    #[error("HTTPS receiver endpoint requires --tls-ca pinning: {0}")]
+    MissingTlsPin(String),
+    #[error("cannot read TLS CA certificate {path}: {source}")]
+    TlsCa { path: PathBuf, source: io::Error },
+    #[error("invalid TLS CA certificate: {0}")]
+    InvalidTlsCa(String),
+    #[error("cannot sign receiver request: {0}")]
+    Signing(String),
 }
 
 /// Fatal local errors from a sender pass.
@@ -287,6 +463,12 @@ pub enum RelayError {
     Discovery(#[from] DiscoveryError),
     #[error(transparent)]
     State(#[from] StateError),
+    #[error(transparent)]
+    Crypto(#[from] CryptoError),
+    #[error("session {0} has no data-key envelope")]
+    EnvelopeMissing(String),
+    #[error("encrypted session verification failed: {0}")]
+    Verification(String),
     #[error("cannot read source stream {path}: {source}")]
     Source { path: PathBuf, source: io::Error },
     #[error("system clock is before the Unix epoch")]
@@ -357,6 +539,68 @@ pub enum TakeoverCommandError {
     PostCommit { epoch: u64, source: RelayError },
 }
 
+#[derive(Debug, Error)]
+pub enum VerifyError {
+    #[error("cannot retrieve session {session} envelope: {source}")]
+    EnvelopeTransport {
+        session: String,
+        source: TransportError,
+    },
+    #[error("session {0} has no data-key envelope")]
+    EnvelopeMissing(String),
+    #[error("cannot unwrap session data key: {0}")]
+    Envelope(#[source] Box<CryptoError>),
+    #[error("cannot retrieve session {session} frames: {source}")]
+    FrameTransport {
+        session: String,
+        source: TransportError,
+    },
+    #[error("frame for session {actual} was returned while verifying {expected}")]
+    Session { expected: String, actual: String },
+    #[error("plaintext frame found while verifying encrypted session {0}")]
+    Plaintext(String),
+    #[error("sequence gap for {stream} generation {generation}: expected {expected}, got {actual}")]
+    Gap {
+        stream: String,
+        generation: u64,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("epoch moved backwards for {stream} generation {generation} at sequence {seq}")]
+    Epoch {
+        stream: String,
+        generation: u64,
+        seq: u64,
+    },
+    #[error("cannot decrypt {stream} generation {generation} sequence {seq}: {source}")]
+    Decrypt {
+        stream: String,
+        generation: u64,
+        seq: u64,
+        source: Box<CryptoError>,
+    },
+    #[error("chain break for {stream} generation {generation} at sequence {seq}")]
+    Chain {
+        stream: String,
+        generation: u64,
+        seq: u64,
+    },
+    #[error(
+        "receiver tip has no verified frame for {stream} generation {generation} sequence {seq}"
+    )]
+    Tip {
+        stream: String,
+        generation: u64,
+        seq: u64,
+    },
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VerifyReport {
+    pub frames: u64,
+    pub streams: u64,
+}
+
 /// Distribution of observation-to-acknowledgement latency.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LagSummary {
@@ -401,6 +645,13 @@ pub struct Sender {
     startup_validated: BTreeSet<StreamKey>,
     machine: Option<String>,
     leases: BTreeMap<String, HeldLease>,
+    crypto: Option<SenderCrypto>,
+}
+
+struct SenderCrypto {
+    identity: x25519::Identity,
+    recipients: Vec<x25519::Recipient>,
+    data_keys: BTreeMap<String, DataKey>,
 }
 
 struct HeldLease {
@@ -464,6 +715,7 @@ struct SendContext<'a, T> {
     pass_observation: &'a Observation,
     observations: &'a mut BTreeMap<ObservationKey, VecDeque<ObservationWindow>>,
     fenced_notice: Option<u64>,
+    data_key: Option<&'a DataKey>,
 }
 
 impl PassReport {
@@ -562,6 +814,232 @@ pub fn takeover_session(
     Ok(takeover)
 }
 
+pub fn verify_encrypted_session(
+    session: &str,
+    identity: &x25519::Identity,
+    machine: &str,
+    transport: &impl Transport,
+) -> Result<VerifyReport, VerifyError> {
+    let envelope = transport
+        .get_envelope(session, machine)
+        .map_err(|source| VerifyError::EnvelopeTransport {
+            session: session.to_owned(),
+            source,
+        })?
+        .ok_or_else(|| VerifyError::EnvelopeMissing(session.to_owned()))?;
+    let key = decrypt_envelope(&envelope, identity)
+        .map_err(|error| VerifyError::Envelope(Box::new(error)))?;
+    let frames =
+        transport
+            .list_frames(session, machine)
+            .map_err(|source| VerifyError::FrameTransport {
+                session: session.to_owned(),
+                source,
+            })?;
+    let tips = verify_encrypted_frames(session, frames, &key)?;
+    Ok(VerifyReport {
+        frames: tips.iter().map(|tip| tip.seq.saturating_add(1)).sum(),
+        streams: tips.len() as u64,
+    })
+}
+
+pub fn verify_encrypted_frames(
+    session: &str,
+    mut frames: Vec<Frame>,
+    key: &DataKey,
+) -> Result<Vec<StreamTip>, VerifyError> {
+    frames.sort_by(|left, right| {
+        (
+            &left.key.stream,
+            left.key.generation,
+            left.key.seq,
+            left.key.epoch,
+        )
+            .cmp(&(
+                &right.key.stream,
+                right.key.generation,
+                right.key.seq,
+                right.key.epoch,
+            ))
+    });
+    let mut tips = BTreeMap::<(String, u64), StreamTip>::new();
+    for frame in frames {
+        if frame.key.session != session {
+            return Err(VerifyError::Session {
+                expected: session.to_owned(),
+                actual: frame.key.session,
+            });
+        }
+        let payload = frame
+            .encrypted_payload()
+            .ok_or_else(|| VerifyError::Plaintext(session.to_owned()))?;
+        let content_tag = payload.tag;
+        let tip_key = (frame.key.stream.clone(), frame.key.generation);
+        let previous = tips.get(&tip_key);
+        let expected = previous.map_or(0, |tip| tip.seq.saturating_add(1));
+        if frame.key.seq != expected {
+            return Err(VerifyError::Gap {
+                stream: frame.key.stream,
+                generation: frame.key.generation,
+                expected,
+                actual: frame.key.seq,
+            });
+        }
+        if previous.is_some_and(|tip| frame.key.epoch < tip.epoch) {
+            return Err(VerifyError::Epoch {
+                stream: frame.key.stream,
+                generation: frame.key.generation,
+                seq: frame.key.seq,
+            });
+        }
+        let (chain, line) =
+            decrypt_frame(key, &frame.key, &frame.machine, payload).map_err(|source| {
+                VerifyError::Decrypt {
+                    stream: frame.key.stream.clone(),
+                    generation: frame.key.generation,
+                    seq: frame.key.seq,
+                    source: Box::new(source),
+                }
+            })?;
+        let previous_chain = previous.and_then(|tip| tip.chain).unwrap_or(ZERO_CHAIN);
+        if chain != chain_line(&previous_chain, &line) {
+            return Err(VerifyError::Chain {
+                stream: frame.key.stream,
+                generation: frame.key.generation,
+                seq: frame.key.seq,
+            });
+        }
+        tips.insert(
+            tip_key,
+            StreamTip {
+                stream: frame.key.stream,
+                generation: frame.key.generation,
+                epoch: frame.key.epoch,
+                seq: frame.key.seq,
+                mode: FrameMode::Encrypted,
+                chain: Some(chain),
+                tag: Some(content_tag),
+            },
+        );
+    }
+    Ok(tips.into_values().collect())
+}
+
+pub fn takeover_session_encrypted(
+    projects_root: &Path,
+    state_path: &Path,
+    session: &str,
+    machine: &str,
+    force: bool,
+    identity: &x25519::Identity,
+    transport: &impl Transport,
+) -> Result<TakeoverResult, TakeoverCommandError> {
+    let snapshot = transport
+        .lease_tips(session, machine)
+        .map_err(TakeoverCommandError::Tips)?;
+    let envelope = transport
+        .get_envelope(session, machine)
+        .map_err(TakeoverCommandError::Tips)?
+        .ok_or_else(|| {
+            TakeoverCommandError::Precheck(RelayError::EnvelopeMissing(session.to_owned()))
+        })?;
+    let key = decrypt_envelope(&envelope, identity)
+        .map_err(|source| TakeoverCommandError::Precheck(RelayError::Crypto(source)))?;
+    let frames = transport
+        .list_frames(session, machine)
+        .map_err(TakeoverCommandError::Tips)?;
+    let verified = verify_encrypted_frames(session, frames, &key).map_err(|error| {
+        TakeoverCommandError::Precheck(RelayError::Verification(error.to_string()))
+    })?;
+    let precheck_tips = match_verified_tips(&snapshot.tips, &verified).map_err(|error| {
+        TakeoverCommandError::Precheck(RelayError::Verification(error.to_string()))
+    })?;
+    verify_takeover_source(projects_root, session, &precheck_tips)
+        .map_err(TakeoverCommandError::Precheck)?;
+    let takeover = transport
+        .takeover(session, machine, snapshot.row.epoch, force)
+        .map_err(TakeoverCommandError::Cas)?;
+    let frames = transport.list_frames(session, machine).map_err(|source| {
+        TakeoverCommandError::PostCommit {
+            epoch: takeover.row.epoch,
+            source: RelayError::Verification(source.to_string()),
+        }
+    })?;
+    let verified = verify_encrypted_frames(session, frames, &key).map_err(|error| {
+        TakeoverCommandError::PostCommit {
+            epoch: takeover.row.epoch,
+            source: RelayError::Verification(error.to_string()),
+        }
+    })?;
+    let post_tips = match_verified_tips(&takeover.tips, &verified).map_err(|error| {
+        TakeoverCommandError::PostCommit {
+            epoch: takeover.row.epoch,
+            source: RelayError::Verification(error.to_string()),
+        }
+    })?;
+    let verified_takeover = TakeoverResult {
+        row: takeover.row.clone(),
+        tips: post_tips,
+    };
+    if let Err(error) =
+        initialize_takeover_state(projects_root, state_path, session, &verified_takeover)
+    {
+        return match error {
+            RelayError::TakeoverBehind {
+                session,
+                stream,
+                behind,
+                ..
+            } => Err(TakeoverCommandError::PostCommitBehind {
+                session,
+                stream,
+                behind,
+                epoch: takeover.row.epoch,
+            }),
+            source => Err(TakeoverCommandError::PostCommit {
+                epoch: takeover.row.epoch,
+                source,
+            }),
+        };
+    }
+    Ok(takeover)
+}
+
+fn match_verified_tips(
+    receiver: &[StreamTip],
+    verified: &[StreamTip],
+) -> Result<Vec<StreamTip>, VerifyError> {
+    let verified = verified
+        .iter()
+        .map(|tip| {
+            (
+                (tip.stream.clone(), tip.generation, tip.epoch, tip.seq),
+                tip,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    receiver
+        .iter()
+        .map(|tip| {
+            let verified = verified
+                .get(&(tip.stream.clone(), tip.generation, tip.epoch, tip.seq))
+                .ok_or_else(|| VerifyError::Tip {
+                    stream: tip.stream.clone(),
+                    generation: tip.generation,
+                    seq: tip.seq,
+                })?;
+            if tip.mode != FrameMode::Encrypted || tip.tag != verified.tag {
+                return Err(VerifyError::Tip {
+                    stream: tip.stream.clone(),
+                    generation: tip.generation,
+                    seq: tip.seq,
+                });
+            }
+            Ok((*verified).clone())
+        })
+        .collect()
+}
+
 /// Adopts already verified receiver watermarks after a successful takeover.
 pub fn initialize_takeover_state(
     projects_root: &Path,
@@ -636,7 +1114,7 @@ fn verified_takeover_streams(
                     behind: receiver_frames.saturating_sub(scan.complete_lines),
                 });
             };
-            if check.chain != tip.chain {
+            if Some(check.chain) != tip.chain {
                 return Err(RelayError::TakeoverPrefix {
                     session: session.to_owned(),
                     stream: name,
@@ -645,7 +1123,7 @@ fn verified_takeover_streams(
                 });
             }
             entry.acked = Some(tip.seq);
-            entry.chain = tip.chain;
+            entry.chain = tip.chain.expect("plaintext tip has a chain");
             entry.generation = tip.generation;
             entry.offset = check.offset;
             entry.last_line_start = Some(check.last_line_start);
@@ -660,6 +1138,22 @@ impl Sender {
     pub fn with_machine(machine: impl Into<String>) -> Self {
         Self {
             machine: Some(machine.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn encrypted(
+        machine: impl Into<String>,
+        identity: x25519::Identity,
+        recipients: Vec<x25519::Recipient>,
+    ) -> Self {
+        Self {
+            machine: Some(machine.into()),
+            crypto: Some(SenderCrypto {
+                identity,
+                recipients,
+                data_keys: BTreeMap::new(),
+            }),
             ..Self::default()
         }
     }
@@ -713,13 +1207,28 @@ impl Sender {
             .map(|(stream, _)| stream.session.clone())
             .collect::<BTreeSet<_>>();
         self.leases.retain(|session, _| sessions.contains(session));
-        let decisions = sessions
-            .into_iter()
+        let mut decisions = sessions
+            .iter()
+            .cloned()
             .map(|session| {
                 let decision = self.ensure_session_lease(&session, &state, transport, &machine);
                 (session, decision)
             })
             .collect::<BTreeMap<_, _>>();
+        let mut pass_keys = BTreeMap::new();
+        if self.crypto.is_some() {
+            for session in &sessions {
+                let may_create = matches!(decisions.get(session), Some(LeaseDecision::Held(_)));
+                match self.ensure_data_key(session, may_create, transport, &machine) {
+                    Ok(key) => {
+                        pass_keys.insert(session.clone(), key);
+                    }
+                    Err(error) => {
+                        decisions.insert(session.clone(), LeaseDecision::Unavailable(error));
+                    }
+                }
+            }
+        }
         let mut reports = Vec::with_capacity(streams.len());
         let mut all_lags = LagAccumulator::default();
         for (stream, snapshot) in streams {
@@ -814,6 +1323,7 @@ impl Sender {
                         pass_observation: &pass_observation,
                         observations: &mut self.observations,
                         fenced_notice: fenced_now,
+                        data_key: pass_keys.get(&stream.session),
                     },
                 )?,
             };
@@ -894,6 +1404,47 @@ impl Sender {
             },
         );
         LeaseDecision::Held(row.epoch)
+    }
+
+    fn ensure_data_key(
+        &mut self,
+        session: &str,
+        may_create: bool,
+        transport: &impl Transport,
+        machine: &str,
+    ) -> Result<DataKey, String> {
+        let crypto = self.crypto.as_mut().expect("caller checked crypto mode");
+        if let Some(key) = crypto.data_keys.get(session) {
+            return Ok(*key);
+        }
+        let key = match transport.get_envelope(session, machine) {
+            Ok(Some(envelope)) => decrypt_envelope(&envelope, &crypto.identity)
+                .map_err(|error| format!("cannot unwrap session {session} data key: {error}"))?,
+            Ok(None) if may_create => {
+                let key = generate_data_key();
+                let envelope = encrypt_envelope(&key, &crypto.recipients)
+                    .map_err(|error| format!("cannot wrap session {session} data key: {error}"))?;
+                if let Err(first_error) =
+                    transport.put_envelope(session, machine, &envelope, false, false)
+                {
+                    let existing = transport
+                        .get_envelope(session, machine)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| first_error.to_string())?;
+                    decrypt_envelope(&existing, &crypto.identity).map_err(|error| {
+                        format!(
+                            "cannot unwrap concurrently created session {session} data key: {error}"
+                        )
+                    })?
+                } else {
+                    key
+                }
+            }
+            Ok(None) => return Err(format!("session {session} has no data-key envelope")),
+            Err(error) => return Err(error.to_string()),
+        };
+        crypto.data_keys.insert(session.to_owned(), key);
+        Ok(key)
     }
 }
 
@@ -1091,6 +1642,7 @@ fn send_stream<T: Transport>(
         pass_observation,
         observations,
         fenced_notice,
+        data_key,
     } = context;
     let key = (stream.session.clone(), stream.stream.clone());
     let mut entry = state
@@ -1155,20 +1707,32 @@ fn send_stream<T: Transport>(
         } else {
             Observation::now(&pass_observation.boot_id)?
         };
-        let frame = Frame {
-            key: FrameKey {
-                session: stream.session.clone(),
-                stream: stream.stream.clone(),
-                generation: entry.generation,
-                epoch: entry.epoch,
-                seq,
-            },
-            machine: machine.to_owned(),
-            chain,
-            sender_wall_ns: observed.wall_ns,
-            sender_mono_ns: observed.mono_ns,
-            boot_id: observed.boot_id.clone(),
-            line: line.clone(),
+        let frame_key = FrameKey {
+            session: stream.session.clone(),
+            stream: stream.stream.clone(),
+            generation: entry.generation,
+            epoch: entry.epoch,
+            seq,
+        };
+        let frame = if let Some(data_key) = data_key {
+            Frame::encrypted(
+                frame_key.clone(),
+                machine.to_owned(),
+                observed.wall_ns,
+                observed.mono_ns,
+                observed.boot_id.clone(),
+                encrypt_frame(data_key, &frame_key, machine, &chain, &line)?,
+            )
+        } else {
+            Frame::plaintext(
+                frame_key,
+                machine.to_owned(),
+                chain,
+                observed.wall_ns,
+                observed.mono_ns,
+                observed.boot_id.clone(),
+                line.clone(),
+            )
         };
 
         if delivering {
