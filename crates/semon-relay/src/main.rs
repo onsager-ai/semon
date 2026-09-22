@@ -8,7 +8,9 @@ use std::{
     time::Duration,
 };
 
-use semon_relay::{HttpTransport, PassReport, Sender, run_pass, serve};
+use semon_relay::{
+    HttpTransport, PassReport, Sender, Transport, read_machine_identity, serve, takeover_session,
+};
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8734/v1/frames";
 
@@ -26,6 +28,8 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
     match arguments.next().as_deref() {
         Some("send") => run_send(arguments),
         Some("receive") => run_receive(arguments),
+        Some("lease") => run_lease(arguments),
+        Some("orphans") => run_orphans(arguments),
         Some("-h" | "--help") => Err(usage()),
         Some(command) => Err(format!("unknown command: {command}\n{}", usage())),
         None => Err(usage()),
@@ -43,6 +47,7 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
     let mut projects = default_projects()?;
     let mut state = default_state()?;
     let mut endpoint = DEFAULT_ENDPOINT.to_owned();
+    let mut machine = None;
     let mut interval = Duration::from_secs(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -51,6 +56,7 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
             "--projects" => projects = value(&mut arguments, "--projects")?.into(),
             "--state" => state = value(&mut arguments, "--state")?.into(),
             "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
+            "--machine" => machine = Some(value(&mut arguments, "--machine")?),
             "--interval-ms" => {
                 let raw = value(&mut arguments, "--interval-ms")?;
                 let milliseconds = raw
@@ -68,20 +74,22 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
     let mode = mode.ok_or_else(|| format!("send requires --once or --follow\n{}", usage()))?;
     let transport =
         HttpTransport::new(endpoint, Duration::from_secs(10)).map_err(|error| error.to_string())?;
+    let machine = machine_identity(machine)?;
+    let mut sender = Sender::with_machine(machine);
     match mode {
         SendMode::Once => {
-            let report =
-                run_pass(&projects, &state, &transport).map_err(|error| error.to_string())?;
+            let report = sender
+                .run_pass(&projects, &state, &transport)
+                .map_err(|error| error.to_string())?;
             print_report(&report).map_err(|error| error.to_string())?;
             if report.had_failures() {
-                Err("one or more streams remain unacknowledged; a later pass will retry".into())
+                Err("one or more streams failed or were fenced; source state was retained".into())
             } else {
                 Ok(())
             }
         }
         SendMode::Follow => {
             let mut backoff = Duration::from_secs(1);
-            let mut sender = Sender::default();
             loop {
                 let report = sender
                     .run_pass(&projects, &state, &transport)
@@ -97,6 +105,117 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
             }
         }
     }
+}
+
+fn run_lease(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let command = arguments
+        .next()
+        .ok_or_else(|| format!("lease requires status or takeover\n{}", usage()))?;
+    let mut session = None;
+    let mut force = false;
+    let mut projects = None;
+    let mut state = None;
+    let mut endpoint = DEFAULT_ENDPOINT.to_owned();
+    let mut machine = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--session" => session = Some(value(&mut arguments, "--session")?),
+            "--force" => force = true,
+            "--projects" => projects = Some(value(&mut arguments, "--projects")?.into()),
+            "--state" => state = Some(value(&mut arguments, "--state")?.into()),
+            "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
+            "--machine" => machine = Some(value(&mut arguments, "--machine")?),
+            "-h" | "--help" => return Err(usage()),
+            _ => return Err(format!("unknown lease argument: {argument}\n{}", usage())),
+        }
+    }
+    let machine = machine_identity(machine)?;
+    let transport =
+        HttpTransport::new(endpoint, Duration::from_secs(10)).map_err(|error| error.to_string())?;
+    match command.as_str() {
+        "status" => {
+            if force {
+                return Err("lease status does not accept --force".into());
+            }
+            let status = transport
+                .lease_status(session.as_deref(), &machine)
+                .map_err(|error| error.to_string())?;
+            for row in status.rows {
+                println!(
+                    "lease session={} epoch={} holder={} expires_at_ms={}",
+                    row.session, row.epoch, row.holder_machine, row.lease_expires_at_ms
+                );
+            }
+            for record in status.takeovers {
+                println!(
+                    "takeover session={} previous_epoch={} epoch={} previous_holder={} holder={} forced={} taken_at_ms={}",
+                    record.session,
+                    record.previous_epoch,
+                    record.epoch,
+                    record.previous_holder,
+                    record.holder_machine,
+                    record.forced,
+                    record.taken_at_ms
+                );
+            }
+            Ok(())
+        }
+        "takeover" => {
+            let session = session.ok_or_else(|| "lease takeover requires --session".to_owned())?;
+            let projects = projects.map_or_else(default_projects, Ok)?;
+            let state = state.map_or_else(default_state, Ok)?;
+            let takeover =
+                takeover_session(&projects, &state, &session, &machine, force, &transport)
+                    .map_err(|error| error.to_string())?;
+            println!(
+                "takeover session={} epoch={} holder={} forced={} streams={}",
+                session,
+                takeover.row.epoch,
+                takeover.row.holder_machine,
+                force,
+                takeover.tips.len()
+            );
+            Ok(())
+        }
+        _ => Err(format!("unknown lease command: {command}\n{}", usage())),
+    }
+}
+
+fn run_orphans(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    match arguments.next().as_deref() {
+        Some("list") => {}
+        Some(command) => return Err(format!("unknown orphans command: {command}\n{}", usage())),
+        None => return Err(format!("orphans requires list\n{}", usage())),
+    }
+    let mut endpoint = DEFAULT_ENDPOINT.to_owned();
+    let mut machine = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
+            "--machine" => machine = Some(value(&mut arguments, "--machine")?),
+            "-h" | "--help" => return Err(usage()),
+            _ => return Err(format!("unknown orphans argument: {argument}\n{}", usage())),
+        }
+    }
+    let machine = machine_identity(machine)?;
+    let transport =
+        HttpTransport::new(endpoint, Duration::from_secs(10)).map_err(|error| error.to_string())?;
+    for orphan in transport
+        .list_orphans(&machine)
+        .map_err(|error| error.to_string())?
+    {
+        println!(
+            "orphan session={} stream={} generation={} fenced_epoch={} frames={} first_seq={} last_seq={}",
+            orphan.session,
+            orphan.stream,
+            orphan.generation,
+            orphan.fenced_epoch,
+            orphan.frames,
+            orphan.first_seq,
+            orphan.last_seq
+        );
+    }
+    Ok(())
 }
 
 fn run_receive(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
@@ -126,12 +245,16 @@ fn run_receive(mut arguments: impl Iterator<Item = String>) -> Result<(), String
 fn print_report(report: &PassReport) -> io::Result<()> {
     for stream in &report.streams {
         println!(
-            "relay stream session={} stream={} generation={} acked_lines={} acked_bytes={} \
-             lag_p50_ms={} lag_p95_ms={} lag_max_ms={} backlog_lines={} backlog_bytes={}{}",
+            "relay stream session={} stream={} generation={} epoch={} fenced={} acked_lines={} \
+             orphan_acked_lines={} acked_bytes={} lag_p50_ms={} lag_p95_ms={} lag_max_ms={} \
+             backlog_lines={} backlog_bytes={}{}",
             stream.session,
             stream.stream,
             stream.generation,
+            stream.epoch,
+            stream.fenced,
             stream.lines_acked,
+            stream.orphan_lines_acked,
             stream.bytes_acked,
             millis(stream.lag.p50),
             millis(stream.lag.p95),
@@ -201,11 +324,23 @@ fn home() -> Result<PathBuf, String> {
         .ok_or_else(|| "HOME is not set".into())
 }
 
+fn machine_identity(override_value: Option<String>) -> Result<String, String> {
+    match override_value {
+        Some(machine) if machine.trim().is_empty() => Err("--machine must not be empty".into()),
+        Some(machine) => Ok(machine),
+        None => read_machine_identity().map_err(|error| error.to_string()),
+    }
+}
+
 fn usage() -> String {
     "Usage: semon-relay send (--once | --follow) [--projects PATH] [--state PATH] \
-     [--endpoint http://127.0.0.1:PORT/v1/frames] [--interval-ms N]\n\
+     [--endpoint http://127.0.0.1:PORT/v1/frames] [--machine ID] [--interval-ms N]\n\
      Usage: semon-relay receive --listen 127.0.0.1:PORT --dir PATH\n\
-     M1 sends plaintext and therefore accepts loopback IP endpoints only."
+     Usage: semon-relay lease status [--session S] [--endpoint URL] [--machine ID]\n\
+     Usage: semon-relay lease takeover --session S [--force] [--projects PATH] [--state PATH] \
+     [--endpoint URL] [--machine ID]\n\
+     Usage: semon-relay orphans list [--endpoint URL] [--machine ID]\n\
+     The relay sends plaintext and therefore accepts loopback IP endpoints only."
         .into()
 }
 

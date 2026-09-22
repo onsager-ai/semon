@@ -83,7 +83,7 @@ or transmits raw forensic records or carrier labels.
 ## Relay Claude Code session files
 
 `semon-relay` is a separate failover path for the carrier's complete session
-files. It does not read the Semon store or use `semon ship`. M1 is deliberately
+files. It does not read the Semon store or use `semon ship`. The relay remains
 **loopback-only**: frames contain unencrypted transcript bytes, so both the
 receiver bind address and sender endpoint must be literal loopback IP addresses.
 Nothing may be sent to another machine until client-side encryption exists.
@@ -99,12 +99,45 @@ That directory contains plaintext transcript frames. The receiver creates its
 root with private permissions, but it should still be treated as sensitive
 local state and never placed in a repository.
 
+The receiver also owns one lease row per session: the current epoch, holder
+machine, and expiry. It uses only its own clock for the three-minute lease;
+sender wall time never decides expiry. A holder renews about once per minute in
+resident follow mode. The machine identity defaults to `/etc/machine-id` and
+can be overridden with `--machine` for synthetic tests. Every frame and lease
+request carries that identity.
+
 Run one sender pass, or poll continuously:
 
 ```sh
 cargo run --locked -p semon-relay -- send --once
 cargo run --locked -p semon-relay -- send --follow
 ```
+
+Inspect the register and its append-only takeover log, or take over an expired
+lease with a compare-and-swap:
+
+```sh
+cargo run --locked -p semon-relay -- lease status
+cargo run --locked -p semon-relay -- lease status --session SESSION_ID
+cargo run --locked -p semon-relay -- \
+  lease takeover --session SESSION_ID
+```
+
+Takeover before expiry is refused unless `--force` is supplied. Before changing
+the register, the command reads the current receiver tips and verifies that the
+local carrier files contain every acknowledged prefix with matching chains. A
+missing, behind, or mismatched stream refuses the takeover without incrementing
+the epoch. A successful compare-and-swap records the previous holder and whether
+it was forced, then initializes local sender watermarks from the receiver's
+contiguous tips.
+
+There is one unavoidable race between that read-only check and the compare-and-
+swap: the old holder can append another frame before it is fenced. The command
+checks the tips returned by the successful takeover again. If the local copy is
+then behind, the epoch has already advanced, but sender state is not written and
+the command exits non-zero with the stream and missing frame count. Bring the
+copy up to date through the future M4 restore before starting the sender. Writing
+restored files back is not implemented here.
 
 The sender reads `~/.claude/projects` by default and writes its atomic ack
 watermarks to `$XDG_STATE_HOME/semon/relay.json`, falling back to
@@ -115,6 +148,26 @@ identity, and the start and hash of its last acknowledged line. Every process
 start re-hashes the complete acknowledged prefix. Later resident follow passes
 check identity, length, and that last line, then seek directly to the saved
 offset instead of re-reading retained history.
+
+The sender checks the register before its first frame for every known session.
+Frames below the current epoch are rejected with a distinct fencing response,
+and frames at the current epoch are accepted only from its holder. Sequence and
+chain continuity continue across an epoch boundary: the new holder's first
+frame follows the previous live tip rather than starting again at sequence zero.
+
+When a sender learns it was fenced, it permanently stops advancing that stream
+in live history and logs the event. Complete records above its live watermark
+are uploaded under the receiver's separate orphan namespace, without being
+merged into or gap-checked against live history. List retained orphan groups
+with:
+
+```sh
+cargo run --locked -p semon-relay -- orphans list
+```
+
+Fencing controls Semon frames only. It does not stop the old Claude Code agent,
+and it cannot prevent that agent from editing files, pushing branches, or
+opening pull requests after takeover.
 
 The source files remain the spool when the receiver is unavailable; the sender
 holds one frame at a time and retains one observation range per failed pass,
@@ -127,7 +180,7 @@ p50/p95/max observation-to-ack lag, remaining backlog, and pass wall duration.
 The conservative loss bound for timer mode is roughly the timer interval plus
 pass duration plus reported lag. For follow mode it is the configured sleep
 interval plus pass duration plus lag: a line appended during sleep cannot be
-observed until the next pass begins. A known M1 limit is that a same-inode,
+observed until the next pass begins. A known relay limit is that a same-inode,
 in-place rewrite inside the already-acknowledged prefix which does not shrink
 the file and leaves the last acknowledged line unchanged is detected only by
 the full re-hash at the next process start.

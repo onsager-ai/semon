@@ -15,7 +15,7 @@ use std::os::unix::fs::OpenOptionsExt;
 
 use crate::ZERO_CHAIN;
 
-const VERSION: u64 = 2;
+const VERSION: u64 = 3;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Durable sender state, keyed by the protocol's session and stream fields.
@@ -31,6 +31,12 @@ pub struct StreamState {
     pub acked: Option<u64>,
     pub chain: [u8; 32],
     pub generation: u64,
+    /// Lease epoch stamped on live and orphan frames from this source.
+    pub epoch: u64,
+    /// A fenced stream never sends to live history again.
+    pub fenced: bool,
+    /// Highest sequence retained in the orphan namespace.
+    pub orphaned: Option<u64>,
     /// Byte immediately after the acknowledged line.
     pub offset: u64,
     /// Device and inode identify replacement between resident passes.
@@ -49,6 +55,9 @@ impl StreamState {
             acked: None,
             chain: ZERO_CHAIN,
             generation: 0,
+            epoch: 0,
+            fenced: false,
+            orphaned: None,
             offset: 0,
             device: 0,
             inode: 0,
@@ -104,6 +113,8 @@ impl RelayState {
                     ),
                     ("chain".into(), Value::String(hex::encode(state.chain))),
                     ("device".into(), Value::Number(state.device.into())),
+                    ("epoch".into(), Value::Number(state.epoch.into())),
+                    ("fenced".into(), Value::Bool(state.fenced)),
                     ("generation".into(), Value::Number(state.generation.into())),
                     ("inode".into(), Value::Number(state.inode.into())),
                     (
@@ -119,6 +130,10 @@ impl RelayState {
                             .map_or(Value::Null, |value| value.into()),
                     ),
                     ("offset".into(), Value::Number(state.offset.into())),
+                    (
+                        "orphaned".into(),
+                        state.orphaned.map_or(Value::Null, |value| value.into()),
+                    ),
                     ("path".into(), Value::String(path.to_owned())),
                     ("session".into(), Value::String(session.clone())),
                     ("stream".into(), Value::String(stream.clone())),
@@ -139,9 +154,9 @@ impl RelayState {
             .get("version")
             .and_then(Value::as_u64)
             .ok_or_else(|| StateError::Invalid("version is missing".into()))?;
-        if !matches!(version, 1 | VERSION) {
+        if !matches!(version, 1 | 2 | VERSION) {
             return Err(StateError::Invalid(format!(
-                "unsupported version {version}; expected 1 or {VERSION}"
+                "unsupported version {version}; expected 1, 2, or {VERSION}"
             )));
         }
         let entries = object
@@ -217,6 +232,20 @@ impl RelayState {
                 acked,
                 chain,
                 generation,
+                epoch: if version < 3 { 0 } else { unsigned("epoch")? },
+                fenced: if version < 3 {
+                    false
+                } else {
+                    entry
+                        .get("fenced")
+                        .and_then(Value::as_bool)
+                        .ok_or_else(|| StateError::Invalid("stream fenced is missing".into()))?
+                },
+                orphaned: if version < 3 {
+                    None
+                } else {
+                    optional_unsigned("orphaned")?
+                },
                 offset: if version == 1 { 0 } else { unsigned("offset")? },
                 device: if version == 1 { 0 } else { unsigned("device")? },
                 inode: if version == 1 { 0 } else { unsigned("inode")? },

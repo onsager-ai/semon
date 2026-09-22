@@ -19,6 +19,7 @@ pub struct FrameKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame {
     pub key: FrameKey,
+    pub machine: String,
     pub chain: [u8; 32],
     pub sender_wall_ns: u64,
     pub sender_mono_ns: u64,
@@ -53,6 +54,7 @@ impl Frame {
                 Value::Number(self.key.generation.into()),
             ),
             ("line".into(), Value::String(hex::encode(&self.line))),
+            ("machine".into(), Value::String(self.machine.clone())),
             ("sender_mono_ns".into(), self.sender_mono_ns.into()),
             ("sender_wall_ns".into(), self.sender_wall_ns.into()),
             ("seq".into(), Value::Number(self.key.seq.into())),
@@ -62,6 +64,17 @@ impl Frame {
     }
 
     pub(crate) fn from_value(value: &Value) -> Result<Self, FrameError> {
+        Self::from_value_with_legacy_machine(value, false)
+    }
+
+    pub(crate) fn from_stored_value(value: &Value) -> Result<Self, FrameError> {
+        Self::from_value_with_legacy_machine(value, true)
+    }
+
+    fn from_value_with_legacy_machine(
+        value: &Value,
+        allow_missing_machine: bool,
+    ) -> Result<Self, FrameError> {
         let object = value.as_object().ok_or(FrameError::NotObject)?;
         let string = |field: &'static str| {
             object
@@ -88,6 +101,11 @@ impl Frame {
         let chain: [u8; 32] = chain
             .try_into()
             .map_err(|_| FrameError::ChainLength(chain_length))?;
+        let machine = match object.get("machine") {
+            None if allow_missing_machine => String::new(),
+            Some(Value::String(machine)) => machine.clone(),
+            _ => return Err(FrameError::Field("machine")),
+        };
         Ok(Self {
             key: FrameKey {
                 session: string("session")?,
@@ -96,6 +114,7 @@ impl Frame {
                 epoch: integer("epoch")?,
                 seq: integer("seq")?,
             },
+            machine,
             chain,
             sender_wall_ns: integer("sender_wall_ns")?,
             sender_mono_ns: integer("sender_mono_ns")?,
