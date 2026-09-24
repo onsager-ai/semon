@@ -459,18 +459,9 @@ cargo run --locked -p semon-store --bin semon -- forensic \
   --out /path/to/forensic-excerpt.txt
 ```
 
-Output is one raw record per line, verbatim bytes as stored. `--out FILE`
-writes to a file created (and re-tightened) `0600` instead of stdout; it is
-an option, not a requirement — bulk selection to stdout works without it,
-by design, so the command's honest bulk capability isn't fenced off behind a
-narrower one nobody chose. See
-`docs/design/forensic-retention-and-exposure.md` for the full reasoning.
+Output is one complete source line per raw record, verbatim bytes as stored. A Claude line with several projected blocks appears once, and replaying identical bytes at the same line key does not add another raw row. `--out FILE` writes to a file created (and re-tightened) `0600` instead of stdout; it is an option, not a requirement — bulk selection to stdout works without it, by design, so the command's honest bulk capability isn't fenced off behind a narrower one nobody chose. See `docs/design/forensic-retention-and-exposure.md` for the full reasoning.
 
-`--session` and `--day` select each raw row's own session and timestamp, so
-they include complete lines that produced no semantic trace or occurrence.
-When a line has no source timestamp, capture time is used. `--trace` selects
-by projected content and therefore cannot select unprojected raw rows, which
-have no trace id; the command states that limit when the selector is used.
+`--session` and `--day` select each raw row's own session and timestamp, so they include complete lines that produced no semantic trace or occurrence. When a line has no source timestamp, capture time is used. `--trace` selects by projected content and therefore cannot select unprojected raw rows, which have no trace links; the command states that limit when the selector is used.
 
 ## Forget forensic records
 
@@ -499,18 +490,7 @@ A bare `semon forget --forensic` with no selector is refused rather than
 deleting everything — this is the first destructive, irreversible command in
 the tool, so it never defaults to the maximal action.
 
-`--session` and `--before` select each raw record's own provenance, not by
-content: `--session ID` deletes exactly that session's own raw records, and
-`--before YYYY-MM-DD` deletes exactly the raw rows whose own timestamp is
-strictly before that UTC day's start, including unprojected lines. A trace
-that recurs after the cutoff keeps only its later capture. `--trace ID` is
-the exception: it matches projected content, so it removes that trace's raw
-records from *every* session it was captured in. It cannot remove
-unprojected rows because they have no trace id. A raw record written before
-the schema-v3 session/sequence link existed cannot have its timestamp
-backfilled during the schema-v4 migration and cannot be reached by
-`--session` or `--before`; the command reports how many such records exist
-and that only `--trace` can remove them individually.
+`--session` and `--before` select each raw record's own provenance, not by content: `--session ID` deletes exactly that session's own raw records, and `--before YYYY-MM-DD` deletes exactly the raw rows whose own timestamp is strictly before that UTC day's start, including unprojected lines. A trace that recurs after the cutoff keeps only its later capture. `--trace ID` is the exception: it matches projected content, so it removes every complete raw source line linked to that trace across sessions. If that line projected other traces, its bytes are deleted too; those traces and their occurrences remain. It cannot remove unprojected rows because they have no trace links. A raw record written before the schema-v3 session/sequence link existed cannot have its timestamp backfilled during the schema-v4 migration and cannot be reached by `--session` or `--before`; the command reports how many such records exist and that only `--trace` can remove them individually.
 
 Without `--yes`, the command prompts interactively, stating exactly how many
 raw records will be deleted and that it cannot be undone. If stdin is not a

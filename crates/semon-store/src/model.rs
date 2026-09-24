@@ -146,12 +146,12 @@ impl CaptureResult {
 
     /// Reports whether this capture created the canonical row.
     ///
-    /// This is false for a repeat capture, while a new raw row is still added.
+    /// This is false for a repeat capture.
     pub fn canonical_inserted(&self) -> bool {
         self.canonical_inserted
     }
 
-    /// Returns the newly appended forensic record's local row identifier.
+    /// Returns the forensic record's local row identifier, reused on replay.
     pub fn raw_record_id(&self) -> i64 {
         self.raw_record_id
     }
@@ -385,16 +385,16 @@ pub struct LogFilter {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawCarrierRecord {
     id: i64,
-    trace_id: Option<TraceId>,
+    trace_ids: Vec<TraceId>,
     carrier: String,
     bytes: Vec<u8>,
 }
 
 impl RawCarrierRecord {
-    pub(crate) fn new(id: i64, trace_id: Option<TraceId>, carrier: String, bytes: Vec<u8>) -> Self {
+    pub(crate) fn new(id: i64, trace_ids: Vec<TraceId>, carrier: String, bytes: Vec<u8>) -> Self {
         Self {
             id,
-            trace_id,
+            trace_ids,
             carrier,
             bytes,
         }
@@ -405,10 +405,10 @@ impl RawCarrierRecord {
         self.id
     }
 
-    /// Returns the canonical trace identity this record archives, or `None`
-    /// when the complete source line had no semantic projection.
-    pub fn trace_id(&self) -> Option<&TraceId> {
-        self.trace_id.as_ref()
+    /// Returns the sorted trace identities projected by this source line.
+    /// An unprojected line has no trace ids.
+    pub fn trace_ids(&self) -> &[TraceId] {
+        &self.trace_ids
     }
 
     /// Returns the label of the producing carrier.
