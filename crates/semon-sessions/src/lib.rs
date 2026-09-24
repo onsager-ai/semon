@@ -12,6 +12,9 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod viewer;
+pub use viewer::{ServeOptions, serve};
+
 #[derive(Clone, Debug)]
 pub struct Options {
     pub claude_home: PathBuf,
@@ -112,9 +115,15 @@ impl Node {
 }
 
 #[derive(Default, Serialize, Deserialize)]
-struct Index {
+pub(crate) struct Index {
     version: u32,
     files: BTreeMap<String, Entry>,
+}
+
+impl Index {
+    pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
+        self.files.keys().map(String::as_str)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -122,12 +131,17 @@ struct Entry {
     dev: u64,
     ino: u64,
     offset: u64,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    modified_ns: u128,
     summary: Summary,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Summary {
     malformed_lines: u64,
+    line_count: u64,
     first: Option<String>,
     last: Option<String>,
     cwd: Option<String>,
@@ -137,6 +151,8 @@ struct Summary {
     tools: BTreeMap<String, String>,
     closed_tools: BTreeSet<String>,
     codex_tokens: Tokens,
+    // Never persisted: a marker can carry a handoff prompt path, and the
+    // on-disk cache must not retain session content (risk:secret).
     #[serde(skip)]
     marker: Option<Marker>,
 }
@@ -200,18 +216,18 @@ fn file_list(root: &Path, output: &mut Vec<PathBuf>, suffix: &str) -> io::Result
     Ok(())
 }
 
-fn read_index(path: &Path) -> Index {
+pub(crate) fn read_index(path: &Path) -> Index {
     fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok())
-        .filter(|index| index.version == 2)
+        .filter(|index| index.version == 3)
         .unwrap_or_else(|| Index {
-            version: 2,
+            version: 3,
             ..Index::default()
         })
 }
 
-fn save_index(path: &Path, index: &Index) -> io::Result<()> {
+pub(crate) fn save_index(path: &Path, index: &Index) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -226,8 +242,18 @@ fn save_index(path: &Path, index: &Index) -> io::Result<()> {
     file.flush()
 }
 
-fn summarize(path: &Path, harness: &str, index: &mut Index) -> io::Result<Summary> {
+fn summarize(
+    path: &Path,
+    harness: &str,
+    index: &mut Index,
+    dirty: &mut bool,
+) -> io::Result<Summary> {
     let metadata = fs::metadata(path)?;
+    let modified_ns = metadata
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     #[cfg(unix)]
     let (dev, ino) = (metadata.dev(), metadata.ino());
     #[cfg(not(unix))]
@@ -236,14 +262,33 @@ fn summarize(path: &Path, harness: &str, index: &mut Index) -> io::Result<Summar
     let prior = index.files.remove(&key);
     let mut summary = Summary::default();
     let mut offset = 0;
-    if let Some(entry) = prior
-        && entry.dev == dev
-        && entry.ino == ino
-        && entry.offset <= metadata.len()
-    {
-        summary = entry.summary;
-        offset = entry.offset;
+    if let Some(entry) = prior {
+        if entry.dev == dev
+            && entry.ino == ino
+            && entry.size == metadata.len()
+            && entry.modified_ns == modified_ns
+        {
+            let mut result = entry.summary.clone();
+            if harness == "codex" {
+                // The marker is never persisted (it can carry a handoff
+                // prompt path), so it must be recomputed even when the rest
+                // of the file is unchanged. This is a bounded first-turn
+                // scan, not a reread of the whole file.
+                result.marker = read_first_marker(path)?;
+            }
+            index.files.insert(key, entry);
+            return Ok(result);
+        }
+        if entry.dev == dev
+            && entry.ino == ino
+            && entry.offset <= metadata.len()
+            && (metadata.len() > entry.size || entry.modified_ns == modified_ns)
+        {
+            summary = entry.summary;
+            offset = entry.offset;
+        }
     }
+    *dirty = true;
     let mut file = fs::File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     let mut reader = BufReader::new(file);
@@ -258,6 +303,7 @@ fn summarize(path: &Path, harness: &str, index: &mut Index) -> io::Result<Summar
             break;
         }
         offset += length as u64;
+        summary.line_count += 1;
         let Ok(record) = serde_json::from_slice::<Value>(&line) else {
             summary.malformed_lines += 1;
             continue;
@@ -281,6 +327,8 @@ fn summarize(path: &Path, harness: &str, index: &mut Index) -> io::Result<Summar
             dev,
             ino,
             offset,
+            size: metadata.len(),
+            modified_ns,
             summary: summary.clone(),
         },
     );
@@ -515,7 +563,7 @@ fn codex_id_from_filename(path: &Path) -> Option<String> {
     Some(id.unwrap_or(stem).to_owned())
 }
 
-fn proc_start(root: &Path, pid: u32) -> Option<u64> {
+pub(crate) fn proc_start(root: &Path, pid: u32) -> Option<u64> {
     let stat = fs::read_to_string(root.join(pid.to_string()).join("stat")).ok()?;
     let close = stat.rfind(')')?;
     stat.get(close + 1..)?
@@ -707,9 +755,20 @@ fn has_live_process(node: &Node) -> bool {
 
 /// Collects a read-only, metadata-only session tree and writes the metadata cache.
 pub fn collect(options: &Options) -> io::Result<Vec<Node>> {
+    let mut index = read_index(&options.cache);
+    let mut dirty = false;
+    let result = collect_with_index(options, &mut index, &mut dirty)?;
+    save_index(&options.cache, &index)?;
+    Ok(result)
+}
+
+pub(crate) fn collect_with_index(
+    options: &Options,
+    index: &mut Index,
+    dirty: &mut bool,
+) -> io::Result<Vec<Node>> {
     let now = unix_now();
     let cutoff = now.saturating_sub(options.since.as_secs());
-    let mut index = read_index(&options.cache);
     let mut flat = BTreeMap::<String, Node>::new();
     let mut parents = BTreeMap::<String, String>::new();
     let mut claude_paths = BTreeMap::<String, PathBuf>::new();
@@ -790,7 +849,7 @@ pub fn collect(options: &Options) -> io::Result<Vec<Node>> {
             stem
         };
         let key = format!("claude:{id}");
-        let summary = summarize(&path, "claude", &mut index).ok();
+        let summary = summarize(&path, "claude", index, dirty).ok();
         let node = flat.entry(key.clone()).or_insert_with(|| {
             Node::new(
                 id.into(),
@@ -957,7 +1016,7 @@ pub fn collect(options: &Options) -> io::Result<Vec<Node>> {
         let summary = if metadata_unreadable {
             None
         } else {
-            summarize(&path, "codex", &mut index).ok()
+            summarize(&path, "codex", index, dirty).ok()
         };
         if let Some(summary) = &summary {
             apply_summary(&mut node, summary, now);
@@ -1007,7 +1066,6 @@ pub fn collect(options: &Options) -> io::Result<Vec<Node>> {
             node
         });
     }
-    save_index(&options.cache, &index)?;
 
     if let Some(id) = &options.session {
         let key = if id.starts_with("claude:") || id.starts_with("codex:") {
