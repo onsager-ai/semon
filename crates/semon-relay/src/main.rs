@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env,
     io::{self, Write},
     net::SocketAddr,
@@ -51,7 +52,9 @@ enum SendMode {
 
 fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
     let mut mode = None;
-    let mut projects = default_projects()?;
+    let mut projects_arg = None;
+    let mut all = false;
+    let mut sessions = BTreeSet::new();
     let mut state = default_state()?;
     let mut endpoint = DEFAULT_ENDPOINT.to_owned();
     let mut machine = None;
@@ -63,7 +66,13 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         match argument.as_str() {
             "--once" => set_mode(&mut mode, SendMode::Once)?,
             "--follow" => set_mode(&mut mode, SendMode::Follow)?,
-            "--projects" => projects = value(&mut arguments, "--projects")?.into(),
+            "--projects" => {
+                projects_arg = Some(PathBuf::from(value(&mut arguments, "--projects")?));
+            }
+            "--all" => all = true,
+            "--session" => {
+                sessions.insert(value(&mut arguments, "--session")?);
+            }
             "--state" => state = value(&mut arguments, "--state")?.into(),
             "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
             "--machine" => machine = Some(value(&mut arguments, "--machine")?),
@@ -85,6 +94,24 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         }
     }
     let mode = mode.ok_or_else(|| format!("send requires --once or --follow\n{}", usage()))?;
+    // No implicit default root: shipping every real session by accident
+    // (the incident this guard exists for) requires an explicit choice.
+    let projects = match (projects_arg, all) {
+        (Some(_), true) => {
+            return Err(format!(
+                "send accepts either --projects PATH or --all, not both\n{}",
+                usage()
+            ));
+        }
+        (Some(path), false) => path,
+        (None, true) => default_projects()?,
+        (None, false) => {
+            return Err(format!(
+                "send requires exactly one of --projects PATH or --all\n{}",
+                usage()
+            ));
+        }
+    };
     let (transport, machine, mut sender) = if insecure_plaintext {
         if tls_ca.is_some() {
             return Err("--insecure-plaintext does not accept --tls-ca".into());
@@ -112,6 +139,9 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         (transport, machine, sender)
     };
     let _ = machine;
+    if !sessions.is_empty() {
+        sender.set_session_filter(sessions);
+    }
     match mode {
         SendMode::Once => {
             let report = sender
@@ -764,8 +794,8 @@ fn machine_identity(override_value: Option<String>) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "Usage: semon-relay send (--once | --follow) [--projects PATH] [--state PATH] \
-     [--endpoint URL] [--config PATH] [--tls-ca CERT] [--interval-ms N] \
+    "Usage: semon-relay send (--once | --follow) (--projects PATH | --all) [--session S ...] \
+     [--state PATH] [--endpoint URL] [--config PATH] [--tls-ca CERT] [--interval-ms N] \
      [--insecure-plaintext --machine ID]\n\
      Usage: semon-relay receive [--listen 127.0.0.1:8734] --dir PATH \
      [--tls-cert CERT --tls-key KEY] [--insecure-plaintext]\n\
@@ -792,5 +822,22 @@ mod tests {
     #[test]
     fn send_requires_exactly_one_mode() {
         assert!(run_send(["--once", "--follow"].map(str::to_owned).into_iter()).is_err());
+    }
+
+    #[test]
+    fn send_requires_an_explicit_root() {
+        assert!(run_send(["--once"].map(str::to_owned).into_iter()).is_err());
+    }
+
+    #[test]
+    fn send_rejects_projects_and_all_together() {
+        assert!(
+            run_send(
+                ["--once", "--projects", "/tmp/does-not-matter", "--all"]
+                    .map(str::to_owned)
+                    .into_iter()
+            )
+            .is_err()
+        );
     }
 }

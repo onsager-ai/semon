@@ -177,7 +177,7 @@ Point a sender at HTTPS and pin that exact supplied certificate as its sole
 trust root. Built-in roots, proxies, and redirects are disabled:
 
 ```sh
-cargo run --locked -p semon-relay -- send --follow \
+cargo run --locked -p semon-relay -- send --follow --all \
   --endpoint https://relay.example.test:8734/v1/frames \
   --tls-ca relay-cert.pem
 ```
@@ -226,11 +226,13 @@ sender wall time never decides expiry. A holder renews about once per minute in
 resident follow mode. Every encrypted frame, key, orphan, and lease request uses
 the signing-key fingerprint and carries a matching signature.
 
-Run one sender pass, or poll continuously:
+Run one sender pass, or poll continuously. `send` never defaults its root: pass `--all` to ship every session under `~/.claude/projects`, or `--projects PATH` to scope it to a directory (handy for a test receiver, so a slip cannot ship every real session on the machine). Add one or more `--session ID` to further narrow either root to just the named sessions' streams (a main transcript plus its subagent files):
 
 ```sh
-cargo run --locked -p semon-relay -- send --once
-cargo run --locked -p semon-relay -- send --follow
+cargo run --locked -p semon-relay -- send --once --all
+cargo run --locked -p semon-relay -- send --follow --all
+cargo run --locked -p semon-relay -- send --follow --projects /path/to/claude/projects
+cargo run --locked -p semon-relay -- send --once --all --session SESSION_ID
 ```
 
 Without an identity and at least one recipient, encrypted sending refuses to
@@ -240,7 +242,7 @@ use on both sides:
 ```sh
 cargo run --locked -p semon-relay -- receive \
   --dir /path/to/private/plaintext-receiver --insecure-plaintext
-cargo run --locked -p semon-relay -- send --once --insecure-plaintext
+cargo run --locked -p semon-relay -- send --once --all --insecure-plaintext
 ```
 
 Plaintext mode uses `/etc/machine-id`; `--machine` exists for synthetic tests.
@@ -286,9 +288,7 @@ cargo run --locked -p semon-relay -- restore \
   --tls-ca relay-cert.pem
 ```
 
-`--projects` defaults to `~/.claude/projects`; `--state` uses the same
-`$XDG_STATE_HOME/semon/relay.json` (or `~/.local/state/semon/relay.json`)
-default as `send` and `lease takeover`.
+`--projects` defaults to `~/.claude/projects` for `restore` and `lease takeover` (unlike `send`, which requires an explicit `--projects` or `--all`); `--state` uses the same `$XDG_STATE_HOME/semon/relay.json` (or `~/.local/state/semon/relay.json`) default as `send`.
 
 Restore downloads the highest live generation of every main and subagent
 stream, unwraps the session key with this machine's identity, decrypts and
@@ -344,15 +344,7 @@ cargo run --locked -p semon-relay -- \
   --tls-ca relay-cert.pem
 ```
 
-The sender reads `~/.claude/projects` by default and writes its atomic ack
-watermarks to `$XDG_STATE_HOME/semon/relay.json`, falling back to
-`~/.local/state/semon/relay.json`. Use `--projects`, `--state`, and `--endpoint`
-to override those locations. Only complete newline-terminated records are
-framed. State includes the byte offset after each stream's watermark, its file
-identity, and the start and hash of its last acknowledged line. Every process
-start re-hashes the complete acknowledged prefix. Later resident follow passes
-check identity, length, and that last line, then seek directly to the saved
-offset instead of re-reading retained history.
+The sender takes its root from `--all` (every session under `~/.claude/projects`) or `--projects PATH` (only sessions under that directory) — exactly one is required — and writes its atomic ack watermarks to `$XDG_STATE_HOME/semon/relay.json`, falling back to `~/.local/state/semon/relay.json`. Use `--state` and `--endpoint` to override those locations, and repeat `--session ID` to further restrict either root to just the named sessions' streams. Only complete newline-terminated records are framed. State includes the byte offset after each stream's watermark, its file identity, and the start and hash of its last acknowledged line. Every process start re-hashes the complete acknowledged prefix. Later resident follow passes check identity, length, and that last line, then seek directly to the saved offset instead of re-reading retained history.
 
 Each encrypted frame uses XChaCha20-Poly1305 with a fresh random nonce. Its
 plaintext is the complete source line plus the new chain value. The frame key

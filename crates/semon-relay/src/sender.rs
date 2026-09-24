@@ -19,9 +19,9 @@ use crate::{
     FRAME_PAGE_MAX_BYTES, FRAME_PAGE_MAX_FRAMES, Frame, FrameContent, FrameKey, FrameMode,
     FramePage, LEASE_RENEW_INTERVAL_MS, LeaseRow, LeaseStatus, OrphanSummary, RelayState,
     RequestSigner, StreamState, StreamTip, TakeoverResult, ZERO_CHAIN, chain_line,
-    decrypt_envelope, decrypt_frame, discover_streams, discovery::DiscoveryError, encrypt_envelope,
-    encrypt_frame, generate_data_key, lease::LeaseValueError, load_state, save_state,
-    state::StateError,
+    decrypt_envelope, decrypt_frame, discover_streams, discovery::DiscoveryError,
+    discovery::filter_by_session, encrypt_envelope, encrypt_frame, generate_data_key,
+    lease::LeaseValueError, load_state, save_state, state::StateError,
 };
 
 type StreamKey = (String, String);
@@ -719,6 +719,11 @@ pub enum RelayError {
         tip_seq: u64,
         behind: u64,
     },
+    #[error(
+        "no stream under the root matches --session {}",
+        missing.iter().cloned().collect::<Vec<_>>().join(", --session ")
+    )]
+    SessionFilterUnmatched { missing: BTreeSet<String> },
 }
 
 /// Failure while performing the preflight, CAS, and post-CAS takeover checks.
@@ -854,6 +859,10 @@ pub struct Sender {
     machine: Option<String>,
     leases: BTreeMap<String, HeldLease>,
     crypto: Option<SenderCrypto>,
+    /// Restricts discovery to these session ids when set. Every other
+    /// session's files are left alone, and a stream that appears later for
+    /// a matching session is still picked up on the next pass.
+    session_filter: Option<BTreeSet<String>>,
 }
 
 struct SenderCrypto {
@@ -1450,6 +1459,13 @@ impl Sender {
         }
     }
 
+    /// Restricts this sender to only the named sessions. Call before the
+    /// first `run_pass`; every discovered stream outside the set is left
+    /// untouched on every pass, including ones that appear later.
+    pub fn set_session_filter(&mut self, sessions: BTreeSet<String>) {
+        self.session_filter = Some(sessions);
+    }
+
     pub fn run_pass(
         &mut self,
         projects_root: &Path,
@@ -1468,6 +1484,24 @@ impl Sender {
             boot_id: read_boot_id()?,
         };
         let discovered = discover_streams(projects_root)?;
+        let discovered = match &self.session_filter {
+            Some(sessions) => {
+                let filtered = filter_by_session(discovered, sessions);
+                let matched = filtered
+                    .iter()
+                    .map(|stream| stream.session.clone())
+                    .collect::<BTreeSet<_>>();
+                let missing = sessions
+                    .difference(&matched)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if !missing.is_empty() {
+                    return Err(RelayError::SessionFilterUnmatched { missing });
+                }
+                filtered
+            }
+            None => discovered,
+        };
         let mut streams = Vec::with_capacity(discovered.len());
         for stream in discovered {
             let metadata = fs::metadata(&stream.path).map_err(|source| RelayError::Source {

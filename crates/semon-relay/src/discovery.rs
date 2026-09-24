@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -100,6 +100,19 @@ pub fn discover_streams(root: &Path) -> Result<Vec<DiscoveredStream>, DiscoveryE
             path,
         })
         .collect())
+}
+
+/// Narrows discovered streams to only the named sessions, keeping every
+/// stream that belongs to one (a main transcript and any subagent files),
+/// so a filter selects whole sessions rather than individual files.
+pub fn filter_by_session(
+    streams: Vec<DiscoveredStream>,
+    sessions: &BTreeSet<String>,
+) -> Vec<DiscoveredStream> {
+    streams
+        .into_iter()
+        .filter(|stream| sessions.contains(&stream.session))
+        .collect()
 }
 
 fn entries(path: &Path) -> Result<fs::ReadDir, DiscoveryError> {
