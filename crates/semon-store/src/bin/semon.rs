@@ -30,6 +30,13 @@ enum Command {
     Log(LogArgs),
     Forensic(ForensicArgs),
     Forget(ForgetArgs),
+    Sessions(SessionsArgs),
+}
+
+struct SessionsArgs {
+    options: semon_sessions::Options,
+    json: bool,
+    watch: bool,
 }
 
 struct ShipArgs {
@@ -76,6 +83,7 @@ struct ForgetArgs {
 fn parse_args() -> Result<Command, String> {
     let mut arguments = env::args().skip(1);
     match arguments.next().as_deref() {
+        Some("sessions") => parse_sessions_args(arguments).map(Command::Sessions),
         Some("ship") => parse_ship_args(arguments).map(Command::Ship),
         Some("log") => parse_log_args(arguments).map(Command::Log),
         Some("forensic") => parse_forensic_args(arguments).map(Command::Forensic),
@@ -84,6 +92,39 @@ fn parse_args() -> Result<Command, String> {
         Some(command) => Err(format!("unknown command: {command}\n{}", usage())),
         None => Err(usage()),
     }
+}
+
+fn parse_sessions_args(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<SessionsArgs, String> {
+    let mut options = semon_sessions::Options::default();
+    let mut json = false;
+    let mut watch = false;
+    while let Some(argument) = arguments.next() {
+        let mut value = || {
+            arguments
+                .next()
+                .ok_or_else(|| format!("{argument} requires a value"))
+        };
+        match argument.as_str() {
+            "--claude-home" => options.claude_home = value()?.into(),
+            "--codex-home" => options.codex_home = value()?.into(),
+            "--proc-root" => options.proc_root = value()?.into(),
+            "--cache" => options.cache = value()?.into(),
+            "--all" => options.all = true,
+            "--since" => options.since = semon_sessions::parse_duration(&value()?)?,
+            "--session" => options.session = Some(value()?),
+            "--json" => json = true,
+            "--watch" => watch = true,
+            "-h" | "--help" => return Err(usage()),
+            _ => return Err(format!("unknown argument: {argument}")),
+        }
+    }
+    Ok(SessionsArgs {
+        options,
+        json,
+        watch,
+    })
 }
 
 fn parse_ship_args(mut arguments: impl Iterator<Item = String>) -> Result<ShipArgs, String> {
@@ -245,10 +286,30 @@ fn parse_forget_args(mut arguments: impl Iterator<Item = String>) -> Result<Forg
 
 fn run(command: Command) -> Result<(), String> {
     match command {
+        Command::Sessions(args) => run_sessions(args),
         Command::Ship(args) => run_ship(args).map(|message| println!("{message}")),
         Command::Log(args) => run_log(args).map(|message| println!("{message}")),
         Command::Forensic(args) => run_forensic(args),
         Command::Forget(args) => run_forget(args),
+    }
+}
+
+fn run_sessions(args: SessionsArgs) -> Result<(), String> {
+    loop {
+        let nodes = semon_sessions::collect(&args.options).map_err(|error| error.to_string())?;
+        if args.watch {
+            print!("\x1b[2J\x1b[H");
+        }
+        if args.json {
+            println!("{}", semon_sessions::render_json(&nodes));
+        } else {
+            print!("{}", semon_sessions::render_text(&nodes));
+        }
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        if !args.watch {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
     }
 }
 
@@ -516,7 +577,10 @@ fn default_store_path() -> PathBuf {
 
 fn usage() -> String {
     format!(
-        "Usage: semon ship [--store PATH] [--endpoint URL]\n\
+        "Usage: semon sessions [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--json] [--watch]\n\
+         Shows a read-only tree of local Claude Code and Codex sessions.\n\
+         \n\
+         Usage: semon ship [--store PATH] [--endpoint URL]\n\
          Endpoint defaults to ${REPLICATION_ENDPOINT_ENV}; when unset, ship succeeds without reading the store.\n\
          \n\
          Usage: semon log [--store PATH] [--repo NAME] [--day YYYY-MM-DD] [--limit N]\n\

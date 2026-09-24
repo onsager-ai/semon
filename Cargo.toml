@@ -4,6 +4,7 @@ members = [
     "crates/semon-claude",
     "crates/semon-codex",
     "crates/semon-relay",
+    "crates/semon-sessions",
     "crates/semon-store",
 ]
 

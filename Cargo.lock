@@ -1868,12 +1868,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "semon-sessions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "semon-store"
 version = "0.1.0"
 dependencies = [
  "hex",
  "reqwest",
  "rusqlite",
+ "semon-sessions",
  "serde_json",
  "serde_json_canonicalizer",
  "sha2 0.10.9",

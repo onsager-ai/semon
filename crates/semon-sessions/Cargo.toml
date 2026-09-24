@@ -1,0 +1,11 @@
+[package]
+name = "semon-sessions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Read-only local Claude Code and Codex session tree."
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json.workspace = true

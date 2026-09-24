@@ -25,6 +25,21 @@ prior run. That access control is the only remaining protection; keep the
 database local, and a private repository is not a safe destination for
 captured session data. No real session fixture should be committed.
 
+## Seeing your agent sessions
+
+Run `semon sessions` to see a local read-only tree of Claude Code sessions and subagents alongside Codex runs and subagents. Live Claude sessions are checked against process start times, and Codex runs are checked against `/proc/locks`; the command never acquires their locks or writes to either agent home. A Codex run joins a Claude session only when its first user message carries a `Semon-Parent` marker. `Semon-Handoff` links it to the launching Bash or Skill call when that call can be found.
+
+```sh
+cargo run --locked -p semon-store --bin semon -- sessions
+cargo run --locked -p semon-store --bin semon -- sessions --since 3d --json
+cargo run --locked -p semon-store --bin semon -- sessions --session THREAD_ID
+cargo run --locked -p semon-store --bin semon -- sessions --watch
+```
+
+Live Claude statuses observed so far are `busy`, `idle`, and `shell`; any other status on a verified live process is shown verbatim. An unreadable transcript or rollout shows `unknown` state with whatever metadata is available. The default view contains roots active in the last 24 hours plus live roots. `--all` includes older sessions; `--since 2h` or `--since 3d` changes the window; `--session ID` selects one subtree. `--claude-home`, `--codex-home`, `--proc-root`, and `--cache` override every source and the cache for fixtures or alternate installations. The cache defaults to `$XDG_STATE_HOME/semon/sessions-index.json`, or `~/.local/state/semon/sessions-index.json`; it contains metadata summaries only and can be deleted safely.
+
+JSON output has `schema_version: 1` and a `roots` array of nested nodes. Every node has `id`, `harness`, `kind`, `label`, `state`, `pid`, `models`, `cwd`, `branch`, `first_activity`, `last_activity`, `last_activity_age_seconds`, `tokens`, `malformed_lines`, `open_tools`, `claude_link`, `via_tool`, `unlinked`, and `children`. Nullable fields use `null`, `tokens` contains `input`, `cached_input`, `output`, `reasoning_output`, and `total`, and each tool has `id` and `name`. Timestamps are RFC 3339 strings from source records. `malformed_lines` counts complete lines that are not JSON objects; they are skipped, and text output shows `malformed:N` when the count is nonzero. The view includes metadata only; it never prints prompts, transcript text, tool inputs, or tool outputs.
+
 ## Capture Codex sessions
 
 Run one cursor-aware capture pass with:
