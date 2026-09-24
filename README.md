@@ -58,6 +58,12 @@ timestamps, repository inference, machine paths, token counts, tool framing,
 and the full source object stay out of content identity. The exact original
 line is retained only through the store's explicit forensic read surface.
 
+## Backfilling raw lines from before schema v4
+
+Run this after upgrading a store whose adapter cursors advanced past unprojected lines before schema v4. Back up the store first, then run each adapter with `--backfill-raw --dry-run` and the same `--store`, `--state`, and source path options used for capture. For example, run `semon-codex --backfill-raw --dry-run --store /path/to/traces.sqlite3 --state /path/to/codex-state.json --sessions /path/to/sessions --history /path/to/history.jsonl` and `semon-claude --backfill-raw --dry-run --store /path/to/traces.sqlite3 --state /path/to/claude-state.json --projects /path/to/projects`. Omit `--dry-run` to insert the missing raw lines. Both commands replay only files recorded in their cursor state and stop at each saved offset; live capture handles newer lines. They never advance the cursor or create traces, occurrences, or raw trace links.
+
+The report counts files and complete lines scanned, raw rows already present, and rows inserted (or rows that would be inserted for a dry run). It lists each missing file, each file shorter than its saved offset as rewritten, and each misaligned file with its first mismatching sequence. A misaligned file has a stored raw row at that line key with different bytes and no matching row; the command inserts nothing for that file. Inspect those files before retrying. An aligned second run inserts zero rows. Opening the store, including during a dry run, performs any pending schema migration; a live v3 store migrates to v5 when opened.
+
 ## Replicate canonical traces
 
 `semon ship` makes one replication pass from the local store to an explicitly

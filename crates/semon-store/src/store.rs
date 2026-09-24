@@ -11,6 +11,30 @@ use crate::{
 /// Claude's per-line sequence stride, shared with its normalizer.
 pub const CLAUDE_MAX_BLOCKS_PER_RECORD: i64 = 1024;
 
+/// One complete source line replayed from a saved adapter cursor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RawBackfillLine {
+    /// Original line bytes, including the newline.
+    pub bytes: Vec<u8>,
+    /// Session derived by the adapter's live path.
+    pub session: String,
+    /// Raw line sequence derived by the adapter's live path.
+    pub sequence: i64,
+    /// Source timestamp derived by the adapter's live path.
+    pub timestamp: i64,
+}
+
+/// Result of checking and optionally inserting one file's raw lines.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RawBackfillResult {
+    /// Rows inserted, or rows that would be inserted for a dry run.
+    pub inserted: usize,
+    /// Lines with an existing row at the same key and with the same bytes.
+    pub already_present: usize,
+    /// First sequence whose existing key has only different bytes.
+    pub misaligned_sequence: Option<i64>,
+}
+
 const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
@@ -334,7 +358,7 @@ impl TraceStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let raw_record_id =
+        let (raw_record_id, _) =
             resolve_raw_record(&transaction, raw_record, session, line_sequence, timestamp)?;
         let mut results = Vec::with_capacity(blocks.len());
 
@@ -427,6 +451,72 @@ impl TraceStore {
             &[],
         )?;
         Ok(id)
+    }
+
+    /// Checks every line against existing raw rows before inserting any of them.
+    ///
+    /// A conflicting key skips the whole file. Validation and insertion share
+    /// one transaction, so a failed insert rolls back the entire file.
+    pub fn backfill_raw_lines(
+        &mut self,
+        carrier: &str,
+        lines: &[RawBackfillLine],
+        dry_run: bool,
+    ) -> Result<RawBackfillResult, StoreError> {
+        if carrier.trim().is_empty() {
+            return Err(StoreError::BlankCarrier);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut result = RawBackfillResult::default();
+        let mut candidates = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            let mut statement = transaction.prepare(
+                "SELECT raw_bytes FROM raw_carrier_records \
+                 WHERE carrier = ?1 AND session = ?2 AND sequence = ?3",
+            )?;
+            let mut rows = statement.query(params![carrier, line.session, line.sequence])?;
+            let mut found_key = false;
+            let mut found_bytes = false;
+            while let Some(row) = rows.next()? {
+                found_key = true;
+                if row.get::<_, Vec<u8>>(0)? == line.bytes {
+                    found_bytes = true;
+                }
+            }
+            if found_bytes {
+                result.already_present += 1;
+            } else if found_key {
+                result.misaligned_sequence.get_or_insert(line.sequence);
+            } else {
+                candidates.push(index);
+            }
+        }
+        if result.misaligned_sequence.is_some() {
+            return Ok(result);
+        }
+        if dry_run {
+            result.inserted = candidates.len();
+        } else {
+            for index in candidates {
+                let line = &lines[index];
+                let (_, inserted) = resolve_raw_record(
+                    &transaction,
+                    NewRawCarrierRecord::new(carrier, &line.bytes),
+                    &line.session,
+                    line.sequence,
+                    line.timestamp,
+                )?;
+                if inserted {
+                    result.inserted += 1;
+                } else {
+                    result.already_present += 1;
+                }
+            }
+            transaction.commit()?;
+        }
+        Ok(result)
     }
 
     /// Fetches a canonical trace by semantic content hash.
@@ -553,7 +643,7 @@ impl TraceStore {
         bindings: &[&dyn ToSql],
     ) -> Result<Vec<RawCarrierRecord>, StoreError> {
         let sql = format!(
-            "SELECT r.raw_record_id, r.carrier, r.raw_bytes, \
+            "SELECT r.raw_record_id, r.carrier, r.raw_bytes, r.session, r.sequence, r.timestamp, \
                     COALESCE((SELECT group_concat(trace_id, ',') FROM \
                         (SELECT trace_id FROM raw_record_traces \
                          WHERE raw_record_id = r.raw_record_id ORDER BY trace_id)), '') \
@@ -565,13 +655,16 @@ impl TraceStore {
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, String>(6)?,
             ))
         })?;
 
         let mut records = Vec::new();
         for row in mapped {
-            let (id, carrier, bytes, trace_ids) = row?;
+            let (id, carrier, bytes, session, sequence, timestamp, trace_ids) = row?;
             records.push(RawCarrierRecord::new(
                 id,
                 trace_ids
@@ -581,6 +674,9 @@ impl TraceStore {
                     .collect::<Result<Vec<_>, _>>()?,
                 carrier,
                 bytes,
+                session,
+                sequence,
+                timestamp,
             ));
         }
         Ok(records)
@@ -754,7 +850,7 @@ fn resolve_raw_record(
     session: &str,
     sequence: i64,
     timestamp: i64,
-) -> Result<i64, StoreError> {
+) -> Result<(i64, bool), StoreError> {
     let existing = transaction
         .query_row(
             "SELECT raw_record_id FROM raw_carrier_records \
@@ -765,14 +861,14 @@ fn resolve_raw_record(
         )
         .optional()?;
     if let Some(id) = existing {
-        return Ok(id);
+        return Ok((id, false));
     }
     transaction.execute(
         "INSERT INTO raw_carrier_records (carrier, raw_bytes, session, sequence, timestamp) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![raw.carrier, raw.bytes, session, sequence, timestamp],
     )?;
-    Ok(transaction.last_insert_rowid())
+    Ok((transaction.last_insert_rowid(), true))
 }
 
 /// Migrates the forensic region to schema version 4 in one transaction.
@@ -1139,6 +1235,61 @@ mod tests {
             rows.iter().map(RawCarrierRecord::bytes).collect::<Vec<_>>(),
             vec![b"original".as_slice(), b"changed".as_slice()]
         );
+    }
+
+    #[test]
+    fn raw_backfill_checks_whole_file_and_rolls_back_failed_inserts() {
+        let path = std::env::temp_dir().join(format!(
+            "semon-backfill-store-{}.sqlite3",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut store = TraceStore::open(&path).unwrap();
+        store
+            .capture_raw_only("codex", b"same\n", "s", 0, 10)
+            .unwrap();
+        store
+            .capture_raw_only("codex", b"old\n", "s", 2, 12)
+            .unwrap();
+        let line = |bytes: &[u8], sequence| RawBackfillLine {
+            bytes: bytes.to_vec(),
+            session: "s".into(),
+            sequence,
+            timestamp: 20 + sequence,
+        };
+        let conflicted = [line(b"same\n", 0), line(b"missing\n", 1), line(b"new\n", 2)];
+        let result = store
+            .backfill_raw_lines("codex", &conflicted, false)
+            .unwrap();
+        assert_eq!(result.misaligned_sequence, Some(2));
+        assert_eq!(result.inserted, 0);
+        assert_eq!(raw_record_count(&store), 2);
+
+        let aligned = [line(b"same\n", 0), line(b"missing\n", 1)];
+        let preview = store.backfill_raw_lines("codex", &aligned, true).unwrap();
+        assert_eq!((preview.inserted, preview.already_present), (1, 1));
+        assert_eq!(raw_record_count(&store), 2);
+        assert_eq!(
+            store.backfill_raw_lines("codex", &aligned, false).unwrap(),
+            preview
+        );
+        assert_eq!(raw_record_count(&store), 3);
+        assert_eq!(
+            store
+                .backfill_raw_lines("codex", &aligned, false)
+                .unwrap()
+                .inserted,
+            0
+        );
+
+        store.connection.execute_batch("CREATE TRIGGER reject_backfill BEFORE INSERT ON raw_carrier_records WHEN NEW.sequence = 4 BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        let failed = [line(b"first\n", 3), line(b"invalid\n", 4)];
+        assert!(store.backfill_raw_lines("codex", &failed, false).is_err());
+        assert_eq!(raw_record_count(&store), 3);
+        assert_eq!(link_count(&store), 0);
+        assert_eq!(occurrence_count(&store), 0);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

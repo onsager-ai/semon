@@ -52,6 +52,9 @@ pub struct CursorState {
 }
 
 impl CursorState {
+    pub(crate) fn files(&self) -> &std::collections::BTreeMap<String, FileCursor> {
+        &self.files
+    }
     pub(crate) fn take_file(&mut self, key: &str) -> FileCursor {
         self.files.remove(key).unwrap_or_default()
     }

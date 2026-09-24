@@ -33,13 +33,14 @@ use std::{
     collections::BTreeMap,
     env,
     fs::{self, File},
-    io::{self, BufRead, BufReader, Seek},
+    io::{self, BufRead, BufReader, Read, Seek},
     path::{Path, PathBuf},
 };
 
 pub use normalize::{MAX_BLOCKS_PER_RECORD, ProjectedBlock, classify_record};
 use semon_store::{
-    NewOccurrence, NewRawCarrierRecord, RepoSource, SemanticCore, StoreError, TraceStore,
+    NewOccurrence, NewRawCarrierRecord, RawBackfillLine, RepoSource, SemanticCore, StoreError,
+    TraceStore,
 };
 use serde_json::Value;
 pub use state::{CursorState, load_state, save_state};
@@ -47,6 +48,109 @@ use thiserror::Error;
 
 /// The forensic carrier label written beside captured Claude Code records.
 pub const CARRIER: &str = "claude";
+
+/// Totals from replaying saved Claude cursors.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct BackfillReport {
+    /// Files recorded in the cursor state.
+    pub files_scanned: usize,
+    /// Complete lines within saved offsets.
+    pub lines_scanned: usize,
+    /// Rows inserted, or rows that would be inserted in a dry run.
+    pub rows_inserted: usize,
+    /// Lines whose exact raw row already exists.
+    pub rows_already_present: usize,
+    /// Files absent from disk.
+    pub missing: Vec<PathBuf>,
+    /// Files shorter than their saved offsets.
+    pub rewritten: Vec<PathBuf>,
+    /// Files with conflicting raw bytes, paired with the first sequence.
+    pub misaligned: Vec<(PathBuf, i64)>,
+}
+
+struct DerivedLine {
+    record: Option<Value>,
+    session: String,
+    sequence: i64,
+    timestamp: i64,
+}
+
+fn derive_line(line: &[u8], ordinal: u64, session: &str) -> DerivedLine {
+    let record = serde_json::from_slice::<Value>(line)
+        .ok()
+        .filter(Value::is_object);
+    let timestamp = semon_codex::parse_timestamp(
+        record
+            .as_ref()
+            .and_then(|record| record.get("timestamp"))
+            .unwrap_or(&Value::Null),
+    );
+    DerivedLine {
+        record,
+        session: session.to_owned(),
+        sequence: sequence_for(ordinal, 0),
+        timestamp,
+    }
+}
+
+/// Replays tracked file prefixes without changing the cursor state.
+pub fn backfill_raw(
+    state: &CursorState,
+    store: &mut TraceStore,
+    dry_run: bool,
+) -> Result<BackfillReport, AdapterError> {
+    let mut report = BackfillReport::default();
+    for (key, saved) in state.files() {
+        report.files_scanned += 1;
+        let path = PathBuf::from(key);
+        let size = match fs::metadata(&path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                report.missing.push(path);
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if size < saved.offset {
+            report.rewritten.push(path);
+            continue;
+        }
+        let (session_id, agent_id) = file_identity(&path);
+        let session = session_label(&session_id, agent_id.as_deref());
+        let mut reader = BufReader::new(File::open(&path)?.take(saved.offset));
+        let mut lines = Vec::new();
+        let mut ordinal = 0;
+        let mut consumed = 0;
+        while consumed < saved.offset {
+            let mut bytes = Vec::new();
+            let count = reader.read_until(b'\n', &mut bytes)?;
+            if count == 0 || !bytes.ends_with(b"\n") {
+                return Err(AdapterError::State(format!(
+                    "cursor is not at a complete line in {}",
+                    path.display()
+                )));
+            }
+            consumed += count as u64;
+            let derived = derive_line(&bytes, ordinal, &session);
+            lines.push(RawBackfillLine {
+                bytes,
+                session: derived.session,
+                sequence: derived.sequence,
+                timestamp: derived.timestamp,
+            });
+            ordinal += 1;
+        }
+        report.lines_scanned += lines.len();
+        let result = store.backfill_raw_lines(CARRIER, &lines, dry_run)?;
+        report.rows_already_present += result.already_present;
+        if let Some(sequence) = result.misaligned_sequence {
+            report.misaligned.push((path, sequence));
+        } else {
+            report.rows_inserted += result.inserted;
+        }
+    }
+    Ok(report)
+}
 
 /// Returns the shared default local Semon database path, identical to
 /// `semon-codex`'s: both carriers write into one store (see
@@ -278,15 +382,16 @@ pub fn process_file(
             let this_line_ordinal = next_line_ordinal;
             next_line_ordinal += 1;
 
-            if let Ok(record) = serde_json::from_slice::<Value>(&line)
-                && record.is_object()
-            {
+            let derived = derive_line(&line, this_line_ordinal, &session);
+            if let Some(record) = derived.record {
                 process_record(
                     store,
                     &record,
                     &line,
                     this_line_ordinal,
-                    &session,
+                    &derived.session,
+                    derived.sequence,
+                    derived.timestamp,
                     agent_id.as_deref(),
                     options.repo_override,
                     &mut ancestor_sequence,
@@ -298,9 +403,9 @@ pub fn process_file(
                 store.capture_raw_only(
                     CARRIER,
                     &line,
-                    &session,
-                    sequence_for(this_line_ordinal, 0),
-                    semon_codex::parse_timestamp(&Value::Null),
+                    &derived.session,
+                    derived.sequence,
+                    derived.timestamp,
                 )?;
             }
         }
@@ -454,12 +559,13 @@ fn process_record(
     raw_line: &[u8],
     line_ordinal: u64,
     session: &str,
+    raw_sequence: i64,
+    timestamp: i64,
     agent_id: Option<&str>,
     repo_override: &str,
     ancestor_sequence: &mut BTreeMap<String, Option<i64>>,
 ) -> Result<(), AdapterError> {
     let (blocks, ancestor_for_first) = resolve_record(record, line_ordinal, ancestor_sequence)?;
-    let timestamp = semon_codex::parse_timestamp(record.get("timestamp").unwrap_or(&Value::Null));
     let (repo, repo_source) = record_repo(record, repo_override);
     let mut captures = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter().enumerate() {
@@ -486,7 +592,7 @@ fn process_record(
     store.capture_line(
         NewRawCarrierRecord::new(CARRIER, raw_line),
         session,
-        sequence_for(line_ordinal, 0),
+        raw_sequence,
         timestamp,
         &captures,
     )?;

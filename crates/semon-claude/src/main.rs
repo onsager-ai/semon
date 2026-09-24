@@ -4,8 +4,8 @@ use std::{env, fs, path::PathBuf, process::ExitCode};
 use std::os::unix::fs::PermissionsExt;
 
 use semon_claude::{
-    ProcessOptions, candidate_files, default_state_path, default_store_path, load_state,
-    process_file,
+    ProcessOptions, backfill_raw, candidate_files, default_state_path, default_store_path,
+    load_state, process_file,
 };
 use semon_store::TraceStore;
 
@@ -16,6 +16,8 @@ struct Args {
     store: PathBuf,
     repo: String,
     verbose: bool,
+    backfill_raw: bool,
+    dry_run: bool,
 }
 
 fn main() -> ExitCode {
@@ -29,9 +31,43 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Args) -> Result<(), String> {
-    ensure_store_dir(&args.store)?;
+    if !args.dry_run {
+        ensure_store_dir(&args.store)?;
+    }
     let mut store = TraceStore::open(&args.store).map_err(|error| error.to_string())?;
     let mut state = load_state(&args.state).map_err(|error| error.to_string())?;
+    if args.backfill_raw {
+        let report =
+            backfill_raw(&state, &mut store, args.dry_run).map_err(|error| error.to_string())?;
+        for path in &report.missing {
+            println!("missing: {}", path.display());
+        }
+        for path in &report.rewritten {
+            println!("rewritten: {}", path.display());
+        }
+        for (path, sequence) in &report.misaligned {
+            println!(
+                "misaligned: {} (first mismatching sequence {sequence})",
+                path.display()
+            );
+        }
+        let label = if args.dry_run {
+            "rows would insert"
+        } else {
+            "rows inserted"
+        };
+        println!(
+            "files scanned: {}, lines scanned: {}, {label}: {}, rows already present: {}, files missing: {}, files rewritten: {}, files misaligned: {}",
+            report.files_scanned,
+            report.lines_scanned,
+            report.rows_inserted,
+            report.rows_already_present,
+            report.missing.len(),
+            report.rewritten.len(),
+            report.misaligned.len()
+        );
+        return Ok(());
+    }
     let mut total = 0;
     for path in candidate_files(&args.projects).map_err(|error| error.to_string())? {
         let mut options = ProcessOptions::new(&args.state);
@@ -74,6 +110,8 @@ fn parse_args() -> Result<Args, String> {
         store: default_store_path(),
         repo: env::var("SEMON_REPO").unwrap_or_default(),
         verbose: false,
+        backfill_raw: false,
+        dry_run: false,
     };
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -88,14 +126,19 @@ fn parse_args() -> Result<Args, String> {
             "--store" => result.store = value(&mut arguments)?.into(),
             "--repo" => result.repo = value(&mut arguments)?,
             "-v" | "--verbose" => result.verbose = true,
+            "--backfill-raw" => result.backfill_raw = true,
+            "--dry-run" => result.dry_run = true,
             "-h" | "--help" => {
                 println!(
-                    "Usage: semon-claude [--projects PATH] [--state PATH] \\\n+                      [--store PATH] [--repo NAME] [--verbose]"
+                    "Usage: semon-claude [--projects PATH] [--state PATH] [--store PATH] [--repo NAME] [--verbose] [--backfill-raw [--dry-run]]"
                 );
                 std::process::exit(0);
             }
             _ => return Err(format!("unknown argument: {argument}")),
         }
+    }
+    if result.dry_run && !result.backfill_raw {
+        return Err("--dry-run requires --backfill-raw".into());
     }
     Ok(result)
 }

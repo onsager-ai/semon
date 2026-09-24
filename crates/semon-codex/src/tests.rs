@@ -5,7 +5,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use semon_store::{AuthoredBy, LogFilter, RepoSource, TraceStore};
+use semon_store::{
+    AuthoredBy, LogFilter, NewOccurrence, NewRawCarrierRecord, OccurrenceSelector, RepoSource,
+    TraceStore,
+};
 use serde_json::{Value, json};
 
 use super::*;
@@ -50,6 +53,212 @@ fn write_session(root: &Path, records: &[Value]) -> PathBuf {
 
 fn options<'a>(state: &'a Path, history: &'a Path) -> ProcessOptions<'a> {
     ProcessOptions::new(state, history)
+}
+
+#[test]
+fn raw_backfill_restores_old_cursor_prefix_and_reports_skips() {
+    let root = TestDir::new();
+    let path = write_session(
+        root.path(),
+        &[
+            json!({"type":"session_meta","timestamp":"2026-09-20T00:00:00Z","payload":{"session_id":"backfill-session"}}),
+            json!({"type":"event_msg","timestamp":"2026-09-20T00:00:01Z","payload":{"type":"user_message","message":"hello backfill"}}),
+            json!({"type":"event_msg","timestamp":"2026-09-20T00:00:02Z","payload":{"type":"token_count"}}),
+        ],
+    );
+    let history = root.path().join("history.jsonl");
+    let state_path = root.path().join("state.json");
+    let mut state = CursorState::default();
+    let mut fresh = TraceStore::open(root.path().join("fresh.sqlite3")).unwrap();
+    process_file(
+        &path,
+        &mut state,
+        &mut fresh,
+        &options(&state_path, &history),
+    )
+    .unwrap();
+    let before_state = fs::read(&state_path).unwrap();
+    let original = fresh
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("backfill-session"))
+        .unwrap();
+    assert_eq!(original.len(), 3);
+    let source = fs::read(&path).unwrap();
+    let source_lines = source
+        .split_inclusive(|byte| *byte == b'\n')
+        .collect::<Vec<_>>();
+
+    let old_path = root.path().join("old.sqlite3");
+    let mut old = TraceStore::open(&old_path).unwrap();
+    let projected = fresh.log(&LogFilter::default()).unwrap();
+    assert_eq!(projected.len(), 1);
+    let occurrence = &projected[0];
+    old.capture(
+        occurrence.semantic_core(),
+        NewRawCarrierRecord::new(CARRIER, source_lines[1]),
+        NewOccurrence {
+            session: occurrence.session(),
+            sequence: occurrence.sequence(),
+            timestamp: occurrence.timestamp(),
+            repo: occurrence.repo(),
+            repo_source: occurrence.repo_source(),
+            parent_sequence: occurrence.parent_sequence(),
+            agent: occurrence.agent(),
+            authored_by: occurrence.authored_by(),
+        },
+    )
+    .unwrap();
+    let baseline_traces = old.list_traces(None, 10).unwrap().len();
+    let baseline_log = old.log(&LogFilter::default()).unwrap().len();
+    let baseline_links = old
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("backfill-session"))
+        .unwrap()
+        .iter()
+        .map(|row| row.trace_ids().len())
+        .sum::<usize>();
+
+    let before_dry_run = fs::read(&old_path).unwrap();
+    let preview = backfill_raw(&state, &mut old, &history, "", true).unwrap();
+    assert_eq!(fs::read(&old_path).unwrap(), before_dry_run);
+    assert_eq!(
+        (
+            preview.files_scanned,
+            preview.lines_scanned,
+            preview.rows_inserted,
+            preview.rows_already_present
+        ),
+        (1, 3, 2, 1)
+    );
+    assert_eq!(
+        old.fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(
+            "backfill-session"
+        ))
+        .unwrap()
+        .len(),
+        1
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"type\":\"extra\"}\n")
+        .unwrap();
+    let inserted = backfill_raw(&state, &mut old, &history, "", false).unwrap();
+    assert_eq!(inserted.rows_inserted, 2);
+    assert_eq!(
+        backfill_raw(&state, &mut old, &history, "", false)
+            .unwrap()
+            .rows_inserted,
+        0
+    );
+    let restored = old
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("backfill-session"))
+        .unwrap();
+    assert_eq!(restored.len(), 3);
+    for expected in &original {
+        let actual = restored
+            .iter()
+            .find(|row| row.sequence() == expected.sequence())
+            .unwrap();
+        assert_eq!(
+            (actual.bytes(), actual.session(), actual.timestamp()),
+            (expected.bytes(), expected.session(), expected.timestamp())
+        );
+    }
+    assert_eq!(old.list_traces(None, 10).unwrap().len(), baseline_traces);
+    assert_eq!(old.log(&LogFilter::default()).unwrap().len(), baseline_log);
+    assert_eq!(
+        restored
+            .iter()
+            .map(|row| row.trace_ids().len())
+            .sum::<usize>(),
+        baseline_links
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), before_state);
+
+    let mut conflict = TraceStore::open(root.path().join("conflict.sqlite3")).unwrap();
+    conflict
+        .capture_raw_only(CARRIER, b"changed\n", "backfill-session", 1, 0)
+        .unwrap();
+    let report = backfill_raw(&state, &mut conflict, &history, "", false).unwrap();
+    assert_eq!(report.misaligned, vec![(path.clone(), 1)]);
+    assert_eq!(report.rows_inserted, 0);
+    assert_eq!(
+        conflict
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(
+                "backfill-session"
+            ))
+            .unwrap()
+            .len(),
+        1
+    );
+    fs::write(&path, b"short\n").unwrap();
+    assert_eq!(
+        backfill_raw(&state, &mut conflict, &history, "", false)
+            .unwrap()
+            .rewritten,
+        vec![path.clone()]
+    );
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        backfill_raw(&state, &mut conflict, &history, "", false)
+            .unwrap()
+            .missing,
+        vec![path]
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), before_state);
+}
+
+#[test]
+fn raw_backfill_replays_history_with_its_live_session_and_timestamp() {
+    let root = TestDir::new();
+    let history = root.path().join("history.jsonl");
+    fs::write(
+        &history,
+        b"{\"session_id\":\"history-a\",\"ts\":1789862400,\"text\":\"old prompt\"}\n",
+    )
+    .unwrap();
+    let state_path = root.path().join("state.json");
+    let mut state = CursorState::default();
+    let mut fresh = TraceStore::open(root.path().join("fresh-history.sqlite3")).unwrap();
+    process_file(
+        &history,
+        &mut state,
+        &mut fresh,
+        &options(&state_path, &history),
+    )
+    .unwrap();
+    let expected = fresh
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("history-a"))
+        .unwrap();
+    assert_eq!(expected.len(), 1);
+    let mut old = TraceStore::open(root.path().join("old-history.sqlite3")).unwrap();
+    let report = backfill_raw(&state, &mut old, &history, "", false).unwrap();
+    assert_eq!(
+        (
+            report.files_scanned,
+            report.lines_scanned,
+            report.rows_inserted
+        ),
+        (1, 1, 1)
+    );
+    let actual = old
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("history-a"))
+        .unwrap();
+    assert_eq!(
+        (
+            actual[0].session(),
+            actual[0].sequence(),
+            actual[0].timestamp(),
+            actual[0].bytes()
+        ),
+        (
+            expected[0].session(),
+            expected[0].sequence(),
+            expected[0].timestamp(),
+            expected[0].bytes()
+        )
+    );
+    assert!(old.log(&LogFilter::default()).unwrap().is_empty());
 }
 
 #[test]

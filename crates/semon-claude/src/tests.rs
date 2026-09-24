@@ -1,10 +1,14 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use semon_store::{AuthoredBy, LogFilter, RepoSource, TraceStore};
+use semon_store::{
+    AuthoredBy, LogFilter, NewOccurrence, NewRawCarrierRecord, OccurrenceSelector, RepoSource,
+    TraceStore,
+};
 use serde_json::{Value, json};
 
 use super::*;
@@ -73,6 +77,150 @@ fn sidechain_user_string(cwd: &str, agent_id: &str, uuid: &str, text: &str) -> V
         "timestamp": "2026-09-20T00:00:00Z",
         "message": {"role": "user", "content": text},
     })
+}
+
+#[test]
+fn raw_backfill_restores_multiblock_and_subagent_prefixes() {
+    let root = TestDir::new();
+    let principal = root.path().join("session-backfill.jsonl");
+    let subagent = root.path().join("session-backfill/subagents/agent-A.jsonl");
+    write_jsonl(
+        &principal,
+        &[
+            json!({"type":"system","timestamp":"2026-09-20T00:00:00Z"}),
+            json!({"type":"assistant","uuid":"a1","parentUuid":null,"cwd":"/work/repo","timestamp":"2026-09-20T00:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"first"},{"type":"text","text":"second"}]}}),
+            json!({"type":"system","timestamp":"2026-09-20T00:00:02Z"}),
+        ],
+    );
+    write_jsonl(
+        &subagent,
+        &[
+            json!({"type":"system","timestamp":"2026-09-20T00:00:03Z"}),
+            sidechain_user_string("/work/repo", "A", "u1", "subagent request"),
+        ],
+    );
+    let state_path = root.path().join("state.json");
+    let mut state = CursorState::default();
+    let mut fresh = TraceStore::open(root.path().join("fresh.sqlite3")).unwrap();
+    for path in [&principal, &subagent] {
+        process_file(path, &mut state, &mut fresh, &options(&state_path)).unwrap();
+    }
+    let state_bytes = fs::read(&state_path).unwrap();
+    let principal_session = "session-backfill";
+    let subagent_session = "session-backfill/agent-A";
+    let occurrences = fresh.log(&LogFilter::default()).unwrap();
+    assert_eq!(occurrences.len(), 3);
+    let mut old = TraceStore::open(root.path().join("old.sqlite3")).unwrap();
+    for (path, session) in [
+        (&principal, principal_session),
+        (&subagent, subagent_session),
+    ] {
+        let source = fs::read(path).unwrap();
+        for (ordinal, line) in source.split_inclusive(|byte| *byte == b'\n').enumerate() {
+            let matched = occurrences
+                .iter()
+                .filter(|row| row.session() == session && row.sequence() / 1024 == ordinal as i64)
+                .collect::<Vec<_>>();
+            if matched.is_empty() {
+                continue;
+            }
+            let blocks = matched
+                .iter()
+                .map(|row| {
+                    (
+                        row.semantic_core().clone(),
+                        NewOccurrence {
+                            session: row.session(),
+                            sequence: row.sequence(),
+                            timestamp: row.timestamp(),
+                            repo: row.repo(),
+                            repo_source: row.repo_source(),
+                            parent_sequence: row.parent_sequence(),
+                            agent: row.agent(),
+                            authored_by: row.authored_by(),
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            old.capture_line(
+                NewRawCarrierRecord::new(CARRIER, line),
+                session,
+                sequence_for(ordinal as u64, 0),
+                matched[0].timestamp(),
+                &blocks,
+            )
+            .unwrap();
+        }
+    }
+    let baseline_traces = old.list_traces(None, 10).unwrap().len();
+    let baseline_log = old.log(&LogFilter::default()).unwrap().len();
+    let baseline_links = [principal_session, subagent_session]
+        .iter()
+        .map(|session| {
+            old.fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(session))
+                .unwrap()
+                .iter()
+                .map(|row| row.trace_ids().len())
+                .sum::<usize>()
+        })
+        .sum::<usize>();
+    let preview = backfill_raw(&state, &mut old, true).unwrap();
+    assert_eq!(
+        (
+            preview.files_scanned,
+            preview.lines_scanned,
+            preview.rows_inserted,
+            preview.rows_already_present
+        ),
+        (2, 5, 3, 2)
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&principal)
+        .unwrap()
+        .write_all(b"{\"type\":\"extra\"}\n")
+        .unwrap();
+    assert_eq!(
+        backfill_raw(&state, &mut old, false).unwrap().rows_inserted,
+        3
+    );
+    assert_eq!(
+        backfill_raw(&state, &mut old, false).unwrap().rows_inserted,
+        0
+    );
+    for session in [principal_session, subagent_session] {
+        let expected = fresh
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(session))
+            .unwrap();
+        let actual = old
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(session))
+            .unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for row in &expected {
+            let restored = actual
+                .iter()
+                .find(|candidate| candidate.sequence() == row.sequence())
+                .unwrap();
+            assert_eq!(
+                (restored.bytes(), restored.session(), restored.timestamp()),
+                (row.bytes(), row.session(), row.timestamp())
+            );
+        }
+    }
+    assert_eq!(old.list_traces(None, 10).unwrap().len(), baseline_traces);
+    assert_eq!(old.log(&LogFilter::default()).unwrap().len(), baseline_log);
+    let links = [principal_session, subagent_session]
+        .iter()
+        .map(|session| {
+            old.fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(session))
+                .unwrap()
+                .iter()
+                .map(|row| row.trace_ids().len())
+                .sum::<usize>()
+        })
+        .sum::<usize>();
+    assert_eq!(links, baseline_links);
+    assert_eq!(fs::read(&state_path).unwrap(), state_bytes);
 }
 
 fn assistant_text(cwd: &str, uuid: &str, parent_uuid: Option<&str>, text: &str) -> Value {
