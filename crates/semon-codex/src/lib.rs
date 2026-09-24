@@ -14,7 +14,7 @@ mod state;
 use std::{
     env,
     fs::{self, File},
-    io::{self, BufRead, BufReader, Seek},
+    io::{self, BufRead, BufReader, Read, Seek},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -24,8 +24,8 @@ pub use normalize::{
     normalize_record, parse_timestamp, repo_from_cwd, repo_from_url, token_usage,
 };
 use semon_store::{
-    AuthoredBy, CaptureResult, NewOccurrence, NewRawCarrierRecord, RepoSource, SemanticCore,
-    StoreError, TraceStore,
+    AuthoredBy, CaptureResult, NewOccurrence, NewRawCarrierRecord, RawBackfillLine, RepoSource,
+    SemanticCore, StoreError, TraceStore,
 };
 use serde_json::{Value, json};
 pub use state::{CursorState, load_state, save_state};
@@ -33,6 +33,141 @@ use thiserror::Error;
 
 /// The forensic carrier label written beside captured Codex records.
 pub const CARRIER: &str = "codex";
+
+/// Totals from replaying saved Codex cursors.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct BackfillReport {
+    /// Files recorded in the cursor state.
+    pub files_scanned: usize,
+    /// Complete lines within saved offsets.
+    pub lines_scanned: usize,
+    /// Rows inserted, or rows that would be inserted in a dry run.
+    pub rows_inserted: usize,
+    /// Lines whose exact raw row already exists.
+    pub rows_already_present: usize,
+    /// Files absent from disk.
+    pub missing: Vec<PathBuf>,
+    /// Files shorter than their saved offsets.
+    pub rewritten: Vec<PathBuf>,
+    /// Files with conflicting raw bytes, paired with the first sequence.
+    pub misaligned: Vec<(PathBuf, i64)>,
+}
+
+struct DerivedLine {
+    event: Option<Value>,
+    session: String,
+    sequence: i64,
+    timestamp: i64,
+}
+
+fn derive_line(
+    line: &[u8],
+    ordinal: u64,
+    context: &mut NormalizeContext,
+    history_source: bool,
+    session_repos: &std::collections::BTreeMap<String, (String, RepoSource)>,
+    repo_override: &str,
+) -> DerivedLine {
+    let event = serde_json::from_slice::<Value>(line)
+        .ok()
+        .filter(Value::is_object)
+        .map(|record| {
+            if history_source {
+                history_event(&record, session_repos, repo_override)
+            } else {
+                normalize_record(&record, context, repo_override)
+            }
+        });
+    let session = event
+        .as_ref()
+        .and_then(|event| event.get("session_id"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| context.session_id())
+        .to_owned();
+    let timestamp = event
+        .as_ref()
+        .and_then(|event| event.get("ts"))
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| parse_timestamp(&Value::Null));
+    DerivedLine {
+        event,
+        session,
+        sequence: ordinal as i64,
+        timestamp,
+    }
+}
+
+/// Replays tracked file prefixes without changing the cursor state.
+pub fn backfill_raw(
+    state: &CursorState,
+    store: &mut TraceStore,
+    history_path: &Path,
+    repo_override: &str,
+    dry_run: bool,
+) -> Result<BackfillReport, AdapterError> {
+    let mut report = BackfillReport::default();
+    for (key, saved) in state.files() {
+        report.files_scanned += 1;
+        let path = PathBuf::from(key);
+        let size = match fs::metadata(&path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                report.missing.push(path);
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if size < saved.offset {
+            report.rewritten.push(path);
+            continue;
+        }
+        let history_source = same_path(&path, history_path)?;
+        let mut context = NormalizeContext::default();
+        if !history_source {
+            context.has_item_stream = saved.context().has_item_stream
+                || file_uses_item_stream_prefix(&path, saved.offset)?;
+        }
+        let mut reader = BufReader::new(File::open(&path)?.take(saved.offset));
+        let mut lines = Vec::new();
+        let mut ordinal = 0;
+        let mut consumed = 0;
+        while consumed < saved.offset {
+            let mut bytes = Vec::new();
+            let count = reader.read_until(b'\n', &mut bytes)?;
+            if count == 0 || !bytes.ends_with(b"\n") {
+                return Err(AdapterError::State(format!(
+                    "cursor is not at a complete line in {}",
+                    path.display()
+                )));
+            }
+            consumed += count as u64;
+            let derived = derive_line(
+                &bytes,
+                ordinal,
+                &mut context,
+                history_source,
+                state.session_repos(),
+                repo_override,
+            );
+            lines.push(RawBackfillLine {
+                bytes,
+                session: derived.session,
+                sequence: derived.sequence,
+                timestamp: derived.timestamp,
+            });
+            ordinal += 1;
+        }
+        report.lines_scanned += lines.len();
+        let result = store.backfill_raw_lines(CARRIER, &lines, dry_run)?;
+        report.rows_already_present += result.already_present;
+        if let Some(sequence) = result.misaligned_sequence {
+            report.misaligned.push((path, sequence));
+        } else {
+            report.rows_inserted += result.inserted;
+        }
+    }
+    Ok(report)
+}
 
 /// Errors produced while normalizing or incrementally capturing Codex data.
 #[derive(Debug, Error)]
@@ -224,18 +359,17 @@ pub fn process_file(
             let this_line_ordinal = next_line_ordinal;
             next_line_ordinal += 1;
 
-            match serde_json::from_slice::<Value>(&line) {
-                Ok(record) if record.is_object() => {
-                    let event = if history_source {
-                        history_event(&record, state.session_repos(), options.repo_override)
-                    } else {
-                        normalize_record(&record, &mut context, options.repo_override)
-                    };
-                    let session = event
-                        .get("session_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_owned();
+            let derived = derive_line(
+                &line,
+                this_line_ordinal,
+                &mut context,
+                history_source,
+                state.session_repos(),
+                options.repo_override,
+            );
+            match derived.event {
+                Some(event) => {
+                    let session = derived.session;
                     let repo = event
                         .get("repo")
                         .and_then(Value::as_str)
@@ -246,7 +380,7 @@ pub fn process_file(
                         .and_then(Value::as_str)
                         .and_then(|value| RepoSource::from_str(value).ok())
                         .unwrap_or(RepoSource::None);
-                    let timestamp = event.get("ts").and_then(Value::as_i64).unwrap_or(0);
+                    let timestamp = derived.timestamp;
                     // The previous *projected* record in this session, never
                     // a locally tracked "last row written" value: this map
                     // is itself fully re-derivable by replaying the file
@@ -254,7 +388,7 @@ pub fn process_file(
                     let parent_sequence = last_projected_sequence.get(&session).copied();
                     let occurrence = NewOccurrence {
                         session: &session,
-                        sequence: this_line_ordinal as i64,
+                        sequence: derived.sequence,
                         timestamp,
                         repo: &repo,
                         repo_source,
@@ -268,28 +402,13 @@ pub fn process_file(
                         last_projected_sequence.insert(session, this_line_ordinal as i64);
                     }
                 }
-                Ok(_) => {
-                    // A complete non-object line has no transferable
-                    // semantics, but Decision 1 retains the source line.
+                None => {
                     store.capture_raw_only(
                         CARRIER,
                         &line,
-                        context.session_id(),
-                        this_line_ordinal as i64,
-                        parse_timestamp(&Value::Null),
-                    )?;
-                }
-                Err(_) => {
-                    // A malformed complete line still belongs in the raw
-                    // region. It has no source timestamp, so capture time is
-                    // used by the same parser fallback as a valid record
-                    // whose timestamp is absent.
-                    store.capture_raw_only(
-                        CARRIER,
-                        &line,
-                        context.session_id(),
-                        this_line_ordinal as i64,
-                        parse_timestamp(&Value::Null),
+                        &derived.session,
+                        derived.sequence,
+                        derived.timestamp,
                     )?;
                 }
             }
@@ -443,7 +562,11 @@ fn file_change_core(event: &Value) -> Result<Option<SemanticCore>, StoreError> {
 /// question is whether the *file* carries the item stream at all, not
 /// whether the unconsumed remainder does.
 fn file_uses_item_stream(path: &Path) -> Result<bool, AdapterError> {
-    let mut reader = BufReader::new(File::open(path)?);
+    file_uses_item_stream_prefix(path, u64::MAX)
+}
+
+fn file_uses_item_stream_prefix(path: &Path, limit: u64) -> Result<bool, AdapterError> {
+    let mut reader = BufReader::new(File::open(path)?.take(limit));
     let mut line = Vec::new();
     loop {
         line.clear();

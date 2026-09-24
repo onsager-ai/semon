@@ -388,15 +388,29 @@ pub struct RawCarrierRecord {
     trace_ids: Vec<TraceId>,
     carrier: String,
     bytes: Vec<u8>,
+    session: Option<String>,
+    sequence: Option<i64>,
+    timestamp: Option<i64>,
 }
 
 impl RawCarrierRecord {
-    pub(crate) fn new(id: i64, trace_ids: Vec<TraceId>, carrier: String, bytes: Vec<u8>) -> Self {
+    pub(crate) fn new(
+        id: i64,
+        trace_ids: Vec<TraceId>,
+        carrier: String,
+        bytes: Vec<u8>,
+        session: Option<String>,
+        sequence: Option<i64>,
+        timestamp: Option<i64>,
+    ) -> Self {
         Self {
             id,
             trace_ids,
             carrier,
             bytes,
+            session,
+            sequence,
+            timestamp,
         }
     }
 
@@ -419,5 +433,20 @@ impl RawCarrierRecord {
     /// Returns the carrier bytes unchanged.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Returns the raw row's own session, when recoverable from its schema.
+    pub fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
+    /// Returns the raw row's source line sequence, when available.
+    pub fn sequence(&self) -> Option<i64> {
+        self.sequence
+    }
+
+    /// Returns the raw row's timestamp, when available.
+    pub fn timestamp(&self) -> Option<i64> {
+        self.timestamp
     }
 }
