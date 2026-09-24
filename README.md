@@ -73,6 +73,8 @@ timestamps, repository inference, machine paths, token counts, tool framing,
 and the full source object stay out of content identity. The exact original
 line is retained only through the store's explicit forensic read surface.
 
+For stores that captured Codex subagent rollouts before the subagent session key fix, run `semon-codex --repair-subagent-keys --dry-run` first with the same `--store`, `--state`, and source path options used for capture, then omit `--dry-run` to repair the stored keys and occurrences. The repair uses only source lines up to saved cursor offsets and skips a parent group if any tracked source file is missing or shorter than its saved offset. Opening the store for the dry run can still migrate an older schema.
+
 ## Backfilling raw lines from before schema v4
 
 Run this after upgrading a store whose adapter cursors advanced past unprojected lines before schema v4. Back up the store first, then run each adapter with `--backfill-raw --dry-run` and the same `--store`, `--state`, and source path options used for capture. For example, run `semon-codex --backfill-raw --dry-run --store /path/to/traces.sqlite3 --state /path/to/codex-state.json --sessions /path/to/sessions --history /path/to/history.jsonl` and `semon-claude --backfill-raw --dry-run --store /path/to/traces.sqlite3 --state /path/to/claude-state.json --projects /path/to/projects`. Omit `--dry-run` to insert the missing raw lines. Both commands replay only files recorded in their cursor state and stop at each saved offset; live capture handles newer lines. They never advance the cursor or create traces, occurrences, or raw trace links.

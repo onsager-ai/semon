@@ -168,6 +168,8 @@ impl CursorState {
 pub(crate) struct FileCursor {
     pub(crate) offset: u64,
     session_id: String,
+    parent_session_id: Option<String>,
+    agent: Option<String>,
     repo: String,
     repo_source: RepoSource,
     cwd: String,
@@ -202,6 +204,8 @@ impl Default for FileCursor {
         Self {
             offset: 0,
             session_id: String::new(),
+            parent_session_id: None,
+            agent: None,
             repo: String::new(),
             repo_source: RepoSource::None,
             cwd: String::new(),
@@ -215,18 +219,23 @@ impl Default for FileCursor {
 
 impl FileCursor {
     pub(crate) fn context(&self) -> NormalizeContext {
-        NormalizeContext::from_parts(
-            self.session_id.clone(),
-            self.repo.clone(),
-            self.repo_source,
-            self.cwd.clone(),
-            self.calls.clone(),
-            self.has_item_stream,
-        )
+        NormalizeContext {
+            session_id: self.session_id.clone(),
+            parent_session_id: self.parent_session_id.clone(),
+            agent: self.agent.clone(),
+            repo: self.repo.clone(),
+            repo_source: self.repo_source,
+            cwd: self.cwd.clone(),
+            calls: self.calls.clone(),
+            has_item_stream: self.has_item_stream,
+        }
     }
 
     pub(crate) fn update_context(&mut self, context: &NormalizeContext) {
         self.session_id.clone_from(&context.session_id);
+        self.parent_session_id
+            .clone_from(&context.parent_session_id);
+        self.agent.clone_from(&context.agent);
         self.repo.clone_from(&context.repo);
         self.repo_source = context.repo_source;
         self.cwd.clone_from(&context.cwd);
@@ -280,6 +289,14 @@ impl FileCursor {
         Ok(Self {
             offset,
             session_id: string("session_id"),
+            parent_session_id: object
+                .get("parent_session_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            agent: object
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             repo: string("repo"),
             repo_source,
             cwd: string("cwd"),
@@ -314,6 +331,16 @@ impl FileCursor {
                 Value::String(self.repo_source.as_str().to_owned()),
             ),
             ("session_id".into(), Value::String(self.session_id.clone())),
+            (
+                "parent_session_id".into(),
+                self.parent_session_id
+                    .clone()
+                    .map_or(Value::Null, Value::String),
+            ),
+            (
+                "agent".into(),
+                self.agent.clone().map_or(Value::Null, Value::String),
+            ),
         ]))
     }
 }

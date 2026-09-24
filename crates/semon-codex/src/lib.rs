@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 mod normalize;
+mod repair;
 mod state;
 
 use std::{
@@ -23,6 +24,7 @@ pub use normalize::{
     NormalizeContext, apply_path_rule, history_event, infer_success, json_text, message_text,
     normalize_record, parse_timestamp, repo_from_cwd, repo_from_url, token_usage,
 };
+pub use repair::{RepairReport, repair_subagent_keys};
 use semon_store::{
     AuthoredBy, CaptureResult, NewOccurrence, NewRawCarrierRecord, RawBackfillLine, RepoSource,
     SemanticCore, StoreError, TraceStore,
@@ -56,6 +58,7 @@ pub struct BackfillReport {
 struct DerivedLine {
     event: Option<Value>,
     session: String,
+    agent: Option<String>,
     sequence: i64,
     timestamp: i64,
 }
@@ -92,6 +95,7 @@ fn derive_line(
     DerivedLine {
         event,
         session,
+        agent: context.agent.clone(),
         sequence: ordinal as i64,
         timestamp,
     }
@@ -291,18 +295,55 @@ pub fn process_file(
     store: &mut TraceStore,
     options: &ProcessOptions<'_>,
 ) -> Result<usize, AdapterError> {
+    process_file_until(path, state, store, options, None, true)
+}
+
+fn process_file_until(
+    path: &Path,
+    state: &mut CursorState,
+    store: &mut TraceStore,
+    options: &ProcessOptions<'_>,
+    offset_limit: Option<u64>,
+    persist_state: bool,
+) -> Result<usize, AdapterError> {
     if options.batch_size == 0 || options.max_batch_bytes == 0 {
         return Err(AdapterError::InvalidBatchLimit);
     }
 
     let key = resolved(path)?;
     let key = key.to_string_lossy().into_owned();
-    let size = fs::metadata(path)?.len();
+    let size = fs::metadata(path)?
+        .len()
+        .min(offset_limit.unwrap_or(u64::MAX));
     let mut saved = state.take_file(&key);
     if saved.offset > size {
         saved = state::FileCursor::default();
     }
     let mut context = saved.context();
+    let history_source = same_path(path, options.history_path)?;
+    if saved.offset > 0 && !history_source && context.parent_session_id.is_none() {
+        let mut first = Vec::new();
+        BufReader::new(File::open(path)?).read_until(b'\n', &mut first)?;
+        if let Ok(record) = serde_json::from_slice::<Value>(&first)
+            && record.get("type").and_then(Value::as_str) == Some("session_meta")
+            && let Some(payload) = record.get("payload").and_then(Value::as_object)
+        {
+            let previous_session = context.session_id.clone();
+            context.set_session_meta_identity(payload);
+            if context.parent_session_id.is_some() {
+                if let Some(sequence) = saved.last_projected_sequence.remove(&previous_session) {
+                    saved
+                        .last_projected_sequence
+                        .insert(context.session_id.clone(), sequence);
+                }
+                saved.update_context(&context);
+                if persist_state {
+                    state.put_file(key.clone(), saved.clone());
+                    save_state(options.state_path, state)?;
+                }
+            }
+        }
+    }
     // Local, per-batch-committed mirrors of the occurrence derivation state
     // that lives in `saved` between calls (see `FileCursor::next_line_ordinal`
     // and `FileCursor::last_projected_sequence`). Mirrored the same way
@@ -312,7 +353,6 @@ pub fn process_file(
     let mut next_line_ordinal = saved.next_line_ordinal;
     let mut last_projected_sequence = saved.last_projected_sequence.clone();
     let mut consumed = 0;
-    let history_source = same_path(path, options.history_path)?;
     // Whether this file carries the `item_completed` item stream decides
     // whether the legacy `response_item`/`message` mirror still projects
     // (see `NormalizeContext::has_item_stream`). That decision has to be
@@ -326,7 +366,7 @@ pub fn process_file(
     // line left for the flag to change the outcome of, so neither case pays
     // for a rescan.
     if !history_source && !context.has_item_stream && saved.offset < size {
-        context.has_item_stream = file_uses_item_stream(path)?;
+        context.has_item_stream = file_uses_item_stream_prefix(path, size)?;
     }
     let mut reader = BufReader::new(File::open(path)?);
     reader.seek(io::SeekFrom::Start(saved.offset))?;
@@ -338,8 +378,15 @@ pub fn process_file(
 
         while batch_count < options.batch_size && pending_bytes < options.max_batch_bytes {
             let start = reader.stream_position()?;
+            if start >= size {
+                break;
+            }
             let mut line = Vec::new();
-            if reader.read_until(b'\n', &mut line)? == 0 {
+            if (&mut reader)
+                .take(size - start)
+                .read_until(b'\n', &mut line)?
+                == 0
+            {
                 break;
             }
             if !line.ends_with(b"\n") {
@@ -393,7 +440,7 @@ pub fn process_file(
                         repo: &repo,
                         repo_source,
                         parent_sequence,
-                        agent: None,
+                        agent: derived.agent.as_deref(),
                         authored_by: authored_by_for_kind(
                             event.get("kind").and_then(Value::as_str).unwrap_or(""),
                         ),
@@ -426,7 +473,9 @@ pub fn process_file(
             state.remember_repo(context.session_id(), context.repo(), context.repo_source());
         }
         state.put_file(key.clone(), saved.clone());
-        save_state(options.state_path, state)?;
+        if persist_state {
+            save_state(options.state_path, state)?;
+        }
         consumed += batch_count;
     }
 
@@ -485,8 +534,6 @@ fn semantic_core(event: &Value) -> Result<Option<SemanticCore>, StoreError> {
 /// classified but discarded along with the rest of the occurrence facts
 /// when [`semantic_core`] returns `None`.
 ///
-/// `agent` is always `None` for Codex, which has no subagent concept — the
-/// column exists for a future carrier (e.g. the Claude adapter) that does.
 fn authored_by_for_kind(kind: &str) -> AuthoredBy {
     match kind {
         "item_user_message" | "user_prompt" | "history_entry" => AuthoredBy::Human,
@@ -558,13 +605,8 @@ fn file_change_core(event: &Value) -> Result<Option<SemanticCore>, StoreError> {
 /// Scans a session file from its start for the first `event_msg`/
 /// `item_completed` record, without holding more than one line in memory.
 ///
-/// This intentionally reads independently of any saved cursor offset: the
-/// question is whether the *file* carries the item stream at all, not
-/// whether the unconsumed remainder does.
-fn file_uses_item_stream(path: &Path) -> Result<bool, AdapterError> {
-    file_uses_item_stream_prefix(path, u64::MAX)
-}
-
+/// This scans the whole captured prefix, including lines before the current
+/// cursor, because early mirror messages depend on a later item stream.
 fn file_uses_item_stream_prefix(path: &Path, limit: u64) -> Result<bool, AdapterError> {
     let mut reader = BufReader::new(File::open(path)?.take(limit));
     let mut line = Vec::new();

@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use semon_codex::{
     ProcessOptions, backfill_raw, candidate_files, default_state_path, default_store_path,
-    load_state, process_file,
+    load_state, process_file, repair_subagent_keys,
 };
 use semon_store::TraceStore;
 
@@ -18,6 +18,7 @@ struct Args {
     repo: String,
     verbose: bool,
     backfill_raw: bool,
+    repair_subagent_keys: bool,
     dry_run: bool,
 }
 
@@ -37,6 +38,30 @@ fn run(args: Args) -> Result<(), String> {
     }
     let mut store = TraceStore::open(&args.store).map_err(|error| error.to_string())?;
     let mut state = load_state(&args.state).map_err(|error| error.to_string())?;
+    if args.repair_subagent_keys {
+        let report =
+            repair_subagent_keys(&state, &mut store, &args.history, &args.repo, args.dry_run)
+                .map_err(|error| error.to_string())?;
+        for (parent, reason) in &report.groups_skipped {
+            println!("skipped {parent}: {reason}");
+        }
+        println!(
+            "groups found: {}, groups repaired: {}, groups skipped: {}, raw rows re-keyed: {}, misplaced duplicates deleted: {}, occurrences deleted: {}, occurrences rebuilt: {}{}",
+            report.groups_found,
+            report.groups_repaired,
+            report.groups_skipped.len(),
+            report.raw_rekeyed,
+            report.duplicates_deleted,
+            report.occurrences_deleted,
+            report.occurrences_rebuilt,
+            if args.dry_run {
+                " (dry run; no repair writes)"
+            } else {
+                ""
+            }
+        );
+        return Ok(());
+    }
     if args.backfill_raw {
         let report = backfill_raw(&state, &mut store, &args.history, &args.repo, args.dry_run)
             .map_err(|error| error.to_string())?;
@@ -114,6 +139,7 @@ fn parse_args() -> Result<Args, String> {
         repo: env::var("SEMON_REPO").unwrap_or_default(),
         verbose: false,
         backfill_raw: false,
+        repair_subagent_keys: false,
         dry_run: false,
     };
     let mut arguments = env::args().skip(1);
@@ -131,18 +157,22 @@ fn parse_args() -> Result<Args, String> {
             "--repo" => result.repo = value(&mut arguments)?,
             "-v" | "--verbose" => result.verbose = true,
             "--backfill-raw" => result.backfill_raw = true,
+            "--repair-subagent-keys" => result.repair_subagent_keys = true,
             "--dry-run" => result.dry_run = true,
             "-h" | "--help" => {
                 println!(
-                    "Usage: semon-codex [--sessions PATH] [--history PATH] [--state PATH] [--store PATH] [--repo NAME] [--verbose] [--backfill-raw [--dry-run]]"
+                    "Usage: semon-codex [--sessions PATH] [--history PATH] [--state PATH] [--store PATH] [--repo NAME] [--verbose] [--backfill-raw | --repair-subagent-keys] [--dry-run]\n\n--repair-subagent-keys repairs stores captured before subagent keys were fixed. --dry-run writes no repair changes, but opening the store can migrate an older schema."
                 );
                 std::process::exit(0);
             }
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
-    if result.dry_run && !result.backfill_raw {
-        return Err("--dry-run requires --backfill-raw".into());
+    if result.backfill_raw && result.repair_subagent_keys {
+        return Err("--backfill-raw and --repair-subagent-keys cannot be combined".into());
+    }
+    if result.dry_run && !result.backfill_raw && !result.repair_subagent_keys {
+        return Err("--dry-run requires --backfill-raw or --repair-subagent-keys".into());
     }
     Ok(result)
 }

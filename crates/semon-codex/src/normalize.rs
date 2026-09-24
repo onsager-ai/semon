@@ -7,6 +7,8 @@ use serde_json::{Map, Number, Value};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizeContext {
     pub(crate) session_id: String,
+    pub(crate) parent_session_id: Option<String>,
+    pub(crate) agent: Option<String>,
     pub(crate) repo: String,
     /// The basis for `repo`, maintained alongside it: set whenever `repo` is
     /// set from a git remote URL or a cwd basename, and reset to `None` when
@@ -30,6 +32,8 @@ impl Default for NormalizeContext {
     fn default() -> Self {
         Self {
             session_id: String::new(),
+            parent_session_id: None,
+            agent: None,
             repo: String::new(),
             repo_source: RepoSource::None,
             cwd: String::new(),
@@ -45,6 +49,11 @@ impl NormalizeContext {
         &self.session_id
     }
 
+    /// Returns the subagent path, or its nickname when no path was supplied.
+    pub fn agent(&self) -> Option<&str> {
+        self.agent.as_deref()
+    }
+
     /// Returns the repository attribution inferred for the session.
     pub fn repo(&self) -> &str {
         &self.repo
@@ -55,21 +64,30 @@ impl NormalizeContext {
         self.repo_source
     }
 
-    pub(crate) fn from_parts(
-        session_id: String,
-        repo: String,
-        repo_source: RepoSource,
-        cwd: String,
-        calls: Map<String, Value>,
-        has_item_stream: bool,
-    ) -> Self {
-        Self {
-            session_id,
-            repo,
-            repo_source,
-            cwd,
-            calls,
-            has_item_stream,
+    pub(crate) fn set_session_meta_identity(&mut self, payload: &Map<String, Value>) {
+        let parent = payload
+            .get("session_id")
+            .filter(|value| truthy(value))
+            .or_else(|| payload.get("id").filter(|value| truthy(value)))
+            .map(py_string)
+            .unwrap_or_else(|| self.session_id.clone());
+        let id = payload.get("id").and_then(Value::as_str);
+        if payload.get("thread_source").and_then(Value::as_str) == Some("subagent")
+            && let Some(id) = id
+            && id != parent
+        {
+            self.session_id = format!("{parent}/agent-{id}");
+            self.parent_session_id = Some(parent);
+            self.agent = payload
+                .get("agent_path")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .or_else(|| payload.get("agent_nickname").and_then(Value::as_str))
+                .map(str::to_owned);
+        } else {
+            self.session_id = parent;
+            self.parent_session_id = None;
+            self.agent = None;
         }
     }
 }
@@ -448,12 +466,7 @@ pub fn normalize_record(
         .unwrap_or(&Value::Null);
 
     if top_type == "session_meta" {
-        context.session_id = payload
-            .get("session_id")
-            .filter(|value| truthy(value))
-            .or_else(|| payload.get("id").filter(|value| truthy(value)))
-            .map(py_string)
-            .unwrap_or_else(|| context.session_id.clone());
+        context.set_session_meta_identity(payload);
         context.cwd = payload
             .get("cwd")
             .filter(|value| truthy(value))
