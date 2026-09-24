@@ -371,9 +371,8 @@ fn checked_in_fixture_captures_canonical_and_raw_regions() {
     }
 
     let raw = store.fetch_raw_carrier_records(trace.id()).unwrap();
-    assert_eq!(raw.len(), 2);
+    assert_eq!(raw.len(), 1, "byte-identical replay must reuse the raw row");
     assert!(raw.iter().all(|record| record.carrier() == CARRIER));
-    assert_eq!(raw[0].bytes(), raw[1].bytes());
     assert!(
         std::str::from_utf8(raw[0].bytes())
             .unwrap()

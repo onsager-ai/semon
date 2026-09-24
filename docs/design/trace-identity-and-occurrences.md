@@ -25,7 +25,7 @@ Two *storage* regions become three, and the new one is ordered. A word of care a
 
 **`occurrences` — new.** One row per time a trace was observed, carrying `(trace_id, session, sequence, timestamp, repo)`. Ordered. Not part of identity.
 
-**`raw_carrier_records` — unchanged.** The forensic region, still reachable only through its own explicit read.
+**`raw_carrier_records` — forensic source lines.** Schema v5 keeps one raw row per source line and links it to every projected trace through `raw_record_traces`; the forensic region is still reachable only through its own explicit read.
 
 A log renders by joining occurrences to traces in occurrence order:
 
@@ -65,7 +65,7 @@ Three consequences follow from putting provenance in a second region. Two resolv
 
 *(derived — the argument is retention)*
 
-A raw carrier record is, in effect, an occurrence that also carries the bytes, so there are three ways to relate them: derive occurrences from raw at read time, let raw displace them, or persist them independently.
+A raw carrier record carries complete source-line bytes and provenance. One line may project several occurrences, so the regions must be persisted independently rather than deriving occurrences from raw at read time.
 
 The first two are foreclosed by the need to delete forensic data at all. Under either of them, purging forensics destroys the log: the user's history evaporates as a side effect of a privacy control. **That is the worst available coupling, because it makes doing the right thing cost the user their history, and so it makes the right thing not get done.**
 
@@ -90,11 +90,12 @@ Raw records were linked only to `trace_id`. But a trace is per *content* and a r
 
 The read path in `semon forensic --session/--day` had the same flaw, over-reading other sessions. It went unnoticed there because extra rows on a read do no damage; on an irreversible delete the same selection destroys data.
 
-**The link:** each raw record carries its occurrence's natural key `(carrier, session, sequence)`. Schema v3.
+**The provenance key:** each raw record carries its own `(carrier, session, sequence)` and timestamp. Schema v3 introduced the key; schema v5 stores the source line at its line sequence while occurrences retain per-block sequences.
 
-- The reference runs **raw → occurrence only**. Occurrences still carry nothing that points at raw, so the log still survives forensic deletion — the property above, and the reason the direction matters.
-- `TraceStore::capture` already receives the occurrence, so the store copies the key onto the raw row itself. No adapter supplies it; none can get it wrong.
-- Rows written before v3 have no link and cannot be backfilled, since `trace_id` was the only connection and it is exactly what is ambiguous. Selections that depend on the link report such rows rather than silently skipping them.
+- `raw_record_traces` links each raw line to every trace it projects. Occurrences still carry nothing that points at raw, so the log survives forensic deletion.
+- `TraceStore::capture_line` receives the line key and all projected blocks in one transaction. Claude uses `sequence_for(line, 0)` for the raw row and preserves each block's own occurrence sequence; Codex uses the line ordinal for both.
+- Rows written before v3 have no session or sequence and cannot be backfilled, since `trace_id` alone cannot determine which occurrence they belonged to. Session and time selections report these rows rather than silently skipping them.
+- Forgetting by trace deletes the entire raw line containing that trace, including bytes for other traces projected from it. Their canonical traces and occurrences remain, and `semon log` continues to render.
 
 Re-measured on the same week after the change: one session's deletion removes exactly its 672 rows with **zero collateral**, and the cutoff deletion removes all 4,222 with **zero survivors**.
 

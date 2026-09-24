@@ -55,7 +55,7 @@ use crate::AdapterError;
 /// encoded as `line_ordinal * 1024 + block_index`, so a `block_index` at or
 /// past this limit would collide with the next line's block 0 — see
 /// [`crate::sequence_for`].
-pub const MAX_BLOCKS_PER_RECORD: usize = 1024;
+pub const MAX_BLOCKS_PER_RECORD: usize = semon_store::CLAUDE_MAX_BLOCKS_PER_RECORD as usize;
 
 /// Harness-injected framing prefixes, identical in spirit to Codex's
 /// `developer`-role exclusion: text the harness inserted, never the human's

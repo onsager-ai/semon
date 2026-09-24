@@ -37,7 +37,7 @@ No pruning by age or size, no opt-out, no sampling. Capture writes every source 
 
 **Consequence that follows and is not optional.** Because retention is unbounded, retention is no longer a mitigation. The entire remaining protection is file access and the shape of the read path, which the next two decisions govern. They carry more weight than they would under a pruning policy, and must not be traded away later on the grounds that "it is only local".
 
-*Implemented by schema v4, 2026-09-22.* "Every source line" now means every complete line an adapter consumes, including a line with no transferable semantic projection. Such a raw row has a nullable `trace_id` and creates no canonical trace or occurrence. Its own session, sequence and timestamp stay on the raw row so forensic selection and deliberate deletion can still reach it; a missing source timestamp falls back to capture time. The v4 migration rebuilds the raw table transactionally and backfills existing timestamps from each row's exact `(carrier, session, sequence)` occurrence link. Pre-v3 rows with no link retain a null timestamp and continue to be reported as unlinked.
+*Implemented by schema v4, 2026-09-22, and schema v5, 2026-09-24.* "Every source line" means every complete line an adapter consumes, including a line with no transferable semantic projection. Its own session, line sequence and timestamp stay on the raw row so forensic selection and deliberate deletion can still reach it; a missing source timestamp falls back to capture time. The v4 migration backfills existing timestamps from each row's exact `(carrier, session, sequence)` occurrence link. Schema v5 moves trace associations into `raw_record_traces`: an unprojected line has no links, and one projected line may link to several traces. Identical bytes at the same line key reuse one row on replay; different bytes at that key remain separate rows. Pre-v3 rows with no session or sequence retain a null timestamp and continue to be reported as unlinked.
 
 The accepted storage cost is larger than the earlier measurement above implied. On the corpus measured for this ruling, retaining every line increased raw row count by about **6.7x** (128,890 complete lines versus at most 19,295 projectable lines across 283 Codex rollouts). Byte growth is greater because tool outputs are among the largest lines.
 
@@ -53,7 +53,7 @@ Permissions are set at creation and re-asserted on open, so an existing store wi
 
 `semon forensic` is the only path from the CLI to raw records. It selects by trace, by session, or by day.
 
-Session and day selection use the raw row's own provenance and therefore include unprojected lines. Trace selection is content selection: it reaches only projected lines, because an unprojected raw row has no trace id. The command states this limit when `--trace` is used.
+Session and day selection use the raw row's own provenance and therefore include unprojected lines. Trace selection follows `raw_record_traces` and returns each complete source line linked to the named trace once. An unprojected raw row has no trace link. The command states this limit when `--trace` is used.
 
 **Bulk selection is deliberate.** Reconstructing an incident means reading a whole session, and a tool that can only return one record at a time forces whoever needs that into `sqlite3` — an unaudited path with no guardrails at all. Honest capability beats a bar that is theatre against anyone who knows SQL.
 
@@ -89,6 +89,8 @@ Two further facts follow, and the second is the uncomfortable one:
 - **There is no supported way to delete forensic data at all.** No command removes raw records, and deleting the store file destroys the canonical traces and occurrences with them. So the property deliberately built in [trace-identity-and-occurrences.md](trace-identity-and-occurrences.md) — that occurrences are persisted independently and the log renders on a store whose raw region is empty, which is enforced by a passing test — currently has **no mechanism that can bring that state about**. The capability is proven and unreachable.
 
 Under Decision 1 this is consistent: retention is unbounded, so nothing is supposed to delete raw. It is recorded because "we chose never to prune" and "there is no way to prune even deliberately" are different statements, and only the first was decided.
+
+The measured limitation above was resolved by `semon forget --forensic`: deliberate deletion is now supported. Schema v5 also makes `--trace` delete a complete linked raw line, because its bytes may contain other projected blocks; their canonical traces and occurrences remain.
 
 ## What this does not decide
 

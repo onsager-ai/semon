@@ -8,6 +8,9 @@ use crate::{
     OccurrenceRecord, RawCarrierRecord, RepoSource, SemanticCore, TraceId, canonical,
 };
 
+/// Claude's per-line sequence stride, shared with its normalizer.
+pub const CLAUDE_MAX_BLOCKS_PER_RECORD: i64 = 1024;
+
 const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
@@ -17,30 +20,26 @@ CREATE TABLE IF NOT EXISTS canonical_traces (
     canonical_json BLOB NOT NULL
 ) STRICT;
 
--- `session` and `sequence` (schema version 3) copy the natural key of the
--- occurrence written in the same `capture()` transaction. Schema version 4
--- adds the raw row's own `timestamp`, so session and time selectors remain
--- exact even for a complete source line that projects no occurrence.
+-- `session` and `sequence` locate the complete source line. Schema version 4
+-- added the raw row's own `timestamp`, so session and time selectors remain
+-- exact even for a line that projects no occurrence. Schema version 5 links
+-- a line to every trace it projects through `raw_record_traces`.
 -- `session`/`sequence` remain nullable because a v1/v2 database's existing
 -- rows predate this link and cannot be backfilled reliably (trace_id alone
 -- cannot recover which occurrence a raw row belonged to when a trace has
--- more than one). `timestamp` is likewise nullable only for those legacy
--- unlinked rows. The link is deliberately not a foreign key to
+-- more than one). `timestamp` is nullable for legacy rows without a
+-- recoverable timestamp. The line key is deliberately not a foreign key to
 -- `occurrences`: enforcing it would prevent the raw-only rows schema v4
 -- exists to retain, and would also couple occurrence survival to the
 -- forensic region in the direction the design rejects.
 CREATE TABLE IF NOT EXISTS raw_carrier_records (
     raw_record_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    trace_id      TEXT REFERENCES canonical_traces(trace_id),
     carrier       TEXT NOT NULL CHECK(length(trim(carrier)) > 0),
     raw_bytes     BLOB NOT NULL,
     session       TEXT,
     sequence      INTEGER,
     timestamp     INTEGER
 ) STRICT;
-
-CREATE INDEX IF NOT EXISTS raw_carrier_records_by_trace
-    ON raw_carrier_records(trace_id, raw_record_id);
 
 -- The occurrence region (schema version 2). One row per time a trace was
 -- observed. Deliberately has NO foreign key to `raw_carrier_records`, and no
@@ -67,10 +66,20 @@ CREATE INDEX IF NOT EXISTS occurrences_by_repo_timestamp
     ON occurrences(repo, timestamp);
 "#;
 
-/// Creates the index over `raw_carrier_records`' link columns.
+const RAW_RECORD_TRACES_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS raw_record_traces (
+    raw_record_id INTEGER NOT NULL REFERENCES raw_carrier_records(raw_record_id) ON DELETE CASCADE,
+    trace_id TEXT NOT NULL REFERENCES canonical_traces(trace_id),
+    PRIMARY KEY(raw_record_id, trace_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS raw_record_traces_by_trace
+    ON raw_record_traces(trace_id, raw_record_id);
+"#;
+
+/// Creates the index over raw source-line lookup columns.
 ///
 /// Run separately from [`SCHEMA`]. For a pre-v4 database, the v4 table
-/// rebuild creates it after the replacement table is renamed. For a v4
+/// rebuild creates it after the replacement table is renamed. For a v5
 /// database, this statement also restores the index if the raw table was
 /// deliberately dropped and recreated by [`TraceStore::open`].
 const RAW_CARRIER_LINK_INDEX: &str = r#"
@@ -87,10 +96,11 @@ CREATE INDEX IF NOT EXISTS raw_carrier_records_by_carrier_session_sequence
 /// to this constant (instead of anything derived from a caller or the
 /// database) is what keeps that `format!` call safe.
 ///
-/// Four schema shapes exist now (1: `canonical_traces` + `raw_carrier_records`
+/// Five schema shapes exist now (1: `canonical_traces` + `raw_carrier_records`
 /// only; 2: adds `occurrences`; 3: adds nullable `session`/`sequence` link
 /// columns and an index to `raw_carrier_records`; 4: makes `trace_id`
-/// nullable and adds the raw row's own `timestamp`), and read behavior
+/// nullable and adds the raw row's own `timestamp`; 5: moves trace links into
+/// `raw_record_traces` and stores one raw row per source line), and read behavior
 /// genuinely depends on which one is on disk — [`TraceStore::log`] requires
 /// the `occurrences` table, and [`TraceStore::forget_forensic`]'s `Session`
 /// and `Before` selectors require the link columns to select exactly rather
@@ -102,11 +112,11 @@ CREATE INDEX IF NOT EXISTS raw_carrier_records_by_carrier_session_sequence
 /// loudly. A version from 1 up to and including `SCHEMA_VERSION` is migrated
 /// forward. Version 3's link columns are first added to older tables, then
 /// version 4 rebuilds the raw table transactionally because SQLite cannot
-/// remove `trace_id`'s `NOT NULL` constraint in place. The marker advances
-/// in the same transaction as that rebuild. A fresh database (`user_version`
-/// 0, SQLite's default) is created in the v4 shape and stamped through the
-/// same idempotent migration path.
-const SCHEMA_VERSION: u32 = 4;
+/// remove `trace_id`'s `NOT NULL` constraint in place. Version 5 rebuilds it
+/// again to remove that column; each rebuild advances its marker in its own
+/// transaction. A fresh database (`user_version` 0) is created directly in
+/// the v5 shape.
+const SCHEMA_VERSION: u32 = 5;
 
 /// Errors returned by the trace store.
 #[derive(Debug, Error)]
@@ -192,7 +202,8 @@ pub enum OccurrenceSelector<'a> {
 /// and issue #20 — a selector is mandatory).
 #[derive(Clone, Copy, Debug)]
 pub enum ForgetSelector<'a> {
-    /// Every raw record for exactly this trace.
+    /// Every raw line containing this trace; other traces on that line remain
+    /// in the semantic and occurrence regions after deletion.
     Trace(&'a TraceId),
     /// Every raw record captured under this session id.
     Session(&'a str),
@@ -208,11 +219,11 @@ pub enum ForgetSelector<'a> {
 /// can never drift apart on what counts as "matching".
 ///
 /// `Session` and `Before` select each raw row's *own* `session` and
-/// `timestamp`, not through `trace_id`. A trace-scoped selection over-deletes
+/// `timestamp`, not through trace links. A trace-scoped selection over-deletes
 /// the moment one trace recurs across sessions. `Trace` alone stays
 /// trace-scoped deliberately: the caller named the projected content itself,
 /// and removing every capture of it, in every session, is what naming a
-/// trace means. An unprojected raw row has no trace id and therefore cannot
+/// trace means. An unprojected raw row has no trace link and therefore cannot
 /// match `Trace`. A raw row with no link (written before schema version 3,
 /// `session IS NULL`) and no backfilled timestamp matches neither `Session`
 /// nor `Before` — see
@@ -222,7 +233,7 @@ pub enum ForgetSelector<'a> {
 fn forget_where_clause(selector: ForgetSelector<'_>) -> (&'static str, Vec<Box<dyn ToSql>>) {
     match selector {
         ForgetSelector::Trace(trace_id) => (
-            "trace_id = ?1",
+            "raw_record_id IN (SELECT raw_record_id FROM raw_record_traces WHERE trace_id = ?1)",
             vec![Box::new(trace_id.as_str().to_owned())],
         ),
         ForgetSelector::Session(session) => ("session = ?1", vec![Box::new(session.to_owned())]),
@@ -267,82 +278,89 @@ impl TraceStore {
         }
 
         // `SCHEMA` creates missing regions and indexes. Against an existing
-        // raw table its `CREATE TABLE IF NOT EXISTS` is a no-op, so a
-        // pre-v4 table still needs the migration below to change trace_id's
-        // nullability and add the raw row's timestamp.
+        // raw table its `CREATE TABLE IF NOT EXISTS` is a no-op, so older
+        // tables still need the migrations below to reach the v5 shape.
         connection.execute_batch(SCHEMA)?;
-        if user_version < SCHEMA_VERSION {
+        if user_version > 0 && user_version < 4 {
             migrate_raw_carrier_records_v4(&mut connection)?;
-        } else {
-            connection.execute_batch(RAW_CARRIER_LINK_INDEX)?;
+        }
+        if user_version > 0 && user_version < 5 {
+            migrate_raw_carrier_records_v5(&mut connection)?;
+        }
+        connection.execute_batch(RAW_CARRIER_LINK_INDEX)?;
+        connection.execute_batch(RAW_RECORD_TRACES_SCHEMA)?;
+        if user_version == 0 {
+            connection.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         }
 
         Ok(Self { connection })
     }
 
-    /// Atomically writes a semantic trace, its raw carrier record, and the
-    /// occurrence that observed it.
-    ///
-    /// The semantic core alone determines trace identity. If that identity
-    /// already exists, the canonical insert is idempotent and this method
-    /// still appends a new raw record for the new capture. The occurrence
-    /// write is an UPSERT on `(carrier, session, sequence)`: a re-capture of
-    /// the same source position updates that occurrence's fields in place
-    /// rather than inserting a duplicate.
+    /// Captures one projected block while preserving the existing one-block API.
     pub fn capture(
         &mut self,
         semantic_core: &SemanticCore,
         raw_record: NewRawCarrierRecord<'_>,
         occurrence: NewOccurrence<'_>,
     ) -> Result<CaptureResult, StoreError> {
+        let (_, mut results) = self.capture_line(
+            raw_record,
+            occurrence.session,
+            occurrence.sequence,
+            occurrence.timestamp,
+            &[(semantic_core.clone(), occurrence)],
+        )?;
+        Ok(results.remove(0))
+    }
+
+    /// Atomically captures one source line and all its projected blocks.
+    ///
+    /// The raw row is reused when its carrier, session, line sequence and
+    /// bytes match an existing row. Each block keeps its own occurrence
+    /// sequence. The returned id belongs to the shared raw row; results are
+    /// in block order and report each trace id and canonical insert status.
+    pub fn capture_line(
+        &mut self,
+        raw_record: NewRawCarrierRecord<'_>,
+        session: &str,
+        line_sequence: i64,
+        timestamp: i64,
+        blocks: &[(SemanticCore, NewOccurrence<'_>)],
+    ) -> Result<(i64, Vec<CaptureResult>), StoreError> {
         if raw_record.carrier.trim().is_empty() {
             return Err(StoreError::BlankCarrier);
         }
 
-        let canonical_json = semantic_core.canonical_json()?;
-        let trace_id = canonical::content_hash(&canonical_json);
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw_record_id =
+            resolve_raw_record(&transaction, raw_record, session, line_sequence, timestamp)?;
+        let mut results = Vec::with_capacity(blocks.len());
 
-        let canonical_inserted = transaction.execute(
-            "INSERT INTO canonical_traces (trace_id, canonical_json) VALUES (?1, ?2) \
+        for (semantic_core, occurrence) in blocks {
+            let canonical_json = semantic_core.canonical_json()?;
+            let trace_id = canonical::content_hash(&canonical_json);
+
+            let canonical_inserted = transaction.execute(
+                "INSERT INTO canonical_traces (trace_id, canonical_json) VALUES (?1, ?2) \
              ON CONFLICT(trace_id) DO NOTHING",
-            params![trace_id.as_str(), &canonical_json],
-        )? == 1;
+                params![trace_id.as_str(), &canonical_json],
+            )? == 1;
 
-        if !canonical_inserted {
-            let existing: Vec<u8> = transaction.query_row(
-                "SELECT canonical_json FROM canonical_traces WHERE trace_id = ?1",
-                [trace_id.as_str()],
-                |row| row.get(0),
-            )?;
-            if existing != canonical_json {
-                return Err(StoreError::HashCollision(trace_id));
+            if !canonical_inserted {
+                let existing: Vec<u8> = transaction.query_row(
+                    "SELECT canonical_json FROM canonical_traces WHERE trace_id = ?1",
+                    [trace_id.as_str()],
+                    |row| row.get(0),
+                )?;
+                if existing != canonical_json {
+                    return Err(StoreError::HashCollision(trace_id));
+                }
             }
-        }
 
-        // The raw row copies this capture's occurrence provenance, including
-        // its timestamp. Keeping that timestamp on the raw row lets the same
-        // selectors reach rows with no occurrence at all, while trace_id
-        // remains only the optional link to projected content.
-        transaction.execute(
-            "INSERT INTO raw_carrier_records \
-                 (trace_id, carrier, raw_bytes, session, sequence, timestamp) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                trace_id.as_str(),
-                raw_record.carrier,
-                raw_record.bytes,
-                occurrence.session,
-                occurrence.sequence,
-                occurrence.timestamp,
-            ],
-        )?;
-        let raw_record_id = transaction.last_insert_rowid();
-
-        transaction.execute(
-            "INSERT INTO occurrences \
+            transaction.execute(
+                "INSERT INTO occurrences \
                  (trace_id, carrier, session, sequence, timestamp, repo, repo_source, \
                   parent_sequence, agent, authored_by) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
@@ -354,40 +372,45 @@ impl TraceStore {
                  parent_sequence = excluded.parent_sequence, \
                  agent = excluded.agent, \
                  authored_by = excluded.authored_by",
-            params![
-                trace_id.as_str(),
-                raw_record.carrier,
-                occurrence.session,
-                occurrence.sequence,
-                occurrence.timestamp,
-                occurrence.repo,
-                occurrence.repo_source.as_str(),
-                occurrence.parent_sequence,
-                occurrence.agent,
-                occurrence.authored_by.as_str(),
-            ],
-        )?;
+                params![
+                    trace_id.as_str(),
+                    raw_record.carrier,
+                    occurrence.session,
+                    occurrence.sequence,
+                    occurrence.timestamp,
+                    occurrence.repo,
+                    occurrence.repo_source.as_str(),
+                    occurrence.parent_sequence,
+                    occurrence.agent,
+                    occurrence.authored_by.as_str(),
+                ],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO raw_record_traces (raw_record_id, trace_id) VALUES (?1, ?2)",
+                params![raw_record_id, trace_id.as_str()],
+            )?;
+            results.push(CaptureResult::new(
+                trace_id,
+                canonical_inserted,
+                raw_record_id,
+            ));
+        }
 
         transaction.commit()?;
-
-        Ok(CaptureResult::new(
-            trace_id,
-            canonical_inserted,
-            raw_record_id,
-        ))
+        Ok((raw_record_id, results))
     }
 
     /// Captures one complete carrier record that has no transferable
     /// semantic projection.
     ///
-    /// This writes exactly one forensic row with a null `trace_id`. It does
+    /// This writes exactly one forensic row with no trace links. It does
     /// not write `canonical_traces` or `occurrences`, so ordinary trace and
     /// log reads remain unable to observe the line. `session`, `sequence`,
     /// and `timestamp` are stored on the raw row itself so the forensic
     /// session/day selectors and their `forget` counterparts can still reach
     /// it.
     ///
-    /// Returns the newly appended forensic record's local row identifier.
+    /// Returns the forensic record's local row identifier, reused on replay.
     pub fn capture_raw_only(
         &mut self,
         carrier: &str,
@@ -396,17 +419,14 @@ impl TraceStore {
         sequence: i64,
         timestamp: i64,
     ) -> Result<i64, StoreError> {
-        if carrier.trim().is_empty() {
-            return Err(StoreError::BlankCarrier);
-        }
-
-        self.connection.execute(
-            "INSERT INTO raw_carrier_records \
-                 (trace_id, carrier, raw_bytes, session, sequence, timestamp) \
-             VALUES (NULL, ?1, ?2, ?3, ?4, ?5)",
-            params![carrier, raw_bytes, session, sequence, timestamp],
+        let (id, _) = self.capture_line(
+            NewRawCarrierRecord::new(carrier, raw_bytes),
+            session,
+            sequence,
+            timestamp,
+            &[],
         )?;
-        Ok(self.connection.last_insert_rowid())
+        Ok(id)
     }
 
     /// Fetches a canonical trace by semantic content hash.
@@ -471,39 +491,16 @@ impl TraceStore {
 
     /// Explicitly fetches forensic records for one canonical trace.
     ///
-    /// This is the only public read path that queries `raw_carrier_records`.
+    /// This read path queries `raw_carrier_records` explicitly.
     /// Records are ordered by ascending local row id (capture insertion order).
     pub fn fetch_raw_carrier_records(
         &self,
         trace_id: &TraceId,
     ) -> Result<Vec<RawCarrierRecord>, StoreError> {
-        let mut statement = self.connection.prepare(
-            "SELECT raw_record_id, trace_id, carrier, raw_bytes \
-             FROM raw_carrier_records WHERE trace_id = ?1 \
-             ORDER BY raw_record_id ASC",
-        )?;
-        let mapped = statement.query_map([trace_id.as_str()], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
-            ))
-        })?;
-
-        let mut records = Vec::new();
-        for row in mapped {
-            let (id, stored_trace_id, carrier, bytes) = row?;
-            records.push(RawCarrierRecord::new(
-                id,
-                stored_trace_id
-                    .map(|trace_id| TraceId::from_str(&trace_id))
-                    .transpose()?,
-                carrier,
-                bytes,
-            ));
-        }
-        Ok(records)
+        self.fetch_raw_records(
+            "r.raw_record_id IN (SELECT raw_record_id FROM raw_record_traces WHERE trace_id = ?1)",
+            &[&trace_id.as_str()],
+        )
     }
 
     /// Explicitly fetches forensic records whose own provenance matches
@@ -546,30 +543,42 @@ impl TraceStore {
             ),
         };
 
+        let params: Vec<&dyn ToSql> = bindings.iter().map(AsRef::as_ref).collect();
+        self.fetch_raw_records(clause, &params)
+    }
+
+    fn fetch_raw_records(
+        &self,
+        clause: &str,
+        bindings: &[&dyn ToSql],
+    ) -> Result<Vec<RawCarrierRecord>, StoreError> {
         let sql = format!(
-            "SELECT r.raw_record_id, r.trace_id, r.carrier, r.raw_bytes \
-             FROM raw_carrier_records r WHERE {clause} \
-             ORDER BY r.raw_record_id ASC"
+            "SELECT r.raw_record_id, r.carrier, r.raw_bytes, \
+                    COALESCE((SELECT group_concat(trace_id, ',') FROM \
+                        (SELECT trace_id FROM raw_record_traces \
+                         WHERE raw_record_id = r.raw_record_id ORDER BY trace_id)), '') \
+             FROM raw_carrier_records r WHERE {clause} ORDER BY r.raw_record_id ASC"
         );
         let mut statement = self.connection.prepare(&sql)?;
-        let params: Vec<&dyn ToSql> = bindings.iter().map(AsRef::as_ref).collect();
-        let mapped = statement.query_map(params.as_slice(), |row| {
+        let mapped = statement.query_map(bindings, |row| {
             Ok((
                 row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
 
         let mut records = Vec::new();
         for row in mapped {
-            let (id, stored_trace_id, carrier, bytes) = row?;
+            let (id, carrier, bytes, trace_ids) = row?;
             records.push(RawCarrierRecord::new(
                 id,
-                stored_trace_id
-                    .map(|trace_id| TraceId::from_str(&trace_id))
-                    .transpose()?,
+                trace_ids
+                    .split(',')
+                    .filter(|id| !id.is_empty())
+                    .map(TraceId::from_str)
+                    .collect::<Result<Vec<_>, _>>()?,
                 carrier,
                 bytes,
             ));
@@ -719,7 +728,7 @@ impl TraceStore {
     /// timestamp after the schema-v4 backfill and which
     /// [`ForgetSelector::Session`] and [`ForgetSelector::Before`] cannot
     /// select (only [`ForgetSelector::Trace`] can still reach them, since it
-    /// matches on `trace_id` rather than the link).
+    /// follows `raw_record_traces` rather than the provenance columns).
     ///
     /// This exists so `semon forget --forensic --session`/`--before` can
     /// report such rows rather than silently completing as though nothing
@@ -735,6 +744,35 @@ impl TraceStore {
         )?;
         Ok(count.max(0) as u64)
     }
+}
+
+/// Resolves a raw row by its source key and exact bytes. A rewritten line at
+/// the same key deliberately inserts another row.
+fn resolve_raw_record(
+    transaction: &rusqlite::Transaction<'_>,
+    raw: NewRawCarrierRecord<'_>,
+    session: &str,
+    sequence: i64,
+    timestamp: i64,
+) -> Result<i64, StoreError> {
+    let existing = transaction
+        .query_row(
+            "SELECT raw_record_id FROM raw_carrier_records \
+             WHERE carrier = ?1 AND session = ?2 AND sequence = ?3 AND raw_bytes = ?4 \
+             ORDER BY raw_record_id LIMIT 1",
+            params![raw.carrier, session, sequence, raw.bytes],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    transaction.execute(
+        "INSERT INTO raw_carrier_records (carrier, raw_bytes, session, sequence, timestamp) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![raw.carrier, raw.bytes, session, sequence, timestamp],
+    )?;
+    Ok(transaction.last_insert_rowid())
 }
 
 /// Migrates the forensic region to schema version 4 in one transaction.
@@ -778,6 +816,87 @@ fn migrate_raw_carrier_records_v4(connection: &mut Connection) -> Result<(), Sto
              ON raw_carrier_records(trace_id, raw_record_id);",
     )?;
     transaction.execute_batch(RAW_CARRIER_LINK_INDEX)?;
+    transaction.execute_batch("PRAGMA user_version = 4;")?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Rebuilds the forensic table without `trace_id`, preserving every old link
+/// before merging byte-identical Claude rows from the same source line.
+fn migrate_raw_carrier_records_v5(connection: &mut Connection) -> Result<(), StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "CREATE TEMP TABLE raw_links_v5 AS \
+             SELECT raw_record_id, trace_id FROM raw_carrier_records WHERE trace_id IS NOT NULL; \
+         CREATE TABLE raw_carrier_records_v5 ( \
+             raw_record_id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             carrier TEXT NOT NULL CHECK(length(trim(carrier)) > 0), \
+             raw_bytes BLOB NOT NULL, \
+             session TEXT, sequence INTEGER, timestamp INTEGER \
+         ) STRICT; \
+         INSERT INTO raw_carrier_records_v5 \
+             (raw_record_id, carrier, raw_bytes, session, sequence, timestamp) \
+         SELECT raw_record_id, carrier, raw_bytes, session, sequence, timestamp \
+         FROM raw_carrier_records; \
+         DROP TABLE raw_carrier_records; \
+         ALTER TABLE raw_carrier_records_v5 RENAME TO raw_carrier_records; \
+         DROP INDEX IF EXISTS raw_carrier_records_by_trace; \
+         CREATE INDEX raw_carrier_records_by_carrier_session_sequence \
+             ON raw_carrier_records(carrier, session, sequence);",
+    )?;
+    transaction.execute_batch(RAW_RECORD_TRACES_SCHEMA)?;
+    transaction.execute_batch(
+        "INSERT INTO raw_record_traces (raw_record_id, trace_id) \
+         SELECT raw_record_id, trace_id FROM raw_links_v5; \
+         DROP TABLE raw_links_v5;",
+    )?;
+
+    // Snapshot the mapping before changing any sequence or deleting rows.
+    let groups = {
+        let mut statement = transaction.prepare(&format!(
+            "SELECT r.raw_record_id, \
+                 (SELECT MIN(k.raw_record_id) FROM raw_carrier_records k \
+                  WHERE k.carrier = 'claude' AND k.session = r.session \
+                    AND k.sequence >= (r.sequence / {CLAUDE_MAX_BLOCKS_PER_RECORD}) * {CLAUDE_MAX_BLOCKS_PER_RECORD} \
+                    AND k.sequence < (r.sequence / {CLAUDE_MAX_BLOCKS_PER_RECORD} + 1) * {CLAUDE_MAX_BLOCKS_PER_RECORD} \
+                    AND k.raw_bytes = r.raw_bytes), \
+                 (r.sequence / {CLAUDE_MAX_BLOCKS_PER_RECORD}) * {CLAUDE_MAX_BLOCKS_PER_RECORD} \
+             FROM raw_carrier_records r \
+             WHERE r.carrier = 'claude' AND r.session IS NOT NULL \
+               AND r.sequence IS NOT NULL AND r.sequence >= 0 \
+             ORDER BY r.raw_record_id"
+        ))?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, keep_id, _) in &groups {
+        if id != keep_id {
+            transaction.execute(
+                "INSERT OR IGNORE INTO raw_record_traces (raw_record_id, trace_id) \
+                 SELECT ?1, trace_id FROM raw_record_traces WHERE raw_record_id = ?2",
+                params![keep_id, id],
+            )?;
+            transaction.execute(
+                "DELETE FROM raw_carrier_records WHERE raw_record_id = ?1",
+                [id],
+            )?;
+        }
+    }
+    for (id, keep_id, line_sequence) in groups {
+        if id == keep_id {
+            transaction.execute(
+                "UPDATE raw_carrier_records SET sequence = ?1 WHERE raw_record_id = ?2",
+                params![line_sequence, id],
+            )?;
+        }
+    }
     transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
     transaction.commit()?;
     Ok(())
@@ -885,6 +1004,141 @@ mod tests {
             .connection
             .query_row("SELECT count(*) FROM occurrences", [], |row| row.get(0))
             .unwrap()
+    }
+
+    fn link_count(store: &TraceStore) -> i64 {
+        store
+            .connection
+            .query_row("SELECT count(*) FROM raw_record_traces", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn claude_line_links_three_blocks_replays_once_and_forgets_as_one_line() {
+        let cores = [
+            semantic(r#"{"block":"one"}"#),
+            semantic(r#"{"block":"two"}"#),
+            semantic(r#"{"block":"three"}"#),
+        ];
+        let blocks = cores
+            .iter()
+            .enumerate()
+            .map(|(index, core)| (core.clone(), occurrence("session-a", 2048 + index as i64)))
+            .collect::<Vec<_>>();
+        let mut store = TraceStore::open_in_memory().unwrap();
+        let raw = NewRawCarrierRecord::new("claude", b"three projected blocks\n");
+        let (id, first) = store
+            .capture_line(raw, "session-a", 2048, 42, &blocks)
+            .unwrap();
+        assert_eq!(counts(&store), (3, 1));
+        assert_eq!(link_count(&store), 3);
+        assert_eq!(occurrence_count(&store), 3);
+        assert_eq!(
+            store
+                .count_forensic_forget(ForgetSelector::Session("session-a"))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_forensic_forget(ForgetSelector::Before(42))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .count_forensic_forget(ForgetSelector::Before(43))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("session-a"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::TimestampRange(
+                    42, 43
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(first.iter().all(CaptureResult::canonical_inserted));
+        assert!(first.iter().all(|result| result.raw_record_id() == id));
+
+        let (replayed_id, replayed) = store
+            .capture_line(raw, "session-a", 2048, 42, &blocks)
+            .unwrap();
+        assert_eq!(replayed_id, id);
+        assert!(replayed.iter().all(|result| !result.canonical_inserted()));
+        assert_eq!(counts(&store), (3, 1));
+        assert_eq!(link_count(&store), 3);
+        assert_eq!(occurrence_count(&store), 3);
+
+        let trace_ids = cores
+            .iter()
+            .map(|core| core.trace_id().unwrap())
+            .collect::<Vec<_>>();
+        let selected = store.fetch_raw_carrier_records(&trace_ids[1]).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id(), id);
+        let mut sorted_ids = trace_ids.clone();
+        sorted_ids.sort();
+        assert_eq!(selected[0].trace_ids(), sorted_ids);
+        let foreign_keys: i64 = store
+            .connection
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(
+            store
+                .forget_forensic(ForgetSelector::Trace(&trace_ids[1]))
+                .unwrap(),
+            1
+        );
+        assert_eq!(raw_record_count(&store), 0);
+        assert_eq!(
+            link_count(&store),
+            0,
+            "foreign-key cascade must delete every link"
+        );
+        assert_eq!(occurrence_count(&store), 3);
+        assert_eq!(store.log(&LogFilter::default()).unwrap().len(), 3);
+        assert!(store.fetch_trace(&trace_ids[0]).unwrap().is_some());
+        assert!(store.fetch_trace(&trace_ids[2]).unwrap().is_some());
+    }
+
+    #[test]
+    fn raw_line_resolution_reuses_identical_bytes_and_keeps_rewrites() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        let id = store
+            .capture_raw_only("claude", b"original", "session", 1024, 10)
+            .unwrap();
+        assert_eq!(
+            store
+                .capture_raw_only("claude", b"original", "session", 1024, 10)
+                .unwrap(),
+            id
+        );
+        let rewritten = store
+            .capture_raw_only("claude", b"changed", "session", 1024, 11)
+            .unwrap();
+        assert_ne!(rewritten, id);
+        assert_eq!(raw_record_count(&store), 2);
+        assert_eq!(link_count(&store), 0);
+        let rows = store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("session"))
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(RawCarrierRecord::bytes).collect::<Vec<_>>(),
+            vec![b"original".as_slice(), b"changed".as_slice()]
+        );
     }
 
     #[test]
@@ -1056,7 +1310,7 @@ mod tests {
             .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("session-raw"))
             .unwrap();
         assert_eq!(by_session.len(), 1);
-        assert_eq!(by_session[0].trace_id(), None);
+        assert_eq!(by_session[0].trace_ids(), &[]);
         assert_eq!(by_session[0].bytes(), b"unprojected metadata\n");
 
         let by_time = store
@@ -1245,6 +1499,129 @@ mod tests {
     }
 
     #[test]
+    fn v3_and_v4_migration_merge_only_identical_claude_lines_and_preserve_every_link() {
+        for version in [3, 4] {
+            let path = unique_temp_db_path(&format!("merge-v{version}"));
+            let ids = (1..=5).map(|n| format!("{n:064x}")).collect::<Vec<_>>();
+            {
+                let connection = Connection::open(&path).unwrap();
+                connection
+                    .execute_batch(&format!(
+                        "PRAGMA foreign_keys = ON; \
+                         CREATE TABLE canonical_traces (trace_id TEXT PRIMARY KEY NOT NULL, canonical_json BLOB NOT NULL) STRICT; \
+                         CREATE TABLE raw_carrier_records ( \
+                             raw_record_id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                             trace_id TEXT REFERENCES canonical_traces(trace_id), \
+                             carrier TEXT NOT NULL, raw_bytes BLOB NOT NULL, \
+                             session TEXT, sequence INTEGER{} \
+                         ) STRICT; \
+                         INSERT INTO canonical_traces VALUES \
+                             ('{}', X'7b7d'), ('{}', X'7b7d'), ('{}', X'7b7d'), \
+                             ('{}', X'7b7d'), ('{}', X'7b7d'); \
+                         INSERT INTO raw_carrier_records \
+                             (raw_record_id, trace_id, carrier, raw_bytes, session, sequence) VALUES \
+                             (1, '{}', 'claude', X'73616d65', 'session', 1024), \
+                             (2, '{}', 'claude', X'73616d65', 'session', 1025), \
+                             (3, '{}', 'claude', X'73616d65', 'session', 1026), \
+                             (4, '{}', 'claude', X'64696666', 'session', 1024), \
+                             (5, '{}', 'codex', X'73616d65', 'session', 1025); \
+                         PRAGMA user_version = {version};",
+                        if version == 4 { ", timestamp INTEGER" } else { "" },
+                        ids[0], ids[1], ids[2], ids[3], ids[4],
+                        ids[0], ids[1], ids[2], ids[3], ids[4],
+                    ))
+                    .unwrap();
+            }
+            let store = TraceStore::open(&path).unwrap();
+            assert_eq!(user_version(&store), 5);
+            assert_eq!(raw_record_count(&store), 3);
+            assert_eq!(link_count(&store), 5);
+            let rows = {
+                let mut statement = store.connection.prepare(
+                    "SELECT raw_record_id, carrier, sequence FROM raw_carrier_records ORDER BY raw_record_id"
+                ).unwrap();
+                statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            assert_eq!(
+                rows,
+                vec![
+                    (1, "claude".to_owned(), 1024),
+                    (4, "claude".to_owned(), 1024),
+                    (5, "codex".to_owned(), 1025)
+                ]
+            );
+            for (index, expected_raw_id) in [1, 1, 1, 4, 5].into_iter().enumerate() {
+                let trace_id = TraceId::from_str(&ids[index]).unwrap();
+                let records = store.fetch_raw_carrier_records(&trace_id).unwrap();
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].id(), expected_raw_id);
+            }
+            let before = store.connection.prepare("SELECT raw_record_id, trace_id FROM raw_record_traces ORDER BY raw_record_id, trace_id")
+                .unwrap().query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+                .unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            drop(store);
+            let reopened = TraceStore::open(&path).unwrap();
+            let after = reopened.connection.prepare("SELECT raw_record_id, trace_id FROM raw_record_traces ORDER BY raw_record_id, trace_id")
+                .unwrap().query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+                .unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(after, before);
+            assert_eq!(raw_record_count(&reopened), 3);
+            drop(reopened);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn failed_v5_migration_keeps_v4_table_and_version() {
+        let path = unique_temp_db_path("failed-v5");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(
+                "CREATE TABLE raw_carrier_records ( \
+                    raw_record_id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                    trace_id TEXT, carrier TEXT NOT NULL, raw_bytes BLOB NOT NULL, \
+                    session TEXT, sequence INTEGER, timestamp INTEGER); \
+                 INSERT INTO raw_carrier_records (trace_id, carrier, raw_bytes, session, sequence) \
+                     VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'claude', X'61', 'session', 0); \
+                 CREATE TABLE raw_record_traces (raw_record_id INTEGER, trace_id TEXT CHECK(0)); \
+                 PRAGMA user_version = 4;"
+            ).unwrap();
+        }
+        assert!(TraceStore::open(&path).is_err());
+        let connection = Connection::open(&path).unwrap();
+        let version: u32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        let columns = connection
+            .prepare("PRAGMA table_info(raw_carrier_records)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.contains(&"trace_id".to_owned()));
+        let bytes: Vec<u8> = connection
+            .query_row("SELECT raw_bytes FROM raw_carrier_records", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(bytes, b"a");
+        drop(connection);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn v3_migration_rebuilds_raw_without_row_loss_and_is_idempotent() {
         let path = unique_temp_db_path("v3-to-v4");
         let linked_trace = "aa11223344556677889900112233445566778899001122334455667788990011";
@@ -1315,7 +1692,7 @@ mod tests {
             let mut statement = store
                 .connection
                 .prepare(
-                    "SELECT raw_record_id, trace_id, session, sequence, timestamp, raw_bytes \
+                    "SELECT raw_record_id, session, sequence, timestamp, raw_bytes \
                      FROM raw_carrier_records ORDER BY raw_record_id",
                 )
                 .unwrap();
@@ -1324,10 +1701,9 @@ mod tests {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(2)?,
                         row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, Vec<u8>>(5)?,
+                        row.get::<_, Vec<u8>>(4)?,
                     ))
                 })
                 .unwrap()
@@ -1336,11 +1712,11 @@ mod tests {
         };
         assert_eq!(migrated_rows.len(), 2);
         assert_eq!(migrated_rows[0].0, 3);
-        assert_eq!(migrated_rows[0].4, Some(987654321));
-        assert_eq!(migrated_rows[0].5, b"linked");
+        assert_eq!(migrated_rows[0].3, Some(987654321));
+        assert_eq!(migrated_rows[0].4, b"linked");
         assert_eq!(migrated_rows[1].0, 8);
-        assert_eq!(migrated_rows[1].4, None);
-        assert_eq!(migrated_rows[1].5, b"unlinked");
+        assert_eq!(migrated_rows[1].3, None);
+        assert_eq!(migrated_rows[1].4, b"unlinked");
 
         let columns = {
             let mut statement = store
@@ -1355,12 +1731,12 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert!(columns.contains(&("trace_id".to_owned(), 0)));
+        assert!(!columns.iter().any(|(name, _)| name == "trace_id"));
         assert!(columns.iter().any(|(name, _)| name == "timestamp"));
 
         drop(store);
 
-        // A second open sees user_version 4 and leaves every migrated field
+        // A second open sees user_version 5 and leaves every migrated field
         // byte-for-byte unchanged.
         let reopened = TraceStore::open(&path).unwrap();
         assert_eq!(user_version(&reopened), SCHEMA_VERSION);
@@ -1368,7 +1744,7 @@ mod tests {
             let mut statement = reopened
                 .connection
                 .prepare(
-                    "SELECT raw_record_id, trace_id, session, sequence, timestamp, raw_bytes \
+                    "SELECT raw_record_id, session, sequence, timestamp, raw_bytes \
                      FROM raw_carrier_records ORDER BY raw_record_id",
                 )
                 .unwrap();
@@ -1377,10 +1753,9 @@ mod tests {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(2)?,
                         row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, Vec<u8>>(5)?,
+                        row.get::<_, Vec<u8>>(4)?,
                     ))
                 })
                 .unwrap()
@@ -1413,6 +1788,9 @@ mod tests {
                          carrier TEXT NOT NULL, \
                          raw_bytes BLOB NOT NULL \
                      );
+                     INSERT INTO canonical_traces VALUES ('cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', X'7b7d');
+                     INSERT INTO raw_carrier_records (trace_id, carrier, raw_bytes) VALUES \
+                         ('cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', 'codex', X'7631');
                      PRAGMA user_version = 1;",
                 )
                 .unwrap();
@@ -1423,6 +1801,13 @@ mod tests {
         // the existing tables.
         let mut store = TraceStore::open(&path).unwrap();
         assert_eq!(user_version(&store), SCHEMA_VERSION);
+        let legacy_id =
+            TraceId::from_str("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+                .unwrap();
+        assert_eq!(
+            store.fetch_raw_carrier_records(&legacy_id).unwrap()[0].bytes(),
+            b"v1"
+        );
         let core = semantic(r#"{"kind":"intent","content":"post-migration capture"}"#);
         store
             .capture(
@@ -1510,6 +1895,10 @@ mod tests {
         let legacy_id =
             TraceId::from_str("aa11223344556677889900112233445566778899001122334455667788990011")
                 .unwrap();
+        assert_eq!(
+            store.fetch_raw_carrier_records(&legacy_id).unwrap()[0].bytes(),
+            b"legacy"
+        );
         assert_eq!(
             store
                 .count_forensic_forget(ForgetSelector::Trace(&legacy_id))
@@ -1606,6 +1995,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(occurrence_count(&store), 1, "same key must not duplicate");
+        assert_eq!(
+            raw_record_count(&store),
+            2,
+            "rewritten bytes must remain as separate raw rows"
+        );
 
         let rows = store.log(&LogFilter::default()).unwrap();
         assert_eq!(rows.len(), 1);
@@ -2044,7 +2438,7 @@ mod tests {
             "session-b's copy of the shared trace's raw record must survive"
         );
         assert_eq!(remaining[0].bytes(), b"session-b's own bytes");
-        assert_eq!(remaining[0].trace_id(), Some(&shared_id));
+        assert_eq!(remaining[0].trace_ids(), &[shared_id]);
 
         assert_eq!(raw_record_count(&store), 1);
         // occurrences and canonical traces are never touched by forget.

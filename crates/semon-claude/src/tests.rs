@@ -205,12 +205,62 @@ fn record_with_no_projected_blocks_writes_one_raw_only_row() {
         ))
         .unwrap();
     assert_eq!(raw.len(), 1);
-    assert_eq!(raw[0].trace_id(), None);
+    assert_eq!(raw[0].trace_ids(), &[]);
     assert!(
         std::str::from_utf8(raw[0].bytes())
             .unwrap()
             .contains("harness metadata")
     );
+}
+
+#[test]
+fn three_block_line_has_one_raw_row_and_file_replay_reuses_it() {
+    let root = TestDir::new();
+    let path = root.path().join("session-three-blocks.jsonl");
+    write_jsonl(
+        &path,
+        &[json!({
+            "type": "assistant",
+            "uuid": "a0",
+            "parentUuid": Value::Null,
+            "cwd": "/work/repo",
+            "timestamp": "2026-09-20T00:00:00Z",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second"},
+                {"type": "text", "text": "third"},
+            ]},
+        })],
+    );
+    let state_path = root.path().join("state.json");
+    let mut state = CursorState::default();
+    let mut store = TraceStore::open_in_memory().unwrap();
+    assert_eq!(
+        process_file(&path, &mut state, &mut store, &options(&state_path)).unwrap(),
+        1
+    );
+    let rows = store.log(&LogFilter::default()).unwrap();
+    assert_eq!(rows.len(), 3);
+    let raw = store
+        .fetch_raw_carrier_records_for_occurrences(semon_store::OccurrenceSelector::Session(
+            "session-three-blocks",
+        ))
+        .unwrap();
+    assert_eq!(raw.len(), 1);
+    assert_eq!(raw[0].trace_ids().len(), 3);
+
+    let mut replay_state = CursorState::default();
+    assert_eq!(
+        process_file(&path, &mut replay_state, &mut store, &options(&state_path)).unwrap(),
+        1
+    );
+    let replayed = store
+        .fetch_raw_carrier_records_for_occurrences(semon_store::OccurrenceSelector::Session(
+            "session-three-blocks",
+        ))
+        .unwrap();
+    assert_eq!(replayed, raw);
+    assert_eq!(store.log(&LogFilter::default()).unwrap(), rows);
 }
 
 /// Test 2 from the spec: per-block sequence. An assistant record with `text`

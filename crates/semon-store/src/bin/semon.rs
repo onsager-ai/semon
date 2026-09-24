@@ -303,8 +303,8 @@ fn run_log(args: LogArgs) -> Result<String, String> {
 const FORENSIC_WARNING: &str = "semon forensic: raw output may contain prompts, responses, \
      source code, credentials, and machine paths captured verbatim.";
 
-const TRACE_SELECTOR_NOTE: &str = "--trace selects projected lines by content; unprojected raw \
-     records have no trace id and must be selected by session or time.";
+const TRACE_SELECTOR_NOTE: &str = "--trace selects complete source lines linked to the trace; \
+     unprojected raw records have no trace links and must be selected by session or time.";
 
 /// The only CLI path that reads `raw_carrier_records`, directly or via
 /// [`semon_store::TraceStore::fetch_raw_carrier_records_for_occurrences`].
@@ -400,7 +400,7 @@ fn write_forensic_records(
 /// row written before the session/sequence link existed has neither value
 /// after migration. Rather than let such a row silently sit outside what
 /// those selectors can reach, this reports how many exist and that only
-/// `--trace` reaches them. Conversely, an unprojected v4 row has no trace id,
+/// `--trace` reaches them. Conversely, an unprojected row has no trace link,
 /// so a trace selector cannot reach it and the command reports that limit.
 fn run_forget(args: ForgetArgs) -> Result<(), String> {
     let mut store = TraceStore::open(&args.store).map_err(|error| error.to_string())?;
@@ -423,6 +423,9 @@ fn run_forget(args: ForgetArgs) -> Result<(), String> {
 
     if matches!(selector, ForgetSelector::Trace(_)) {
         eprintln!("forget --forensic: {TRACE_SELECTOR_NOTE}");
+        eprintln!(
+            "forget --forensic: deleting a linked trace removes its whole raw source line; other projected traces and occurrences remain."
+        );
     }
 
     if !matches!(selector, ForgetSelector::Trace(_)) {
@@ -532,9 +535,10 @@ fn usage() -> String {
          everything. Without --yes, prompts interactively and errors if\n\
          stdin is not a terminal.\n\
          --session and --before match a raw record's own session/timestamp.\n\
-         --trace matches projected content instead: it removes that trace's\n\
-         captures from every session it was ever seen in. Unprojected raw\n\
-         records have no trace id, so --trace cannot select them."
+         --trace matches projected content instead: it removes every raw\n\
+         source line linked to that trace, including bytes for other traces\n\
+         on those lines. Their canonical traces and occurrences remain.\n\
+         Unprojected raw records have no trace links, so --trace cannot select them."
     )
 }
 

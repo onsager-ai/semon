@@ -14,8 +14,8 @@
 //!   is the ordinary read over this region, joined to `canonical_traces`.
 //! - `raw_carrier_records` contains every complete source line as opaque
 //!   carrier bytes with its own session, sequence, and timestamp. Its
-//!   `trace_id` is nullable because a line with no transferable projection
-//!   has no canonical trace or occurrence. Raw rows are available only
+//!   trace links live in `raw_record_traces`; an unprojected line has none.
+//!   Raw rows are available only
 //!   through the deliberately separate
 //!   [`TraceStore::fetch_raw_carrier_records`] and
 //!   [`TraceStore::fetch_raw_carrier_records_for_occurrences`] calls, which
@@ -33,8 +33,8 @@
 //!
 //! A projected capture inserts into all three regions in one SQLite
 //! transaction. A raw-only capture inserts only its forensic row. Repeated
-//! captures of the same semantics retain one canonical row and append one
-//! raw row per successful capture, including byte-identical captures. The
+//! captures of the same source line reuse its raw row when the key and bytes
+//! agree. Different bytes at the same key retain separate rows. The
 //! occurrence write is instead an UPSERT keyed on
 //! `(carrier, session, sequence)`, because an occurrence is one row per time a
 //! trace was *seen*, so "already recorded" cannot be expressed by content —
@@ -88,7 +88,9 @@ pub use model::{
 };
 pub use render::{day_bounds_ns, format_timestamp_ns, render_occurrence_line};
 pub use replication::{REPLICATION_ENDPOINT_ENV, ReplicationError, ShipReport, ship};
-pub use store::{ForgetSelector, OccurrenceSelector, StoreError, TraceStore};
+pub use store::{
+    CLAUDE_MAX_BLOCKS_PER_RECORD, ForgetSelector, OccurrenceSelector, StoreError, TraceStore,
+};
 
 #[cfg(test)]
 mod boundary_tests {

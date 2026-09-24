@@ -40,6 +40,70 @@ fn semantic(content: &str) -> SemanticCore {
     SemanticCore::from_value(serde_json::json!({"kind": "intent", "content": content})).unwrap()
 }
 
+#[test]
+fn shared_claude_line_is_output_once_and_trace_forget_keeps_the_log() {
+    let store_path = unique_store_path("shared-claude-line");
+    let trace_id = {
+        let mut store = TraceStore::open(&store_path).unwrap();
+        let cores = [semantic("first"), semantic("second"), semantic("third")];
+        let blocks = cores
+            .iter()
+            .enumerate()
+            .map(|(index, core)| {
+                (
+                    core.clone(),
+                    NewOccurrence {
+                        session: "claude-session",
+                        sequence: index as i64,
+                        timestamp: 10,
+                        repo: "repo",
+                        repo_source: RepoSource::ExplicitOverride,
+                        parent_sequence: if index == 0 {
+                            None
+                        } else {
+                            Some(index as i64 - 1)
+                        },
+                        agent: None,
+                        authored_by: AuthoredBy::Agent,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        store
+            .capture_line(
+                NewRawCarrierRecord::new("claude", b"shared line\n"),
+                "claude-session",
+                0,
+                10,
+                &blocks,
+            )
+            .unwrap();
+        cores[1].trace_id().unwrap().to_string()
+    };
+    let before_log = run_semon(&store_path, &["log"]);
+    assert!(before_log.status.success());
+    let forensic = run_semon(&store_path, &["forensic", "--trace", &trace_id]);
+    assert!(forensic.status.success());
+    assert_eq!(forensic.stdout, b"shared line\n");
+    let by_session = run_semon(&store_path, &["forensic", "--session", "claude-session"]);
+    assert!(by_session.status.success());
+    assert_eq!(by_session.stdout, b"shared line\n");
+
+    let forget = run_semon(
+        &store_path,
+        &["forget", "--forensic", "--trace", &trace_id, "--yes"],
+    );
+    assert!(forget.status.success());
+    assert!(String::from_utf8_lossy(&forget.stderr).contains("whole raw source line"));
+    assert!(
+        String::from_utf8_lossy(&forget.stdout).contains("permanently deleted 1 raw record(s)")
+    );
+    let after_log = run_semon(&store_path, &["log"]);
+    assert!(after_log.status.success());
+    assert_eq!(after_log.stdout, before_log.stdout);
+    let _ = std::fs::remove_file(store_path);
+}
+
 /// Runs the compiled `semon` binary as a fresh child process against
 /// `store`, with the given arguments (excluding `--store`, which this always
 /// appends). `stdin_is_tty` false pipes a closed stdin, guaranteeing
@@ -568,7 +632,7 @@ fn trace_selectors_explain_that_unprojected_rows_are_out_of_scope() {
     assert!(std::fs::read(&out_path).unwrap().is_empty());
     assert!(
         String::from_utf8_lossy(&forensic.stderr)
-            .contains("unprojected raw records have no trace id")
+            .contains("unprojected raw records have no trace links")
     );
 
     let forget = run_semon(
@@ -578,7 +642,7 @@ fn trace_selectors_explain_that_unprojected_rows_are_out_of_scope() {
     assert!(forget.status.success());
     assert!(
         String::from_utf8_lossy(&forget.stderr)
-            .contains("unprojected raw records have no trace id")
+            .contains("unprojected raw records have no trace links")
     );
     assert!(String::from_utf8_lossy(&forget.stdout).contains("no matching raw records"));
 

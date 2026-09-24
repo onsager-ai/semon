@@ -460,23 +460,8 @@ fn process_record(
 ) -> Result<(), AdapterError> {
     let (blocks, ancestor_for_first) = resolve_record(record, line_ordinal, ancestor_sequence)?;
     let timestamp = semon_codex::parse_timestamp(record.get("timestamp").unwrap_or(&Value::Null));
-    if blocks.is_empty() {
-        // Block 0 cannot collide with an occurrence for this line because
-        // no block projected. Keeping the same per-line sequence encoding
-        // preserves the raw-to-occurrence key convention without creating
-        // an occurrence.
-        store.capture_raw_only(
-            CARRIER,
-            raw_line,
-            session,
-            sequence_for(line_ordinal, 0),
-            timestamp,
-        )?;
-        return Ok(());
-    }
-
     let (repo, repo_source) = record_repo(record, repo_override);
-
+    let mut captures = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter().enumerate() {
         let sequence = sequence_for(line_ordinal, block.block_index);
         let parent_sequence = if index == 0 {
@@ -495,12 +480,16 @@ fn process_record(
             agent: agent_id,
             authored_by: block.authored_by,
         };
-        store.capture(
-            &core,
-            NewRawCarrierRecord::new(CARRIER, raw_line),
-            occurrence,
-        )?;
+        captures.push((core, occurrence));
     }
+
+    store.capture_line(
+        NewRawCarrierRecord::new(CARRIER, raw_line),
+        session,
+        sequence_for(line_ordinal, 0),
+        timestamp,
+        &captures,
+    )?;
 
     Ok(())
 }
