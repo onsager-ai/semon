@@ -37,6 +37,8 @@ struct SessionsArgs {
     options: semon_sessions::Options,
     json: bool,
     watch: bool,
+    serve: bool,
+    listen: String,
 }
 
 struct ShipArgs {
@@ -100,6 +102,9 @@ fn parse_sessions_args(
     let mut options = semon_sessions::Options::default();
     let mut json = false;
     let mut watch = false;
+    let mut serve = false;
+    let mut listen = "127.0.0.1:0".to_owned();
+    let mut listen_given = false;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -116,14 +121,27 @@ fn parse_sessions_args(
             "--session" => options.session = Some(value()?),
             "--json" => json = true,
             "--watch" => watch = true,
+            "--serve" => serve = true,
+            "--listen" => {
+                listen = value()?;
+                listen_given = true;
+            }
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown argument: {argument}")),
         }
+    }
+    if serve && (json || watch) {
+        return Err("--serve cannot be combined with --json or --watch".into());
+    }
+    if !serve && listen_given {
+        return Err("--listen requires --serve".into());
     }
     Ok(SessionsArgs {
         options,
         json,
         watch,
+        serve,
+        listen,
     })
 }
 
@@ -295,6 +313,13 @@ fn run(command: Command) -> Result<(), String> {
 }
 
 fn run_sessions(args: SessionsArgs) -> Result<(), String> {
+    if args.serve {
+        return semon_sessions::serve(semon_sessions::ServeOptions {
+            sessions: args.options,
+            listen: args.listen,
+        })
+        .map_err(|error| error.to_string());
+    }
     loop {
         let nodes = semon_sessions::collect(&args.options).map_err(|error| error.to_string())?;
         if args.watch {
@@ -577,7 +602,7 @@ fn default_store_path() -> PathBuf {
 
 fn usage() -> String {
     format!(
-        "Usage: semon sessions [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--json] [--watch]\n\
+        "Usage: semon sessions [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--json] [--watch] [--serve [--listen 127.0.0.1:PORT]]\n\
          Shows a read-only tree of local Claude Code and Codex sessions.\n\
          \n\
          Usage: semon ship [--store PATH] [--endpoint URL]\n\
