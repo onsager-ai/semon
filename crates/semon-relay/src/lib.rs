@@ -17,7 +17,7 @@ pub use crypto::{
     content_tag, decrypt_envelope, decrypt_frame, encrypt_envelope, encrypt_frame,
     generate_data_key,
 };
-pub use discovery::{DiscoveredStream, discover_streams};
+pub use discovery::{DiscoveredStream, discover_streams, filter_by_session};
 pub use identity::{
     AGE_IDENTITY_FILE, IdentityError, InitOutcome, MACHINES_FILE, MachineIdentity, RECIPIENTS_FILE,
     SIGNING_KEY_FILE, enroll_machine, enroll_recipient, fingerprint, init, load_age_identity,

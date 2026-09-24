@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -771,6 +772,100 @@ fn subagent_streams_are_discovered_and_shipped_independently() {
             .iter()
             .any(|frame| frame.key.stream == "subagents/agent-worker.jsonl")
     );
+}
+
+#[test]
+fn session_filter_restricts_to_named_session_streams() {
+    let temp = TempDir::new("session-filter");
+    let (projects, source, state_path) = source_file(&temp, b"main\n");
+    let project_dir = source.parent().unwrap();
+    // An unrelated session in the same projects root must never be shipped.
+    fs::write(project_dir.join("session-b.jsonl"), b"other\n").unwrap();
+    let session_dir = project_dir.join("session-a/subagents");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(session_dir.join("agent-worker.jsonl"), b"side\n").unwrap();
+
+    let transport = RecordingTransport::default();
+    let mut sender = Sender::default();
+    sender.set_session_filter(BTreeSet::from(["session-a".to_owned()]));
+    let report = sender.run_pass(&projects, &state_path, &transport).unwrap();
+    assert_eq!(report.streams.len(), 2);
+    assert!(
+        report
+            .streams
+            .iter()
+            .all(|stream| stream.session == "session-a")
+    );
+
+    let frames = transport.frames.lock().unwrap();
+    assert!(frames.iter().all(|frame| frame.key.session == "session-a"));
+    assert!(frames.iter().any(|frame| frame.key.stream == "main"));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.key.stream == "subagents/agent-worker.jsonl")
+    );
+}
+
+#[test]
+fn session_filter_picks_up_streams_that_appear_after_the_first_pass() {
+    let temp = TempDir::new("session-filter-follow");
+    let (projects, source, state_path) = source_file(&temp, b"main\n");
+    let transport = RecordingTransport::default();
+    let mut sender = Sender::default();
+    sender.set_session_filter(BTreeSet::from(["session-a".to_owned()]));
+
+    let first = sender.run_pass(&projects, &state_path, &transport).unwrap();
+    assert_eq!(first.streams.len(), 1);
+
+    // Simulates a subagent starting mid-`--follow`: the new file belongs to
+    // an already-matching session, so the next pass must pick it up too.
+    let session_dir = source.parent().unwrap().join("session-a/subagents");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(session_dir.join("agent-worker.jsonl"), b"side\n").unwrap();
+
+    let second = sender.run_pass(&projects, &state_path, &transport).unwrap();
+    assert_eq!(second.streams.len(), 2);
+    let frames = transport.frames.lock().unwrap();
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.key.stream == "subagents/agent-worker.jsonl")
+    );
+}
+
+#[test]
+fn session_filter_errors_when_no_session_matches() {
+    let temp = TempDir::new("session-filter-missing");
+    let (projects, _source, state_path) = source_file(&temp, b"main\n");
+    let transport = RecordingTransport::default();
+    let mut sender = Sender::default();
+    sender.set_session_filter(BTreeSet::from(["does-not-exist".to_owned()]));
+    let error = sender
+        .run_pass(&projects, &state_path, &transport)
+        .unwrap_err();
+    assert!(matches!(error, RelayError::SessionFilterUnmatched { .. }));
+}
+
+#[test]
+fn session_filter_errors_and_sends_nothing_when_one_of_several_names_is_unknown() {
+    let temp = TempDir::new("session-filter-partial-miss");
+    let (projects, _source, state_path) = source_file(&temp, b"main\n");
+    let transport = RecordingTransport::default();
+    let mut sender = Sender::default();
+    // "session-a" exists under the root; "typo" does not. A typo in one
+    // name must not silently ship the other and drop the mistake.
+    sender.set_session_filter(BTreeSet::from(["session-a".to_owned(), "typo".to_owned()]));
+    let error = sender
+        .run_pass(&projects, &state_path, &transport)
+        .unwrap_err();
+    match error {
+        RelayError::SessionFilterUnmatched { missing } => {
+            assert_eq!(missing, BTreeSet::from(["typo".to_owned()]));
+        }
+        other => panic!("expected SessionFilterUnmatched, got {other}"),
+    }
+    assert!(transport.frames.lock().unwrap().is_empty());
 }
 
 #[test]
