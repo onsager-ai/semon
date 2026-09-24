@@ -90,7 +90,7 @@ pub use render::{day_bounds_ns, format_timestamp_ns, render_occurrence_line};
 pub use replication::{REPLICATION_ENDPOINT_ENV, ReplicationError, ShipReport, ship};
 pub use store::{
     CLAUDE_MAX_BLOCKS_PER_RECORD, ForgetSelector, OccurrenceSelector, RawBackfillLine,
-    RawBackfillResult, StoreError, TraceStore,
+    RawBackfillResult, RawSessionRekeyLine, SessionRepairCounts, StoreError, TraceStore,
 };
 
 #[cfg(test)]

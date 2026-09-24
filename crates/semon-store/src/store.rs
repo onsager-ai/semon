@@ -35,6 +35,31 @@ pub struct RawBackfillResult {
     pub misaligned_sequence: Option<i64>,
 }
 
+/// An exact raw line whose old session key may belong to a subagent.
+pub struct RawSessionRekeyLine {
+    /// The session used by the old adapter.
+    pub old_session: String,
+    /// The session derived by the current adapter.
+    pub new_session: String,
+    /// Source line ordinal.
+    pub sequence: i64,
+    /// Complete source line, including its newline.
+    pub bytes: Vec<u8>,
+}
+
+/// Counts from one atomic session repair.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct SessionRepairCounts {
+    /// Raw rows moved to the corrected session.
+    pub raw_rekeyed: usize,
+    /// Misplaced rows removed because exact bytes already exist at the new key.
+    pub duplicates_deleted: usize,
+    /// Old occurrences removed before replay.
+    pub occurrences_deleted: usize,
+    /// Occurrences present for this group after replay.
+    pub occurrences_rebuilt: usize,
+}
+
 const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
@@ -172,6 +197,10 @@ pub enum StoreError {
     /// Existing canonical bytes disagreed with bytes having the same digest.
     #[error("content hash collision for trace {0}")]
     HashCollision(TraceId),
+
+    /// A session repair would add semantic content that was not already captured.
+    #[error("session repair would add canonical traces; transaction rolled back")]
+    RepairWouldAddCanonicalTraces,
 
     /// A stored or supplied `repo_source` was not one of the four known bases.
     #[error("invalid repo_source: {0}")]
@@ -355,9 +384,7 @@ impl TraceStore {
             return Err(StoreError::BlankCarrier);
         }
 
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self.connection.savepoint()?;
         let (raw_record_id, _) =
             resolve_raw_record(&transaction, raw_record, session, line_sequence, timestamp)?;
         let mut results = Vec::with_capacity(blocks.len());
@@ -422,6 +449,125 @@ impl TraceStore {
 
         transaction.commit()?;
         Ok((raw_record_id, results))
+    }
+
+    /// Repairs exact raw keys and rebuilds one carrier session family atomically.
+    /// A dry run executes the same replay and rolls it back.
+    pub fn repair_session_keys<E, F>(
+        &mut self,
+        carrier: &str,
+        parent: &str,
+        lines: &[RawSessionRekeyLine],
+        dry_run: bool,
+        replay: F,
+    ) -> Result<SessionRepairCounts, E>
+    where
+        E: From<StoreError>,
+        F: FnOnce(&mut Self) -> Result<(), E>,
+    {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(StoreError::from)?;
+        let result = (|| {
+            let mut counts = SessionRepairCounts::default();
+            let canonical_before: i64 = self
+                .connection
+                .query_row("SELECT count(*) FROM canonical_traces", [], |row| {
+                    row.get(0)
+                })
+                .map_err(StoreError::from)?;
+            for line in lines {
+                let ids = {
+                    let mut statement = self
+                        .connection
+                        .prepare(
+                            "SELECT raw_record_id FROM raw_carrier_records \
+                         WHERE carrier = ?1 AND session = ?2 AND sequence = ?3 AND raw_bytes = ?4 \
+                         ORDER BY raw_record_id",
+                        )
+                        .map_err(StoreError::from)?;
+                    statement
+                        .query_map(
+                            params![carrier, line.old_session, line.sequence, line.bytes],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(StoreError::from)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(StoreError::from)?
+                };
+                for id in ids {
+                    let duplicate = self
+                        .connection
+                        .query_row(
+                            "SELECT raw_record_id FROM raw_carrier_records \
+                         WHERE carrier = ?1 AND session = ?2 AND sequence = ?3 AND raw_bytes = ?4 \
+                         ORDER BY raw_record_id LIMIT 1",
+                            params![carrier, line.new_session, line.sequence, line.bytes],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()
+                        .map_err(StoreError::from)?;
+                    if duplicate.is_some() {
+                        self.connection
+                            .execute(
+                                "DELETE FROM raw_carrier_records WHERE raw_record_id = ?1",
+                                [id],
+                            )
+                            .map_err(StoreError::from)?;
+                        counts.duplicates_deleted += 1;
+                    } else {
+                        self.connection.execute("UPDATE raw_carrier_records SET session = ?1 WHERE raw_record_id = ?2", params![line.new_session, id]).map_err(StoreError::from)?;
+                        counts.raw_rekeyed += 1;
+                    }
+                }
+            }
+            let prefix = format!("{parent}/agent-");
+            let predicate =
+                "carrier = ?1 AND (session = ?2 OR substr(session, 1, length(?3)) = ?3)";
+            counts.occurrences_deleted = self
+                .connection
+                .query_row(
+                    &format!("SELECT count(*) FROM occurrences WHERE {predicate}"),
+                    params![carrier, parent, prefix],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(StoreError::from)? as usize;
+            self.connection
+                .execute(
+                    &format!("DELETE FROM occurrences WHERE {predicate}"),
+                    params![carrier, parent, prefix],
+                )
+                .map_err(StoreError::from)?;
+            replay(self)?;
+            let canonical_after: i64 = self
+                .connection
+                .query_row("SELECT count(*) FROM canonical_traces", [], |row| {
+                    row.get(0)
+                })
+                .map_err(StoreError::from)?;
+            if canonical_after != canonical_before {
+                return Err(StoreError::RepairWouldAddCanonicalTraces.into());
+            }
+            counts.occurrences_rebuilt = self
+                .connection
+                .query_row(
+                    &format!("SELECT count(*) FROM occurrences WHERE {predicate}"),
+                    params![carrier, parent, prefix],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(StoreError::from)? as usize;
+            Ok(counts)
+        })();
+        if dry_run || result.is_err() {
+            self.connection
+                .execute_batch("ROLLBACK")
+                .map_err(StoreError::from)?;
+        } else {
+            self.connection
+                .execute_batch("COMMIT")
+                .map_err(StoreError::from)?;
+        }
+        result
     }
 
     /// Captures one complete carrier record that has no transferable
@@ -845,7 +991,7 @@ impl TraceStore {
 /// Resolves a raw row by its source key and exact bytes. A rewritten line at
 /// the same key deliberately inserts another row.
 fn resolve_raw_record(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Connection,
     raw: NewRawCarrierRecord<'_>,
     session: &str,
     sequence: i64,

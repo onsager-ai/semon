@@ -15,6 +15,8 @@ use super::*;
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+type OccurrenceSnapshot = (String, i64, String, Option<i64>, Option<String>);
+
 struct TestDir(PathBuf);
 
 impl TestDir {
@@ -53,6 +55,407 @@ fn write_session(root: &Path, records: &[Value]) -> PathBuf {
 
 fn options<'a>(state: &'a Path, history: &'a Path) -> ProcessOptions<'a> {
     ProcessOptions::new(state, history)
+}
+
+fn write_rollout(root: &Path, id: &str, records: &[Value]) -> PathBuf {
+    let directory = root.join("sessions/2026/09");
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(format!("rollout-2026-09-24T00-00-00-{id}.jsonl"));
+    let contents = records
+        .iter()
+        .map(|record| format!("{}\n", serde_json::to_string(record).unwrap()))
+        .collect::<String>();
+    fs::write(&path, contents).unwrap();
+    path
+}
+
+fn subagent_fixture(root: &Path) -> Vec<PathBuf> {
+    let meta = |id: &str, source: &str, path: Option<&str>, nickname: Option<&str>| {
+        json!({"type":"session_meta","timestamp":"2026-09-24T00:00:00Z","payload":{
+            "id":id,"session_id":"parent","thread_source":source,
+            "agent_path":path,"agent_nickname":nickname,"cwd":"/work/semon"
+        }})
+    };
+    let message = |text: &str| {
+        json!({
+            "type":"event_msg","timestamp":"2026-09-24T00:00:01Z",
+            "payload":{"type":"user_message","message":text}
+        })
+    };
+    vec![
+        write_rollout(
+            root,
+            "parent",
+            &[
+                meta("parent", "user", None, None),
+                message("parent one"),
+                message("parent two"),
+            ],
+        ),
+        write_rollout(
+            root,
+            "sub-a",
+            &[
+                meta("sub-a", "subagent", Some("/root/a"), Some("A")),
+                message("sub a one"),
+                json!({"type":"event_msg","timestamp":"2026-09-24T00:00:02Z","payload":{"type":"token_count"}}),
+                message("sub a past parent"),
+            ],
+        ),
+        write_rollout(
+            root,
+            "sub-b",
+            &[
+                meta("sub-b", "subagent", None, Some("Bee")),
+                message("sub b one"),
+                message("sub b two"),
+            ],
+        ),
+    ]
+}
+
+fn all_raw(store: &TraceStore) -> std::collections::BTreeSet<(String, i64, Vec<u8>, Vec<String>)> {
+    ["parent", "parent/agent-sub-a", "parent/agent-sub-b"]
+        .into_iter()
+        .flat_map(|session| {
+            store
+                .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(session))
+                .unwrap()
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.session().unwrap().to_owned(),
+                        row.sequence().unwrap(),
+                        row.bytes().to_vec(),
+                        row.trace_ids()
+                            .iter()
+                            .map(|id| id.as_str().to_owned())
+                            .collect(),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn all_occurrences(store: &TraceStore) -> std::collections::BTreeSet<OccurrenceSnapshot> {
+    store
+        .log(&LogFilter::default())
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.session().to_owned(),
+                row.sequence(),
+                row.trace_id().as_str().to_owned(),
+                row.parent_sequence(),
+                row.agent().map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn subagent_live_capture_and_backfill_use_distinct_sessions() {
+    let root = TestDir::new();
+    let files = subagent_fixture(root.path());
+    let history = root.path().join("history.jsonl");
+    let state_path = root.path().join("state.json");
+    let mut state = CursorState::default();
+    let mut store = TraceStore::open(root.path().join("live.sqlite3")).unwrap();
+    for file in &files {
+        process_file(
+            file,
+            &mut state,
+            &mut store,
+            &options(&state_path, &history),
+        )
+        .unwrap();
+    }
+    let occurrences = all_occurrences(&store);
+    assert_eq!(occurrences.len(), 6);
+    assert_eq!(
+        occurrences
+            .iter()
+            .map(|row| row.0.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["parent", "parent/agent-sub-a", "parent/agent-sub-b"]
+            .into_iter()
+            .collect()
+    );
+    assert!(
+        occurrences
+            .iter()
+            .any(|row| row.0 == "parent" && row.1 == 1 && row.4.is_none())
+    );
+    assert!(occurrences.iter().any(|row| row.0 == "parent/agent-sub-a"
+        && row.1 == 3
+        && row.4.as_deref() == Some("/root/a")));
+    assert!(
+        occurrences.iter().any(|row| row.0 == "parent/agent-sub-b"
+            && row.1 == 1
+            && row.4.as_deref() == Some("Bee"))
+    );
+    let mut backfilled = TraceStore::open(root.path().join("backfill.sqlite3")).unwrap();
+    let report = backfill_raw(&state, &mut backfilled, &history, "", false).unwrap();
+    assert_eq!(report.rows_inserted, 10);
+    assert_eq!(all_raw(&backfilled).len(), 10);
+    assert_eq!(
+        all_raw(&backfilled)
+            .iter()
+            .map(|row| row.0.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["parent", "parent/agent-sub-a", "parent/agent-sub-b"]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
+fn old_subagent_cursor_upgrades_before_resuming() {
+    let root = TestDir::new();
+    let files = subagent_fixture(root.path());
+    let path = &files[1];
+    let history = root.path().join("history.jsonl");
+    let state_path = root.path().join("state.json");
+    let all = fs::read(path).unwrap();
+    let cutoff = all
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(2)
+        .map(<[u8]>::len)
+        .sum::<usize>();
+    fs::write(path, &all[..cutoff]).unwrap();
+    let mut state = CursorState::default();
+    let mut store = TraceStore::open(root.path().join("resume.sqlite3")).unwrap();
+    process_file(
+        path,
+        &mut state,
+        &mut store,
+        &options(&state_path, &history),
+    )
+    .unwrap();
+    let mut document: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let key = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let cursor = &mut document["files"][&key];
+    cursor["session_id"] = json!("parent");
+    cursor.as_object_mut().unwrap().remove("parent_session_id");
+    cursor.as_object_mut().unwrap().remove("agent");
+    cursor["last_projected_sequence"] = json!({"parent":1});
+    fs::write(&state_path, serde_json::to_vec(&document).unwrap()).unwrap();
+    fs::write(path, all).unwrap();
+    let mut old_state = load_state(&state_path).unwrap();
+    assert_eq!(
+        process_file(
+            path,
+            &mut old_state,
+            &mut store,
+            &options(&state_path, &history)
+        )
+        .unwrap(),
+        2
+    );
+    let upgraded: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let cursor = &upgraded["files"][&key];
+    assert_eq!(cursor["session_id"], "parent/agent-sub-a");
+    assert_eq!(cursor["parent_session_id"], "parent");
+    assert_eq!(cursor["agent"], "/root/a");
+    assert!(cursor["last_projected_sequence"].get("parent").is_none());
+    assert_eq!(cursor["last_projected_sequence"]["parent/agent-sub-a"], 3);
+    assert!(
+        all_occurrences(&store)
+            .iter()
+            .any(|row| row.0 == "parent/agent-sub-a"
+                && row.1 == 3
+                && row.4.as_deref() == Some("/root/a"))
+    );
+}
+
+#[test]
+fn repair_rebuilds_collided_store_and_skips_missing_group() {
+    let root = TestDir::new();
+    let files = subagent_fixture(root.path());
+    let history = root.path().join("history.jsonl");
+    let state_path = root.path().join("state.json");
+    let mut state = CursorState::default();
+    let mut fresh = TraceStore::open(root.path().join("fresh.sqlite3")).unwrap();
+    for file in &files {
+        process_file(
+            file,
+            &mut state,
+            &mut fresh,
+            &options(&state_path, &history),
+        )
+        .unwrap();
+    }
+    let expected_raw = all_raw(&fresh);
+    let expected_occurrences = all_occurrences(&fresh);
+    let mut cursor_document: Value =
+        serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    for (file, id) in files.iter().skip(1).zip(["sub-a", "sub-b"]) {
+        let key = file.canonicalize().unwrap().to_string_lossy().into_owned();
+        let cursor = &mut cursor_document["files"][&key];
+        let sequence = cursor["last_projected_sequence"][format!("parent/agent-{id}")].clone();
+        cursor["session_id"] = json!("parent");
+        cursor["last_projected_sequence"] = json!({"parent":sequence});
+        cursor.as_object_mut().unwrap().remove("parent_session_id");
+        cursor.as_object_mut().unwrap().remove("agent");
+    }
+    fs::write(&state_path, serde_json::to_vec(&cursor_document).unwrap()).unwrap();
+    state = load_state(&state_path).unwrap();
+    let old_path = root.path().join("old.sqlite3");
+    let mut old = TraceStore::open(&old_path).unwrap();
+    let projected = fresh.log(&LogFilter::default()).unwrap();
+    for session in ["parent", "parent/agent-sub-a", "parent/agent-sub-b"] {
+        for row in fresh
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(session))
+            .unwrap()
+        {
+            if let Some(occurrence) = projected.iter().find(|occurrence| {
+                occurrence.session() == session && occurrence.sequence() == row.sequence().unwrap()
+            }) {
+                old.capture(
+                    occurrence.semantic_core(),
+                    NewRawCarrierRecord::new(CARRIER, row.bytes()),
+                    NewOccurrence {
+                        session: "parent",
+                        sequence: row.sequence().unwrap(),
+                        timestamp: row.timestamp().unwrap(),
+                        repo: occurrence.repo(),
+                        repo_source: occurrence.repo_source(),
+                        parent_sequence: occurrence.parent_sequence(),
+                        agent: None,
+                        authored_by: occurrence.authored_by(),
+                    },
+                )
+                .unwrap();
+            } else {
+                old.capture_raw_only(
+                    CARRIER,
+                    row.bytes(),
+                    "parent",
+                    row.sequence().unwrap(),
+                    row.timestamp().unwrap(),
+                )
+                .unwrap();
+            }
+        }
+    }
+    assert_eq!(all_occurrences(&old).len(), 3);
+    assert_eq!(
+        old.fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("parent"))
+            .unwrap()
+            .len(),
+        10
+    );
+    let subagent_rows = fresh
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(
+            "parent/agent-sub-a",
+        ))
+        .unwrap();
+    let duplicate = subagent_rows
+        .iter()
+        .find(|row| row.sequence() == Some(0))
+        .unwrap();
+    old.capture_raw_only(
+        CARRIER,
+        duplicate.bytes(),
+        "parent/agent-sub-a",
+        0,
+        duplicate.timestamp().unwrap(),
+    )
+    .unwrap();
+    let moved = subagent_rows
+        .iter()
+        .find(|row| row.sequence() == Some(1))
+        .unwrap();
+    let original = old
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("parent"))
+        .unwrap()
+        .into_iter()
+        .find(|row| row.sequence() == Some(1) && row.bytes() == moved.bytes())
+        .unwrap();
+    let original_id = original.id();
+    let original_links = original.trace_ids().to_vec();
+    let before_raw = all_raw(&old);
+    let before_occurrences = all_occurrences(&old);
+    let before_canonical = old.list_traces(None, 100).unwrap();
+    let before_state = fs::read(&state_path).unwrap();
+    OpenOptions::new()
+        .append(true)
+        .open(&files[1])
+        .unwrap()
+        .write_all(b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"beyond saved offset\"}}\n")
+        .unwrap();
+    let preview = repair_subagent_keys(&state, &mut old, &history, "", true).unwrap();
+    assert_eq!(preview.groups_found, 1);
+    assert_eq!(preview.groups_repaired, 1);
+    assert_eq!(preview.raw_rekeyed, 6);
+    assert_eq!(preview.duplicates_deleted, 1);
+    assert_eq!(all_raw(&old), before_raw);
+    assert_eq!(all_occurrences(&old), before_occurrences);
+    assert_eq!(fs::read(&state_path).unwrap(), before_state);
+    let repaired = repair_subagent_keys(&state, &mut old, &history, "", false).unwrap();
+    assert_eq!(preview, repaired);
+    assert_eq!(all_raw(&old), expected_raw);
+    assert_eq!(all_occurrences(&old), expected_occurrences);
+    assert_eq!(old.list_traces(None, 100).unwrap(), before_canonical);
+    let moved_after = old
+        .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(
+            "parent/agent-sub-a",
+        ))
+        .unwrap()
+        .into_iter()
+        .find(|row| row.sequence() == Some(1) && row.bytes() == moved.bytes())
+        .unwrap();
+    assert_eq!(moved_after.id(), original_id);
+    assert_eq!(moved_after.trace_ids(), original_links);
+    assert_eq!(fs::read(&state_path).unwrap(), before_state);
+    let second = repair_subagent_keys(&state, &mut old, &history, "", false).unwrap();
+    assert_eq!(second.raw_rekeyed, 0);
+    assert_eq!(second.duplicates_deleted, 0);
+    assert_eq!(all_raw(&old), expected_raw);
+    assert_eq!(all_occurrences(&old), expected_occurrences);
+
+    let mut incomplete = TraceStore::open(root.path().join("incomplete.sqlite3")).unwrap();
+    incomplete
+        .capture_raw_only(CARRIER, b"untouched\n", "parent", 99, 0)
+        .unwrap();
+    let incomplete_raw = all_raw(&incomplete);
+    assert!(matches!(
+        repair_subagent_keys(&state, &mut incomplete, &history, "", false),
+        Err(AdapterError::Store(
+            semon_store::StoreError::RepairWouldAddCanonicalTraces
+        ))
+    ));
+    assert_eq!(all_raw(&incomplete), incomplete_raw);
+    assert!(all_occurrences(&incomplete).is_empty());
+
+    let mut missing = TraceStore::open(root.path().join("missing.sqlite3")).unwrap();
+    let occurrence = &projected[0];
+    missing
+        .capture(
+            occurrence.semantic_core(),
+            NewRawCarrierRecord::new(CARRIER, b"untouched\n"),
+            NewOccurrence {
+                session: "parent",
+                sequence: 99,
+                timestamp: 0,
+                repo: "",
+                repo_source: RepoSource::None,
+                parent_sequence: None,
+                agent: None,
+                authored_by: AuthoredBy::Human,
+            },
+        )
+        .unwrap();
+    let missing_before = all_raw(&missing);
+    let missing_occurrences = all_occurrences(&missing);
+    fs::remove_file(&files[2]).unwrap();
+    let skipped = repair_subagent_keys(&state, &mut missing, &history, "", false).unwrap();
+    assert_eq!(skipped.groups_found, 1);
+    assert_eq!(skipped.groups_repaired, 0);
+    assert_eq!(skipped.groups_skipped.len(), 1);
+    assert_eq!(all_raw(&missing), missing_before);
+    assert_eq!(all_occurrences(&missing), missing_occurrences);
 }
 
 #[test]
