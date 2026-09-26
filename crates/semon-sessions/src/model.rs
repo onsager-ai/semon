@@ -176,6 +176,9 @@ pub(crate) struct Built {
     pub(crate) handoffs: Vec<Handoff>,
     #[cfg(test)]
     pub(crate) turns: Vec<Turn>,
+    /// Each session's assistant texts by turn: (turn number, offset, block).
+    #[cfg(test)]
+    pub(crate) texts: BTreeMap<String, Vec<(usize, u64, u32)>>,
 }
 
 impl Built {
@@ -2376,6 +2379,33 @@ impl<'a> Builder<'a> {
 
     // -- turns --
 
+    #[cfg(test)]
+    fn texts_by_turn(&self) -> BTreeMap<String, Vec<(usize, u64, u32)>> {
+        let mut result = BTreeMap::new();
+        for (index, session) in self.sessions.iter().enumerate() {
+            if session.kind == SessKind::Stub {
+                continue;
+            }
+            let entries = self.entries(index);
+            let texts: Vec<(usize, u64, u32)> = self
+                .groups(index, &entries)
+                .iter()
+                .enumerate()
+                .flat_map(|(number, turn)| {
+                    turn.entries
+                        .iter()
+                        .map(|position| &entries[*position])
+                        .filter(|entry| matches!(entry.kind, EntryKind::A))
+                        .filter_map(|entry| entry.at)
+                        .map(move |at| (number, event(self.files, at).o, event(self.files, at).b))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            result.insert(session.key.clone(), texts);
+        }
+        result
+    }
+
     fn turns(&self) -> Vec<Turn> {
         let mut turns = Vec::new();
         for (index, session) in self.sessions.iter().enumerate() {
@@ -3036,6 +3066,8 @@ pub(crate) fn build(
     builder.lineage_states();
     builder.activity();
     let mut turns = builder.turns();
+    #[cfg(test)]
+    let texts = builder.texts_by_turn();
 
     // Stubs span the handoffs that name them.
     for handoff in &builder.handoffs {
@@ -3148,6 +3180,8 @@ pub(crate) fn build(
         handoffs,
         #[cfg(test)]
         turns,
+        #[cfg(test)]
+        texts,
     })
 }
 
