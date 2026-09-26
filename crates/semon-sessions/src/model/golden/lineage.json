@@ -1,0 +1,427 @@
+{
+  "version": "a66c517836cd7281",
+  "now": 1790294400000,
+  "machine": {
+    "id": "testbox",
+    "name": "testbox",
+    "up": true
+  },
+  "sessions": {
+    "bridged-1": {
+      "name": "lane-20",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "idle",
+      "model": "—",
+      "tokens": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start": 1790251200000,
+      "last": 1790258400000,
+      "busy": [
+        [
+          1790251200000,
+          1790251200000
+        ],
+        [
+          1790253000000,
+          1790253000000
+        ],
+        [
+          1790254800000,
+          1790254800000
+        ],
+        [
+          1790258400000,
+          1790258400000
+        ]
+      ]
+    },
+    "neighbour": {
+      "name": "proj",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "—",
+      "tokens": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start": 1790245860000,
+      "last": 1790245860000,
+      "busy": [
+        [
+          1790245860000,
+          1790245860000
+        ]
+      ]
+    },
+    "old": {
+      "name": "proj",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790247600000,
+      "last": 1790248200000,
+      "busy": [
+        [
+          1790247600000,
+          1790248200000
+        ]
+      ]
+    },
+    "pid-only": {
+      "name": "lane-21",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "idle",
+      "model": "—",
+      "tokens": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start": 1790260200000,
+      "last": 1790260200000,
+      "busy": [
+        [
+          1790260200000,
+          1790260200000
+        ]
+      ]
+    },
+    "root": {
+      "name": "proj",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "—",
+      "tokens": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start": 1790244000000,
+      "last": 1790245800000,
+      "busy": [
+        [
+          1790244000000,
+          1790244000000
+        ],
+        [
+          1790245800000,
+          1790245800000
+        ]
+      ]
+    }
+  },
+  "handoffs": [
+    {
+      "id": "a7614bdf4a5834d0a",
+      "kind": "ask",
+      "from": "you",
+      "to": "root",
+      "at": 1790244000000,
+      "status": "done",
+      "brief": "first"
+    },
+    {
+      "id": "a22e0a2e41c890276",
+      "kind": "ask",
+      "from": "you",
+      "to": "root",
+      "at": 1790245800000,
+      "status": "done",
+      "brief": "after clear"
+    },
+    {
+      "id": "af9c8775fa4523241",
+      "kind": "ask",
+      "from": "you",
+      "to": "neighbour",
+      "at": 1790245860000,
+      "status": "done",
+      "brief": "close in time, no link"
+    },
+    {
+      "id": "aa251c4172552f37f",
+      "kind": "ask",
+      "from": "you",
+      "to": "old",
+      "at": 1790247600000,
+      "status": "done",
+      "brief": "before copy"
+    },
+    {
+      "id": "qb5f2e4d9fd360c0d",
+      "kind": "toyou",
+      "ask": "question",
+      "from": "old",
+      "to": "you",
+      "at": 1790247660000,
+      "done": 1790247720000,
+      "status": "done",
+      "brief": "Copied?",
+      "answer": [
+        "Yes"
+      ],
+      "answers": [
+        {
+          "question": "Copied?",
+          "values": [
+            "Yes"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "a92d15ce548f85e63",
+      "kind": "ask",
+      "from": "you",
+      "to": "old",
+      "at": 1790248200000,
+      "status": "done",
+      "brief": "after copy"
+    },
+    {
+      "id": "a684823cfbb51834d",
+      "kind": "ask",
+      "from": "you",
+      "to": "bridged-1",
+      "at": 1790251200000,
+      "status": "done",
+      "brief": "remote one"
+    },
+    {
+      "id": "ad4e88fe8dbd76fb8",
+      "kind": "ask",
+      "from": "you",
+      "to": "bridged-1",
+      "at": 1790253000000,
+      "status": "done",
+      "brief": "while the first was open"
+    },
+    {
+      "id": "a294351b7a52823aa",
+      "kind": "ask",
+      "from": "you",
+      "to": "bridged-1",
+      "at": 1790254800000,
+      "status": "done",
+      "brief": "remote two"
+    },
+    {
+      "id": "a73504ead768dd8f7",
+      "kind": "ask",
+      "from": "you",
+      "to": "bridged-1",
+      "at": 1790258400000,
+      "status": "done",
+      "brief": "after restart"
+    },
+    {
+      "id": "a80e72e6cd0411b60",
+      "kind": "ask",
+      "from": "you",
+      "to": "pid-only",
+      "at": 1790260200000,
+      "status": "done",
+      "brief": "not joined"
+    }
+  ],
+  "turns": [
+    {
+      "id": "a7614bdf4a5834d0a",
+      "sid": "root",
+      "start": "a7614bdf4a5834d0a",
+      "at": 1790244000000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "root",
+      "offset": 0
+    },
+    {
+      "id": "a22e0a2e41c890276",
+      "sid": "root",
+      "start": "a22e0a2e41c890276",
+      "at": 1790245800000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "cleared",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "af9c8775fa4523241",
+      "sid": "neighbour",
+      "start": "af9c8775fa4523241",
+      "at": 1790245860000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "neighbour",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "aa251c4172552f37f",
+      "sid": "old",
+      "start": "aa251c4172552f37f",
+      "at": 1790247600000,
+      "end": {
+        "st": "done",
+        "why": "toyou",
+        "h": "qb5f2e4d9fd360c0d"
+      },
+      "sent": [
+        "qb5f2e4d9fd360c0d"
+      ],
+      "file": "old",
+      "offset": 0
+    },
+    {
+      "id": "a92d15ce548f85e63",
+      "sid": "old",
+      "start": "a92d15ce548f85e63",
+      "at": 1790248200000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "new",
+      "offset": 913,
+      "last": true
+    },
+    {
+      "id": "a684823cfbb51834d",
+      "sid": "bridged-1",
+      "start": "a684823cfbb51834d",
+      "at": 1790251200000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "bridged-1",
+      "offset": 75
+    },
+    {
+      "id": "ad4e88fe8dbd76fb8",
+      "sid": "bridged-1",
+      "start": "ad4e88fe8dbd76fb8",
+      "at": 1790253000000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "restarted",
+      "offset": 75
+    },
+    {
+      "id": "a294351b7a52823aa",
+      "sid": "bridged-1",
+      "start": "a294351b7a52823aa",
+      "at": 1790254800000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "bridged-2",
+      "offset": 75
+    },
+    {
+      "id": "a73504ead768dd8f7",
+      "sid": "bridged-1",
+      "start": "a73504ead768dd8f7",
+      "at": 1790258400000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "restarted",
+      "offset": 243,
+      "last": true
+    },
+    {
+      "id": "a80e72e6cd0411b60",
+      "sid": "pid-only",
+      "start": "a80e72e6cd0411b60",
+      "at": 1790260200000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "pid-only",
+      "offset": 0,
+      "last": true
+    }
+  ],
+  "busy": {
+    "testbox": [
+      [
+        1790244000000,
+        1790244000000
+      ],
+      [
+        1790245800000,
+        1790245860000
+      ],
+      [
+        1790247600000,
+        1790248200000
+      ],
+      [
+        1790251200000,
+        1790251200000
+      ],
+      [
+        1790253000000,
+        1790253000000
+      ],
+      [
+        1790254800000,
+        1790254800000
+      ],
+      [
+        1790258400000,
+        1790258400000
+      ],
+      [
+        1790260200000,
+        1790260200000
+      ]
+    ]
+  }
+}

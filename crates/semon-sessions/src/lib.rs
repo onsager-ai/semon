@@ -12,7 +12,10 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod events;
+mod model;
 mod viewer;
+pub use model::model_json;
 pub use viewer::{ServeOptions, serve};
 
 #[derive(Clone, Debug)]
@@ -228,18 +231,35 @@ pub(crate) fn read_index(path: &Path) -> Index {
 }
 
 pub(crate) fn save_index(path: &Path, index: &Index) -> io::Result<()> {
+    save_json(path, index)
+}
+
+/// Writes a cache file buffered, to a private temporary file renamed over the
+/// old one, so a reader never sees a half-written cache.
+pub(crate) fn save_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".{}.tmp", std::process::id()));
+    let temporary = PathBuf::from(temporary);
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     options.mode(0o600);
-    let mut file = options.open(path)?;
+    let file = options.open(&temporary)?;
     #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    serde_json::to_writer(&mut file, index)?;
-    file.flush()
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    let mut writer = io::BufWriter::new(file);
+    let written = serde_json::to_writer(&mut writer, value)
+        .map_err(io::Error::from)
+        .and_then(|()| writer.flush());
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    drop(writer);
+    fs::rename(&temporary, path)
 }
 
 fn summarize(
@@ -758,7 +778,9 @@ pub fn collect(options: &Options) -> io::Result<Vec<Node>> {
     let mut index = read_index(&options.cache);
     let mut dirty = false;
     let result = collect_with_index(options, &mut index, &mut dirty)?;
-    save_index(&options.cache, &index)?;
+    if dirty || !options.cache.exists() {
+        save_index(&options.cache, &index)?;
+    }
     Ok(result)
 }
 

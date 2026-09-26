@@ -1,0 +1,262 @@
+{
+  "version": "72ea334626d384a1",
+  "now": 0,
+  "machine": {
+    "id": "testbox",
+    "name": "testbox",
+    "up": true
+  },
+  "sessions": {
+    "a1": {
+      "name": "Review the diff",
+      "harness": "claude",
+      "kind": "Subagent",
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.002,
+        0.045,
+        0.001
+      ],
+      "repo": "harbor",
+      "branch": "main",
+      "start": 1790244240000,
+      "last": 1790244480000,
+      "busy": [
+        [
+          1790244240000,
+          1790244480000
+        ]
+      ]
+    },
+    "codex-run": {
+      "name": "feat/flush",
+      "harness": "codex",
+      "kind": "Codex run",
+      "machine": "testbox",
+      "state": "done",
+      "model": "gpt-6-luna",
+      "tokens": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "repo": "harbor",
+      "branch": "feat/flush",
+      "start": 1790244840000,
+      "last": 1790245080000,
+      "busy": [
+        [
+          1790244840000,
+          1790245080000
+        ]
+      ]
+    },
+    "harbor": {
+      "name": "harbor",
+      "harness": "claude",
+      "lane": true,
+      "machine": "testbox",
+      "state": "wait",
+      "model": "opus-5.5",
+      "tokens": [
+        0.002,
+        0.045,
+        0.001
+      ],
+      "repo": "harbor",
+      "branch": "main",
+      "start": 1790244000000,
+      "last": 1790245260000,
+      "busy": [
+        [
+          1790244000000,
+          1790244180000
+        ],
+        [
+          1790244540000,
+          1790244780000
+        ],
+        [
+          1790245200000,
+          1790245260000
+        ]
+      ]
+    },
+    "quill": {
+      "name": "quill",
+      "harness": "claude",
+      "lane": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.002,
+        0.045,
+        0.001
+      ],
+      "repo": "harbor",
+      "branch": "main",
+      "start": 1790244000000,
+      "last": 1790244660000,
+      "busy": [
+        [
+          1790244000000,
+          1790244000000
+        ],
+        [
+          1790244600000,
+          1790244660000
+        ]
+      ]
+    }
+  },
+  "handoffs": [
+    {
+      "id": "a368026b39844b198",
+      "kind": "ask",
+      "from": "you",
+      "to": "harbor",
+      "at": 1790244000000,
+      "status": "done",
+      "brief": "Fix the sync tests"
+    },
+    {
+      "id": "scf9085bcbd567a10",
+      "kind": "spawn",
+      "from": "harbor",
+      "to": "a1",
+      "at": 1790244180000,
+      "done": 1790244540000,
+      "status": "done",
+      "brief": "Review the diff",
+      "result": "Looks right"
+    },
+    {
+      "id": "ra4d4f55525170a57",
+      "kind": "relay",
+      "from": "harbor",
+      "to": "quill",
+      "at": 1790244600000,
+      "status": "done",
+      "brief": "Sync is fixed"
+    },
+    {
+      "id": "qf84cb3bbd95c749a",
+      "kind": "toyou",
+      "ask": "question",
+      "from": "harbor",
+      "to": "you",
+      "at": 1790244660000,
+      "done": 1790244720000,
+      "status": "done",
+      "brief": "Merge now?",
+      "answer": [
+        "Yes"
+      ],
+      "answers": [
+        {
+          "question": "Merge now?",
+          "values": [
+            "Yes"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "s249fde0718402de8",
+      "kind": "spawn",
+      "from": "harbor",
+      "to": "codex-run",
+      "at": 1790244780000,
+      "done": 1790245080000,
+      "status": "done",
+      "brief": "Implement the flush",
+      "result": "Flush implemented."
+    },
+    {
+      "id": "q4dbf42620ae59d8b",
+      "kind": "toyou",
+      "ask": "result",
+      "from": "harbor",
+      "to": "you",
+      "at": 1790245260000,
+      "status": "wait",
+      "brief": "All merged."
+    }
+  ],
+  "turns": [
+    {
+      "id": "a368026b39844b198",
+      "sid": "harbor",
+      "start": "a368026b39844b198",
+      "at": 1790244000000,
+      "end": {
+        "st": "wait",
+        "why": "toyou",
+        "h": "q4dbf42620ae59d8b"
+      },
+      "sent": [
+        "scf9085bcbd567a10",
+        "ra4d4f55525170a57",
+        "qf84cb3bbd95c749a",
+        "s249fde0718402de8",
+        "q4dbf42620ae59d8b"
+      ],
+      "file": "harbor",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "ra4d4f55525170a57",
+      "sid": "quill",
+      "start": "ra4d4f55525170a57",
+      "at": 1790244600000,
+      "end": {
+        "st": "done",
+        "why": "replied"
+      },
+      "sent": [],
+      "file": "quill",
+      "offset": 166,
+      "last": true
+    },
+    {
+      "id": "scf9085bcbd567a10",
+      "sid": "a1",
+      "start": "scf9085bcbd567a10",
+      "at": 1790244180000,
+      "end": {
+        "st": "done",
+        "why": "returned"
+      },
+      "sent": [],
+      "file": "a1",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "s249fde0718402de8",
+      "sid": "codex-run",
+      "start": "s249fde0718402de8",
+      "at": 1790244780000,
+      "end": {
+        "st": "done",
+        "why": "returned"
+      },
+      "sent": [],
+      "file": "codex-run",
+      "offset": 286,
+      "last": true
+    }
+  ],
+  "busy": {
+    "testbox": [
+      [
+        1790244000000,
+        1790245260000
+      ]
+    ]
+  }
+}

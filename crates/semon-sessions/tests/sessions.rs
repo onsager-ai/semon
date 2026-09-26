@@ -1,7 +1,8 @@
 use std::{
+    collections::BTreeSet,
     fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -9,7 +10,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-use semon_sessions::{Options, collect, render_json, render_text};
+use semon_sessions::{Options, collect, model_json, render_json, render_text};
 use serde_json::{Value, json};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -353,6 +354,7 @@ fn set_lock(fixture: &Fixture, id: &str, held: bool) {
 fn codex_subagents_use_thread_ids_and_lock_states() {
     let fixture = Fixture::new();
     fixture.codex("parent", None, &[codex_line("turn_context", json!({"model":"gpt-test"})),
+        codex_line("response_item", json!({"type":"function_call","name":"shell","call_id":"open-call","arguments":"{}"})),
         codex_line("event_msg", json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}})),
         codex_line("event_msg", json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":9,"output_tokens":4,"total_tokens":13}}}))]);
     fixture.codex("child-a", Some("parent"), &[]);
@@ -365,6 +367,7 @@ fn codex_subagents_use_thread_ids_and_lock_states() {
     assert_eq!(nodes[0].children[0].id, "child-a");
     assert_eq!(nodes[0].children[1].id, "child-b");
     assert_eq!(nodes[0].tokens.input, 9);
+    assert!(nodes[0].open_tools.is_empty());
     #[cfg(unix)]
     {
         assert_eq!(nodes[0].state, "running");
@@ -615,4 +618,349 @@ fn timestamp_parser_handles_offsets_through_age() {
             .abs_diff(expected)
             <= 1
     );
+}
+
+// ---- The session model (#40 M1) --------------------------------------------------------
+
+fn model_home() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write("proc/sys/kernel/hostname", "testbox\n");
+    fixture
+}
+
+fn line(kind: &str, sid: &str, minute: u32, cwd: &Path, extra: Value) -> Value {
+    let mut record = json!({"type":kind,"timestamp":format!("2026-09-24T10:{minute:02}:00.000Z"),
+        "sessionId":sid,"cwd":cwd,"gitBranch":"main"});
+    for (key, value) in extra.as_object().unwrap() {
+        record[key] = value.clone();
+    }
+    record
+}
+
+fn said(blocks: Value) -> Value {
+    json!({"message":{"id":"msg","model":"claude-opus-5-5","role":"assistant","content":blocks,
+        "usage":{"input_tokens":1200,"cache_creation_input_tokens":300,"cache_read_input_tokens":45000,"output_tokens":700}}})
+}
+
+/// A home with one of each: your message, a subagent that returns, a relay
+/// between two lanes, an answered question, a Codex run, and a live lane
+/// waiting on you with a result.
+fn write_model_home(fixture: &Fixture, secrets: bool) {
+    // A worktree path names its repo without touching the disk, and a fixed
+    // path keeps the golden file's byte offsets independent of the temp dir.
+    let cwd = Path::new("/work/harbor/.claude/worktrees/m1");
+    let secret = |label: &str| {
+        if secrets {
+            format!(" SECRET_{label}_42")
+        } else {
+            String::new()
+        }
+    };
+    fixture.jsonl(
+        "claude/projects/-work-harbor/harbor.jsonl",
+        &[
+            line("user", "harbor", 0, cwd, json!({"origin":{"kind":"human"},"message":{"role":"user","content":format!("Fix the sync tests{}", secret("ASK"))}})),
+            line("assistant", "harbor", 1, cwd, said(json!([
+                {"type":"text","text":format!("Running them{}", secret("TEXT"))},
+                {"type":"tool_use","id":"bash-1","name":"Bash","input":{"command":format!("cargo test{}", secret("INPUT"))}},
+            ]))),
+            line("user", "harbor", 2, cwd, json!({"toolUseResult":{"stdout":"ok"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"bash-1","content":format!("test result: ok{}", secret("OUTPUT"))}]}})),
+            line("assistant", "harbor", 3, cwd, said(json!([
+                {"type":"tool_use","id":"agent-1","name":"Agent","input":{"description":"Review","prompt":format!("Review the diff{}", secret("BRIEF"))}},
+            ]))),
+            line("user", "harbor", 3, cwd, json!({"toolUseResult":{"status":"async_launched"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"agent-1","content":"launched"}]}})),
+            line("user", "harbor", 9, cwd, json!({"origin":{"kind":"task-notification"},"message":{"role":"user","content":"<task-notification><tool-use-id>agent-1</tool-use-id><status>completed</status><result>Looks right</result></task-notification>"}})),
+            line("assistant", "harbor", 10, cwd, said(json!([
+                {"type":"tool_use","id":"send-1","name":"SendMessage","input":{"to":"quill-7a","message":format!("Sync is fixed{}", secret("RELAY")),"type":"message"}},
+            ]))),
+            line("user", "harbor", 10, cwd, json!({"toolUseResult":{"success":true,"message":"sent","msg_id":"msg-1"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send-1","content":"sent"}]}})),
+            line("assistant", "harbor", 11, cwd, said(json!([
+                {"type":"tool_use","id":"ask-1","name":"AskUserQuestion","input":{"questions":[{"question":"Merge now?","header":"Merge","multiSelect":false,"options":[{"label":"Yes","description":"d"},{"label":"No","description":"d"}]}]}},
+            ]))),
+            line("user", "harbor", 12, cwd, json!({"toolUseResult":{"questions":[],"answers":{"Merge now?":format!("Yes{}", secret("ANSWER"))}},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"ask-1","content":"Your questions have been answered"}]}})),
+            line("assistant", "harbor", 13, cwd, said(json!([
+                {"type":"tool_use","id":"codex-1","name":"Bash","input":{"command":"codex exec"}},
+            ]))),
+            line("user", "harbor", 20, cwd, json!({"toolUseResult":{},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"codex-1","content":"done"}]}})),
+            line("assistant", "harbor", 21, cwd, said(json!([{"type":"text","text":"All merged."}]))),
+        ],
+    );
+    fixture.jsonl(
+        "claude/projects/-work-harbor/harbor/subagents/agent-a1.jsonl",
+        &[
+            line(
+                "user",
+                "harbor",
+                4,
+                cwd,
+                json!({"message":{"role":"user","content":"Review the diff"}}),
+            ),
+            line(
+                "assistant",
+                "harbor",
+                8,
+                cwd,
+                said(json!([{"type":"text","text":"Looks right"}])),
+            ),
+        ],
+    );
+    fixture.write(
+        "claude/projects/-work-harbor/harbor/subagents/agent-a1.meta.json",
+        &json!({"agentType":"general-purpose","description":"Review the diff","toolUseId":"agent-1"}).to_string(),
+    );
+    fixture.jsonl(
+        "claude/projects/-work-harbor/quill.jsonl",
+        &[
+            line("custom-title", "quill", 0, cwd, json!({"customTitle":"quill"})),
+            line("user", "quill", 10, cwd, json!({"origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/100.sock","name":"harbor-3c","msg_id":"msg-1","body":"Sync is fixed","verifiedPeerPid":100,"verifiedPeerProcStart":"123"},
+                "message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/100.sock\" from-name=\"harbor-3c\">Sync is fixed</cross-session-message>"}})),
+            line("assistant", "quill", 11, cwd, said(json!([{"type":"text","text":"Thanks, rebasing."}]))),
+        ],
+    );
+    fixture.jsonl(
+        "codex/sessions/2026/09/24/rollout-codex-run.jsonl",
+        &[
+            json!({"timestamp":"2026-09-24T10:14:00.000Z","type":"session_meta","payload":{"id":"codex-run","cwd":cwd,"originator":"codex_exec","git":{"branch":"feat/flush"}}}),
+            json!({"timestamp":"2026-09-24T10:14:00.000Z","type":"turn_context","payload":{"model":"gpt-6-luna"}}),
+            json!({"timestamp":"2026-09-24T10:14:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Semon-Parent: claude:harbor:codex-1\nImplement the flush"}]}}),
+            json!({"timestamp":"2026-09-24T10:18:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Flush implemented."}]}}),
+        ],
+    );
+    fixture.process(100, 123);
+    fixture.write(
+        "claude/sessions/100.json",
+        &json!({"pid":100,"sessionId":"harbor","procStart":123,"status":"idle","name":"harbor"})
+            .to_string(),
+    );
+}
+
+#[test]
+fn model_json_matches_the_golden_file() {
+    let fixture = model_home();
+    write_model_home(&fixture, false);
+    let json = model_json(&fixture.options).unwrap();
+    let mut model: Value = serde_json::from_str(&json).unwrap();
+    assert!(model["now"].as_i64().unwrap() > 1_790_000_000_000);
+    model["now"] = json!(0);
+    let actual = serde_json::to_string_pretty(&model).unwrap() + "\n";
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/model.json");
+    if std::env::var_os("SEMON_UPDATE_GOLDEN").is_some() {
+        fs::write(&golden, &actual).unwrap();
+    }
+    assert_eq!(actual, fs::read_to_string(golden).unwrap());
+    // A second run from the warm cache gives the same model and version.
+    let again: Value = serde_json::from_str(&model_json(&fixture.options).unwrap()).unwrap();
+    assert_eq!(again["version"], model["version"]);
+}
+
+/// Every other content path the model reads: task-notification results,
+/// hand-back bodies, `SubagentHandback` input, a Codex brief, result and
+/// arguments, question text, option labels, previews and free text, a queued
+/// prompt, a received body with no send, and thinking.
+fn write_more_secrets(fixture: &Fixture) {
+    let cwd = Path::new("/work/harbor/.claude/worktrees/m1");
+    let say = |minute, blocks| line("assistant", "tasks", minute, cwd, said(blocks));
+    let user = |minute, extra| line("user", "tasks", minute, cwd, extra);
+    let asked = |id: &str, question: &str, labels: [&str; 2]| {
+        json!([{"type":"tool_use","id":id,"name":"AskUserQuestion","input":{"questions":[{"question":question,"header":"h","multiSelect":false,
+            "options":[{"label":labels[0],"description":"d"},{"label":labels[1],"description":"d"}]}]}}])
+    };
+    fixture.jsonl(
+        "claude/projects/-work-harbor/tasks.jsonl",
+        &[
+            line("attachment", "tasks", 30, cwd, json!({"attachment":{"type":"queued_command","commandMode":"prompt",
+                "prompt":"Queue SECRET_QUEUED_42","origin":{"kind":"human"}}})),
+            say(31, json!([{"type":"thinking","thinking":"SECRET_THINKING_42"},
+                {"type":"tool_use","id":"t-tn","name":"Agent","input":{"prompt":"one"}},
+                {"type":"tool_use","id":"t-hb","name":"Agent","input":{"prompt":"two"}},
+                {"type":"tool_use","id":"t-sh","name":"Agent","input":{"prompt":"three"}}])),
+            user(31, json!({"toolUseResult":{"status":"async_launched"},"message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t-tn","content":"launched"},
+                {"type":"tool_result","tool_use_id":"t-hb","content":"launched"},
+                {"type":"tool_result","tool_use_id":"t-sh","content":"launched"}]}})),
+            user(32, json!({"origin":{"kind":"task-notification"},"message":{"role":"user","content":
+                "<task-notification><tool-use-id>t-tn</tool-use-id><status>completed</status><result>SECRET_TN_RESULT_42</result></task-notification>"}})),
+            user(33, json!({"origin":{"kind":"peer","handback":true,"from":"lead","senderTaskId":"a-hb","body":"SECRET_HANDBACK_42"},
+                "message":{"role":"user","content":"x"}})),
+            user(34, json!({"origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/7.sock","name":"gone","msg_id":"m-orphan",
+                "body":"SECRET_BODY_42","verifiedPeerPid":7,"verifiedPeerProcStart":"1"},"message":{"role":"user","content":"SECRET_BODY_42"}})),
+            say(35, asked("q-label", "Pick SECRET_QUESTION_42?", ["SECRET_LABEL_42", "SECRET_UNCHOSEN_42"])),
+            user(35, json!({"toolUseResult":{"answers":{"Pick SECRET_QUESTION_42?":"SECRET_LABEL_42"}},
+                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q-label","content":"answered"}]}})),
+            say(36, asked("q-free", "Layout?", ["Grid", "List"])),
+            user(36, json!({"toolUseResult":{"answers":{"Layout?":"SECRET_FREE_42"},"annotations":{"Layout?":{"preview":"SECRET_PREVIEW_42"}}},
+                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q-free","content":"answered"}]}})),
+        ],
+    );
+    for (agent, tool, records) in [
+        (
+            "a-tn",
+            "t-tn",
+            vec![line(
+                "user",
+                "tasks",
+                31,
+                cwd,
+                json!({"message":{"role":"user","content":"one"}}),
+            )],
+        ),
+        (
+            "a-hb",
+            "t-hb",
+            vec![line(
+                "user",
+                "tasks",
+                31,
+                cwd,
+                json!({"message":{"role":"user","content":"two"}}),
+            )],
+        ),
+        (
+            "a-sh",
+            "t-sh",
+            vec![
+                line(
+                    "user",
+                    "tasks",
+                    31,
+                    cwd,
+                    json!({"message":{"role":"user","content":"three"}}),
+                ),
+                line(
+                    "assistant",
+                    "tasks",
+                    32,
+                    cwd,
+                    said(
+                        json!([{"type":"tool_use","id":"sh","name":"SubagentHandback",
+                "input":{"message":"SECRET_SUBAGENT_HANDBACK_42"}}]),
+                    ),
+                ),
+            ],
+        ),
+    ] {
+        fixture.jsonl(
+            &format!("claude/projects/-work-harbor/tasks/subagents/agent-{agent}.jsonl"),
+            &records,
+        );
+        fixture.write(
+            &format!("claude/projects/-work-harbor/tasks/subagents/agent-{agent}.meta.json"),
+            &json!({"description":agent,"toolUseId":tool}).to_string(),
+        );
+    }
+    fixture.jsonl(
+        "codex/sessions/2026/09/24/rollout-codex-secret.jsonl",
+        &[
+            json!({"timestamp":"2026-09-24T10:40:00.000Z","type":"session_meta","payload":{"id":"codex-secret","cwd":cwd,"originator":"codex_exec"}}),
+            json!({"timestamp":"2026-09-24T10:40:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Semon-Parent: claude:tasks\nDo SECRET_CODEX_BRIEF_42"}]}}),
+            json!({"timestamp":"2026-09-24T10:41:00.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1","arguments":"{\"command\":\"echo SECRET_CODEX_ARGS_42\"}"}}),
+            json!({"timestamp":"2026-09-24T10:41:00.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"SECRET_CODEX_OUTPUT_42"}}),
+            json!({"timestamp":"2026-09-24T10:42:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SECRET_CODEX_RESULT_42"}]}}),
+        ],
+    );
+}
+
+/// Every string in `value` with its path, e.g. `handoffs.3.brief`.
+fn strings(value: &Value, path: String, output: &mut Vec<(String, String)>) {
+    match value {
+        Value::String(text) => output.push((path, text.clone())),
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                strings(item, format!("{path}.{index}"), output);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                strings(item, format!("{path}.{key}"), output);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn planted_secrets_never_reach_the_cache_and_reach_the_model_only_as_their_session() {
+    let fixture = model_home();
+    write_model_home(&fixture, true);
+    write_more_secrets(&fixture);
+    let model: Value = serde_json::from_str(&model_json(&fixture.options).unwrap()).unwrap();
+    let nodes = collect(&fixture.options).unwrap();
+    let cache = fs::read_to_string(&fixture.options.cache).unwrap();
+    let events = fs::read_to_string(fixture.options.cache.with_extension("events.json")).unwrap();
+    // label -> a session the handoff carrying it must touch; None: never shown.
+    let owners: [(&str, Option<&str>); 22] = [
+        ("ASK", Some("harbor")),
+        ("BRIEF", Some("harbor")),
+        ("RELAY", Some("harbor")),
+        ("ANSWER", Some("harbor")),
+        ("TEXT", None),
+        ("INPUT", None),
+        ("OUTPUT", None),
+        ("QUEUED", Some("tasks")),
+        ("THINKING", None),
+        ("TN_RESULT", Some("a-tn")),
+        ("HANDBACK", Some("a-hb")),
+        ("SUBAGENT_HANDBACK", Some("a-sh")),
+        ("BODY", Some("tasks")),
+        ("QUESTION", Some("tasks")),
+        ("LABEL", Some("tasks")),
+        ("UNCHOSEN", None),
+        ("FREE", Some("tasks")),
+        ("PREVIEW", Some("tasks")),
+        ("CODEX_BRIEF", Some("codex-secret")),
+        ("CODEX_RESULT", Some("codex-secret")),
+        ("CODEX_ARGS", None),
+        ("CODEX_OUTPUT", None),
+    ];
+    for (label, _) in owners {
+        let secret = format!("SECRET_{label}_42");
+        for (name, output) in [
+            ("V1 cache", &cache),
+            ("event cache", &events),
+            ("tree text", &render_text(&nodes)),
+            ("tree json", &render_json(&nodes)),
+        ] {
+            assert!(!output.contains(&secret), "{secret} in the {name}");
+        }
+    }
+    // The model's content fields are the handoffs' briefs, results, targets
+    // and answers, and a running tool's argument in `sessions[].activity`
+    // (content too, covered by the model's activity test). Nothing else in it
+    // carries text: not ids, turns, busy or the rest of a session.
+    let content = |path: &str| {
+        let parts: Vec<&str> = path.split('.').collect();
+        matches!(
+            parts.as_slice(),
+            ["", "handoffs", _, "brief" | "result" | "target"]
+                | ["", "handoffs", _, "answer", _]
+                | ["", "handoffs", _, "answers", _, "question" | "preview"]
+                | ["", "handoffs", _, "answers", _, "values", _]
+                | ["", "sessions", _, "activity", "1"]
+        )
+    };
+    let mut found = Vec::new();
+    strings(&model, String::new(), &mut found);
+    let mut seen = BTreeSet::new();
+    for (path, text) in found {
+        for (label, owner) in owners {
+            if !text.contains(&format!("SECRET_{label}_42")) {
+                continue;
+            }
+            assert!(content(&path), "{label} at {path}");
+            let owner = owner.unwrap_or_else(|| panic!("{label} must not reach the model: {path}"));
+            let index: usize = path.split('.').nth(2).unwrap().parse().unwrap();
+            let handoff = &model["handoffs"][index];
+            assert!(
+                handoff["from"] == owner || handoff["to"] == owner,
+                "{label} left {owner}: {handoff}"
+            );
+            seen.insert(label);
+        }
+    }
+    let shown: BTreeSet<&str> = owners
+        .iter()
+        .filter(|(_, owner)| owner.is_some())
+        .map(|(label, _)| *label)
+        .collect();
+    assert_eq!(seen, shown);
 }

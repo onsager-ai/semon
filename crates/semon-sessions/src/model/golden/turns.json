@@ -1,0 +1,136 @@
+{
+  "version": "49bfda349d4ba4ca",
+  "now": 1790294400000,
+  "machine": {
+    "id": "testbox",
+    "name": "testbox",
+    "up": true
+  },
+  "sessions": {
+    "peer-33c470005d19c980": {
+      "name": "other",
+      "harness": "claude",
+      "lane": true,
+      "stub": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "—",
+      "tokens": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start": 1790269320000,
+      "last": 1790269320000,
+      "busy": []
+    },
+    "turny": {
+      "name": "proj",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.004,
+        0.008,
+        0.002
+      ],
+      "start": 1790269200000,
+      "last": 1790269620000,
+      "busy": [
+        [
+          1790269200000,
+          1790269620000
+        ]
+      ]
+    }
+  },
+  "handoffs": [
+    {
+      "id": "a54f7afbc37f9d7c0",
+      "kind": "ask",
+      "from": "you",
+      "to": "turny",
+      "at": 1790269200000,
+      "status": "done",
+      "brief": "first ask"
+    },
+    {
+      "id": "rff825f448513cd59",
+      "kind": "relay",
+      "from": "peer-33c470005d19c980",
+      "to": "turny",
+      "at": 1790269320000,
+      "status": "done",
+      "brief": "a relay in",
+      "unmatched": true
+    }
+  ],
+  "turns": [
+    {
+      "id": "a54f7afbc37f9d7c0",
+      "sid": "turny",
+      "start": "a54f7afbc37f9d7c0",
+      "at": 1790269200000,
+      "end": {
+        "st": "done",
+        "why": "replied"
+      },
+      "sent": [],
+      "file": "turny",
+      "offset": 0
+    },
+    {
+      "id": "rff825f448513cd59",
+      "sid": "turny",
+      "start": "rff825f448513cd59",
+      "at": 1790269320000,
+      "end": {
+        "st": "err",
+        "why": "failed_step"
+      },
+      "sent": [],
+      "file": "turny",
+      "offset": 486
+    },
+    {
+      "id": "turny:turny:1509",
+      "sid": "turny",
+      "start": null,
+      "at": 1790269500000,
+      "end": {
+        "st": "err",
+        "why": "unfinished_step"
+      },
+      "sent": [],
+      "file": "turny",
+      "offset": 1509
+    },
+    {
+      "id": "turny:turny:1885",
+      "sid": "turny",
+      "start": null,
+      "u": true,
+      "at": 1790269560000,
+      "end": {
+        "st": "done",
+        "why": "replied"
+      },
+      "sent": [],
+      "file": "turny",
+      "offset": 1885,
+      "last": true
+    }
+  ],
+  "busy": {
+    "testbox": [
+      [
+        1790269200000,
+        1790269620000
+      ]
+    ]
+  }
+}

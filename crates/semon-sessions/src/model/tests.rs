@@ -1,0 +1,1565 @@
+//! One test per rule in the design's table, on synthetic homes only.
+
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+
+use serde_json::{Value, json};
+
+use super::*;
+use crate::events::EventCache;
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// 2026-09-24T00:00:00Z.
+const BASE: i64 = 1_790_208_000_000;
+/// A day after BASE: nothing in these homes counts as running by time alone.
+const NOW: i64 = BASE + 86_400_000;
+
+fn at(hour: i64, minute: i64) -> i64 {
+    BASE + (hour * 60 + minute) * 60_000
+}
+
+fn ts(hour: i64, minute: i64) -> String {
+    format!("2026-09-24T{hour:02}:{minute:02}:00.000Z")
+}
+
+struct Home {
+    root: PathBuf,
+    options: Options,
+}
+
+impl Home {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "semon-model-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let options = Options {
+            claude_home: root.join("claude"),
+            codex_home: root.join("codex"),
+            proc_root: root.join("proc"),
+            cache: root.join("index.json"),
+            all: true,
+            since: Duration::from_secs(86400),
+            session: None,
+        };
+        let home = Self { root, options };
+        home.write("proc/locks", "");
+        home.write("proc/sys/kernel/hostname", "testbox\n");
+        home
+    }
+
+    fn write(&self, relative: &str, content: &str) -> PathBuf {
+        let path = self.root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn lines(&self, relative: &str, records: &[Value]) -> PathBuf {
+        let text = records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        self.write(relative, &text)
+    }
+
+    fn top(&self, id: &str, records: &[Value]) -> PathBuf {
+        self.lines(&format!("claude/projects/-work-proj/{id}.jsonl"), records)
+    }
+
+    fn agent(&self, parent: &str, agent: &str, tool_use: &str, records: &[Value]) {
+        self.lines(
+            &format!("claude/projects/-work-proj/{parent}/subagents/agent-{agent}.jsonl"),
+            records,
+        );
+        self.write(
+            &format!("claude/projects/-work-proj/{parent}/subagents/agent-{agent}.meta.json"),
+            &json!({"agentType":"general-purpose","description":format!("task {agent}"),"toolUseId":tool_use}).to_string(),
+        );
+    }
+
+    fn codex(&self, id: &str, meta: Value, records: &[Value]) {
+        let mut payload =
+            json!({"id":id,"cwd":"/work/proj","originator":"codex_exec","thread_source":"user"});
+        for (key, value) in meta.as_object().unwrap() {
+            payload[key] = value.clone();
+        }
+        let mut lines = vec![json!({"timestamp":ts(0, 0),"type":"session_meta","payload":payload})];
+        lines.extend_from_slice(records);
+        self.lines(
+            &format!("codex/sessions/2026/09/24/rollout-{id}.jsonl"),
+            &lines,
+        );
+    }
+
+    /// A live Claude process for `session`.
+    fn live(&self, pid: u32, session: &str, status: &str, extra: Value) {
+        let mut fields = vec!["0"; 20];
+        fields[19] = "777";
+        self.write(
+            &format!("proc/{pid}/stat"),
+            &format!("{pid} (claude) {}\n", fields.join(" ")),
+        );
+        let mut record = json!({"pid":pid,"sessionId":session,"procStart":777,"status":status,"name":format!("lane-{pid}")});
+        for (key, value) in extra.as_object().unwrap() {
+            record[key] = value.clone();
+        }
+        self.write(&format!("claude/sessions/{pid}.json"), &record.to_string());
+    }
+
+    fn build(&self) -> Built {
+        self.build_at(&self.options, NOW)
+    }
+
+    /// Builds from this home's saved event cache, saves it back, and checks
+    /// the model's invariants.
+    fn build_at(&self, options: &Options, now: i64) -> Built {
+        let path = EventCache::path(&options.cache);
+        let mut cache = EventCache::read(&path);
+        let mut dirty = false;
+        let built = build(options, &mut cache, &mut dirty, &mut Texts::default(), now).unwrap();
+        if dirty {
+            cache.save(&path).unwrap();
+        }
+        invariants(&built);
+        built
+    }
+}
+
+/// Holds for every model: handoff and turn ids are unique, and every id and
+/// session a handoff or turn names exists.
+fn invariants(built: &Built) {
+    let mut ids = BTreeSet::new();
+    for handoff in &built.handoffs {
+        assert!(
+            ids.insert(handoff.id.clone()),
+            "duplicate handoff {}",
+            handoff.id
+        );
+        for end in [Some(&handoff.from), handoff.to.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(
+                end == "you" || built.sessions.contains_key(end),
+                "no session {end}"
+            );
+        }
+    }
+    let mut turns = BTreeSet::new();
+    for turn in &built.turns {
+        assert!(turns.insert(turn.id.clone()), "duplicate turn {}", turn.id);
+        assert!(built.sessions.contains_key(&turn.sid));
+        for id in turn.start.iter().chain(&turn.sent) {
+            assert!(
+                ids.contains(id),
+                "turn {} names missing handoff {id}",
+                turn.id
+            );
+        }
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn human(sid: &str, time: String, text: &str) -> Value {
+    json!({"type":"user","timestamp":time,"sessionId":sid,"origin":{"kind":"human"},"message":{"role":"user","content":text}})
+}
+
+fn user(sid: &str, time: String, text: &str) -> Value {
+    json!({"type":"user","timestamp":time,"sessionId":sid,"message":{"role":"user","content":text}})
+}
+
+fn assistant(sid: &str, time: String, blocks: Vec<Value>) -> Value {
+    json!({"type":"assistant","timestamp":time.clone(),"sessionId":sid,"message":{"id":format!("m-{sid}-{time}"),"model":"claude-opus-5-5","role":"assistant","content":blocks,
+        "usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":2000,"output_tokens":500}}})
+}
+
+fn uuid(mut record: Value, id: &str) -> Value {
+    record["uuid"] = json!(id);
+    record
+}
+
+fn text(value: &str) -> Value {
+    json!({"type":"text","text":value})
+}
+
+fn tool(id: &str, name: &str, input: Value) -> Value {
+    json!({"type":"tool_use","id":id,"name":name,"input":input})
+}
+
+fn result(sid: &str, time: String, id: &str, content: &str, error: bool, outcome: Value) -> Value {
+    json!({"type":"user","timestamp":time,"sessionId":sid,"toolUseResult":outcome,
+        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":content,"is_error":error}]}})
+}
+
+fn peer(sid: &str, time: String, msg_id: &str, name: &str, pid: u64, body: &str) -> Value {
+    json!({"type":"user","timestamp":time,"sessionId":sid,
+        "origin":{"kind":"peer","from":format!("uds:/run/user/1000/cc-socks/{pid}.sock"),"name":name,"fromMode":"prompting","msg_id":msg_id,"body":body,"verifiedPeerPid":pid,"verifiedPeerProcStart":"999"},
+        "message":{"role":"user","content":format!("<cross-session-message from=\"uds:/run/user/1000/cc-socks/{pid}.sock\" from-name=\"{name}\">{body}</cross-session-message>")}})
+}
+
+fn notification(sid: &str, time: String, id: &str, status: &str, body: &str) -> Value {
+    json!({"type":"user","timestamp":time,"sessionId":sid,"origin":{"kind":"task-notification"},
+        "message":{"role":"user","content":format!("<task-notification><task-id>x</task-id><tool-use-id>{id}</tool-use-id><status>{status}</status><result>{body}</result></task-notification>")}})
+}
+
+fn codex_line(time: String, kind: &str, payload: Value) -> Value {
+    json!({"timestamp":time,"type":kind,"payload":payload})
+}
+
+fn codex_user(time: String, text: &str) -> Value {
+    codex_line(
+        time,
+        "response_item",
+        json!({"type":"message","role":"user","content":[{"type":"input_text","text":text}]}),
+    )
+}
+
+fn codex_reply(time: String, text: &str) -> Value {
+    codex_line(
+        time,
+        "response_item",
+        json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}),
+    )
+}
+
+fn only<'a>(built: &'a Built, kind: &str, from: &str, to: &str) -> &'a Handoff {
+    let found: Vec<&Handoff> = built
+        .handoffs
+        .iter()
+        .filter(|handoff| {
+            handoff.kind == kind && handoff.from == from && handoff.to.as_deref() == Some(to)
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "{kind} {from} -> {to}: {found:?}");
+    found[0]
+}
+
+fn by_brief<'a>(built: &'a Built, brief: &str) -> &'a Handoff {
+    built
+        .handoffs
+        .iter()
+        .find(|handoff| handoff.brief == brief)
+        .unwrap_or_else(|| panic!("no handoff with brief {brief:?}: {:?}", built.handoffs))
+}
+
+fn turns_of<'a>(built: &'a Built, sid: &str) -> Vec<&'a Turn> {
+    built.turns.iter().filter(|turn| turn.sid == sid).collect()
+}
+
+fn parent_with_agents(home: &Home) {
+    home.top(
+        "parent",
+        &[
+            human("parent", ts(1, 0), "Split the work"),
+            assistant(
+                "parent",
+                ts(1, 1),
+                vec![
+                    tool("t1", "Agent", json!({"description":"one","prompt":"brief one"})),
+                    tool("t2", "Agent", json!({"description":"two","prompt":"brief two"})),
+                    tool("t3", "Agent", json!({"description":"three","prompt":"brief three"})),
+                    tool("t4", "Agent", json!({"description":"four","prompt":"brief four"})),
+                    tool("t5", "Agent", json!({"description":"five","prompt":"brief five"})),
+                    tool("t6", "Agent", json!({"description":"six","prompt":"brief six"})),
+                    tool("t7", "Agent", json!({"description":"seven","prompt":"brief seven"})),
+                    tool("t8", "Agent", json!({"description":"eight","prompt":"brief eight"})),
+                ],
+            ),
+            result("parent", ts(1, 2), "t1", "launched", false, json!({"status":"async_launched","agentId":"a1"})),
+            result("parent", ts(1, 2), "t2", "launched", false, json!({"status":"async_launched","agentId":"a2"})),
+            result("parent", ts(1, 3), "t3", "sync result three", false, json!({"status":"completed"})),
+            result("parent", ts(1, 2), "t4", "launched", false, json!({"status":"async_launched"})),
+            result("parent", ts(1, 2), "t5", "launched", false, json!({"status":"async_launched"})),
+            result("parent", ts(1, 2), "t6", "launched", false, json!({"status":"async_launched"})),
+            result("parent", ts(1, 2), "t7", "launched", false, json!({"status":"async_launched"})),
+            result("parent", ts(1, 2), "t8", "launched", false, json!({"status":"async_launched"})),
+            notification("parent", ts(1, 10), "t1", "completed", "notified one"),
+            json!({"type":"user","timestamp":ts(1, 11),"sessionId":"parent",
+                "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/9.sock","handback":true,"senderTaskId":"a2","body":"handed back two"},
+                "message":{"role":"user","content":"<agent-message from=\"a2\">handed back two</agent-message>"}}),
+            json!({"type":"user","timestamp":ts(1, 15),"sessionId":"parent",
+                "origin":{"kind":"peer","from":"lead","handback":true,"senderTaskId":"t8","body":"handed back eight"},
+                "message":{"role":"user","content":"x"}}),
+            notification("parent", ts(1, 12), "t5", "failed", "five broke"),
+            notification("parent", ts(1, 13), "t6", "completed", "six by notification"),
+            json!({"type":"user","timestamp":ts(1, 14),"sessionId":"parent",
+                "origin":{"kind":"peer","from":"a6","handback":true,"senderTaskId":"a6","body":"six by hand-back"},
+                "message":{"role":"user","content":"x"}}),
+        ],
+    );
+    for (agent, tool_use) in [
+        ("a1", "t1"),
+        ("a2", "t2"),
+        ("a3", "t3"),
+        ("a5", "t5"),
+        ("a6", "t6"),
+        ("a7", "t7"),
+        ("a8", "t8"),
+    ] {
+        home.agent(
+            "parent",
+            agent,
+            tool_use,
+            &[
+                user("parent", ts(1, 1), &format!("brief {agent}")),
+                assistant("parent", ts(1, 5), vec![text("working")]),
+            ],
+        );
+    }
+    home.agent(
+        "parent",
+        "a4",
+        "t4",
+        &[
+            user("parent", ts(1, 1), "brief a4"),
+            assistant(
+                "parent",
+                ts(1, 6),
+                vec![tool(
+                    "hb",
+                    "SubagentHandback",
+                    json!({"message":"handback tool four"}),
+                )],
+            ),
+        ],
+    );
+}
+
+#[test]
+fn spawn_results_come_from_four_sources_in_order() {
+    let home = Home::new();
+    parent_with_agents(&home);
+    let built = home.build();
+    let spawn = |agent: &str| only(&built, "spawn", "parent", agent).clone();
+    let one = spawn("a1");
+    assert_eq!(one.brief, "brief one");
+    assert_eq!(one.at, at(1, 1));
+    assert_eq!(
+        (one.status, one.result.as_deref(), one.done),
+        ("done", Some("notified one"), Some(at(1, 10)))
+    );
+    // A hand-back's `senderTaskId` names the agent, or its spawning call;
+    // `from` differs in both.
+    assert_eq!(spawn("a2").result.as_deref(), Some("handed back two"));
+    assert_eq!(spawn("a8").result.as_deref(), Some("handed back eight"));
+    assert_eq!(spawn("a3").result.as_deref(), Some("sync result three"));
+    assert_eq!(spawn("a4").result.as_deref(), Some("handback tool four"));
+    let five = spawn("a5");
+    assert_eq!(
+        (five.status, five.result.as_deref()),
+        ("err", Some("five broke"))
+    );
+    assert_eq!(built.sessions["a5"].state, "err");
+    // A notification outranks a hand-back.
+    assert_eq!(spawn("a6").result.as_deref(), Some("six by notification"));
+    // No result and the parent isn't running: done, with nothing returned.
+    let seven = spawn("a7");
+    assert_eq!((seven.status, seven.result.as_deref()), ("done", None));
+    assert_eq!(built.sessions["a7"].kind, Some("Subagent"));
+    assert_eq!(built.sessions["a7"].name, "task a7");
+    // The spawn sits in the parent's turn and starts the child's.
+    let parent_turns = turns_of(&built, "parent");
+    assert_eq!(parent_turns.len(), 1);
+    assert_eq!(parent_turns[0].sent.len(), 8);
+    let child = turns_of(&built, "a1");
+    assert_eq!(child[0].start.as_deref(), Some(one.id.as_str()));
+    assert_eq!(child[0].end.why, "returned");
+}
+
+#[test]
+fn a_running_parent_keeps_an_unreturned_subagent_working() {
+    let home = Home::new();
+    parent_with_agents(&home);
+    home.live(10, "parent", "busy", json!({}));
+    let built = home.build();
+    assert_eq!(only(&built, "spawn", "parent", "a7").status, "work");
+    assert_eq!(built.sessions["a7"].state, "work");
+    assert_eq!(built.sessions["parent"].state, "work");
+}
+
+#[test]
+fn codex_runs_link_by_marker_or_parent_thread_and_otherwise_stay_unlinked() {
+    let home = Home::new();
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(2, 0), "Hand it to Codex"),
+            assistant(
+                "lead",
+                ts(2, 1),
+                vec![tool(
+                    "bash-1",
+                    "Bash",
+                    json!({"command":"codex exec < /tmp/p.md"}),
+                )],
+            ),
+            result("lead", ts(2, 30), "bash-1", "ok", false, json!({})),
+        ],
+    );
+    home.codex(
+        "run-marked",
+        json!({}),
+        &[
+            codex_user(ts(2, 2), "<environment_context>x</environment_context>"),
+            codex_user(
+                ts(2, 2),
+                "Semon-Parent: claude:lead:bash-1\nImplement the thing",
+            ),
+            codex_reply(ts(2, 20), "Implemented"),
+        ],
+    );
+    home.codex(
+        "run-alone",
+        json!({}),
+        &[
+            codex_user(ts(3, 0), "Do it alone"),
+            codex_line(
+                ts(3, 5),
+                "event_msg",
+                json!({"type":"task_complete","error":{"message":"boom"}}),
+            ),
+        ],
+    );
+    home.codex(
+        "root",
+        json!({}),
+        &[
+            codex_user(ts(4, 0), "Coordinate"),
+            codex_line(ts(4, 1), "response_item", json!({"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"c1","arguments":"{\"task_name\":\"worker\",\"message\":\"go\"}"})),
+            codex_line(ts(4, 1), "response_item", json!({"type":"function_call_output","call_id":"c1","output":"{\"task_name\":\"worker\"}"})),
+            codex_line(ts(4, 2), "response_item", json!({"type":"function_call","namespace":"collaboration","name":"send_message","call_id":"c2","arguments":"{\"target\":\"root/worker\",\"message\":\"also this\"}"})),
+            codex_line(ts(4, 2), "response_item", json!({"type":"function_call_output","call_id":"c2","output":"sent"})),
+            codex_line(ts(4, 9), "response_item", json!({"type":"agent_message","author":"root/worker","recipient":"root","content":[{"type":"input_text","text":"worker finished"}]})),
+        ],
+    );
+    home.codex(
+        "child",
+        json!({"parent_thread_id":"root","thread_source":"subagent","agent_nickname":"worker","agent_path":"root/worker"}),
+        &[codex_user(ts(4, 1), "go"), codex_reply(ts(4, 8), "done")],
+    );
+    let built = home.build();
+    let marked = only(&built, "spawn", "lead", "run-marked");
+    assert_eq!(marked.brief, "Implement the thing");
+    assert_eq!(marked.result.as_deref(), Some("Implemented"));
+    let lead = turns_of(&built, "lead");
+    assert_eq!(lead[0].sent, std::slice::from_ref(&marked.id));
+    assert!(
+        built
+            .handoffs
+            .iter()
+            .all(|handoff| handoff.to.as_deref() != Some("run-alone"))
+    );
+    assert!(built.sessions["run-alone"].lane);
+    assert_eq!(built.sessions["run-alone"].state, "err");
+    assert_eq!(built.sessions["run-alone"].kind, Some("Codex run"));
+    let child = only(&built, "spawn", "root", "child");
+    assert_eq!(child.result.as_deref(), Some("worker finished"));
+    assert_eq!(built.sessions["child"].name, "worker");
+    let relay = only(&built, "relay", "root", "child");
+    assert_eq!(
+        (relay.brief.as_str(), relay.unmatched),
+        ("also this", false)
+    );
+    let root = turns_of(&built, "root");
+    assert_eq!(root[0].sent, [child.id.clone(), relay.id.clone()]);
+}
+
+fn relay_home() -> Home {
+    let home = Home::new();
+    home.top(
+        "alpha",
+        &[
+            json!({"type":"custom-title","customTitle":"Alpha","sessionId":"alpha"}),
+            human("alpha", ts(5, 0), "Tell the others"),
+            assistant(
+                "alpha",
+                ts(5, 1),
+                vec![
+                    tool(
+                        "s1",
+                        "SendMessage",
+                        json!({"to":"beta-01","message":"hello beta","type":"message"}),
+                    ),
+                    tool(
+                        "s2",
+                        "SendMessage",
+                        json!({"to":"nobody-9f","message":"lost one","type":"message"}),
+                    ),
+                    tool(
+                        "s3",
+                        "SendMessage",
+                        json!({"to":"beta-01","message":"denied one","type":"message"}),
+                    ),
+                    tool(
+                        "s4",
+                        "SendMessage",
+                        json!({"to":"Bee","message":"by unique name","type":"message"}),
+                    ),
+                    tool(
+                        "s5",
+                        "SendMessage",
+                        json!({"to":"Twin [a1b2]","message":"to a twin","type":"message"}),
+                    ),
+                    tool(
+                        "s6",
+                        "SendMessage",
+                        json!({"to":"a1","message":"to my subagent","type":"message"}),
+                    ),
+                ],
+            ),
+            result(
+                "alpha",
+                ts(5, 1),
+                "s1",
+                "sent",
+                false,
+                json!({"success":true,"message":"sent","msg_id":"m1"}),
+            ),
+            result(
+                "alpha",
+                ts(5, 1),
+                "s2",
+                "no such peer",
+                false,
+                json!({"success":false,"message":"no such peer"}),
+            ),
+            result(
+                "alpha",
+                ts(5, 1),
+                "s3",
+                "Permission denied",
+                true,
+                json!("Error: permission denied"),
+            ),
+            result(
+                "alpha",
+                ts(5, 1),
+                "s4",
+                "sent",
+                false,
+                json!({"success":true,"message":"sent"}),
+            ),
+            result(
+                "alpha",
+                ts(5, 1),
+                "s5",
+                "sent",
+                false,
+                json!({"success":true,"message":"sent"}),
+            ),
+            result(
+                "alpha",
+                ts(5, 1),
+                "s6",
+                "sent",
+                false,
+                json!({"success":true,"message":"sent","pin":{"id":"a1","name":"x","ref":"y"}}),
+            ),
+        ],
+    );
+    home.top(
+        "beta",
+        &[
+            json!({"type":"custom-title","customTitle":"Bee","sessionId":"beta"}),
+            peer("beta", ts(5, 2), "m1", "alpha-3c [lead]", 111, "hello beta"),
+            assistant("beta", ts(5, 3), vec![text("got it")]),
+            peer("beta", ts(6, 0), "m9", "ghost", 4242, "from a gone session"),
+        ],
+    );
+    for id in ["twin-1", "twin-2"] {
+        home.top(
+            id,
+            &[
+                json!({"type":"custom-title","customTitle":"Twin","sessionId":id}),
+                human(id, ts(0, 30), "twin work"),
+            ],
+        );
+    }
+    home
+}
+
+#[test]
+fn relays_join_on_msg_id() {
+    let home = relay_home();
+    let built = home.build();
+    let relay = by_brief(&built, "hello beta");
+    assert_eq!(
+        (relay.from.as_str(), relay.to.as_deref()),
+        ("alpha", Some("beta"))
+    );
+    assert_eq!(
+        (relay.status, relay.unmatched, relay.at),
+        ("done", false, at(5, 1))
+    );
+    let beta = turns_of(&built, "beta");
+    assert_eq!(beta[0].start.as_deref(), Some(relay.id.as_str()));
+    assert_eq!(beta[0].end.why, "replied");
+    // One relay per message: the receiving side doesn't add another.
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.brief == "hello beta")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn failed_and_denied_sends_are_failed_relays_with_no_receiver() {
+    let home = relay_home();
+    let built = home.build();
+    for (brief, target) in [("lost one", "nobody-9f"), ("denied one", "beta-01")] {
+        let relay = by_brief(&built, brief);
+        assert_eq!(relay.status, "err", "{brief}");
+        assert_eq!(relay.to, None, "{brief}");
+        assert_eq!(relay.target.as_deref(), Some(target));
+    }
+    // No stub stands in for a receiver that never got the message.
+    assert!(
+        built
+            .sessions
+            .values()
+            .all(|session| session.name != "nobody-9f" && session.name != "beta-01")
+    );
+    // A send to a subagent isn't a relay.
+    assert!(
+        built
+            .handoffs
+            .iter()
+            .all(|handoff| handoff.brief != "to my subagent")
+    );
+}
+
+#[test]
+fn received_message_from_a_gone_sender_keeps_a_stub() {
+    let home = relay_home();
+    let built = home.build();
+    let relay = by_brief(&built, "from a gone session");
+    assert_eq!(relay.to.as_deref(), Some("beta"));
+    assert!(relay.unmatched);
+    let stub = &built.sessions[&relay.from];
+    assert!(stub.stub && stub.lane);
+    assert_eq!((stub.name.as_str(), stub.state), ("ghost", "done"));
+    assert_eq!((stub.start, stub.last), (at(6, 0), at(6, 0)));
+}
+
+#[test]
+fn a_send_without_msg_id_resolves_a_unique_name_only() {
+    let home = relay_home();
+    let built = home.build();
+    let unique = by_brief(&built, "by unique name");
+    assert_eq!(
+        (unique.to.as_deref(), unique.unmatched),
+        (Some("beta"), false)
+    );
+    let twin = by_brief(&built, "to a twin");
+    assert!(twin.unmatched);
+    let stub = &built.sessions[twin.to.as_ref().unwrap()];
+    assert!(stub.stub);
+    assert_eq!(stub.name, "Twin");
+}
+
+fn question(text: &str, labels: &[&str], multi: bool) -> Value {
+    json!({"question":text,"header":"h","multiSelect":multi,
+        "options":labels.iter().map(|label| json!({"label":label,"description":"d"})).collect::<Vec<_>>()})
+}
+
+#[test]
+fn questions_take_answers_from_the_structured_result() {
+    let home = Home::new();
+    let calls = [
+        (
+            "q1",
+            vec![question("Ship it?", &["Yes", "No"], false)],
+            json!({"answers":{"Ship it?":"Yes"}}),
+            "",
+            false,
+        ),
+        (
+            "q3",
+            vec![
+                question("First?", &["A", "B"], false),
+                question("Second?", &["C", "D"], false),
+                question("Third?", &["E", "F"], false),
+            ],
+            json!({"answers":{"Third?":"F","First?":"A","Second?":"D"}}),
+            "",
+            false,
+        ),
+        (
+            "multi-list",
+            vec![question("Which?", &["Red", "Green", "Blue, light"], true)],
+            json!({"answers":{"Which?":["Red","Blue, light"]}}),
+            "",
+            false,
+        ),
+        (
+            "multi-joined",
+            vec![question("Pick?", &["Red", "Blue, light", "Green"], true)],
+            json!({"answers":{"Pick?":"Blue, light,Green"}}),
+            "",
+            false,
+        ),
+        (
+            "free",
+            vec![question("Name?", &["Semon", "Other"], false)],
+            json!({"answers":{"Name?":"Call it Tern"}}),
+            "",
+            false,
+        ),
+        (
+            "preview",
+            vec![question("Layout?", &["Grid", "List"], false)],
+            json!({"answers":{"Layout?":"Grid"},"annotations":{"Layout?":{"preview":"[grid]"}}}),
+            "",
+            false,
+        ),
+        (
+            "declined",
+            vec![question("Delete it?", &["Yes", "No"], false)],
+            json!("User declined to answer questions"),
+            "User declined",
+            true,
+        ),
+        (
+            "text-only",
+            vec![
+                question("Is \"quoted\" fine?", &["Yes", "No"], false),
+                question("Next?", &["Go"], false),
+            ],
+            Value::Null,
+            "Your questions have been answered: \"Is \"quoted\" fine?\"=\"Yes, \"really\"\", \"Next?\"=\"Go\". You can now continue with these answers in mind.",
+            false,
+        ),
+    ];
+    let mut records = vec![human("asker", ts(7, 0), "Ask me things")];
+    for (minute, (id, questions, outcome, content, error)) in calls.iter().enumerate() {
+        let minute = i64::try_from(minute).unwrap() * 2;
+        records.push(assistant(
+            "asker",
+            ts(7, minute + 1),
+            vec![tool(id, "AskUserQuestion", json!({"questions":questions}))],
+        ));
+        let mut line = result(
+            "asker",
+            ts(7, minute + 2),
+            id,
+            content,
+            *error,
+            outcome.clone(),
+        );
+        if outcome.is_null() {
+            line.as_object_mut().unwrap().remove("toolUseResult");
+        }
+        records.push(line);
+    }
+    home.top("asker", &records);
+    let built = home.build();
+    golden("answers", &built);
+    let get = |first: &str| by_brief(&built, first).clone();
+    let one = get("Ship it?");
+    assert_eq!(
+        (one.kind, one.ask, one.status),
+        ("toyou", Some("question"), "done")
+    );
+    assert_eq!(one.answer.as_deref(), Some(&["Yes".to_owned()][..]));
+    assert_eq!(one.done, Some(at(7, 2)));
+    let three = get("First?\nSecond?\nThird?");
+    assert_eq!(three.answer.unwrap(), ["A", "D", "F"]);
+    let list = get("Which?").answers.unwrap();
+    assert_eq!(list[0].values, ["Red", "Blue, light"]);
+    assert!(list[0].multi && !list[0].free);
+    let joined = get("Pick?");
+    assert_eq!(
+        joined.answers.as_ref().unwrap()[0].values,
+        ["Blue, light", "Green"]
+    );
+    assert_eq!(joined.answer.unwrap(), ["Blue, light, Green"]);
+    let free = get("Name?").answers.unwrap();
+    assert!(free[0].free);
+    assert_eq!(free[0].values, ["Call it Tern"]);
+    assert_eq!(
+        get("Layout?").answers.unwrap()[0].preview.as_deref(),
+        Some("[grid]")
+    );
+    let declined = get("Delete it?");
+    assert!(declined.declined);
+    assert_eq!(declined.answer.unwrap(), Vec::<String>::new());
+    let text_only = get("Is \"quoted\" fine?\nNext?");
+    assert_eq!(text_only.answer.unwrap(), ["Yes, \"really\"", "Go"]);
+}
+
+#[test]
+fn only_human_origin_prompts_are_your_messages() {
+    let home = Home::new();
+    home.top(
+        "lane",
+        &[
+            human("lane", ts(8, 0), "a real message"),
+            user("lane", ts(8, 1), "/compact"),
+            human("lane", ts(8, 1), "/compact keep the test output"),
+            human("lane", ts(8, 2), "/compactor notes are fine"),
+            user("lane", ts(8, 2), "<command-name>/compact</command-name>"),
+            human("lane", ts(8, 3), "<command-name>/prompt-for-decisions</command-name>\n<command-args></command-args>"),
+            json!({"type":"attachment","timestamp":ts(8, 4),"sessionId":"lane","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"queued from you","origin":{"kind":"human"}}}),
+            human("lane", ts(8, 5), "<system-reminder>only a reminder</system-reminder>"),
+            json!({"type":"user","timestamp":ts(8, 6),"sessionId":"lane","isMeta":true,"origin":{"kind":"human"},"message":{"role":"user","content":"meta"}}),
+        ],
+    );
+    home.top(
+        "sdk",
+        &[
+            json!({"type":"user","timestamp":ts(9, 0),"sessionId":"sdk","entrypoint":"sdk-cli","promptSource":"sdk","message":{"role":"user","content":"a program's brief"}}),
+            assistant("sdk", ts(9, 1), vec![text("done")]),
+        ],
+    );
+    let built = home.build();
+    let asks: Vec<&str> = built
+        .handoffs
+        .iter()
+        .filter(|handoff| handoff.kind == "ask")
+        .map(|handoff| handoff.brief.as_str())
+        .collect();
+    assert_eq!(
+        asks,
+        [
+            "a real message",
+            "/compactor notes are fine",
+            "<command-name>/prompt-for-decisions</command-name>\n<command-args></command-args>",
+            "queued from you"
+        ]
+    );
+    let sdk = turns_of(&built, "sdk");
+    assert_eq!(sdk.len(), 1);
+    assert!(sdk[0].u && sdk[0].start.is_none());
+    assert_eq!(sdk[0].end.why, "replied");
+}
+
+#[test]
+fn lineages_join_by_session_id_continued_in_and_bridge_only() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(10, 0), "first")]);
+    home.top(
+        "cleared",
+        &[json!({"type":"user","timestamp":ts(10, 30),"sessionId":"cleared","session_id":"root","origin":{"kind":"human"},"message":{"role":"user","content":"after clear"}})],
+    );
+    // A copy-resume: the new file starts with the old file's lines, uuids
+    // and all.
+    let history = [
+        uuid(human("old", ts(11, 0), "before copy"), "u1"),
+        uuid(
+            assistant(
+                "old",
+                ts(11, 1),
+                vec![tool(
+                    "q-copied",
+                    "AskUserQuestion",
+                    json!({"questions":[question("Copied?", &["Yes"], false)]}),
+                )],
+            ),
+            "u2",
+        ),
+        uuid(
+            result(
+                "old",
+                ts(11, 2),
+                "q-copied",
+                "answered",
+                false,
+                json!({"answers":{"Copied?":"Yes"}}),
+            ),
+            "u3",
+        ),
+    ];
+    let mut old = history.to_vec();
+    old.push(json!({"type":"continued-in","continuedInSessionId":"new","sessionId":"old","timestamp":ts(11, 5)}));
+    home.top("old", &old);
+    let mut new = history.to_vec();
+    new.push(uuid(human("new", ts(11, 10), "after copy"), "u4"));
+    home.top("new", &new);
+    home.top(
+        "bridged-1",
+        &[
+            json!({"type":"bridge-session","bridgeSessionId":"rc-1","sessionId":"bridged-1"}),
+            human("bridged-1", ts(12, 0), "remote one"),
+        ],
+    );
+    home.top(
+        "bridged-2",
+        &[
+            json!({"type":"bridge-session","bridgeSessionId":"rc-1","sessionId":"bridged-2"}),
+            human("bridged-2", ts(13, 0), "remote two"),
+        ],
+    );
+    home.top(
+        "restarted",
+        &[
+            json!({"type":"bridge-session","bridgeSessionId":"rc-1","sessionId":"restarted"}),
+            human("restarted", ts(12, 30), "while the first was open"),
+            human("restarted", ts(14, 0), "after restart"),
+        ],
+    );
+    home.live(20, "restarted", "idle", json!({}));
+    // Only a live pid file names this bridge: that link would vanish with the
+    // process, so it isn't one.
+    home.top("pid-only", &[human("pid-only", ts(14, 30), "not joined")]);
+    home.live(21, "pid-only", "idle", json!({"bridgeSessionId":"rc-1"}));
+    home.top(
+        "neighbour",
+        &[human("neighbour", ts(10, 31), "close in time, no link")],
+    );
+    let built = home.build();
+    golden("lineage", &built);
+    let keys: Vec<&str> = built.sessions.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["bridged-1", "neighbour", "old", "pid-only", "root"]);
+    let asks = |to: &str| -> Vec<&str> {
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.kind == "ask" && handoff.to.as_deref() == Some(to))
+            .map(|handoff| handoff.brief.as_str())
+            .collect()
+    };
+    assert_eq!(asks("root"), ["first", "after clear"]);
+    assert_eq!(asks("old"), ["before copy", "after copy"]);
+    let copied: Vec<&Handoff> = built
+        .handoffs
+        .iter()
+        .filter(|handoff| handoff.brief == "Copied?")
+        .collect();
+    assert_eq!(copied.len(), 1);
+    assert_eq!(turns_of(&built, "old").len(), 2);
+    // The copied assistant message counts once: usage merges by message id.
+    assert_eq!(built.sessions["old"].tokens, [0.001, 0.002, 0.001]);
+    assert_eq!(
+        asks("bridged-1"),
+        [
+            "remote one",
+            "while the first was open",
+            "remote two",
+            "after restart"
+        ]
+    );
+    // Files of one Remote Control session that were written at the same time
+    // interleave by time.
+    let starts: Vec<Option<i64>> = turns_of(&built, "bridged-1")
+        .iter()
+        .map(|turn| turn.at)
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            Some(at(12, 0)),
+            Some(at(12, 30)),
+            Some(at(13, 0)),
+            Some(at(14, 0))
+        ]
+    );
+    assert_eq!(built.sessions["bridged-1"].state, "idle");
+    assert_eq!(built.sessions["bridged-1"].name, "lane-20");
+}
+
+#[test]
+fn busy_clusters_every_line_of_a_lineage_within_five_minutes() {
+    let home = Home::new();
+    home.top(
+        "one",
+        &[
+            human("one", ts(15, 0), "go"),
+            json!({"type":"system","timestamp":ts(15, 4),"sessionId":"one"}),
+        ],
+    );
+    home.top(
+        "two",
+        &[
+            json!({"type":"system","timestamp":ts(15, 8),"sessionId":"two","session_id":"one"}),
+            json!({"type":"system","timestamp":ts(15, 20),"sessionId":"two","session_id":"one"}),
+        ],
+    );
+    let built = home.build();
+    assert_eq!(
+        built.sessions["one"].busy,
+        [(at(15, 0), at(15, 8)), (at(15, 20), at(15, 20))]
+    );
+}
+
+#[test]
+fn states_follow_the_process_the_question_and_the_last_word() {
+    let home = Home::new();
+    home.top("working", &[human("working", ts(16, 0), "busy work")]);
+    home.live(30, "working", "busy", json!({}));
+    home.top(
+        "asking",
+        &[
+            human("asking", ts(16, 0), "ask me"),
+            assistant(
+                "asking",
+                ts(16, 1),
+                vec![tool(
+                    "open-q",
+                    "AskUserQuestion",
+                    json!({"questions":[question("Now?", &["Yes"], false)]}),
+                )],
+            ),
+        ],
+    );
+    home.live(31, "asking", "idle", json!({}));
+    home.top(
+        "answered",
+        &[
+            human("answered", ts(16, 0), "do it"),
+            assistant(
+                "answered",
+                ts(16, 2),
+                vec![text("All done: 3 files changed.")],
+            ),
+        ],
+    );
+    home.live(32, "answered", "idle", json!({}));
+    home.top(
+        "idle",
+        &[
+            assistant("idle", ts(16, 0), vec![text("earlier")]),
+            human("idle", ts(16, 3), "one more thing"),
+        ],
+    );
+    home.live(33, "idle", "idle", json!({}));
+    home.top("ended", &[human("ended", ts(16, 0), "long ago")]);
+    let built = home.build();
+    let state = |key: &str| built.sessions[key].state;
+    assert_eq!(
+        [
+            state("working"),
+            state("asking"),
+            state("answered"),
+            state("idle"),
+            state("ended")
+        ],
+        ["work", "wait", "wait", "idle", "done"]
+    );
+    assert_eq!(by_brief(&built, "busy work").status, "work");
+    assert_eq!(by_brief(&built, "Now?").status, "wait");
+    let result = by_brief(&built, "All done: 3 files changed.");
+    assert_eq!(
+        (result.kind, result.ask, result.status),
+        ("toyou", Some("result"), "wait")
+    );
+    let answered = turns_of(&built, "answered");
+    assert_eq!(answered[0].end.why, "toyou");
+    assert_eq!(answered[0].end.st, "wait");
+    assert_eq!(turns_of(&built, "working")[0].end.why, "working");
+}
+
+#[test]
+fn turns_split_at_each_incoming_entry_and_at_a_gap() {
+    let home = Home::new();
+    let path = home.top(
+        "turny",
+        &[
+            human("turny", ts(17, 0), "first ask"),
+            assistant("turny", ts(17, 1), vec![text("reply one")]),
+            peer("turny", ts(17, 2), "m-in", "other", 5, "a relay in"),
+            assistant(
+                "turny",
+                ts(17, 3),
+                vec![tool("bad", "Bash", json!({"command":"false"}))],
+            ),
+            result("turny", ts(17, 3), "bad", "exit 1", true, json!({})),
+        ],
+    );
+    let mut content = fs::read_to_string(&path).unwrap();
+    content.push_str("{not json\n");
+    for record in [
+        assistant(
+            "turny",
+            ts(17, 5),
+            vec![tool("never", "Read", json!({"file_path":"/x"}))],
+        ),
+        user("turny", ts(17, 6), "a prompt that isn't yours"),
+        assistant("turny", ts(17, 7), vec![text("reply two")]),
+    ] {
+        content.push_str(&record.to_string());
+        content.push('\n');
+    }
+    fs::write(&path, content).unwrap();
+    let built = home.build();
+    golden("turns", &built);
+    let turns = turns_of(&built, "turny");
+    let summary: Vec<(Option<&str>, bool, &str)> = turns
+        .iter()
+        .map(|turn| (turn.start.as_deref(), turn.u, turn.end.why))
+        .collect();
+    let ask = by_brief(&built, "first ask").id.clone();
+    let relay = by_brief(&built, "a relay in").id.clone();
+    assert_eq!(
+        summary,
+        [
+            (Some(ask.as_str()), false, "replied"),
+            (Some(relay.as_str()), false, "failed_step"),
+            (None, false, "unfinished_step"),
+            (None, true, "replied"),
+        ]
+    );
+    assert_eq!(turns[0].id, ask);
+    assert_eq!(turns[0].offset, 0);
+    assert!(turns[2].id.starts_with("turny:turny:"));
+    assert!(turns[3].last && !turns[2].last);
+    // Turn offsets point at the first entry's line.
+    let content = fs::read_to_string(&path).unwrap();
+    let line = &content[usize::try_from(turns[3].offset).unwrap()..];
+    assert!(line.starts_with("{\"type\":\"user\""));
+}
+
+#[test]
+fn handoff_ids_are_stable_across_rebuilds_and_growth() {
+    let home = relay_home();
+    let first = home.build();
+    let path = home.root.join("claude/projects/-work-proj/beta.jsonl");
+    let mut content = fs::read_to_string(&path).unwrap();
+    content.push_str(&format!("{}\n", human("beta", ts(6, 30), "later ask")));
+    fs::write(&path, content).unwrap();
+    let second = home.build();
+    for handoff in &first.handoffs {
+        assert!(
+            second
+                .handoffs
+                .iter()
+                .any(|other| other.id == handoff.id && other.brief == handoff.brief),
+            "{} moved",
+            handoff.id
+        );
+    }
+    assert_eq!(second.handoffs.len(), first.handoffs.len() + 1);
+}
+
+#[test]
+fn the_window_trims_output_but_not_links() {
+    let mut home = relay_home();
+    home.options.all = false;
+    home.options.since = Duration::from_secs(3600);
+    let built = home.build_at(&home.options, at(6, 30));
+    let briefs: Vec<&str> = built
+        .handoffs
+        .iter()
+        .map(|handoff| handoff.brief.as_str())
+        .collect();
+    assert_eq!(briefs, ["from a gone session"]);
+    assert_eq!(built.sessions.len(), 2);
+    assert!(
+        built.sessions["beta"]
+            .busy
+            .iter()
+            .all(|interval| interval.0 >= at(5, 30))
+    );
+}
+
+#[test]
+fn a_subagent_message_to_a_sibling_names_its_sender_agent() {
+    let home = Home::new();
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(18, 0), "Run a team"),
+            assistant(
+                "lead",
+                ts(18, 1),
+                vec![
+                    tool("ta", "Agent", json!({"prompt":"brief a"})),
+                    tool("tb", "Agent", json!({"prompt":"brief b"})),
+                ],
+            ),
+        ],
+    );
+    home.agent(
+        "lead",
+        "aa",
+        "ta",
+        &[
+            user("lead", ts(18, 1), "brief a"),
+            assistant(
+                "lead",
+                ts(18, 2),
+                vec![tool(
+                    "to-b",
+                    "SendMessage",
+                    json!({"to":"ab","message":"sibling note"}),
+                )],
+            ),
+            result(
+                "lead",
+                ts(18, 2),
+                "to-b",
+                "sent",
+                false,
+                json!({"success":true,"message":"sent","pin":{"id":"ab"}}),
+            ),
+        ],
+    );
+    home.agent(
+        "lead",
+        "ab",
+        "tb",
+        &[
+            user("lead", ts(18, 1), "brief b"),
+            json!({"type":"user","timestamp":ts(18, 3),"sessionId":"lead",
+                "origin":{"kind":"peer","from":"aa","name":"worker-a","body":"sibling note"},
+                "message":{"role":"user","content":"<cross-session-message from=\"aa\" from-name=\"worker-a\">sibling note</cross-session-message>"}}),
+        ],
+    );
+    let built = home.build();
+    let relay = only(&built, "relay", "aa", "ab");
+    assert_eq!(
+        (relay.brief.as_str(), relay.unmatched),
+        ("sibling note", false)
+    );
+    assert!(built.sessions.values().all(|session| !session.stub));
+    let receiver = turns_of(&built, "ab");
+    assert_eq!(receiver[1].start.as_deref(), Some(relay.id.as_str()));
+}
+
+fn golden(name: &str, built: &Built) {
+    let actual =
+        serde_json::to_string_pretty(&serde_json::from_str::<Value>(&built.json(NOW)).unwrap())
+            .unwrap()
+            + "\n";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/model/golden")
+        .join(format!("{name}.json"));
+    if std::env::var_os("SEMON_UPDATE_GOLDEN").is_some() {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &actual).unwrap();
+    }
+    assert_eq!(actual, fs::read_to_string(&path).unwrap(), "{name} golden");
+}
+
+#[test]
+fn rule_goldens() {
+    golden("relays", &relay_home().build());
+    let home = Home::new();
+    parent_with_agents(&home);
+    golden("spawns", &home.build());
+}
+
+#[test]
+fn a_sender_that_cleared_without_a_link_stays_a_stub() {
+    let home = Home::new();
+    // A sent to B, then ran `/clear` with no session_id or bridge link, and
+    // A's old file is gone. The same process now writes A's new file.
+    home.top("a-new", &[human("a-new", ts(19, 0), "after the clear")]);
+    home.live(42, "a-new", "idle", json!({}));
+    let mut line = peer("b", ts(18, 30), "m-a", "a-3c", 42, "sent before the clear");
+    line["origin"]["verifiedPeerProcStart"] = json!("777");
+    home.top("b", &[line]);
+    let built = home.build();
+    let relay = by_brief(&built, "sent before the clear");
+    assert_ne!(relay.from, "a-new");
+    assert!(relay.unmatched);
+    assert!(built.sessions[&relay.from].stub);
+    assert_eq!(built.sessions[&relay.from].name, "a-3c");
+}
+
+#[test]
+fn an_unchanged_second_build_parses_no_lines() {
+    let home = relay_home();
+    let first = home.build();
+    let before = events::PARSED.with(std::cell::Cell::get);
+    let second = home.build();
+    assert_eq!(events::PARSED.with(std::cell::Cell::get), before);
+    assert_eq!(first.version, second.version);
+    let path = home.root.join("claude/projects/-work-proj/beta.jsonl");
+    let mut content = fs::read_to_string(&path).unwrap();
+    content.push_str(&human("beta", ts(6, 30), "one more").to_string());
+    content.push('\n');
+    fs::write(&path, content).unwrap();
+    home.build();
+    assert_eq!(events::PARSED.with(std::cell::Cell::get), before + 1);
+}
+
+#[test]
+fn a_resumed_cache_builds_the_same_model_as_a_cold_one() {
+    let home = relay_home();
+    home.build();
+    let path = home.root.join("claude/projects/-work-proj/alpha.jsonl");
+    let append = |records: &[Value], malformed: bool| {
+        let mut content = fs::read_to_string(&path).unwrap();
+        if malformed {
+            content.push_str("{not json\n");
+        }
+        for record in records {
+            content.push_str(&record.to_string());
+            content.push('\n');
+        }
+        fs::write(&path, content).unwrap();
+    };
+    append(
+        &[assistant(
+            "alpha",
+            ts(7, 0),
+            vec![
+                text("checking"),
+                tool("late", "Bash", json!({"command":"ls"})),
+            ],
+        )],
+        true,
+    );
+    home.build();
+    append(
+        &[
+            result("alpha", ts(7, 1), "late", "ok", false, json!({})),
+            human("alpha", ts(7, 2), "thanks"),
+        ],
+        false,
+    );
+    let warm = home.build().json(NOW);
+    let mut cold = home.options.clone();
+    cold.cache = home.root.join("cold/index.json");
+    assert_eq!(warm, home.build_at(&cold, NOW).json(NOW));
+}
+
+#[test]
+fn non_ascii_tag_attributes_parse_without_panicking() {
+    let home = Home::new();
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(20, 0), "go"),
+            assistant("lead", ts(20, 1), vec![tool("tz", "Agent", json!({"prompt":"brief"}))]),
+            result("lead", ts(20, 1), "tz", "launched", false, json!({"status":"async_launched"})),
+            user(
+                "lead",
+                ts(20, 5),
+                "<agent-message 名前=\"x\" from=\"az\">über fertig</agent-message>",
+            ),
+            user(
+                "lead",
+                ts(20, 6),
+                "<cross-session-message from=\"uds:ü\" from-name=\"名前-ü\">héllo</cross-session-message>",
+            ),
+        ],
+    );
+    home.agent("lead", "az", "tz", &[user("lead", ts(20, 1), "brief")]);
+    let built = home.build();
+    assert_eq!(
+        only(&built, "spawn", "lead", "az").result.as_deref(),
+        Some("über fertig")
+    );
+    let relay = by_brief(&built, "héllo");
+    assert_eq!(built.sessions[&relay.from].name, "名前-ü");
+}
+
+#[test]
+fn a_running_tool_ages_when_served_and_expires_after_thirty_minutes() {
+    let home = Home::new();
+    home.top(
+        "busy",
+        &[
+            human("busy", ts(21, 0), "run it"),
+            assistant(
+                "busy",
+                ts(21, 1),
+                vec![tool(
+                    "run",
+                    "Bash",
+                    json!({"command":"cargo test -p semon"}),
+                )],
+            ),
+        ],
+    );
+    home.live(50, "busy", "busy", json!({}));
+    let built = home.build_at(&home.options, at(21, 2));
+    let activity = |now: i64| {
+        serde_json::from_str::<Value>(&built.json(now)).unwrap()["sessions"]["busy"]["activity"]
+            .clone()
+    };
+    // `[name, argument, age in seconds when served, start in epoch ms]`.
+    assert_eq!(
+        activity(at(21, 2)),
+        json!(["Bash", "cargo test -p semon", 60, at(21, 1)])
+    );
+    assert_eq!(
+        activity(at(21, 11)),
+        json!(["Bash", "cargo test -p semon", 600, at(21, 1)])
+    );
+    assert_eq!(activity(at(21, 31)), Value::Null);
+    // The running step keeps its turn working, whatever the time.
+    assert_eq!(turns_of(&built, "busy")[0].end.why, "working");
+}
+
+#[cfg(unix)]
+fn hold_lock(home: &Home, id: &str) {
+    use std::os::unix::fs::MetadataExt;
+    let path = home.write(&format!("codex/thread-writer-locks/{id}.lock"), "");
+    let meta = fs::metadata(path).unwrap();
+    let dev = meta.dev();
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
+    let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
+    home.write(
+        "proc/locks",
+        &format!(
+            "12: FLOCK ADVISORY WRITE 4242 {major:x}:{minor:x}:{} 0 EOF\n",
+            meta.ino()
+        ),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn same_name_codex_spawns_stay_unplaced_and_questions_wait_only_while_unanswered() {
+    let home = Home::new();
+    let call = |minute: i64, id: &str| {
+        codex_line(
+            ts(22, minute),
+            "response_item",
+            json!({"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":id,"arguments":"{\"task_name\":\"worker\",\"message\":\"go\"}"}),
+        )
+    };
+    let ask = |minute: i64, id: &str, title: &str| {
+        codex_line(
+            ts(22, minute),
+            "response_item",
+            json!({"type":"function_call","name":"request_user_input_async","call_id":id,
+                "arguments":format!("{{\"questions\":[{{\"title\":\"{title}\"}}]}}")}),
+        )
+    };
+    let reply = |minute: i64, id: &str, output: &str| {
+        codex_line(
+            ts(22, minute),
+            "response_item",
+            json!({"type":"function_call_output","call_id":id,"output":output}),
+        )
+    };
+    home.codex(
+        "root",
+        json!({}),
+        &[
+            codex_user(ts(22, 0), "Coordinate"),
+            call(1, "c1"),
+            call(5, "c2"),
+            ask(6, "followed", "Followed by a message?"),
+            reply(6, "followed", "{\"accepted\":true}"),
+            codex_user(ts(22, 7), "Use the first"),
+            ask(8, "answered", "Answered in the output?"),
+            reply(8, "answered", "{\"accepted\":true,\"answer\":\"yes\"}"),
+            ask(9, "open", "Still open?"),
+            reply(9, "open", "{\"accepted\":true}"),
+        ],
+    );
+    for id in ["first", "second"] {
+        home.codex(
+            id,
+            json!({"parent_thread_id":"root","thread_source":"subagent","agent_nickname":"worker","agent_path":"root/worker"}),
+            &[codex_user(ts(22, 3), "go")],
+        );
+    }
+    hold_lock(&home, "root");
+    let built = home.build();
+    for child in ["first", "second"] {
+        let spawn = only(&built, "spawn", "root", child);
+        // Two calls and two runs share the task name: no pairing is exact.
+        assert!(spawn.ambiguous, "{child}");
+        assert_eq!(spawn.at, built.sessions[child].start);
+    }
+    let sent: Vec<&String> = built
+        .turns
+        .iter()
+        .filter(|turn| turn.sid == "root")
+        .flat_map(|turn| &turn.sent)
+        .collect();
+    assert!(sent.iter().all(|id| !id.starts_with('s')));
+    assert_eq!(by_brief(&built, "Followed by a message?").status, "done");
+    assert_eq!(by_brief(&built, "Answered in the output?").status, "done");
+    assert_eq!(by_brief(&built, "Still open?").status, "wait");
+}
+
+#[test]
+fn a_unique_codex_spawn_call_is_placed() {
+    let home = Home::new();
+    home.codex(
+        "root",
+        json!({}),
+        &[
+            codex_user(ts(23, 0), "Coordinate"),
+            codex_line(ts(23, 1), "response_item", json!({"type":"function_call","name":"spawn_agent","call_id":"only","arguments":"{\"task_name\":\"solo\"}"})),
+        ],
+    );
+    home.codex(
+        "solo",
+        json!({"parent_thread_id":"root","thread_source":"subagent","agent_nickname":"solo","agent_path":"root/solo"}),
+        &[codex_user(ts(23, 2), "go")],
+    );
+    let built = home.build();
+    let spawn = only(&built, "spawn", "root", "solo");
+    assert!(!spawn.ambiguous);
+    assert_eq!(spawn.at, at(23, 1));
+    assert_eq!(
+        turns_of(&built, "root")[0].sent,
+        std::slice::from_ref(&spawn.id)
+    );
+}
+
+#[test]
+fn only_the_last_turn_can_hold_a_running_tool() {
+    let home = Home::new();
+    home.top(
+        "stuck",
+        &[
+            human("stuck", ts(23, 0), "first"),
+            assistant(
+                "stuck",
+                ts(23, 1),
+                vec![tool("never", "Bash", json!({"command":"hang"}))],
+            ),
+            human("stuck", ts(23, 2), "second"),
+            assistant("stuck", ts(23, 3), vec![text("on it")]),
+        ],
+    );
+    home.live(60, "stuck", "busy", json!({}));
+    home.top(
+        "running",
+        &[
+            human("running", ts(23, 0), "first"),
+            assistant(
+                "running",
+                ts(23, 1),
+                vec![tool("old", "Read", json!({"file_path":"/old"}))],
+            ),
+            human("running", ts(23, 2), "second"),
+            assistant(
+                "running",
+                ts(23, 3),
+                vec![tool("now", "Bash", json!({"command":"make"}))],
+            ),
+        ],
+    );
+    home.live(61, "running", "busy", json!({}));
+    let built = home.build_at(&home.options, at(23, 4));
+    let ends = |sid: &str| -> Vec<&str> {
+        turns_of(&built, sid)
+            .iter()
+            .map(|turn| turn.end.why)
+            .collect()
+    };
+    assert_eq!(ends("stuck"), ["unfinished_step", "working"]);
+    assert_eq!(ends("running"), ["unfinished_step", "working"]);
+    let model: Value = serde_json::from_str(&built.json(at(23, 4))).unwrap();
+    assert_eq!(model["sessions"]["stuck"]["activity"], Value::Null);
+    assert_eq!(
+        model["sessions"]["running"]["activity"],
+        json!(["Bash", "make", 60, at(23, 3)])
+    );
+}

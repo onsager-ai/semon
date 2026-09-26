@@ -36,6 +36,7 @@ enum Command {
 struct SessionsArgs {
     options: semon_sessions::Options,
     json: bool,
+    model_json: bool,
     watch: bool,
     serve: bool,
     listen: String,
@@ -101,6 +102,7 @@ fn parse_sessions_args(
 ) -> Result<SessionsArgs, String> {
     let mut options = semon_sessions::Options::default();
     let mut json = false;
+    let mut model_json = false;
     let mut watch = false;
     let mut serve = false;
     let mut listen = "127.0.0.1:0".to_owned();
@@ -120,6 +122,7 @@ fn parse_sessions_args(
             "--since" => options.since = semon_sessions::parse_duration(&value()?)?,
             "--session" => options.session = Some(value()?),
             "--json" => json = true,
+            "--model-json" => model_json = true,
             "--watch" => watch = true,
             "--serve" => serve = true,
             "--listen" => {
@@ -133,12 +136,21 @@ fn parse_sessions_args(
     if serve && (json || watch) {
         return Err("--serve cannot be combined with --json or --watch".into());
     }
+    if model_json && (serve || json || watch) {
+        return Err("--model-json cannot be combined with --serve, --json or --watch".into());
+    }
+    if model_json && options.session.is_some() {
+        return Err(
+            "--model-json returns every session; --session is not supported with it".into(),
+        );
+    }
     if !serve && listen_given {
         return Err("--listen requires --serve".into());
     }
     Ok(SessionsArgs {
         options,
         json,
+        model_json,
         watch,
         serve,
         listen,
@@ -319,6 +331,11 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
             listen: args.listen,
         })
         .map_err(|error| error.to_string());
+    }
+    if args.model_json {
+        let json = semon_sessions::model_json(&args.options).map_err(|error| error.to_string())?;
+        println!("{json}");
+        return Ok(());
     }
     loop {
         let nodes = semon_sessions::collect(&args.options).map_err(|error| error.to_string())?;
@@ -602,8 +619,9 @@ fn default_store_path() -> PathBuf {
 
 fn usage() -> String {
     format!(
-        "Usage: semon sessions [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--json] [--watch] [--serve [--listen 127.0.0.1:PORT]]\n\
-         Shows a read-only tree of local Claude Code and Codex sessions.\n\
+        "Usage: semon sessions [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]]\n\
+         Shows a read-only tree of local Claude Code and Codex sessions. --model-json writes the viewer's\n\
+         session model (sessions, handoffs, turns, busy) instead; it reads every log, --all/--since trim the output.\n\
          \n\
          Usage: semon ship [--store PATH] [--endpoint URL]\n\
          Endpoint defaults to ${REPLICATION_ENDPOINT_ENV}; when unset, ship succeeds without reading the store.\n\
@@ -637,6 +655,21 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn model_json_refuses_flags_it_cannot_honour() {
+        let parse = |arguments: &[&str]| {
+            parse_sessions_args(arguments.iter().map(|argument| (*argument).to_owned()))
+        };
+        assert!(parse(&["--model-json", "--all"]).is_ok_and(|args| args.model_json));
+        for refused in [
+            &["--model-json", "--session", "abc"][..],
+            &["--model-json", "--json"][..],
+            &["--model-json", "--serve"][..],
+        ] {
+            assert!(parse(refused).is_err(), "{refused:?}");
+        }
+    }
 
     #[test]
     fn unconfigured_ship_succeeds_without_opening_the_store() {
