@@ -1,0 +1,149 @@
+// Ported from the mockup's viewer.js. The original had two independent halves: a phone-dark half that drove
+// test-real.html (real logs) — a census of every step's cut/uncut preview against whether "View all" shows, then
+// opened the longest cut call's "View all" sheet and checked its geometry, its full text, and that back/close/Escape
+// each restore the page exactly — and a desktop-light half that already drove test7.html (the sample mockup) to
+// check the same dialog on a wide screen and that a backdrop click closes it.
+//
+// Ported: the phone half now drives the served sample fixture instead of test-real.html (the same measurements, on
+// the fixture's data); the desktop half already used the sample, so it only changes how the page is reached. Session
+// ids are unchanged from the sample. Neither half named a sample handoff or turn id, so there is no id mapping here.
+// The original opened whichever lane is first in the sidebar's DOM order ('.srow >> nth=0') to find its longest cut
+// call; that lane has no cut preview at all in this fixture (per gaps.json, previews are short except harbor's first
+// Bash output), so the phone half instead opens whichever lane the per-lane census above actually found a cut
+// preview on (discovered at runtime from the census, never hardcoded to "harbor"). The desktop half still opens
+// 'harbor' by session id, which is stable and does have a cut preview on its first step.
+//
+// Tool entries carry `src` and may carry `more` in the served viewer: "View all" shows whenever the server cut a
+// preview, even where the preview isn't visually clipped, and the sheet fetches the full text from /api/entry before
+// it opens (see gaps.json: previews are short in this fixture except harbor's first Bash output).
+//
+// Assertions:
+//  - no page errors, phone or desktop.
+//  - the phone census: mismatch === 0 (every cut preview shows "View all" and vice versa, for every step on every lane).
+//  - the "View all" sheet: it opens (open === true), sits inside the viewport (sideways === 0), and its fetched full
+//    text for every <pre> is at least as long as what the (possibly cut) preview showed — i.e. "View all" actually
+//    fetched more, never less.
+//  - back, the close button and Escape each close the sheet, restore the same history state, and leave the page's
+//    expanded steps as they were (afterBack/afterClose/afterEsc: dialog === false, sameState === true, stepsStillOpen
+//    unchanged, and back also drops the viewer-open html class).
+//  - the desktop dialog: at least one "View all" is visible on the sample's first expanded step, the dialog is not
+//    sideways-clipped off the 1280px viewport, and a backdrop click closes it (closedByBackdrop === true).
+import path from "node:path";
+import { ENV, served, data, reporter } from "../lib.mjs";
+
+const afterTitle = (page, text) => page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, text);
+
+export default async function viewerCheck(browser) {
+  const D = await data();
+  const r = reporter("viewer");
+  const R = {};
+
+  // ---- Phone, dark: census, then the "View all" sheet on the first lane. ----
+  {
+    const page = await served(browser, { size: "phone", dark: true });
+    const top = async () => { await page.evaluate(() => window.scrollTo(0, 0)); await page.mouse.wheel(0, -50); await page.waitForTimeout(350); };
+
+    await page.click("#lead-btn"); await page.waitForTimeout(280);
+    const lanes = await page.evaluate(() => [...document.querySelectorAll(".srow")].map((row) => row.dataset.id));
+    await page.click("#drawer-close"); await page.waitForTimeout(250);
+    const C = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0 }; const cutLanes = [];
+    for (const id of lanes) {
+      await top(); await page.click("#lead-btn"); await page.waitForTimeout(280);
+      await page.click('.srow[data-id="' + id + '"]'); await afterTitle(page, D.SESS[id].name); await page.waitForTimeout(150);
+      const rr = await page.evaluate(() => { const r = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0 };
+        for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"]').forEach((x) => x.click());
+        document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => { x.click(); r.steps++; const o = x.parentElement.querySelector('.out');
+          const cut = [...o.querySelectorAll('.clip')].some((c) => c.scrollHeight > c.clientHeight + 1); const shown = !o.querySelector('.viewall').hidden;
+          if (cut) r.cut++; if (shown) r.viewAllShown++; if (cut !== shown) r.mismatch++; }); return r; });
+      for (const k in C) C[k] += rr[k];
+      if (rr.cut) cutLanes.push(id);
+    }
+    R.census = C;
+    R.cutLanes = cutLanes;
+
+    // Open the "View all" sheet on whichever lane the census above actually found a cut preview on (per gaps.json,
+    // previews are short in this fixture except harbor's first Bash output — but the lane is found from the census,
+    // not hardcoded, so this still works if the fixture changes which step is long).
+    const targetId = cutLanes[0];
+    r.expect(!!targetId, "no lane had a cut preview to open 'View all' on (census.cut=" + C.cut + ")");
+    if (targetId) {
+    await top(); await page.click("#lead-btn"); await page.waitForTimeout(280); await page.click('.srow[data-id="' + targetId + '"]');
+    await afterTitle(page, D.SESS[targetId].name); await page.waitForTimeout(200);
+    await page.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => x.click()); });
+    const hashBefore = await page.evaluate(() => JSON.stringify(history.state));
+    const btn = page.locator(".viewall:visible").first();
+    const btnCount = await btn.count();
+    r.expect(btnCount > 0, "no 'View all' button visible on " + targetId + " despite a cut preview in the census");
+    if (btnCount > 0) {
+      await btn.scrollIntoViewIfNeeded(); await page.evaluate(() => window.scrollBy(0, -250)); await page.waitForTimeout(300);
+      await page.screenshot({ path: path.join(ENV.out, "v-preview.png") });
+      const expected = await btn.evaluate((x) => [...x.parentElement.querySelectorAll("pre")].map((q) => q.textContent.length));
+      await btn.click(); await page.waitForTimeout(350);
+      R.sheet = await page.evaluate(() => { const d = document.querySelector("dialog.viewer"); const r = d.getBoundingClientRect(); const vw = document.documentElement.clientWidth;
+        let out = 0; d.querySelectorAll("*").forEach((e) => { const b = e.getBoundingClientRect(); if (b.width && (b.right > vw + 0.5 || b.left < -0.5)) out++; });
+        return { open: d.open, x: r.x, y: r.y, w: r.width, h: r.height, vw, vh: innerHeight, pres: [...d.querySelectorAll("pre")].map((q) => q.textContent.length), sideways: out, bodyScrolls: d.querySelector(".vb").scrollHeight > d.querySelector(".vb").clientHeight, state: history.state?.sheet ?? 0, focus: document.activeElement?.className }; });
+      R.sheet.previewPres = expected;
+      await page.screenshot({ path: path.join(ENV.out, "v-sheet.png") });
+      await page.evaluate(() => { const b = document.querySelector(".viewer .vb"); b.scrollTop = b.scrollHeight; }); await page.waitForTimeout(200); await page.screenshot({ path: path.join(ENV.out, "v-sheet-end.png") });
+      // Back closes it and keeps the page as it was (still expanded, same route).
+      await page.goBack(); await page.waitForTimeout(350);
+      R.afterBack = await page.evaluate((h) => ({ dialog: !!document.querySelector("dialog.viewer"), sameState: JSON.stringify(history.state) === h, stepsStillOpen: document.querySelectorAll('.step > button[aria-expanded="true"]').length, htmlLock: document.documentElement.classList.contains("viewer-open") }), hashBefore);
+      // The close button, then Escape, each restore the same history entry.
+      await page.locator(".viewall:visible").first().click(); await page.waitForTimeout(250); await page.click(".viewer .vclose"); await page.waitForTimeout(350);
+      R.afterClose = await page.evaluate((h) => ({ dialog: !!document.querySelector("dialog.viewer"), sameState: JSON.stringify(history.state) === h, stepsStillOpen: document.querySelectorAll('.step > button[aria-expanded="true"]').length }), hashBefore);
+      await page.locator(".viewall:visible").first().click(); await page.waitForTimeout(250); await page.keyboard.press("Escape"); await page.waitForTimeout(350);
+      R.afterEsc = await page.evaluate((h) => ({ dialog: !!document.querySelector("dialog.viewer"), sameState: JSON.stringify(history.state) === h, stepsStillOpen: document.querySelectorAll('.step > button[aria-expanded="true"]').length }), hashBefore);
+    }
+    }
+    R.phoneErrors = page.errors;
+    await page.context().close();
+  }
+
+  // ---- Desktop, light: the dialog on the sample's harbor lane. ----
+  {
+    const page = await served(browser, { size: "desktop", dark: false });
+    await page.click('.srow[data-id="harbor"]'); await afterTitle(page, D.SESS.harbor.name); await page.waitForTimeout(200);
+    await page.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); });
+    await page.locator(".step > button").first().click(); await page.waitForTimeout(200);
+    R.sample = { viewAll: await page.locator(".viewall:visible").count() };
+    r.expect(R.sample.viewAll > 0, "no View all button on the sample harbor lane's first expanded step");
+    if (R.sample.viewAll) {
+      await page.locator(".viewall:visible").first().click(); await page.waitForTimeout(300);
+      R.desk = await page.evaluate(() => { const r = document.querySelector("dialog.viewer").getBoundingClientRect(); return { x: Math.round(r.x), w: Math.round(r.width), h: Math.round(r.height), vh: innerHeight, vw: document.documentElement.clientWidth }; });
+      await page.screenshot({ path: path.join(ENV.out, "v-desk.png") });
+      await page.mouse.click(40, 40); await page.waitForTimeout(250);
+      R.desk.closedByBackdrop = !(await page.$("dialog.viewer"));
+    }
+    R.deskErrors = page.errors;
+    await page.context().close();
+  }
+
+  r.results = R;
+  r.expect((R.phoneErrors ?? []).length === 0, "phone page errors: " + (R.phoneErrors ?? []).join(" | "));
+  r.expect((R.deskErrors ?? []).length === 0, "desktop page errors: " + (R.deskErrors ?? []).join(" | "));
+  r.expect(R.census?.mismatch === 0, "census mismatch=" + R.census?.mismatch);
+  r.expect(!!R.sheet, "the 'View all' sheet was never opened, so nothing below could be checked");
+  if (R.sheet) {
+    r.expect(R.sheet.open === true, "sheet did not open");
+    r.expect(R.sheet.sideways === 0, "sheet sideways=" + R.sheet.sideways);
+    r.expect(R.sheet.pres.every((len, i) => len >= (R.sheet.previewPres[i] ?? 0)), "View all fetched less than the preview showed");
+    // Here the preview is cut on screen only (the sample's output is under the server's 1536-byte preview), so the sheet
+    // holds the same text, unclipped. That View all fetches a preview the server cut is asserted in extras.mjs.
+  }
+  r.expect(!!R.afterBack, "back was never tried on the sheet");
+  if (R.afterBack) {
+    r.expect(R.afterBack.dialog === false && R.afterBack.sameState && R.afterBack.htmlLock === false, "back did not restore the page: " + JSON.stringify(R.afterBack));
+    r.expect(R.afterBack.stepsStillOpen > 0, "steps did not stay open after back");
+  }
+  r.expect(!!R.afterClose, "the close button was never tried on the sheet");
+  if (R.afterClose) r.expect(R.afterClose.dialog === false && R.afterClose.sameState, "close button did not restore the page: " + JSON.stringify(R.afterClose));
+  r.expect(!!R.afterEsc, "Escape was never tried on the sheet");
+  if (R.afterEsc) r.expect(R.afterEsc.dialog === false && R.afterEsc.sameState, "Escape did not restore the page: " + JSON.stringify(R.afterEsc));
+  r.expect(!!R.desk, "the desktop dialog was never opened, so nothing below could be checked");
+  if (R.desk) {
+    r.expect(R.desk.x >= 0 && R.desk.x + R.desk.w <= R.desk.vw + 0.5, "desktop dialog sideways: " + JSON.stringify(R.desk));
+    r.expect(R.desk.closedByBackdrop === true, "backdrop click did not close the desktop dialog");
+  }
+
+  return r.done();
+}

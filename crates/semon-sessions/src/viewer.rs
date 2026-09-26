@@ -19,7 +19,7 @@ use crate::{
     events::EventCache,
     field, file_list, is_agent_output,
     model::{self, Built, Texts},
-    proc_start, read_index, save_index, user_text,
+    proc_start, read_index, save_index, tx, user_text,
 };
 
 const PAGE_ENTRIES: usize = 200;
@@ -118,7 +118,39 @@ struct ModelCache {
 }
 
 /// A routed response: status, content type, body and an optional `ETag`.
-type Routed = (u16, &'static str, String, Option<String>);
+type Routed = (u16, &'static str, Vec<u8>, Option<String>);
+
+/// The viewer's page: every screen's URL serves it.
+const PAGE: &str = include_str!("viewer.html");
+
+/// The mockup's three families, vendored (D1): Instrument Sans, JetBrains
+/// Mono and Source Serif 4, each in its latin and latin-ext subsets.
+const FONTS: [(&str, &[u8]); 6] = [
+    (
+        "instrument-sans-latin",
+        include_bytes!("fonts/instrument-sans/latin.woff2"),
+    ),
+    (
+        "instrument-sans-latin-ext",
+        include_bytes!("fonts/instrument-sans/latin-ext.woff2"),
+    ),
+    (
+        "jetbrains-mono-latin",
+        include_bytes!("fonts/jetbrains-mono/latin.woff2"),
+    ),
+    (
+        "jetbrains-mono-latin-ext",
+        include_bytes!("fonts/jetbrains-mono/latin-ext.woff2"),
+    ),
+    (
+        "source-serif-4-latin",
+        include_bytes!("fonts/source-serif-4/latin.woff2"),
+    ),
+    (
+        "source-serif-4-latin-ext",
+        include_bytes!("fonts/source-serif-4/latin-ext.woff2"),
+    ),
+];
 
 fn watch_tree(path: &Path, suffixes: &[&str], watched: &mut BTreeMap<PathBuf, Option<Stamp>>) {
     watched.insert(path.to_owned(), stamp(path));
@@ -261,11 +293,11 @@ fn respond(
     request: Request,
     status: u16,
     content_type: &str,
-    body: String,
+    body: Vec<u8>,
     cookie: Option<&str>,
     etag: Option<&str>,
 ) {
-    let mut response = Response::from_string(body).with_status_code(StatusCode(status));
+    let mut response = Response::from_data(body).with_status_code(StatusCode(status));
     if let Some(etag) = etag {
         response.add_header(header("ETag", etag));
     }
@@ -477,7 +509,7 @@ impl Viewer {
                 request,
                 403,
                 "text/plain; charset=utf-8",
-                "Forbidden".into(),
+                b"Forbidden".to_vec(),
                 None,
                 None,
             );
@@ -492,13 +524,16 @@ impl Viewer {
         };
         let (status, content_type, body, etag) = match answer {
             Ok(answer) => answer,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                (404, "text/plain; charset=utf-8", "Not found".into(), None)
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (
+                404,
+                "text/plain; charset=utf-8",
+                b"Not found".to_vec(),
+                None,
+            ),
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => (
                 400,
                 "text/plain; charset=utf-8",
-                "Invalid request".into(),
+                b"Invalid request".to_vec(),
                 None,
             ),
             Err(error) => {
@@ -506,7 +541,7 @@ impl Viewer {
                 (
                     500,
                     "text/plain; charset=utf-8",
-                    "Internal error".into(),
+                    b"Internal error".to_vec(),
                     None,
                 )
             }
@@ -572,16 +607,84 @@ impl Viewer {
         let since = query_value(query, "since").and_then(decoded);
         if if_none_match == Some(etag.as_str()) || since.as_deref() == Some(built.version.as_str())
         {
-            return Ok((304, json, String::new(), Some(etag)));
+            return Ok((304, json, Vec::new(), Some(etag)));
         }
-        Ok((200, json, built.json(model::now_ms()), Some(etag)))
+        Ok((
+            200,
+            json,
+            built.json(model::now_ms()).into_bytes(),
+            Some(etag),
+        ))
     }
 
-    fn route(&mut self, path: &str, query: &str) -> io::Result<(u16, &'static str, String)> {
+    /// `/api/tx?sid=&before=|after=|turn=`: a page of one session's
+    /// transcript.
+    fn tx(&mut self, query: &str) -> io::Result<String> {
+        let sid = query_value(query, "sid")
+            .and_then(decoded)
+            .ok_or_else(|| invalid_input("sid"))?;
+        let index = |key: &str| {
+            query_value(query, key)
+                .map(|value| value.parse::<usize>().map_err(|_| invalid_input(key)))
+                .transpose()
+        };
+        let turn = query_value(query, "turn").and_then(decoded);
+        let anchor = match (index("before")?, index("after")?, turn) {
+            (None, None, None) => tx::Anchor::Last,
+            (Some(before), None, None) => tx::Anchor::Before(before),
+            (None, Some(after), None) => tx::Anchor::After(after),
+            (None, None, Some(turn)) => tx::Anchor::Turn(turn),
+            _ => return Err(invalid_input("before, after and turn are exclusive")),
+        };
+        self.refresh_model()?;
+        let built = &self.model.as_ref().expect("model loaded").built;
+        tx::page(built, &sid, &anchor, model::now_ms())
+    }
+
+    /// Whether a page URL names something in the model: `/machines/<id>`,
+    /// `/s/<harness>/<id>` and `/trace/<harness>/<id>/<turn>`.
+    fn page_exists(&mut self, path: &str) -> io::Result<bool> {
+        let parts: Option<Vec<String>> = path
+            .trim_start_matches('/')
+            .split('/')
+            .map(decoded)
+            .collect();
+        let parts = parts.ok_or_else(|| invalid_input("path"))?;
+        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+        self.refresh_model()?;
+        let built = &self.model.as_ref().expect("model loaded").built;
+        let session = |harness: &str, id: &str| {
+            built
+                .sessions
+                .get(id)
+                .is_some_and(|session| session.harness == harness)
+        };
+        Ok(match parts.as_slice() {
+            ["machines", id] => *id == built.machine_id,
+            ["s", harness, id] => {
+                session(harness, id)
+                    || (*harness == "claude"
+                        && id.starts_with("unsent:")
+                        && built.tx.contains_key(*id))
+            }
+            ["trace", harness, id, turn] => {
+                session(harness, id)
+                    && built.tx.get(*id).is_some_and(|transcript| {
+                        transcript
+                            .slots
+                            .iter()
+                            .any(|slot| slot.turn.as_deref() == Some(*turn))
+                    })
+            }
+            _ => false,
+        })
+    }
+
+    fn route(&mut self, path: &str, query: &str) -> io::Result<(u16, &'static str, Vec<u8>)> {
         let html = "text/html; charset=utf-8";
         let json = "application/json; charset=utf-8";
         match path {
-            "/" => Ok((200, html, include_str!("viewer.html").into())),
+            "/" | "/timeline" | "/sessions" | "/machines" => Ok((200, html, PAGE.into())),
             "/viewer.js" => Ok((
                 200,
                 "text/javascript; charset=utf-8",
@@ -592,23 +695,29 @@ impl Viewer {
                 "text/css; charset=utf-8",
                 include_str!("viewer.css").into(),
             )),
-            "/api/tree" => Ok((200, json, self.tree_json()?)),
-            "/api/transcript" => Ok((200, json, serde_json::to_string(&self.transcript(query)?)?)),
-            "/api/entry" => Ok((200, json, self.expand(query)?)),
-            _ if path.starts_with("/s/") => {
-                let mut parts = path[3..].split('/');
-                let harness = parts
-                    .next()
-                    .and_then(decoded)
-                    .ok_or_else(|| invalid_input("harness"))?;
-                let id = parts
-                    .next()
-                    .and_then(decoded)
-                    .ok_or_else(|| invalid_input("id"))?;
-                if parts.next().is_some() || self.transcript_path(&harness, &id)?.is_none() {
-                    return Err(io::ErrorKind::NotFound.into());
+            "/api/tree" => Ok((200, json, self.tree_json()?.into_bytes())),
+            "/api/transcript" => Ok((200, json, serde_json::to_vec(&self.transcript(query)?)?)),
+            "/api/tx" => Ok((200, json, self.tx(query)?.into_bytes())),
+            "/api/entry" => Ok((200, json, self.expand(query)?.into_bytes())),
+            _ if path.starts_with("/fonts/") => {
+                let name = path["/fonts/".len()..]
+                    .strip_suffix(".woff2")
+                    .ok_or(io::ErrorKind::NotFound)?;
+                FONTS
+                    .iter()
+                    .find(|(font, _)| *font == name)
+                    .map(|(_, bytes)| (200, "font/woff2", bytes.to_vec()))
+                    .ok_or_else(|| io::ErrorKind::NotFound.into())
+            }
+            _ if path.starts_with("/machines/")
+                || path.starts_with("/s/")
+                || path.starts_with("/trace/") =>
+            {
+                if self.page_exists(path)? {
+                    Ok((200, html, PAGE.into()))
+                } else {
+                    Err(io::ErrorKind::NotFound.into())
                 }
-                Ok((200, html, include_str!("viewer.html").into()))
             }
             _ => Err(io::ErrorKind::NotFound.into()),
         }
@@ -712,7 +821,20 @@ impl Viewer {
         Ok(page)
     }
 
+    /// `/api/entry`: one entry in full. With `sid`, `slot` and
+    /// `as=in|out|diff`, one part of a transcript's tool call for "View all".
     fn expand(&mut self, query: &str) -> io::Result<String> {
+        if let Some(part) = query_value(query, "as") {
+            let sid = query_value(query, "sid")
+                .and_then(decoded)
+                .ok_or_else(|| invalid_input("sid"))?;
+            let slot = query_value(query, "slot")
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or_else(|| invalid_input("slot"))?;
+            self.refresh_model()?;
+            let built = &self.model.as_ref().expect("model loaded").built;
+            return tx::full_slot(built, &sid, slot, part);
+        }
         let harness = query_value(query, "harness")
             .and_then(decoded)
             .ok_or_else(|| invalid_input("harness"))?;
@@ -1521,10 +1643,10 @@ mod tests {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.write_all(request.as_bytes()).unwrap();
         stream.shutdown(std::net::Shutdown::Write).unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
         worker.join().unwrap();
-        response
+        String::from_utf8_lossy(&response).into_owned()
     }
 
     #[test]
@@ -1614,6 +1736,199 @@ mod tests {
             "GET /api/model HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n",
         );
         assert!(refused.starts_with("HTTP/1.1 403"));
+    }
+
+    const HEADERS: [&str; 4] = [
+        "Cache-Control: no-store",
+        "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'",
+        "X-Frame-Options: DENY",
+        "Referrer-Policy: no-referrer",
+    ];
+
+    fn get(fixture: &Fixture, path: &str) -> String {
+        let token = "0123456789abcdef0123456789abcdef";
+        let separator = if path.contains('?') { '&' } else { '?' };
+        http(
+            fixture,
+            &format!("GET {path}{separator}t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n"),
+        )
+    }
+
+    /// A lane with a turn, for the page and transcript routes.
+    fn lane_fixture() -> Fixture {
+        let fixture = Fixture::new();
+        fixture.write("proc/sys/kernel/hostname", "testbox\n");
+        fixture.claude(
+            "lane",
+            &[
+                json!({"type":"user","timestamp":"2026-09-24T00:00:00Z","sessionId":"lane","origin":{"kind":"human"},
+                    "message":{"role":"user","content":"<script>alert(1)</script>"}}),
+                json!({"type":"assistant","timestamp":"2026-09-24T00:01:00Z","sessionId":"lane",
+                    "message":{"role":"assistant","content":[{"type":"text","text":"<img src=x onerror=alert(2)>"}]}}),
+            ],
+        );
+        fixture
+    }
+
+    #[test]
+    fn every_screen_url_serves_the_page_and_unknown_ones_404() {
+        let fixture = lane_fixture();
+        let mut viewer = fixture.viewer();
+        let model: Value = serde_json::from_str(
+            &viewer
+                .model("", None)
+                .map(|routed| String::from_utf8(routed.2).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let turn = model["turns"][0]["id"].as_str().unwrap().to_owned();
+        for path in [
+            "/".to_owned(),
+            "/timeline".into(),
+            "/sessions".into(),
+            "/machines".into(),
+            "/machines/testbox".into(),
+            "/s/claude/lane".into(),
+            format!("/s/claude/lane?turn={turn}"),
+            format!("/trace/claude/lane/{turn}"),
+        ] {
+            let wire = get(&fixture, &path);
+            assert!(wire.starts_with("HTTP/1.1 200"), "{path}");
+            assert!(
+                wire.contains("Content-Type: text/html; charset=utf-8"),
+                "{path}"
+            );
+            assert!(wire.ends_with(PAGE), "{path}");
+            for header in HEADERS {
+                assert!(wire.contains(header), "{path}: missing {header}");
+            }
+        }
+        for path in [
+            "/machines/elsewhere",
+            "/s/claude/nobody",
+            "/s/codex/lane",
+            "/s/claude/lane/more",
+            "/trace/claude/lane/no-such-turn",
+            "/trace/claude/nobody/x",
+            "/fonts/nope.woff2",
+            "/elsewhere",
+        ] {
+            let wire = get(&fixture, path);
+            assert!(wire.starts_with("HTTP/1.1 404"), "{path}");
+            for header in HEADERS {
+                assert!(wire.contains(header), "{path}: missing {header}");
+            }
+        }
+        // The token guards pages as it guards the API.
+        assert!(
+            http(
+                &fixture,
+                "GET /timeline HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n"
+            )
+            .starts_with("HTTP/1.1 403")
+        );
+    }
+
+    #[test]
+    fn assets_and_fonts_carry_the_headers() {
+        let fixture = lane_fixture();
+        for (path, content_type) in [
+            ("/viewer.js", "text/javascript; charset=utf-8"),
+            ("/viewer.css", "text/css; charset=utf-8"),
+            ("/fonts/instrument-sans-latin.woff2", "font/woff2"),
+            ("/fonts/instrument-sans-latin-ext.woff2", "font/woff2"),
+            ("/fonts/jetbrains-mono-latin.woff2", "font/woff2"),
+            ("/fonts/jetbrains-mono-latin-ext.woff2", "font/woff2"),
+            ("/fonts/source-serif-4-latin.woff2", "font/woff2"),
+            ("/fonts/source-serif-4-latin-ext.woff2", "font/woff2"),
+            ("/api/model", "application/json; charset=utf-8"),
+            ("/api/tx?sid=lane", "application/json; charset=utf-8"),
+            ("/api/tree", "application/json; charset=utf-8"),
+        ] {
+            let wire = get(&fixture, path);
+            assert!(wire.starts_with("HTTP/1.1 200"), "{path}");
+            assert!(
+                wire.contains(&format!("Content-Type: {content_type}")),
+                "{path}"
+            );
+            for header in HEADERS {
+                assert!(wire.contains(header), "{path}: missing {header}");
+            }
+        }
+        // Every font the stylesheet names is served, and nothing else is fetched.
+        let css = include_str!("viewer.css");
+        let urls: Vec<&str> = css
+            .split("url(\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap())
+            .collect();
+        assert_eq!(urls.len(), 14);
+        for url in urls {
+            let name = url
+                .strip_prefix("/fonts/")
+                .unwrap()
+                .strip_suffix(".woff2")
+                .unwrap();
+            assert!(FONTS.iter().any(|(font, _)| *font == name), "{url}");
+        }
+        for (_, bytes) in FONTS {
+            assert_eq!(&bytes[..4], b"wOF2");
+        }
+    }
+
+    #[test]
+    fn the_page_has_no_inline_script_style_or_html_injection() {
+        let lower = PAGE.to_ascii_lowercase();
+        assert_eq!(lower.matches("<script").count(), 1);
+        assert!(lower.contains("<script src=\"/viewer.js\" defer></script>"));
+        assert!(!lower.contains("<style"));
+        assert!(!lower.contains(" style="));
+        assert!(!lower.contains("javascript:"));
+        let handler = lower
+            .split(|c: char| c.is_whitespace())
+            .any(|word| word.starts_with("on") && word.contains('='));
+        assert!(!handler, "no inline event handlers");
+        let js = include_str!("viewer.js");
+        for banned in [
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+            "eval(",
+            "new Function",
+            "setAttribute(\"style\"",
+            "cssText",
+        ] {
+            assert!(!js.contains(banned), "viewer.js uses {banned}");
+        }
+        assert!(js.contains("textContent"));
+        for banned in ["@import", "http://", "https://"] {
+            assert!(
+                !include_str!("viewer.css").contains(banned),
+                "viewer.css uses {banned}"
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_content_is_served_as_data() {
+        let fixture = lane_fixture();
+        let wire = get(&fixture, "/api/tx?sid=lane");
+        let page: Value = serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries[0]["k"], "h");
+        assert_eq!(entries[1]["text"], "<img src=x onerror=alert(2)>");
+        let model = get(&fixture, "/api/model");
+        let model: Value = serde_json::from_str(model.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(model["handoffs"][0]["brief"], "<script>alert(1)</script>");
+        for query in [
+            "/api/tx",
+            "/api/tx?sid=lane&before=x",
+            "/api/tx?sid=lane&before=1&after=1",
+        ] {
+            assert!(get(&fixture, query).starts_with("HTTP/1.1 400"), "{query}");
+        }
+        assert!(get(&fixture, "/api/tx?sid=nobody").starts_with("HTTP/1.1 404"));
     }
 
     #[test]

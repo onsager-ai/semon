@@ -1,0 +1,20 @@
+{
+  "name": "semon-viewer-ui-checks",
+  "private": true,
+  "description": "CI-only browser checks for semon sessions --serve: the sample fixture, the ported mockup check scripts, and the pixel comparison against the mockup. Not part of the Rust build.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "fixture": "node fixture.mjs",
+    "gaps": "node gaps.mjs",
+    "pixels": "node pixels.mjs",
+    "checks": "node checks/run.mjs"
+  },
+  "dependencies": {
+    "pixelmatch": "7.2.0",
+    "playwright": "1.63.0",
+    "pngjs": "7.0.0"
+  }
+}

@@ -1,0 +1,116 @@
+// Shared by the browser checks: the served viewer's address, pages opened on it, the served data in the mockup's shapes,
+// and the report every check writes. Environment:
+//   SEMON_BASE   http://127.0.0.1:PORT of a running `semon sessions --serve`
+//   SEMON_TOKEN  its token (the ?t= it printed)
+//   SEMON_NOW    the fixture's pinned now (epoch ms): the browser's clock stands there too
+//   SEMON_UI_OUT where reports, screenshots and diffs go (default: ./out)
+import fs from "node:fs";
+import path from "node:path";
+import { chromium } from "playwright";
+
+export const ENV = {
+  base: (process.env.SEMON_BASE ?? "").replace(/\/$/, ""),
+  token: process.env.SEMON_TOKEN ?? "",
+  // The extras fixture's server (fixture.mjs --extras).
+  extraBase: (process.env.SEMON_EXTRA_BASE ?? "").replace(/\/$/, ""),
+  extraToken: process.env.SEMON_EXTRA_TOKEN ?? "",
+  now: Number(process.env.SEMON_NOW ?? Date.now()),
+  out: path.resolve(process.env.SEMON_UI_OUT ?? "out"),
+};
+fs.mkdirSync(ENV.out, { recursive: true });
+
+export const launch = () => chromium.launch({ args: ["--disable-gpu", "--font-render-hinting=none"] });
+
+// The three screens every check and comparison covers.
+export const VIEWPORTS = {
+  phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true },
+  desktop: { viewport: { width: 1280, height: 860 }, deviceScaleFactor: 1, isMobile: false, hasTouch: false },
+};
+
+export async function context(browser, { size = "phone", dark = false } = {}) {
+  return browser.newContext({ ...VIEWPORTS[size], colorScheme: dark ? "dark" : "light", timezoneId: "UTC", locale: "en-US", reducedMotion: "no-preference" });
+}
+
+// A page on the served viewer at `path` (such as "/" or "/s/claude/harbor"), signed in with the token. Only the served
+// origin is reachable. `page.errors` collects page errors. `extras: true` opens the extras fixture's server.
+export async function served(browser, opts = {}) {
+  const base = opts.extras ? ENV.extraBase : ENV.base, token = opts.extras ? ENV.extraToken : ENV.token;
+  if (!base) throw new Error(opts.extras ? "SEMON_EXTRA_BASE is not set" : "SEMON_BASE is not set");
+  const ctx = await context(browser, opts);
+  const page = await ctx.newPage();
+  page.errors = [];
+  page.on("pageerror", (e) => page.errors.push(e.message.split("\n")[0]));
+  page.setDefaultTimeout(opts.timeout ?? 5000);
+  await page.clock.setFixedTime(ENV.now);
+  await page.route(/.*/, (r) => (r.request().url().startsWith(base + "/") ? r.continue() : r.abort()));
+  await page.goto(base + (opts.path ?? "/") + ((opts.path ?? "/").includes("?") ? "&" : "?") + "t=" + token, { waitUntil: "load" });
+  await settled(page);
+  return page;
+}
+
+// The screen a route draws has its title in the bar, its transcript loaded, and its fonts in.
+export function titleOf(route, D) {
+  return { home: "Home", timeline: "Timeline", sessions: "Sessions", machines: "Machines", trace: "Trace" }[route.v]
+    ?? (route.v === "machine" ? D.MACHINE[route.id] : D.SESS[route.id]?.name);
+}
+export async function settled(page) {
+  await page.waitForFunction(() => document.querySelector("#topbar .t, #topbar #find") && document.querySelector("#page").childElementCount > 0);
+  await page.evaluate(() => document.fonts.ready);
+}
+
+// Goes to a route the way the mockup's check scripts did: a history entry and a popstate, then waits for its screen.
+export async function goto(page, route, D) {
+  await page.evaluate((r) => { history.pushState(r, ""); dispatchEvent(new PopStateEvent("popstate", { state: r })); }, route);
+  const title = titleOf(route, D);
+  if (title) await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, title);
+  if (route.v === "session") await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']"));
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForTimeout(60);
+}
+
+// The served data in the mockup's shapes: SESS, H, MACHINE, MACHINE_UP, NOW, every transcript in full as TX, and the
+// server's turn index.
+export async function data({ extras = false } = {}) {
+  const base = extras ? ENV.extraBase : ENV.base, token = extras ? ENV.extraToken : ENV.token;
+  const get = async (p) => {
+    const r = await fetch(base + p + (p.includes("?") ? "&" : "?") + "t=" + token);
+    if (!r.ok) throw new Error(p + ": " + r.status);
+    return r.json();
+  };
+  const model = await get("/api/model");
+  const SESS = model.sessions, H = model.handoffs, TX = {};
+  for (const [id, s] of Object.entries(SESS)) s.id = id;
+  for (const sid of Object.keys(SESS)) {
+    let page = await get("/api/tx?sid=" + encodeURIComponent(sid)), entries = page.entries;
+    while (page.from > 0) { page = await get("/api/tx?sid=" + encodeURIComponent(sid) + "&before=" + page.from); entries = page.entries.concat(entries); }
+    TX[sid] = entries;
+  }
+  return { model, SESS, H, TX, turns: model.turns, NOW: model.now, MACHINE: { [model.machine.id]: model.machine.name }, MACHINE_UP: { [model.machine.id]: model.machine.up } };
+}
+
+// Each check writes out/<name>.json and fails when any of its assertions failed.
+export function reporter(name) {
+  const failures = [];
+  const rep = {
+    // A check may replace `results` whole; the report reads it when done.
+    results: {},
+    expect(ok, what) { if (!ok) failures.push(what); return ok; },
+    done() {
+      fs.writeFileSync(path.join(ENV.out, name + ".json"), JSON.stringify({ results: rep.results, failures }, null, 1));
+      console.log("== " + name + ": " + (failures.length ? failures.length + " failed" : "ok"));
+      console.log(JSON.stringify(rep.results));
+      for (const f of failures) console.log("  FAIL " + f);
+      return failures.length === 0;
+    },
+  };
+  return rep;
+}
+
+// Elements past the screen's edge that no overflow-clipping ancestor hides, plus 1000 if the page itself scrolls sideways
+// (the mockup check scripts' over()).
+export const overflow = (page) => page.evaluate(() => {
+  document.body.style.overflowX = "visible"; const vw = document.documentElement.clientWidth; let n = 0;
+  const clipped = (e) => { for (let a = e.parentElement; a && a !== document.body; a = a.parentElement) { const o = getComputedStyle(a).overflowX; if (o === "hidden" || o === "clip" || o === "auto" || o === "scroll") { const r = a.getBoundingClientRect(); if (r.right <= vw + 0.5) return true; } } return false; };
+  for (const e of document.querySelectorAll(".page *, .topbar *")) { const r = e.getBoundingClientRect(); if (r.width && r.height && (r.right > vw + 0.5 || r.left < -0.5) && !clipped(e)) n++; }
+  const sw = document.documentElement.scrollWidth; document.body.style.overflowX = ""; if (sw > vw) n += 1000; return n;
+});

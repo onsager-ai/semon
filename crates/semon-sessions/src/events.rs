@@ -26,7 +26,8 @@ use crate::{Tokens, field};
 /// The event cache sits beside V1's metadata cache and has its own version,
 /// so `semon sessions`, `--watch` and `--json` never load or rewrite it.
 /// v3: every assistant text is its own event (v2 collapsed adjacent ones).
-const CACHE_VERSION: u32 = 3;
+/// v4: thinking blocks and Codex harness text are indexed apart, as `extras`.
+const CACHE_VERSION: u32 = 4;
 
 /// One file's event index and the facts the model needs about it. Metadata
 /// only (risk:secret).
@@ -34,6 +35,11 @@ const CACHE_VERSION: u32 = 3;
 pub(crate) struct FileIndex {
     #[serde(default)]
     pub(crate) events: Vec<Event>,
+    /// Transcript-only markers the model's rules never read: thinking blocks
+    /// and harness text added before a Codex prompt. Kept apart from
+    /// `events` so they can't change how events collapse or turns split.
+    #[serde(default)]
+    pub(crate) extras: Vec<Event>,
     /// Tool calls still waiting for a result: call id -> event index.
     #[serde(default)]
     pub(crate) pending: BTreeMap<String, usize>,
@@ -276,6 +282,11 @@ pub(crate) enum Kind {
     Tn,
     /// Lines the log lost: a run of malformed lines.
     Gap,
+    /// A thinking block or Codex reasoning item (in `extras` only).
+    Think,
+    /// Harness text added before a Codex prompt, `n` its tag (in `extras`
+    /// only).
+    Harness,
 }
 
 /// Result flags on a tool call.
@@ -435,6 +446,22 @@ fn push(summary: &mut FileIndex, event: Event) {
         return;
     }
     summary.events.push(event);
+}
+
+/// Adds a transcript-only marker. Consecutive thinking collapses into the
+/// first, as the prototype draws one marker per run.
+fn extra(summary: &mut FileIndex, event: Event) {
+    if event.k == Kind::Think
+        && let Some(last) = summary.extras.last()
+        && last.k == Kind::Think
+        && summary
+            .events
+            .last()
+            .is_none_or(|previous| (previous.o, previous.b) < (last.o, last.b))
+    {
+        return;
+    }
+    summary.extras.push(event);
 }
 
 pub(crate) fn gap(summary: &mut FileIndex, offset: u64) {
@@ -932,6 +959,24 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                             texts.push(text);
                         }
                     }
+                    // Only thinking with text to show: Claude Code stores most of it
+                    // empty (a signature only), and an empty marker draws nothing.
+                    Some("thinking")
+                        if role == Some("assistant")
+                            && field(item, "thinking")
+                                .is_some_and(|text| !text.trim().is_empty()) =>
+                    {
+                        extra(
+                            summary,
+                            Event {
+                                k: Kind::Think,
+                                o: offset,
+                                b: block,
+                                t: time,
+                                ..Event::default()
+                            },
+                        );
+                    }
                     Some("tool_use") => tool_event(
                         summary,
                         Event {
@@ -1015,6 +1060,24 @@ fn codex_exit(output: Option<&Value>) -> Option<i64> {
     value.get("metadata")?.get("exit_code")?.as_i64()
 }
 
+/// Text Codex adds before a prompt, by its tag. Any other text is a prompt,
+/// even one that starts with `<`.
+const HARNESS_TAGS: [&str; 5] = [
+    "environment_context",
+    "user_instructions",
+    "recommended_plugins",
+    "user_shell_command",
+    "turn_aborted",
+];
+
+fn harness_tag(text: &str) -> Option<&'static str> {
+    let rest = text.trim_start().strip_prefix('<')?;
+    HARNESS_TAGS.into_iter().find(|tag| {
+        rest.strip_prefix(tag)
+            .is_some_and(|after| after.starts_with(['>', ' ', '\n']))
+    })
+}
+
 /// Codex rollout lines.
 pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
     let time = record_time(record);
@@ -1075,9 +1138,17 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     })
                     .unwrap_or_default();
                 match field(payload, "role") {
-                    Some("user")
-                        if !text.trim_start().starts_with('<') && !text.trim().is_empty() =>
-                    {
+                    Some("user") if harness_tag(&text).is_some() => extra(
+                        summary,
+                        Event {
+                            k: Kind::Harness,
+                            o: offset,
+                            t: time,
+                            n: harness_tag(&text).map(str::to_owned),
+                            ..Event::default()
+                        },
+                    ),
+                    Some("user") if !text.trim().is_empty() => {
                         push(
                             summary,
                             Event {
@@ -1127,6 +1198,27 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                         ..Reply::default()
                     });
                 }
+            }
+            Some("reasoning")
+                if payload
+                    .get("summary")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|part| field(part, "text"))
+                            .any(|text| !text.trim().is_empty())
+                    }) =>
+            {
+                extra(
+                    summary,
+                    Event {
+                        k: Kind::Think,
+                        o: offset,
+                        t: time,
+                        ..Event::default()
+                    },
+                );
             }
             Some("agent_message") => push(
                 summary,
