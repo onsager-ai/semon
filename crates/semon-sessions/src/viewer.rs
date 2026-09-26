@@ -15,8 +15,11 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use std::os::unix::fs::MetadataExt;
 
 use crate::{
-    Index, Node, Options, codex_id_from_filename, codex_meta, collect_with_index, field, file_list,
-    is_agent_output, proc_start, read_index, save_index, user_text,
+    Index, Node, Options, codex_id_from_filename, codex_meta, collect_with_index,
+    events::EventCache,
+    field, file_list, is_agent_output,
+    model::{self, Built, Texts},
+    proc_start, read_index, save_index, user_text,
 };
 
 const PAGE_ENTRIES: usize = 200;
@@ -66,8 +69,13 @@ struct Viewer {
     port: u16,
     index: Option<Index>,
     index_dirty: bool,
+    events: Option<EventCache>,
+    events_dirty: bool,
+    events_saved: Option<Instant>,
     last_save: Option<Instant>,
     tree: Option<TreeCache>,
+    model: Option<ModelCache>,
+    texts: Texts,
     paths: BTreeMap<(String, String), PathBuf>,
     known_paths: BTreeSet<PathBuf>,
     harness: BTreeMap<PathBuf, ((u64, u64), BTreeSet<u64>)>,
@@ -104,6 +112,14 @@ struct TreeCache {
     snapshot: Snapshot,
 }
 
+struct ModelCache {
+    built: Built,
+    snapshot: Snapshot,
+}
+
+/// A routed response: status, content type, body and an optional `ETag`.
+type Routed = (u16, &'static str, String, Option<String>);
+
 fn watch_tree(path: &Path, suffixes: &[&str], watched: &mut BTreeMap<PathBuf, Option<Stamp>>) {
     watched.insert(path.to_owned(), stamp(path));
     let Ok(entries) = fs::read_dir(path) else {
@@ -134,6 +150,16 @@ fn node_pids(nodes: &[Node], output: &mut BTreeSet<u32>) {
 
 impl Snapshot {
     fn capture(options: &Options, roots: &[Node], index: &Index) -> Self {
+        let mut ids = BTreeSet::new();
+        node_pids(roots, &mut ids);
+        Self::capture_pids(options, ids, index.paths())
+    }
+
+    fn capture_pids<'a>(
+        options: &Options,
+        ids: BTreeSet<u32>,
+        paths: impl Iterator<Item = &'a str>,
+    ) -> Self {
         let mut watched = BTreeMap::new();
         watch_tree(
             &options.claude_home.join("projects"),
@@ -155,12 +181,10 @@ impl Snapshot {
             &[".lock"],
             &mut watched,
         );
-        for path in index.paths() {
+        for path in paths {
             let path = PathBuf::from(path);
             watched.entry(path.clone()).or_insert_with(|| stamp(&path));
         }
-        let mut ids = BTreeSet::new();
-        node_pids(roots, &mut ids);
         let pids = ids
             .into_iter()
             .map(|pid| (pid, proc_start(&options.proc_root, pid)))
@@ -233,8 +257,18 @@ fn header(name: &str, value: &str) -> Header {
     Header::from_bytes(name, value).expect("static HTTP header")
 }
 
-fn respond(request: Request, status: u16, content_type: &str, body: String, cookie: Option<&str>) {
+fn respond(
+    request: Request,
+    status: u16,
+    content_type: &str,
+    body: String,
+    cookie: Option<&str>,
+    etag: Option<&str>,
+) {
     let mut response = Response::from_string(body).with_status_code(StatusCode(status));
+    if let Some(etag) = etag {
+        response.add_header(header("ETag", etag));
+    }
     for (name, value) in [
         ("Content-Type", content_type),
         ("Cache-Control", "no-store"),
@@ -330,8 +364,13 @@ impl Viewer {
             port,
             index: None,
             index_dirty: false,
+            events: None,
+            events_dirty: false,
+            events_saved: None,
             last_save: None,
             tree: None,
+            model: None,
+            texts: Texts::default(),
             paths: BTreeMap::new(),
             known_paths: BTreeSet::new(),
             harness: BTreeMap::new(),
@@ -440,21 +479,36 @@ impl Viewer {
                 "text/plain; charset=utf-8",
                 "Forbidden".into(),
                 None,
+                None,
             );
             return;
         };
-        let answer = self.route(path, query);
-        let (status, content_type, body) = match answer {
+        let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
+        let answer = if path == "/api/model" {
+            self.model(query, if_none_match.as_deref())
+        } else {
+            self.route(path, query)
+                .map(|(status, content_type, body)| (status, content_type, body, None))
+        };
+        let (status, content_type, body, etag) = match answer {
             Ok(answer) => answer,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                (404, "text/plain; charset=utf-8", "Not found".into())
+                (404, "text/plain; charset=utf-8", "Not found".into(), None)
             }
-            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
-                (400, "text/plain; charset=utf-8", "Invalid request".into())
-            }
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => (
+                400,
+                "text/plain; charset=utf-8",
+                "Invalid request".into(),
+                None,
+            ),
             Err(error) => {
                 eprintln!("semon sessions viewer: {error}");
-                (500, "text/plain; charset=utf-8", "Internal error".into())
+                (
+                    500,
+                    "text/plain; charset=utf-8",
+                    "Internal error".into(),
+                    None,
+                )
             }
         };
         respond(
@@ -463,7 +517,64 @@ impl Viewer {
             content_type,
             body,
             set_cookie.then_some(&self.token),
+            etag.as_deref(),
         );
+    }
+
+    fn refresh_model(&mut self) -> io::Result<()> {
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|model| !model.snapshot.changed(&self.options))
+        {
+            return self.persist_events_if_due();
+        }
+        let path = EventCache::path(&self.options.cache);
+        let cache = self.events.get_or_insert_with(|| EventCache::read(&path));
+        let built = model::build(
+            &self.options,
+            cache,
+            &mut self.events_dirty,
+            &mut self.texts,
+            model::now_ms(),
+        )?;
+        let snapshot = Snapshot::capture_pids(
+            &self.options,
+            built.pids.iter().copied().collect(),
+            cache.paths(),
+        );
+        self.model = Some(ModelCache { built, snapshot });
+        self.persist_events_if_due()
+    }
+
+    /// The event cache is saved at most every 30 s, like V1's index.
+    fn persist_events_if_due(&mut self) -> io::Result<()> {
+        if self.events_dirty
+            && self
+                .events_saved
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
+            && let Some(cache) = &self.events
+        {
+            cache.save(&EventCache::path(&self.options.cache))?;
+            self.events_dirty = false;
+            self.events_saved = Some(Instant::now());
+        }
+        Ok(())
+    }
+
+    /// `/api/model`: the whole model, or 304 when the client's `ETag` or
+    /// `?since=` version is still current.
+    fn model(&mut self, query: &str, if_none_match: Option<&str>) -> io::Result<Routed> {
+        let json = "application/json; charset=utf-8";
+        self.refresh_model()?;
+        let built = &self.model.as_ref().expect("model loaded").built;
+        let etag = format!("\"{}\"", built.version);
+        let since = query_value(query, "since").and_then(decoded);
+        if if_none_match == Some(etag.as_str()) || since.as_deref() == Some(built.version.as_str())
+        {
+            return Ok((304, json, String::new(), Some(etag)));
+        }
+        Ok((200, json, built.json(model::now_ms()), Some(etag)))
     }
 
     fn route(&mut self, path: &str, query: &str) -> io::Result<(u16, &'static str, String)> {
@@ -1451,6 +1562,58 @@ mod tests {
         let random = random_token().unwrap();
         assert_eq!(random.len(), 32);
         assert!(random.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn model_is_json_with_headers_etag_and_304() {
+        let fixture = Fixture::new();
+        fixture.write("proc/sys/kernel/hostname", "testbox\n");
+        fixture.claude(
+            "xss",
+            &[json!({"type":"user","timestamp":"2026-09-24T00:00:00Z","sessionId":"xss","origin":{"kind":"human"},
+                "message":{"role":"user","content":"<script>alert(1)</script>"}})],
+        );
+        let token = "0123456789abcdef0123456789abcdef";
+        let get = |extra: &str, query: &str| {
+            http(
+                &fixture,
+                &format!(
+                    "GET /api/model?t={token}{query} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n{extra}\r\n"
+                ),
+            )
+        };
+        let wire = get("", "");
+        assert!(wire.starts_with("HTTP/1.1 200"));
+        for header in [
+            "Content-Type: application/json; charset=utf-8",
+            "Cache-Control: no-store",
+            "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'",
+            "X-Frame-Options: DENY",
+            "Referrer-Policy: no-referrer",
+        ] {
+            assert!(wire.contains(header), "missing {header}");
+        }
+        let body = wire.split_once("\r\n\r\n").unwrap().1;
+        let model: Value = serde_json::from_str(body).unwrap();
+        for key in [
+            "version", "now", "machine", "sessions", "handoffs", "turns", "busy",
+        ] {
+            assert!(model.get(key).is_some(), "missing {key}");
+        }
+        assert_eq!(model["handoffs"][0]["brief"], "<script>alert(1)</script>");
+        let version = model["version"].as_str().unwrap();
+        let etag = format!("\"{version}\"");
+        assert!(wire.contains(&format!("ETag: {etag}")));
+        let cached = get(&format!("If-None-Match: {etag}\r\n"), "");
+        assert!(cached.starts_with("HTTP/1.1 304"));
+        assert!(cached.split_once("\r\n\r\n").unwrap().1.is_empty());
+        assert!(get("", &format!("&since={version}")).starts_with("HTTP/1.1 304"));
+        assert!(get("", "&since=stale").starts_with("HTTP/1.1 200"));
+        let refused = http(
+            &fixture,
+            "GET /api/model HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n",
+        );
+        assert!(refused.starts_with("HTTP/1.1 403"));
     }
 
     #[test]

@@ -1,0 +1,273 @@
+{
+  "version": "9f6d46fb761b6da2",
+  "now": 1790294400000,
+  "machine": {
+    "id": "testbox",
+    "name": "testbox",
+    "up": true
+  },
+  "sessions": {
+    "asker": {
+      "name": "proj",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.008,
+        0.016,
+        0.004
+      ],
+      "start": 1790233200000,
+      "last": 1790234160000,
+      "busy": [
+        [
+          1790233200000,
+          1790234160000
+        ]
+      ]
+    }
+  },
+  "handoffs": [
+    {
+      "id": "a64aab7ddcb5d3428",
+      "kind": "ask",
+      "from": "you",
+      "to": "asker",
+      "at": 1790233200000,
+      "status": "done",
+      "brief": "Ask me things"
+    },
+    {
+      "id": "q602bd307189788d9",
+      "kind": "toyou",
+      "ask": "question",
+      "from": "asker",
+      "to": "you",
+      "at": 1790233260000,
+      "done": 1790233320000,
+      "status": "done",
+      "brief": "Ship it?",
+      "answer": [
+        "Yes"
+      ],
+      "answers": [
+        {
+          "question": "Ship it?",
+          "values": [
+            "Yes"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q602bd10718978573",
+      "kind": "toyou",
+      "ask": "question",
+      "from": "asker",
+      "to": "you",
+      "at": 1790233380000,
+      "done": 1790233440000,
+      "status": "done",
+      "brief": "First?\nSecond?\nThird?",
+      "answer": [
+        "A",
+        "D",
+        "F"
+      ],
+      "answers": [
+        {
+          "question": "First?",
+          "values": [
+            "A"
+          ]
+        },
+        {
+          "question": "Second?",
+          "values": [
+            "D"
+          ]
+        },
+        {
+          "question": "Third?",
+          "values": [
+            "F"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q38946c5b8d42046f",
+      "kind": "toyou",
+      "ask": "question",
+      "from": "asker",
+      "to": "you",
+      "at": 1790233500000,
+      "done": 1790233560000,
+      "status": "done",
+      "brief": "Which?",
+      "answer": [
+        "Red, Blue, light"
+      ],
+      "answers": [
+        {
+          "question": "Which?",
+          "values": [
+            "Red",
+            "Blue, light"
+          ],
+          "multi": true
+        }
+      ]
+    },
+    {
+      "id": "qb702f6b0d3794ea6",
+      "kind": "toyou",
+      "ask": "question",
+      "from": "asker",
+      "to": "you",
+      "at": 1790233620000,
+      "done": 1790233680000,
+      "status": "done",
+      "brief": "Pick?",
+      "answer": [
+        "Blue, light, Green"
+      ],
+      "answers": [
+        {
+          "question": "Pick?",
+          "values": [
+            "Blue, light",
+            "Green"
+          ],
+          "multi": true
+        }
+      ]
+    },
+    {
+      "id": "qea11687ddd4a6815",
+      "kind": "toyou",
+      "ask": "question",
+      "from": "asker",
+      "to": "you",
+      "at": 1790233740000,
+      "done": 1790233800000,
+      "status": "done",
+      "brief": "Name?",
+      "answer": [
+        "Call it Tern"
+      ],
+      "answers": [
+        {
+          "question": "Name?",
+          "values": [
+            "Call it Tern"
+          ],
+          "free": true
+        }
+      ]
+    },
+    {
+      "id": "qfed9fb9b54125fa1",
+      "kind": "toyou",
+      "ask": "question",
+      "from": "asker",
+      "to": "you",
+      "at": 1790233860000,
+      "done": 1790233920000,
+      "status": "done",
+      "brief": "Layout?",
+      "answer": [
+        "Grid"
+      ],
+      "answers": [
+        {
+          "question": "Layout?",
+          "values": [
+            "Grid"
+          ],
+          "preview": "[grid]"
+        }
+      ]
+    },
+    {
+      "id": "qc82a958a6f41a499",
+      "kind": "toyou",
+      "ask": "question",
+      "from": "asker",
+      "to": "you",
+      "at": 1790233980000,
+      "done": 1790234040000,
+      "status": "done",
+      "brief": "Delete it?",
+      "answer": [],
+      "declined": true
+    },
+    {
+      "id": "q8f602fe1e235cb29",
+      "kind": "toyou",
+      "ask": "question",
+      "from": "asker",
+      "to": "you",
+      "at": 1790234100000,
+      "done": 1790234160000,
+      "status": "done",
+      "brief": "Is \"quoted\" fine?\nNext?",
+      "answer": [
+        "Yes, \"really\"",
+        "Go"
+      ],
+      "answers": [
+        {
+          "question": "Is \"quoted\" fine?",
+          "values": [
+            "Yes, \"really\""
+          ],
+          "free": true
+        },
+        {
+          "question": "Next?",
+          "values": [
+            "Go"
+          ]
+        }
+      ]
+    }
+  ],
+  "turns": [
+    {
+      "id": "a64aab7ddcb5d3428",
+      "sid": "asker",
+      "start": "a64aab7ddcb5d3428",
+      "at": 1790233200000,
+      "end": {
+        "st": "done",
+        "why": "toyou",
+        "h": "q8f602fe1e235cb29"
+      },
+      "sent": [
+        "q602bd307189788d9",
+        "q602bd10718978573",
+        "q38946c5b8d42046f",
+        "qb702f6b0d3794ea6",
+        "qea11687ddd4a6815",
+        "qfed9fb9b54125fa1",
+        "qc82a958a6f41a499",
+        "q8f602fe1e235cb29"
+      ],
+      "file": "asker",
+      "offset": 0,
+      "last": true
+    }
+  ],
+  "busy": {
+    "testbox": [
+      [
+        1790233200000,
+        1790234160000
+      ]
+    ]
+  }
+}

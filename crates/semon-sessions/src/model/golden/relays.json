@@ -1,0 +1,319 @@
+{
+  "version": "55331c3105cee621",
+  "now": 1790294400000,
+  "machine": {
+    "id": "testbox",
+    "name": "testbox",
+    "up": true
+  },
+  "sessions": {
+    "alpha": {
+      "name": "Alpha",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790226000000,
+      "last": 1790226060000,
+      "busy": [
+        [
+          1790226000000,
+          1790226060000
+        ]
+      ]
+    },
+    "beta": {
+      "name": "Bee",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790226120000,
+      "last": 1790229600000,
+      "busy": [
+        [
+          1790226120000,
+          1790226180000
+        ],
+        [
+          1790229600000,
+          1790229600000
+        ]
+      ]
+    },
+    "peer-1d9972cea8f58bc7": {
+      "name": "ghost",
+      "harness": "claude",
+      "lane": true,
+      "stub": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "—",
+      "tokens": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start": 1790229600000,
+      "last": 1790229600000,
+      "busy": []
+    },
+    "peer-db6aae54c633b96e": {
+      "name": "Twin",
+      "harness": "claude",
+      "lane": true,
+      "stub": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "—",
+      "tokens": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start": 1790226060000,
+      "last": 1790226060000,
+      "busy": []
+    },
+    "twin-1": {
+      "name": "Twin",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "—",
+      "tokens": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start": 1790209800000,
+      "last": 1790209800000,
+      "busy": [
+        [
+          1790209800000,
+          1790209800000
+        ]
+      ]
+    },
+    "twin-2": {
+      "name": "Twin",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "—",
+      "tokens": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start": 1790209800000,
+      "last": 1790209800000,
+      "busy": [
+        [
+          1790209800000,
+          1790209800000
+        ]
+      ]
+    }
+  },
+  "handoffs": [
+    {
+      "id": "aaf317181677d77ee",
+      "kind": "ask",
+      "from": "you",
+      "to": "twin-1",
+      "at": 1790209800000,
+      "status": "done",
+      "brief": "twin work"
+    },
+    {
+      "id": "aee7335997dda6de5",
+      "kind": "ask",
+      "from": "you",
+      "to": "twin-2",
+      "at": 1790209800000,
+      "status": "done",
+      "brief": "twin work"
+    },
+    {
+      "id": "a17aaf761967e17ce",
+      "kind": "ask",
+      "from": "you",
+      "to": "alpha",
+      "at": 1790226000000,
+      "status": "done",
+      "brief": "Tell the others"
+    },
+    {
+      "id": "re8a0d47ac5fdc026",
+      "kind": "relay",
+      "from": "alpha",
+      "to": null,
+      "target": "beta-01",
+      "at": 1790226060000,
+      "status": "err",
+      "brief": "denied one"
+    },
+    {
+      "id": "re8a0d57ac5fdc1d9",
+      "kind": "relay",
+      "from": "alpha",
+      "to": null,
+      "target": "nobody-9f",
+      "at": 1790226060000,
+      "status": "err",
+      "brief": "lost one"
+    },
+    {
+      "id": "re8a0d67ac5fdc38c",
+      "kind": "relay",
+      "from": "alpha",
+      "to": "peer-db6aae54c633b96e",
+      "at": 1790226060000,
+      "status": "done",
+      "brief": "to a twin",
+      "unmatched": true
+    },
+    {
+      "id": "re8a0d77ac5fdc53f",
+      "kind": "relay",
+      "from": "alpha",
+      "to": "beta",
+      "at": 1790226060000,
+      "status": "done",
+      "brief": "by unique name"
+    },
+    {
+      "id": "ref4c0b08d7c3afaa",
+      "kind": "relay",
+      "from": "alpha",
+      "to": "beta",
+      "at": 1790226060000,
+      "status": "done",
+      "brief": "hello beta"
+    },
+    {
+      "id": "ref4c0308d7c3a212",
+      "kind": "relay",
+      "from": "peer-1d9972cea8f58bc7",
+      "to": "beta",
+      "at": 1790229600000,
+      "status": "done",
+      "brief": "from a gone session",
+      "unmatched": true
+    }
+  ],
+  "turns": [
+    {
+      "id": "aaf317181677d77ee",
+      "sid": "twin-1",
+      "start": "aaf317181677d77ee",
+      "at": 1790209800000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "twin-1",
+      "offset": 66,
+      "last": true
+    },
+    {
+      "id": "aee7335997dda6de5",
+      "sid": "twin-2",
+      "start": "aee7335997dda6de5",
+      "at": 1790209800000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "twin-2",
+      "offset": 66,
+      "last": true
+    },
+    {
+      "id": "a17aaf761967e17ce",
+      "sid": "alpha",
+      "start": "a17aaf761967e17ce",
+      "at": 1790226000000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [
+        "ref4c0b08d7c3afaa",
+        "re8a0d57ac5fdc1d9",
+        "re8a0d47ac5fdc026",
+        "re8a0d77ac5fdc53f",
+        "re8a0d67ac5fdc38c"
+      ],
+      "file": "alpha",
+      "offset": 66,
+      "last": true
+    },
+    {
+      "id": "ref4c0b08d7c3afaa",
+      "sid": "beta",
+      "start": "ref4c0b08d7c3afaa",
+      "at": 1790226060000,
+      "end": {
+        "st": "done",
+        "why": "replied"
+      },
+      "sent": [],
+      "file": "beta",
+      "offset": 63
+    },
+    {
+      "id": "ref4c0308d7c3a212",
+      "sid": "beta",
+      "start": "ref4c0308d7c3a212",
+      "at": 1790229600000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [],
+      "file": "beta",
+      "offset": 846,
+      "last": true
+    }
+  ],
+  "busy": {
+    "testbox": [
+      [
+        1790209800000,
+        1790209800000
+      ],
+      [
+        1790226000000,
+        1790226180000
+      ],
+      [
+        1790229600000,
+        1790229600000
+      ]
+    ]
+  }
+}

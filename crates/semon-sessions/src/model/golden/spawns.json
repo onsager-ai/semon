@@ -1,0 +1,455 @@
+{
+  "version": "1c2f1110788fb13f",
+  "now": 1790294400000,
+  "machine": {
+    "id": "testbox",
+    "name": "testbox",
+    "up": true
+  },
+  "sessions": {
+    "a1": {
+      "name": "task a1",
+      "harness": "claude",
+      "kind": "Subagent",
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790211660000,
+      "last": 1790211900000,
+      "busy": [
+        [
+          1790211660000,
+          1790211900000
+        ]
+      ]
+    },
+    "a2": {
+      "name": "task a2",
+      "harness": "claude",
+      "kind": "Subagent",
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790211660000,
+      "last": 1790211900000,
+      "busy": [
+        [
+          1790211660000,
+          1790211900000
+        ]
+      ]
+    },
+    "a3": {
+      "name": "task a3",
+      "harness": "claude",
+      "kind": "Subagent",
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790211660000,
+      "last": 1790211900000,
+      "busy": [
+        [
+          1790211660000,
+          1790211900000
+        ]
+      ]
+    },
+    "a4": {
+      "name": "task a4",
+      "harness": "claude",
+      "kind": "Subagent",
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790211660000,
+      "last": 1790211960000,
+      "busy": [
+        [
+          1790211660000,
+          1790211960000
+        ]
+      ]
+    },
+    "a5": {
+      "name": "task a5",
+      "harness": "claude",
+      "kind": "Subagent",
+      "role": true,
+      "machine": "testbox",
+      "state": "err",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790211660000,
+      "last": 1790211900000,
+      "busy": [
+        [
+          1790211660000,
+          1790211900000
+        ]
+      ]
+    },
+    "a6": {
+      "name": "task a6",
+      "harness": "claude",
+      "kind": "Subagent",
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790211660000,
+      "last": 1790211900000,
+      "busy": [
+        [
+          1790211660000,
+          1790211900000
+        ]
+      ]
+    },
+    "a7": {
+      "name": "task a7",
+      "harness": "claude",
+      "kind": "Subagent",
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790211660000,
+      "last": 1790211900000,
+      "busy": [
+        [
+          1790211660000,
+          1790211900000
+        ]
+      ]
+    },
+    "a8": {
+      "name": "task a8",
+      "harness": "claude",
+      "kind": "Subagent",
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790211660000,
+      "last": 1790211900000,
+      "busy": [
+        [
+          1790211660000,
+          1790211900000
+        ]
+      ]
+    },
+    "parent": {
+      "name": "proj",
+      "harness": "claude",
+      "lane": true,
+      "role": true,
+      "machine": "testbox",
+      "state": "done",
+      "model": "opus-5.5",
+      "tokens": [
+        0.001,
+        0.002,
+        0.001
+      ],
+      "start": 1790211600000,
+      "last": 1790212500000,
+      "busy": [
+        [
+          1790211600000,
+          1790211780000
+        ],
+        [
+          1790212200000,
+          1790212500000
+        ]
+      ]
+    }
+  },
+  "handoffs": [
+    {
+      "id": "a6424d58b04e2ca72",
+      "kind": "ask",
+      "from": "you",
+      "to": "parent",
+      "at": 1790211600000,
+      "status": "done",
+      "brief": "Split the work"
+    },
+    {
+      "id": "scf9085bcbd567a10",
+      "kind": "spawn",
+      "from": "parent",
+      "to": "a1",
+      "at": 1790211660000,
+      "done": 1790212200000,
+      "status": "done",
+      "brief": "brief one",
+      "result": "notified one"
+    },
+    {
+      "id": "scf9087bcbd567d76",
+      "kind": "spawn",
+      "from": "parent",
+      "to": "a3",
+      "at": 1790211660000,
+      "done": 1790211780000,
+      "status": "done",
+      "brief": "brief three",
+      "result": "sync result three"
+    },
+    {
+      "id": "scf9088bcbd567f29",
+      "kind": "spawn",
+      "from": "parent",
+      "to": "a2",
+      "at": 1790211660000,
+      "done": 1790212260000,
+      "status": "done",
+      "brief": "brief two",
+      "result": "handed back two"
+    },
+    {
+      "id": "scf9089bcbd5680dc",
+      "kind": "spawn",
+      "from": "parent",
+      "to": "a5",
+      "at": 1790211660000,
+      "done": 1790212320000,
+      "status": "err",
+      "brief": "brief five",
+      "result": "five broke"
+    },
+    {
+      "id": "scf908abcbd56828f",
+      "kind": "spawn",
+      "from": "parent",
+      "to": "a4",
+      "at": 1790211660000,
+      "done": 1790211960000,
+      "status": "done",
+      "brief": "brief four",
+      "result": "handback tool four"
+    },
+    {
+      "id": "scf908bbcbd568442",
+      "kind": "spawn",
+      "from": "parent",
+      "to": "a7",
+      "at": 1790211660000,
+      "status": "done",
+      "brief": "brief seven"
+    },
+    {
+      "id": "scf908cbcbd5685f5",
+      "kind": "spawn",
+      "from": "parent",
+      "to": "a6",
+      "at": 1790211660000,
+      "done": 1790212380000,
+      "status": "done",
+      "brief": "brief six",
+      "result": "six by notification"
+    },
+    {
+      "id": "scf908ebcbd56895b",
+      "kind": "spawn",
+      "from": "parent",
+      "to": "a8",
+      "at": 1790211660000,
+      "done": 1790212500000,
+      "status": "done",
+      "brief": "brief eight",
+      "result": "handed back eight"
+    }
+  ],
+  "turns": [
+    {
+      "id": "a6424d58b04e2ca72",
+      "sid": "parent",
+      "start": "a6424d58b04e2ca72",
+      "at": 1790211600000,
+      "end": {
+        "st": "idle",
+        "why": "no_reply"
+      },
+      "sent": [
+        "scf9085bcbd567a10",
+        "scf9088bcbd567f29",
+        "scf9087bcbd567d76",
+        "scf908abcbd56828f",
+        "scf9089bcbd5680dc",
+        "scf908cbcbd5685f5",
+        "scf908bbcbd568442",
+        "scf908ebcbd56895b"
+      ],
+      "file": "parent",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "scf9085bcbd567a10",
+      "sid": "a1",
+      "start": "scf9085bcbd567a10",
+      "at": 1790211660000,
+      "end": {
+        "st": "done",
+        "why": "returned"
+      },
+      "sent": [],
+      "file": "a1",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "scf9088bcbd567f29",
+      "sid": "a2",
+      "start": "scf9088bcbd567f29",
+      "at": 1790211660000,
+      "end": {
+        "st": "done",
+        "why": "returned"
+      },
+      "sent": [],
+      "file": "a2",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "scf9087bcbd567d76",
+      "sid": "a3",
+      "start": "scf9087bcbd567d76",
+      "at": 1790211660000,
+      "end": {
+        "st": "done",
+        "why": "returned"
+      },
+      "sent": [],
+      "file": "a3",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "scf908abcbd56828f",
+      "sid": "a4",
+      "start": "scf908abcbd56828f",
+      "at": 1790211660000,
+      "end": {
+        "st": "done",
+        "why": "returned"
+      },
+      "sent": [],
+      "file": "a4",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "scf9089bcbd5680dc",
+      "sid": "a5",
+      "start": "scf9089bcbd5680dc",
+      "at": 1790211660000,
+      "end": {
+        "st": "err",
+        "why": "failed"
+      },
+      "sent": [],
+      "file": "a5",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "scf908cbcbd5685f5",
+      "sid": "a6",
+      "start": "scf908cbcbd5685f5",
+      "at": 1790211660000,
+      "end": {
+        "st": "done",
+        "why": "returned"
+      },
+      "sent": [],
+      "file": "a6",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "scf908bbcbd568442",
+      "sid": "a7",
+      "start": "scf908bbcbd568442",
+      "at": 1790211660000,
+      "end": {
+        "st": "done",
+        "why": "returned"
+      },
+      "sent": [],
+      "file": "a7",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "scf908ebcbd56895b",
+      "sid": "a8",
+      "start": "scf908ebcbd56895b",
+      "at": 1790211660000,
+      "end": {
+        "st": "done",
+        "why": "returned"
+      },
+      "sent": [],
+      "file": "a8",
+      "offset": 0,
+      "last": true
+    }
+  ],
+  "busy": {
+    "testbox": [
+      [
+        1790211600000,
+        1790212500000
+      ]
+    ]
+  }
+}
