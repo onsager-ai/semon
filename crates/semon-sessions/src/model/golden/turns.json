@@ -1,5 +1,5 @@
 {
-  "version": "49bfda349d4ba4ca",
+  "version": "c362d0cc1ffa2844",
   "now": 1790294400000,
   "machine": {
     "id": "testbox",
@@ -114,6 +114,7 @@
       "sid": "turny",
       "start": null,
       "u": true,
+      "text": "a prompt that isn't yours",
       "at": 1790269560000,
       "end": {
         "st": "done",

@@ -14,8 +14,9 @@ use serde_json::Value;
 
 mod events;
 mod model;
+mod tx;
 mod viewer;
-pub use model::model_json;
+pub use model::{model_json, model_json_at};
 pub use viewer::{ServeOptions, serve};
 
 #[derive(Clone, Debug)]

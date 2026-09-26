@@ -34,12 +34,12 @@ use crate::{
 };
 
 /// Briefs and results are capped as in the mockup data.
-const MSG_MAX: usize = 4096;
+pub(crate) const MSG_MAX: usize = 4096;
 const TRUNCATED: &str = "\n…(truncated)";
 /// A tool call without a result counts as running for this long.
 const LIVE_MS: i64 = 30 * 60 * 1000;
 /// A single source line read back for text is bounded by this.
-const MAX_LINE: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_LINE: u64 = 64 * 1024 * 1024;
 
 // ---- Output shapes: the mockup's field names ---------------------------------------------
 
@@ -138,6 +138,10 @@ pub(crate) struct Turn {
     pub(crate) start: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) u: bool,
+    /// A `u` turn's prompt (not a handoff, so no brief carries it), capped
+    /// like briefs: Home, search and traces show it without a transcript.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) text: Option<String>,
     pub(crate) at: Option<i64>,
     pub(crate) end: End,
     pub(crate) sent: Vec<String>,
@@ -172,6 +176,13 @@ pub(crate) struct Built {
     /// `"handoffs":…,"turns":…,"busy":…}`
     rest: String,
     pub(crate) pids: Vec<u32>,
+    /// This machine's id, as sessions name it.
+    pub(crate) machine_id: String,
+    /// Every source file, by position: what transcript slots point into.
+    pub(crate) files: Vec<SlotFile>,
+    /// Each session's transcript index, for `/api/tx`: metadata and offsets
+    /// only, the text is read back per page.
+    pub(crate) tx: BTreeMap<String, Transcript>,
     #[cfg(test)]
     pub(crate) handoffs: Vec<Handoff>,
     #[cfg(test)]
@@ -237,6 +248,16 @@ impl Handoff {
 }
 
 pub(crate) fn now_ms() -> i64 {
+    // CI's browser suite serves a fixture whose clock must stand still. Only
+    // a debug build with the `test-clock` feature reads this: without the
+    // feature, or in a release build, the variable is ignored.
+    #[cfg(all(feature = "test-clock", debug_assertions))]
+    if let Some(now) = env::var("SEMON_TEST_NOW")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+    {
+        return now;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|time| i64::try_from(time.as_millis()).unwrap_or(i64::MAX))
@@ -258,15 +279,21 @@ fn stable_id(prefix: &str, source: &str) -> String {
 
 /// Writes the model for `options` as JSON, and saves the metadata cache.
 pub fn model_json(options: &Options) -> io::Result<String> {
+    model_json_at(options, now_ms())
+}
+
+/// [`model_json`] at a fixed `now` (epoch ms), for fixtures.
+#[doc(hidden)]
+pub fn model_json_at(options: &Options, now: i64) -> io::Result<String> {
     let path = EventCache::path(&options.cache);
     let mut cache = EventCache::read(&path);
     let mut dirty = false;
     let mut texts = Texts::default();
-    let built = build(options, &mut cache, &mut dirty, &mut texts, now_ms())?;
+    let built = build(options, &mut cache, &mut dirty, &mut texts, now)?;
     if dirty {
         cache.save(&path)?;
     }
-    Ok(built.json(now_ms()))
+    Ok(built.json(now))
 }
 
 // ---- Text read back by offset, held in memory only ---------------------------------------
@@ -301,7 +328,7 @@ pub(crate) struct Texts {
     markers: HashMap<PathBuf, (Stamp, Option<Marker>)>,
 }
 
-fn read_line(path: &Path, offset: u64) -> Option<Value> {
+pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
     let mut file = fs::File::open(path).ok()?;
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut reader = BufReader::new(file).take(MAX_LINE);
@@ -409,7 +436,7 @@ impl Texts {
     }
 }
 
-fn cap(text: &str, limit: usize) -> String {
+pub(crate) fn cap(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_owned();
     }
@@ -420,7 +447,7 @@ fn cap(text: &str, limit: usize) -> String {
     format!("{}{TRUNCATED}", text[..end].trim_end())
 }
 
-fn one_line(text: &str, limit: usize) -> String {
+pub(crate) fn one_line(text: &str, limit: usize) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.chars().count() <= limit {
         return text;
@@ -430,7 +457,7 @@ fn one_line(text: &str, limit: usize) -> String {
     short
 }
 
-fn content_text(value: &Value) -> String {
+pub(crate) fn content_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
         Value::Array(parts) => parts
@@ -448,7 +475,7 @@ fn content_text(value: &Value) -> String {
 
 /// A prompt's text: a Claude user record, a queued command or a Codex user
 /// message, with reminders removed.
-fn prompt_text(record: &Value) -> Option<String> {
+pub(crate) fn prompt_text(record: &Value) -> Option<String> {
     if let Some(attachment) = record.get("attachment") {
         return attachment
             .get("prompt")
@@ -490,7 +517,7 @@ fn block_of(record: &Value, block: usize) -> Option<&Value> {
         .get(block)
 }
 
-fn assistant_text(record: &Value, block: usize) -> Option<String> {
+pub(crate) fn assistant_text(record: &Value, block: usize) -> Option<String> {
     if let Some(item) = block_of(record, block) {
         return field(item, "text").map(|text| text.trim().to_owned());
     }
@@ -509,7 +536,7 @@ fn assistant_text(record: &Value, block: usize) -> Option<String> {
 
 /// A tool call's input: a Claude `tool_use` block, or a Codex call's
 /// arguments parsed as JSON.
-fn tool_input(record: &Value, block: usize) -> Option<Value> {
+pub(crate) fn tool_input(record: &Value, block: usize) -> Option<Value> {
     if let Some(item) = block_of(record, block) {
         return item.get("input").cloned();
     }
@@ -609,7 +636,7 @@ fn notification_result(record: &Value, id: &str) -> Option<String> {
         })
 }
 
-fn tool_result_text(record: &Value, block: usize) -> Option<String> {
+pub(crate) fn tool_result_text(record: &Value, block: usize) -> Option<String> {
     block_of(record, block)
         .and_then(|item| item.get("content"))
         .map(content_text)
@@ -2406,16 +2433,156 @@ impl<'a> Builder<'a> {
         result
     }
 
-    fn turns(&self) -> Vec<Turn> {
+    /// Every session's turns, and its transcript index: the entries the
+    /// turns were split from, with the transcript-only extras merged in.
+    fn turns(&mut self) -> (Vec<Turn>, BTreeMap<String, Transcript>) {
         let mut turns = Vec::new();
-        for (index, session) in self.sessions.iter().enumerate() {
-            if session.kind == SessKind::Stub {
+        let mut transcripts = BTreeMap::new();
+        for index in 0..self.sessions.len() {
+            if self.sessions[index].kind == SessKind::Stub {
+                transcripts.insert(
+                    self.sessions[index].key.clone(),
+                    self.stub_transcript(index),
+                );
                 continue;
             }
             let entries = self.entries(index);
-            turns.extend(self.split(index, &entries));
+            let (mut split, owners, prompts) = self.split(index, &entries);
+            for (turn, at) in prompts {
+                split[turn].text = self
+                    .text(at, "user", |record, _| prompt_text(record))
+                    .map(|text| cap(&text, MSG_MAX));
+            }
+            let slots = self.slots(index, &entries, &owners, &split);
+            transcripts.insert(self.sessions[index].key.clone(), slots);
+            turns.extend(split);
         }
-        turns
+        (turns, transcripts)
+    }
+
+    /// A stub has no transcript of its own: it shows the handoffs that name
+    /// it, after a note that its activity isn't in these logs.
+    fn stub_transcript(&self, index: usize) -> Transcript {
+        let mut named: Vec<&H> = self
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.from == Some(index) || handoff.to == Some(index))
+            .collect();
+        named.sort_by_key(|handoff| handoff.out.at);
+        let mut slots = vec![Slot::new(SlotKind::NoActivity, None, 0, 0, None)];
+        slots.extend(named.into_iter().map(|handoff| {
+            Slot::new(
+                SlotKind::H(handoff.out.id.clone()),
+                None,
+                0,
+                0,
+                Some(handoff.out.at),
+            )
+        }));
+        Transcript::from_slots(slots)
+    }
+
+    /// The transcript index of one session: its entries in order, each
+    /// thinking or harness marker after the entry before it in its file, and
+    /// a return line when a spawned run handed back.
+    fn slots(
+        &self,
+        index: usize,
+        entries: &[Entry],
+        owners: &[Option<usize>],
+        turns: &[Turn],
+    ) -> Transcript {
+        let session = &self.sessions[index];
+        let mut extras: BTreeMap<usize, std::collections::VecDeque<&Event>> = BTreeMap::new();
+        for file in &session.files {
+            extras.insert(*file, self.files[*file].summary.extras.iter().collect());
+        }
+        let mut slots = Vec::with_capacity(entries.len());
+        let mut owner: Option<usize> = None;
+        let mut started = BTreeSet::new();
+        let turn_id = |turn: Option<usize>| turn.map(|turn| turns[turn].id.clone());
+        let extra_slot = |event: &Event, file: usize, owner: Option<usize>| {
+            let kind = match event.k {
+                Kind::Harness => SlotKind::Harness(event.n.clone().unwrap_or_default()),
+                _ => SlotKind::Think,
+            };
+            let mut slot = Slot::new(kind, Some(file), event.o, event.b, event.t);
+            slot.turn = turn_id(owner);
+            slot
+        };
+        for (position, entry) in entries.iter().enumerate() {
+            if let Some(queue) = extras.get_mut(&entry.file) {
+                let at = entry.at.map_or((entry.offset, 0), |at| {
+                    let found = event(self.files, at);
+                    (found.o, found.b)
+                });
+                while queue.front().is_some_and(|extra| (extra.o, extra.b) < at) {
+                    let extra = queue.pop_front().expect("front");
+                    slots.push(extra_slot(extra, entry.file, owner));
+                }
+            }
+            owner = owners[position];
+            let block = entry.at.map_or(0, |at| event(self.files, at).b);
+            let kind = match entry.kind {
+                EntryKind::H(handoff) => SlotKind::H(self.handoffs[handoff].out.id.clone()),
+                EntryKind::U => SlotKind::U,
+                EntryKind::A => SlotKind::A,
+                EntryKind::Gap => SlotKind::Gap,
+                EntryKind::Tool(state) => {
+                    let found = entry.at.map(|at| event(self.files, at));
+                    let running = session.out.state == "work"
+                        && owner.is_some_and(|turn| turn + 1 == turns.len() && turns[turn].last);
+                    SlotKind::Tool {
+                        shown: match state {
+                            ToolState::Ok => Shown::Ok,
+                            ToolState::Err => Shown::Err,
+                            ToolState::Unknown => Shown::Unknown,
+                            ToolState::Pending if running => Shown::Live,
+                            ToolState::Pending => Shown::Unfinished,
+                        },
+                        name: found
+                            .and_then(|found| found.n.clone())
+                            .unwrap_or_else(|| "tool".into()),
+                        reply: found.and_then(|found| found.r.clone()),
+                    }
+                }
+            };
+            let mut slot = Slot::new(kind, Some(entry.file), entry.offset, block, entry.t);
+            slot.turn = turn_id(owner);
+            slot.first = owner.is_some_and(|turn| started.insert(turn));
+            slots.push(slot);
+        }
+        // Markers after the last entry, from every file, in time order.
+        let mut rest: Vec<(usize, &Event)> = extras
+            .into_iter()
+            .flat_map(|(file, queue)| queue.into_iter().map(move |extra| (file, extra)))
+            .collect();
+        rest.sort_by_key(|(file, extra)| (extra.t, *file, extra.o, extra.b));
+        for (file, extra) in rest {
+            slots.push(extra_slot(extra, file, owner));
+        }
+        if let Some(spawn) = self.handoffs.iter().find(|handoff| {
+            handoff.to == Some(index)
+                && handoff.out.kind == "spawn"
+                && handoff.out.done.is_some()
+                && matches!(handoff.out.status, "done" | "err")
+        }) && let Some(parent) = spawn.from
+        {
+            let mut slot = Slot::new(
+                SlotKind::Returned {
+                    to: self.sessions[parent].key.clone(),
+                    at: spawn.out.done,
+                    failed: spawn.out.status == "err",
+                },
+                None,
+                0,
+                0,
+                spawn.out.done,
+            );
+            slot.turn = turn_id(owner);
+            slots.push(slot);
+        }
+        Transcript::from_slots(slots)
     }
 
     fn entries(&self, index: usize) -> Vec<Entry> {
@@ -2522,11 +2689,21 @@ impl<'a> Builder<'a> {
         open
     }
 
-    fn split(&self, index: usize, entries: &[Entry]) -> Vec<Turn> {
+    /// Returns the turns, each entry's turn (by position in the returned
+    /// list; `None` for entries of a turn with nothing in it), and the prompt
+    /// event of each `u` turn.
+    #[allow(clippy::type_complexity)]
+    fn split(
+        &self,
+        index: usize,
+        entries: &[Entry],
+    ) -> (Vec<Turn>, Vec<Option<usize>>, Vec<(usize, Ref)>) {
         let sid = &self.sessions[index].key;
         let open = self.groups(index, entries);
         let count = open.len();
         let mut turns = Vec::new();
+        let mut owners = vec![None; entries.len()];
+        let mut prompts = Vec::new();
         for (number, turn) in open.into_iter().enumerate() {
             let last = number + 1 == count;
             let sent: Vec<usize> = turn
@@ -2553,6 +2730,17 @@ impl<'a> Builder<'a> {
             ) else {
                 continue;
             };
+            for position in &turn.entries {
+                owners[*position] = Some(turns.len());
+            }
+            if turn.u
+                && let Some(at) = turn
+                    .entries
+                    .first()
+                    .and_then(|position| entries[*position].at)
+            {
+                prompts.push((turns.len(), at));
+            }
             turns.push(Turn {
                 id: match turn.start {
                     Some(handoff) => self.handoffs[handoff].out.id.clone(),
@@ -2563,6 +2751,7 @@ impl<'a> Builder<'a> {
                     .start
                     .map(|handoff| self.handoffs[handoff].out.id.clone()),
                 u: turn.u,
+                text: None,
                 at: turn.at,
                 end,
                 sent: sent
@@ -2574,7 +2763,7 @@ impl<'a> Builder<'a> {
                 last,
             });
         }
-        turns
+        (turns, owners, prompts)
     }
 
     /// How a turn ended, as the mockup's `turnEnd`. `None` for a turn with
@@ -2686,8 +2875,8 @@ impl<'a> Builder<'a> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ToolState {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolState {
     Ok,
     Err,
     /// A Codex call with no structured exit code: neither ok nor failed.
@@ -2704,6 +2893,105 @@ enum EntryKind {
     A,
     Tool(ToolState),
     Gap,
+}
+
+/// How a tool call is drawn: a pending call is live only in the last turn
+/// of a working session, as the model's turn ends and activity read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Shown {
+    Ok,
+    Err,
+    /// A Codex call with no exit status: neither ok nor failed.
+    Unknown,
+    Live,
+    Unfinished,
+}
+
+/// A source file a transcript slot points into.
+#[derive(Clone, Debug)]
+pub(crate) struct SlotFile {
+    pub(crate) path: PathBuf,
+    pub(crate) cwd: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum SlotKind {
+    H(String),
+    U,
+    A,
+    Tool {
+        shown: Shown,
+        name: String,
+        reply: Option<events::Reply>,
+    },
+    Gap,
+    Think,
+    Harness(String),
+    /// A spawned run's return to the session that started it.
+    Returned {
+        to: String,
+        at: Option<i64>,
+        failed: bool,
+    },
+    /// A stub's transcript: nothing of its own in these logs.
+    NoActivity,
+}
+
+/// One transcript entry, as offsets: `/api/tx` reads its text per page.
+#[derive(Clone, Debug)]
+pub(crate) struct Slot {
+    pub(crate) kind: SlotKind,
+    pub(crate) file: Option<usize>,
+    pub(crate) offset: u64,
+    pub(crate) block: u32,
+    pub(crate) t: Option<i64>,
+    /// The turn it belongs to, when that turn is in the model.
+    pub(crate) turn: Option<String>,
+    /// The first entry of its turn.
+    pub(crate) first: bool,
+}
+
+impl Slot {
+    fn new(kind: SlotKind, file: Option<usize>, offset: u64, block: u32, t: Option<i64>) -> Self {
+        Self {
+            kind,
+            file,
+            offset,
+            block,
+            t,
+            turn: None,
+            first: false,
+        }
+    }
+}
+
+/// A session's transcript index and its totals.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Transcript {
+    pub(crate) slots: Vec<Slot>,
+    /// Tool calls, and those that failed or never finished.
+    pub(crate) calls: usize,
+    pub(crate) errors: usize,
+}
+
+impl Transcript {
+    fn from_slots(slots: Vec<Slot>) -> Self {
+        let mut calls = 0;
+        let mut errors = 0;
+        for slot in &slots {
+            if let SlotKind::Tool { shown, .. } = &slot.kind {
+                calls += 1;
+                if matches!(shown, Shown::Err | Shown::Unfinished) {
+                    errors += 1;
+                }
+            }
+        }
+        Self {
+            slots,
+            calls,
+            errors,
+        }
+    }
 }
 
 struct Entry {
@@ -2983,7 +3271,31 @@ fn text_answers(questions: &[Question], text: &str) -> Vec<Answer> {
     result
 }
 
-fn relative(path: &str, cwd: Option<&str>) -> String {
+/// A Codex `apply_patch` call's patch: its raw input, or an `input` or
+/// `patch` argument.
+pub(crate) fn patch_text(input: &Value) -> Option<String> {
+    match input {
+        Value::String(text) => Some(text.clone()),
+        _ => field(input, "input")
+            .or_else(|| field(input, "patch"))
+            .map(str::to_owned),
+    }
+}
+
+/// The files a patch touches, in order.
+pub(crate) fn patch_files(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(|line| {
+            ["*** Update File: ", "*** Add File: ", "*** Delete File: "]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix))
+        })
+        .map(|path| path.trim().to_owned())
+        .collect()
+}
+
+pub(crate) fn relative(path: &str, cwd: Option<&str>) -> String {
     if let Some(cwd) = cwd
         && let Some(rest) = path.strip_prefix(&format!("{}/", cwd.trim_end_matches('/')))
     {
@@ -2998,7 +3310,7 @@ fn relative(path: &str, cwd: Option<&str>) -> String {
 }
 
 /// The one-line argument the mockup shows for a running tool.
-fn arg_summary(name: &str, input: &Value, cwd: Option<&str>) -> String {
+pub(crate) fn arg_summary(name: &str, input: &Value, cwd: Option<&str>) -> String {
     let get = |key: &str| field(input, key).map(str::to_owned);
     let summary = match name {
         "Bash" | "shell" | "exec_command" | "local_shell" => {
@@ -3024,6 +3336,12 @@ fn arg_summary(name: &str, input: &Value, cwd: Option<&str>) -> String {
         "SendMessage" => get("to"),
         "Skill" => get("skill"),
         "Monitor" => get("description").or_else(|| get("command")),
+        "apply_patch" => patch_text(input).and_then(|patch| {
+            patch_files(&patch)
+                .into_iter()
+                .next()
+                .map(|path| relative(&path, cwd))
+        }),
         _ => None,
     };
     let summary = summary.filter(|text| !text.trim().is_empty()).or_else(|| {
@@ -3065,9 +3383,9 @@ pub(crate) fn build(
     builder.questions();
     builder.lineage_states();
     builder.activity();
-    let mut turns = builder.turns();
     #[cfg(test)]
     let texts = builder.texts_by_turn();
+    let (mut turns, mut tx) = builder.turns();
 
     // Stubs span the handoffs that name them.
     for handoff in &builder.handoffs {
@@ -3114,6 +3432,7 @@ pub(crate) fn build(
             keep.extend(handoff.to.clone());
         }
         sessions.retain(|key, _| keep.contains(key));
+        tx.retain(|key, _| keep.contains(key));
         let kept: BTreeSet<&str> = handoffs.iter().map(|handoff| handoff.id.as_str()).collect();
         turns.retain(|turn| {
             sessions.contains_key(&turn.sid)
@@ -3150,7 +3469,34 @@ pub(crate) fn build(
             .flat_map(|session| session.busy.iter().copied())
             .collect(),
     );
+    // A failed send reached no one. The page draws a stub for the addressee
+    // as written, `unsent:<target>`; its transcript lists those sends.
+    let mut unsent: BTreeMap<String, Vec<&Handoff>> = BTreeMap::new();
+    for handoff in &handoffs {
+        if handoff.to.is_none()
+            && let Some(target) = &handoff.target
+        {
+            unsent
+                .entry(format!("unsent:{target}"))
+                .or_default()
+                .push(handoff);
+        }
+    }
+    for (key, sends) in unsent {
+        let mut slots = vec![Slot::new(SlotKind::NoActivity, None, 0, 0, None)];
+        slots.extend(sends.into_iter().map(|handoff| {
+            Slot::new(
+                SlotKind::H(handoff.id.clone()),
+                None,
+                0,
+                0,
+                Some(handoff.at),
+            )
+        }));
+        tx.insert(key, Transcript::from_slots(slots));
+    }
     let busy = BTreeMap::from([(machine.clone(), all_busy)]);
+    let machine_id = machine.clone();
     let machine = Machine {
         id: machine.clone(),
         name: machine,
@@ -3170,12 +3516,22 @@ pub(crate) fn build(
         ))
     );
     let pids = pids.iter().map(|pid| pid.pid).collect();
+    let slot_files = files
+        .iter()
+        .map(|file| SlotFile {
+            path: file.path.clone(),
+            cwd: file.summary.cwd.clone(),
+        })
+        .collect();
     Ok(Built {
         version,
         machine,
         sessions,
         rest: rest[1..].to_owned(),
         pids,
+        machine_id,
+        files: slot_files,
+        tx,
         #[cfg(test)]
         handoffs,
         #[cfg(test)]

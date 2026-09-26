@@ -1,3 +1,506 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><style>body{margin:0}[hidden]{display:none!important}img{max-width:100%}</style></head><body>
+<title>Semon Sessions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+:root {
+  --ground: #ffffff; --side: #f7f7f5; --sunken: #f0f1ee; --bubble: #eeefeb;
+  --ink: #191d1b; --ink-2: #3f4642; --muted: #6f7773; --faint: #9aa19d; --line: #e5e7e3;
+  --accent: #4152c4; --claude: #c0643f; --codex: #2b8070; --you: #4152c4;
+  --work: #1f78c1; --wait: #b9740b; --wait-soft: #faf0da; --err: #c23b3b; --done: #8b928e;
+  --diff-add: #e3f3e8; --diff-del: #fbe8e6;
+  --sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --serif: "Source Serif 4", "Iowan Old Style", Georgia, serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #141817; --side: #181c1b; --sunken: #202523; --bubble: #242927;
+    --ink: #e5e9e6; --ink-2: #c3c9c5; --muted: #8b938f; --faint: #646c68; --line: #272d2a;
+    --accent: #8f9cf0; --claude: #de8a63; --codex: #4fb5a0; --you: #8f9cf0;
+    --work: #58a9ec; --wait: #e2a23a; --wait-soft: #33280f; --err: #ef6b66; --done: #737b77;
+    --diff-add: #173022; --diff-del: #381d1b; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #141817; --side: #181c1b; --sunken: #202523; --bubble: #242927;
+  --ink: #e5e9e6; --ink-2: #c3c9c5; --muted: #8b938f; --faint: #646c68; --line: #272d2a;
+  --accent: #8f9cf0; --claude: #de8a63; --codex: #4fb5a0; --you: #8f9cf0;
+  --work: #58a9ec; --wait: #e2a23a; --wait-soft: #33280f; --err: #ef6b66; --done: #737b77;
+  --diff-add: #173022; --diff-del: #381d1b; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { background: var(--ground); color: var(--ink); font: 14px/1.45 var(--sans); -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+svg { display: block; }
+code, .mono { font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+code { overflow-wrap: anywhere; }
+
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+.dot.work { background: var(--work); animation: pulse 1.8s ease-out infinite; }
+.dot.wait { background: var(--wait); }
+.dot.idle { border: 1.5px solid var(--done); }
+.dot.done { background: var(--done); opacity: .7; }
+.dot.err { background: var(--err); }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--work) 55%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
+.spin { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--line); border-top-color: var(--work); animation: spin .9s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .dot.work, .spin { animation: none; } .sidebar, .scrim, .topbar { transition: none !important; } }
+.h-claude { --h: var(--claude); } .h-codex { --h: var(--codex); } .h-you { --h: var(--you); }
+.icon { width: 18px; height: 18px; flex: none; }
+
+/* ---- Shell ----------------------------------------------------------------- */
+.app { display: grid; grid-template-columns: 296px minmax(0, 1fr); height: 100%; }
+.sidebar { background: var(--side); border-right: 1px solid var(--line); overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; min-height: 0; padding-bottom: 12px; }
+.main { overflow-y: auto; min-width: 0; position: relative; }
+.scrim { display: none; }
+.brandrow { display: flex; align-items: center; gap: 8px; padding: 14px 16px 10px; font-weight: 600; font-size: 15px; }
+.mark { width: 14px; height: 14px; border-radius: 4px; background: linear-gradient(135deg, var(--claude) 0 50%, var(--codex) 50% 100%); flex: none; }
+.brandrow .close { display: none; margin-left: auto; }
+/* Search sits on the same grid as the nav rows below it: same side margin, padding, icon size, gap and height,
+   so its icon and text line up with Home / Machines. */
+.side-search { margin: 0 8px 6px; height: 36px; display: flex; align-items: center; gap: 10px; background: var(--sunken); border-radius: 9px; padding: 0 10px; color: var(--muted); overflow: hidden; }
+.side-search input { border: 0; outline: none; background: transparent; width: 100%; min-width: 0; padding: 0; font-size: 14px; color: var(--ink); }
+.side-search input::placeholder, .find input::placeholder { color: var(--faint); }
+.side-search svg { width: 18px; height: 18px; flex: none; }
+.nav-item { width: calc(100% - 16px); margin: 1px 8px; display: flex; align-items: center; gap: 10px; border: 0; background: none; padding: 8px 10px; border-radius: 9px; text-align: left; font-weight: 500; color: var(--ink-2); }
+@media (hover: hover) { .nav-item:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); } }
+.nav-item[aria-current="page"] { background: var(--sunken); color: var(--ink); }
+.nav-item .cnt { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--faint); font-weight: 400; }
+.nav-item .cnt.hot { color: var(--wait); font-weight: 500; }
+.side-h { display: flex; align-items: center; gap: 6px; margin: 16px 18px 2px; font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase; font-weight: 600; color: var(--muted); }
+.groupby { display: flex; flex-wrap: wrap; gap: 2px; margin: 4px 12px 2px; font-size: 12.5px; }
+.groupby button { border: 0; background: none; padding: 4px 7px; border-radius: 7px; color: var(--muted); }
+.groupby button[aria-pressed="true"] { background: var(--sunken); color: var(--ink); font-weight: 500; }
+.ghead { padding: 10px 18px 2px; font-size: 11.5px; color: var(--faint); display: flex; gap: 6px; }
+.srow { width: calc(100% - 16px); margin: 0 8px; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 0 8px; align-items: center; border: 0; background: none; padding: 6px 10px; border-radius: 9px; text-align: left; }
+@media (hover: hover) { .srow:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); } }
+.srow[aria-current="page"] { background: var(--sunken); }
+.srow .nm { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow .ag { font-size: 11.5px; color: var(--faint); font-family: var(--mono); }
+.srow .fx { grid-column: 2 / 4; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 6px; min-height: 52px; padding: 8px 20px; background: color-mix(in srgb, var(--ground) 92%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid transparent; }
+.topbar.scrolled { border-bottom-color: var(--line); }
+.topbar .ttl { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; justify-content: center; font-weight: 600; font-size: 16px; min-width: 0; }
+.topbar .ttl .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ibtn { display: inline-grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 9px; background: none; color: var(--ink-2); flex: none; }
+@media (hover: hover) { .ibtn:hover { background: var(--sunken); } }
+.ibtn[aria-expanded="true"] { background: var(--sunken); }
+.ibtn svg { width: 20px; height: 20px; }
+.lead { display: none; }
+/* The page title lives only in the top bar. A parent crumb before it ("quill ›") is the way up a level. */
+.topbar .crumb { flex: none; max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 500; }
+@media (hover: hover) { .topbar .crumb:hover { text-decoration: underline; text-underline-offset: 3px; } }
+.topbar .sep { color: var(--faint); font-weight: 400; flex: none; }
+
+.page { max-width: 760px; margin: 0 auto; padding: 4px 28px 72px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+.page > * { min-width: 0; }
+/* Visually hidden: the same title is already in the top bar, but screen readers keep a page heading. */
+.ph h1 { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.ph { padding-top: 6px; }
+/* A detail page's title and summary live in the bar; the page keeps only a heading for screen readers. */
+.ph.sr { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); }
+.ph .sub { color: var(--muted); font-size: 13.5px; display: flex; flex-wrap: wrap; gap: 2px 14px; }
+.ph .sub b { color: var(--ink); font-weight: 600; margin-right: 3px; }
+.sec-h { display: flex; align-items: baseline; gap: 8px; margin: 8px 0 0; font-size: 12px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.sec-h .n { font-family: var(--mono); letter-spacing: 0; color: var(--faint); font-weight: 400; }
+.list { display: grid; grid-template-columns: minmax(0, 1fr); border-top: 1px solid var(--line); }
+.list > * { min-width: 0; }
+.empty { color: var(--muted); font-size: 13.5px; margin: 0; padding: 12px 0; }
+.cw-toggle { justify-self: start; display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13.5px; }
+.cw-toggle .chev { transition: transform .15s; }
+.cw-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.childwork { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: -6px; }
+.cw-body { margin: 6px 0 4px 8px; padding-left: 14px; border-left: 2px solid var(--line); }
+.cw-body > .nested .msg.assistant .body { font-size: 15px; }
+/* Real content has long unbroken paths, ids and commands: every text that comes from a transcript or a handoff
+   may break anywhere, and every grid track holding it may shrink below its content. */
+.hop .body { grid-template-columns: minmax(0, 1fr); }
+.hop .body > *, .hop .meta > *, .turn-h > *, .turn-end > * { min-width: 0; }
+.hop .brief, .hop .result, .hop .sent, .hcard .brief, .hcard .result, .hcard .ln, .ib .q, .ib .ln, .hop .open, .chip-h, .msg .body { overflow-wrap: anywhere; }
+.chip-h { max-width: 100%; text-align: left; }
+
+/* A handoff's sentence: who did what to whom. Used on Home, in traces and in transcripts. */
+.who { font-weight: 600; }
+.verb { color: var(--muted); }
+.chip-h { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+.chip-h::before { content: ""; width: 6px; height: 6px; border-radius: 2px; background: var(--h); }
+.stat { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.stat.work { color: var(--work); } .stat.wait { color: var(--wait); } .stat.err { color: var(--err); } .stat.done, .stat.idle { color: var(--muted); }
+
+/* ---- Inbox ---------------------------------------------------------------- */
+.ib { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 3px 10px; align-items: start; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 14px 0; text-align: left; width: 100%; }
+.ib > svg { width: 18px; height: 18px; margin-top: 1px; color: var(--wait); }
+.ib .ln { min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+.ib .tm { font-family: var(--mono); font-size: 12px; color: var(--faint); padding-top: 1px; }
+.ib .q { grid-column: 2 / 4; font-family: var(--serif); font-size: 16px; line-height: 1.45; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.ib .ctx { grid-column: 2 / 4; font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: center; }
+.ib { cursor: pointer; }
+/* Where the work came from: the message of yours at the root of its trace, one line. */
+.ib .org { grid-column: 2 / 4; min-width: 0; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ib .org .oq { color: var(--ink-2); }
+.ib .ctx .tracebtn { margin: -8px -10px -8px auto; }
+@media (hover: hover) { .ib:hover .q { color: var(--accent); } }
+.ib.quiet > svg { color: var(--faint); }
+.ib.quiet .q { color: var(--ink-2); font-size: 15px; -webkit-line-clamp: 2; }
+
+/* ---- Now -------------------------------------------------------------------- */
+.nrow { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 11px 0; text-align: left; width: 100%; }
+.nrow .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nrow .ag { font-size: 12px; color: var(--faint); }
+.nrow .for, .nrow .act { grid-column: 2 / 4; min-width: 0; }
+.nrow .for { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nrow .act { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-2); }
+.nrow .act code { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; overflow-wrap: normal; }
+.nrow .act .el { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--faint); flex: none; padding-left: 8px; }
+@media (hover: hover) { .nrow:hover .nm { color: var(--accent); } }
+.mhead { display: flex; align-items: baseline; gap: 8px; padding: 16px 0 4px; font-size: 13px; font-weight: 600; }
+.mhead svg { width: 16px; height: 16px; color: var(--faint); align-self: center; }
+.mhead .n { font-family: var(--mono); font-weight: 400; font-size: 12px; color: var(--faint); }
+.mhead .off { font-weight: 400; font-size: 12.5px; color: var(--err); }
+.ph .sub .off { color: var(--err); }
+
+/* ---- Trace: one turn and what it set off, on one rail ------------------------------- */
+.flow { display: grid; grid-template-columns: minmax(0, 1fr); }
+/* One continuous rail through every step. Every node is centred on it (x = 14px) and wears a ring of the
+   page colour so the rail passes cleanly behind it. Depth is never shown by indenting, which breaks the rail;
+   a child agent's step gets a smaller node instead. */
+.hop { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 0 12px; padding: 0 0 20px; }
+.hop::before { content: ""; position: absolute; left: 13px; width: 2px; top: 0; bottom: 0; background: var(--line); }
+.hop:first-child::before { top: 14px; }
+.hop:last-child::before { bottom: auto; height: 14px; }
+.hop:only-child::before { display: none; }
+.hop .node { position: relative; z-index: 1; justify-self: center; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--sunken); color: var(--ink-2); box-shadow: 0 0 0 4px var(--ground); }
+.hop .node svg { width: 15px; height: 15px; }
+.hop.child .node { width: 20px; height: 20px; margin-top: 4px; }
+.hop.child .node svg { width: 12px; height: 12px; }
+.hop.k-toyou .node { background: var(--wait-soft); color: var(--wait); }
+.hop.s-err .node { color: var(--err); }
+.hop.k-move .node { color: var(--accent); }
+.hop .body { min-width: 0; padding-top: 3px; display: grid; gap: 4px; }
+.hop .sent { font-size: 14px; overflow-wrap: anywhere; }
+.hop .sent .tm { font-family: var(--mono); font-size: 12px; color: var(--faint); margin-left: 6px; }
+.hop .brief { font-family: var(--serif); font-size: 15.5px; line-height: 1.45; color: var(--ink-2); max-height: 5.8em; overflow: hidden; }
+.hop .more { justify-self: start; min-height: 36px; margin: -8px 0; border: 0; background: none; padding: 0; color: var(--accent); font-size: 13px; }
+.hop .result { font-size: 13.5px; color: var(--ink-2); }
+.hop .result .rl { color: var(--muted); margin-right: 4px; }
+.hop .meta { display: flex; flex-wrap: wrap; gap: 2px 12px; align-items: center; font-size: 12.5px; color: var(--muted); }
+.hop .meta .stat { white-space: normal; }
+.hop .open { min-height: 36px; border: 0; background: none; padding: 0; color: var(--accent); font-size: 12.5px; text-align: left; }
+.hop .meta .gone { color: var(--faint); }
+.hop.k-root .node { color: var(--h); background: color-mix(in srgb, var(--h) 16%, var(--ground)); }
+/* A handoff whose receiving turn is not in these logs: a hollow node, nothing below it. */
+.hop.stub .node { background: var(--ground); border: 1.5px dashed var(--faint); }
+
+/* ---- Session page ----------------------------------------------------------------- */
+/* An opaque bar: content scrolls under it without showing through. */
+.topbar { background: var(--ground); backdrop-filter: none; -webkit-backdrop-filter: none; }
+.list .more { border: 0; background: none; padding: 10px 0; text-align: left; color: var(--accent); font-size: 13.5px; }
+/* A turn: one stretch of a transcript, from what came in (your message, a relay, a brief) to how it ended. */
+.turns { display: grid; grid-template-columns: minmax(0, 1fr); }
+.turns > * { min-width: 0; }
+.turns > .divider { margin-bottom: 4px; }
+.turn { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 14px 0 16px; border-radius: 6px; transition: background-color .6s ease, box-shadow .6s ease; }
+.turn > * { min-width: 0; }
+/* The divider is drawn apart from the box, so the box's rounded corners (for the deep-link mark) don't bend it. */
+.turn + .turn::before { content: ""; position: absolute; top: 0; left: 0; right: 0; border-top: 1px solid var(--line); }
+/* A deep link marks its turn for a moment; the shadow pads the mark without moving anything. */
+.turn.flash { background: color-mix(in srgb, var(--accent) 10%, transparent); box-shadow: 0 0 0 8px color-mix(in srgb, var(--accent) 10%, transparent); transition: none; }
+.turn-h { display: flex; align-items: center; gap: 8px; min-height: 36px; margin: 0 0 -4px; font: inherit; font-size: 13.5px; font-weight: 400; color: var(--ink-2); }
+.turn-h > svg { width: 16px; height: 16px; flex: none; color: var(--h); }
+.turn-h .lbl { display: flex; align-items: center; min-width: 0; }
+.turn-h .verb { flex: none; white-space: pre; }
+.turn-h .from { min-height: 36px; min-width: 0; border: 0; background: none; padding: 0; color: var(--accent); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (hover: hover) { .turn-h .from:hover { text-decoration: underline; text-underline-offset: 3px; } }
+.turn-h .tm { margin-left: auto; padding-left: 8px; flex: none; font-family: var(--mono); font-size: 12px; color: var(--faint); }
+.turn-end { display: flex; align-items: center; gap: 8px; min-height: 36px; margin-bottom: -6px; }
+.turn-end .stat { white-space: normal; }
+.tracebtn { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 6px; min-height: 36px; border: 0; background: none; padding: 0 10px; margin-right: -10px; border-radius: 9px; color: var(--accent); font-size: 13.5px; }
+@media (hover: hover) { .tracebtn:hover { background: var(--sunken); } }
+.tracebtn svg { width: 16px; height: 16px; }
+@media (prefers-reduced-motion: reduce) { .turn { transition: none; } }
+.menu { position: absolute; right: 16px; top: calc(100% + 4px); z-index: 20; width: min(300px, calc(100vw - 32px)); background: var(--ground); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgb(0 0 0 / .12); padding: 6px; }
+.menu button { display: flex; width: 100%; align-items: center; gap: 10px; border: 0; background: none; padding: 9px 10px; border-radius: 8px; text-align: left; color: var(--ink); font-size: 14px; }
+@media (hover: hover) { .menu button:hover { background: var(--sunken); } }
+.menu dl { margin: 6px 0 2px; padding: 8px 10px 4px; border-top: 1px solid var(--line); display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 13px; }
+.menu dt { color: var(--faint); } .menu dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+
+/* Transcript, modelled on Claude's chat */
+.find { display: flex; align-items: center; height: 38px; background: var(--sunken); border-radius: 9px; padding: 0 10px; overflow: hidden; }
+.find input { border: 0; outline: none; background: transparent; width: 100%; min-width: 0; padding: 0; font-size: 14px; }
+.filters { display: flex; flex-wrap: wrap; gap: 4px 18px; background: var(--sunken); border-radius: 10px; padding: 8px 12px; }
+.filters label { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; min-height: 30px; }
+.filters input { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; }
+/* The transcript filter drops down from its button in the bar, over the page, so nothing below moves. */
+.filters.pop { position: absolute; top: calc(100% + 4px); right: 16px; z-index: 20; display: grid; gap: 0; min-width: 200px; background: var(--ground); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgb(0 0 0 / .12); padding: 4px 12px; }
+.filters.pop label { min-height: 40px; }
+.find > svg { width: 18px; height: 18px; flex: none; margin-right: 8px; color: var(--muted); }
+.tx { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.tx > * { min-width: 0; }
+.divider { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--faint); text-align: center; }
+.divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); min-width: 16px; }
+.msg .body { line-height: 1.5; }
+.msg .body p { margin: 0 0 7px; } .msg .body p:last-child, .msg .body ul:last-child { margin-bottom: 0; }
+.msg .body ul { margin: 0 0 7px; padding-left: 20px; } .msg .body li + li { margin-top: 2px; }
+.msg .body code { font-size: .84em; background: var(--sunken); padding: 1px 5px; border-radius: 5px; }
+/* Markdown in messages and briefs. Code blocks and tables scroll sideways inside their own box; the page never does. */
+.md p { margin: 0 0 7px; } .md ul, .md ol { margin: 0 0 7px; padding-left: 22px; } .md li + li { margin-top: 2px; }
+.md li > ul, .md li > ol { margin: 2px 0 0; } .md > :last-child, .md li > :last-child { margin-bottom: 0; }
+.md .mh { margin: 10px 0 4px; font-weight: 600; color: var(--ink); } .md .mh1 { font-size: 1.2em; } .md .mh2 { font-size: 1.1em; } .md > .mh:first-child { margin-top: 0; }
+.md blockquote { margin: 0 0 7px; padding-left: 12px; border-left: 3px solid var(--line); color: var(--ink-2); }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
+.md a, .answer a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.md .codeblock { margin: 0 0 7px; max-width: 100%; overflow-x: auto; background: var(--sunken); border-radius: 8px; }
+.md .codeblock pre { margin: 0; padding: 8px 12px; width: max-content; min-width: 100%; font: 12.5px/1.45 var(--mono); white-space: pre; color: var(--ink-2); }
+.md .tbl { margin: 0 0 7px; max-width: 100%; overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+.md table { border-collapse: collapse; min-width: 100%; font-family: var(--sans); font-size: 13.5px; line-height: 1.4; }
+.md th, .md td { padding: 6px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); overflow-wrap: break-word; min-width: 5em; }
+.md tr:last-child td { border-bottom: 0; }
+.md th { font-weight: 600; color: var(--ink); background: var(--sunken); }
+.md td code, .md th code { white-space: nowrap; overflow-wrap: normal; }
+.brief.md code { font-size: .9em; }
+/* What you answered, under a question that went to you. */
+.answer ol { margin: 2px 0 0; padding-left: 20px; } .answer.none { color: var(--muted); }
+.ib .ans { grid-column: 2 / 4; min-width: 0; font-size: 13px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Your message's time sits under it, right-aligned, as in a chat. */
+.msg-tm { justify-self: end; margin-top: -10px; font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+.msg.user { justify-self: end; max-width: min(85%, 600px); background: var(--bubble); border-radius: 18px; padding: 8px 14px; }
+.msg.user .body { font-size: 15px; line-height: 1.45; }
+.msg.user .body code { background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.msg.assistant { max-width: 68ch; }
+.msg.assistant .body { font-family: var(--serif); font-size: 16px; color: var(--ink); }
+.think { justify-self: start; display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0; color: var(--muted); font-size: 13.5px; }
+.chev { width: 14px; height: 14px; flex: none; }
+.harness-note { font-size: 12.5px; color: var(--faint); font-style: italic; }
+.steps { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; border-left: 2px solid var(--line); padding-left: 12px; margin-left: 2px; }
+.steps > * { min-width: 0; }
+.step > button, .step.live { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: none; padding: 3px 6px; margin-left: -6px; border-radius: 7px; text-align: left; color: var(--muted); font-size: 13.5px; min-width: 0; }
+@media (hover: hover) { .step > button:hover { background: var(--sunken); } }
+.step > button > svg:first-child { width: 16px; height: 16px; flex: none; }
+.step .sv { flex: none; }
+.step .sa { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; overflow-wrap: normal; }
+.step .sd { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--faint); flex: none; padding-left: 8px; }
+.step .chev { color: var(--faint); transition: transform .15s; }
+.step > button[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.step.err .sv, .step.err .sd, .step.err > button > svg:first-child { color: var(--err); }
+.tgroup { display: grid; grid-template-columns: minmax(0, 1fr); }
+.tsum { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: none; padding: 3px 6px; margin-left: -6px; border-radius: 7px; text-align: left; color: var(--muted); font-size: 13.5px; min-width: 0; }
+@media (hover: hover) { .tsum:hover { background: var(--sunken); } }
+.tsum > svg:first-child { width: 16px; height: 16px; flex: none; }
+.tsum .tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tsum .tf { color: var(--err); flex: none; } .tsum .tl { color: var(--work); flex: none; }
+.tsum .chev { margin-left: auto; color: var(--faint); transition: transform .15s; }
+.tsum[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.tgroup > .steps { margin-top: 2px; }
+.step .out { margin: 4px 0 8px; border-radius: 10px; background: var(--sunken); overflow: hidden; }
+.step .out pre { margin: 0; padding: 8px 12px; font: 12px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
+.step .out .io { padding: 7px 12px 0; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.step .out .io + pre { padding-top: 3px; }
+.step .out pre.in { color: var(--ink); }
+.step .out pre.in + .io { border-top: 1px solid var(--line); margin-top: 2px; }
+.step .out .noout { padding: 3px 12px 8px; font-size: 12.5px; color: var(--faint); }
+.step .out .cutnote { padding: 0 12px 8px; font-size: 12px; color: var(--faint); }
+/* An expanded step is a preview: each block stops at about eleven lines and fades. "View all" opens the whole call. */
+.step .out .clip { max-height: 15.6em; overflow: hidden; }
+.step .out .clip.clipped { -webkit-mask-image: linear-gradient(#000 calc(100% - 32px), transparent); mask-image: linear-gradient(#000 calc(100% - 32px), transparent); }
+.step .out .diff.clip { max-height: 16.5em; }
+.step .out .viewall { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 40px; border: 0; border-top: 1px solid var(--line); background: none; padding: 8px 12px; color: var(--accent); font-size: 13.5px; }
+.step .out .viewall svg { width: 15px; height: 15px; }
+@media (hover: hover) { .step .out .viewall:hover { background: color-mix(in srgb, var(--sunken) 60%, var(--line)); } }
+/* The whole call: a full-screen sheet on phones, a dialog on wider screens. Text wraps; nothing scrolls sideways. */
+html.viewer-open, html.viewer-open body { overflow: hidden; }
+dialog.viewer { padding: 0; border: 0; color: var(--ink); background: var(--ground); }
+dialog.viewer[open] { display: flex; flex-direction: column; }
+dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
+.viewer .vh { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 8px; padding: 10px 8px 10px 16px; border-bottom: 1px solid var(--line); }
+.viewer .vt { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 15px; font-weight: 600; }
+.viewer .vt svg { width: 17px; height: 17px; flex: none; color: var(--muted); }
+.viewer .vt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.viewer .vm { grid-column: 1; font-size: 12.5px; color: var(--muted); }
+.viewer .vm.err { color: var(--err); }
+.viewer .vclose { grid-row: 1 / 3; grid-column: 2; width: 40px; height: 40px; display: grid; place-items: center; border: 0; background: none; border-radius: 10px; color: var(--ink-2); }
+@media (hover: hover) { .viewer .vclose:hover { background: var(--sunken); } }
+.viewer .vclose svg { width: 20px; height: 20px; }
+.viewer .vb { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; padding: 4px 16px 24px; }
+.viewer .vs { display: flex; align-items: center; justify-content: space-between; margin: 14px 0 6px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.viewer .vcopy { display: inline-flex; align-items: center; gap: 5px; border: 0; background: none; padding: 4px 6px; margin-right: -6px; border-radius: 7px; font-size: 12.5px; letter-spacing: 0; text-transform: none; color: var(--accent); }
+.viewer .vcopy svg { width: 14px; height: 14px; }
+@media (hover: hover) { .viewer .vcopy:hover { background: var(--sunken); } }
+.viewer pre { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--sunken); font: 12.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
+.viewer pre.in { color: var(--ink); }
+.viewer .diff { border-radius: 10px; background: var(--sunken); }
+.viewer .vnote { margin: 8px 0 0; font-size: 12.5px; color: var(--faint); }
+@media (max-width: 760px) {
+  dialog.viewer { position: fixed; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; }
+  .viewer .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
+  .viewer .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
+}
+@media (min-width: 761px) {
+  dialog.viewer { width: min(760px, calc(100vw - 48px)); max-height: 85vh; margin: auto; border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 20px 60px rgb(0 0 0 / .25); overflow: hidden; }
+}
+.diff { font: 12px/1.45 var(--mono); padding: 6px 0; }
+.diff div { padding: 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff .add { background: var(--diff-add); } .diff .del { background: var(--diff-del); } .diff .ctx { color: var(--muted); }
+/* A handoff inside a transcript: flat, marked by direction icon and the counterpart's colour. */
+.hcard { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 3px 10px; align-items: start; border: 0; border-left: 2px solid var(--h); background: color-mix(in srgb, var(--sunken) 55%, transparent); border-radius: 0 10px 10px 0; padding: 9px 12px; text-align: left; width: 100%; }
+.hcard > svg { width: 16px; height: 16px; margin-top: 2px; color: var(--h); }
+.hcard .ln { font-size: 13.5px; min-width: 0; overflow-wrap: anywhere; }
+/* A brief is markdown: three lines show, then it fades; Show more opens it in place. */
+.hcard .brief { grid-column: 2 / 4; font-size: 13.5px; line-height: 1.45; color: var(--ink-2); max-height: 4.35em; overflow: hidden; }
+.hcard .brief.clipped, .hop .brief.clipped { -webkit-mask-image: linear-gradient(#000 calc(100% - 1.45em), transparent); mask-image: linear-gradient(#000 calc(100% - 1.45em), transparent); }
+.hcard { cursor: pointer; }
+.hcard.open .brief, .hop .brief.open { max-height: none; overflow: visible; -webkit-mask-image: none; mask-image: none; }
+.hcard .more { grid-column: 2 / 4; justify-self: start; border: 0; background: none; padding: 2px 0; margin: -2px 0 0; font-size: 13px; color: var(--accent); }
+@media (hover: hover) { .hcard .more:hover { text-decoration: underline; } }
+.hcard .result { grid-column: 2 / 4; font-size: 13px; color: var(--muted); }
+.hcard .result b { font-weight: 500; color: var(--ink-2); }
+@media (hover: hover) { .hcard:hover .ln .who { color: var(--accent); } }
+.hcard.toyou { --h: var(--wait); background: var(--wait-soft); }
+.hcard.move { --h: var(--accent); }
+/* The relay or brief that starts a turn: just its text. The turn header already says who sent it. */
+.hcard.start { grid-template-columns: minmax(0, 1fr); }
+.hcard.start > svg, .hcard.start > .ln, .hcard.start > .stat { display: none; }
+.hcard.start > .brief, .hcard.start > .more, .hcard.start > .result { grid-column: 1 / -1; }
+
+/* ---- Top bar: always visible. A detail page's title is two lines: its name, then a summary that ellipsizes. ---- */
+.topbar .l1 { display: flex; align-items: baseline; gap: 6px; min-width: 0; line-height: 20px; }
+.topbar.detail .ttl { min-height: 40px; }
+.topbar.detail .l1 { font-size: 15.5px; }
+.topbar .l2 { display: flex; align-items: center; min-width: 0; margin-top: 1px; font-size: 12.5px; line-height: 17px; font-weight: 400; color: var(--muted); white-space: nowrap; }
+.topbar .l2 > * { flex: none; }
+.topbar .l2 .stat { gap: 5px; font-size: 12.5px; }
+.topbar .l2 .sep { white-space: pre; }
+.topbar .l2 .rest { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The whole title block opens the session's details. Its text is drawn over that button and lets taps through,
+   except the crumb and the errors link, which keep their own. */
+.topbar .hit { position: absolute; inset: 0; z-index: 0; border: 0; background: none; padding: 0; border-radius: 8px; }
+@media (hover: hover) { .topbar .hit:hover { background: var(--sunken); } }
+.topbar .ttl > .l1, .topbar .ttl > .l2 { position: relative; z-index: 1; pointer-events: none; }
+.topbar .l1 .crumb, .topbar .l2 .errs { pointer-events: auto; }
+.topbar .l1 .crumb { padding: 8px 0; margin: -8px 0; }
+.topbar .l2 .errs { display: inline-flex; align-items: center; min-height: 36px; margin: -10px 0; border: 0; background: none; padding: 0; font: inherit; font-weight: 500; color: var(--err); text-decoration: underline; text-underline-offset: 3px; }
+.topbar.searching { gap: 8px; }
+.topbar .find { flex: 1 1 auto; min-width: 0; }
+.topbar .fcount { flex: none; font-family: var(--mono); font-size: 12px; color: var(--muted); padding-right: 4px; }
+.ibtn.on { color: var(--accent); }
+/* ---- Sessions page and the sidebar's short list ---- */
+.page .groupby { margin: 0; gap: 6px; font-size: 13.5px; }
+.page .groupby button { min-height: 36px; padding: 0 12px; border-radius: 9px; }
+.nrow .kids { grid-column: 2 / 4; font-size: 12.5px; color: var(--muted); }
+.side-all { width: calc(100% - 16px); margin: 4px 8px 0; display: flex; align-items: center; min-height: 36px; border: 0; background: none; padding: 0 10px; border-radius: 9px; color: var(--accent); font-weight: 500; text-align: left; }
+@media (hover: hover) { .side-all:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); } }
+
+/* ---- Timeline: sessions as rows, time across. The labels stay put; only the chart scrolls sideways, and its axis
+   follows it. Rows, bars and marks are placed in px from one time-to-x map, so everything lines up at any zoom. ---- */
+.page.wide { max-width: 1120px; }
+.tl-legend { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.tl-ctl { display: flex; align-items: center; gap: 4px; }
+.tl-ctl .zl { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 60px; text-align: center; }
+.tl-ctl .ibtn:disabled { opacity: .35; cursor: default; }
+.tl-tog { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 18px; background: none; color: var(--muted); font-size: 13px; }
+.tl-tog[aria-pressed="true"] { background: var(--sunken); border-color: transparent; color: var(--ink); }
+.tl { --lw: 116px; display: grid; grid-template-columns: minmax(0, 1fr); }
+.tl-axisrow { position: sticky; top: var(--barh, 50px); z-index: 4; display: grid; grid-template-columns: var(--lw) minmax(0, 1fr); height: 36px; background: var(--ground); border-bottom: 1px solid var(--line); }
+.tl-axisclip { position: relative; overflow: hidden; min-width: 0; border-left: 1px solid var(--line); }
+.tl-axis { position: absolute; top: 0; bottom: 0; left: 0; }
+.tl-tick { position: absolute; bottom: 0; width: 0; height: 5px; border-left: 1px solid var(--line); }
+.tl-hr { position: absolute; bottom: 6px; transform: translateX(-50%); font-family: var(--mono); font-size: 10.5px; line-height: 14px; color: var(--faint); white-space: nowrap; }
+.tl-day { position: absolute; top: 2px; padding-left: 3px; border-left: 1px solid var(--faint); font-size: 11px; line-height: 13px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.tl-axgap { position: absolute; top: 0; bottom: 0; width: 28px; display: grid; place-items: end center; padding-bottom: 6px; background: var(--sunken); font-size: 9.5px; line-height: 14px; color: var(--muted); white-space: nowrap; }
+.tl-body { display: grid; grid-template-columns: var(--lw) minmax(0, 1fr); }
+.tl-labels { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; min-width: 0; }
+.tl-lab, .tl-disc { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 0 6px 0 0; text-align: left; }
+.tl-lab { color: var(--ink); font-size: 13.5px; }
+.tl-lab .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.tl-lab.top .nm { font-weight: 600; }
+.tl-lab .gd { align-self: stretch; flex: none; }
+.tl-lab.child .gd { border-right: 1px solid var(--line); }
+.tl-lab .dot.hollow { background: none; border: 1.5px dashed var(--done); }
+.tl-disc { color: var(--accent); font-size: 12px; }
+.tl-disc > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-disc .gd { align-self: stretch; flex: none; }
+.tl-scroll { position: relative; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; min-width: 0; border-left: 1px solid var(--line); }
+.tl-canvas { position: relative; }
+.tl-track { position: absolute; left: 0; right: 0; border-bottom: 1px solid var(--line); }
+.tl-track.disc { background: color-mix(in srgb, var(--sunken) 45%, transparent); }
+/* A collapsed stretch with nothing anywhere: a narrow band with a double line across every row. */
+.tl-gap { position: absolute; top: 0; bottom: 0; width: 28px; background: var(--sunken); }
+.tl-gap::before { content: ""; position: absolute; top: 0; bottom: 0; left: 11px; width: 3px; border-left: 1.5px solid var(--faint); border-right: 1.5px solid var(--faint); }
+.tl-now { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--accent); }
+.tl-hit { position: absolute; border: 0; background: none; padding: 0; color: inherit; }
+.tl-barhit { z-index: 1; } .tl-conn { z-index: 2; } .tl-mark { z-index: 3; width: 36px; height: 36px; }
+.tl-bar { position: absolute; top: 50%; height: 12px; margin-top: -6px; border-radius: 3px; background: var(--h); }
+.tl-bar.live { animation: tlpulse 1.8s ease-in-out infinite; }
+@keyframes tlpulse { 50% { opacity: .55; } }
+.tl-bar.fail::after { content: ""; position: absolute; right: -2px; top: -3px; bottom: -3px; width: 3px; border-radius: 1px; background: var(--err); }
+.tl-sum { position: absolute; top: 50%; height: 4px; margin-top: -2px; border-radius: 2px; background: var(--faint); }
+.tl-mark .vis { position: absolute; left: 50%; top: 50%; box-shadow: 0 0 0 2px var(--ground); }
+.tl-mark.ask .vis { width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; background: var(--you); }
+.tl-mark.ty .vis { width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; transform: rotate(45deg); background: var(--wait); }
+.tl-mark.ty.done .vis { background: var(--faint); }
+.tl-conn .ln { position: absolute; left: 18px; width: 0; border-left: 1.5px dashed var(--muted); }
+.tl-conn.sp .ln { border-left-style: solid; border-left-color: var(--ink-2); }
+.tl-conn .ft { position: absolute; left: 18px; width: 10px; height: 0; border-top: 1.5px solid var(--ink-2); }
+.tl-conn .hd { position: absolute; left: 14.25px; width: 0; height: 0; border-left: 4.5px solid transparent; border-right: 4.5px solid transparent; }
+.tl-conn .hd.dn { margin-top: -7px; border-top: 7px solid var(--muted); }
+.tl-conn .hd.up { border-bottom: 7px solid var(--muted); }
+.tl.norel .tl-conn.rel { display: none; }
+@media (min-width: 761px) { .tl { --lw: 200px; } }
+@media (max-width: 760px) { .tl-axisrow { top: calc(var(--barh, 50px) + env(safe-area-inset-top, 0px)); } }
+@media (prefers-reduced-motion: reduce) { .tl-bar.live { animation: none; } }
+
+/* ---- Phone: sidebar becomes a left drawer; the top bar stays ---- */
+@media (max-width: 760px) {
+  body { font-size: 15px; }
+  .app { display: block; height: auto; min-height: 100%; }
+  .main { overflow: visible; }
+  .sidebar { position: fixed; inset: 0 auto 0 0; width: min(86vw, 330px); z-index: 30; transform: translateX(-100%); visibility: hidden; transition: transform .24s ease, visibility 0s linear .24s;
+    padding-top: env(safe-area-inset-top, 0px); padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+  body.drawer-open .sidebar { transform: none; visibility: visible; transition: transform .24s ease; }
+  .scrim { display: block; position: fixed; inset: 0; z-index: 25; background: rgb(0 0 0 / .32); opacity: 0; pointer-events: none; transition: opacity .24s ease; }
+  body.drawer-open .scrim { opacity: 1; pointer-events: auto; }
+  body.drawer-open { overflow: hidden; }
+  .brandrow .close { display: inline-grid; }
+  /* iOS zooms on focus below 16px. Keep 16px for layout, draw it at 15px to match the phone's text size. */
+  .side-search input, .find input { font-size: 16px; transform: scale(.9375); transform-origin: left center; width: calc(100% / .9375); }
+  .side-search, .find { height: 42px; min-height: 42px; flex: none; }
+  .nav-item { padding-block: 10px; }
+  .srow { padding-block: 8px; }
+  .groupby button { padding: 6px 8px; }
+  .topbar { top: env(safe-area-inset-top, 0px); padding: 6px 10px; min-height: 50px; }
+  .topbar.detail { min-height: 56px; }
+  .lead { display: inline-grid; }
+  .page { padding: 2px 16px 56px; gap: 16px; }
+  .msg.user { max-width: 88%; }
+  .step > button, .step.live { min-height: 36px; }
+  .menu, .filters.pop { right: 10px; }
+}
+</style>
+
+<div class="app">
+  <aside class="sidebar" id="sidebar" aria-label="Navigation">
+    <div class="brandrow"><span class="mark" aria-hidden="true"></span>Semon
+      <button class="ibtn close" id="drawer-close" type="button" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <label class="side-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4"/></svg><input id="q" type="search" placeholder="Search" autocomplete="off"></label>
+    <div id="nav"></div>
+    <div class="side-h">Recent</div>
+    <div id="lanes"></div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+  <div class="main" id="main">
+    <header class="topbar" id="topbar"></header>
+    <div class="page" id="page"></div>
+  </div>
+</div>
+
+<script>
 (() => {
   // ====================================================================================
   // Model: sessions are places; handoffs are how work moves between them (ask: you → session,
@@ -5,16 +508,109 @@
   // machine, toyou: session → you). A turn is one stretch of a session's transcript, from an
   // incoming ask, relay or brief to the next one. A trace follows a turn's outgoing handoffs to
   // the turns they started, recursively. Both are computed from what the logs record.
-  // Harness, machine, project and role are facets, never a hierarchy. Real data from this machine's logs.
+  // Harness, machine, project and role are facets, never a hierarchy. All data is made up.
   // ====================================================================================
-  // Data: /api/model fills these when the page loads (boot), and /api/tx fills TX a page at a time.
-  let NOW = Date.now();
-  const MACHINE = {};
-  const MACHINE_UP = {};
+  const T = (h, m) => h * 60 + m; const NOW = T(12, 40);
+  const MACHINE = { laptop: "laptop", studio: "mac-studio", buildbox: "buildbox", cloud: "claude.ai cloud" };
+  const MACHINE_UP = { laptop: true, studio: true, buildbox: false, cloud: true };
   const HARNESS = { claude: "Claude Code", codex: "Codex" };
-  const SESS = {};
-  const H = [];
-  const TX = {};
+
+  // Sessions. lane = a top-level session you work with directly (named lanes and direct runs).
+  const SESS = {
+    principal: { busy: [[T(7, 12), T(7, 14)], [T(7, 30), T(7, 48)], [T(9, 8), T(9, 12)], [T(9, 46), T(9, 50)]], name: "Principal", role: true, lane: true, harness: "claude", machine: "laptop", model: "opus-5.5", state: "wait", start: T(7, 30), last: T(9, 50), tokens: [0.52, 44.1, 0.23] },
+    sentinel:  { busy: [[T(6, 0), T(6, 4)], [T(6, 30), T(6, 32)], [T(7, 0), T(7, 13)], [T(7, 40), T(7, 42)], [T(8, 20), T(8, 22)], [T(9, 0), T(9, 2)], [T(9, 40), T(9, 42)], [T(10, 20), T(10, 22)], [T(11, 0), T(11, 2)], [T(11, 40), T(11, 42)], [T(12, 20), T(12, 22)], [T(12, 38), NOW]], name: "Sentinel", role: true, lane: true, harness: "claude", machine: "cloud", model: "sonnet-5", state: "work", start: T(6, 0), last: NOW, tokens: [0.12, 9.4, 0.03], activity: ["Bash", "gh run list --status failure", 1] },
+    advisor:   { busy: [[T(9, 10), T(9, 45)]], name: "Advisor", role: true, lane: true, harness: "claude", machine: "laptop", model: "opus-5.5", state: "idle", start: T(9, 10), last: T(9, 45), tokens: [0.07, 3.1, 0.04] },
+    harbor:    { busy: [[T(8, 5), T(8, 12)], [T(11, 40), NOW]], name: "harbor", repo: "harbor", branch: "main", lane: true, harness: "claude", machine: "laptop", model: "opus-5.5", state: "work", start: T(8, 5), last: NOW, tokens: [0.41, 38.2, 0.19], activity: ["Bash", "cargo test -p harbor-sync", 42] },
+    "h-codex": { busy: [[T(11, 52), NOW]], name: "feat/offline-sync", repo: "harbor", branch: "feat/offline-sync", kind: "Codex run", harness: "codex", machine: "laptop", model: "gpt-6-luna", state: "work", start: T(11, 52), last: NOW, tokens: [0.9, 11.4, 0.06], activity: ["apply_patch", "crates/sync/src/queue.rs", 6] },
+    "h-review":{ busy: [[T(12, 31), NOW]], name: "Review offline-sync diff", repo: "harbor", kind: "Subagent", harness: "claude", machine: "laptop", model: "sonnet-5", state: "work", start: T(12, 31), last: NOW, tokens: [0.05, 1.8, 0.01], activity: ["Read", "crates/sync/src/flush.rs", 2] },
+    quill:     { busy: [[T(10, 10), T(10, 41)], [T(11, 15), T(11, 21)], [T(12, 5), T(12, 32)]], name: "quill", repo: "quill", branch: "feat/pdf-export", lane: true, harness: "claude", machine: "studio", model: "opus-5.5", state: "wait", start: T(10, 10), last: T(12, 32), tokens: [0.22, 19.7, 0.11] },
+    "q-plan":  { busy: [[T(10, 40), T(11, 15)]], name: "Draft the migration plan", repo: "quill", kind: "Subagent", harness: "claude", machine: "studio", model: "opus-5.5", state: "done", start: T(10, 40), last: T(11, 15), tokens: [0.12, 5.3, 0.03] },
+    "q-codex": { busy: [[T(11, 20), T(12, 5)]], name: "feat/pdf-export", repo: "quill", branch: "feat/pdf-export", kind: "Codex run", harness: "codex", machine: "studio", model: "gpt-6-luna", state: "err", start: T(11, 20), last: T(12, 5), tokens: [0.7, 9.8, 0.05] },
+    atlas:     { busy: [[T(10, 30), T(11, 2)], [T(11, 7), T(11, 8)]], name: "atlas", repo: "atlas", branch: "infra/staging-net", lane: true, harness: "claude", machine: "laptop", movedFrom: "buildbox", model: "opus-5.5", state: "wait", start: T(10, 30), last: T(11, 8), tokens: [0.18, 12.6, 0.07] },
+    deps:      { busy: [[T(12, 20), NOW]], name: "deps audit", repo: "meridian", branch: "chore/deps-audit", lane: true, harness: "codex", machine: "laptop", model: "gpt-6-luna", state: "work", start: T(12, 20), last: NOW, tokens: [0.3, 2.2, 0.02], activity: ["shell", "cargo audit --json", 11] },
+    ledger:    { busy: [[T(7, 10), T(7, 23)], [T(7, 31), T(8, 2)]], name: "ledger", repo: "ledger", branch: "fix/rounding", lane: true, harness: "claude", machine: "laptop", model: "opus-5.5", state: "done", start: T(7, 10), last: T(8, 2), tokens: [0.06, 3.9, 0.03] },
+    "l-sub":   { busy: [[T(7, 22), T(7, 31)]], name: "Find rounding call sites", repo: "ledger", kind: "Subagent", harness: "claude", machine: "laptop", model: "haiku-4.5", state: "done", start: T(7, 22), last: T(7, 31), tokens: [0.02, 0.6, 0.01] },
+  };
+  for (const [id, s] of Object.entries(SESS)) s.id = id;
+
+  // Handoffs. kind: ask (you → session), spawn (session → subagent / Codex run), relay (lane → lane),
+  // move (takeover to another machine), toyou (session → you: question, result or decision).
+  const H = [
+    { id: "h1", t: "t1", kind: "ask", from: "you", to: "harbor", at: T(11, 40), status: "work", brief: "Run the sync tests again; if `retry_backoff` still fails, fix it and hand the offline flush to Codex." },
+    { id: "h2", t: "t1", kind: "spawn", from: "harbor", to: "h-codex", at: T(11, 52), status: "work", brief: "Implement the offline queue flush (#212): flush oldest first, stop at the first `Nack`. Acceptance: the new `flush_*` tests pass." },
+    { id: "h3", t: "t1", kind: "spawn", from: "harbor", to: "h-review", at: T(12, 31), status: "work", brief: "Review Codex's diff on `feat/offline-sync` as it lands: ordering, `Nack` handling, no commit before `Ack`." },
+    { id: "h4", t: "t2", kind: "ask", from: "you", to: "quill", at: T(10, 10), status: "done", brief: "Add PDF export for invoices. Plan the migration first, then have Codex implement it." },
+    { id: "h5", t: "t2", kind: "spawn", from: "quill", to: "q-plan", at: T(10, 40), status: "done", done: T(11, 15), brief: "Draft a migration plan for an `export_jobs` table: columns, indexes, rollback, backfill.", result: "`export_jobs` with a nullable `pdf_path`, one index, no backfill." },
+    { id: "h6", t: "t2", kind: "spawn", from: "quill", to: "q-codex", at: T(11, 20), status: "err", done: T(12, 5), brief: "Implement PDF export per the plan. Acceptance: unit tests and the `layout` suite pass.", result: "PR #219 pushed; the layout suite fails on `invoice_multi_page` and `invoice_rtl`." },
+    { id: "h7", t: "t2", kind: "toyou", ask: "question", from: "quill", to: "you", at: T(12, 32), status: "wait", brief: "Codex's PR #219 fails two layout tests. Both look like the page-break rule. Should I send it back to Codex with the failing cases, or would you rather look at the RTL layout first?" },
+    { id: "h8", t: "t3", kind: "ask", from: "you", to: "principal", at: T(7, 30), status: "done", brief: "Morning sweep: what's open across the repos, and did anything fail overnight?" },
+    { id: "h9", t: "t3", kind: "relay", from: "sentinel", to: "principal", at: T(7, 12), status: "done", brief: "New failure on quill `main`: layout / pdf-render. Not flaky: failed twice." },
+    { id: "h10", t: "t3", kind: "relay", from: "principal", to: "advisor", at: T(9, 10), status: "done", done: T(9, 45), brief: "Second opinion: is moving the sync queue to SQLite worth it this quarter?", result: "Not this quarter. Revisit when offline sync (#212) lands and there are real queue sizes." },
+    { id: "h11", t: "t3", kind: "toyou", ask: "result", from: "principal", to: "you", at: T(9, 50), status: "wait", brief: "Sweep done: 2 CI failures (quill is real, ledger was flaky), 5 open PRs, and the SQLite queue move is deferred on Advisor's advice." },
+    { id: "h12", t: "t4", kind: "ask", from: "you", to: "atlas", at: T(10, 30), status: "done", brief: "Apply the new staging network plan and confirm the services come back healthy." },
+    { id: "h13", t: "t4", kind: "move", from: "atlas", to: "atlas", fromMachine: "buildbox", toMachine: "laptop", at: T(11, 7), status: "done", brief: "buildbox stopped responding at 11:02. Its lease expired at 11:05, and Semon restored atlas on laptop from the replicated log (epoch 1)." },
+    { id: "h14", t: "t4", kind: "toyou", ask: "decision", from: "atlas", to: "you", at: T(11, 8), status: "wait", brief: "One tool call didn't finish before the move: `terraform apply -auto-approve`. Check the real infrastructure state before I resume." },
+    { id: "h15", t: "t5", kind: "ask", from: "you", to: "deps", at: T(12, 20), status: "work", brief: "Audit meridian's Cargo dependencies for advisories and yanked versions. Report only." },
+    { id: "h16", t: "t6", kind: "ask", from: "you", to: "ledger", at: T(7, 10), status: "done", brief: "Invoice totals are off by a cent in some currencies. Find where we round." },
+    { id: "h17", t: "t6", kind: "spawn", from: "ledger", to: "l-sub", at: T(7, 22), status: "done", done: T(7, 31), brief: "List every place that rounds money, and whether it rounds before or after summing.", result: "4 call sites; only `money.rs:31` rounds before summing." },
+    { id: "h18", t: "t6", kind: "toyou", ask: "result", from: "ledger", to: "you", at: T(8, 2), status: "done", brief: "Rounding now happens once, after summing. 42 tests pass. Committed on `fix/rounding`." },
+  ];
+  // Topic titles from an earlier design. Unused: topics aren't recorded in the logs, so nothing groups by them.
+  const THREADS = {
+    t1: { title: "Offline sync for harbor" }, t2: { title: "PDF export for quill" }, t3: { title: "Morning sweep" },
+    t4: { title: "Staging network for atlas" }, t5: { title: "Dependency audit for meridian" }, t6: { title: "Invoice rounding fix" },
+  };
+
+  // Transcripts. {k:"h", id} renders a handoff from this session's point of view.
+  const TX = {
+    harbor: [ {k:"h",id:"h1"}, {k:"think",secs:9},
+      {k:"a",text:"Running the sync suite first. If `retry_backoff` still fails intermittently I'll fix it before handing anything off."},
+      {k:"tool",name:"Bash",arg:"cargo test -p harbor-sync",in:"cd ~/work/harbor && RUST_BACKTRACE=1 cargo test -p harbor-sync -- --test-threads=4",ok:false,secs:"38.2s",out:"running 128 tests\ntest queue::enqueue_basic ... ok\ntest queue::enqueue_many ... ok\ntest queue::dequeue_empty ... ok\ntest queue::dequeue_order ... ok\ntest queue::retry_backoff ... FAILED\ntest queue::retry_limit ... ok\ntest queue::retry_jitter ... ok\ntest queue::dead_letter ... ok\ntest queue::visibility_timeout ... ok\ntest queue::ack_twice ... ok\ntest store::open_fresh ... ok\ntest store::open_existing ... ok\ntest store::migrate_v3 ... ok\ntest store::migrate_v4 ... ok\ntest store::compact ... ok\ntest store::crash_recovery ... ok\ntest sync::push_one ... ok\ntest sync::push_batch ... ok\ntest sync::pull_since ... ok\ntest sync::pull_gap ... ok\ntest sync::conflict_lww ... ok\ntest sync::conflict_merge ... ok\ntest sync::tombstone ... ok\ntest sync::clock_skew ... ok\ntest net::connect_timeout ... ok\ntest net::tls_reject ... ok\ntest net::reconnect ... ok\ntest net::backpressure ... ok\n...\n\nfailures:\n\n---- queue::retry_backoff stdout ----\nseed 0x5f3a: expected 3 attempts, got 4\nthread 'queue::retry_backoff' panicked at crates/sync/src/queue.rs:212:9:\nassertion `left == right` failed\n  left: 4\n right: 3\n\ntest result: FAILED. 127 passed; 1 failed"},
+      {k:"tool",name:"Read",arg:"crates/sync/src/queue.rs",ok:true,secs:"0.1s",out:"fn next_delay(attempt: u32) -> Duration {\n    let delay = BASE * 2u32.pow(attempt);\n    Duration::from_millis(delay as u64)\n}"},
+      {k:"tool",name:"Edit",arg:"crates/sync/src/queue.rs",ok:true,secs:"0.0s",diff:[["ctx"," fn next_delay(attempt: u32) -> Duration {"],["del","-    let delay = BASE * 2u32.pow(attempt);"],["add","+    let delay = BASE.saturating_mul(2u32.saturating_pow(attempt)).min(MAX_DELAY);"]]},
+      {k:"tool",name:"Bash",arg:"cargo test -p harbor-sync",ok:true,secs:"41.6s",out:"test result: ok. 128 passed; 0 failed"},
+      {k:"h",id:"h2"}, {k:"h",id:"h3"},
+      {k:"a",text:"The backoff overflow is fixed: **128 passed**. Codex is implementing the offline flush, and a reviewer subagent checks its diff as it lands. I'll rerun the suite once both finish."},
+      {k:"tool",name:"Bash",arg:"cargo test -p harbor-sync",live:true,secs:"42s"} ],
+    "h-codex": [ {k:"h",id:"h2"}, {k:"harness",label:"recommended_plugins"}, {k:"think",secs:18},
+      {k:"tool",name:"apply_patch",arg:"crates/sync/src/flush.rs",ok:true,secs:"0.0s",diff:[["del","-pub fn flush(_queue: &mut Queue) -> Result<()> { todo!() }"],["add","+pub fn flush(queue: &mut Queue, client: &Client) -> Result<Flushed> {"],["add","+    while let Some(batch) = queue.oldest() { /* push; commit on Ack */ }"],["add","+}"]]},
+      {k:"tool",name:"shell",arg:"cargo test -p harbor-sync flush",ok:false,secs:"19.4s",out:"test flush::stops_at_first_nack ... FAILED\nexpected Paused(2s), got Done"},
+      {k:"tool",name:"apply_patch",arg:"crates/sync/src/queue.rs",live:true,secs:"6s"} ],
+    "h-review": [ {k:"h",id:"h3"}, {k:"tool",name:"Bash",arg:"git diff main --stat",ok:true,secs:"0.2s",out:" crates/sync/src/flush.rs | 14 ++++++++++++--"}, {k:"tool",name:"Read",arg:"crates/sync/src/flush.rs",live:true,secs:"2s"} ],
+    quill: [ {k:"h",id:"h4"}, {k:"h",id:"h5"},
+      {k:"a",text:"The plan adds `export_jobs` with a nullable `pdf_path` and no backfill. Handing the implementation to Codex."},
+      {k:"h",id:"h6"},
+      {k:"tool",name:"Bash",arg:"gh pr checks 219",ok:false,secs:"1.1s",out:"layout / pdf-render   fail   invoice_multi_page, invoice_rtl"},
+      {k:"h",id:"h7"} ],
+    "q-plan": [ {k:"h",id:"h5"}, {k:"a",text:"**Plan**\n- `export_jobs(id, invoice_id, status, pdf_path NULL, created_at)`.\n- Index on `(invoice_id, created_at)`.\n- Down migration drops the table. No backfill."}, {k:"end",text:"Returned to quill · 11:15"} ],
+    "q-codex": [ {k:"h",id:"h6"}, {k:"harness",label:"recommended_plugins"},
+      {k:"tool",name:"shell",arg:"npm test -- export",ok:true,secs:"14.2s",out:"Tests: 18 passed"},
+      {k:"tool",name:"shell",arg:"gh pr checks 219 --watch",ok:false,secs:"3m 12s",out:"layout / pdf-render   fail\n  invoice_multi_page: page 2 header overlaps table\n  invoice_rtl: totals column mirrored twice"},
+      {k:"a",text:"PR #219 is pushed. Unit tests pass; the `layout` suite fails on two cases. I stopped there as instructed."}, {k:"end",text:"Returned to quill · failed · 12:05"} ],
+    principal: [ {k:"h",id:"h9"}, {k:"a",text:"Noted. I'll check it in the morning sweep."}, {k:"h",id:"h8"},
+      {k:"tool",name:"Bash",arg:"gh pr list --state open --json title,repo",ok:true,secs:"2.3s",out:"5 open PRs: harbor #208, #211 · quill #219 · ledger #77 · atlas #40"},
+      {k:"h",id:"h10"},
+      {k:"a",text:"Overnight: **2 CI failures**. quill's is real (PR #219); ledger's passed on retry. Five PRs are open. Advisor recommends deferring the SQLite queue move."},
+      {k:"h",id:"h11"} ],
+    sentinel: [ {k:"u",text:"Watch CI on every repo. Tell Principal only about new failures on `main`."},
+      {k:"a",text:"Watching. I check every 10 minutes and relay only new failures on `main` to Principal."},
+      {k:"tool",name:"Bash",arg:"gh run list --status failure --branch main",ok:true,secs:"1.2s",out:"quill  layout / pdf-render  main  failed (2 attempts)"},
+      {k:"h",id:"h9"}, {k:"tool",name:"Bash",arg:"gh run list --status failure",live:true,secs:"1s"} ],
+    advisor: [ {k:"h",id:"h10"}, {k:"think",secs:21},
+      {k:"a",text:"Not this quarter. The current queue loses nothing, and the migration touches every client. Revisit when offline sync (#212) lands and you have real queue sizes."}, {k:"end",text:"Returned to Principal · 09:45"} ],
+    atlas: [ {k:"h",id:"h12"},
+      {k:"tool",name:"Bash",arg:"terraform plan -out staging.plan",ok:true,secs:"48s",out:"Plan: 3 to add, 2 to change, 0 to destroy."},
+      {k:"tool",name:"Bash",arg:"terraform apply -auto-approve staging.plan",ok:false,unfinished:true,secs:"—",out:"(no result: buildbox stopped responding while this was running)"},
+      {k:"h",id:"h13"},
+      {k:"a",text:"I'm back on laptop with the full conversation. The `terraform apply` I started on buildbox never reported a result, so I don't know how far it got."},
+      {k:"h",id:"h14"} ],
+    deps: [ {k:"h",id:"h15"}, {k:"harness",label:"recommended_plugins"}, {k:"tool",name:"shell",arg:"cargo audit --json",live:true,secs:"11s"} ],
+    ledger: [ {k:"h",id:"h16"}, {k:"h",id:"h17"},
+      {k:"tool",name:"Edit",arg:"src/money.rs",ok:true,secs:"0.0s",diff:[["del","-    (amount * rate).round()"],["add","+    (amount * rate).round_dp_with_strategy(2, MidpointNearestEven)"]]},
+      {k:"tool",name:"Bash",arg:"cargo test money",ok:true,secs:"6.8s",out:"test result: ok. 42 passed"},
+      {k:"h",id:"h18"} ],
+    "l-sub": [ {k:"h",id:"h17"}, {k:"tool",name:"Grep",arg:"\\.round\\(",ok:true,secs:"0.2s",out:"src/money.rs:31\nsrc/invoice.rs:77\nsrc/report.rs:12\nsrc/report.rs:40"}, {k:"a",text:"4 call sites. Only `src/money.rs:31` rounds **before** summing."}, {k:"end",text:"Returned to ledger · 07:31"} ],
+  };
 
   // ====================================================================================
   const $ = (s, r = document) => r.querySelector(s);
@@ -28,9 +624,9 @@
     machine: "M3 5h18v11H3zM8 20h8M12 16v4", repo: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6", role: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6",
     out: "M7 17L17 7M9 7h8v8", in: "M17 7L7 17M15 17H7V9", move: "M4 8h13l-3-3M20 16H7l3 3", ask: "M5 18l-1 3 3-1 11-11-2-2zM14 6l4 4", you: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6", q: "M9 9a3 3 0 1 1 4 2.8c-.7.3-1 .9-1 1.7V14M12 18h.01", check: "M5 12l4 4 10-10", qc: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4M12 17h.01", decide: "M12 21v-6M12 15L6 9M12 15l6-6M6 9V4M18 9V4M4 6l2-2 2 2M16 6l2-2 2 2", result: "M14 3H6v18h12V7zM14 3v4h4M9 12h6M9 16h6", done: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12.5l2.7 2.7L16 9.8", x: "M6 6l12 12M18 6L6 18", expand: "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7", copy: "M9 9h11v11H9zM5 15H4V4h11v1", ext: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
   };
-  const clock = (t) => { const d = new Date(t), n = new Date(NOW); const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(undefined, { weekday: "short" }) + " " + hm; };
-  const ago = (t) => { const d = Math.floor((NOW - t) / 60000); return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d"; };
-  const dur = (a, b) => { const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 60000)); return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor((d % 1440) / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };
+  const clock = (m) => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");
+  const ago = (m) => { const d = NOW - m; return d < 1 ? "now" : d < 60 ? d + "m" : Math.floor(d / 60) + "h"; };
+  const dur = (a, b) => { const d = (b ?? NOW) - a; return d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };
   const tok = (m) => m >= 1 ? m.toFixed(1) + "M" : Math.round(m * 1000) + "k";
   const dot = (st) => { const d = el("span", "dot " + st); d.title = STATE[st] ?? st; d.setAttribute("role", "img"); d.setAttribute("aria-label", d.title); return d; };
   const STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed" };
@@ -102,7 +698,7 @@
   // A one-line preview (Home): block markers dropped, lines run together.
   const preview = (t) => t.split("\n").map((l) => l.replace(/^\s*(#{1,6}\s+|>\s?|[-*]\s+|\d{1,3}[.)]\s+)/, "").trim()).filter((l) => l && !/^\s*\|?\s*:?-{2,}/.test(l)).join(" ");
   // What you answered, when the logs kept it: h.answer holds one string per question, in the brief's order.
-  const answersOf = (h) => h.kind === "toyou" && h.ask !== "result" && h.status === "done" ? (Array.isArray(h.answers) ? h.answers.map((a) => (a.values ?? []).join(", ")) : Array.isArray(h.answer) ? h.answer : h.answer != null ? [h.answer] : []).map((a) => String(a).trim()).filter(Boolean) : null;
+  const answersOf = (h) => h.kind === "toyou" && h.ask !== "result" && h.status === "done" ? (Array.isArray(h.answer) ? h.answer : h.answer != null ? [h.answer] : []).map((a) => String(a).trim()).filter(Boolean) : null;
   function answerEl(h, cls) {
     const a = answersOf(h); if (!a) return null; const r = el("div", cls + " answer" + (a.length ? "" : " none"));
     if (!a.length) { r.append(el("b", null, "Answered"), " · reply not in these logs"); return r; }
@@ -134,26 +730,36 @@
   // A gap marker ("Earlier entries not included in this copy") is where this copy skips part of the log. It ends the
   // turn before it, and what follows starts a turn of its own, so the marker is drawn between turns, never inside one.
   const isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
-  const HID = new Map();
-  // TURNS, TURN, STARTS and HOLDS keep the shapes above, filled from the server's turn index (adopt), since the page no longer
-  // holds every transcript. A turn's entries are the loaded ones (spread).
+  const HID = new Map(H.map((h) => [h.id, h]));
   const TURNS = {}, TURN = new Map(), STARTS = new Map(), HOLDS = new Map();
-  const hasTurn = (t) => !!t.end || !!(t.start || t.u) || t.entries.some((e) => e.k === "a" || e.k === "tool" || e.k === "h");
+  for (const [sid, es] of Object.entries(TX)) {
+    const ts = TURNS[sid] = []; let t = null;
+    es.forEach((e, i) => {
+      if (isGap(e)) { t = null; return; }
+      const h = e.k === "h" ? HID.get(e.id) : null;
+      const inc = h ? h.to === sid && /^(ask|relay|spawn)$/.test(h.kind) && !STARTS.has(h.id) : e.k === "u";
+      if (inc || !t) { t = { id: inc && h ? h.id : sid + ":" + i, sid, start: inc ? h : null, u: inc && !h ? e : null, entries: [], out: [], sent: [] }; ts.push(t); TURN.set(t.id, t); if (inc && h) STARTS.set(h.id, t); }
+      t.entries.push(e);
+      if (h && !inc && (h.from === sid || h.kind === "move")) { HOLDS.set(h.id, t); t.sent.push(h); if (h.kind !== "move") t.out.push(h); }
+    });
+    if (ts.length) ts[ts.length - 1].last = true;
+  }
+  const hasTurn = (t) => !!(t.start || t.u) || t.entries.some((e) => e.k === "a" || e.k === "tool" || e.k === "h");
   const oneLine = (s) => clean(s).replace(/\s+/g, " ").trim();
   // How a turn ended: still working, a message to you, a failure, a return or reply, or nothing recorded.
   const TOYOU = { question: "Asked you", result: "Sent you a result", decision: "Needs your decision" };
   function turnEnd(t) {
-    if (!hasTurn(t) || !t.end) return null;
-    const { st, why } = t.end, mh = t.end.h ? HID.get(t.end.h) : null;
-    if (why === "working") return { st: "work", text: "Still working" };
-    if (why === "toyou" && mh) return { st: mh.status === "wait" ? "wait" : "done", text: (TOYOU[mh.ask] ?? "Sent you a message") + " · " + statWord(mh) + " · " + clock(mh.at) };
-    if (why === "failed") return { st: "err", text: "Failed" + (t.start?.done ? " · " + clock(t.start.done) : "") };
-    if (why === "unfinished_step") return { st: "err", text: "Stopped on a step with no result" };
-    if (why === "failed_step") return { st: "err", text: "Stopped on a failed step" };
-    if (why === "handoff_failed" && mh) return { st: "err", text: "Handoff to " + nameOf(mh.to) + " failed" };
-    if (why === "returned" && t.start) return { st: "done", text: "Returned to " + nameOf(t.start.from) + (t.start.done ? " · " + clock(t.start.done) : "") };
-    if (why === "replied") return { st: "done", text: "Replied" };
-    return { st: st ?? "idle", text: "No reply in these logs" };
+    if (!hasTurn(t)) return null;
+    if (t.last && SESS[t.sid]?.state === "work") return { st: "work", text: "Still working" };
+    const ty = t.out.filter((h) => h.kind === "toyou").at(-1);
+    if (ty) return { st: ty.status === "wait" ? "wait" : "done", text: (TOYOU[ty.ask] ?? "Sent you a message") + " · " + statWord(ty) + " · " + clock(ty.at) };
+    const ms = t.entries.filter((e) => e.k === "a" || e.k === "tool" || (e.k === "h" && t.out.includes(HID.get(e.id)))), m = ms.at(-1), mh = m?.k === "h" ? HID.get(m.id) : null;
+    if (t.start?.status === "err") return { st: "err", text: "Failed" + (t.start.done ? " · " + clock(t.start.done) : "") };
+    if (m?.k === "tool" && m.ok === false && !m.live) return { st: "err", text: m.unfinished ? "Stopped on a step with no result" : "Stopped on a failed step" };
+    if (mh?.status === "err") return { st: "err", text: "Handoff to " + nameOf(mh.to) + " failed" };
+    if (t.start?.kind === "spawn" && t.start.status === "done") return { st: "done", text: "Returned to " + nameOf(t.start.from) + (t.start.done ? " · " + clock(t.start.done) : "") };
+    if (ms.some((e) => e.k === "a")) return { st: "done", text: "Replied" };
+    return { st: "idle", text: "No reply in these logs" };
   }
   // Where a turn's trace began: from a relay or brief, step back to the sender's turn that sent it, until a turn
   // that started with your message or whose sender's side isn't in the logs.
@@ -164,121 +770,6 @@
     return o;
   }
 
-
-  // ---- Loading: the model from /api/model, transcripts a page at a time from /api/tx --------------------------
-  const TXM = {}; // per session: the loaded range of its transcript { from, to, total } and its totals { calls, errors }
-  let serverNow = 0, fetchedAt = 0;
-  const enc = encodeURIComponent;
-  const api = (path) => fetch(path, { credentials: "same-origin" }).then((r) => { if (!r.ok) throw new Error(r.status + " " + r.statusText); return r.json(); });
-  // NOW follows the client clock from the model's `now`, so every "ago" keeps moving; a running tool's age follows NOW.
-  function tick() {
-    NOW = serverNow + (Date.now() - fetchedAt);
-    for (const s of Object.values(SESS)) if (s.activity && s.activity[3] != null) s.activity[2] = Math.floor((NOW - s.activity[3]) / 1000);
-  }
-  function adopt(m) {
-    serverNow = m.now; fetchedAt = Date.now();
-    for (const k of Object.keys(MACHINE)) { delete MACHINE[k]; delete MACHINE_UP[k]; }
-    MACHINE[m.machine.id] = m.machine.name; MACHINE_UP[m.machine.id] = m.machine.up;
-    for (const k of Object.keys(SESS)) delete SESS[k];
-    for (const [id, s] of Object.entries(m.sessions)) { s.id = id; SESS[id] = s; }
-    H.length = 0; H.push(...m.handoffs);
-    // A failed send reached no one: a stub named as the send addressed it stands for the other end, marked failed.
-    for (const h of H) if (h.to == null) {
-      const id = "unsent:" + (h.target ?? "");
-      const s = SESS[id] ??= { id, name: h.target || "unknown", harness: "claude", stub: true, machine: m.machine.id, state: "err", model: "—", tokens: [0, 0, 0], start: h.at, last: h.at, busy: [] };
-      s.start = Math.min(s.start, h.at); s.last = Math.max(s.last, h.at); h.to = id;
-    }
-    HID.clear(); for (const h of H) HID.set(h.id, h);
-    for (const k of Object.keys(TURNS)) delete TURNS[k];
-    TURN.clear(); STARTS.clear(); HOLDS.clear();
-    for (const x of m.turns) {
-      const t = { id: x.id, sid: x.sid, start: x.start ? HID.get(x.start) ?? null : null, u: x.u ? { k: "u", text: x.text ?? "" } : null, entries: [], out: [], sent: [], end: x.end };
-      t.sent = x.sent.map((id) => HID.get(id)).filter(Boolean); t.out = t.sent.filter((h) => h.kind !== "move"); if (x.last) t.last = true;
-      (TURNS[x.sid] ??= []).push(t); TURN.set(t.id, t); if (t.start) STARTS.set(t.start.id, t); for (const h of t.sent) HOLDS.set(h.id, t);
-    }
-    for (const k of Object.keys(TX)) { delete TX[k]; delete TXM[k]; }
-    tick();
-  }
-  // Each loaded entry goes to its turn: an entry that starts a turn (or a page) names it.
-  function spread(sid) {
-    for (const t of TURNS[sid] ?? []) t.entries = [];
-    let t = null;
-    for (const e of TX[sid] ?? []) { if (e.turn) t = TURN.get(e.turn) ?? null; if (t) t.entries.push(e); }
-  }
-  // A return line arrives as data; it reads as the mockup's "Returned to … · HH:MM".
-  const txEntry = (e) => e.k === "end" && e.ret ? { k: "end", text: "Returned to " + nameOf(e.ret.to) + (e.ret.failed ? " · failed" : "") + (e.ret.at != null ? " · " + clock(e.ret.at) : ""), turn: e.turn } : e;
-  // where: "before" and "after" extend the loaded range; otherwise the page replaces it.
-  function fetchTx(sid, q, where) {
-    return api("/api/tx?sid=" + enc(sid) + (q ? "&" + q : "")).then((p) => {
-      const es = p.entries.map((e) => txEntry({ ...e, sid })), m = TXM[sid];
-      if (where === "before" && m) { TX[sid] = es.concat(TX[sid]); m.from = p.from; }
-      else if (where === "after" && m) { TX[sid] = TX[sid].concat(es); m.to = p.to; }
-      else { TX[sid] = es; TXM[sid] = { from: p.from, to: p.to }; }
-      Object.assign(TXM[sid], { total: p.total, calls: p.calls, errors: p.errors }); spread(sid);
-    });
-  }
-  // A spawn's child work opens inline under its card: load the turn each brief started, when its session isn't loaded.
-  function kids(sid) {
-    const jobs = [];
-    for (const e of TX[sid] ?? []) {
-      const h = e.k === "h" ? HID.get(e.id) : null, c = h && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id) : null;
-      if (c && !TX[c.sid]) jobs.push(fetchTx(c.sid, "turn=" + enc(c.id)));
-    }
-    return jobs.length ? Promise.all(jobs) : null;
-  }
-  // What a route needs before it can draw: a session's page (the one holding a deep-linked turn), and its child work.
-  function load(r) {
-    if (r.v !== "session" || !SESS[r.id]) return null;
-    const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
-    if (TX[r.id] && !deep) return kids(r.id);
-    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "").then(() => kids(r.id));
-  }
-  // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
-  function pager(sid, where, label) {
-    const w = el("div", "list"), b = el("button", "more", label); b.type = "button"; w.append(b);
-    b.addEventListener("click", () => {
-      const m = TXM[sid], box = phone.matches ? document.documentElement : $("#main"), h0 = box.scrollHeight; b.disabled = true;
-      fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where).then(() => kids(sid)).then(() => {
-        render(); if (where === "before") { const d = box.scrollHeight - h0; if (phone.matches) window.scrollBy(0, d); else box.scrollTop += d; } }, () => { b.disabled = false; });
-    });
-    return w;
-  }
-  // "View all" reads the whole call: each part the server cut ("more") is fetched in full from /api/entry, by the entry's
-  // session and slot. A part cut again at 8 MB is noted (fullCut).
-  function fullOf(e) {
-    const part = (as) => api("/api/entry?sid=" + enc(e.sid) + "&slot=" + e.slot + "&as=" + as).then((r) => [as, r]);
-    return Promise.all((e.more ?? []).map(part)).then((rs) => {
-      const f = { fullCut: [] };
-      for (const [k, r] of rs) { f[k] = k === "diff" ? r.diff : r.text; if (r.truncated) f.fullCut.push(k); }
-      return f;
-    });
-  }
-  // Real URLs: every screen has one, and the server serves this page for each.
-  function urlOf(r) {
-    const hs = (id) => SESS[id]?.harness ?? "claude";
-    return r.v === "home" ? "/" : r.v === "timeline" ? "/timeline" : r.v === "sessions" ? "/sessions" : r.v === "machines" ? "/machines"
-      : r.v === "machine" ? "/machines/" + enc(r.id)
-      : r.v === "session" ? "/s/" + hs(r.id) + "/" + enc(r.id) + (r.turn ? "?turn=" + enc(r.turn) : "")
-      : "/trace/" + hs(r.sid) + "/" + enc(r.sid) + "/" + enc(r.turn);
-  }
-  function routeOf(loc) {
-    const p = loc.pathname.split("/").filter(Boolean).map((x) => { try { return decodeURIComponent(x); } catch { return x; } }), turn = new URLSearchParams(loc.search).get("turn");
-    if (p[0] === "timeline") return { v: "timeline" };
-    if (p[0] === "sessions") return { v: "sessions" };
-    if (p[0] === "machines") return p[1] && MACHINE[p[1]] ? { v: "machine", id: p[1] } : { v: "machines" };
-    if (p[0] === "s" && SESS[p[2]]) return turn ? { v: "session", id: p[2], turn } : { v: "session", id: p[2] };
-    if (p[0] === "trace" && SESS[p[2]] && p[3]) return { v: "trace", sid: p[2], turn: p[3] };
-    return { v: "home" };
-  }
-  function boot() {
-    api("/api/model").then((m) => {
-      adopt(m); route = routeOf(location);
-      try { history.replaceState(route, "", urlOf(route)); } catch {}
-      const done = () => { render(); if (route.v === "session" && route.turn) revealTurn(route.turn, true); };
-      const p = load(route); if (p) p.then(done, done); else done();
-    }, (err) => { $("#page").replaceChildren(el("p", "empty", "Couldn't load the sessions: " + err.message)); });
-  }
-
   // ---- State & navigation ---------------------------------------------------------------
   const phone = window.matchMedia("(max-width: 760px)");
   let route = { v: "home" }; let groupBy = "recent"; let query = "";
@@ -286,10 +777,9 @@
   const quietTop = () => { if (phone.matches) window.scrollTo(0, 0); else $("#main").scrollTop = 0; };
   function go(r, fromHistory) {
     route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".menu")?.remove();
-    if (!fromHistory) { try { history.pushState(r, "", urlOf(r)); } catch {} }
+    if (!fromHistory) { try { history.pushState(r, ""); } catch {} }
     if (r.v === "timeline" && !fromHistory) tlView.left = null;
-    const done = () => { if (route !== r) return; render(); if (r.v === "session" && r.turn) revealTurn(r.turn, !fromHistory); else quietTop(); };
-    const p = load(r); if (p) p.then(done, done); else done();
+    render(); if (r.v === "session" && r.turn) revealTurn(r.turn, !fromHistory); else quietTop();
   }
   window.addEventListener("popstate", (e) => {
     if (skipPop) { skipPop = false; return; }                        // our own history.back() after closing the viewer
@@ -379,7 +869,7 @@
   }
   // A session's summary line: state, errors (a jump to the first failed step), turns and calls, harness and model, machine, repo.
   const sessionLine = (s) => (l2) => {
-    const es = TX[s.id] ?? [], m = TXM[s.id], calls = m ? m.calls : es.filter((e) => e.k === "tool").length, errors = m ? m.errors : es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
+    const es = TX[s.id] ?? [], calls = es.filter((e) => e.k === "tool").length, errors = es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
     const st = el("span", "stat " + s.state); st.append(dot(s.state), STATE[s.state]); l2.append(st);
     if (errors) { const j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")); j.type = "button"; j.setAttribute("aria-label", j.textContent + ": jump to the first failed step");
       j.addEventListener("click", (ev) => { ev.stopPropagation(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
@@ -580,9 +1070,7 @@
     const turnMode = !opts.nested;
     // On a session page the transcript is a list of turns, each with its own entries; a nested one is a plain list.
     const box = el("div", turnMode ? "turns" : "tx"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);
-    const range = turnMode ? TXM[sid] : null;
-    if (range?.from > 0) box.append(pager(sid, "before", "Load earlier"));
-    else if (!find && turnMode) box.append(el("div", "divider", "Started " + clock(SESS[sid].start) + " on " + MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine]));
+    if (!find && turnMode) box.append(el("div", "divider", "Started " + clock(SESS[sid].start) + " on " + MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine]));
     // Adjacent tool calls collapse into one summary line ("Ran 2 commands, read 1 file · 1 failed"),
     // expandable to the individual steps. A lone call stays a single line; while finding, matches show directly.
     let run = [];
@@ -625,8 +1113,8 @@
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
         if (e.live) { const r = el("div", "step live"); r.append(el("span", "spin"), el("span", "sv", v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs }); continue; }
-        const box = el("div", "step" + (e.ok || e.ok === null ? "" : " err")); const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
-        b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "no result" : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs), icon(I.chev, "chev"));
+        const box = el("div", "step" + (e.ok ? "" : " err")); const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
+        b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "no result" : e.ok ? e.secs : "failed · " + e.secs), icon(I.chev, "chev"));
         const out = el("div", "out"); out.hidden = true;
         // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
         // eleven lines. When either is cut, "View all" opens the whole call in a sheet.
@@ -637,15 +1125,15 @@
         const all = el("button", "viewall"); all.type = "button"; all.hidden = true; all.append(icon(I.expand), el("span", null, "View all"));
         all.addEventListener("click", () => openViewer(e, v, ic, inLabel)); out.append(all);
         b.addEventListener("click", () => { out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden));
-          if (!out.hidden) { let cut = !!e.more?.length; out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; }); all.hidden = !cut;
+          if (!out.hidden) { let cut = false; out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; }); all.hidden = !cut;
             // Text cut when this copy was made, with nothing more to show: say so instead of ending on "…".
             if (!cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs")); } });
-        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false }); continue;
+        box.append(b, out); run.push({ node: box, v, k: e.name, err: !e.ok }); continue;
       }
       flush();
       if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = el("div", "msg user"); m.append(markdown(e.text)); tx.append(m); }
       else if (e.k === "a") { if (!show.messages || !hit(e.text)) continue; const m = el("div", "msg assistant"); m.append(markdown(e.text)); tx.append(m); }
-      else if (e.k === "think") { if (!show.thinking || find || (!e.secs && !e.text)) continue; /* Claude Code stores most thinking empty: no marker without content or a duration */ const t = el("button", "think"); t.type = "button"; t.append(el("span", null, e.secs != null ? "Thought for " + e.secs + "s" : "Thought"), icon(I.chev, "chev")); tx.append(t); }
+      else if (e.k === "think") { if (!show.thinking || find || (!e.secs && !e.text)) continue; /* Claude Code stores most thinking empty: no marker without content or a duration */ const t = el("button", "think"); t.type = "button"; t.append(el("span", null, "Thought for " + e.secs + "s"), icon(I.chev, "chev")); tx.append(t); }
       else if (e.k === "harness") { if (!show.messages || find) continue; tx.append(el("div", "harness-note", "Harness text added before the prompt (" + e.label + ")")); }
       else if (e.k === "end") { if (find) continue; tx.append(el("div", "divider", e.text)); }
       else if (e.k === "h") {
@@ -671,7 +1159,6 @@
       }
     }
     closeTurn();
-    if (range && range.to < range.total) box.append(pager(sid, "after", "Load later"));
     if (!box.querySelector(".msg, .step, .hcard")) box.append(el("p", "empty", find ? "Nothing matches “" + find + "”." : "Nothing to show with these filters."));
     sec.append(box); return sec;
   }
@@ -680,22 +1167,19 @@
   // so the back gesture closes it without leaving the page.
   let viewerEl = null, skipPop = false;
   function openViewer(e, verb, ic, inLabel) {
-    if (e.more?.length && e.slot != null && !e.full) { const open = (f) => openViewer({ ...e, ...f, full: true }, verb, ic, inLabel); fullOf(e).then(open, () => open({ fullFailed: true })); return; }
     const d = el("dialog", "viewer"); d.setAttribute("aria-label", verb + " " + e.arg);
     const head = el("div", "vh"); const t = el("div", "vt"); t.append(icon(I[ic]), el("span", null, verb + " " + e.arg));
     const close = el("button", "vclose"); close.type = "button"; close.setAttribute("aria-label", "Close"); close.append(icon(I.x)); close.addEventListener("click", () => d.close());
-    head.append(t, close, el("div", "vm" + (e.ok || e.ok === null ? "" : " err"), e.name + " · " + (e.unfinished ? "no result" : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs)));
+    head.append(t, close, el("div", "vm" + (e.ok ? "" : " err"), e.name + " · " + (e.unfinished ? "no result" : e.ok ? e.secs : "failed · " + e.secs)));
     const body = el("div", "vb");
     const section = (label, text) => { const s = el("div", "vs"); s.append(el("span", null, label));
       if (text) { const c = el("button", "vcopy"); c.type = "button"; c.append(icon(I.copy), el("span", null, "Copy"));
         c.addEventListener("click", () => navigator.clipboard?.writeText(text).then(() => { c.lastChild.textContent = "Copied"; }, () => { c.lastChild.textContent = "Copy failed"; })); s.append(c); }
       body.append(s); };
-    const cutNote = (text) => { if (!e.fullFailed && /…(\(truncated\))?\s*$/.test(text ?? "")) body.append(el("p", "vnote", "Cut short in this copy of the logs.")); };
+    const cutNote = (text) => { if (/…(\(truncated\))?\s*$/.test(text ?? "")) body.append(el("p", "vnote", "Cut short in this copy of the logs.")); };
     if (e.in) { section(inLabel, e.in); body.append(el("pre", "in", e.in)); cutNote(e.in); }
     if (e.diff) { section("Change", null); body.append(diffEl(e.diff)); }
     else { section("Output", e.out); if (e.out) { body.append(el("pre", null, e.out)); cutNote(e.out); } else body.append(el("p", "vnote", e.unfinished ? "No result recorded." : "No output.")); }
-    if (e.fullFailed) body.append(el("p", "vnote", "Couldn't load the full text: this is the preview."));
-    if (e.fullCut?.length) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));
     d.append(head, body); document.body.append(d);
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); }); // a tap on the backdrop (wide screens)
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } });
@@ -727,7 +1211,7 @@
   // ---- Render --------------------------------------------------------------------------------------------------------
   function render() {
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
-    tick(); const page = $("#page"), r = route; page.replaceChildren(); page.classList.toggle("wide", r.v === "timeline");
+    const page = $("#page"), r = route; page.replaceChildren(); page.classList.toggle("wide", r.v === "timeline");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "timeline") { renderTimeline(page); renderTopbar("Timeline"); }
     else if (r.v === "sessions") { renderSessions(page); renderTopbar("Sessions"); }
@@ -954,5 +1438,7 @@
   $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); query = e.target.value.trim(); go({ v: "sessions" }); } });
   phone.addEventListener("change", () => { closeDrawer(true); if (route.v === "timeline") render(); });
 
-  boot();
+  try { history.replaceState(route, ""); } catch {}
+  render();
 })();
+</script>

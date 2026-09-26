@@ -1,0 +1,117 @@
+# The session viewer's browser checks (#40 M4, decision D2). Builds `semon` with a test clock, writes the synthetic sample
+# fixture (tests/ui/fixture.mjs) and its extras variant, serves both with `semon sessions --serve`, and runs, in Chromium
+# through Playwright:
+#   - the fixture's gaps against the sample mockup's data (tests/ui/gaps.mjs, listed in tests/ui/gaps.json),
+#   - the mockup's check scripts, ported to the served viewer (tests/ui/checks/),
+#   - a pixel comparison of every screen with the mockup (tests/ui/pixels.mjs), at 390×844 light and dark and 1280×860.
+# Node and Playwright are CI-only tooling in tests/ui/package.json; the Rust build doesn't depend on them. Nothing here
+# touches a real ~/.claude or ~/.codex: the server reads only the fixture.
+name: Viewer UI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    name: viewer browser checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Unpinned on purpose, as in rust.yml: the ref selects the stable channel.
+      - name: Install Rust toolchain
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-ui-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-ui-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      # The test-clock feature lets SEMON_TEST_NOW pin the server's clock to the fixture's.
+      - name: Build semon with the test clock
+        run: cargo build --locked -p semon-store --bin semon --features semon-sessions/test-clock
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: tests/ui/package-lock.json
+
+      - name: Install the check tooling and Chromium
+        working-directory: tests/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Write the sample fixtures
+        run: |
+          echo "SEMON_NOW=$(node tests/ui/fixture.mjs "$RUNNER_TEMP/sample")" >> "$GITHUB_ENV"
+          node tests/ui/fixture.mjs "$RUNNER_TEMP/sample-extras" --extras > /dev/null
+
+      - name: Serve the fixtures
+        run: |
+          serve() { # name port dir
+            SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen "127.0.0.1:$2" \
+              --claude-home "$3/claude" --codex-home "$3/codex" --proc-root "$3/proc" --cache "$3/index.json" \
+              < /dev/null > "$RUNNER_TEMP/$1.log" 2>&1 &
+            for _ in $(seq 1 100); do
+              url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/$1.log" || true)
+              [ -n "$url" ] && break
+              sleep 0.2
+            done
+            [ -n "$url" ] || { cat "$RUNNER_TEMP/$1.log"; exit 1; }
+            echo "${url%%/?t=*} ${url##*t=}"
+          }
+          read -r base token < <(serve sample 8765 "$RUNNER_TEMP/sample")
+          [ -n "$token" ] || { cat "$RUNNER_TEMP"/sample*.log; exit 1; }
+          echo "SEMON_BASE=$base" >> "$GITHUB_ENV"
+          echo "SEMON_TOKEN=$token" >> "$GITHUB_ENV"
+          read -r base token < <(serve sample-extras 8766 "$RUNNER_TEMP/sample-extras")
+          [ -n "$token" ] || { cat "$RUNNER_TEMP"/sample*.log; exit 1; }
+          echo "SEMON_EXTRA_BASE=$base" >> "$GITHUB_ENV"
+          echo "SEMON_EXTRA_TOKEN=$token" >> "$GITHUB_ENV"
+          curl -fsS -o /dev/null "$base/?t=$token"
+
+      - name: Fixture gaps against the sample's data
+        working-directory: tests/ui
+        run: node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN"
+
+      - name: Mockup check scripts on the served viewer
+        if: ${{ !cancelled() }}
+        working-directory: tests/ui
+        run: node checks/run.mjs
+
+      - name: Pixel comparison with the mockup
+        if: ${{ !cancelled() }}
+        working-directory: tests/ui
+        run: node pixels.mjs
+
+      - name: Server logs
+        if: ${{ always() }}
+        run: cat "$RUNNER_TEMP"/sample*.log || true
+
+      - name: Upload reports, screenshots and diffs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: viewer-ui
+          path: tests/ui/out
+          if-no-files-found: warn

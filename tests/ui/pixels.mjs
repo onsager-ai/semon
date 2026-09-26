@@ -1,0 +1,177 @@
+// Pixel comparison of every screen of the served viewer against the mockup, at 390×844 light and dark and 1280×860.
+//
+// Two references, both the committed sample mockup (reference/semon-sample.html) rendered in the same browser:
+//
+//   port    The mockup's own code on the served data: the sample file with its data block replaced by what /api/model and
+//           /api/tx serve, and with the three clock lines and the "Thought" line of the approved real-data mockup (the only
+//           code the served data needs changed, since its times are epoch milliseconds). This isolates the frontend port:
+//           the served page must match it within the anti-aliasing tolerance. Enforced.
+//   sample  The sample mockup exactly as committed, with its own data. The differences are the fixture's gaps (gaps.json:
+//           one machine, no moves, …), so this one is reported with its diff images, not enforced.
+//
+// Fonts: both sides use the vendored woff2 files (the reference's Google Fonts request is answered with them).
+// Clock: both pages stand at the fixture's now, in UTC.
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { PNG } from "pngjs";
+import pixelmatch from "pixelmatch";
+import { ENV, launch, context, served, goto, data } from "./lib.mjs";
+import { sample } from "./fixture.mjs";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const J = JSON.stringify;
+// Set once, before any run: pixelmatch's per-pixel colour threshold with anti-aliased pixels ignored, and at most this
+// share of the other pixels may differ. Never raise these to make a run pass.
+const THRESHOLD = 0.1;
+const MAX_RATIO = 0.0001;
+const SCHEMES = [["phone", false], ["phone", true], ["desktop", false]];
+const FONTS = path.join(here, "../../crates/semon-sessions/src/fonts");
+const OUT = path.join(ENV.out, "pixels");
+
+const MOCKUP = fs.readFileSync(path.join(here, "reference/semon-sample.html"), "utf8");
+const DATA_START = "  const T = (h, m) => h * 60 + m;";
+const DATA_END = "  // ====================================================================================\n  const $ = ";
+const CLOCKS = [
+  ['  const clock = (m) => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");',
+    '  const clock = (t) => { const d = new Date(t), n = new Date(NOW); const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(undefined, { weekday: "short" }) + " " + hm; };'],
+  ['  const ago = (m) => { const d = NOW - m; return d < 1 ? "now" : d < 60 ? d + "m" : Math.floor(d / 60) + "h"; };',
+    '  const ago = (t) => { const d = Math.floor((NOW - t) / 60000); return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d"; };'],
+  ['  const dur = (a, b) => { const d = (b ?? NOW) - a; return d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };',
+    '  const dur = (a, b) => { const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 60000)); return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor((d % 1440) / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };'],
+  ['el("span", null, "Thought for " + e.secs + "s")', 'el("span", null, e.secs != null ? "Thought for " + e.secs + "s" : "Thought")'],
+];
+
+// The mockup file with the served data in its data block.
+function portReference(D) {
+  const start = MOCKUP.indexOf(DATA_START), end = MOCKUP.indexOf(DATA_END);
+  const hhmm = (t) => new Date(t).toISOString().slice(11, 16);
+  const TX = {};
+  for (const [sid, es] of Object.entries(D.TX)) TX[sid] = es.map((e) => (e.ret ? { k: "end", text: "Returned to " + D.SESS[e.ret.to].name + (e.ret.failed ? " · failed" : "") + " · " + hhmm(e.ret.at) } : e));
+  const block = ["  const NOW = " + D.NOW + ";", "  const MACHINE = " + J(D.MACHINE) + ";", "  const MACHINE_UP = " + J(D.MACHINE_UP) + ";",
+    '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(D.SESS) + ";", "  for (const [id, s] of Object.entries(SESS)) s.id = id;",
+    "  const H = " + J(D.H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", ""].join("\n");
+  let html = MOCKUP.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + MOCKUP.slice(end);
+  for (const [a, b] of CLOCKS) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
+  return html;
+}
+
+// The fonts, as the served viewer declares them, for the reference's Google Fonts request.
+const FACES = fs.readFileSync(path.join(here, "../../crates/semon-sessions/src/viewer.css"), "utf8").match(/@font-face \{[^}]*\}/g).join("\n");
+async function referencePage(browser, size, dark, html) {
+  const ctx = await context(browser, { size, dark });
+  const page = await ctx.newPage();
+  page.errors = [];
+  page.on("pageerror", (e) => page.errors.push(e.message.split("\n")[0]));
+  await page.clock.setFixedTime(ENV.now);
+  await page.route(/.*/, async (r) => {
+    const url = new URL(r.request().url());
+    if (url.href === "http://reference.test/") return r.fulfill({ contentType: "text/html; charset=utf-8", body: html });
+    if (url.host === "fonts.googleapis.com") return r.fulfill({ contentType: "text/css", body: FACES.replaceAll('url("/fonts/', 'url("http://reference.test/fonts/') });
+    const font = /^\/fonts\/(instrument-sans|jetbrains-mono|source-serif-4)-(latin-ext|latin)\.woff2$/.exec(url.pathname);
+    if (url.host === "reference.test" && font) return r.fulfill({ contentType: "font/woff2", body: fs.readFileSync(path.join(FONTS, font[1], font[2] + ".woff2")) });
+    return r.abort();
+  });
+  await page.goto("http://reference.test/", { waitUntil: "load" });
+  return page;
+}
+
+const FACE_LOADS = ['400 14px "Instrument Sans"', '500 14px "Instrument Sans"', '600 14px "Instrument Sans"', '400 12px "JetBrains Mono"', '500 12px "JetBrains Mono"', '400 14px "Source Serif 4"', '600 14px "Source Serif 4"'];
+async function ready(page) {
+  await page.evaluate((faces) => Promise.all(faces.map((f) => document.fonts.load(f))).then(() => document.fonts.ready), FACE_LOADS);
+  await page.evaluate(() => { window.scrollTo(0, 0); const m = document.querySelector("#main"); if (m) m.scrollTop = 0; });
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  await page.waitForTimeout(120);
+}
+async function shot(page, size) {
+  await ready(page);
+  return PNG.sync.read(await page.screenshot({ fullPage: size === "phone", animations: "disabled", caret: "hide" }));
+}
+
+// Differing pixels over the larger of the two images; the area one image lacks counts as differing.
+function compare(a, b) {
+  const w = Math.max(a.width, b.width), h = Math.max(a.height, b.height);
+  const pad = (img) => { if (img.width === w && img.height === h) return img; const p = new PNG({ width: w, height: h }); p.data.fill(255); PNG.bitblt(img, p, 0, 0, img.width, img.height, 0, 0); return p; };
+  const A = pad(a), B = pad(b), diff = new PNG({ width: w, height: h });
+  const n = pixelmatch(A.data, B.data, diff.data, w, h, { threshold: THRESHOLD, includeAA: false });
+  return { pixels: n, ratio: n / (w * h), size: a.width === b.width && a.height === b.height ? null : [a.width + "×" + a.height, b.width + "×" + b.height], diff, A, B };
+}
+
+// Every screen, as routes on the served viewer and on each reference.
+function screens(D, S, ids) {
+  const list = [["home", { v: "home" }], ["timeline", { v: "timeline" }], ["sessions", { v: "sessions" }], ["machines", { v: "machines" }], ["machine-laptop", { v: "machine", id: "laptop" }]];
+  for (const sid of Object.keys(D.SESS)) list.push(["session-" + sid, { v: "session", id: sid }]);
+  for (const t of D.turns) {
+    if (!t.sent.length) continue;
+    const at = D.TX[t.sid].findIndex((e) => e.turn === t.id);
+    // The mockup names a turn by its start handoff, else "<session>:<entry index>".
+    const port = t.start ?? t.sid + ":" + at;
+    const inSample = t.start ? ids.get(t.start) : S.TX[t.sid]?.[at]?.k === "u" ? t.sid + ":" + at : null;
+    list.push(["trace-" + t.sid + "-" + (inSample ?? t.id).replace(/[^\w-]/g, "_"), { v: "trace", sid: t.sid, turn: t.id }, { v: "trace", sid: t.sid, turn: port }, inSample ? { v: "trace", sid: t.sid, turn: inSample } : null]);
+  }
+  return list.map(([name, served, port, sample]) => ({ name, served, port: port ?? served, sample: sample === undefined ? served : sample }));
+}
+
+// The sample's handoff for each served one, matched as gaps.mjs matches them.
+function sampleIds(D, S) {
+  const min = (t) => Math.round(((t - Date.UTC(2026, 8, 24)) / 60000) * 1000) / 1000, ids = new Map();
+  for (const h of S.H) { const v = D.H.find((x) => !ids.has(x.id) && x.kind === h.kind && x.from === h.from && x.to === h.to && min(x.at) === h.at); if (v) ids.set(v.id, h.id); }
+  return ids;
+}
+
+async function nav(page, route, D, mockup) {
+  if (!mockup) return goto(page, route, D);
+  await page.evaluate((r) => { history.pushState(r, ""); dispatchEvent(new PopStateEvent("popstate", { state: r })); }, route);
+  await page.waitForTimeout(80);
+}
+
+const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name + ".png"), PNG.sync.write(img)); };
+
+(async () => {
+  const D = await data(), S = sample(), ids = sampleIds(D, S), list = screens(D, S, ids);
+  const browser = await launch();
+  const results = [], errors = [];
+  for (const [size, dark] of SCHEMES) {
+    const scheme = size + "-" + (dark ? "dark" : "light");
+    const page = await served(browser, { size, dark });
+    const port = await referencePage(browser, size, dark, portReference(D));
+    const orig = await referencePage(browser, size, dark, MOCKUP);
+    for (const s of list) {
+      await nav(page, s.served, D, false); const a = await shot(page, size);
+      await nav(port, s.port, D, true); const b = await shot(port, size);
+      const p = compare(a, b);
+      const row = { scheme, screen: s.name, port: { pixels: p.pixels, ratio: p.ratio, size: p.size, pass: p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size } };
+      if (!row.port.pass) { const dir = path.join(OUT, "port", scheme); save(dir, s.name + "-served", p.A); save(dir, s.name + "-reference", p.B); save(dir, s.name + "-diff", p.diff); }
+      if (s.sample) {
+        await nav(orig, s.sample, D, true); const c = await shot(orig, size);
+        const q = compare(a, c);
+        row.sample = { pixels: q.pixels, ratio: q.ratio, size: q.size };
+        if (q.pixels) { const dir = path.join(OUT, "sample", scheme); save(dir, s.name + "-served", q.A); save(dir, s.name + "-sample", q.B); save(dir, s.name + "-diff", q.diff); }
+      }
+      results.push(row);
+    }
+    // The phone's navigation drawer, open on Home.
+    if (size === "phone") {
+      await nav(page, { v: "home" }, D, false); await page.click("#lead-btn"); await page.waitForTimeout(350);
+      await nav(port, { v: "home" }, D, true); await port.click("#lead-btn"); await port.waitForTimeout(350);
+      const p = compare(await shot(page, "desktop"), await shot(port, "desktop"));
+      const row = { scheme, screen: "drawer", port: { pixels: p.pixels, ratio: p.ratio, size: p.size, pass: p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size } };
+      if (!row.port.pass) { const dir = path.join(OUT, "port", scheme); save(dir, "drawer-served", p.A); save(dir, "drawer-reference", p.B); save(dir, "drawer-diff", p.diff); }
+      results.push(row);
+    }
+    errors.push(...page.errors.map((e) => scheme + " served: " + e), ...port.errors.map((e) => scheme + " port reference: " + e), ...orig.errors.map((e) => scheme + " sample: " + e));
+    await page.context().close(); await port.context().close(); await orig.context().close();
+  }
+  await browser.close();
+  const failed = results.filter((r) => !r.port.pass);
+  const pct = (x) => (x * 100).toFixed(3) + "%";
+  const md = ["| Screen | Scheme | vs port reference | vs sample mockup |", "|---|---|---|---|",
+    ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.pass ? "✓ " : "✗ ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
+  fs.writeFileSync(path.join(ENV.out, "pixels.json"), J({ threshold: THRESHOLD, maxRatio: MAX_RATIO, results, errors }, null, 1));
+  fs.writeFileSync(path.join(ENV.out, "pixels.md"), md + "\n");
+  console.log(md);
+  console.log("screens: " + results.length + ", port mismatches: " + failed.length + ", page errors: " + errors.length);
+  for (const e of errors) console.log("  page error: " + e);
+  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Pixel comparison\n\n" + md + "\n");
+  process.exit(failed.length || errors.length ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(2); });
