@@ -25,7 +25,8 @@ use crate::{Tokens, field};
 
 /// The event cache sits beside V1's metadata cache and has its own version,
 /// so `semon sessions`, `--watch` and `--json` never load or rewrite it.
-const CACHE_VERSION: u32 = 2;
+/// v3: every assistant text is its own event (v2 collapsed adjacent ones).
+const CACHE_VERSION: u32 = 3;
 
 /// One file's event index and the facts the model needs about it. Metadata
 /// only (risk:secret).
@@ -260,7 +261,8 @@ pub(crate) enum Kind {
     /// Codex user message.
     #[default]
     U,
-    /// Assistant text. Consecutive text blocks collapse into the last one.
+    /// Assistant text: one event per text block, so back-to-back texts all
+    /// stay (where the last reply matters, the model takes it explicitly).
     A,
     /// A tool call, resolved in place when its result arrives.
     Tool,
@@ -424,13 +426,6 @@ pub(crate) fn busy_merge(mut intervals: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
 }
 
 fn push(summary: &mut FileIndex, event: Event) {
-    if event.k == Kind::A
-        && let Some(last) = summary.events.last_mut()
-        && last.k == Kind::A
-    {
-        *last = event;
-        return;
-    }
     if event.k == Kind::Gap
         && summary
             .events
@@ -1289,6 +1284,44 @@ mod tests {
             .map(|event| event.r.as_ref().unwrap().f & ACK != 0)
             .collect();
         assert_eq!(flags, [true, false]);
+    }
+
+    fn texts(records: &[Value]) -> Vec<(u64, u32)> {
+        let mut index = FileIndex::default();
+        for (offset, record) in records.iter().enumerate() {
+            claude(&mut index, record, offset as u64 * 100);
+        }
+        index
+            .events
+            .iter()
+            .filter(|event| event.k == Kind::A)
+            .map(|event| (event.o, event.b))
+            .collect()
+    }
+
+    fn said(id: &str, blocks: &[&str]) -> Value {
+        let content: Vec<Value> = blocks
+            .iter()
+            .map(|text| serde_json::json!({"type":"text","text":text}))
+            .collect();
+        serde_json::json!({"type":"assistant","uuid":format!("u-{id}"),"message":{"id":id,"role":"assistant","content":content}})
+    }
+
+    #[test]
+    fn every_assistant_text_is_its_own_event() {
+        // Two text blocks in one message.
+        assert_eq!(texts(&[said("m1", &["first", "second"])]), [(0, 0), (0, 1)]);
+        // Two consecutive messages, and one message streamed over two lines
+        // (Claude Code writes a line per block, with the same message id).
+        assert_eq!(
+            texts(&[
+                said("m1", &["one"]),
+                said("m2", &["two"]),
+                said("m3", &["three"]),
+                said("m3", &["four"]),
+            ]),
+            [(0, 0), (100, 0), (200, 0), (300, 0)]
+        );
     }
 
     #[test]

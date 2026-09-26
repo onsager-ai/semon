@@ -1563,3 +1563,56 @@ fn only_the_last_turn_can_hold_a_running_tool() {
         json!(["Bash", "make", 60, at(23, 3)])
     );
 }
+
+#[test]
+fn every_assistant_text_survives_into_the_turn() {
+    let home = Home::new();
+    let path = home.top(
+        "chatty",
+        &[
+            human("chatty", ts(2, 0), "talk to me"),
+            assistant("chatty", ts(2, 1), vec![text("first"), text("second")]),
+            assistant("chatty", ts(2, 2), vec![text("third")]),
+            assistant("chatty", ts(2, 3), vec![text("the last word")]),
+        ],
+    );
+    home.live(70, "chatty", "idle", json!({}));
+    home.codex(
+        "run",
+        json!({}),
+        &[
+            codex_user(ts(3, 0), "Semon-Parent: claude:chatty\nDo it"),
+            codex_reply(ts(3, 1), "halfway"),
+            codex_reply(ts(3, 2), "all done"),
+        ],
+    );
+    let built = home.build();
+    let content = fs::read_to_string(&path).unwrap();
+    let offset = |needle: &str| -> u64 {
+        let at = content.find(needle).unwrap();
+        u64::try_from(content[..at].rfind('\n').map_or(0, |line| line + 1)).unwrap()
+    };
+    // All four texts are in the one turn, in order.
+    assert_eq!(
+        built.texts["chatty"],
+        [
+            (0, offset("\"first\""), 0),
+            (0, offset("\"first\""), 1),
+            (0, offset("\"third\""), 0),
+            (0, offset("the last word"), 0),
+        ]
+    );
+    assert_eq!(turns_of(&built, "chatty")[0].end.why, "toyou");
+    // The waiting result and a run's returned result are the last reply.
+    let waiting = built
+        .handoffs
+        .iter()
+        .find(|handoff| handoff.ask == Some("result"))
+        .unwrap();
+    assert_eq!(waiting.brief, "the last word");
+    assert_eq!(
+        only(&built, "spawn", "chatty", "run").result.as_deref(),
+        Some("all done")
+    );
+    assert_eq!(built.texts["run"].len(), 2);
+}
