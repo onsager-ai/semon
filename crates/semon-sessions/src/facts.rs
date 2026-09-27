@@ -334,9 +334,21 @@ pub(crate) fn read_run(proc_root: &Path, pid: u32) -> Option<BTreeMap<String, St
     let run = (read.is_ok() && environ.len() as u64 <= ENVIRON_MAX)
         .then(|| run_of(&environ))
         .flatten();
-    // Nothing else of the environment outlives the parse.
-    environ.fill(0);
+    wipe(&mut environ);
     run
+}
+
+/// Zeroes a buffer that held a process environment, so nothing else of it
+/// outlives the parse in this process's memory. Volatile writes and a fence
+/// keep the optimiser from dropping the stores as dead before the free.
+/// Best-effort: the kernel's copy, and anything read before, are out of
+/// reach.
+fn wipe(bytes: &mut [u8]) {
+    for byte in bytes.iter_mut() {
+        // SAFETY: `byte` is a valid, aligned, exclusive reference to a u8.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
 /// The [`RUN_VARIABLES`] entries of a NUL-separated environment, by exact
@@ -378,6 +390,13 @@ pub fn write_facts(path: &Path, facts: &Facts) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wipe_zeroes_every_byte() {
+        let mut bytes = b"OSTROM_RUN_ID=r1\0SECRET=x".to_vec();
+        wipe(&mut bytes);
+        assert!(bytes.iter().all(|byte| *byte == 0));
+    }
 
     #[test]
     fn only_the_run_variables_are_kept_by_exact_name() {
