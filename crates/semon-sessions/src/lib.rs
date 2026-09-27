@@ -17,7 +17,7 @@ mod model;
 mod tx;
 mod viewer;
 pub use model::{model_json, model_json_at};
-pub use viewer::{ServeOptions, serve};
+pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerCore, ViewerReply, serve};
 
 #[derive(Clone, Debug)]
 pub struct Options {
