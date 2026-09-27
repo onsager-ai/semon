@@ -326,7 +326,10 @@ fn local_codex_lock(_: &Options, _: Option<&str>, _: &str) -> Lock {
 /// read, is larger than [`ENVIRON_MAX`], or holds a run id that isn't UTF-8.
 pub(crate) fn read_run(proc_root: &Path, pid: u32) -> Option<BTreeMap<String, String>> {
     let file = fs::File::open(proc_root.join(pid.to_string()).join("environ")).ok()?;
-    let mut environ = Vec::new();
+    // One buffer, big enough for the whole read: a growing one would leave
+    // copies of the environment in freed memory that the wipe below never
+    // reaches.
+    let mut environ = Vec::with_capacity(ENVIRON_MAX as usize + 1);
     let read = file.take(ENVIRON_MAX + 1).read_to_end(&mut environ);
     let run = (read.is_ok() && environ.len() as u64 <= ENVIRON_MAX)
         .then(|| run_of(&environ))
