@@ -1678,14 +1678,14 @@ fn a_copy_of_the_inputs_with_the_facts_builds_the_same_model() {
     home.top(
         "in-repo",
         &[
-            json!({"type":"user","timestamp":ts(17, 0),"sessionId":"in-repo","cwd":cwd,
+            json!({"type":"user","timestamp":ts(17, 0),"sessionId":"in-repo","cwd":&cwd,
             "origin":{"kind":"human"},"message":{"role":"user","content":"fix the build"}}),
         ],
     );
     // A running Codex run, holding its writer lock.
     home.codex(
         "root",
-        json!({"cwd": cwd}),
+        json!({"cwd": &cwd}),
         &[codex_user(ts(18, 0), "run the suite")],
     );
     hold_lock(&home, "root");
