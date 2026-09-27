@@ -1,0 +1,57 @@
+# A release build of the `semon` binary for Linux x86_64, uploaded as a workflow artifact, so that the binary can be used
+# without building it on a machine that can't take a long compile. Fetch the latest one with
+#   gh run download -R onsager-ai/semon -n semon-linux-x86_64 $(gh run list -R onsager-ai/semon -w release-binary.yml -b main -s success -L 1 --json databaseId -q '.[0].databaseId')
+# It runs on every push to main, on demand, and on pull requests that change this file.
+name: Release binary
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - .github/workflows/release-binary.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: semon release build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Unpinned on purpose, as in rust.yml: the ref selects the stable channel.
+      - name: Install Rust toolchain
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-release-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-release-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Build semon
+        run: cargo build --locked --release -p semon-store --bin semon
+
+      # `--help` prints the usage and exits nonzero, so only the grep's status counts.
+      - name: Smoke test
+        run: ./target/release/semon sessions --help 2>&1 | grep -q -- --serve
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: semon-linux-x86_64
+          path: target/release/semon
+          if-no-files-found: error
+          retention-days: 30
