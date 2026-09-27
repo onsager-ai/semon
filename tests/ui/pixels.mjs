@@ -25,7 +25,10 @@ const J = JSON.stringify;
 // share of the other pixels may differ. Never raise these to make a run pass.
 const THRESHOLD = 0.1;
 const MAX_RATIO = 0.0001;
-const SCHEMES = [["phone", false], ["phone", true], ["desktop", false]];
+// SEMON_PIXEL_SCHEMES=all adds 1280×860 dark.
+const SCHEMES = [["phone", false], ["phone", true], ["desktop", false], ...(process.env.SEMON_PIXEL_SCHEMES === "all" ? [["desktop", true]] : [])];
+// SEMON_PIXEL_SCREENS=a,b compares only the screens whose names start with one of these (all by default).
+const ONLY = (process.env.SEMON_PIXEL_SCREENS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 const FONTS = path.join(here, "../../crates/semon-sessions/src/fonts");
 const OUT = path.join(ENV.out, "pixels");
 
@@ -41,6 +44,14 @@ const CLOCKS = [
     '  const dur = (a, b) => { const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 60000)); return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor((d % 1440) / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };'],
   ['el("span", null, "Thought for " + e.secs + "s")', 'el("span", null, e.secs != null ? "Thought for " + e.secs + "s" : "Thought")'],
 ];
+// The served viewer's other deliberate differences on the Machines screens (several machines from the server): an
+// offline machine's last-seen time where the sample had a move, and the embedding server's management link.
+const MACHINE_LINES = [
+  ['        : ["Not responding" + (mh ? " since " + clock(mh.at) : ""), mv ? mv + (mv === 1 ? " session" : " sessions") + " moved off" : null].filter(Boolean).join(" · ")));\n      list.append(r);\n    }\n    page.append(list);',
+    '        : ["Not responding" + (mh ? " since " + clock(mh.at) : MACHINE_LAST[m] != null ? " since " + clock(MACHINE_LAST[m]) : ""), mv ? mv + (mv === 1 ? " session" : " sessions") + " moved off" : null].filter(Boolean).join(" · ")));\n      list.append(r);\n    }\n    if (ADMIN) { const a = el("button", "more", ADMIN.label); a.type = "button"; a.addEventListener("click", () => location.assign(ADMIN.href)); list.append(a); }\n    page.append(list);'],
+  ['l2.append(el("span", "rest", up ? w + " working · " + here.length + (here.length === 1 ? " session" : " sessions") : "Semon moved its sessions to other machines")); };',
+    'l2.append(el("span", "rest", up ? w + " working · " + here.length + (here.length === 1 ? " session" : " sessions") : movedOff(m).length ? "Semon moved its sessions to other machines" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, here.length + (here.length === 1 ? " session" : " sessions")].filter(Boolean).join(" · "))); };'],
+];
 
 // The mockup file with the served data in its data block.
 function portReference(D) {
@@ -49,10 +60,11 @@ function portReference(D) {
   const TX = {};
   for (const [sid, es] of Object.entries(D.TX)) TX[sid] = es.map((e) => (e.ret ? { k: "end", text: "Returned to " + D.SESS[e.ret.to].name + (e.ret.failed ? " · failed" : "") + " · " + hhmm(e.ret.at) } : e));
   const block = ["  const NOW = " + D.NOW + ";", "  const MACHINE = " + J(D.MACHINE) + ";", "  const MACHINE_UP = " + J(D.MACHINE_UP) + ";",
+    "  const MACHINE_LAST = " + J(D.MACHINE_LAST ?? {}) + ";", "  const ADMIN = " + J(D.ADMIN ?? null) + ";",
     '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(D.SESS) + ";", "  for (const [id, s] of Object.entries(SESS)) s.id = id;",
     "  const H = " + J(D.H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", ""].join("\n");
   let html = MOCKUP.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + MOCKUP.slice(end);
-  for (const [a, b] of CLOCKS) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
+  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
   return html;
 }
 
@@ -99,7 +111,8 @@ function compare(a, b) {
 
 // Every screen, as routes on the served viewer and on each reference.
 function screens(D, S, ids) {
-  const list = [["home", { v: "home" }], ["timeline", { v: "timeline" }], ["sessions", { v: "sessions" }], ["machines", { v: "machines" }], ["machine-laptop", { v: "machine", id: "laptop" }]];
+  const list = [["home", { v: "home" }], ["timeline", { v: "timeline" }], ["sessions", { v: "sessions" }], ["machines", { v: "machines" }]];
+  for (const m of Object.keys(D.MACHINE)) list.push(["machine-" + m, { v: "machine", id: m }]);
   for (const sid of Object.keys(D.SESS)) list.push(["session-" + sid, { v: "session", id: sid }]);
   for (const t of D.turns) {
     if (!t.sent.length) continue;
@@ -109,7 +122,8 @@ function screens(D, S, ids) {
     const inSample = t.start ? ids.get(t.start) : S.TX[t.sid]?.[at]?.k === "u" ? t.sid + ":" + at : null;
     list.push(["trace-" + t.sid + "-" + (inSample ?? t.id).replace(/[^\w-]/g, "_"), { v: "trace", sid: t.sid, turn: t.id }, { v: "trace", sid: t.sid, turn: port }, inSample ? { v: "trace", sid: t.sid, turn: inSample } : null]);
   }
-  return list.map(([name, served, port, sample]) => ({ name, served, port: port ?? served, sample: sample === undefined ? served : sample }));
+  return list.map(([name, served, port, sample]) => ({ name, served, port: port ?? served, sample: sample === undefined ? served : sample }))
+    .filter((s) => !ONLY.length || ONLY.some((prefix) => s.name.startsWith(prefix)));
 }
 
 // The sample's handoff for each served one, matched as gaps.mjs matches them.
@@ -151,7 +165,7 @@ const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.wr
       results.push(row);
     }
     // The phone's navigation drawer, open on Home.
-    if (size === "phone") {
+    if (size === "phone" && !ONLY.length) {
       await nav(page, { v: "home" }, D, false); await page.click("#lead-btn"); await page.waitForTimeout(350);
       await nav(port, { v: "home" }, D, true); await port.click("#lead-btn"); await port.waitForTimeout(350);
       const p = compare(await shot(page, "desktop"), await shot(port, "desktop"));

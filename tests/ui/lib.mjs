@@ -85,7 +85,14 @@ export async function data({ extras = false } = {}) {
     while (page.from > 0) { page = await get("/api/tx?sid=" + encodeURIComponent(sid) + "&before=" + page.from); entries = page.entries.concat(entries); }
     TX[sid] = entries;
   }
-  return { model, SESS, H, TX, turns: model.turns, NOW: model.now, MACHINE: { [model.machine.id]: model.machine.name }, MACHINE_UP: { [model.machine.id]: model.machine.up } };
+  const machines = model.machines ?? [model.machine];
+  return {
+    model, SESS, H, TX, turns: model.turns, NOW: model.now,
+    MACHINE: Object.fromEntries(machines.map((m) => [m.id, m.name])),
+    MACHINE_UP: Object.fromEntries(machines.map((m) => [m.id, m.up])),
+    MACHINE_LAST: Object.fromEntries(machines.filter((m) => m.last != null).map((m) => [m.id, m.last])),
+    ADMIN: model.admin ?? null,
+  };
 }
 
 // Each check writes out/<name>.json and fails when any of its assertions failed.
