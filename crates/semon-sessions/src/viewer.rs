@@ -90,6 +90,13 @@ pub struct ViewerCore {
     harness: BTreeMap<PathBuf, ((u64, u64), BTreeSet<u64>)>,
 }
 
+// An embedding server moves a core to a blocking thread and shares it
+// behind a lock: it must stay `Send`.
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<ViewerCore>();
+};
+
 /// The loopback server around a [`ViewerCore`]: the per-run token and its
 /// cookie, the exact local Host check and GET only.
 struct Viewer {
