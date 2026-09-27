@@ -313,13 +313,14 @@ fn tool_entry(
     name: &str,
     reply: Option<&crate::events::Reply>,
     now: i64,
+    home: Option<&str>,
 ) -> Value {
     let record = lines.get(&file.path, slot.offset);
     let input = record
         .as_ref()
         .and_then(|record| tool_input(record, slot.block as usize))
         .unwrap_or(Value::Null);
-    let arg = arg_summary(name, &input, file.cwd.as_deref());
+    let arg = arg_summary(name, &input, file.cwd.as_deref(), home);
     let mut entry = Map::new();
     entry.insert("k".into(), json!("tool"));
     entry.insert("name".into(), json!(name));
@@ -423,9 +424,17 @@ fn render(built: &Built, lines: &mut Lines, slot: &Slot, index: usize, now: i64)
         SlotKind::Returned { to, at, failed } => {
             json!({"k": "end", "ret": {"to": to, "at": at, "failed": failed}})
         }
-        SlotKind::Tool { shown, name, reply } => {
-            tool_entry(lines, file?, slot, index, *shown, name, reply.as_ref(), now)
-        }
+        SlotKind::Tool { shown, name, reply } => tool_entry(
+            lines,
+            file?,
+            slot,
+            index,
+            *shown,
+            name,
+            reply.as_ref(),
+            now,
+            built.home.as_deref(),
+        ),
     };
     Some(entry)
 }
@@ -608,6 +617,7 @@ mod tests {
                 all: true,
                 since: Duration::from_secs(86400),
                 session: None,
+                facts: None,
             };
             let home = Self { root, options };
             home.write("proc/locks", "");
@@ -1081,12 +1091,12 @@ mod tests {
     fn a_command_longer_than_its_summary_shows_as_input() {
         let long = format!("cd /work/proj && {}", "cargo test ".repeat(20));
         let input = json!({"command": long});
-        let arg = arg_summary("Bash", &input, None);
+        let arg = arg_summary("Bash", &input, None, None);
         assert!(arg.ends_with('…'));
         assert_eq!(tool_in("Bash", &input, &arg), Some(long));
         let multi = json!({"command": "set -e\nmake"});
         assert_eq!(
-            tool_in("Bash", &multi, &arg_summary("Bash", &multi, None)).as_deref(),
+            tool_in("Bash", &multi, &arg_summary("Bash", &multi, None, None)).as_deref(),
             Some("set -e\nmake")
         );
         let short = json!({"command": "ls -la"});
@@ -1108,6 +1118,7 @@ mod tests {
             all: false,
             since: Duration::from_secs(86400),
             session: None,
+            facts: None,
         };
         let mut cache = EventCache::default();
         let built = build(&options, &mut cache, &mut false, &mut Texts::default(), now).unwrap();

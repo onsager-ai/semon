@@ -12,7 +12,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    env, fs,
+    fs,
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
@@ -30,7 +30,8 @@ use crate::{
     events::{
         ACK, ANSWERED, ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
-    field, file_list, lock_identity, lock_pid, matches_handoff, proc_start, read_first_marker,
+    facts::Machine,
+    field, file_list, matches_handoff, read_first_marker,
 };
 
 /// Briefs and results are capped as in the mockup data.
@@ -181,6 +182,8 @@ pub(crate) struct Built {
     /// `"handoffs":…,"turns":…,"busy":…,"tx":…}`
     rest: String,
     pub(crate) pids: Vec<u32>,
+    /// `$HOME` of the machine the logs come from, for shortening paths.
+    pub(crate) home: Option<String>,
     /// This machine's id, as sessions name it.
     pub(crate) machine_id: String,
     /// Every source file, by position: what transcript slots point into.
@@ -257,7 +260,7 @@ pub(crate) fn now_ms() -> i64 {
     // a debug build with the `test-clock` feature reads this: without the
     // feature, or in a release build, the variable is ignored.
     #[cfg(all(feature = "test-clock", debug_assertions))]
-    if let Some(now) = env::var("SEMON_TEST_NOW")
+    if let Some(now) = std::env::var("SEMON_TEST_NOW")
         .ok()
         .and_then(|value| value.parse::<i64>().ok())
     {
@@ -438,7 +441,7 @@ impl Texts {
         if let Some(repo) = self.repos.get(cwd) {
             return repo.clone();
         }
-        let repo = repo_of(cwd);
+        let repo = repo_of(cwd, crate::facts::env_home().as_deref().map(Path::new));
         self.repos.insert(cwd.to_owned(), repo.clone());
         repo
     }
@@ -692,22 +695,17 @@ pub(crate) fn tool_result_text(record: &Value, block: usize) -> Option<String> {
         .map(content_text)
 }
 
-fn home() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-fn repo_of(cwd: &str) -> Option<String> {
+/// The repository `cwd` is in: the directory holding the nearest `.git`
+/// below `home` (or a worktree's owner), by name.
+pub(crate) fn repo_of(cwd: &str, home: Option<&Path>) -> Option<String> {
     if let Some((before, _)) = cwd.split_once("/.claude/worktrees/") {
         return Path::new(before)
             .file_name()
             .map(|name| name.to_string_lossy().into_owned());
     }
-    let home = home();
     let mut path = Some(Path::new(cwd));
     while let Some(current) = path {
-        if current == Path::new("/") || home.as_deref() == Some(current) {
+        if current == Path::new("/") || home == Some(current) {
             break;
         }
         if current.join(".git").exists() {
@@ -751,7 +749,8 @@ fn plain_name(name: &str) -> String {
         .to_owned()
 }
 
-fn hostname(options: &Options) -> String {
+/// This machine's hostname, as `/proc` (or `/etc/hostname`) gives it.
+pub(crate) fn local_hostname(options: &Options) -> String {
     fs::read_to_string(options.proc_root.join("sys/kernel/hostname"))
         .or_else(|_| fs::read_to_string("/etc/hostname"))
         .ok()
@@ -847,7 +846,7 @@ fn stamp_of(path: &Path) -> Stamp {
     }
 }
 
-fn pid_files(options: &Options) -> Vec<PidFile> {
+fn pid_files(options: &Options, machine: &Machine) -> Vec<PidFile> {
     let mut result = Vec::new();
     let Ok(entries) = fs::read_dir(options.claude_home.join("sessions")) else {
         return result;
@@ -880,7 +879,7 @@ fn pid_files(options: &Options) -> Vec<PidFile> {
         result.push(PidFile {
             pid,
             session: session.to_owned(),
-            alive: start.is_some() && proc_start(&options.proc_root, pid) == start,
+            alive: start.is_some() && machine.proc_start(options, pid) == start,
             status: field(&record, "status").map(str::to_owned),
             name: field(&record, "name").map(str::to_owned),
         });
@@ -889,28 +888,25 @@ fn pid_files(options: &Options) -> Vec<PidFile> {
     result
 }
 
-fn held_codex(options: &Options) -> BTreeSet<String> {
-    let mut held = BTreeSet::new();
-    #[cfg(unix)]
-    if let (Ok(locks), Ok(entries)) = (
-        fs::read_to_string(options.proc_root.join("locks")),
-        fs::read_dir(options.codex_home.join("thread-writer-locks")),
-    ) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".lock")) else {
-                continue;
-            };
-            if let Ok((major, minor, ino)) = lock_identity(&entry.path())
-                && lock_pid(&locks, major, minor, ino).is_some()
-            {
-                held.insert(id.to_owned());
-            }
+/// Every working directory the logs name, for [`crate::Facts::repos`]: each
+/// file's own, and each subagent's and Codex run's metadata's. A superset of
+/// the ones the builder looks a repository up for.
+pub(crate) fn working_dirs(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+) -> io::Result<BTreeSet<String>> {
+    let files = scan(options, cache, dirty, &mut Texts::default())?;
+    let mut cwds = BTreeSet::new();
+    for file in &files {
+        cwds.extend(file.summary.cwd.clone());
+        match &file.role {
+            Role::Agent(meta) => cwds.extend(meta.cwd.clone()),
+            Role::Codex(meta) => cwds.extend(meta.cwd.clone()),
+            Role::Top { .. } => {}
         }
     }
-    #[cfg(not(unix))]
-    let _ = options;
-    held
+    Ok(cwds)
 }
 
 fn scan(
@@ -1166,6 +1162,8 @@ struct Builder<'a> {
     texts: &'a mut Texts,
     now: i64,
     machine: String,
+    facts: &'a Machine,
+    home: Option<String>,
     sessions: Vec<Sess>,
     of_file: Vec<usize>,
     by_key: HashMap<String, usize>,
@@ -1184,12 +1182,20 @@ fn event(files: &[SourceFile], at: Ref) -> &Event {
 }
 
 impl<'a> Builder<'a> {
-    fn new(files: &'a [SourceFile], texts: &'a mut Texts, now: i64, machine: String) -> Self {
+    fn new(
+        files: &'a [SourceFile],
+        texts: &'a mut Texts,
+        now: i64,
+        machine: String,
+        facts: &'a Machine,
+    ) -> Self {
         Self {
             files,
             texts,
             now,
             machine,
+            home: facts.home(),
+            facts,
             sessions: Vec::new(),
             of_file: vec![usize::MAX; files.len()],
             by_key: HashMap::new(),
@@ -1545,7 +1551,11 @@ impl<'a> Builder<'a> {
                 String::new(),
             ),
         };
-        let repo = cwd.as_deref().and_then(|cwd| self.texts.repo(cwd));
+        let repo = cwd.as_deref().and_then(|cwd| {
+            self.facts
+                .recorded_repo(cwd)
+                .unwrap_or_else(|| self.texts.repo(cwd))
+        });
         let session = &mut self.sessions[index];
         session.names.extend(names);
         let out = &mut session.out;
@@ -2459,10 +2469,12 @@ impl<'a> Builder<'a> {
             let name = found.n.clone().unwrap_or_else(|| "tool".into());
             let cwd = self.files[at.0].summary.cwd.clone();
             let summary_name = name.clone();
+            let home = self.home.clone();
             let arg = self
                 .text(at, "arg", move |record, block| {
-                    tool_input(record, block)
-                        .map(|input| arg_summary(&summary_name, &input, cwd.as_deref()))
+                    tool_input(record, block).map(|input| {
+                        arg_summary(&summary_name, &input, cwd.as_deref(), home.as_deref())
+                    })
                 })
                 .unwrap_or_default();
             // The age is filled when served, so `version` depends on the
@@ -3362,14 +3374,14 @@ pub(crate) fn patch_files(patch: &str) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn relative(path: &str, cwd: Option<&str>) -> String {
+pub(crate) fn relative(path: &str, cwd: Option<&str>, home: Option<&str>) -> String {
     if let Some(cwd) = cwd
         && let Some(rest) = path.strip_prefix(&format!("{}/", cwd.trim_end_matches('/')))
     {
         return rest.to_owned();
     }
-    if let Some(home) = home().and_then(|home| home.to_str().map(str::to_owned))
-        && let Some(rest) = path.strip_prefix(&home)
+    if let Some(home) = home
+        && let Some(rest) = path.strip_prefix(home)
     {
         return format!("~{rest}");
     }
@@ -3377,7 +3389,12 @@ pub(crate) fn relative(path: &str, cwd: Option<&str>) -> String {
 }
 
 /// The one-line argument the mockup shows for a running tool.
-pub(crate) fn arg_summary(name: &str, input: &Value, cwd: Option<&str>) -> String {
+pub(crate) fn arg_summary(
+    name: &str,
+    input: &Value,
+    cwd: Option<&str>,
+    home: Option<&str>,
+) -> String {
     let get = |key: &str| field(input, key).map(str::to_owned);
     let summary = match name {
         "Bash" | "shell" | "exec_command" | "local_shell" => {
@@ -3395,7 +3412,7 @@ pub(crate) fn arg_summary(name: &str, input: &Value, cwd: Option<&str>) -> Strin
         }
         "Read" | "Edit" | "Write" | "NotebookEdit" | "MultiEdit" => get("file_path")
             .or_else(|| get("notebook_path"))
-            .map(|path| relative(&path, cwd)),
+            .map(|path| relative(&path, cwd, home)),
         "Grep" | "Glob" => get("pattern"),
         "WebFetch" => get("url"),
         "WebSearch" | "ToolSearch" => get("query"),
@@ -3407,7 +3424,7 @@ pub(crate) fn arg_summary(name: &str, input: &Value, cwd: Option<&str>) -> Strin
             patch_files(&patch)
                 .into_iter()
                 .next()
-                .map(|path| relative(&path, cwd))
+                .map(|path| relative(&path, cwd, home))
         }),
         _ => None,
     };
@@ -3440,11 +3457,13 @@ pub(crate) fn build(
         BUILDS.with(|builds| builds.set(builds.get() + 1));
         AFTER_SCAN.with(|hook| hook.borrow_mut().take().map(|hook| hook()));
     }
-    let pids = pid_files(options);
-    let held = held_codex(options);
-    let machine = hostname(options);
+    let facts = Machine::of(options);
+    let pids = pid_files(options, &facts);
+    let held = facts.held_codex(options);
+    let machine = facts.hostname(options);
+    let home = facts.home();
     let groups = lineages(&files);
-    let mut builder = Builder::new(&files, texts, now, machine.clone());
+    let mut builder = Builder::new(&files, texts, now, machine.clone(), &facts);
     builder.sessions(groups, &pids, &held);
     builder.index_tools();
     builder.claude_spawns();
@@ -3645,6 +3664,7 @@ pub(crate) fn build(
         sessions,
         rest: rest[1..].to_owned(),
         pids,
+        home,
         machine_id,
         files: slot_files,
         tx,

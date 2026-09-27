@@ -13,9 +13,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod events;
+mod facts;
+mod inputs;
 mod model;
 mod tx;
 mod viewer;
+pub use facts::{FACTS_VERSION, Facts, local_facts, read_facts, write_facts};
+pub use inputs::{Input, InputRoot, inputs, is_input_path};
 pub use model::{model_json, model_json_at};
 pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerCore, ViewerReply, serve};
 
@@ -28,6 +32,11 @@ pub struct Options {
     pub all: bool,
     pub since: Duration,
     pub session: Option<String>,
+    /// A facts file ([`Facts`]) to take the machine's side of the model
+    /// from, in place of `proc_root`, `/etc/hostname`, `$HOME` and the
+    /// working directories on this disk. For logs copied from another
+    /// machine.
+    pub facts: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -48,6 +57,7 @@ impl Default for Options {
             all: false,
             since: Duration::from_secs(24 * 60 * 60),
             session: None,
+            facts: None,
         }
     }
 }
@@ -797,6 +807,7 @@ pub(crate) fn collect_with_index(
     let mut claude_paths = BTreeMap::<String, PathBuf>::new();
     let mut summaries = BTreeMap::<String, Summary>::new();
 
+    let machine = facts::Machine::of(options);
     let sessions = options.claude_home.join("sessions");
     if let Ok(entries) = fs::read_dir(sessions) {
         for entry in entries {
@@ -828,7 +839,7 @@ pub(crate) fn collect_with_index(
                 .get("procStart")
                 .and_then(Value::as_u64)
                 .or_else(|| field(&record, "procStart").and_then(|value| value.parse().ok()));
-            if start.is_none() || proc_start(&options.proc_root, pid) != start {
+            if start.is_none() || machine.proc_start(options, pid) != start {
                 continue;
             }
             let key = format!("claude:{id}");
@@ -942,8 +953,16 @@ pub(crate) fn collect_with_index(
         }
     }
 
-    let locks = fs::read_to_string(options.proc_root.join("locks")).ok();
+    let recorded = matches!(machine, facts::Machine::Recorded(_));
+    let locks = if recorded {
+        None
+    } else {
+        fs::read_to_string(options.proc_root.join("locks")).ok()
+    };
     let mut held_threads = BTreeMap::<String, u32>::new();
+    if let facts::Machine::Recorded(facts) = &machine {
+        held_threads.extend(facts.codex_locks.clone());
+    }
     #[cfg(unix)]
     if let (Some(locks), Ok(entries)) = (
         &locks,
@@ -1010,32 +1029,14 @@ pub(crate) fn collect_with_index(
             (None, Some(path)) => Some(path.into()),
             _ => None,
         };
-        #[cfg(unix)]
-        {
-            node.state = match &locks {
-                None => "unknown".into(),
-                Some(locks) => match lock_identity(
-                    &options
-                        .codex_home
-                        .join("thread-writer-locks")
-                        .join(format!("{}.lock", node.id)),
-                ) {
-                    Ok((major, minor, ino)) => match lock_pid(locks, major, minor, ino) {
-                        Some(pid) => {
-                            node.pid = Some(pid);
-                            "running".into()
-                        }
-                        None => "ended".into(),
-                    },
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => "ended".into(),
-                    Err(_) => "unknown".into(),
-                },
-            };
-        }
-        #[cfg(not(unix))]
-        {
-            node.state = "unknown".into();
-        }
+        node.state = match machine.codex_lock(options, locks.as_deref(), &node.id) {
+            facts::Lock::Held(pid) => {
+                node.pid = Some(pid);
+                "running".into()
+            }
+            facts::Lock::Free => "ended".into(),
+            facts::Lock::Unknown => "unknown".into(),
+        };
         let summary = if metadata_unreadable {
             None
         } else {

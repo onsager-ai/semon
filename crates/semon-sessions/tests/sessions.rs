@@ -36,6 +36,7 @@ impl Fixture {
             all: true,
             since: Duration::from_secs(86400),
             session: None,
+            facts: None,
         };
         fs::create_dir_all(&options.proc_root).unwrap();
         fs::write(options.proc_root.join("locks"), "").unwrap();
