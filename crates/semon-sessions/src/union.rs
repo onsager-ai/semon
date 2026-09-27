@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn an_admin_link_is_a_same_origin_path_with_a_label() {
-        assert!(AdminLink::new("Manage machines", "/hub/machines").is_some());
+        assert!(AdminLink::new("Manage machines", "/admin/machines").is_some());
         for (label, href) in [
             ("", "/x"),
             ("Manage", "https://elsewhere.test/x"),
@@ -538,10 +538,10 @@ mod tests {
         ] {
             assert!(AdminLink::new(label, href).is_none(), "{label:?} {href:?}");
         }
-        let link = AdminLink::new("Manage machines", "/hub/machines").unwrap();
+        let link = AdminLink::new("Manage machines", "/admin/machines").unwrap();
         assert_eq!(
             with_admin(b"{\"version\":\"v\"}", &link),
-            b"{\"admin\":{\"label\":\"Manage machines\",\"href\":\"/hub/machines\"},\"version\":\"v\"}"
+            b"{\"admin\":{\"label\":\"Manage machines\",\"href\":\"/admin/machines\"},\"version\":\"v\"}"
         );
         assert_eq!(
             with_param("sid=a%40b&before=3", "sid", "a"),

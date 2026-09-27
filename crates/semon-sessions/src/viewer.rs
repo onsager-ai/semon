@@ -2753,10 +2753,10 @@ mod tests {
             !String::from_utf8_lossy(&core.respond("GET", "/api/model", "", None).body)
                 .contains("\"admin\"")
         );
-        core.set_admin_link(crate::AdminLink::new("Manage machines", "/hub/machines"));
+        core.set_admin_link(crate::AdminLink::new("Manage machines", "/admin/machines"));
         let linked = core.respond("GET", "/api/model", "", None);
         assert!(linked.body.starts_with(
-            b"{\"admin\":{\"label\":\"Manage machines\",\"href\":\"/hub/machines\"},\"version\":"
+            b"{\"admin\":{\"label\":\"Manage machines\",\"href\":\"/admin/machines\"},\"version\":"
         ));
     }
 
