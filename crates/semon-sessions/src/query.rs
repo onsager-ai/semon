@@ -15,6 +15,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fmt, io,
+    time::Duration,
 };
 
 use serde_json::{Map, Value, json};
@@ -95,7 +96,11 @@ const STALL_RULE: &str = "A session stalls when no log line has landed for at le
      status is busy, a subagent whose parent runs and whose spawning call has no result, or a Codex run \
      that holds its writer lock.";
 
-const SINCE: &str = "A duration back from now (90m, 2h, 7d, 1w) or an RFC 3339 time.";
+const SINCE: &str = "A duration back from now (90m, 2h, 7d, 1w) or an RFC 3339 time; not before the \
+     window's start (window_start), or the answer is the error outside_window.";
+
+/// How far back `semon query` and `semon mcp` read by default.
+pub const DEFAULT_WINDOW: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Defaults and bounds.
 const LIST_LIMIT: i64 = 100;
@@ -111,9 +116,11 @@ const CONTEXT: usize = 80;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryError {
     /// `unknown_tool`, `invalid_arguments`, `unknown_session`,
-    /// `unknown_turn`, `id_conflict` or `io`.
+    /// `unknown_turn`, `outside_window`, `id_conflict` or `io`.
     pub code: &'static str,
     pub message: String,
+    /// With `outside_window`: where the window starts (epoch ms).
+    pub window_start: Option<i64>,
 }
 
 impl QueryError {
@@ -121,6 +128,7 @@ impl QueryError {
         Self {
             code,
             message: message.into(),
+            window_start: None,
         }
     }
 
@@ -139,9 +147,14 @@ impl QueryError {
         Self::new("io", error.to_string())
     }
 
-    /// `{"error": {"code": …, "message": …}}`.
+    /// `{"error": {"code": …, "message": …}}`, and the `window_start` of
+    /// an `outside_window`.
     pub fn to_json(&self) -> Value {
-        json!({"error": {"code": self.code, "message": self.message}})
+        let mut error = json!({"code": self.code, "message": self.message});
+        if let Some(start) = self.window_start {
+            error["window_start"] = json!(start);
+        }
+        json!({ "error": error })
     }
 }
 
@@ -489,6 +502,8 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
 /// caches between calls, rebuilding only what changed.
 pub struct Query {
     core: ViewerCore,
+    /// How far back the model reads; `None` for the whole history.
+    window: Option<Duration>,
 }
 
 impl Query {
@@ -499,15 +514,25 @@ impl Query {
 
     /// The tools over several machines' homes, as one model: the union
     /// [`ViewerCore::with_machines`] serves.
+    ///
+    /// The window is the first machine's `since`, or the whole history with
+    /// `all`: only log files modified within it are read
+    /// ([`Options::scan_window`]), and every answer names its
+    /// `window_start`. A tool's own `since` is a filter inside it.
     pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
-        // The whole history: the tools filter by their own `since`.
+        let window = machines
+            .first()
+            .filter(|(_, options)| !options.all)
+            .map(|(_, options)| options.since);
         let machines = machines
             .into_iter()
             .map(|(key, options)| {
                 (
                     key,
                     Options {
-                        all: true,
+                        all: window.is_none(),
+                        since: window.unwrap_or(options.since),
+                        scan_window: true,
                         session: None,
                         ..options
                     },
@@ -516,7 +541,34 @@ impl Query {
             .collect();
         Self {
             core: ViewerCore::with_machines(machines),
+            window,
         }
+    }
+
+    /// Where the window starts at `now` (epoch ms); `None` without one.
+    fn window_start(&self, now: i64) -> Option<i64> {
+        self.window
+            .map(|window| now.saturating_sub(i64::try_from(window.as_millis()).unwrap_or(i64::MAX)))
+    }
+
+    /// A tool's `since`, which must not reach before the window's start.
+    fn since(&self, args: &Value, now: i64) -> Result<Option<i64>, QueryError> {
+        let parsed = since_ms(args, now)?;
+        if let (Some(since), Some(start)) = (parsed, self.window_start(now))
+            && since < start
+        {
+            return Err(QueryError {
+                window_start: Some(start),
+                ..QueryError::new(
+                    "outside_window",
+                    format!(
+                        "since reaches before the window, which starts at {start} (epoch ms); \
+                         widen it with --since or --all"
+                    ),
+                )
+            });
+        }
+        Ok(parsed)
     }
 
     /// Calls one tool with its arguments (a JSON object).
@@ -538,14 +590,16 @@ impl Query {
         let empty = json!({});
         let args = if args.is_null() { &empty } else { args };
         validate(&spec.input_schema, args)?;
-        match tool {
+        let mut answer = match tool {
             "list_sessions" => self.list_sessions(args, now),
             "get_session" => self.get_session(args, now),
             "read_transcript" => self.read_transcript(args, now),
             "find" => self.find(args, now),
             "stalls" => self.stalls(args, now),
             _ => unreachable!("every tool is handled"),
-        }
+        }?;
+        answer["window_start"] = json!(self.window_start(now));
+        Ok(answer)
     }
 
     fn view(&mut self, now: i64) -> Result<View, QueryError> {
@@ -623,7 +677,7 @@ impl Query {
 
     fn list_sessions(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
         let view = self.view(now)?;
-        let since = since_ms(args, now)?;
+        let since = self.since(args, now)?;
         let state = string(args, "state");
         let repo = string(args, "repo");
         let parent = string(args, "parent");
@@ -733,7 +787,7 @@ impl Query {
     fn find(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
         let text = string(args, "text").unwrap_or_default();
         let needle = text.to_ascii_lowercase();
-        let since = since_ms(args, now)?;
+        let since = self.since(args, now)?;
         let limit = integer(args, "limit").unwrap_or(FIND_LIMIT) as usize;
         let max_bytes = integer(args, "max_bytes").unwrap_or(FIND_BYTES) as u64;
         let view = self.view(now)?;
@@ -882,7 +936,7 @@ impl Query {
     fn stalls(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
         let view = self.view(now)?;
         let idle_minutes = integer(args, "idle_minutes").unwrap_or(1);
-        let since = since_ms(args, now)?;
+        let since = self.since(args, now)?;
         let threshold = idle_minutes.saturating_mul(60_000);
         let mut rows = Vec::new();
         for (id, session) in &view.sessions {

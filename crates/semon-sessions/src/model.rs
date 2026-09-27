@@ -950,9 +950,19 @@ fn scan(
     let projects = options.claude_home.join("projects");
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
+    // A file outside a scan window isn't read at all: its cached index is
+    // kept (it counts as seen) for builds that read every file.
+    let cutoff = (options.scan_window && !options.all)
+        .then(|| crate::unix_now().saturating_sub(options.since.as_secs()));
+    let outside =
+        |path: &Path| cutoff.is_some_and(|cutoff| !crate::modified_recently(path, cutoff));
     let mut paths = Vec::new();
     file_list(&projects, &mut paths, "jsonl")?;
     for path in paths {
+        if outside(&path) {
+            seen.insert(path.to_string_lossy().into_owned());
+            continue;
+        }
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
@@ -1021,6 +1031,10 @@ fn scan(
     let mut paths = Vec::new();
     file_list(&options.codex_home.join("sessions"), &mut paths, "jsonl")?;
     for path in paths {
+        if outside(&path) {
+            seen.insert(path.to_string_lossy().into_owned());
+            continue;
+        }
         let Ok(meta) = texts.meta(&path, true, codex_meta) else {
             continue;
         };
@@ -3541,8 +3555,9 @@ pub(crate) fn arg_summary(
 // ---- Build -------------------------------------------------------------------------------
 
 /// Builds the model from the whole of `~/.claude` and `~/.codex`: links need
-/// both ends, so every file is indexed whatever the window. The window only
-/// trims what is returned.
+/// both ends, so every file is indexed whatever the window, and the window
+/// only trims what is returned. With [`Options::scan_window`], files last
+/// modified before the window aren't read at all.
 pub(crate) fn build(
     options: &Options,
     cache: &mut EventCache,
