@@ -157,6 +157,9 @@ pub(crate) struct Machine {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) up: bool,
+    /// When an offline machine was last seen (epoch ms).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -3462,6 +3465,7 @@ pub(crate) fn build(
     let held = facts.held_codex(options);
     let machine = facts.hostname(options);
     let home = facts.home();
+    let offline_since = facts.offline_since();
     let groups = lineages(&files);
     let mut builder = Builder::new(&files, texts, now, machine.clone(), &facts);
     builder.sessions(groups, &pids, &held);
@@ -3625,7 +3629,8 @@ pub(crate) fn build(
     let machine = Machine {
         id: machine.clone(),
         name: machine,
-        up: true,
+        up: offline_since.is_none(),
+        last: offline_since,
     };
     let machine = serde_json::to_string(&machine)?;
     let rest = serde_json::to_string(&Rest {

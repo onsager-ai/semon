@@ -34,15 +34,20 @@ pub struct Facts {
     /// The repository (its directory's name) of every working directory the
     /// logs name, or null when it's in none.
     pub repos: BTreeMap<String, Option<String>>,
+    /// Set by a receiver that has stopped hearing from the machine: when it
+    /// was last seen (epoch ms). The machine then counts as offline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline_since: Option<i64>,
 }
 
 impl Facts {
-    /// The same machine with nothing running: its hostname, home and
-    /// repositories, and no live process or held lock.
-    pub fn offline(&self) -> Self {
+    /// The same machine, offline since `last_seen` (epoch ms): its hostname,
+    /// home and repositories, and no live process or held lock.
+    pub fn offline(&self, last_seen: i64) -> Self {
         Self {
             proc_starts: BTreeMap::new(),
             codex_locks: BTreeMap::new(),
+            offline_since: Some(last_seen),
             ..self.clone()
         }
     }
@@ -80,6 +85,7 @@ pub fn local_facts(options: &Options) -> io::Result<Facts> {
         proc_starts,
         codex_locks: codex_locks(options),
         repos,
+        offline_since: None,
     })
 }
 
@@ -166,6 +172,14 @@ impl MachineFacts {
             Self::Local => model::local_hostname(options),
             Self::Recorded(facts) if facts.hostname.trim().is_empty() => "localhost".into(),
             Self::Recorded(facts) => facts.hostname.trim().to_owned(),
+        }
+    }
+
+    /// When the machine was last seen, if its facts say it's offline.
+    pub(crate) fn offline_since(&self) -> Option<i64> {
+        match self {
+            Self::Local => None,
+            Self::Recorded(facts) => facts.offline_since,
         }
     }
 
