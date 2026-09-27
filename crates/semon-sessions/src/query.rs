@@ -376,6 +376,8 @@ fn since_ms(args: &Value, now: i64) -> Result<Option<i64>, QueryError> {
 struct View {
     now: i64,
     sessions: Vec<(String, Value)>,
+    /// Each session's position in `sessions`, by id.
+    index: HashMap<String, usize>,
     handoffs: Vec<Value>,
     turns: Vec<Value>,
     facts: BTreeMap<String, SessionFacts>,
@@ -386,10 +388,9 @@ struct View {
 
 impl View {
     fn session(&self, id: &str) -> Option<&Value> {
-        self.sessions
-            .iter()
-            .find(|(key, _)| key == id)
-            .map(|(_, session)| session)
+        self.index
+            .get(id)
+            .map(|position| &self.sessions[*position].1)
     }
 
     fn state(&self, id: &str, session: &Value) -> State {
@@ -597,6 +598,11 @@ impl Query {
                 );
             }
         }
+        let index = sessions
+            .iter()
+            .enumerate()
+            .map(|(position, (id, _))| (id.clone(), position))
+            .collect();
         let mut children = BTreeMap::<String, Vec<String>>::new();
         for (id, _) in &sessions {
             if let Some(parent) = facts.get(id).and_then(|facts| facts.parent.clone()) {
@@ -606,6 +612,7 @@ impl Query {
         Ok(View {
             now,
             sessions,
+            index,
             handoffs,
             turns,
             facts,
