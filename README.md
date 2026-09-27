@@ -104,6 +104,8 @@ By default, the adapter reads `~/.codex/sessions/**/*.jsonl` and
 cursor location at `~/.local/state/devlog/codex-tailer.json`. The corresponding
 XDG base-directory variables override those roots.
 
+Recent Codex versions no longer write `~/.codex/history.jsonl`. When it is missing the adapter skips it without an error, so on a current install only the session rollouts are captured, and the history-derived intent traces never appear. Where Codex keeps that history now is unverified (#2).
+
 Useful source and destination overrides are:
 
 ```sh
