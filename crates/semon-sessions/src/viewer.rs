@@ -63,10 +63,19 @@ struct ChildLink {
     label: Option<String>,
 }
 
-struct Viewer {
+/// The session viewer without a transport: the pages, assets and API routes
+/// `semon sessions --serve` answers, with the in-memory model, caches and
+/// live refresh behind them, and no listener, token or Host check of its own.
+/// It lets another server embed the viewer: that server owns the socket and
+/// decides who may ask, then hands each request to [`ViewerCore::respond`]
+/// and sends back the [`ViewerReply`] with [`SECURITY_HEADERS`].
+///
+/// A core reads one set of agent homes ([`Options`]). A call does blocking
+/// file I/O, and the first one builds the model, so an async server should
+/// call it off its runtime (for example on a blocking thread) and keep the
+/// core behind a lock: one core answers one request at a time.
+pub struct ViewerCore {
     options: Options,
-    token: String,
-    port: u16,
     index: Option<Index>,
     index_dirty: bool,
     events: Option<EventCache>,
@@ -79,6 +88,44 @@ struct Viewer {
     paths: BTreeMap<(String, String), PathBuf>,
     known_paths: BTreeSet<PathBuf>,
     harness: BTreeMap<PathBuf, ((u64, u64), BTreeSet<u64>)>,
+}
+
+// An embedding server moves a core to a blocking thread and shares it
+// behind a lock: it must stay `Send`.
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<ViewerCore>();
+};
+
+/// The loopback server around a [`ViewerCore`]: the per-run token and its
+/// cookie, the exact local Host check and GET only.
+struct Viewer {
+    core: ViewerCore,
+    token: String,
+    port: u16,
+}
+
+/// Headers the viewer sends on every response, whatever its status. A server
+/// embedding [`ViewerCore`] sends them too: the page relies on this CSP (no
+/// inline script or style), and nothing it serves may be cached or framed.
+pub const SECURITY_HEADERS: [(&str, &str); 4] = [
+    ("Cache-Control", "no-store"),
+    (
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self'",
+    ),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "no-referrer"),
+];
+
+/// One answer from [`ViewerCore::respond`]: the status, the body's content
+/// type, the body and, for `/api/model`, its `ETag`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewerReply {
+    pub status: u16,
+    pub content_type: &'static str,
+    pub body: Vec<u8>,
+    pub etag: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -325,7 +372,11 @@ pub fn serve(options: ServeOptions) -> io::Result<()> {
         .to_ip()
         .ok_or_else(|| invalid_input("expected TCP listener"))?
         .port();
-    let mut viewer = Viewer::new(options.sessions, random_token()?, port);
+    let mut viewer = Viewer {
+        core: ViewerCore::new(options.sessions),
+        token: random_token()?,
+        port,
+    };
     println!("http://127.0.0.1:{port}/?t={}", viewer.token);
     loop {
         // recv blocks. No timer or scanner runs between requests.
@@ -350,16 +401,8 @@ fn respond(
     if let Some(etag) = etag {
         response.add_header(header("ETag", etag));
     }
-    for (name, value) in [
-        ("Content-Type", content_type),
-        ("Cache-Control", "no-store"),
-        (
-            "Content-Security-Policy",
-            "default-src 'self'; script-src 'self'; style-src 'self'",
-        ),
-        ("X-Frame-Options", "DENY"),
-        ("Referrer-Policy", "no-referrer"),
-    ] {
+    response.add_header(header("Content-Type", content_type));
+    for (name, value) in SECURITY_HEADERS {
         response.add_header(header(name, value));
     }
     if let Some(token) = cookie {
@@ -438,11 +481,41 @@ fn authorized(request: &Request, query: &str, token: &str, port: u16) -> Option<
 }
 
 impl Viewer {
-    fn new(options: Options, token: String, port: u16) -> Self {
+    fn handle(&mut self, request: Request) {
+        let url = request.url().to_owned();
+        let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+        let Some(set_cookie) = authorized(&request, query, &self.token, self.port) else {
+            respond(
+                request,
+                403,
+                "text/plain; charset=utf-8",
+                b"Forbidden".to_vec(),
+                None,
+                None,
+            );
+            return;
+        };
+        let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
+        let reply = self
+            .core
+            .respond("GET", path, query, if_none_match.as_deref());
+        respond(
+            request,
+            reply.status,
+            reply.content_type,
+            reply.body,
+            set_cookie.then_some(&self.token),
+            reply.etag.as_deref(),
+        );
+    }
+}
+
+impl ViewerCore {
+    /// A core over the agent homes, `/proc` and cache that `options` name.
+    /// Nothing is read until the first request.
+    pub fn new(options: Options) -> Self {
         Self {
             options,
-            token,
-            port,
             index: None,
             index_dirty: false,
             events: None,
@@ -550,59 +623,49 @@ impl Viewer {
         Ok(self.tree.as_ref().expect("tree loaded").json.clone())
     }
 
-    fn handle(&mut self, request: Request) {
-        let url = request.url().to_owned();
-        let (path, query) = url.split_once('?').unwrap_or((&url, ""));
-        let Some(set_cookie) = authorized(&request, query, &self.token, self.port) else {
-            respond(
-                request,
-                403,
-                "text/plain; charset=utf-8",
-                b"Forbidden".to_vec(),
-                None,
-                None,
-            );
-            return;
+    /// Answers one request: `path` and `query` split at the `?`, still
+    /// percent-encoded, and the request's `If-None-Match`. Only GET is
+    /// answered (405 otherwise); every URL the viewer uses is a GET. The
+    /// caller authenticates first: the core serves whoever it is handed.
+    pub fn respond(
+        &mut self,
+        method: &str,
+        path: &str,
+        query: &str,
+        if_none_match: Option<&str>,
+    ) -> ViewerReply {
+        let text = "text/plain; charset=utf-8";
+        let reply = |status, body: &[u8]| ViewerReply {
+            status,
+            content_type: text,
+            body: body.to_vec(),
+            etag: None,
         };
-        let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
+        if method != "GET" {
+            return reply(405, b"Method not allowed");
+        }
         let answer = if path == "/api/model" {
-            self.model(query, if_none_match.as_deref())
+            self.model(query, if_none_match)
         } else {
             self.route(path, query)
                 .map(|(status, content_type, body)| (status, content_type, body, None))
         };
-        let (status, content_type, body, etag) = match answer {
-            Ok(answer) => answer,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (
-                404,
-                "text/plain; charset=utf-8",
-                b"Not found".to_vec(),
-                None,
-            ),
-            Err(error) if error.kind() == io::ErrorKind::InvalidInput => (
-                400,
-                "text/plain; charset=utf-8",
-                b"Invalid request".to_vec(),
-                None,
-            ),
+        match answer {
+            Ok((status, content_type, body, etag)) => ViewerReply {
+                status,
+                content_type,
+                body,
+                etag,
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => reply(404, b"Not found"),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                reply(400, b"Invalid request")
+            }
             Err(error) => {
                 eprintln!("semon sessions viewer: {error}");
-                (
-                    500,
-                    "text/plain; charset=utf-8",
-                    b"Internal error".to_vec(),
-                    None,
-                )
+                reply(500, b"Internal error")
             }
-        };
-        respond(
-            request,
-            status,
-            content_type,
-            body,
-            set_cookie.then_some(&self.token),
-            etag.as_deref(),
-        );
+        }
     }
 
     fn refresh_model(&mut self) -> io::Result<()> {
@@ -1668,12 +1731,8 @@ mod tests {
             )
         }
 
-        fn viewer(&self) -> Viewer {
-            Viewer::new(
-                self.options.clone(),
-                "0123456789abcdef0123456789abcdef".into(),
-                0,
-            )
+        fn viewer(&self) -> ViewerCore {
+            ViewerCore::new(self.options.clone())
         }
     }
 
@@ -1690,8 +1749,11 @@ mod tests {
     fn http(fixture: &Fixture, request: &str) -> String {
         let server = Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
-        let mut viewer = fixture.viewer();
-        viewer.port = port;
+        let mut viewer = Viewer {
+            core: fixture.viewer(),
+            token: "0123456789abcdef0123456789abcdef".into(),
+            port,
+        };
         let request = request.replace("PORT", &port.to_string());
         let worker = thread::spawn(move || viewer.handle(server.recv().unwrap()));
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -2244,6 +2306,54 @@ mod tests {
             assert!(get(&fixture, query).starts_with("HTTP/1.1 400"), "{query}");
         }
         assert!(get(&fixture, "/api/tx?sid=nobody").starts_with("HTTP/1.1 404"));
+    }
+
+    /// The core answers without a transport: the same bodies, statuses and
+    /// `ETag` the loopback server sends, GET only, and the headers it sends
+    /// are the ones a server embedding the core is given.
+    #[test]
+    fn the_core_answers_without_a_transport() {
+        let fixture = lane_fixture();
+        let mut core = fixture.viewer();
+        let page = core.respond("GET", "/timeline", "", None);
+        assert_eq!(
+            (
+                page.status,
+                page.content_type,
+                page.body.as_slice(),
+                page.etag
+            ),
+            (200, "text/html; charset=utf-8", PAGE.as_bytes(), None)
+        );
+        let script = core.respond("GET", "/viewer.js", "", None);
+        assert_eq!(script.body, include_bytes!("viewer.js"));
+        let model = core.respond("GET", "/api/model", "", None);
+        assert_eq!(model.status, 200);
+        let etag = model.etag.clone().unwrap();
+        let body: Value = serde_json::from_slice(&model.body).unwrap();
+        assert_eq!(etag, format!("\"{}\"", body["version"].as_str().unwrap()));
+        let cached = core.respond("GET", "/api/model", "", Some(&etag));
+        assert_eq!((cached.status, cached.body.len()), (304, 0));
+        assert_eq!(
+            core.respond("GET", "/api/tx", "sid=lane&before=x", None)
+                .status,
+            400
+        );
+        assert_eq!(core.respond("GET", "/elsewhere", "", None).status, 404);
+        for method in ["POST", "HEAD", "PUT", "DELETE"] {
+            let refused = core.respond(method, "/", "", None);
+            assert_eq!(refused.status, 405, "{method}");
+        }
+        // The loopback server sends exactly these, and the same body.
+        let wire = get(&fixture, "/timeline");
+        assert!(wire.ends_with(PAGE));
+        for (name, value) in SECURITY_HEADERS {
+            assert!(wire.contains(&format!("{name}: {value}")), "{name}");
+        }
+        assert_eq!(HEADERS.len(), SECURITY_HEADERS.len());
+        for (header, (name, value)) in HEADERS.iter().zip(SECURITY_HEADERS) {
+            assert_eq!(*header, format!("{name}: {value}"));
+        }
     }
 
     #[test]
