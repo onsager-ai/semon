@@ -311,6 +311,16 @@ impl Snapshot {
             let path = PathBuf::from(path);
             watched.entry(path.clone()).or_insert_with(|| stamp(&path));
         }
+        // With a facts file, it is the machine: nothing here reads `/proc`.
+        if let Some(facts) = &options.facts {
+            watched.insert(facts.clone(), stamp(facts));
+            return Self {
+                watched,
+                lock_ids: BTreeSet::new(),
+                locks: None,
+                pids: BTreeMap::new(),
+            };
+        }
         let pids = ids
             .into_iter()
             .map(|pid| (pid, proc_start(&options.proc_root, pid)))
@@ -325,10 +335,17 @@ impl Snapshot {
     }
 
     fn changed(&self, options: &Options) -> bool {
-        self.watched
+        if self
+            .watched
             .iter()
             .any(|(path, original)| stamp(path) != *original)
-            || writer_locks(options, &self.lock_ids) != self.locks
+        {
+            return true;
+        }
+        if options.facts.is_some() {
+            return false;
+        }
+        writer_locks(options, &self.lock_ids) != self.locks
             || self
                 .pids
                 .iter()
@@ -690,11 +707,13 @@ impl ViewerCore {
             &mut self.texts,
             model::now_ms(),
         )?;
-        snapshot.pids = built
-            .pids
-            .iter()
-            .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
-            .collect();
+        if self.options.facts.is_none() {
+            snapshot.pids = built
+                .pids
+                .iter()
+                .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
+                .collect();
+        }
         self.model = Some(ModelCache { built, snapshot });
         self.persist_events_if_due()
     }
@@ -1687,6 +1706,7 @@ mod tests {
                 all: true,
                 since: Duration::from_secs(86400),
                 session: None,
+                facts: None,
             };
             fs::create_dir_all(&options.proc_root).unwrap();
             fs::write(options.proc_root.join("locks"), "").unwrap();

@@ -47,6 +47,7 @@ impl Home {
             all: true,
             since: Duration::from_secs(86400),
             session: None,
+            facts: None,
         };
         let home = Self { root, options };
         home.write("proc/locks", "");
@@ -1615,4 +1616,188 @@ fn every_assistant_text_survives_into_the_turn() {
         Some("all done")
     );
     assert_eq!(built.texts["run"].len(), 2);
+}
+
+/// A copy of exactly `inputs()` of `home`, with `local_facts()` of the
+/// original written beside it: the options that build the copy. The copy's
+/// own `/proc` names another machine and nothing running, so only the facts
+/// can make its model match.
+fn copy_with_facts(home: &Home) -> (Home, Options) {
+    let copy = Home::new();
+    copy.write("proc/sys/kernel/hostname", "elsewhere\n");
+    let mut options = copy.options.clone();
+    for input in crate::inputs(&home.options).unwrap() {
+        assert!(crate::is_input_path(input.root.as_str(), &input.path));
+        let to = input.full_path(&options);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(input.full_path(&home.options), to).unwrap();
+    }
+    let facts = crate::local_facts(&home.options).unwrap();
+    let path = copy.root.join("facts.json");
+    crate::write_facts(&path, &facts).unwrap();
+    options.facts = Some(path);
+    (copy, options)
+}
+
+/// Every session's last transcript page, as served.
+fn pages(built: &Built) -> Vec<String> {
+    built
+        .tx
+        .keys()
+        .map(|sid| crate::tx::page(built, sid, &crate::tx::Anchor::Last, NOW).unwrap())
+        .collect()
+}
+
+fn assert_mirrors(home: &Home) {
+    let original = home.build();
+    let (_copy, options) = copy_with_facts(home);
+    let mirrored = home.build_at(&options, NOW);
+    assert_eq!(mirrored.json(NOW), original.json(NOW), "the model");
+    assert_eq!(pages(&mirrored), pages(&original), "the transcripts");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_copy_of_the_inputs_with_the_facts_builds_the_same_model() {
+    let home = Home::new();
+    parent_with_agents(&home);
+    home.live(10, "parent", "busy", json!({}));
+    home.top("working", &[human("working", ts(16, 0), "busy work")]);
+    home.live(30, "working", "busy", json!({}));
+    home.top("ended", &[human("ended", ts(16, 0), "long ago")]);
+    // A pid file whose process is gone is not live.
+    home.write(
+        "claude/sessions/99.json",
+        &json!({"pid":99,"sessionId":"ended","procStart":5,"status":"busy"}).to_string(),
+    );
+    // A repository on this disk, named by a session's and a run's cwd.
+    let repo = home.root.join("work/harbor");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    let cwd = repo.join("src").to_string_lossy().into_owned();
+    home.top(
+        "in-repo",
+        &[
+            json!({"type":"user","timestamp":ts(17, 0),"sessionId":"in-repo","cwd":&cwd,
+            "origin":{"kind":"human"},"message":{"role":"user","content":"fix the build"}}),
+        ],
+    );
+    // A running Codex run, holding its writer lock.
+    home.codex(
+        "root",
+        json!({"cwd": &cwd}),
+        &[codex_user(ts(18, 0), "run the suite")],
+    );
+    hold_lock(&home, "root");
+    // Never an input.
+    home.write("claude/sessions/secret.key", "NEVER");
+
+    let original = home.build();
+    assert_eq!(original.sessions["working"].state, "work");
+    assert_eq!(original.sessions["root"].state, "work");
+    assert_eq!(original.sessions["in-repo"].repo.as_deref(), Some("harbor"));
+    let inputs = crate::inputs(&home.options).unwrap();
+    assert!(inputs.iter().all(|input| !input.path.ends_with(".key")));
+    assert!(inputs.iter().any(|input| input.path == "sessions/30.json"));
+    assert!(
+        inputs
+            .iter()
+            .any(|input| input.path.ends_with("subagents/agent-a1.meta.json"))
+    );
+    assert_mirrors(&home);
+}
+
+#[test]
+fn relays_and_lineages_mirror_too() {
+    assert_mirrors(&relay_home());
+}
+
+#[test]
+fn recorded_facts_decide_liveness_hostname_home_and_repos() {
+    let home = Home::new();
+    home.top(
+        "reader",
+        &[
+            human("reader", ts(16, 0), "read it"),
+            assistant(
+                "reader",
+                ts(16, 1),
+                vec![tool(
+                    "r1",
+                    "Read",
+                    json!({"file_path":"/home/fake-user/notes.md"}),
+                )],
+            ),
+        ],
+    );
+    home.write(
+        "claude/sessions/40.json",
+        &json!({"pid":40,"sessionId":"reader","procStart":777,"status":"busy"}).to_string(),
+    );
+    let path = home.root.join("facts.json");
+    let facts = crate::Facts {
+        version: crate::FACTS_VERSION,
+        hostname: "laptop".into(),
+        home: Some("/home/fake-user".into()),
+        proc_starts: BTreeMap::from([(40, 777)]),
+        codex_locks: BTreeMap::new(),
+        repos: BTreeMap::new(),
+    };
+    crate::write_facts(&path, &facts).unwrap();
+    let mut options = home.options.clone();
+    options.facts = Some(path.clone());
+    let live = home.build_at(&options, NOW);
+    assert_eq!(live.machine_id, "laptop");
+    assert_eq!(live.sessions["reader"].state, "work");
+    assert!(pages(&live).concat().contains("~/notes.md"));
+    // Offline: the same machine, nothing running.
+    crate::write_facts(&path, &facts.offline()).unwrap();
+    let offline = home.build_at(&options, NOW);
+    assert_eq!(offline.machine_id, "laptop");
+    assert_ne!(offline.sessions["reader"].state, "work");
+    // A missing facts file: nothing is live, whatever `/proc` says.
+    options.facts = Some(home.root.join("missing.json"));
+    let unknown = home.build_at(&options, NOW);
+    assert_eq!(unknown.machine_id, "localhost");
+    assert_ne!(unknown.sessions["reader"].state, "work");
+}
+
+#[test]
+fn input_paths_are_the_builders_and_nothing_else() {
+    for (root, path) in [
+        ("claude", "projects/-work-proj/abc.jsonl"),
+        ("claude", "projects/-work-proj/abc/subagents/agent-a1.jsonl"),
+        (
+            "claude",
+            "projects/-work-proj/abc/subagents/agent-a1.meta.json",
+        ),
+        ("claude", "sessions/1234.json"),
+        ("codex", "sessions/2026/09/24/rollout-x.jsonl"),
+    ] {
+        assert!(crate::is_input_path(root, path), "{root}/{path}");
+    }
+    for (root, path) in [
+        ("claude", "sessions/1234.key"),
+        ("claude", "sessions/abc.json"),
+        ("claude", "sessions/1234.json/x"),
+        ("claude", "projects/../sessions/1.key"),
+        ("claude", "projects/p/../../x.jsonl"),
+        ("claude", "/etc/passwd"),
+        ("claude", "projects//x.jsonl"),
+        ("claude", "projects/./x.jsonl"),
+        ("claude", "projects/p\\x.jsonl"),
+        ("claude", "projects/p/x.jsonl\n"),
+        ("claude", "projects/p/x.json"),
+        ("claude", "projects/p/agent-a.meta.json"),
+        ("claude", "projects/p/subagents/agent-.meta.json"),
+        ("claude", "settings.json"),
+        ("claude", "history.jsonl"),
+        ("claude", ""),
+        ("codex", "auth.json"),
+        ("codex", "thread-writer-locks/x.lock"),
+        ("codex", "sessions/.jsonl"),
+        ("elsewhere", "sessions/1.json"),
+    ] {
+        assert!(!crate::is_input_path(root, path), "{root}/{path:?}");
+    }
 }

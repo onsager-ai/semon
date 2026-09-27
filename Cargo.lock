@@ -1851,6 +1851,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "semon-push"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "reqwest",
+ "semon-sessions",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tiny_http",
+]
+
+[[package]]
 name = "semon-relay"
 version = "0.1.0"
 dependencies = [
@@ -1883,6 +1896,7 @@ dependencies = [
  "hex",
  "reqwest",
  "rusqlite",
+ "semon-push",
  "semon-sessions",
  "serde_json",
  "serde_json_canonicalizer",
