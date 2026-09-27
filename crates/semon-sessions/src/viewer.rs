@@ -19,7 +19,9 @@ use crate::{
     events::EventCache,
     field, file_list, is_agent_output,
     model::{self, Built, Texts},
-    proc_start, read_index, save_index, tx, user_text,
+    proc_start, read_index, save_index, tx,
+    union::ViewerCore,
+    user_text,
 };
 
 const PAGE_ENTRIES: usize = 200;
@@ -31,6 +33,9 @@ const MAX_LINE: usize = EXPAND_BYTES + 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct ServeOptions {
     pub sessions: Options,
+    /// Several machines' homes to serve as one view instead of `sessions`,
+    /// each with a stable key. Empty: `sessions` alone.
+    pub machines: Vec<(String, Options)>,
     pub listen: String,
 }
 
@@ -63,18 +68,10 @@ struct ChildLink {
     label: Option<String>,
 }
 
-/// The session viewer without a transport: the pages, assets and API routes
-/// `semon sessions --serve` answers, with the in-memory model, caches and
-/// live refresh behind them, and no listener, token or Host check of its own.
-/// It lets another server embed the viewer: that server owns the socket and
-/// decides who may ask, then hands each request to [`ViewerCore::respond`]
-/// and sends back the [`ViewerReply`] with [`SECURITY_HEADERS`].
-///
-/// A core reads one set of agent homes ([`Options`]). A call does blocking
-/// file I/O, and the first one builds the model, so an async server should
-/// call it off its runtime (for example on a blocking thread) and keep the
-/// core behind a lock: one core answers one request at a time.
-pub struct ViewerCore {
+/// One machine's viewer: the pages, assets and API routes over one set of
+/// agent homes, with the in-memory model, caches and live refresh behind
+/// them. [`ViewerCore`] serves one or several of these.
+pub(crate) struct MachineView {
     options: Options,
     index: Option<Index>,
     index_dirty: bool,
@@ -95,6 +92,7 @@ pub struct ViewerCore {
 const _: fn() = || {
     fn send<T: Send>() {}
     send::<ViewerCore>();
+    send::<MachineView>();
 };
 
 /// The loopback server around a [`ViewerCore`]: the per-run token and its
@@ -390,7 +388,11 @@ pub fn serve(options: ServeOptions) -> io::Result<()> {
         .ok_or_else(|| invalid_input("expected TCP listener"))?
         .port();
     let mut viewer = Viewer {
-        core: ViewerCore::new(options.sessions),
+        core: if options.machines.is_empty() {
+            ViewerCore::new(options.sessions)
+        } else {
+            ViewerCore::with_machines(options.machines)
+        },
         token: random_token()?,
         port,
     };
@@ -439,7 +441,7 @@ fn request_header<'a>(request: &'a Request, name: &'static str) -> Option<&'a st
         .map(|header| header.value.as_str())
 }
 
-fn decoded(value: &str) -> Option<String> {
+pub(crate) fn decoded(value: &str) -> Option<String> {
     let mut result = Vec::with_capacity(value.len());
     let bytes = value.as_bytes();
     let mut index = 0;
@@ -464,7 +466,7 @@ fn decoded(value: &str) -> Option<String> {
     String::from_utf8(result).ok()
 }
 
-fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').find_map(|part| {
         let (name, value) = part.split_once('=')?;
         (name == key).then_some(value)
@@ -527,10 +529,10 @@ impl Viewer {
     }
 }
 
-impl ViewerCore {
-    /// A core over the agent homes, `/proc` and cache that `options` name.
+impl MachineView {
+    /// A view over the agent homes, `/proc` and cache that `options` name.
     /// Nothing is read until the first request.
-    pub fn new(options: Options) -> Self {
+    pub(crate) fn new(options: Options) -> Self {
         Self {
             options,
             index: None,
@@ -644,7 +646,7 @@ impl ViewerCore {
     /// percent-encoded, and the request's `If-None-Match`. Only GET is
     /// answered (405 otherwise); every URL the viewer uses is a GET. The
     /// caller authenticates first: the core serves whoever it is handed.
-    pub fn respond(
+    pub(crate) fn respond(
         &mut self,
         method: &str,
         path: &str,
@@ -789,29 +791,10 @@ impl ViewerCore {
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
         self.refresh_model()?;
         let built = &self.model.as_ref().expect("model loaded").built;
-        let session = |harness: &str, id: &str| {
-            built
-                .sessions
-                .get(id)
-                .is_some_and(|session| session.harness == harness)
-        };
         Ok(match parts.as_slice() {
             ["machines", id] => *id == built.machine_id,
-            ["s", harness, id] => {
-                session(harness, id)
-                    || (*harness == "claude"
-                        && id.starts_with("unsent:")
-                        && built.tx.contains_key(*id))
-            }
-            ["trace", harness, id, turn] => {
-                session(harness, id)
-                    && built.tx.get(*id).is_some_and(|transcript| {
-                        transcript
-                            .slots
-                            .iter()
-                            .any(|slot| slot.turn.as_deref() == Some(*turn))
-                    })
-            }
+            ["s", harness, id] => has_session_page(built, harness, id),
+            ["trace", harness, id, turn] => has_trace_page(built, harness, id, turn),
             _ => false,
         })
     }
@@ -1002,6 +985,53 @@ impl ViewerCore {
     }
 }
 
+impl MachineView {
+    /// This machine's model, rebuilt first if its logs or facts changed.
+    pub(crate) fn built(&mut self) -> io::Result<&Built> {
+        self.refresh_model()?;
+        Ok(&self.model.as_ref().expect("model loaded").built)
+    }
+
+    /// The model last built, if any.
+    pub(crate) fn last_built(&self) -> Option<&Built> {
+        self.model.as_ref().map(|model| &model.built)
+    }
+
+    /// The V1 tree's roots, rebuilt first if anything changed.
+    pub(crate) fn tree_roots(&mut self) -> io::Result<Vec<Node>> {
+        self.refresh_tree()?;
+        Ok(self.tree.as_ref().expect("tree loaded").roots.clone())
+    }
+
+    /// Whether this machine has a transcript file for a V1 tree node.
+    pub(crate) fn has_transcript(&mut self, harness: &str, id: &str) -> io::Result<bool> {
+        Ok(self.transcript_path(harness, id)?.is_some())
+    }
+}
+
+/// Whether `built` has the session page `/s/<harness>/<id>`.
+pub(crate) fn has_session_page(built: &Built, harness: &str, id: &str) -> bool {
+    built
+        .sessions
+        .get(id)
+        .is_some_and(|session| session.harness == harness)
+        || (harness == "claude" && id.starts_with("unsent:") && built.tx.contains_key(id))
+}
+
+/// Whether `built` has the trace page `/trace/<harness>/<id>/<turn>`.
+pub(crate) fn has_trace_page(built: &Built, harness: &str, id: &str, turn: &str) -> bool {
+    built
+        .sessions
+        .get(id)
+        .is_some_and(|session| session.harness == harness)
+        && built.tx.get(id).is_some_and(|transcript| {
+            transcript
+                .slots
+                .iter()
+                .any(|slot| slot.turn.as_deref() == Some(turn))
+        })
+}
+
 fn find_node<'a>(nodes: &'a [Node], harness: &str, id: &str) -> Option<&'a Node> {
     for node in nodes {
         if node.harness == harness && node.id == id {
@@ -1028,7 +1058,7 @@ fn tool_links(node: &Node) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn percent_encode(value: &str) -> String {
+pub(crate) fn percent_encode(value: &str) -> String {
     let mut result = String::new();
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
@@ -1751,8 +1781,8 @@ mod tests {
             )
         }
 
-        fn viewer(&self) -> ViewerCore {
-            ViewerCore::new(self.options.clone())
+        fn viewer(&self) -> MachineView {
+            MachineView::new(self.options.clone())
         }
     }
 
@@ -1770,7 +1800,7 @@ mod tests {
         let server = Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
         let mut viewer = Viewer {
-            core: fixture.viewer(),
+            core: ViewerCore::new(fixture.options.clone()),
             token: "0123456789abcdef0123456789abcdef".into(),
             port,
         };
@@ -2655,5 +2685,205 @@ mod tests {
         for poll in polls {
             assert_eq!(poll, warm);
         }
+    }
+
+    /// A machine named `host` with one session, `sid`, and a relay from a
+    /// sender whose logs are gone: a stub only this machine knows.
+    fn machine(host: &str, sid: &str) -> Fixture {
+        let fixture = Fixture::new();
+        fixture.write("proc/sys/kernel/hostname", &format!("{host}\n"));
+        fixture.claude(
+            sid,
+            &[
+                json!({"type":"user","timestamp":"2026-09-24T00:00:00Z","sessionId":sid,"origin":{"kind":"human"},
+                    "message":{"role":"user","content":format!("work on {host}")}}),
+                json!({"type":"user","timestamp":"2026-09-24T00:01:00Z","sessionId":sid,
+                    "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/9.sock","name":"ghost","msg_id":format!("m-ghost-{host}-{sid}"),"body":"hello"},
+                    "message":{"role":"user","content":"hello"}}),
+                json!({"type":"assistant","timestamp":"2026-09-24T00:02:00Z","sessionId":sid,
+                    "message":{"role":"assistant","content":[{"type":"text","text":format!("done on {host}")}]}}),
+            ],
+        );
+        fixture
+    }
+
+    fn body_of(reply: &ViewerReply) -> Value {
+        serde_json::from_slice(&reply.body).unwrap()
+    }
+
+    /// `now` moves between two calls; everything else must not.
+    fn without_now(body: &[u8]) -> String {
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        let (head, rest) = text.split_once("\"now\":").unwrap();
+        let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        format!("{head}\"now\":0{rest}")
+    }
+
+    #[test]
+    fn one_machine_through_with_machines_is_todays_viewer_byte_for_byte() {
+        let fixture = machine("laptop", "lane");
+        let mut today = fixture.viewer();
+        let mut core =
+            ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);
+        for (path, query) in [
+            ("/api/model", ""),
+            ("/api/tx", "sid=lane"),
+            ("/api/tree", ""),
+            ("/s/claude/lane", ""),
+            ("/machines/laptop", ""),
+            ("/viewer.js", ""),
+        ] {
+            let (a, b) = (
+                today.respond("GET", path, query, None),
+                core.respond("GET", path, query, None),
+            );
+            assert_eq!(
+                (a.status, a.content_type, a.etag.clone()),
+                (b.status, b.content_type, b.etag.clone()),
+                "{path}"
+            );
+            if path == "/api/model" {
+                assert_eq!(without_now(&a.body), without_now(&b.body));
+            } else {
+                assert_eq!(a.body, b.body, "{path}");
+            }
+        }
+        // No admin link unless the embedder sets one, and then first.
+        assert!(
+            !String::from_utf8_lossy(&core.respond("GET", "/api/model", "", None).body)
+                .contains("\"admin\"")
+        );
+        core.set_admin_link(crate::AdminLink::new("Manage machines", "/admin/machines"));
+        let linked = core.respond("GET", "/api/model", "", None);
+        assert!(linked.body.starts_with(
+            b"{\"admin\":{\"label\":\"Manage machines\",\"href\":\"/admin/machines\"},\"version\":"
+        ));
+    }
+
+    #[test]
+    fn several_machines_serve_one_model_and_each_answers_for_its_own() {
+        let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
+        let mut core = ViewerCore::with_machines(vec![
+            ("a".into(), alpha.options.clone()),
+            ("b".into(), bravo.options.clone()),
+        ]);
+        let reply = core.respond("GET", "/api/model", "", None);
+        assert_eq!(reply.status, 200);
+        let model = body_of(&reply);
+        let ids: Vec<&str> = model["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["alpha", "bravo"]);
+        assert_eq!(model["machine"]["id"], "alpha");
+        assert_eq!(model["sessions"]["lane-a"]["machine"], "alpha");
+        assert_eq!(model["sessions"]["lane-b"]["machine"], "bravo");
+        assert!(model["busy"]["alpha"].is_array() && model["busy"]["bravo"].is_array());
+        // Each machine's stub for the gone sender is its own: never merged.
+        let sessions = model["sessions"].as_object().unwrap();
+        let stubs: Vec<(&String, &Value)> =
+            sessions.iter().filter(|(_, s)| s["stub"] == true).collect();
+        assert_eq!(stubs.len(), 2, "{sessions:?}");
+        for (id, stub) in &stubs {
+            assert!(
+                id.ends_with(&format!("@{}", stub["machine"].as_str().unwrap())),
+                "{id}"
+            );
+        }
+        // Every handoff and turn names a session the union serves.
+        for handoff in model["handoffs"].as_array().unwrap() {
+            for end in ["from", "to"] {
+                if let Some(id) = handoff[end].as_str().filter(|id| *id != "you") {
+                    assert!(sessions.contains_key(id), "{end} {id}");
+                }
+            }
+        }
+        for turn in model["turns"].as_array().unwrap() {
+            assert!(sessions.contains_key(turn["sid"].as_str().unwrap()));
+        }
+        // Each machine answers for its own sessions.
+        let tx = core.respond("GET", "/api/tx", "sid=lane-b", None);
+        assert_eq!(tx.status, 200);
+        assert!(String::from_utf8_lossy(&tx.body).contains("done on bravo"));
+        assert_eq!(
+            core.respond("GET", "/api/tx", "sid=nobody", None).status,
+            404
+        );
+        for (path, status) in [
+            ("/s/claude/lane-a", 200),
+            ("/s/claude/lane-b", 200),
+            ("/s/claude/nobody", 404),
+            ("/machines/alpha", 200),
+            ("/machines/bravo", 200),
+            ("/machines/gamma", 404),
+            ("/timeline", 200),
+        ] {
+            assert_eq!(core.respond("GET", path, "", None).status, status, "{path}");
+        }
+        // The ETag covers every machine: a line on either is a new version.
+        let version = model["version"].as_str().unwrap().to_owned();
+        assert_eq!(
+            core.respond("GET", "/api/model", &format!("since={version}"), None)
+                .status,
+            304
+        );
+        let path = bravo.root.join("claude/projects/project/lane-b.jsonl");
+        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(file, "{}", json!({"type":"user","timestamp":"2026-09-24T00:05:00Z","sessionId":"lane-b","origin":{"kind":"human"},"message":{"role":"user","content":"more"}})).unwrap();
+        drop(file);
+        let moved = core.respond("GET", "/api/model", &format!("since={version}"), None);
+        assert_eq!(moved.status, 200);
+        assert_ne!(body_of(&moved)["version"], version.as_str());
+    }
+
+    #[test]
+    fn a_session_id_two_machines_share_is_refused_not_picked() {
+        let (alpha, bravo) = (machine("alpha", "same"), machine("bravo", "same"));
+        let mut core = ViewerCore::with_machines(vec![
+            ("a".into(), alpha.options.clone()),
+            ("b".into(), bravo.options.clone()),
+        ]);
+        let model = core.respond("GET", "/api/model", "", None);
+        assert_eq!(model.status, 409);
+        let ids = body_of(&model)["ids"].clone();
+        assert!(
+            ids.as_array().unwrap().iter().any(|id| id == "same"),
+            "{ids}"
+        );
+        assert_eq!(core.respond("GET", "/api/tx", "sid=same", None).status, 409);
+        assert_eq!(core.respond("GET", "/s/claude/same", "", None).status, 404);
+    }
+
+    #[test]
+    fn two_machines_with_one_hostname_stay_two_and_offline_facts_say_so() {
+        let (first, second) = (machine("twin", "lane-1"), machine("twin", "lane-2"));
+        let facts = second.root.join("facts.json");
+        let mut recorded = crate::local_facts(&second.options)
+            .unwrap()
+            .offline(1_790_000_000_000);
+        recorded.hostname = "twin".into();
+        crate::write_facts(&facts, &recorded).unwrap();
+        let mut offline = second.options.clone();
+        offline.facts = Some(facts);
+        let mut core = ViewerCore::with_machines(vec![
+            ("one".into(), first.options.clone()),
+            ("two".into(), offline),
+        ]);
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        let machines = model["machines"].as_array().unwrap();
+        assert_eq!(machines[0]["id"], "twin");
+        assert_eq!(machines[1]["id"], "twin~two");
+        assert_eq!(machines[1]["name"], "twin");
+        assert_eq!(machines[0]["up"], true);
+        assert!(machines[0].get("last").is_none());
+        assert_eq!(machines[1]["up"], false);
+        assert_eq!(machines[1]["last"], 1_790_000_000_000_i64);
+        assert_eq!(model["sessions"]["lane-2"]["machine"], "twin~two");
+        assert_eq!(
+            core.respond("GET", "/machines/twin~two", "", None).status,
+            200
+        );
     }
 }

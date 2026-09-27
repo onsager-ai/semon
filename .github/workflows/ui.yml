@@ -112,9 +112,30 @@ jobs:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
         run: node checks/live.mjs
 
+      # One viewer over two machines' homes (the sample and a second machine, `desktop`): its Machines screens, pixel
+      # for pixel against the mockup's code on the same data, at 390×844 and 1280×860, light and dark.
+      - name: Two machines in one viewer
+        if: ${{ !cancelled() }}
+        env:
+          SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/two-machines
+          SEMON_PIXEL_SCREENS: machines,machine-
+          SEMON_PIXEL_SCHEMES: all
+        run: |
+          [ "$(node tests/ui/fixture.mjs "$RUNNER_TEMP/second" --second)" = "$SEMON_NOW" ]
+          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen 127.0.0.1:8767 \
+            --machine "$RUNNER_TEMP/sample" --machine "$RUNNER_TEMP/second" < /dev/null > "$RUNNER_TEMP/two-machines.log" 2>&1 &
+          for _ in $(seq 1 100); do
+            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/two-machines.log" || true)
+            [ -n "$url" ] && break
+            sleep 0.2
+          done
+          [ -n "$url" ] || { cat "$RUNNER_TEMP/two-machines.log"; exit 1; }
+          cd tests/ui
+          SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}" node pixels.mjs
+
       - name: Server logs
         if: ${{ always() }}
-        run: cat "$RUNNER_TEMP"/sample*.log || true
+        run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/two-machines.log || true
 
       - name: Upload reports, screenshots and diffs
         if: ${{ always() }}

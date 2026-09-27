@@ -175,6 +175,8 @@ These are the only places the served viewer departs from the mockup:
 3. **Live updates** with view state kept, as above.
 4. **One machine.** The Machines page lists this machine. Moves and offline machines appear only once M5 brings in other machines.
 5. **Sample-only data is gone:** the made-up machines, the `T(h,m)` clock, and the unused `THREADS` object.
+6. **Several machines from real data.** A viewer over several machines' homes (`ViewerCore::with_machines`) serves them as `machines`, each with its sessions. An offline machine without a move shows when it was last seen ("Not responding since …", "Last seen …") where the sample showed its move. Stubs and unsent sends are keyed per machine (`<id>@<machine>`), so nothing is linked across machines.
+7. **An embedder's management link.** When the embedding server sets one (`ViewerCore::set_admin_link`), the Machines page ends its list with it, in the list's "more" style. The local viewer never sets one.
 
 ## Verification
 

@@ -3,6 +3,7 @@
 // and every line here is made from it: the texts are read from the committed mockup, never from real logs.
 //
 //   node fixture.mjs OUT_DIR [--extras]   writes OUT_DIR/{claude,codex,proc,work,roles} and prints the `now` to pin
+//   node fixture.mjs OUT_DIR --second     writes a second machine's home (`desktop`) for views across machines
 //
 // --extras writes the sample plus what only the served viewer has to handle, for the check scripts (never for the pixel
 // comparison or the gap check): what the mockup's markdown check page (mkmd.js) added (one message in harbor using every
@@ -386,8 +387,42 @@ export function write(out, { extras = false } = {}) {
   return ms(NOW);
 }
 
+// A second machine, for views across machines: `desktop`, with a session that finished this morning and one working
+// now, in its own repository. Its ids can't collide with the sample's. Prints the same `now` as the sample.
+export function writeSecond(out) {
+  const { NOW } = sample();
+  const rm = (p) => fs.rmSync(p, { recursive: true, force: true });
+  for (const d of ["claude", "codex", "proc", "work"]) rm(path.join(out, d));
+  const put = (rel, text) => { const p = path.join(out, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); return p; };
+  put("proc/sys/kernel/hostname", "desktop\n");
+  put("proc/locks", "");
+  const cwd = path.join(out, "work", "foundry");
+  fs.mkdirSync(path.join(cwd, ".git"), { recursive: true });
+  const project = "claude/projects/" + cwd.replace(/[^A-Za-z0-9]/g, "-") + "/";
+  let seq = 0;
+  const line = (sid, t, type, extra) => ({ parentUuid: null, isSidechain: false, type, timestamp: iso(t), sessionId: sid, cwd, gitBranch: "main", version: "2.1.0", uuid: "u-second-" + seq++, ...extra });
+  const said = (sid, t, content) => line(sid, t, "assistant", { message: { id: "msg-second-" + seq, model: "claude-sonnet-5", role: "assistant", type: "message", content } });
+  const save = (sid, lines) => put(project + sid + ".jsonl", lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  const review = "5e1c0a2e-0d1c-4b7e-9a51-2f6c1d0e7a01", build = "5e1c0a2e-0d1c-4b7e-9a51-2f6c1d0e7a02";
+  save(review, [
+    { type: "custom-title", customTitle: "Nightly review", sessionId: review },
+    line(review, ms(T(8, 10)), "user", { origin: { kind: "human" }, message: { role: "user", content: "Review last night's foundry run" } }),
+    said(review, ms(T(8, 14)), [{ type: "text", text: "Reviewed: two flaky tests, both in the cache layer. Nothing else failed." }]),
+  ]);
+  save(build, [
+    { type: "custom-title", customTitle: "Release build", sessionId: build },
+    line(build, ms(T(12, 20)), "user", { origin: { kind: "human" }, message: { role: "user", content: "Cut the 0.9 release build" } }),
+    said(build, ms(T(12, 22)), [{ type: "tool_use", id: "toolu-second-1", name: "Bash", input: { command: "cargo build --release" } }]),
+  ]);
+  const pid = 4100, fields = Array(20).fill("0"); fields[19] = "777";
+  put("proc/" + pid + "/stat", pid + " (claude) " + fields.join(" ") + "\n");
+  put("claude/sessions/" + pid + ".json", JSON.stringify({ pid, sessionId: build, cwd, startedAt: ms(T(12, 20)), procStart: 777, status: "busy", name: "Release build", kind: "interactive" }));
+  return ms(NOW);
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const out = process.argv[2];
-  if (!out) { console.error("usage: node fixture.mjs OUT_DIR"); process.exit(2); }
-  console.log(write(path.resolve(out), { extras: process.argv.includes("--extras") }));
+  if (!out) { console.error("usage: node fixture.mjs OUT_DIR [--extras | --second]"); process.exit(2); }
+  if (process.argv.includes("--second")) console.log(writeSecond(path.resolve(out)));
+  else console.log(write(path.resolve(out), { extras: process.argv.includes("--extras") }));
 }

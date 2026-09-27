@@ -41,6 +41,8 @@ struct PushArgs {
 
 struct SessionsArgs {
     options: semon_sessions::Options,
+    /// `--machine DIR`, repeated: several machines' homes in one model.
+    machines: Vec<PathBuf>,
     json: bool,
     model_json: bool,
     watch: bool,
@@ -114,6 +116,7 @@ fn parse_sessions_args(
     let mut serve = false;
     let mut listen = "127.0.0.1:0".to_owned();
     let mut listen_given = false;
+    let mut machines = Vec::new();
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -129,6 +132,7 @@ fn parse_sessions_args(
             "--since" => options.since = semon_sessions::parse_duration(&value()?)?,
             "--session" => options.session = Some(value()?),
             "--facts" => options.facts = Some(value()?.into()),
+            "--machine" => machines.push(PathBuf::from(value()?)),
             "--json" => json = true,
             "--model-json" => model_json = true,
             "--watch" => watch = true,
@@ -155,8 +159,12 @@ fn parse_sessions_args(
     if !serve && listen_given {
         return Err("--listen requires --serve".into());
     }
+    if !machines.is_empty() && !(model_json || serve) {
+        return Err("--machine works with --model-json or --serve".into());
+    }
     Ok(SessionsArgs {
         options,
+        machines,
         json,
         model_json,
         watch,
@@ -372,13 +380,53 @@ fn run(command: Command) -> Result<(), String> {
     }
 }
 
+/// The model of several machines' homes, as one viewer serves it: each
+/// `DIR` holds `claude/`, `codex/` and `proc/`, and `facts.json` when its
+/// facts were recorded elsewhere; the metadata cache goes in `DIR/.semon/`.
+fn print_machines_model(args: &SessionsArgs) -> Result<(), String> {
+    let mut core = semon_sessions::ViewerCore::with_machines(machine_options(args));
+    let reply = core.respond("GET", "/api/model", "", None);
+    let body = String::from_utf8_lossy(&reply.body);
+    if reply.status != 200 {
+        return Err(format!(
+            "the model of these machines: {} {body}",
+            reply.status
+        ));
+    }
+    println!("{body}");
+    Ok(())
+}
+
+/// Each `--machine DIR`'s options.
+fn machine_options(args: &SessionsArgs) -> Vec<(String, semon_sessions::Options)> {
+    args.machines
+        .iter()
+        .map(|dir| {
+            let facts = dir.join("facts.json");
+            let options = semon_sessions::Options {
+                claude_home: dir.join("claude"),
+                codex_home: dir.join("codex"),
+                proc_root: dir.join("proc"),
+                cache: dir.join(".semon").join("sessions-index.json"),
+                facts: facts.is_file().then_some(facts),
+                ..args.options.clone()
+            };
+            (dir.display().to_string(), options)
+        })
+        .collect()
+}
+
 fn run_sessions(args: SessionsArgs) -> Result<(), String> {
     if args.serve {
         return semon_sessions::serve(semon_sessions::ServeOptions {
+            machines: machine_options(&args),
             sessions: args.options,
             listen: args.listen,
         })
         .map_err(|error| error.to_string());
+    }
+    if args.model_json && !args.machines.is_empty() {
+        return print_machines_model(&args);
     }
     if args.model_json {
         let json = semon_sessions::model_json(&args.options).map_err(|error| error.to_string())?;
@@ -671,6 +719,7 @@ fn usage() -> String {
          Shows a read-only tree of local Claude Code and Codex sessions. --model-json writes the viewer's\n\
          session model (sessions, handoffs, turns, busy) instead; it reads every log, --all/--since trim the output.\n\
          --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
+         --machine DIR (repeated, with --model-json or --serve): one view over several machines' homes, DIR/{{claude,codex,proc}}.\n\
          \n\
          Usage: semon push --to URL --token-file PATH [--watch] [--state PATH] [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\

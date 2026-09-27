@@ -1742,6 +1742,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         proc_starts: BTreeMap::from([(40, 777)]),
         codex_locks: BTreeMap::new(),
         repos: BTreeMap::new(),
+        offline_since: None,
     };
     crate::write_facts(&path, &facts).unwrap();
     let mut options = home.options.clone();
@@ -1751,7 +1752,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
     assert_eq!(live.sessions["reader"].state, "work");
     assert!(pages(&live).concat().contains("~/notes.md"));
     // Offline: the same machine, nothing running.
-    crate::write_facts(&path, &facts.offline()).unwrap();
+    crate::write_facts(&path, &facts.offline(1_790_000_000_000)).unwrap();
     let offline = home.build_at(&options, NOW);
     assert_eq!(offline.machine_id, "laptop");
     assert_ne!(offline.sessions["reader"].state, "work");

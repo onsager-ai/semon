@@ -11,6 +11,9 @@
   let NOW = Date.now();
   const MACHINE = {};
   const MACHINE_UP = {};
+  // An offline machine's last-seen time (epoch ms), and the embedding server's machine-management link, when served.
+  const MACHINE_LAST = {};
+  let ADMIN = null;
   const HARNESS = { claude: "Claude Code", codex: "Codex" };
   const SESS = {};
   const H = [];
@@ -179,15 +182,18 @@
   }
   function adopt(m) {
     serverNow = m.now; fetchedAt = Date.now(); TOK = m.tx ?? {};
-    for (const k of Object.keys(MACHINE)) { delete MACHINE[k]; delete MACHINE_UP[k]; }
-    MACHINE[m.machine.id] = m.machine.name; MACHINE_UP[m.machine.id] = m.machine.up;
+    for (const k of Object.keys(MACHINE)) { delete MACHINE[k]; delete MACHINE_UP[k]; delete MACHINE_LAST[k]; }
+    // Several machines come as `machines`; one comes as `machine` alone.
+    for (const x of m.machines ?? [m.machine]) { MACHINE[x.id] = x.name; MACHINE_UP[x.id] = x.up; if (x.last != null) MACHINE_LAST[x.id] = x.last; }
+    ADMIN = m.admin && typeof m.admin.href === "string" && m.admin.href.startsWith("/") && !m.admin.href.startsWith("//") ? m.admin : null;
     for (const k of Object.keys(SESS)) delete SESS[k];
     for (const [id, s] of Object.entries(m.sessions)) { s.id = id; SESS[id] = s; }
     H.length = 0; H.push(...m.handoffs);
     // A failed send reached no one: a stub named as the send addressed it stands for the other end, marked failed.
     for (const h of H) if (h.to == null) {
-      const id = "unsent:" + (h.target ?? "");
-      const s = SESS[id] ??= { id, name: h.target || "unknown", harness: "claude", stub: true, machine: m.machine.id, state: "err", model: "—", tokens: [0, 0, 0], start: h.at, last: h.at, busy: [] };
+      // With several machines, a stand-in belongs to the sender's machine: nothing is linked across machines.
+      const machine = SESS[h.from]?.machine ?? m.machine.id, id = "unsent:" + (h.target ?? "") + (m.machines ? "@" + machine : "");
+      const s = SESS[id] ??= { id, name: h.target || "unknown", harness: "claude", stub: true, machine, state: "err", model: "—", tokens: [0, 0, 0], start: h.at, last: h.at, busy: [] };
       s.start = Math.min(s.start, h.at); s.last = Math.max(s.last, h.at); h.to = id;
     }
     HID.clear(); for (const h of H) HID.set(h.id, h);
@@ -391,7 +397,7 @@
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
     const st = el("span", "stat " + (!up ? "err" : w ? "work" : "idle")); st.append(dot(!up ? "err" : w ? "work" : "idle"), !up ? "Not responding" : w ? "Up" : "Idle"); l2.append(st, el("span", "sep", " · "));
-    l2.append(el("span", "rest", up ? w + " working · " + here.length + (here.length === 1 ? " session" : " sessions") : "Semon moved its sessions to other machines")); };
+    l2.append(el("span", "rest", up ? w + " working · " + here.length + (here.length === 1 ? " session" : " sessions") : movedOff(m).length ? "Semon moved its sessions to other machines" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, here.length + (here.length === 1 ? " session" : " sessions")].filter(Boolean).join(" · "))); };
   // One observer for the current page title; the previous page's is disconnected so it can't flip the new bar.
   let titleObs = null;
   function observeTitle() { syncBarLine(); }
@@ -488,9 +494,10 @@
       r.append(dot(!up ? "err" : w ? "work" : "idle"), el("span", "nm", MACHINE[m]), el("span", "ag", !up ? "offline" : w ? "up" : "idle"));
       const mv = movedOff(m).length, mh = movesOf(m).find((h) => h.fromMachine === m);
       r.append(el("span", "for", up ? [w + " working", here.length + (here.length === 1 ? " session" : " sessions")].join(" · ")
-        : ["Not responding" + (mh ? " since " + clock(mh.at) : ""), mv ? mv + (mv === 1 ? " session" : " sessions") + " moved off" : null].filter(Boolean).join(" · ")));
+        : ["Not responding" + (mh ? " since " + clock(mh.at) : MACHINE_LAST[m] != null ? " since " + clock(MACHINE_LAST[m]) : ""), mv ? mv + (mv === 1 ? " session" : " sessions") + " moved off" : null].filter(Boolean).join(" · ")));
       list.append(r);
     }
+    if (ADMIN) { const a = el("button", "more", ADMIN.label); a.type = "button"; a.addEventListener("click", () => location.assign(ADMIN.href)); list.append(a); }
     page.append(list);
   }
   function renderMachine(page, m) {
