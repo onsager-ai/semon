@@ -688,6 +688,11 @@ impl MachineView {
     }
 
     fn refresh_model(&mut self) -> io::Result<()> {
+        self.refresh_model_at(model::now_ms())
+    }
+
+    /// Rebuilds the model at `now` if its logs or facts changed.
+    fn refresh_model_at(&mut self, now: i64) -> io::Result<()> {
         if self
             .model
             .as_ref()
@@ -707,7 +712,7 @@ impl MachineView {
             cache,
             &mut self.events_dirty,
             &mut self.texts,
-            model::now_ms(),
+            now,
         )?;
         if self.options.facts.is_none() {
             snapshot.pids = built
@@ -983,7 +988,12 @@ impl MachineView {
 impl MachineView {
     /// This machine's model, rebuilt first if its logs or facts changed.
     pub(crate) fn built(&mut self) -> io::Result<&Built> {
-        self.refresh_model()?;
+        self.built_at(model::now_ms())
+    }
+
+    /// [`MachineView::built`], a rebuild taking `now` as its clock.
+    pub(crate) fn built_at(&mut self, now: i64) -> io::Result<&Built> {
+        self.refresh_model_at(now)?;
         Ok(&self.model.as_ref().expect("model loaded").built)
     }
 

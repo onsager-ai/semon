@@ -46,8 +46,10 @@ pub struct Options {
     /// Index only the log files modified within the window (`since`, unless
     /// `all`), instead of every file. A cold build on a large home then
     /// reads weeks, not years, of logs; but a link whose other end is in an
-    /// older file isn't made, and that end shows as a stub or unlinked. Off
-    /// for the viewer and `--model-json`; the agent read surface turns it on.
+    /// older file isn't made, and that end shows as a stub or unlinked. What
+    /// is read is returned whole: the window doesn't trim sessions, turns,
+    /// handoffs or busy intervals as well. Off for the viewer and
+    /// `--model-json`; the agent read surface turns it on.
     pub scan_window: bool,
 }
 

@@ -391,8 +391,13 @@ impl ViewerCore {
 
     /// Brings every machine's model up to date, and plans the union.
     fn refresh(&mut self) -> io::Result<Plan> {
+        self.refresh_at(crate::model::now_ms())
+    }
+
+    /// [`ViewerCore::refresh`], a rebuild taking `now` as its clock.
+    fn refresh_at(&mut self, now: i64) -> io::Result<Plan> {
         for (_, view) in &mut self.views {
-            view.built()?;
+            view.built_at(now)?;
         }
         Ok(plan(&self.parts()))
     }
@@ -495,9 +500,9 @@ impl ViewerCore {
     pub(crate) fn model_at(&mut self, now: i64) -> io::Result<Result<String, Vec<String>>> {
         match self.views.len() {
             0 => Err(io::ErrorKind::NotFound.into()),
-            1 => Ok(Ok(self.views[0].1.built()?.json(now))),
+            1 => Ok(Ok(self.views[0].1.built_at(now)?.json(now))),
             _ => {
-                let plan = self.refresh()?;
+                let plan = self.refresh_at(now)?;
                 Ok(union_json(&self.parts(), &plan, now))
             }
         }
@@ -505,12 +510,12 @@ impl ViewerCore {
 
     /// Every machine's model, brought up to date, with how the core serves
     /// its session ids.
-    pub(crate) fn served(&mut self) -> io::Result<Vec<Served<'_>>> {
+    pub(crate) fn served(&mut self, now: i64) -> io::Result<Vec<Served<'_>>> {
         let machine_ids = if self.views.len() > 1 {
-            self.refresh()?.machine_ids
+            self.refresh_at(now)?.machine_ids
         } else {
             for (_, view) in &mut self.views {
-                view.built()?;
+                view.built_at(now)?;
             }
             Vec::new()
         };

@@ -193,7 +193,7 @@ pub fn query_tools() -> Vec<QueryTool> {
             name: "list_sessions",
             description: "Session summaries, most recently active first: id, harness, kind, name, model, repo, \
                 branch, machine, parent, children, state, start, last_activity (epoch ms), pid, alive, exit, \
-                open_question, tokens and run. A field Semon can't know exactly is null.",
+                open_question, tokens, run and turns_truncated. A field Semon can't know exactly is null.",
             positional: None,
             input_schema: json!({
                 "type": "object",
@@ -447,6 +447,7 @@ impl View {
             // Q3: a Codex rollout's recorded exit status, and Claude's if its logs hold one.
             "exit": Value::Null,
             "open_question": self.open.get(id).cloned().unwrap_or(Value::Null),
+            "turns_truncated": facts.is_some_and(|facts| facts.turns_truncated),
             "tokens": facts.and_then(|facts| facts.tokens.as_ref()).map(|tokens| json!({
                 "input": tokens.input.saturating_sub(tokens.cached_input),
                 "cached": tokens.cached_input,
@@ -502,8 +503,8 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
 /// caches between calls, rebuilding only what changed.
 pub struct Query {
     core: ViewerCore,
-    /// How far back the model reads; `None` for the whole history.
-    window: Option<Duration>,
+    /// The current call's window start (epoch ms), as the model was built.
+    start: Option<i64>,
 }
 
 impl Query {
@@ -515,23 +516,19 @@ impl Query {
     /// The tools over several machines' homes, as one model: the union
     /// [`ViewerCore::with_machines`] serves.
     ///
-    /// The window is the first machine's `since`, or the whole history with
-    /// `all`: only log files modified within it are read
-    /// ([`Options::scan_window`]), and every answer names its
-    /// `window_start`. A tool's own `since` is a filter inside it.
+    /// Each machine keeps its own window: its `since`, or every file with
+    /// `all`. Only log files modified within it are read
+    /// ([`Options::scan_window`]), and what is read is answered whole. Every
+    /// answer names `window_start`, the latest of the machines' starts: a
+    /// tool's `since` before it would be cut short on some machine, so it is
+    /// refused.
     pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
-        let window = machines
-            .first()
-            .filter(|(_, options)| !options.all)
-            .map(|(_, options)| options.since);
         let machines = machines
             .into_iter()
             .map(|(key, options)| {
                 (
                     key,
                     Options {
-                        all: window.is_none(),
-                        since: window.unwrap_or(options.since),
                         scan_window: true,
                         session: None,
                         ..options
@@ -541,20 +538,27 @@ impl Query {
             .collect();
         Self {
             core: ViewerCore::with_machines(machines),
-            window,
+            start: None,
         }
     }
 
-    /// Where the window starts at `now` (epoch ms); `None` without one.
-    fn window_start(&self, now: i64) -> Option<i64> {
-        self.window
-            .map(|window| now.saturating_sub(i64::try_from(window.as_millis()).unwrap_or(i64::MAX)))
+    /// Where the window starts, as the current models were built with it
+    /// (epoch ms): the latest machine's start; `None` when every machine
+    /// read every file.
+    fn window_start(&mut self, now: i64) -> Result<Option<i64>, QueryError> {
+        Ok(self
+            .core
+            .served(now)
+            .map_err(|error| QueryError::io(&error))?
+            .iter()
+            .filter_map(|part| part.built.window_start)
+            .max())
     }
 
     /// A tool's `since`, which must not reach before the window's start.
     fn since(&self, args: &Value, now: i64) -> Result<Option<i64>, QueryError> {
         let parsed = since_ms(args, now)?;
-        if let (Some(since), Some(start)) = (parsed, self.window_start(now))
+        if let (Some(since), Some(start)) = (parsed, self.start)
             && since < start
         {
             return Err(QueryError {
@@ -590,6 +594,9 @@ impl Query {
         let empty = json!({});
         let args = if args.is_null() { &empty } else { args };
         validate(&spec.input_schema, args)?;
+        // Once per call: the answer's window and the check of `since` are
+        // the models' own.
+        self.start = self.window_start(now)?;
         let mut answer = match tool {
             "list_sessions" => self.list_sessions(args, now),
             "get_session" => self.get_session(args, now),
@@ -598,7 +605,7 @@ impl Query {
             "stalls" => self.stalls(args, now),
             _ => unreachable!("every tool is handled"),
         }?;
-        answer["window_start"] = json!(self.window_start(now));
+        answer["window_start"] = json!(self.start);
         Ok(answer)
     }
 
@@ -619,7 +626,11 @@ impl Query {
         let mut model: Value = serde_json::from_str(&model)
             .map_err(|error| QueryError::new("io", error.to_string()))?;
         let mut facts = BTreeMap::new();
-        for part in self.core.served().map_err(|error| QueryError::io(&error))? {
+        for part in self
+            .core
+            .served(now)
+            .map_err(|error| QueryError::io(&error))?
+        {
             for (id, own) in &part.built.facts {
                 let mut own = own.clone();
                 own.parent = own.parent.map(|parent| part.served(&parent));
@@ -818,7 +829,10 @@ impl Query {
         }
         // Every session's transcript, the most recently active first, each
         // from its newest entry back. Stubs have no activity of their own.
-        let parts = self.core.served().map_err(|error| QueryError::io(&error))?;
+        let parts = self
+            .core
+            .served(now)
+            .map_err(|error| QueryError::io(&error))?;
         let mut order: Vec<(Option<i64>, String, usize, &str)> = Vec::new();
         for (index, part) in parts.iter().enumerate() {
             for own in part.built.tx.keys() {

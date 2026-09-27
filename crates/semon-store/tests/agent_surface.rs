@@ -241,7 +241,7 @@ fn summaries(model: &Value) -> BTreeMap<&'static str, Value> {
     let claude = |id: &str| {
         json!({"id": id, "harness": "claude", "kind": "session", "model": "opus-5.5", "repo": null, "branch": null,
             "machine": "testbox", "parent": null, "children": [], "exit": null,
-            "tokens": {"input": 1000, "cached": 2000, "output": 500}, "run": null})
+            "tokens": {"input": 1000, "cached": 2000, "output": 500}, "run": null, "turns_truncated": false})
     };
     let mut done = claude("done");
     for (key, value) in [
@@ -273,7 +273,8 @@ fn summaries(model: &Value) -> BTreeMap<&'static str, Value> {
     let cx = json!({"id": "cx", "harness": "codex", "kind": "codex-run", "name": "Codex run", "model": "codex",
         "repo": null, "branch": null, "machine": "testbox", "parent": null, "children": [], "state": "ended",
         "start": at(5, 0), "last_activity": at(5, 2), "pid": null, "alive": null, "exit": null,
-        "open_question": null, "tokens": {"input": 0, "cached": 0, "output": 0}, "run": null});
+        "open_question": null, "tokens": {"input": 0, "cached": 0, "output": 0}, "run": null,
+        "turns_truncated": false});
     BTreeMap::from([("done", done), ("asker", asker), ("cx", cx)])
 }
 

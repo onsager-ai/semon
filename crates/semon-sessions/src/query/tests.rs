@@ -285,7 +285,7 @@ fn summary(id: &str, question: &str) -> Value {
     let base = json!({
         "id": id, "harness": "claude", "kind": "session", "model": "opus-5.5", "repo": null, "branch": null,
         "machine": "testbox", "parent": null, "children": [], "pid": null, "alive": null, "exit": null,
-        "open_question": null, "tokens": tokens, "run": null,
+        "open_question": null, "tokens": tokens, "run": null, "turns_truncated": false,
     });
     let fields = match id {
         "lead" => {
@@ -921,4 +921,175 @@ fn a_since_before_the_window_is_refused_not_cut_short() {
     let mut all = windowed(&home, true);
     let old = all.call("list_sessions", &json!({"since": "90d"})).unwrap();
     assert_eq!(ids_of(&old), ["recent", "old"]);
+}
+
+/// `path`'s modification time, `ago_ms` before now.
+fn age(path: &std::path::Path, ago_ms: i64) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(
+            std::time::SystemTime::now() - Duration::from_millis(u64::try_from(ago_ms).unwrap()),
+        )
+        .unwrap();
+}
+
+#[test]
+fn the_window_start_itself_is_inside_the_window() {
+    let home = aged();
+    let mut query = windowed(&home, false);
+    let now = now_ms();
+    let listed = query.call_at("list_sessions", &json!({}), now).unwrap();
+    let start = listed["window_start"].as_i64().unwrap();
+    // Built on this call's clock: the start is exactly 30 days back.
+    assert_eq!(start, now - 30 * DAY_MS);
+    for since in [json!("30d"), json!(iso(start))] {
+        let answer = query
+            .call_at("list_sessions", &json!({"since": since}), now)
+            .unwrap();
+        assert_eq!(ids_of(&answer), ["recent"], "{since}");
+    }
+    let error = query
+        .call_at("list_sessions", &json!({"since": iso(start - 1)}), now)
+        .unwrap_err();
+    assert_eq!(
+        (error.code, error.window_start),
+        ("outside_window", Some(start))
+    );
+}
+
+#[test]
+fn a_session_that_crosses_the_window_start_keeps_every_turn() {
+    let home = Home::new("testbox");
+    let now = now_ms();
+    let early = now - 40 * DAY_MS;
+    let late = now - 3_600_000;
+    // One file, written an hour ago, with a turn from 40 days back.
+    home.top(
+        "long",
+        &[
+            human("long", iso(early), "Start the migration"),
+            assistant("long", iso(early + 60_000), vec![text("Started.")]),
+            human("long", iso(late), "Finish the migration"),
+            assistant("long", iso(late + 60_000), vec![text("Finished.")]),
+        ],
+    );
+    // A session split over two files: the first written 60 days ago, the
+    // second naming it by `session_id`.
+    let first = now - 60 * DAY_MS;
+    home.top(
+        "first",
+        &[
+            human("first", iso(first), "Plan the release"),
+            assistant("first", iso(first + 60_000), vec![text("Planned.")]),
+        ],
+    );
+    age(
+        &home.root.join("claude/projects/-work-proj/first.jsonl"),
+        60 * DAY_MS,
+    );
+    let resumed_at = now - 7_200_000;
+    let mut resumed = human("second", iso(resumed_at), "Ship the release");
+    resumed["session_id"] = json!("first");
+    let mut shipped = assistant("second", iso(resumed_at + 60_000), vec![text("Shipped.")]);
+    shipped["session_id"] = json!("first");
+    home.top("second", &[resumed, shipped]);
+
+    let mut query = windowed(&home, false);
+    let long = query
+        .call_at("get_session", &json!({"id": "long"}), now)
+        .unwrap();
+    let session = &long["session"];
+    let turns: Vec<i64> = session["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| turn["at"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        turns,
+        [early, late],
+        "no turn is trimmed at the window's start"
+    );
+    assert_eq!(session["handoffs"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        session["busy"],
+        json!([[early, early + 60_000], [late, late + 60_000]])
+    );
+    assert_eq!(session["start"], early);
+    assert_eq!(session["turns_truncated"], false);
+    // The resumed session's earlier file wasn't read: it says so.
+    let listed = query.call_at("list_sessions", &json!({}), now).unwrap();
+    let rows: Vec<(&str, bool)> = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["id"].as_str().unwrap(),
+                row["turns_truncated"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(rows, [("long", false), ("second", true)]);
+    // Everything read: one session under its first file's id, whole.
+    let mut all = windowed(&home, true);
+    let listed = all.call_at("list_sessions", &json!({}), now).unwrap();
+    let rows: Vec<(&str, bool)> = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["id"].as_str().unwrap(),
+                row["turns_truncated"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(rows, [("long", false), ("first", false)]);
+    let whole = all
+        .call_at("get_session", &json!({"id": "first"}), now)
+        .unwrap();
+    assert_eq!(whole["session"]["turns"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn each_machine_keeps_its_own_window_and_the_latest_start_answers() {
+    let now = now_ms();
+    let wide = Home::new("wide");
+    let narrow = Home::new("narrow");
+    for (home, id) in [(&wide, "wide-ten"), (&narrow, "narrow-ten")] {
+        let at = now - 10 * DAY_MS;
+        home.top(
+            id,
+            &[
+                human(id, iso(at), "Ten days ago"),
+                assistant(id, iso(at + 60_000), vec![text("Done.")]),
+            ],
+        );
+        age(
+            &home
+                .root
+                .join(format!("claude/projects/-work-proj/{id}.jsonl")),
+            10 * DAY_MS,
+        );
+    }
+    let options = |home: &Home, days: u64| Options {
+        all: false,
+        since: Duration::from_secs(days * 86_400),
+        ..home.options.clone()
+    };
+    let mut query = Query::with_machines(vec![
+        ("wide".into(), options(&wide, 30)),
+        ("narrow".into(), options(&narrow, 7)),
+    ]);
+    let listed = query.call_at("list_sessions", &json!({}), now).unwrap();
+    // The narrow machine read only its last 7 days; the wide one, 30.
+    assert_eq!(ids_of(&listed), ["wide-ten"]);
+    assert_eq!(listed["window_start"], now - 7 * DAY_MS);
+    let error = query
+        .call_at("list_sessions", &json!({"since": "10d"}), now)
+        .unwrap_err();
+    assert_eq!(error.code, "outside_window");
 }
