@@ -807,7 +807,7 @@ pub(crate) fn collect_with_index(
     let mut claude_paths = BTreeMap::<String, PathBuf>::new();
     let mut summaries = BTreeMap::<String, Summary>::new();
 
-    let machine = facts::Machine::of(options);
+    let machine = facts::MachineFacts::of(options);
     let sessions = options.claude_home.join("sessions");
     if let Ok(entries) = fs::read_dir(sessions) {
         for entry in entries {
@@ -953,14 +953,14 @@ pub(crate) fn collect_with_index(
         }
     }
 
-    let recorded = matches!(machine, facts::Machine::Recorded(_));
+    let recorded = matches!(machine, facts::MachineFacts::Recorded(_));
     let locks = if recorded {
         None
     } else {
         fs::read_to_string(options.proc_root.join("locks")).ok()
     };
     let mut held_threads = BTreeMap::<String, u32>::new();
-    if let facts::Machine::Recorded(facts) = &machine {
+    if let facts::MachineFacts::Recorded(facts) = &machine {
         held_threads.extend(facts.codex_locks.clone());
     }
     #[cfg(unix)]

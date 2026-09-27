@@ -30,7 +30,7 @@ use crate::{
     events::{
         ACK, ANSWERED, ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
-    facts::Machine,
+    facts::MachineFacts,
     field, file_list, matches_handoff, read_first_marker,
 };
 
@@ -846,7 +846,7 @@ fn stamp_of(path: &Path) -> Stamp {
     }
 }
 
-fn pid_files(options: &Options, machine: &Machine) -> Vec<PidFile> {
+fn pid_files(options: &Options, machine: &MachineFacts) -> Vec<PidFile> {
     let mut result = Vec::new();
     let Ok(entries) = fs::read_dir(options.claude_home.join("sessions")) else {
         return result;
@@ -1162,7 +1162,7 @@ struct Builder<'a> {
     texts: &'a mut Texts,
     now: i64,
     machine: String,
-    facts: &'a Machine,
+    facts: &'a MachineFacts,
     home: Option<String>,
     sessions: Vec<Sess>,
     of_file: Vec<usize>,
@@ -1187,7 +1187,7 @@ impl<'a> Builder<'a> {
         texts: &'a mut Texts,
         now: i64,
         machine: String,
-        facts: &'a Machine,
+        facts: &'a MachineFacts,
     ) -> Self {
         Self {
             files,
@@ -3457,7 +3457,7 @@ pub(crate) fn build(
         BUILDS.with(|builds| builds.set(builds.get() + 1));
         AFTER_SCAN.with(|hook| hook.borrow_mut().take().map(|hook| hook()));
     }
-    let facts = Machine::of(options);
+    let facts = MachineFacts::of(options);
     let pids = pid_files(options, &facts);
     let held = facts.held_codex(options);
     let machine = facts.hostname(options);

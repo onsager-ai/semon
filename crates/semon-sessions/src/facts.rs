@@ -132,7 +132,7 @@ fn codex_locks(options: &Options) -> BTreeMap<String, u32> {
 }
 
 /// Where the builder learns about the machine: this one, or a facts file.
-pub(crate) enum Machine {
+pub(crate) enum MachineFacts {
     Local,
     Recorded(Facts),
 }
@@ -144,7 +144,7 @@ pub(crate) enum Lock {
     Unknown,
 }
 
-impl Machine {
+impl MachineFacts {
     /// A facts file that is missing or unreadable reads as a machine with
     /// nothing running and nothing known.
     pub(crate) fn of(options: &Options) -> Self {

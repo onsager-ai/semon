@@ -110,12 +110,21 @@ pub fn check_url(url: &str) -> Result<String> {
     }
     match scheme {
         "https" => Ok(url.to_owned()),
-        "http" if matches!(hostname, "127.0.0.1" | "localhost" | "[::1]") => Ok(url.to_owned()),
+        "http" if loopback(hostname) => Ok(url.to_owned()),
         "http" => Err(format!(
             "{url}: plain http is allowed to a loopback address only"
         )),
         _ => Err(format!("{url}: the URL must be https")),
     }
+}
+
+/// `localhost`, `[::1]` or any address in 127.0.0.0/8.
+fn loopback(host: &str) -> bool {
+    host == "localhost"
+        || host == "[::1]"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -49,7 +49,7 @@ impl Drop for Receiver {
 
 fn json_response(status: u16, body: serde_json::Value) -> Response<std::io::Cursor<Vec<u8>>> {
     Response::from_data(body.to_string().into_bytes())
-        .with_status_code(status)
+        .with_status_code(tiny_http::StatusCode(status))
         .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
 }
 
@@ -439,12 +439,14 @@ fn only_https_or_loopback_http() {
     for good in [
         "https://mirror.example/api/push",
         "http://127.0.0.1:8080/x",
+        "http://127.0.0.2:8781/api/push",
         "http://localhost:1",
     ] {
         assert!(semon_push::check_url(good).is_ok(), "{good}");
     }
     for bad in [
         "http://mirror.example/api/push",
+        "http://10.0.0.1/api/push",
         "ftp://127.0.0.1",
         "https://user:pw@mirror.example",
         "https://mirror.example/?x=1",
