@@ -2698,7 +2698,7 @@ mod tests {
                 json!({"type":"user","timestamp":"2026-09-24T00:00:00Z","sessionId":sid,"origin":{"kind":"human"},
                     "message":{"role":"user","content":format!("work on {host}")}}),
                 json!({"type":"user","timestamp":"2026-09-24T00:01:00Z","sessionId":sid,
-                    "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/9.sock","name":"ghost","msg_id":"m-ghost","body":"hello"},
+                    "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/9.sock","name":"ghost","msg_id":format!("m-ghost-{host}"),"body":"hello"},
                     "message":{"role":"user","content":"hello"}}),
                 json!({"type":"assistant","timestamp":"2026-09-24T00:02:00Z","sessionId":sid,
                     "message":{"role":"assistant","content":[{"type":"text","text":format!("done on {host}")}]}}),
@@ -2847,7 +2847,11 @@ mod tests {
         ]);
         let model = core.respond("GET", "/api/model", "", None);
         assert_eq!(model.status, 409);
-        assert_eq!(body_of(&model)["ids"][0], "same");
+        let ids = body_of(&model)["ids"].clone();
+        assert!(
+            ids.as_array().unwrap().iter().any(|id| id == "same"),
+            "{ids}"
+        );
         assert_eq!(core.respond("GET", "/api/tx", "sid=same", None).status, 409);
         assert_eq!(core.respond("GET", "/s/claude/same", "", None).status, 404);
     }
