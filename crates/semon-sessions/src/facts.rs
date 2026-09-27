@@ -198,11 +198,34 @@ impl MachineFacts {
         }
     }
 
-    /// Codex threads whose writer lock is held.
-    pub(crate) fn held_codex(&self, options: &Options) -> BTreeSet<String> {
+    /// Codex threads whose writer lock is held, with the holder's pid.
+    /// `None` when this machine's `/proc/locks` can't be read: then nothing
+    /// is known about any lock.
+    pub(crate) fn codex_lock_pids(&self, options: &Options) -> Option<BTreeMap<String, u32>> {
         match self {
-            Self::Local => codex_locks(options).into_keys().collect(),
-            Self::Recorded(facts) => facts.codex_locks.keys().cloned().collect(),
+            Self::Local => fs::metadata(options.proc_root.join("locks"))
+                .is_ok()
+                .then(|| codex_locks(options)),
+            Self::Recorded(facts) => Some(facts.codex_locks.clone()),
+        }
+    }
+
+    /// Whether a Codex thread has a writer-lock file. `None` for recorded
+    /// facts, which name only the held locks.
+    pub(crate) fn codex_lock_file(&self, options: &Options, id: &str) -> Option<bool> {
+        match self {
+            // An id is a file name, never a path.
+            Self::Local => Some(
+                !id.is_empty()
+                    && !id.starts_with('.')
+                    && !id.contains(['/', '\\'])
+                    && options
+                        .codex_home
+                        .join("thread-writer-locks")
+                        .join(format!("{id}.lock"))
+                        .is_file(),
+            ),
+            Self::Recorded(_) => None,
         }
     }
 

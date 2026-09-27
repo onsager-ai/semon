@@ -49,23 +49,56 @@ pub(crate) enum Anchor {
     Turn(String),
 }
 
+impl Anchor {
+    /// The page `before`, `after` or `turn` names; with none of them, the
+    /// last page. `None` when more than one is given: they are exclusive.
+    pub(crate) fn of(
+        before: Option<usize>,
+        after: Option<usize>,
+        turn: Option<String>,
+    ) -> Option<Self> {
+        match (before, after, turn) {
+            (None, None, None) => Some(Self::Last),
+            (Some(before), None, None) => Some(Self::Before(before)),
+            (None, Some(after), None) => Some(Self::After(after)),
+            (None, None, Some(turn)) => Some(Self::Turn(turn)),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) fn read_record(path: &Path, offset: u64) -> Option<Value> {
-    let mut file = fs::File::open(path).ok()?;
-    file.seek(SeekFrom::Start(offset)).ok()?;
+    read_sized(path, offset).0
+}
+
+/// The record at `offset`, and how many bytes were read for it.
+fn read_sized(path: &Path, offset: u64) -> (Option<Value>, u64) {
+    let Ok(mut file) = fs::File::open(path) else {
+        return (None, 0);
+    };
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return (None, 0);
+    }
     let mut reader = BufReader::new(file).take(LINE_MAX + 1);
     let mut bytes = Vec::new();
-    reader.read_until(b'\n', &mut bytes).ok()?;
-    if bytes.len() as u64 > LINE_MAX {
-        return None;
+    let read = reader.read_until(b'\n', &mut bytes);
+    let size = bytes.len() as u64;
+    if read.is_err() || size > LINE_MAX {
+        return (None, size);
     }
-    serde_json::from_slice(&bytes).ok().filter(Value::is_object)
+    (
+        serde_json::from_slice(&bytes).ok().filter(Value::is_object),
+        size,
+    )
 }
 
 /// Source lines read for one page: a line holding several blocks, or a call
 /// and its result, is read once. Only the last few lines are kept.
 #[derive(Default)]
-struct Lines {
+pub(crate) struct Lines {
     recent: VecDeque<(LineKey, Option<Rc<Value>>)>,
+    /// Bytes read from source files so far.
+    pub(crate) bytes: u64,
 }
 
 /// A source line: its file and byte offset.
@@ -82,7 +115,9 @@ impl Lines {
         {
             return record.clone();
         }
-        let record = read_record(path, offset).map(Rc::new);
+        let (record, size) = read_sized(path, offset);
+        self.bytes += size;
+        let record = record.map(Rc::new);
         if self.recent.len() == Self::KEEP {
             self.recent.pop_front();
         }
@@ -439,9 +474,86 @@ fn render(built: &Built, lines: &mut Lines, slot: &Slot, index: usize, now: i64)
     Some(entry)
 }
 
+/// Every string a value holds, one per line: a tool input's text, whatever
+/// its shape.
+fn strings(value: &Value, out: &mut String) {
+    match value {
+        Value::String(text) => {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(text);
+        }
+        Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+        Value::Object(fields) => fields.values().for_each(|item| strings(item, out)),
+        _ => {}
+    }
+}
+
+/// A slot's text, whole, read back from its source line for search: the
+/// same parts a page shows (`text`, or a call's `in` and `out`), uncapped.
+/// A handoff's text is the model's (its brief, result and answer), so a
+/// handoff slot has none here; neither do markers.
+pub(crate) fn slot_texts(
+    built: &Built,
+    lines: &mut Lines,
+    slot: &Slot,
+) -> Vec<(&'static str, String)> {
+    let Some(file) = slot.file.and_then(|file| built.files.get(file)) else {
+        return Vec::new();
+    };
+    let block = slot.block as usize;
+    let mut texts = Vec::new();
+    let text = match &slot.kind {
+        SlotKind::U => lines
+            .get(&file.path, slot.offset)
+            .and_then(|record| prompt_text(&record)),
+        SlotKind::A => lines
+            .get(&file.path, slot.offset)
+            .and_then(|record| model::assistant_text(&record, block)),
+        SlotKind::Think => lines
+            .get(&file.path, slot.offset)
+            .and_then(|record| think_text(&record, block)),
+        SlotKind::Tool { reply, .. } => {
+            if let Some(input) = lines
+                .get(&file.path, slot.offset)
+                .and_then(|record| tool_input(&record, block))
+            {
+                let mut text = String::new();
+                strings(&input, &mut text);
+                texts.push(("in", text));
+            }
+            if let Some(reply) = reply
+                && let Some(text) = lines
+                    .get(&file.path, reply.o)
+                    .and_then(|record| result_text(&record, reply.b as usize))
+            {
+                texts.push(("out", text));
+            }
+            None
+        }
+        _ => None,
+    };
+    texts.extend(text.map(|text| ("text", text)));
+    texts
+}
+
 /// A page of `sid`'s transcript as JSON. Each entry that starts a turn, and
 /// the page's first entry, carries its turn's id as `turn`.
 pub(crate) fn page(built: &Built, sid: &str, anchor: &Anchor, now: i64) -> io::Result<String> {
+    page_limited(built, sid, anchor, now, PAGE_ENTRIES)
+}
+
+/// [`page`] with at most `limit` entries (1 to [`PAGE_ENTRIES`]); the byte
+/// bound is the same.
+pub(crate) fn page_limited(
+    built: &Built,
+    sid: &str,
+    anchor: &Anchor,
+    now: i64,
+    limit: usize,
+) -> io::Result<String> {
+    let limit = limit.clamp(1, PAGE_ENTRIES);
     let transcript = built.tx.get(sid).ok_or(io::ErrorKind::NotFound)?;
     let slots = &transcript.slots;
     let total = slots.len();
@@ -465,7 +577,7 @@ pub(crate) fn page(built: &Built, sid: &str, anchor: &Anchor, now: i64) -> io::R
             return true;
         };
         let size = entry.to_string().len() + 1;
-        if !picked.is_empty() && (picked.len() >= PAGE_ENTRIES || bytes + size > PAGE_BYTES) {
+        if !picked.is_empty() && (picked.len() >= limit || bytes + size > PAGE_BYTES) {
             return false;
         }
         bytes += size;
