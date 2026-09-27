@@ -162,6 +162,33 @@ pub(crate) struct Machine {
     pub(crate) last: Option<i64>,
 }
 
+/// What the agent read surface (`semon query`, `semon mcp`) says about a
+/// session beyond `/api/model`'s shape: facts the builder already holds but
+/// the viewer doesn't serve. Metadata only, never served by `/api/model`, so
+/// the model's JSON and version don't change with it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SessionFacts {
+    /// `session`, `subagent`, `codex-run` or `stub`.
+    pub(crate) kind: &'static str,
+    /// The session that spawned this one, by a logged id (a spawn handoff's
+    /// `from`).
+    pub(crate) parent: Option<String>,
+    /// The process a record names for it: a Claude `sessions/<pid>.json`, or
+    /// the holder of a Codex writer lock.
+    pub(crate) pid: Option<u32>,
+    /// Whether that process runs: `true` when its start time matches (or its
+    /// writer lock is held), `false` when the record's process is gone,
+    /// `None` when there is no process record to check.
+    pub(crate) alive: Option<bool>,
+    /// The status the Claude pid file recorded (`busy`, `idle`, …).
+    pub(crate) recorded_status: Option<String>,
+    /// The earliest and latest log line's time (epoch ms); `None` without one.
+    pub(crate) first: Option<i64>,
+    pub(crate) last: Option<i64>,
+    /// Exact token counts; `None` for a stub, which has no logs.
+    pub(crate) tokens: Option<crate::Tokens>,
+}
+
 #[derive(Serialize)]
 struct Rest<'a> {
     handoffs: &'a [Handoff],
@@ -194,6 +221,8 @@ pub(crate) struct Built {
     /// Each session's transcript index, for `/api/tx`: metadata and offsets
     /// only, the text is read back per page.
     pub(crate) tx: BTreeMap<String, Transcript>,
+    /// Each session's facts for the agent read surface, by session key.
+    pub(crate) facts: BTreeMap<String, SessionFacts>,
     #[cfg(test)]
     pub(crate) handoffs: Vec<Handoff>,
     #[cfg(test)]
@@ -1143,6 +1172,12 @@ struct Sess {
     names: BTreeSet<String>,
     refs: Vec<Ref>,
     parent: Option<usize>,
+    /// Every pid file that names this lineage: (pid, alive, status).
+    pid_files: Vec<(u32, bool, Option<String>)>,
+    /// The earliest and latest line's time, when any line has one.
+    first: Option<i64>,
+    last: Option<i64>,
+    tokens: crate::Tokens,
     out: Session,
 }
 
@@ -1254,6 +1289,10 @@ impl<'a> Builder<'a> {
             names: BTreeSet::new(),
             refs: Vec::new(),
             parent: None,
+            pid_files: Vec::new(),
+            first: None,
+            last: None,
+            tokens: crate::Tokens::default(),
             out,
         });
         index
@@ -1412,6 +1451,57 @@ impl<'a> Builder<'a> {
         session
     }
 
+    /// Every session's facts for the agent read surface. `codex_process`
+    /// gives a Codex run's writer-lock holder and whether it runs.
+    fn session_facts(
+        &self,
+        codex_process: impl Fn(&str) -> (Option<u32>, Option<bool>),
+    ) -> BTreeMap<String, SessionFacts> {
+        self.sessions
+            .iter()
+            .map(|session| {
+                let (kind, pid, alive, recorded_status) = match session.kind {
+                    SessKind::Lineage => {
+                        let live = session.pid_files.iter().find(|(_, alive, _)| *alive);
+                        match (live, session.pid_files.as_slice()) {
+                            (Some((pid, _, status)), _) => {
+                                ("session", Some(*pid), Some(true), status.clone())
+                            }
+                            // One pid file, and its process is gone.
+                            (None, [(pid, _, status)]) => {
+                                ("session", Some(*pid), Some(false), status.clone())
+                            }
+                            // No process record: nothing to check.
+                            (None, []) => ("session", None, None, None),
+                            // Several, all gone: which one ran last isn't logged.
+                            (None, _) => ("session", None, Some(false), None),
+                        }
+                    }
+                    // A subagent runs in its parent's process: no record of its own.
+                    SessKind::Agent => ("subagent", None, None, None),
+                    SessKind::Codex => {
+                        let (pid, alive) = codex_process(&session.key);
+                        ("codex-run", pid, alive, None)
+                    }
+                    SessKind::Stub => ("stub", None, None, None),
+                };
+                let facts = SessionFacts {
+                    kind,
+                    parent: session
+                        .parent
+                        .map(|parent| self.sessions[parent].key.clone()),
+                    pid,
+                    alive,
+                    recorded_status,
+                    first: session.first,
+                    last: session.last,
+                    tokens: (session.kind != SessKind::Stub).then(|| session.tokens.clone()),
+                };
+                (session.key.clone(), facts)
+            })
+            .collect()
+    }
+
     // -- sessions --
 
     fn sessions(&mut self, lineages: Vec<Vec<usize>>, pids: &[PidFile], held: &BTreeSet<String>) {
@@ -1454,6 +1544,9 @@ impl<'a> Builder<'a> {
                 continue;
             };
             let session = &mut self.sessions[index];
+            session
+                .pid_files
+                .push((pid.pid, pid.alive, pid.status.clone()));
             if let Some(name) = &pid.name {
                 session.names.insert(plain_name(name));
             }
@@ -1561,6 +1654,9 @@ impl<'a> Builder<'a> {
         });
         let session = &mut self.sessions[index];
         session.names.extend(names);
+        session.tokens = tokens.clone();
+        session.first = (start != i64::MAX).then_some(start);
+        session.last = (last != 0).then_some(last);
         let out = &mut session.out;
         out.tokens = [
             million(tokens.input.saturating_sub(tokens.cached_input)),
@@ -3462,7 +3558,11 @@ pub(crate) fn build(
     }
     let facts = MachineFacts::of(options);
     let pids = pid_files(options, &facts);
-    let held = facts.held_codex(options);
+    let lock_pids = facts.codex_lock_pids(options);
+    let held: BTreeSet<String> = lock_pids
+        .iter()
+        .flat_map(|locks| locks.keys().cloned())
+        .collect();
     let machine = facts.hostname(options);
     let home = facts.home();
     let offline_since = facts.offline_since();
@@ -3497,6 +3597,21 @@ pub(crate) fn build(
             }
         }
     }
+    let session_facts = builder.session_facts(|id| match lock_pids.as_ref() {
+        Some(locks) => match locks.get(id) {
+            Some(pid) => (Some(*pid), Some(true)),
+            // A lock file no process holds: its writer is gone. Without a
+            // lock file there is no process record.
+            None => (
+                None,
+                facts
+                    .codex_lock_file(options, id)
+                    .filter(|exists| *exists)
+                    .map(|_| false),
+            ),
+        },
+        None => (None, None),
+    });
 
     let mut handoffs: Vec<Handoff> = builder
         .handoffs
@@ -3673,6 +3788,7 @@ pub(crate) fn build(
         machine_id,
         files: slot_files,
         tx,
+        facts: session_facts,
         #[cfg(test)]
         handoffs,
         #[cfg(test)]

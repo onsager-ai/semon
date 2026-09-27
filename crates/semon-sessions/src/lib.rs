@@ -15,13 +15,17 @@ use serde_json::Value;
 mod events;
 mod facts;
 mod inputs;
+mod mcp;
 mod model;
+mod query;
 mod tx;
 mod union;
 mod viewer;
 pub use facts::{FACTS_VERSION, Facts, local_facts, read_facts, write_facts};
 pub use inputs::{Input, InputRoot, inputs, is_input_path};
+pub use mcp::serve_mcp;
 pub use model::{model_json, model_json_at};
+pub use query::{Query, QueryError, QueryTool, query_tools};
 pub use union::{AdminLink, ViewerCore};
 pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve};
 

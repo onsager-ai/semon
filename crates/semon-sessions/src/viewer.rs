@@ -767,13 +767,8 @@ impl MachineView {
                 .transpose()
         };
         let turn = query_value(query, "turn").and_then(decoded);
-        let anchor = match (index("before")?, index("after")?, turn) {
-            (None, None, None) => tx::Anchor::Last,
-            (Some(before), None, None) => tx::Anchor::Before(before),
-            (None, Some(after), None) => tx::Anchor::After(after),
-            (None, None, Some(turn)) => tx::Anchor::Turn(turn),
-            _ => return Err(invalid_input("before, after and turn are exclusive")),
-        };
+        let anchor = tx::Anchor::of(index("before")?, index("after")?, turn)
+            .ok_or_else(|| invalid_input("before, after and turn are exclusive"))?;
         self.refresh_model()?;
         let built = &self.model.as_ref().expect("model loaded").built;
         tx::page(built, &sid, &anchor, model::now_ms())

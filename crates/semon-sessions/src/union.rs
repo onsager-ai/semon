@@ -85,6 +85,33 @@ struct Plan {
     version: String,
 }
 
+/// Which machine answers for a session id.
+pub(crate) enum Owner {
+    /// This machine (by position), under this id there.
+    At(usize, String),
+    Missing,
+    /// Two machines both claim it: refused, never picked.
+    Conflict,
+}
+
+/// One machine's part of what a core serves: its model, and the machine id
+/// its machine-local ids are served under (`None` with one machine, where
+/// no id is renamed).
+pub(crate) struct Served<'a> {
+    pub(crate) built: &'a Built,
+    pub(crate) machine: Option<String>,
+}
+
+impl Served<'_> {
+    /// The id the core serves this machine's session `id` under.
+    pub(crate) fn served(&self, id: &str) -> String {
+        match &self.machine {
+            Some(machine) if machine_local(self.built, id) => format!("{id}@{machine}"),
+            _ => id.to_owned(),
+        }
+    }
+}
+
 /// Whether `id` is a stand-in only its own machine knows: a stub for the
 /// far end of a handoff, or an unsent send's.
 fn machine_local(built: &Built, id: &str) -> bool {
@@ -418,21 +445,86 @@ impl ViewerCore {
         let Some(sid) = query_value(query, "sid").and_then(decoded) else {
             return Ok(text(400, "Invalid request"));
         };
-        let plan = self.refresh()?;
-        if plan.conflicts.contains(&sid) {
-            return Ok(conflict(&[sid]));
+        Ok(match self.owner(&sid)? {
+            Owner::Conflict => conflict(&[sid]),
+            Owner::Missing => text(404, "Not found"),
+            Owner::At(index, own) => {
+                let query = if own == sid {
+                    query.to_owned()
+                } else {
+                    with_param(query, "sid", &own)
+                };
+                self.views[index]
+                    .1
+                    .respond("GET", path, &query, if_none_match)
+            }
+        })
+    }
+
+    /// The machine that answers for session `sid`, and the session's id
+    /// there. With one machine that is always the one machine, under `sid`
+    /// itself: whether it has the session is its own answer.
+    pub(crate) fn owner(&mut self, sid: &str) -> io::Result<Owner> {
+        match self.views.len() {
+            0 => Ok(Owner::Missing),
+            1 => Ok(Owner::At(0, sid.to_owned())),
+            _ => {
+                let plan = self.refresh()?;
+                if plan.conflicts.contains(sid) {
+                    return Ok(Owner::Conflict);
+                }
+                Ok(match plan.owners.get(sid) {
+                    Some((index, own)) => Owner::At(*index, own.clone()),
+                    None => Owner::Missing,
+                })
+            }
         }
-        let Some((index, own)) = plan.owners.get(&sid) else {
-            return Ok(text(404, "Not found"));
-        };
-        let query = if *own == sid {
-            query.to_owned()
-        } else {
-            with_param(query, "sid", own)
-        };
-        Ok(self.views[*index]
+    }
+
+    /// Machine `index`'s model, rebuilt first if its logs changed.
+    pub(crate) fn built_at(&mut self, index: usize) -> io::Result<&Built> {
+        self.views
+            .get_mut(index)
+            .ok_or(io::ErrorKind::NotFound)?
             .1
-            .respond("GET", path, &query, if_none_match))
+            .built()
+    }
+
+    /// The model `/api/model` serves (without an admin link) at `now`, or
+    /// the ids two machines both claim.
+    pub(crate) fn model_at(&mut self, now: i64) -> io::Result<Result<String, Vec<String>>> {
+        match self.views.len() {
+            0 => Err(io::ErrorKind::NotFound.into()),
+            1 => Ok(Ok(self.views[0].1.built()?.json(now))),
+            _ => {
+                let plan = self.refresh()?;
+                Ok(union_json(&self.parts(), &plan, now))
+            }
+        }
+    }
+
+    /// Every machine's model, brought up to date, with how the core serves
+    /// its session ids.
+    pub(crate) fn served(&mut self) -> io::Result<Vec<Served<'_>>> {
+        let machine_ids = if self.views.len() > 1 {
+            self.refresh()?.machine_ids
+        } else {
+            for (_, view) in &mut self.views {
+                view.built()?;
+            }
+            Vec::new()
+        };
+        Ok(self
+            .views
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, view))| {
+                view.last_built().map(|built| Served {
+                    built,
+                    machine: machine_ids.get(index).cloned(),
+                })
+            })
+            .collect())
     }
 
     /// The V1 routes that name a transcript by harness and id: the machine

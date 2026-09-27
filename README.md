@@ -52,6 +52,44 @@ Live Claude statuses observed so far are `busy`, `idle`, and `shell`; any other 
 
 JSON output has `schema_version: 1` and a `roots` array of nested nodes. Every node has `id`, `harness`, `kind`, `label`, `state`, `pid`, `models`, `cwd`, `branch`, `first_activity`, `last_activity`, `last_activity_age_seconds`, `tokens`, `malformed_lines`, `open_tools`, `claude_link`, `via_tool`, `unlinked`, and `children`. Nullable fields use `null`, `tokens` contains `input`, `cached_input`, `output`, `reasoning_output`, and `total`, and each tool has `id` and `name`. Timestamps are RFC 3339 strings from source records. `malformed_lines` counts complete lines that are not JSON objects; they are skipped, and text output shows `malformed:N` when the count is nonzero. The view includes metadata only; it never prints prompts, transcript text, tool inputs, or tool outputs.
 
+## For agents: `semon query` and `semon mcp`
+
+The same session model, shaped for agents and scripts rather than people. `semon query TOOL` prints one tool's answer as JSON (one line with `--json`, pretty without); `semon mcp` serves the same tools as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. Both take the home options of `semon sessions` (`--claude-home`, `--codex-home`, `--proc-root`, `--cache`, `--facts`, and `--machine DIR` repeated for several machines' homes), read the whole history (each tool filters by its own `since`), and are read-only: no listener, no network, and nothing written but the metadata cache.
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `list_sessions` | `state`, `repo`, `since`, `parent`, `harness`, `limit` | session summaries, most recently active first |
+| `get_session` | `id` | the summary, busy intervals, turns (each incoming message and how the turn ended) and every handoff to or from it |
+| `read_transcript` | `id`, one of `before` / `after` / `turn`, `limit` | a page of the transcript, exactly as the viewer's `/api/tx` serves it |
+| `find` | `text`, `since`, `limit`, `max_bytes` | entries containing the text (ASCII case-insensitive), newest first, with their session, position and a snippet; bounded by a result limit and a byte budget |
+| `stalls` | `idle_minutes`, `since` | sessions quiet for that long that are working, wait on a question, or whose process died while its pid file said busy, each with a `stall_reason` |
+
+A summary has `id`, `harness`, `kind` (`session`, `subagent`, `codex-run`, `stub`), `name`, `model`, `repo`, `branch`, `machine`, `parent`, `children`, `state`, `start`, `last_activity`, `pid`, `alive`, `exit`, `open_question`, `tokens` (`input` uncached, `cached`, `output`) and `run`. Times are epoch milliseconds. `state` is one of `working`, `waiting-question`, `idle`, `ended`, `error` and `unknown`; `stall_reason` is one of `waiting-question`, `no-output` and `process-gone`, and every `stalls` answer states its rule. A field Semon can't know exactly is `null`: `pid` and `alive` come only from a Claude pid file checked against its process's start time, or from a held Codex writer lock, and `exit` and `run` are `null` for now. Turns and handoffs are the model's own objects, as `--model-json` has them. `since` is a duration back from now (`90m`, `2h`, `7d`) or an RFC 3339 time. A failure has a closed `code` (`unknown_session`, `unknown_turn`, `invalid_arguments`, …): `semon query` exits nonzero, and `semon mcp` returns a tool result with `isError`.
+
+```sh
+semon query list_sessions --state working --json
+semon query get_session SESSION_ID
+semon query read_transcript SESSION_ID --before 200 --limit 50
+semon query find "cargo test" --since 2d
+semon query stalls --idle-minutes 30
+```
+
+To give Claude Code's agents these tools, add the server once; user scope makes it available in every project:
+
+```sh
+claude mcp add --scope user semon -- semon mcp
+```
+
+Or put it in a project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "semon": { "command": "semon", "args": ["mcp"] }
+  }
+}
+```
+
 ## Capture Codex sessions
 
 Run one cursor-aware capture pass with:

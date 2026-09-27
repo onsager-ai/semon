@@ -32,6 +32,54 @@ enum Command {
     Forget(ForgetArgs),
     Sessions(SessionsArgs),
     Push(PushArgs),
+    Query(QueryArgs),
+    Mcp(HomeArgs),
+}
+
+/// The agent homes, `/proc`, cache and facts `semon sessions` reads, or
+/// several machines' homes.
+#[derive(Default)]
+struct HomeArgs {
+    options: semon_sessions::Options,
+    /// `--machine DIR`, repeated: several machines' homes in one model.
+    machines: Vec<PathBuf>,
+}
+
+impl HomeArgs {
+    /// Takes one of the home options, `semon sessions`' names for them;
+    /// `false` when `argument` isn't one.
+    fn take(
+        &mut self,
+        argument: &str,
+        value: &mut dyn FnMut() -> Result<String, String>,
+    ) -> Result<bool, String> {
+        match argument {
+            "--claude-home" => self.options.claude_home = value()?.into(),
+            "--codex-home" => self.options.codex_home = value()?.into(),
+            "--proc-root" => self.options.proc_root = value()?.into(),
+            "--cache" => self.options.cache = value()?.into(),
+            "--facts" => self.options.facts = Some(value()?.into()),
+            "--machine" => self.machines.push(PathBuf::from(value()?)),
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// The read surface over these homes.
+    fn query(&self) -> semon_sessions::Query {
+        if self.machines.is_empty() {
+            semon_sessions::Query::new(self.options.clone())
+        } else {
+            semon_sessions::Query::with_machines(machine_options(&self.options, &self.machines))
+        }
+    }
+}
+
+struct QueryArgs {
+    home: HomeArgs,
+    tool: String,
+    arguments: serde_json::Value,
+    json: bool,
 }
 
 struct PushArgs {
@@ -96,6 +144,8 @@ fn parse_args() -> Result<Command, String> {
     match arguments.next().as_deref() {
         Some("sessions") => parse_sessions_args(arguments).map(Command::Sessions),
         Some("push") => parse_push_args(arguments).map(Command::Push),
+        Some("query") => parse_query_args(arguments).map(Command::Query),
+        Some("mcp") => parse_mcp_args(arguments).map(Command::Mcp),
         Some("ship") => parse_ship_args(arguments).map(Command::Ship),
         Some("log") => parse_log_args(arguments).map(Command::Log),
         Some("forensic") => parse_forensic_args(arguments).map(Command::Forensic),
@@ -171,6 +221,91 @@ fn parse_sessions_args(
         serve,
         listen,
     })
+}
+
+/// `semon query <tool> [VALUE] [--argument VALUE …] [--json]` and the home
+/// options. Each `--name VALUE` is the tool's argument `name` (dashes for
+/// underscores), typed by its schema; `VALUE` alone fills the tool's
+/// positional argument.
+fn parse_query_args(mut arguments: impl Iterator<Item = String>) -> Result<QueryArgs, String> {
+    let tools = semon_sessions::query_tools();
+    let tool = match arguments.next() {
+        Some(name) if !name.starts_with('-') => name,
+        _ => return Err(query_usage()),
+    };
+    let Some(spec) = tools.iter().find(|spec| spec.name == tool) else {
+        return Err(format!("unknown tool: {tool}\n{}", query_usage()));
+    };
+    let mut home = HomeArgs::default();
+    let mut json = false;
+    let mut values = serde_json::Map::new();
+    while let Some(argument) = arguments.next() {
+        let mut value = || {
+            arguments
+                .next()
+                .ok_or_else(|| format!("{argument} requires a value"))
+        };
+        if home.take(&argument, &mut value)? {
+            continue;
+        }
+        match argument.as_str() {
+            "--json" => json = true,
+            "-h" | "--help" => return Err(query_usage()),
+            flag if flag.starts_with("--") => {
+                let key = flag["--".len()..].replace('-', "_");
+                let Some(property) = spec.input_schema["properties"].get(&key) else {
+                    return Err(format!("{tool} has no argument {flag}\n{}", query_usage()));
+                };
+                let raw = value()?;
+                let parsed = if property["type"] == "integer" {
+                    serde_json::Value::from(
+                        raw.parse::<i64>()
+                            .map_err(|_| format!("{flag} expects an integer, got {raw}"))?,
+                    )
+                } else {
+                    serde_json::Value::String(raw)
+                };
+                values.insert(key, parsed);
+            }
+            positional => {
+                let Some(key) = spec.positional else {
+                    return Err(format!("{tool} takes no positional argument: {positional}"));
+                };
+                if values.contains_key(key) {
+                    return Err(format!("{tool}: {key} given twice"));
+                }
+                values.insert(
+                    key.to_owned(),
+                    serde_json::Value::String(positional.to_owned()),
+                );
+            }
+        }
+    }
+    Ok(QueryArgs {
+        home,
+        tool,
+        arguments: serde_json::Value::Object(values),
+        json,
+    })
+}
+
+fn parse_mcp_args(mut arguments: impl Iterator<Item = String>) -> Result<HomeArgs, String> {
+    let mut home = HomeArgs::default();
+    while let Some(argument) = arguments.next() {
+        let mut value = || {
+            arguments
+                .next()
+                .ok_or_else(|| format!("{argument} requires a value"))
+        };
+        if home.take(&argument, &mut value)? {
+            continue;
+        }
+        return Err(match argument.as_str() {
+            "-h" | "--help" => usage(),
+            _ => format!("unknown argument: {argument}"),
+        });
+    }
+    Ok(home)
 }
 
 fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushArgs, String> {
@@ -373,6 +508,8 @@ fn run(command: Command) -> Result<(), String> {
     match command {
         Command::Sessions(args) => run_sessions(args),
         Command::Push(args) => semon_push::push(&args.options, args.watch),
+        Command::Query(args) => run_query(args),
+        Command::Mcp(home) => run_mcp(&home),
         Command::Ship(args) => run_ship(args).map(|message| println!("{message}")),
         Command::Log(args) => run_log(args).map(|message| println!("{message}")),
         Command::Forensic(args) => run_forensic(args),
@@ -384,7 +521,8 @@ fn run(command: Command) -> Result<(), String> {
 /// `DIR` holds `claude/`, `codex/` and `proc/`, and `facts.json` when its
 /// facts were recorded elsewhere; the metadata cache goes in `DIR/.semon/`.
 fn print_machines_model(args: &SessionsArgs) -> Result<(), String> {
-    let mut core = semon_sessions::ViewerCore::with_machines(machine_options(args));
+    let mut core =
+        semon_sessions::ViewerCore::with_machines(machine_options(&args.options, &args.machines));
     let reply = core.respond("GET", "/api/model", "", None);
     let body = String::from_utf8_lossy(&reply.body);
     if reply.status != 200 {
@@ -398,8 +536,11 @@ fn print_machines_model(args: &SessionsArgs) -> Result<(), String> {
 }
 
 /// Each `--machine DIR`'s options.
-fn machine_options(args: &SessionsArgs) -> Vec<(String, semon_sessions::Options)> {
-    args.machines
+fn machine_options(
+    options: &semon_sessions::Options,
+    machines: &[PathBuf],
+) -> Vec<(String, semon_sessions::Options)> {
+    machines
         .iter()
         .map(|dir| {
             let facts = dir.join("facts.json");
@@ -409,7 +550,7 @@ fn machine_options(args: &SessionsArgs) -> Vec<(String, semon_sessions::Options)
                 proc_root: dir.join("proc"),
                 cache: dir.join(".semon").join("sessions-index.json"),
                 facts: facts.is_file().then_some(facts),
-                ..args.options.clone()
+                ..options.clone()
             };
             (dir.display().to_string(), options)
         })
@@ -419,7 +560,7 @@ fn machine_options(args: &SessionsArgs) -> Vec<(String, semon_sessions::Options)
 fn run_sessions(args: SessionsArgs) -> Result<(), String> {
     if args.serve {
         return semon_sessions::serve(semon_sessions::ServeOptions {
-            machines: machine_options(&args),
+            machines: machine_options(&args.options, &args.machines),
             sessions: args.options,
             listen: args.listen,
         })
@@ -449,6 +590,39 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
+}
+
+/// One tool's answer as JSON on stdout: pretty, or one line with `--json`.
+/// A failure goes to stderr (and, with `--json`, as a JSON error on stdout)
+/// and exits nonzero.
+fn run_query(args: QueryArgs) -> Result<(), String> {
+    let mut query = args.home.query();
+    match query.call(&args.tool, &args.arguments) {
+        Ok(value) => {
+            if args.json {
+                println!("{value}");
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if args.json {
+                println!("{}", error.to_json());
+            }
+            Err(format!("query {}: {error}", args.tool))
+        }
+    }
+}
+
+/// The read surface as an MCP server on stdin and stdout, until stdin ends.
+fn run_mcp(home: &HomeArgs) -> Result<(), String> {
+    let mut query = home.query();
+    semon_sessions::serve_mcp(&mut query, io::stdin().lock(), io::stdout().lock())
+        .map_err(|error| error.to_string())
 }
 
 fn run_ship(args: ShipArgs) -> Result<String, String> {
@@ -713,6 +887,35 @@ fn default_store_path() -> PathBuf {
         .join(".local/share/semon/traces.sqlite3")
 }
 
+fn query_usage() -> String {
+    let tools: Vec<String> = semon_sessions::query_tools()
+        .iter()
+        .map(|tool| {
+            let mut line = format!("  {}", tool.name);
+            if let Some(positional) = tool.positional {
+                line.push_str(&format!(" {}", positional.to_uppercase()));
+            }
+            let flags: Vec<String> = tool.input_schema["properties"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(name, _)| Some(name.as_str()) != tool.positional)
+                .map(|(name, _)| format!("[--{} VALUE]", name.replace('_', "-")))
+                .collect();
+            if !flags.is_empty() {
+                line.push(' ');
+                line.push_str(&flags.join(" "));
+            }
+            line
+        })
+        .collect();
+    format!(
+        "Usage: semon query TOOL [ARGUMENTS] [--json] [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
+         The agent read surface: one tool's answer as JSON (one line with --json). The tools:\n{}",
+        tools.join("\n")
+    )
+}
+
 fn usage() -> String {
     format!(
         "Usage: semon sessions [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]]\n\
@@ -720,6 +923,13 @@ fn usage() -> String {
          session model (sessions, handoffs, turns, busy) instead; it reads every log, --all/--since trim the output.\n\
          --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
          --machine DIR (repeated, with --model-json or --serve): one view over several machines' homes, DIR/{{claude,codex,proc}}.\n\
+         \n\
+         Usage: semon query TOOL [ARGUMENTS] [--json] [home options as for sessions, and --machine DIR]\n\
+         The agent read surface over the same session model: list_sessions, get_session, read_transcript, find,\n\
+         stalls. `semon query` alone lists each tool's arguments.\n\
+         \n\
+         Usage: semon mcp [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
+         The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener.\n\
          \n\
          Usage: semon push --to URL --token-file PATH [--watch] [--state PATH] [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\
