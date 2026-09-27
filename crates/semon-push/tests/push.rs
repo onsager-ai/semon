@@ -4,7 +4,6 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
     path::PathBuf,
     sync::{
         Arc, Mutex,
