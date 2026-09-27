@@ -495,3 +495,12 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .step > button, .step.live { min-height: 36px; }
   .menu, .filters.pop { right: 10px; }
 }
+
+/* ---- Live updates (deliberate difference 3) -------------------------------------------------------------------------
+   Not in the mockup, which never changes under the reader: on a session page, "N new ↓" when entries arrive below a
+   reader who scrolled up; anywhere, a quiet note once the server stops answering this page's token. Both sit at the
+   bottom of the main column, clear of the phone's home indicator. */
+.newpill { position: fixed; z-index: 6; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); display: inline-flex; align-items: center; min-height: 36px; max-width: calc(100vw - 32px); padding: 0 16px; border: 1px solid var(--line); border-radius: 18px; background: var(--ground); color: var(--accent); font-size: 13.5px; font-weight: 500; white-space: nowrap; box-shadow: 0 6px 20px rgb(0 0 0 / .12); }
+@media (hover: hover) { .newpill:hover { background: var(--sunken); } }
+.livenote { position: fixed; z-index: 6; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); margin: 0; padding: 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--sunken); color: var(--muted); font-size: 13px; text-align: center; }
+@media (min-width: 761px) { .newpill, .livenote { left: calc(50% + 148px); max-width: calc(100vw - 296px - 32px); } }

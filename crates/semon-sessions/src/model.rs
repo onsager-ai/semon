@@ -163,17 +163,22 @@ struct Rest<'a> {
     handoffs: &'a [Handoff],
     turns: &'a [Turn],
     busy: &'a BTreeMap<String, Vec<(i64, i64)>>,
+    /// Each transcript's growth mark, `<entries>.<bytes>.<running>`: its slot
+    /// count, the length of the files its slots come from, and how many of
+    /// its calls are running. The page tails a loaded transcript only when
+    /// its mark moved.
+    tx: &'a BTreeMap<&'a str, String>,
 }
 
 /// A built model. Everything but the sessions' running-tool age is
-/// serialized once; `version` hashes the build, so it only changes when the
-/// logs do.
+/// serialized once; `version` hashes the build and every source file's
+/// length, so it changes when, and only when, the logs do.
 pub(crate) struct Built {
     pub(crate) version: String,
     machine: String,
     /// `activity[2]` holds the running tool's start (epoch ms) until served.
     pub(crate) sessions: BTreeMap<String, Session>,
-    /// `"handoffs":…,"turns":…,"busy":…}`
+    /// `"handoffs":…,"turns":…,"busy":…,"tx":…}`
     rest: String,
     pub(crate) pids: Vec<u32>,
     /// This machine's id, as sessions name it.
@@ -326,6 +331,22 @@ pub(crate) struct Texts {
     handoff_tools: HashMap<String, (u64, Option<String>)>,
     repos: HashMap<String, Option<String>>,
     markers: HashMap<PathBuf, (Stamp, Option<Marker>)>,
+    /// Each Codex file's `session_meta` and each subagent's `.meta.json`, by
+    /// the file's stamp: a rebuild after one file grew re-reads neither for
+    /// the files that didn't change.
+    metas: HashMap<PathBuf, (Stamp, Option<Value>)>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Metadata files read by [`Texts::meta`] on this thread: a rebuild reads
+    /// only the changed ones.
+    pub(crate) static META_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Builds on this thread.
+    pub(crate) static BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Runs once right after the scan read the files: a test appends there,
+    /// as a writer would while a build runs.
+    pub(crate) static AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
@@ -433,6 +454,35 @@ impl Texts {
         self.markers
             .insert(path.to_owned(), (stamp, marker.clone()));
         marker
+    }
+
+    /// A file's metadata, read by `read` only when its stamp changed. A Codex
+    /// file that only grew keeps its first line, so a `session_meta` already
+    /// read is kept (the event cache's rule); one not yet complete is read
+    /// again. A read error isn't kept, so the file is tried again next time.
+    fn meta(
+        &mut self,
+        path: &Path,
+        grows: bool,
+        read: impl FnOnce(&Path) -> io::Result<Option<Value>>,
+    ) -> io::Result<Option<Value>> {
+        let stamp = stamp_of(path);
+        if let Some((seen, meta)) = self.metas.get_mut(path)
+            && (*seen == stamp
+                || (grows
+                    && meta.is_some()
+                    && seen.dev == stamp.dev
+                    && seen.ino == stamp.ino
+                    && stamp.size > seen.size))
+        {
+            *seen = stamp;
+            return Ok(meta.clone());
+        }
+        #[cfg(test)]
+        META_READS.with(|reads| reads.set(reads.get() + 1));
+        let meta = read(path)?;
+        self.metas.insert(path.to_owned(), (stamp, meta.clone()));
+        Ok(meta)
     }
 }
 
@@ -891,10 +941,15 @@ fn scan(
             .is_some_and(|name| name == "subagents")
             && stem.starts_with("agent-")
         {
-            let meta = fs::read(path.with_extension("meta.json"))
+            let meta = texts
+                .meta(&path.with_extension("meta.json"), false, |meta| {
+                    Ok(fs::read(meta)
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                        .filter(Value::is_object))
+                })
                 .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .filter(Value::is_object)
+                .flatten()
                 .unwrap_or(Value::Null);
             Role::Agent(AgentMeta {
                 parent: parent
@@ -917,12 +972,15 @@ fn scan(
             Role::Agent(_) => stem.strip_prefix("agent-").unwrap_or(stem),
             _ => stem,
         };
+        // Stamped before it is read, so a line that lands during the read
+        // counts toward the next version, not this one.
+        let stamp = stamp_of(&path);
         let Ok(summary) = events::scan_file(&path, "claude", cache, dirty) else {
             continue;
         };
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
-            stamp: stamp_of(&path),
+            stamp,
             id: id.to_owned(),
             first: summary.first,
             last: summary.last,
@@ -935,7 +993,7 @@ fn scan(
     let mut paths = Vec::new();
     file_list(&options.codex_home.join("sessions"), &mut paths, "jsonl")?;
     for path in paths {
-        let Ok(meta) = codex_meta(&path) else {
+        let Ok(meta) = texts.meta(&path, true, codex_meta) else {
             continue;
         };
         let Some(id) = meta
@@ -946,12 +1004,12 @@ fn scan(
         else {
             continue;
         };
+        let stamp = stamp_of(&path);
         let Ok(summary) = events::scan_file(&path, "codex", cache, dirty) else {
             continue;
         };
         seen.insert(path.to_string_lossy().into_owned());
         let meta = meta.unwrap_or(Value::Null);
-        let stamp = stamp_of(&path);
         files.push(SourceFile {
             marker: texts.marker(&path, stamp),
             stamp,
@@ -973,6 +1031,15 @@ fn scan(
         });
     }
     cache.retain(&seen, dirty);
+    // Metadata of files that are gone is dropped with them.
+    texts.metas.retain(|path, _| {
+        let file = if path.extension().is_some_and(|ext| ext == "json") {
+            path.with_extension("").with_extension("jsonl")
+        } else {
+            path.clone()
+        };
+        seen.contains(file.to_string_lossy().as_ref())
+    });
     Ok(files)
 }
 
@@ -3368,6 +3435,11 @@ pub(crate) fn build(
     now: i64,
 ) -> io::Result<Built> {
     let files = scan(options, cache, dirty, texts)?;
+    #[cfg(test)]
+    {
+        BUILDS.with(|builds| builds.set(builds.get() + 1));
+        AFTER_SCAN.with(|hook| hook.borrow_mut().take().map(|hook| hook()));
+    }
     let pids = pid_files(options);
     let held = held_codex(options);
     let machine = hostname(options);
@@ -3496,6 +3568,40 @@ pub(crate) fn build(
         tx.insert(key, Transcript::from_slots(slots));
     }
     let busy = BTreeMap::from([(machine.clone(), all_busy)]);
+    let marks: BTreeMap<&str, String> = tx
+        .iter()
+        .map(|(sid, transcript)| {
+            let sources: BTreeSet<usize> = transcript
+                .slots
+                .iter()
+                .filter_map(|slot| slot.file)
+                .collect();
+            let bytes: u64 = sources
+                .iter()
+                .filter_map(|file| files.get(*file))
+                .map(|file| file.stamp.size)
+                .sum();
+            // A call stops running when its process dies, which writes no
+            // line: the running count moves the mark all the same.
+            let running = transcript
+                .slots
+                .iter()
+                .filter(|slot| {
+                    matches!(
+                        slot.kind,
+                        SlotKind::Tool {
+                            shown: Shown::Live,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            (
+                sid.as_str(),
+                format!("{}.{bytes}.{running}", transcript.slots.len()),
+            )
+        })
+        .collect();
     let machine_id = machine.clone();
     let machine = Machine {
         id: machine.clone(),
@@ -3507,12 +3613,22 @@ pub(crate) fn build(
         handoffs: &handoffs,
         turns: &turns,
         busy: &busy,
+        tx: &marks,
     })?;
+    // The version also covers every source file's length, so any appended
+    // line gives a new version, even one whose entry changes nothing else in
+    // the model (the same timestamp as the line before it). Lengths, not
+    // paths or times, keep it the same for the same content.
+    let lengths: Vec<String> = files
+        .iter()
+        .map(|file| file.stamp.size.to_string())
+        .collect();
     let version = format!(
         "{:016x}",
         fnv(&format!(
-            "{machine}{}{rest}",
-            serde_json::to_string(&sessions)?
+            "{machine}{}{rest}|{}",
+            serde_json::to_string(&sessions)?,
+            lengths.join(",")
         ))
     );
     let pids = pids.iter().map(|pid| pid.pid).collect();
