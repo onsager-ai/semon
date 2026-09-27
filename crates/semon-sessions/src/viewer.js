@@ -168,15 +168,17 @@
   // ---- Loading: the model from /api/model, transcripts a page at a time from /api/tx --------------------------
   const TXM = {}; // per session: the loaded range of its transcript { from, to, total } and its totals { calls, errors }
   let serverNow = 0, fetchedAt = 0;
+  let TOK = {}; // per session: its transcript's growth mark in the model; a loaded transcript is tailed only when it moved
   const enc = encodeURIComponent;
-  const api = (path) => fetch(path, { credentials: "same-origin" }).then((r) => { if (!r.ok) throw new Error(r.status + " " + r.statusText); return r.json(); });
+  // An error carries the HTTP status (0: no response), so live polling can tell a 403 from a dropped connection.
+  const api = (path) => fetch(path, { credentials: "same-origin" }).then((r) => { if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status }); return r.json(); }, (e) => { throw Object.assign(e, { status: 0 }); });
   // NOW follows the client clock from the model's `now`, so every "ago" keeps moving; a running tool's age follows NOW.
   function tick() {
     NOW = serverNow + (Date.now() - fetchedAt);
     for (const s of Object.values(SESS)) if (s.activity && s.activity[3] != null) s.activity[2] = Math.floor((NOW - s.activity[3]) / 1000);
   }
   function adopt(m) {
-    serverNow = m.now; fetchedAt = Date.now();
+    serverNow = m.now; fetchedAt = Date.now(); TOK = m.tx ?? {};
     for (const k of Object.keys(MACHINE)) { delete MACHINE[k]; delete MACHINE_UP[k]; }
     MACHINE[m.machine.id] = m.machine.name; MACHINE_UP[m.machine.id] = m.machine.up;
     for (const k of Object.keys(SESS)) delete SESS[k];
@@ -196,25 +198,26 @@
       t.sent = x.sent.map((id) => HID.get(id)).filter(Boolean); t.out = t.sent.filter((h) => h.kind !== "move"); if (x.last) t.last = true;
       (TURNS[x.sid] ??= []).push(t); TURN.set(t.id, t); if (t.start) STARTS.set(t.start.id, t); for (const h of t.sent) HOLDS.set(h.id, t);
     }
-    for (const k of Object.keys(TX)) { delete TX[k]; delete TXM[k]; }
     tick();
   }
-  // Each loaded entry goes to its turn: an entry that starts a turn (or a page) names it.
+  // Each loaded entry goes to its turn: an entry that starts a turn (or a page) names it. Its key, its turn and place in
+  // it, stays the same while the transcript only grows: live updates find what was open and where the reader was by it.
   function spread(sid) {
     for (const t of TURNS[sid] ?? []) t.entries = [];
-    let t = null;
-    for (const e of TX[sid] ?? []) { if (e.turn) t = TURN.get(e.turn) ?? null; if (t) t.entries.push(e); }
+    let t = null, pre = 0;
+    for (const e of TX[sid] ?? []) { if (e.turn) t = TURN.get(e.turn) ?? null; if (t) { e.key = t.id + "#" + t.entries.length; t.entries.push(e); } else e.key = sid + "#" + pre++; }
   }
   // A return line arrives as data; it reads as the mockup's "Returned to … · HH:MM".
   const txEntry = (e) => e.k === "end" && e.ret ? { k: "end", text: "Returned to " + nameOf(e.ret.to) + (e.ret.failed ? " · failed" : "") + (e.ret.at != null ? " · " + clock(e.ret.at) : ""), turn: e.turn } : e;
   // where: "before" and "after" extend the loaded range; otherwise the page replaces it.
   function fetchTx(sid, q, where) {
+    const tok = TOK[sid];
     return api("/api/tx?sid=" + enc(sid) + (q ? "&" + q : "")).then((p) => {
       const es = p.entries.map((e) => txEntry({ ...e, sid })), m = TXM[sid];
       if (where === "before" && m) { TX[sid] = es.concat(TX[sid]); m.from = p.from; }
       else if (where === "after" && m) { TX[sid] = TX[sid].concat(es); m.to = p.to; }
       else { TX[sid] = es; TXM[sid] = { from: p.from, to: p.to }; }
-      Object.assign(TXM[sid], { total: p.total, calls: p.calls, errors: p.errors }); spread(sid);
+      Object.assign(TXM[sid], { total: p.total, calls: p.calls, errors: p.errors }); if (where !== "before" && p.to >= p.total) TXM[sid].tok = tok; spread(sid);
     });
   }
   // A spawn's child work opens inline under its card: load the turn each brief started, when its session isn't loaded.
@@ -272,9 +275,9 @@
   }
   function boot() {
     api("/api/model").then((m) => {
-      adopt(m); route = routeOf(location);
+      adopt(m); route = routeOf(location); LIVE.version = m.version; remember(m);
       try { history.replaceState(route, "", urlOf(route)); } catch {}
-      const done = () => { render(); if (route.v === "session" && route.turn) revealTurn(route.turn, true); };
+      const done = () => { render(); if (route.v === "session" && route.turn) revealTurn(route.turn, true); schedule(2000); setInterval(ticker, 1000); };
       const p = load(route); if (p) p.then(done, done); else done();
     }, (err) => { $("#page").replaceChildren(el("p", "empty", "Couldn't load the sessions: " + err.message)); });
   }
@@ -285,7 +288,7 @@
   let show = { messages: true, tools: true, thinking: true }; let find = ""; let findOpen = false; let filterOpen = false;
   const quietTop = () => { if (phone.matches) window.scrollTo(0, 0); else $("#main").scrollTop = 0; };
   function go(r, fromHistory) {
-    route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".menu")?.remove();
+    route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".menu")?.remove(); clearPill();
     if (!fromHistory) { try { history.pushState(r, "", urlOf(r)); } catch {} }
     if (r.v === "timeline" && !fromHistory) tlView.left = null;
     const done = () => { if (route !== r) return; render(); if (r.v === "session" && r.turn) revealTurn(r.turn, !fromHistory); else quietTop(); };
@@ -580,6 +583,7 @@
     const turnMode = !opts.nested;
     // On a session page the transcript is a list of turns, each with its own entries; a nested one is a plain list.
     const box = el("div", turnMode ? "turns" : "tx"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);
+    const keyed = (n, e) => { if (e.key) n.dataset.e = e.key; return n; };
     const range = turnMode ? TXM[sid] : null;
     if (range?.from > 0) box.append(pager(sid, "before", "Load earlier"));
     else if (!find && turnMode) box.append(el("div", "divider", "Started " + clock(SESS[sid].start) + " on " + MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine]));
@@ -594,10 +598,10 @@
       let text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
       text = text[0].toUpperCase() + text.slice(1);
       const failed = run.filter((r) => r.err).length, live = run.find((r) => r.live);
-      const g = el("div", "tgroup"); const b = el("button", "tsum"); b.type = "button"; b.setAttribute("aria-expanded", "false");
+      const g = el("div", "tgroup"); if (run[0].key) g.dataset.e = "g:" + run[0].key; const b = el("button", "tsum"); b.type = "button"; b.setAttribute("aria-expanded", "false");
       b.append(live ? el("span", "spin") : icon(I.stack), el("span", "tt", text));
       if (failed) b.append(el("span", "tf", "· " + failed + " failed"));
-      if (live) b.append(el("span", "tl", "· running " + live.secs));
+      if (live) b.append(el("span", "tl tick", "· running " + live.secs));
       b.append(icon(I.chev, "chev"));
       steps.hidden = true;
       b.addEventListener("click", () => { steps.hidden = !steps.hidden; b.setAttribute("aria-expanded", String(!steps.hidden)); });
@@ -605,6 +609,8 @@
     };
     // A turn block: who started it, the work, and how it ended. While finding or filtering, a turn left with nothing drops out.
     const firsts = turnMode ? new Map((TURNS[sid] ?? []).map((t) => [t.entries[0], t])) : new Map(); let cur = null;
+    // A live update draws only the turns that changed (opts.only, by turn id).
+    const owner = opts.only ? new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id]))) : null;
     const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
       if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard")) { blk.remove(); return; }
       const end = turnEnd(t); if (!end) return;
@@ -617,6 +623,7 @@
       else if (h) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in), l, el("span", "tm", clock(h.at))); blk.append(hd); }
       tx = el("div", "tx"); blk.append(tx); box.append(blk); cur = { t, blk }; };
     for (const e of entries) {
+      if (owner && !opts.only.has(owner.get(e))) continue;
       if (turnMode && isGap(e)) { closeTurn(); if (!find) box.append(el("div", "divider", e.text)); continue; }
       if (firsts.has(e)) openTurn(firsts.get(e));
       // Entries that render nothing (empty thinking, hidden kinds) must not split a run of tool calls.
@@ -624,8 +631,8 @@
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
-        if (e.live) { const r = el("div", "step live"); r.append(el("span", "spin"), el("span", "sv", v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs }); continue; }
-        const box = el("div", "step" + (e.ok || e.ok === null ? "" : " err")); const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
+        if (e.live) { const r = keyed(el("div", "step live"), e); r.dataset.live = sid; r.append(el("span", "spin"), el("span", "sv", v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd tick", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs, key: e.key }); continue; }
+        const box = keyed(el("div", "step" + (e.ok || e.ok === null ? "" : " err")), e); const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
         b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "no result" : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs), icon(I.chev, "chev"));
         const out = el("div", "out"); out.hidden = true;
         // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
@@ -640,29 +647,33 @@
           if (!out.hidden) { let cut = !!e.more?.length; out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; }); all.hidden = !cut;
             // Text cut when this copy was made, with nothing more to show: say so instead of ending on "…".
             if (!cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs")); } });
-        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false }); continue;
+        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key }); continue;
       }
       flush();
-      if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = el("div", "msg user"); m.append(markdown(e.text)); tx.append(m); }
-      else if (e.k === "a") { if (!show.messages || !hit(e.text)) continue; const m = el("div", "msg assistant"); m.append(markdown(e.text)); tx.append(m); }
-      else if (e.k === "think") { if (!show.thinking || find || (!e.secs && !e.text)) continue; /* Claude Code stores most thinking empty: no marker without content or a duration */ const t = el("button", "think"); t.type = "button"; t.append(el("span", null, e.secs != null ? "Thought for " + e.secs + "s" : "Thought"), icon(I.chev, "chev")); tx.append(t); }
-      else if (e.k === "harness") { if (!show.messages || find) continue; tx.append(el("div", "harness-note", "Harness text added before the prompt (" + e.label + ")")); }
-      else if (e.k === "end") { if (find) continue; tx.append(el("div", "divider", e.text)); }
+      if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg user"), e); m.append(markdown(e.text)); tx.append(m); }
+      else if (e.k === "a") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg assistant"), e); m.append(markdown(e.text)); tx.append(m); }
+      else if (e.k === "think") { if (!show.thinking || find || (!e.secs && !e.text)) continue; /* Claude Code stores most thinking empty: no marker without content or a duration */ const t = el("button", "think"); t.type = "button"; t.append(el("span", null, e.secs != null ? "Thought for " + e.secs + "s" : "Thought"), icon(I.chev, "chev")); tx.append(keyed(t, e)); }
+      else if (e.k === "harness") { if (!show.messages || find) continue; tx.append(keyed(el("div", "harness-note", "Harness text added before the prompt (" + e.label + ")"), e)); }
+      else if (e.k === "end") { if (find) continue; tx.append(keyed(el("div", "divider", e.text), e)); }
       else if (e.k === "h") {
         const h = H.find((x) => x.id === e.id); if (!hit(h.brief + " " + (h.result ?? ""))) continue;
         // Your own ask is simply your message.
-        if (h.kind === "ask") { if (!show.messages) continue; const m = el("div", "msg user"); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
+        if (h.kind === "ask") { if (!show.messages) continue; const m = keyed(el("div", "msg user"), e); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
         // A relay or brief that starts a turn is that turn's message.
-        if (cur && cur.t.start === h && e === cur.t.entries[0]) { if (!show.messages) continue; tx.append(handoffCard(h, sid, true)); continue; }
-        if (h.kind === "move") { if (find) continue; tx.append(handoffCard(h, sid)); continue; }
+        if (cur && cur.t.start === h && e === cur.t.entries[0]) { if (!show.messages) continue; tx.append(keyed(handoffCard(h, sid, true), e)); continue; }
+        if (h.kind === "move") { if (find) continue; tx.append(keyed(handoffCard(h, sid), e)); continue; }
         if (!show.tools && h.kind !== "toyou") continue;
         if (opts.nested && h.kind === "spawn" && h.to === sid) continue; // the parent's card already shows this brief
-        tx.append(handoffCard(h, sid));
+        tx.append(keyed(handoffCard(h, sid), e));
         // A subagent's or Codex run's own work opens inline under its handoff: the turn that brief started there.
         const cw = turnMode && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id)?.entries ?? TX[h.to] ?? [] : [];
         if (cw.length) {
           const n = cw.filter((x) => x.k === "tool").length;
-          const w = el("div", "childwork"); const b = el("button", "cw-toggle"); b.type = "button"; b.setAttribute("aria-expanded", "false");
+          const w = el("div", "childwork"); if (e.key) w.dataset.e = "cw:" + e.key; const lastCw = cw.at(-1);
+          // What the child did, as far as loaded (a change redraws its turn): how many entries, the last one and its state, and how
+          // many calls are running or failed, so a parallel call that finishes earlier in the child counts too.
+          w.dataset.sum = [cw.length, lastCw.key, lastCw.live ? "live" : lastCw.unfinished ? "open" : String(lastCw.ok), cw.filter((x) => x.live).length, cw.filter((x) => x.ok === false).length].join(" ");
+          const b = el("button", "cw-toggle"); b.type = "button"; b.setAttribute("aria-expanded", "false");
           b.append(icon(I.chev, "chev"), el("span", null, "What " + SESS[h.to].name + " did" + (n ? " · " + n + (n === 1 ? " tool call" : " tool calls") : "")));
           const inner = el("div", "cw-body"); inner.hidden = true;
           b.addEventListener("click", () => { if (!inner.childElementCount) inner.append(transcript(h.to, { nested: true, entries: cw })); inner.hidden = !inner.hidden; b.setAttribute("aria-expanded", String(!inner.hidden)); });
@@ -698,7 +709,7 @@
     if (e.fullCut?.length) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));
     d.append(head, body); document.body.append(d);
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); }); // a tap on the backdrop (wide screens)
-    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } });
+    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
     try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
   }
@@ -727,7 +738,7 @@
   // ---- Render --------------------------------------------------------------------------------------------------------
   function render() {
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
-    tick(); const page = $("#page"), r = route; page.replaceChildren(); page.classList.toggle("wide", r.v === "timeline");
+    tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; page.replaceChildren(); page.classList.toggle("wide", r.v === "timeline");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "timeline") { renderTimeline(page); renderTopbar("Timeline"); }
     else if (r.v === "sessions") { renderSessions(page); renderTopbar("Sessions"); }
@@ -953,6 +964,296 @@
   $("#q").addEventListener("input", (e) => { query = e.target.value.trim(); renderLanes(); });
   $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); query = e.target.value.trim(); go({ v: "sessions" }); } });
   phone.addEventListener("change", () => { closeDrawer(true); if (route.v === "timeline") render(); });
+
+  // ---- Live updates (deliberate difference 3) --------------------------------------------------------------------------------
+  // Every screen polls /api/model?since= every 2 s while the tab is visible, one request at a time: it backs off up to 30 s
+  // on errors and stops on 403 (the server restarted with a new token). A new model swaps the globals and draws the screen
+  // again with its view state kept: the scroll position, anchored to the first visible block; what is open, by stable keys;
+  // the Timeline's zoom, scroll and rows; focus, find and filters; the drawer. A session page follows its transcript's tail
+  // with /api/tx?after= and replaces only the turns that changed. An open View all sheet holds the redraw until it closes.
+  const LIVE = { version: null, timer: null, busy: false, delay: 2000, ended: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
+  // The turn index as last drawn, to tell which turns an update changed.
+  const remember = (m) => { LIVE.turns = new Map(m.turns.map((x) => [x.id, turnKey(x)])); };
+  // What an update can change in a turn record or a handoff, cheaply (not the text, which a record never rewrites).
+  const turnKey = (x) => [x.start, x.end?.st, x.end?.why, x.end?.h, x.sent.join(","), x.last ? 1 : 0].join("|");
+  const handKey = (h) => [h.status, h.to, h.done, h.result?.length, h.answer?.length, h.answers?.length, h.declined ? 1 : 0].join("|");
+  let rendered = null; // the route the page shows
+  const visible = () => document.visibilityState === "visible";
+  function schedule(ms) { clearTimeout(LIVE.timer); LIVE.timer = null; if (!LIVE.ended && visible()) LIVE.timer = setTimeout(poll, ms); }
+  document.addEventListener("visibilitychange", () => {
+    if (!visible()) { clearTimeout(LIVE.timer); LIVE.timer = null; } else if (LIVE.version && !LIVE.busy && !LIVE.timer) schedule(LIVE.delay > 2000 ? LIVE.delay : 0); }); // a backoff in progress holds
+  function poll() {
+    LIVE.timer = null; if (LIVE.busy || LIVE.ended || !visible()) return; LIVE.busy = true;
+    fetch("/api/model?since=" + enc(LIVE.version ?? ""), { credentials: "same-origin" })
+      .then((r) => r.status === 304 ? null : r.ok ? r.json() : Promise.reject(Object.assign(new Error(r.status + " " + r.statusText), { status: r.status })), (e) => Promise.reject(Object.assign(e, { status: 0 })))
+      .then((m) => (m ? update(m) : null))
+      .then(() => { LIVE.delay = 2000; }, (err) => {
+        if (err?.status === 403) return ended();
+        LIVE.delay = Math.min(30000, LIVE.delay * 2);
+        if (err?.status == null) setTimeout(() => { throw err; }); // not the network: a fault on the page, reported as one
+      })
+      .finally(() => { LIVE.busy = false; schedule(LIVE.delay); });
+  }
+  function ended() {
+    LIVE.ended = true; clearTimeout(LIVE.timer); LIVE.timer = null; if ($(".livenote")) return;
+    const n = el("p", "livenote", "Session ended: reload with the printed URL"); n.setAttribute("role", "status"); document.body.append(n);
+  }
+  // A 403 or a dropped connection fails the update (and backs off); anything else skips that one transcript.
+  const soft = (p) => p.catch((e) => { if (e?.status === 403 || e?.status === 0) throw e; });
+  // The transcripts on screen: a session page's own, and its child runs'. Any other loaded transcript is dropped, so opening
+  // it again loads it fresh.
+  const viewed = () => { const v = new Set(); if (route.v !== "session") return v; v.add(route.id); for (const h of H) if (h.kind === "spawn" && h.from === route.id && h.to) v.add(h.to); return v; };
+  function update(m) {
+    const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
+    adopt(m); remember(m);
+    const changedH = new Set(H.filter((h) => oldH.get(h.id) !== handKey(h)).map((h) => h.id));
+    const view = viewed(), grown = new Set(), cuts = new Map();
+    let full = Object.values(SESS).some((x) => names.has(x.id) && names.get(x.id) !== x.name); // a new name shows in every turn
+    for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
+    // Only transcripts whose mark in the model moved are asked for, one at a time.
+    let chain = Promise.resolve();
+    // A mark with fewer entries or bytes than the one loaded means the file was cut or rewritten: load it again.
+    const shrank = (a, b) => { const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number); return s1 < s0 || b1 < b0; };
+    for (const sid of view) if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
+    else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.reload) full = true; })));
+    if (route.v === "session" && TX[route.id]) chain = chain.then(() => newKids(route.id, grown));
+    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); });
+  }
+  // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), those
+  // whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw them all.
+  function dirtyTurns(cuts, grown, changedH, oldT) {
+    if (route.v !== "session" || !TX[route.id]) return null;
+    const sid = route.id, dirty = new Set(), owner = new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id])));
+    if (cuts.has(sid)) for (const e of TX[sid].slice(cuts.get(sid))) { if (isGap(e)) return null; if (owner.has(e)) dirty.add(owner.get(e)); }
+    for (const t of TURNS[sid] ?? []) {
+      if (oldT.get(t.id) !== LIVE.turns.get(t.id) || [t.start, ...t.sent].some((h) => h && changedH.has(h.id)) || t.entries.some((e) => e.k === "h" && changedH.has(e.id))) dirty.add(t.id);
+    }
+    for (const h of H) if (h.kind === "spawn" && h.from === sid && grown.has(h.to) && HOLDS.get(h.id)) dirty.add(HOLDS.get(h.id).id);
+    return dirty;
+  }
+  // The tail of a transcript loaded to its end: from its first call still running (anywhere), or the last turn's first call
+  // with no result yet, since its result may have landed; else from the end. A file that shrank or was rewritten, or more
+  // than five pages of new entries, loads the last page again instead.
+  function tail(sid) {
+    const es = TX[sid], m = TXM[sid], tok = TOK[sid];
+    let cut = es.findIndex((e) => e.live && e.slot != null); if (cut < 0) cut = es.length;
+    for (let i = es.length - 1; i >= 0; i--) { if (es[i].unfinished && es[i].slot != null) cut = Math.min(cut, i); if (es[i].turn) break; }
+    let got = [], last = null, n = 0;
+    const page = (after) => api("/api/tx?sid=" + enc(sid) + "&after=" + after).then((p) => {
+      got = got.concat(p.entries.map((e) => txEntry({ ...e, sid }))); last = p;
+      if (p.to < p.total && p.entries.length && ++n < 5) return page(p.to);
+    });
+    return page(cut < es.length ? es[cut].slot : m.to).then(() => {
+      if (TX[sid] !== es) return { cut: null }; // "Load earlier" ran meanwhile: the next update catches up
+      if (last.total < m.total || last.to < last.total || (cut < es.length && got[0]?.slot !== es[cut].slot)) return reload(sid);
+      TX[sid] = es.slice(0, cut).concat(got); Object.assign(m, { to: last.to, total: last.total, calls: last.calls, errors: last.errors, tok }); spread(sid);
+      return { cut };
+    });
+  }
+  // The page's own transcript loads its last page again; a child run's is dropped, and loads again as new child work.
+  function reload(sid) {
+    if (sid !== route.id) { delete TX[sid]; delete TXM[sid]; return Promise.resolve({ cut: null, reload: true }); }
+    return fetchTx(sid, "").then(() => ({ cut: null, reload: true }));
+  }
+  // A new spawn's child work: its turn, loaded one request at a time. A turn the server doesn't have (404) isn't asked for again.
+  function newKids(sid, grown) {
+    let chain = Promise.resolve();
+    for (const e of TX[sid] ?? []) {
+      const h = e.k === "h" ? HID.get(e.id) : null, c = h && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id) : null;
+      if (c && !TX[c.sid] && !LIVE.missing.has(c.id)) chain = chain.then(() => (TX[c.sid] ? null : soft(fetchTx(c.sid, "turn=" + enc(c.id)).then(() => { grown.add(c.sid); }, (err) => { if (err?.status === 404) LIVE.missing.add(c.id); throw err; }))));
+    }
+    return chain;
+  }
+  // Draws the new model on the screen shown, unless a navigation is still loading (it draws when done), the sheet is open
+  // (it draws when the sheet closes), or what the screen shows left the model (it stays as it was).
+  function refresh(dirty) {
+    if (viewerEl) { LIVE.pending = true; return; } // drawn whole when the sheet closes
+    LIVE.pending = false; const r = route;
+    if (rendered !== r || (r.v === "session" && !SESS[r.id]) || (r.v === "trace" && !SESS[r.sid]) || (r.v === "machine" && !MACHINE[r.id])) return;
+    const st = capture(); $("#page").style.paddingBottom = "";
+    if (r.v !== "session") { render(); restore(st); return; }
+    const n = patchSession(dirty); restore(st, st.bottom);
+    if (!st.bottom && n) pill(n);
+  }
+
+  // View state. A block's identity: its class and keys, or its own text when it has no key (a section heading).
+  const scroller = () => (phone.matches ? document.scrollingElement : $("#main"));
+  const edge = () => $("#topbar").getBoundingClientRect().bottom;
+  const ANCHORS = "[data-e], .turn, .hop, .ib, .nrow, .sec-h, .ph, .divider, .tl-lab, .tl-disc, .tl-ctl, .groupby, .find, .empty";
+  const HOSTS = "[data-e], [data-h], [data-id], [data-sid], [data-go], [data-turn], [data-g], [data-m]";
+  const FOCUSABLE = "button, input, [tabindex]";
+  const identOf = (n) => { const d = n.dataset, keys = [d.e, d.turn, d.h, d.id, d.m, d.sid, d.go, d.g];
+    return [n.classList[0], ...keys, keys.some((x) => x != null) ? "" : n.firstChild?.nodeType === 3 ? n.firstChild.data : ""].map((x) => x ?? "").join("|"); };
+  // Each anchor candidate on the page, in order, with its identity made unique by how many came before it.
+  function anchors(fn) { const seen = new Map(); for (const n of $("#page").querySelectorAll(ANCHORS)) { const id = identOf(n), k = seen.get(id) ?? 0; seen.set(id, k + 1); if (fn(n, id + "#" + k)) return; } }
+  const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : n.classList.contains("childwork") ? n.querySelector(":scope > .cw-toggle") : null;
+  function capture() {
+    const sc = scroller(), line = edge();
+    const st = { top: sc.scrollTop, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80, anchor: null, open: new Set(), groups: new Set(), focus: null, drawer: document.body.classList.contains("drawer-open") };
+    // The first block, innermost, still visible under the bar, and how far its top is from the bar. While the reader hasn't
+    // scrolled since the last redraw placed it, that placement's block and offset are kept as they were, so the fraction
+    // of a pixel each placement rounds off can't add up over many updates.
+    const kept = LIVE.anchor; let still = null;
+    if (kept && kept.route === rendered && Math.abs(sc.scrollTop - kept.top) < 1) anchors((n, id) => (id === kept.id ? (still = n) : false));
+    // ... and only while that block is still where it was placed (a filter, find or zoom since has moved it).
+    if (still && Math.abs(still.getBoundingClientRect().top - line - kept.off) <= 1) st.anchor = { id: kept.id, off: kept.off };
+    else anchors((n, id) => { if (n.querySelector(ANCHORS)) return false; const b = n.getBoundingClientRect(); if (!b.height || b.bottom <= line) return false; st.anchor = { id, off: b.top - line }; return true; });
+    for (const n of $("#page").querySelectorAll("[data-e]")) {
+      if (n.classList.contains("tgroup")) st.groups.add(n.dataset.e);
+      if (opener(n)?.getAttribute("aria-expanded") === "true" || (n.classList.contains("hcard") && n.classList.contains("open"))) st.open.add(n.dataset.e);
+    }
+    for (const n of $("#page").querySelectorAll(".hop")) if (n.querySelector(".brief.open")) st.open.add("hop:" + identOf(n));
+    // The Timeline's child rows keep how they are shown, even where that is the default a new child run would change.
+    for (const b of $("#page").querySelectorAll(".tl-disc")) tlView.open.set(b.dataset.sid, b.getAttribute("aria-expanded") === "true");
+    // At the chart's right edge (within 8 px) it follows new activity, as a session page at its end does; elsewhere it keeps
+    // its position in pixels (tlView.left).
+    const tl = $("#page .tl-scroll"); if (tl && tl.scrollWidth - tl.scrollLeft - tl.clientWidth <= 8) tlView.left = null;
+    // Child work opened and then closed keeps what was open inside it, for when it opens again.
+    st.shut = new Set([...$("#page").querySelectorAll(".childwork[data-e]")].filter((n) => opener(n).getAttribute("aria-expanded") === "false" && n.querySelector(":scope > .cw-body").childElementCount).map((n) => n.dataset.e));
+    const a = document.activeElement;
+    if (a && a !== document.body && !a.closest("dialog")) {
+      const host = a.id ? null : a.closest(HOSTS), sel = host && host !== a ? a.tagName.toLowerCase() + [...a.classList].map((c) => "." + CSS.escape(c)).join("") : null;
+      // By id, else by its keyed block and place in it, else by its label, else by its place among the page's controls.
+      st.focus = { id: a.id || null, host: host ? identOf(host) : null, sel, i: sel ? [...host.querySelectorAll(sel)].indexOf(a) : 0, range: null,
+        label: a.getAttribute("aria-label"), at: [...$("#page").querySelectorAll(FOCUSABLE)].indexOf(a), of: $("#page").querySelectorAll(FOCUSABLE).length };
+      try { if (typeof a.selectionStart === "number") st.focus.range = [a.selectionStart, a.selectionEnd]; } catch {}
+    }
+    return st;
+  }
+  function restore(st, pin) {
+    const all = (sel) => [...$("#page").querySelectorAll(sel)], r0 = rendered;
+    // A new card or brief measures its "Show more" now, as its ResizeObserver would a frame later, so nothing moves after the
+    // scroll position is set.
+    const clamp = (br, more) => { if (!br || !more || !br.clientHeight) return; const x = br.scrollHeight > br.clientHeight + 1; more.hidden = !x; br.classList.toggle("clipped", x); };
+    for (const c of all(".hcard:not(.open)")) clamp(c.querySelector(":scope > .brief"), c.querySelector(":scope > .more"));
+    for (const br of all(".hop .body > .brief:not(.open)")) clamp(br, br.parentElement.querySelector(":scope > .more"));
+    // Child work first (opening it draws its steps), then groups (a new one opens if it holds an open step), then steps and cards.
+    // Child work that was closed with something open inside is opened for the restore (so its steps measure as shown) and
+    // closed again below, in the same task: it is never drawn open.
+    const shut = all(".childwork[data-e]").filter((n) => st.shut.has(n.dataset.e) && opener(n).getAttribute("aria-expanded") === "false");
+    for (const n of all(".childwork[data-e]")) if ((st.open.has(n.dataset.e) || shut.includes(n)) && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
+    for (const n of all(".tgroup[data-e]")) {
+      const want = st.groups.has(n.dataset.e) ? st.open.has(n.dataset.e) : [...n.querySelectorAll(".step[data-e]")].some((x) => st.open.has(x.dataset.e));
+      if (want && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
+    }
+    for (const n of all(".step[data-e]")) if (st.open.has(n.dataset.e) && opener(n)?.getAttribute("aria-expanded") === "false") opener(n).click();
+    for (const n of shut) opener(n).click();
+    // A card or brief opened before its size was measured: its "Show less" is shown by hand.
+    for (const n of all(".hcard[data-e]")) if (st.open.has(n.dataset.e) && !n.classList.contains("open")) { const m = n.querySelector(":scope > .more"); m.hidden = false; m.click(); }
+    for (const n of all(".hop")) if (st.open.has("hop:" + identOf(n)) && !n.querySelector(".brief.open")) { const m = n.querySelector(".body > .more"); m.hidden = false; m.click(); }
+    if (st.drawer) { document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
+    if (st.focus) {
+      let n = st.focus.id ? document.getElementById(st.focus.id) : null;
+      if (!n && st.focus.host) { const host = [...document.querySelectorAll(HOSTS)].find((x) => identOf(x) === st.focus.host); n = host && st.focus.sel ? host.querySelectorAll(st.focus.sel)[st.focus.i] : host; }
+      if (!n && st.focus.label) n = [...document.querySelectorAll("#page [aria-label], #topbar [aria-label]")].find((x) => x.getAttribute("aria-label") === st.focus.label);
+      // By place only when it had no keyed block and the page has as many controls as before: never onto another row.
+      if (!n && !st.focus.host && st.focus.at >= 0 && $("#page").querySelectorAll(FOCUSABLE).length === st.focus.of) n = $("#page").querySelectorAll(FOCUSABLE)[st.focus.at];
+      if (n && n !== document.activeElement) { n.focus({ preventScroll: true }); if (st.focus.range) try { n.setSelectionRange(...st.focus.range); } catch {} }
+    }
+    const place = (first) => {
+      const sc = scroller();
+      if (pin) sc.scrollTop = sc.scrollHeight;
+      else {
+        let found = null; if (st.anchor) anchors((n, id) => (id === st.anchor.id ? (found = n) : false));
+        if (found) {
+          // Rows that moved from below the anchor to above it (a re-sorted list) need more room below than the page may
+          // have: the page's bottom padding grows by what is missing, rather than the view sliding. The next redraw or
+          // navigation drops it.
+          const d = found.getBoundingClientRect().top - edge() - st.anchor.off, want = sc.scrollTop + d, room = sc.scrollHeight - sc.clientHeight;
+          if (want > room + 0.5) { const page = $("#page"); page.style.paddingBottom = parseFloat(getComputedStyle(page).paddingBottom) + Math.ceil(want - room) + "px"; }
+          if (d) sc.scrollTop = want;
+          LIVE.anchor = { ...st.anchor, route: r0, top: sc.scrollTop };
+        } else if (first) sc.scrollTop = st.top;
+      }
+      if (pin) LIVE.anchor = null;
+      syncBarLine();
+    };
+    // And once more two frames later, in case something above changed size after all (as revealTurn does).
+    place(true); requestAnimationFrame(() => requestAnimationFrame(() => { if (rendered === r0 && !viewerEl) place(false); })); // not on a page opened since
+  }
+
+  // A session page in place: its turns are drawn again and only those that changed (or are new) replace the ones shown, so
+  // the rest keep their nodes and state. The bar's summary line, the title and the sidebar follow. Returns how many entries
+  // are new.
+  function patchSession(dirty) {
+    tick(); const s = SESS[route.id], box = $("#page .turns");
+    const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .step, .hcard)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
+    const before = keys();
+    // Only the changed turns are drawn again, unless the turns shown no longer match the index or nothing was shown.
+    const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some((b) => !TURN.has(b.dataset.turn));
+    if (whole) morph(box, transcript(route.id).querySelector(".turns"));
+    else if (dirty.size) morphTurns(box, transcript(route.id, { only: dirty }).querySelector(".turns"), dirty);
+    const h1 = $("#page .ph h1"); if (h1) h1.textContent = s.name;
+    const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.title = s.name; }
+    const l2 = $("#topbar .l2"); if (l2) { l2.replaceChildren(); sessionLine(s)(l2); }
+    const fc = $("#topbar .fcount"); if (fc) { const n = find ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : 0; fc.textContent = find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""; }
+    renderNav(); renderLanes(); ticker();
+    let n = 0; for (const k of keys()) if (!before.has(k)) n++;
+    return n;
+  }
+  // What a block shows, without what the reader toggled (open, hidden, measured clipping) or what opening fills in.
+  const VIEW = new Set(["open", "clipped", "flash"]);
+  function sig(root) {
+    let s = [...root.classList].filter((c) => !VIEW.has(c)).join(" ");
+    const walk = (x) => { for (const c of x.childNodes) {
+      if (c.nodeType === 3) { s += c.data; continue; }
+      // A running time (the clock rewrites it every second) is left out: it isn't a change.
+      if (c.nodeType !== 1 || c.classList.contains("cw-body") || c.classList.contains("cutnote") || c.classList.contains("more") || c.classList.contains("tick")) continue;
+      s += "<" + c.tagName + " " + [...c.classList].filter((k) => !VIEW.has(k)).join(" ") + " " + (c.dataset?.e ?? "") + " " + (c.dataset?.h ?? "") + " " + (c.dataset?.sum ?? "") + " " + (c.getAttribute("d") ?? "") + ">"; walk(c); s += "</>"; } };
+    walk(root); return s;
+  }
+  // A block's signature is taken once: what the reader toggles and the clock's times are outside it.
+  const SIGS = new WeakMap();
+  const sigOf = (n) => { let x = SIGS.get(n); if (x == null) SIGS.set(n, (x = sig(n))); return x; };
+  function morph(box, fresh) {
+    const keyOf = (n) => (n.classList.contains("turn") ? "t:" + n.dataset.turn : "x:" + n.className + ":" + n.textContent);
+    const count = new Map(), tag = (n) => { const k = keyOf(n), i = count.get(k) ?? 0; count.set(k, i + 1); return k + "#" + i; };
+    const old = new Map(); for (const n of box.children) old.set(tag(n), n); count.clear();
+    const next = [...fresh.children].map((n) => { const o = old.get(tag(n)); return o && sigOf(o) === sigOf(n) ? o : n; });
+    const cur = [...box.children]; let i = 0; while (i < next.length && next[i] === cur[i]) i++;
+    for (const n of cur.slice(i)) n.remove();
+    box.append(...next.slice(i));
+  }
+  // The changed turns only, in the index's order: each replaces the one shown if what it shows differs, a new one goes
+  // before the next turn shown (else at the end), and one with nothing left to show goes.
+  function morphTurns(box, fresh, dirty) {
+    const order = (TURNS[route.id] ?? []).map((t) => t.id), q = (root, id) => root.querySelector(':scope > .turn[data-turn="' + CSS.escape(id) + '"]');
+    order.forEach((id, i) => {
+      if (!dirty.has(id)) return;
+      const nb = q(fresh, id), ob = q(box, id);
+      if (!nb) { ob?.remove(); return; }
+      if (ob) { if (sigOf(ob) !== sigOf(nb)) ob.replaceWith(nb); return; }
+      const next = order.slice(i + 1).map((x) => q(box, x)).find(Boolean);
+      // With no later turn shown it is the newest: it goes at the end, after any divider there, but before "Load later".
+      if (next) next.before(nb); else { const later = box.querySelector(":scope > .list:last-child, :scope > p.empty:last-child"); if (later) later.before(nb); else box.append(nb); }
+    });
+  }
+
+  // "N new ↓": entries that arrived below a reader who had scrolled up. Tapping it goes to the end; reaching the end clears it.
+  function pill(n) {
+    LIVE.fresh += n; let p = $(".newpill");
+    if (!p) { p = el("button", "newpill"); p.type = "button"; p.addEventListener("click", () => { const sc = scroller(); sc.scrollTop = sc.scrollHeight; clearPill(); }); document.body.append(p); }
+    p.textContent = LIVE.fresh + " new ↓"; p.setAttribute("aria-label", LIVE.fresh + (LIVE.fresh === 1 ? " new entry" : " new entries") + ": go to the latest");
+  }
+  function clearPill() { LIVE.fresh = 0; $(".newpill")?.remove(); }
+  const atEnd = () => { if (!LIVE.fresh) return; const sc = scroller(); if (sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80) clearPill(); };
+  window.addEventListener("scroll", atEnd, { passive: true });
+  $("#main").addEventListener("scroll", atEnd, { passive: true });
+
+  // Every second: a running step's elapsed time, from its session's activity[3] (the call's start), and a running row's age.
+  // A clock that stands still (the checks pin it) changes nothing.
+  const running = (ms) => { const x = Math.max(0, Math.floor(ms / 1000)); return x < 60 ? x + "s" : Math.floor(x / 60) + "m " + (x % 60) + "s"; };
+  function ticker() {
+    if (!visible() || Date.now() === fetchedAt) return;
+    tick();
+    const last = new Map(); for (const n of document.querySelectorAll(".step.live[data-live]")) last.set(n.dataset.live, n);
+    for (const [sid, n] of last) {
+      const a = SESS[sid]?.activity; if (!a || a[3] == null) continue; const text = running(NOW - a[3]), sd = n.querySelector(".sd");
+      if (sd && sd.textContent !== text) sd.textContent = text;
+      const tl = n.closest(".tgroup")?.querySelector(":scope > .tsum > .tl"); if (tl) tl.textContent = "· running " + text;
+    }
+    for (const n of document.querySelectorAll(".nrow[data-id] .act .el")) { const a = SESS[n.closest(".nrow").dataset.id]?.activity; if (a) n.textContent = Math.max(0, a[2]) + "s"; }
+  }
 
   boot();
 })();

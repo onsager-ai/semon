@@ -4,6 +4,7 @@
 #   - the fixture's gaps against the sample mockup's data (tests/ui/gaps.mjs, listed in tests/ui/gaps.json),
 #   - the mockup's check scripts, ported to the served viewer (tests/ui/checks/),
 #   - a pixel comparison of every screen with the mockup (tests/ui/pixels.mjs), at 390×844 light and dark and 1280×860.
+# and, on fixtures of its own that it writes to while the page is open, the live-update check (tests/ui/checks/live.mjs).
 # Node and Playwright are CI-only tooling in tests/ui/package.json; the Rust build doesn't depend on them. Nothing here
 # touches a real ~/.claude or ~/.codex: the server reads only the fixture.
 name: Viewer UI
@@ -103,6 +104,13 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: tests/ui
         run: node pixels.mjs
+
+      - name: Live updates while the logs are written
+        if: ${{ !cancelled() }}
+        working-directory: tests/ui
+        env:
+          SEMON_BIN: ${{ github.workspace }}/target/debug/semon
+        run: node checks/live.mjs
 
       - name: Server logs
         if: ${{ always() }}

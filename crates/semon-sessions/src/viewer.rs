@@ -102,8 +102,55 @@ fn stamp(path: &Path) -> Option<Stamp> {
 
 struct Snapshot {
     watched: BTreeMap<PathBuf, Option<Stamp>>,
+    /// The Codex writer-lock files' identities, and the `/proc/locks` lines
+    /// that name them. Other locks on the machine (a browser's, SQLite's)
+    /// come and go all the time and change nothing here.
+    lock_ids: BTreeSet<(u64, u64, u64)>,
     locks: Option<String>,
     pids: BTreeMap<u32, Option<u64>>,
+}
+
+/// A `/proc/locks` line's `major:minor:inode`, as `lock_pid` reads it.
+fn lock_key(line: &str) -> Option<(u64, u64, u64)> {
+    let words: Vec<_> = line.split_whitespace().collect();
+    let parts: Vec<_> = words.get(5)?.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some((
+        u64::from_str_radix(parts[0], 16).ok()?,
+        u64::from_str_radix(parts[1], 16).ok()?,
+        parts[2].parse().ok()?,
+    ))
+}
+
+/// The lines of `/proc/locks` on the writer-lock files, and nothing else.
+fn writer_locks(options: &Options, ids: &BTreeSet<(u64, u64, u64)>) -> Option<String> {
+    let locks = fs::read_to_string(options.proc_root.join("locks")).ok()?;
+    Some(
+        locks
+            .lines()
+            .filter(|line| lock_key(line).is_some_and(|key| ids.contains(&key)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn lock_ids(options: &Options) -> BTreeSet<(u64, u64, u64)> {
+    let mut ids = BTreeSet::new();
+    #[cfg(unix)]
+    if let Ok(entries) = fs::read_dir(options.codex_home.join("thread-writer-locks")) {
+        for entry in entries.flatten() {
+            if entry.path().extension().is_some_and(|ext| ext == "lock")
+                && let Ok(id) = crate::lock_identity(&entry.path())
+            {
+                ids.insert(id);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = options;
+    ids
 }
 
 struct TreeCache {
@@ -221,9 +268,11 @@ impl Snapshot {
             .into_iter()
             .map(|pid| (pid, proc_start(&options.proc_root, pid)))
             .collect();
+        let lock_ids = lock_ids(options);
         Self {
             watched,
-            locks: fs::read_to_string(options.proc_root.join("locks")).ok(),
+            locks: writer_locks(options, &lock_ids),
+            lock_ids,
             pids,
         }
     }
@@ -232,7 +281,7 @@ impl Snapshot {
         self.watched
             .iter()
             .any(|(path, original)| stamp(path) != *original)
-            || fs::read_to_string(options.proc_root.join("locks")).ok() != self.locks
+            || writer_locks(options, &self.lock_ids) != self.locks
             || self
                 .pids
                 .iter()
@@ -566,6 +615,11 @@ impl Viewer {
         }
         let path = EventCache::path(&self.options.cache);
         let cache = self.events.get_or_insert_with(|| EventCache::read(&path));
+        // The files are stamped before the build reads them: a line that
+        // lands while it runs is then a change the next poll sees, never one
+        // that is neither parsed nor noticed. (A file created meanwhile
+        // changes its directory's stamp.)
+        let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
         let built = model::build(
             &self.options,
             cache,
@@ -573,11 +627,11 @@ impl Viewer {
             &mut self.texts,
             model::now_ms(),
         )?;
-        let snapshot = Snapshot::capture_pids(
-            &self.options,
-            built.pids.iter().copied().collect(),
-            cache.paths(),
-        );
+        snapshot.pids = built
+            .pids
+            .iter()
+            .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
+            .collect();
         self.model = Some(ModelCache { built, snapshot });
         self.persist_events_if_due()
     }
@@ -1736,6 +1790,267 @@ mod tests {
             "GET /api/model HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n",
         );
         assert!(refused.starts_with("HTTP/1.1 403"));
+    }
+
+    /// Live polling (#40 M3): `?since=` answers 304 while nothing changed,
+    /// without parsing a line; any appended line changes the version, even
+    /// one that changes nothing else in the model, and the rebuild parses
+    /// that line only and reads no other file's metadata.
+    #[test]
+    fn polls_are_304_until_a_line_lands_and_the_rebuild_reads_only_it() {
+        let fixture = lane_fixture();
+        fixture.claude(
+            "other",
+            &[
+                json!({"type":"user","timestamp":"2026-09-24T00:02:00Z","sessionId":"other","origin":{"kind":"human"},
+                    "message":{"role":"user","content":"another lane"}}),
+            ],
+        );
+        let codex = fixture.codex(
+            "run",
+            &[
+                json!({"type":"response_item","timestamp":"2026-09-24T00:03:00Z",
+                    "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"a codex run"}]}}),
+            ],
+        );
+        fixture.write(
+            "claude/projects/project/lane/subagents/agent-sub.jsonl",
+            &(json!({"type":"user","timestamp":"2026-09-24T00:04:00Z","sessionId":"lane","agentId":"sub","isSidechain":true,
+                "message":{"role":"user","content":"check the lane"}})
+            .to_string()
+                + "\n"),
+        );
+        let meta = fixture.write(
+            "claude/projects/project/lane/subagents/agent-sub.meta.json",
+            r#"{"agentType":"general-purpose","description":"Checker"}"#,
+        );
+        let mut viewer = fixture.viewer();
+        let version = |routed: &Routed| {
+            serde_json::from_slice::<Value>(&routed.2).unwrap()["version"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let parsed = || crate::events::PARSED.with(std::cell::Cell::get);
+        let metas = || crate::model::META_READS.with(std::cell::Cell::get);
+        let marks =
+            |routed: &Routed| serde_json::from_slice::<Value>(&routed.2).unwrap()["tx"].clone();
+        let append = |path: &Path, line: Value| {
+            let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(file, "{line}").unwrap();
+        };
+        let first = viewer.model("", None).unwrap();
+        let marks1 = marks(&first);
+        assert!(
+            marks1["lane"].is_string() && marks1["other"].is_string() && marks1["run"].is_string()
+        );
+        assert_eq!(first.0, 200);
+        let v1 = version(&first);
+        let (lines, reads) = (parsed(), metas());
+        for _ in 0..3 {
+            let poll = viewer.model(&format!("since={v1}"), None).unwrap();
+            assert_eq!(poll.0, 304);
+            assert!(poll.2.is_empty());
+            assert_eq!(poll.3, Some(format!("\"{v1}\"")));
+        }
+        assert_eq!(
+            (parsed(), metas()),
+            (lines, reads),
+            "idle polls parse nothing"
+        );
+
+        let path = fixture.root.join("claude/projects/project/lane.jsonl");
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"user","timestamp":"2026-09-24T00:05:00Z","sessionId":"lane","origin":{"kind":"human"},
+                "message":{"role":"user","content":"one more"}})
+        )
+        .unwrap();
+        drop(file);
+        let changed = viewer.model(&format!("since={v1}"), None).unwrap();
+        assert_eq!(changed.0, 200);
+        let v2 = version(&changed);
+        assert_ne!(v2, v1, "an appended line changes the version");
+        assert_eq!(changed.3, Some(format!("\"{v2}\"")));
+        assert_eq!(parsed(), lines + 1, "only the appended line is parsed");
+        assert_eq!(metas(), reads, "no unchanged file's metadata is read again");
+        // Only the grown transcript's mark moves: the page tails only it.
+        let marks2 = marks(&changed);
+        assert_ne!(marks2["lane"], marks1["lane"]);
+        assert_eq!(marks2["other"], marks1["other"]);
+        assert_eq!(marks2["run"], marks1["run"]);
+        assert_eq!(viewer.model(&format!("since={v2}"), None).unwrap().0, 304);
+        assert_eq!(parsed(), lines + 1);
+
+        // A line that changes nothing else in the model (the same timestamp
+        // as the one before, no entry of its own) still gives a new version.
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"system","subtype":"turn_duration","timestamp":"2026-09-24T00:05:00Z","sessionId":"lane"})
+        )
+        .unwrap();
+        drop(file);
+        let quiet = viewer.model(&format!("since={v2}"), None).unwrap();
+        assert_eq!(quiet.0, 200, "any appended line changes the version");
+        let v3 = version(&quiet);
+        assert_ne!(v3, v2);
+        assert_eq!(parsed(), lines + 2);
+        assert_eq!(viewer.model(&format!("since={v3}"), None).unwrap().0, 304);
+
+        // A Codex file that grows keeps its session_meta: its line is parsed,
+        // its metadata isn't read again.
+        append(
+            &codex,
+            json!({"type":"response_item","timestamp":"2026-09-24T00:06:00Z",
+                "payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}),
+        );
+        let grown = viewer.model(&format!("since={v3}"), None).unwrap();
+        assert_eq!(grown.0, 200);
+        assert_eq!(parsed(), lines + 3);
+        assert_eq!(
+            metas(),
+            reads,
+            "a Codex file that grew keeps its session_meta"
+        );
+        // A subagent's .meta.json that changes is read again, and only it.
+        fs::write(
+            &meta,
+            r#"{"agentType":"general-purpose","description":"Checker, renamed"}"#,
+        )
+        .unwrap();
+        let renamed = viewer
+            .model(&format!("since={}", version(&grown)), None)
+            .unwrap();
+        assert_eq!(renamed.0, 200);
+        assert_eq!(metas(), reads + 1, "only the changed .meta.json is read");
+        assert_eq!(parsed(), lines + 3);
+    }
+
+    /// A process that dies mid-call writes no line, but its running step is
+    /// no longer running: the transcript's mark moves, so the page tails it.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_dies_mid_call_moves_its_transcripts_mark() {
+        let fixture = Fixture::new();
+        fixture.write("proc/sys/kernel/hostname", "testbox\n");
+        fixture.claude(
+            "lane",
+            &[
+                json!({"type":"user","timestamp":"2026-09-24T00:00:00Z","sessionId":"lane","origin":{"kind":"human"},
+                    "message":{"role":"user","content":"run the suite"}}),
+                json!({"type":"assistant","timestamp":"2026-09-24T00:01:00Z","sessionId":"lane",
+                    "message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}),
+            ],
+        );
+        let mut fields = vec!["0"; 20];
+        fields[19] = "777";
+        let stat = fixture.write(
+            "proc/100/stat",
+            &format!("100 (claude) {}\n", fields.join(" ")),
+        );
+        fixture.write(
+            "claude/sessions/100.json",
+            &json!({"pid":100,"sessionId":"lane","procStart":777,"status":"busy","name":"lane"})
+                .to_string(),
+        );
+        let mut viewer = fixture.viewer();
+        let model = |routed: &Routed| serde_json::from_slice::<Value>(&routed.2).unwrap();
+        let alive = model(&viewer.model("", None).unwrap());
+        assert_eq!(alive["sessions"]["lane"]["state"], "work");
+        let mark = alive["tx"]["lane"].as_str().unwrap().to_owned();
+        assert!(mark.ends_with(".1"), "one running call: {mark}");
+        fs::remove_file(stat).unwrap();
+        let version = alive["version"].as_str().unwrap();
+        let dead = viewer.model(&format!("since={version}"), None).unwrap();
+        assert_eq!(dead.0, 200, "the process ending is a change");
+        let dead = model(&dead);
+        assert_ne!(dead["sessions"]["lane"]["state"], "work");
+        let after = dead["tx"]["lane"].as_str().unwrap();
+        assert!(after.ends_with(".0"), "no running call: {after}");
+        assert_eq!(
+            after.rsplit_once('.').unwrap().0,
+            mark.rsplit_once('.').unwrap().0,
+            "no line was written"
+        );
+    }
+
+    /// Two ways a poll could miss or waste a build: a line that lands while a
+    /// build runs is seen by the next poll (the files are stamped before the
+    /// build reads them), and a lock anywhere else on the machine doesn't
+    /// rebuild (only the Codex writer locks' lines of /proc/locks count).
+    #[cfg(unix)]
+    #[test]
+    fn a_line_during_a_build_is_seen_and_other_locks_dont_rebuild() {
+        let fixture = lane_fixture();
+        let lock = fixture.write("codex/thread-writer-locks/run.lock", "");
+        let path = fixture.root.join("claude/projects/project/lane.jsonl");
+        let mut viewer = fixture.viewer();
+        let builds = || crate::model::BUILDS.with(std::cell::Cell::get);
+        let version = |routed: &Routed| {
+            serde_json::from_slice::<Value>(&routed.2).unwrap()["version"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let v1 = version(&viewer.model("", None).unwrap());
+
+        // Appended after the scan read the file, before the build is done.
+        let late = path.clone();
+        crate::model::AFTER_SCAN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let mut file = fs::OpenOptions::new().append(true).open(&late).unwrap();
+                writeln!(
+                    file,
+                    "{}",
+                    json!({"type":"user","timestamp":"2026-09-24T00:07:00Z","sessionId":"lane","origin":{"kind":"human"},
+                        "message":{"role":"user","content":"landed mid-build"}})
+                )
+                .unwrap();
+            }));
+        });
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"user","timestamp":"2026-09-24T00:06:00Z","sessionId":"lane","origin":{"kind":"human"},
+                "message":{"role":"user","content":"before the build"}})
+        )
+        .unwrap();
+        drop(file);
+        let during = viewer.model(&format!("since={v1}"), None).unwrap();
+        assert_eq!(during.0, 200);
+        assert!(!String::from_utf8_lossy(&during.2).contains("landed mid-build"));
+        let v2 = version(&during);
+        let next = viewer.model(&format!("since={v2}"), None).unwrap();
+        assert_eq!(next.0, 200, "the line that landed mid-build is a change");
+        assert!(String::from_utf8_lossy(&next.2).contains("landed mid-build"));
+        let v3 = version(&next);
+        assert_eq!(viewer.model(&format!("since={v3}"), None).unwrap().0, 304);
+
+        // A lock on some other file: no build.
+        let before = builds();
+        fixture.write(
+            "proc/locks",
+            "1: POSIX  ADVISORY  WRITE 999 08:01:424242 0 EOF\n",
+        );
+        assert_eq!(viewer.model(&format!("since={v3}"), None).unwrap().0, 304);
+        assert_eq!(builds(), before, "an unrelated lock rebuilt the model");
+        // The writer lock taken: a build.
+        let (major, minor, ino) = crate::lock_identity(&lock).unwrap();
+        fixture.write(
+            "proc/locks",
+            &format!("1: POSIX  ADVISORY  WRITE 999 08:01:424242 0 EOF\n2: FLOCK  ADVISORY  WRITE 1234 {major:02x}:{minor:02x}:{ino} 0 EOF\n"),
+        );
+        viewer.model(&format!("since={v3}"), None).unwrap();
+        assert_eq!(
+            builds(),
+            before + 1,
+            "the writer lock didn't rebuild the model"
+        );
     }
 
     const HEADERS: [&str; 4] = [
