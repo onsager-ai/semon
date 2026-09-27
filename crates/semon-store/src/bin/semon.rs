@@ -12,7 +12,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use semon_store::{
     ForgetSelector, LogFilter, OccurrenceSelector, REPLICATION_ENDPOINT_ENV, TraceId, TraceStore,
-    day_bounds_ns, render_occurrence_line, ship,
+    day_bounds_ns, format_day_ns, render_occurrence_line, ship,
 };
 
 fn main() -> ExitCode {
@@ -654,12 +654,37 @@ fn run_log(args: LogArgs) -> Result<String, String> {
     let store = TraceStore::open(&args.store).map_err(|error| error.to_string())?;
     let timestamp_range = args.day.as_deref().map(parse_day).transpose()?;
     let filter = LogFilter {
-        repo: args.repo,
+        repo: args.repo.clone(),
         timestamp_range,
         limit: args.limit,
     };
     let rows = store.log(&filter).map_err(|error| error.to_string())?;
     if rows.is_empty() {
+        if let Some(day) = args.day.as_deref() {
+            // A --day-filtered miss is ambiguous: it reads the same whether
+            // that UTC day genuinely had no occurrences, or the caller named
+            // the wrong day (--day is a UTC calendar day; e.g. Codex's
+            // `~/.codex/sessions/YYYY/MM/DD/` directories are named in local
+            // time, so a directory-derived date can be one UTC day off).
+            // When the store isn't empty (ignoring --day, but still under
+            // the same --repo, if given), name the UTC day(s) it does cover
+            // so the two cases aren't indistinguishable.
+            let span = store
+                .timestamp_span(args.repo.as_deref())
+                .map_err(|error| error.to_string())?;
+            if let Some((earliest, latest)) = span {
+                let earliest_day = format_day_ns(earliest);
+                let latest_day = format_day_ns(latest);
+                let covers = if earliest_day == latest_day {
+                    earliest_day
+                } else {
+                    format!("{earliest_day} to {latest_day}")
+                };
+                return Ok(format!(
+                    "(no occurrences on {day} UTC; store covers {covers})"
+                ));
+            }
+        }
         return Ok("(no occurrences)".to_owned());
     }
     Ok(rows
@@ -940,7 +965,12 @@ fn usage() -> String {
          Endpoint defaults to ${REPLICATION_ENDPOINT_ENV}; when unset, ship succeeds without reading the store.\n\
          \n\
          Usage: semon log [--store PATH] [--repo NAME] [--day YYYY-MM-DD] [--limit N]\n\
-         Renders the occurrence log. Never reads raw_carrier_records.\n\
+         Renders the occurrence log. Never reads raw_carrier_records. --day is a UTC\n\
+         calendar day (00:00:00Z through 23:59:59Z), not local time — Codex's own\n\
+         ~/.codex/sessions/YYYY/MM/DD/ directory names are local dates, so a date taken\n\
+         from one can be a UTC day off. If --day matches nothing but the store (under\n\
+         the same --repo, if given) is not empty, the days it does cover are reported\n\
+         instead of a bare empty result.\n\
          \n\
          Usage: semon forensic [--store PATH] (--trace ID | --session ID | --day YYYY-MM-DD) [--out FILE]\n\
          Reads raw_carrier_records — the only command that does. Exactly one\n\
@@ -1058,6 +1088,115 @@ mod tests {
         })
         .unwrap();
 
+        assert_eq!(message, "(no occurrences)");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn log_on_a_matching_day_renders_normally_with_no_hint() {
+        let path = unique_temp_db_path("log-day-hit");
+        let (start, _) = day_bounds_ns(2026, 9, 18);
+        {
+            let mut store = TraceStore::open(&path).unwrap();
+            let core = SemanticCore::from_value(json!({"kind": "intent", "content": "on the day"}))
+                .unwrap();
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"raw bytes"),
+                    NewOccurrence {
+                        session: "session-a",
+                        sequence: 0,
+                        timestamp: start + 1,
+                        repo: "semon",
+                        repo_source: RepoSource::GitRemote,
+                        parent_sequence: None,
+                        agent: None,
+                        authored_by: AuthoredBy::Human,
+                    },
+                )
+                .unwrap();
+        }
+
+        let message = run_log(LogArgs {
+            store: path.clone(),
+            repo: None,
+            day: Some("2026-09-18".to_owned()),
+            limit: None,
+        })
+        .unwrap();
+
+        // The output for a --day filter that actually matches is exactly the
+        // ordinary rendering: no "store covers" hint appended.
+        assert!(message.contains("session-a#0"));
+        assert!(message.contains("on the day"));
+        assert!(!message.contains("store covers"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn log_on_a_missed_day_names_the_days_the_store_covers() {
+        let path = unique_temp_db_path("log-day-miss");
+        // A capture on 2026-09-18, queried with --day 2026-09-19 — the exact
+        // Codex-local-vs-UTC trap issue #5 names: a store that isn't empty,
+        // but has nothing on the requested UTC day.
+        let (start, _) = day_bounds_ns(2026, 9, 18);
+        {
+            let mut store = TraceStore::open(&path).unwrap();
+            let core = SemanticCore::from_value(
+                json!({"kind": "intent", "content": "captured on the 18th"}),
+            )
+            .unwrap();
+            store
+                .capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"raw bytes"),
+                    NewOccurrence {
+                        session: "session-a",
+                        sequence: 0,
+                        timestamp: start + 1,
+                        repo: "semon",
+                        repo_source: RepoSource::GitRemote,
+                        parent_sequence: None,
+                        agent: None,
+                        authored_by: AuthoredBy::Human,
+                    },
+                )
+                .unwrap();
+        }
+
+        let message = run_log(LogArgs {
+            store: path.clone(),
+            repo: None,
+            day: Some("2026-09-19".to_owned()),
+            limit: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            message,
+            "(no occurrences on 2026-09-19 UTC; store covers 2026-09-18)"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn log_on_a_missed_day_over_an_empty_store_gives_no_hint() {
+        let path = unique_temp_db_path("log-day-miss-empty");
+        TraceStore::open(&path).unwrap();
+
+        let message = run_log(LogArgs {
+            store: path.clone(),
+            repo: None,
+            day: Some("2026-09-19".to_owned()),
+            limit: None,
+        })
+        .unwrap();
+
+        // Nothing to name a span from: the plain, pre-existing message.
         assert_eq!(message, "(no occurrences)");
 
         let _ = std::fs::remove_file(&path);
