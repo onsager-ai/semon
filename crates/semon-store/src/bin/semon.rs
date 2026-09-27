@@ -31,6 +31,12 @@ enum Command {
     Forensic(ForensicArgs),
     Forget(ForgetArgs),
     Sessions(SessionsArgs),
+    Push(PushArgs),
+}
+
+struct PushArgs {
+    options: semon_push::PushOptions,
+    watch: bool,
 }
 
 struct SessionsArgs {
@@ -87,6 +93,7 @@ fn parse_args() -> Result<Command, String> {
     let mut arguments = env::args().skip(1);
     match arguments.next().as_deref() {
         Some("sessions") => parse_sessions_args(arguments).map(Command::Sessions),
+        Some("push") => parse_push_args(arguments).map(Command::Push),
         Some("ship") => parse_ship_args(arguments).map(Command::Ship),
         Some("log") => parse_log_args(arguments).map(Command::Log),
         Some("forensic") => parse_forensic_args(arguments).map(Command::Forensic),
@@ -121,6 +128,7 @@ fn parse_sessions_args(
             "--all" => options.all = true,
             "--since" => options.since = semon_sessions::parse_duration(&value()?)?,
             "--session" => options.session = Some(value()?),
+            "--facts" => options.facts = Some(value()?.into()),
             "--json" => json = true,
             "--model-json" => model_json = true,
             "--watch" => watch = true,
@@ -154,6 +162,45 @@ fn parse_sessions_args(
         watch,
         serve,
         listen,
+    })
+}
+
+fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushArgs, String> {
+    let mut sessions = semon_sessions::Options::default();
+    let mut url = None;
+    let mut token_file = None;
+    let mut state = None;
+    let mut watch = false;
+    while let Some(argument) = arguments.next() {
+        let mut value = || {
+            arguments
+                .next()
+                .ok_or_else(|| format!("{argument} requires a value"))
+        };
+        match argument.as_str() {
+            "--to" => url = Some(value()?),
+            "--token-file" => token_file = Some(PathBuf::from(value()?)),
+            "--state" => state = Some(PathBuf::from(value()?)),
+            "--claude-home" => sessions.claude_home = value()?.into(),
+            "--codex-home" => sessions.codex_home = value()?.into(),
+            "--proc-root" => sessions.proc_root = value()?.into(),
+            "--cache" => sessions.cache = value()?.into(),
+            "--watch" => watch = true,
+            "-h" | "--help" => return Err(usage()),
+            _ => return Err(format!("unknown argument: {argument}")),
+        }
+    }
+    let url = url.ok_or("push requires --to URL")?;
+    let token_file = token_file.ok_or("push requires --token-file PATH")?;
+    let state = state.unwrap_or_else(|| semon_push::default_state_path(&url));
+    Ok(PushArgs {
+        options: semon_push::PushOptions {
+            url,
+            token_file,
+            sessions,
+            state,
+        },
+        watch,
     })
 }
 
@@ -317,6 +364,7 @@ fn parse_forget_args(mut arguments: impl Iterator<Item = String>) -> Result<Forg
 fn run(command: Command) -> Result<(), String> {
     match command {
         Command::Sessions(args) => run_sessions(args),
+        Command::Push(args) => semon_push::push(&args.options, args.watch),
         Command::Ship(args) => run_ship(args).map(|message| println!("{message}")),
         Command::Log(args) => run_log(args).map(|message| println!("{message}")),
         Command::Forensic(args) => run_forensic(args),
@@ -619,9 +667,15 @@ fn default_store_path() -> PathBuf {
 
 fn usage() -> String {
     format!(
-        "Usage: semon sessions [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]]\n\
+        "Usage: semon sessions [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]]\n\
          Shows a read-only tree of local Claude Code and Codex sessions. --model-json writes the viewer's\n\
          session model (sessions, handoffs, turns, busy) instead; it reads every log, --all/--since trim the output.\n\
+         --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
+         \n\
+         Usage: semon push --to URL --token-file PATH [--watch] [--state PATH] [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
+         Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\
+         (docs/mirror-protocol.md), appending as they grow. The token file must be mode 0600. --watch keeps going:\n\
+         new lines every 2 s, facts every 10 s.\n\
          \n\
          Usage: semon ship [--store PATH] [--endpoint URL]\n\
          Endpoint defaults to ${REPLICATION_ENDPOINT_ENV}; when unset, ship succeeds without reading the store.\n\

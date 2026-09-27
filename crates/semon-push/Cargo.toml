@@ -1,0 +1,18 @@
+[package]
+name = "semon-push"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Mirror-protocol client: sends the session logs' input files, redacted, and the machine's facts to a receiver."
+
+[dependencies]
+hex.workspace = true
+reqwest.workspace = true
+semon-sessions = { path = "../semon-sessions" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tiny_http.workspace = true
