@@ -97,10 +97,22 @@ fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
     );
     let expected_origin = format!("http://{expected_host}");
     let valid_origin = same_origin_request(&request, &expected_origin);
+    if is_post {
+        eprintln!(
+            "POST {path}: host={valid_host} session={} action={post_action} same_origin={valid_origin}",
+            query_token || cookie_token
+        );
+    }
     if !valid_host
         || !(query_token || cookie_token)
         || (!is_get && !(is_post && post_action && valid_origin))
     {
+        if is_get && path == "/" {
+            eprintln!(
+                "GET / rejected: host={valid_host} session={}",
+                query_token || cookie_token
+            );
+        }
         answer(
             request,
             403,
