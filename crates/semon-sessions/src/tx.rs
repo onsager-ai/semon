@@ -430,6 +430,183 @@ fn tool_entry(
     Value::Object(entry)
 }
 
+fn codex_path(path: &str, cwd: Option<&str>) -> String {
+    let path = path.strip_prefix("file://").unwrap_or(path);
+    if let Some(cwd) = cwd {
+        let base = if cwd == "/" {
+            "/"
+        } else {
+            cwd.trim_end_matches('/')
+        };
+        if path == base {
+            return ".".to_owned();
+        }
+        return model::relative(path, Some(cwd), None);
+    }
+    path.to_owned()
+}
+
+fn codex_duration(item: &Value) -> Option<String> {
+    let duration = item.get("duration")?;
+    let seconds = duration.get("secs")?.as_i64()?;
+    let nanos = duration.get("nanos").and_then(Value::as_i64).unwrap_or(0);
+    Some(secs(
+        seconds
+            .saturating_mul(1000)
+            .saturating_add(nanos / 1_000_000),
+    ))
+}
+
+fn codex_diff_rows(diff: &str, limit: usize) -> (Value, bool, usize) {
+    let mut rows = Vec::new();
+    let mut used = 0;
+    let mut cut = false;
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if line.starts_with("@@") {
+            in_hunk = true;
+            continue;
+        }
+        if (!in_hunk && (line.starts_with("--- ") || line.starts_with("+++ ")))
+            || line.starts_with("\\ No newline")
+        {
+            continue;
+        }
+        let Some((kind, text)) = line
+            .strip_prefix('+')
+            .map(|text| ("add", format!("+{text}")))
+            .or_else(|| {
+                line.strip_prefix('-')
+                    .map(|text| ("del", format!("-{text}")))
+            })
+            .or_else(|| {
+                line.strip_prefix(' ')
+                    .map(|text| ("ctx", format!(" {text}")))
+            })
+        else {
+            continue;
+        };
+        if used >= limit {
+            rows.push(json!(["ctx", "…"]));
+            cut = true;
+            break;
+        }
+        let (text, clipped) = clip(&text, limit - used);
+        used += text.len() + 1;
+        cut |= clipped;
+        rows.push(json!([kind, text]));
+        if clipped {
+            break;
+        }
+    }
+    (Value::Array(rows), cut, used)
+}
+
+fn operation_entry(
+    lines: &mut Lines,
+    file: &SlotFile,
+    slot: &Slot,
+    index: usize,
+    kind: &str,
+    ok: Option<bool>,
+    script_offset: Option<u64>,
+) -> Option<Value> {
+    let record = lines.get(&file.path, slot.offset)?;
+    let item = record.get("payload")?.get("item")?;
+    let mut entry = Map::new();
+    let mut more = Vec::new();
+    entry.insert("k".into(), json!("tool"));
+    entry.insert(
+        "name".into(),
+        json!(match kind {
+            "CommandExecution" => "exec_command",
+            "FileChange" => "apply_patch",
+            _ => return None,
+        }),
+    );
+    entry.insert("ok".into(), json!(ok));
+    entry.insert(
+        "secs".into(),
+        json!(codex_duration(item).unwrap_or_else(|| "—".to_owned())),
+    );
+    entry.insert("slot".into(), json!(index));
+    if let Some(script_offset) = script_offset {
+        entry.insert("script".into(), json!(script_offset));
+    }
+    match kind {
+        "CommandExecution" => {
+            let argv: Vec<&str> = item
+                .get("command")
+                .and_then(Value::as_array)
+                .map(|parts| parts.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let command = if argv.len() == 3 && argv[1] == "-lc" {
+                argv[2].to_owned()
+            } else if !argv.is_empty() {
+                argv.join(" ")
+            } else {
+                item.get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned()
+            };
+            entry.insert("arg".into(), json!(one_line(&command, 160)));
+            if let Some(exit) = item.get("exit_code").and_then(Value::as_i64) {
+                entry.insert("exit".into(), json!(exit));
+            }
+            if let Some(cwd) = field(item, "cwd") {
+                entry.insert("cwd".into(), json!(codex_path(cwd, file.cwd.as_deref())));
+            }
+            if let Some(output) = field(item, "aggregated_output")
+                && !output.is_empty()
+            {
+                let (output, cut) = clip(output, PREVIEW_MAX);
+                entry.insert("out".into(), json!(output));
+                if cut {
+                    more.push("out");
+                }
+            }
+        }
+        "FileChange" => {
+            let mut changes = Vec::new();
+            let mut paths = Vec::new();
+            let mut remaining = PREVIEW_MAX;
+            let mut cut = false;
+            if let Some(fields) = item.get("changes").and_then(Value::as_object) {
+                for (path, change) in fields {
+                    let path = codex_path(path, file.cwd.as_deref());
+                    paths.push(path.clone());
+                    let mut rendered = Map::new();
+                    rendered.insert("path".into(), json!(path));
+                    if let Some(move_path) = field(change, "move_path") {
+                        rendered.insert(
+                            "move".into(),
+                            json!(codex_path(move_path, file.cwd.as_deref())),
+                        );
+                    }
+                    let (rows, clipped, used) = field(change, "unified_diff")
+                        .map(|diff| codex_diff_rows(diff, remaining))
+                        .unwrap_or_else(|| (json!([]), false, 0));
+                    remaining = remaining.saturating_sub(used);
+                    cut |= clipped;
+                    rendered.insert("diff".into(), rows);
+                    changes.push(Value::Object(rendered));
+                }
+            }
+            entry.insert("arg".into(), json!(model::one_line(&paths.join(", "), 160)));
+            entry.insert("changes".into(), Value::Array(changes));
+            if cut {
+                more.push("diff");
+            }
+        }
+        _ => return None,
+    }
+    if !more.is_empty() {
+        entry.insert("more".into(), json!(more));
+    }
+    Some(Value::Object(entry))
+}
+
 /// One slot as a `TX` entry; `None` for a slot with nothing to show.
 fn render(built: &Built, lines: &mut Lines, slot: &Slot, index: usize, now: i64) -> Option<Value> {
     let file = slot.file.and_then(|file| built.files.get(file));
@@ -470,6 +647,11 @@ fn render(built: &Built, lines: &mut Lines, slot: &Slot, index: usize, now: i64)
             now,
             built.home.as_deref(),
         ),
+        SlotKind::Operation {
+            kind,
+            ok,
+            script_offset,
+        } => operation_entry(lines, file?, slot, index, kind, *ok, *script_offset)?,
     };
     Some(entry)
 }
@@ -529,6 +711,39 @@ pub(crate) fn slot_texts(
                     .and_then(|record| result_text(&record, reply.b as usize))
             {
                 texts.push(("out", text));
+            }
+            None
+        }
+        SlotKind::Operation { kind, .. } => {
+            if let Some(item) = lines.get(&file.path, slot.offset).and_then(|record| {
+                record
+                    .get("payload")
+                    .and_then(|payload| payload.get("item"))
+                    .cloned()
+            }) {
+                match kind.as_str() {
+                    "CommandExecution" => {
+                        if let Some(command) = item.get("command") {
+                            let mut text = String::new();
+                            strings(command, &mut text);
+                            texts.push(("in", text));
+                        }
+                        if let Some(output) = field(&item, "aggregated_output") {
+                            texts.push(("out", output.to_owned()));
+                        }
+                    }
+                    "FileChange" => {
+                        if let Some(changes) = item.get("changes").and_then(Value::as_object) {
+                            for (path, change) in changes {
+                                texts.push(("in", path.clone()));
+                                if let Some(diff) = field(change, "unified_diff") {
+                                    texts.push(("out", diff.to_owned()));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
             None
         }
@@ -624,14 +839,69 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
         .get(sid)
         .and_then(|transcript| transcript.slots.get(index))
         .ok_or(io::ErrorKind::NotFound)?;
-    let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "not a tool call");
-    let SlotKind::Tool { reply, .. } = &slot.kind else {
-        return Err(invalid());
-    };
     let file = slot
         .file
         .and_then(|file| built.files.get(file))
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a tool call"))?;
+    if part == "script"
+        && let SlotKind::Operation {
+            script_offset: Some(offset),
+            ..
+        } = &slot.kind
+    {
+        let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "entry is not expandable");
+        let record = read_record(&file.path, *offset).ok_or_else(invalid)?;
+        let script = model::tool_input(&record, 0)
+            .and_then(|input| input.as_str().map(str::to_owned))
+            .ok_or_else(invalid)?;
+        let (text, truncated) = clip(&script, FULL_MAX);
+        return Ok(json!({"text": text, "truncated": truncated}).to_string());
+    }
+    let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "not a tool call");
+    let SlotKind::Tool { reply, .. } = &slot.kind else {
+        if part == "out"
+            && let SlotKind::Operation { kind, .. } = &slot.kind
+            && kind == "CommandExecution"
+        {
+            let record = read_record(&file.path, slot.offset).ok_or_else(invalid)?;
+            let output = record
+                .get("payload")
+                .and_then(|payload| payload.get("item"))
+                .and_then(|item| field(item, "aggregated_output"))
+                .ok_or_else(invalid)?;
+            let (text, truncated) = clip(output, FULL_MAX);
+            return Ok(json!({"text": text, "truncated": truncated}).to_string());
+        }
+        if part == "diff"
+            && let SlotKind::Operation { kind, .. } = &slot.kind
+            && kind == "FileChange"
+        {
+            let record = read_record(&file.path, slot.offset).ok_or_else(invalid)?;
+            let item = record
+                .get("payload")
+                .and_then(|payload| payload.get("item"))
+                .ok_or_else(invalid)?;
+            let mut remaining = FULL_MAX;
+            let mut truncated = false;
+            let mut changes = Vec::new();
+            if let Some(fields) = item.get("changes").and_then(Value::as_object) {
+                for (path, change) in fields {
+                    let (diff, cut, used) = field(change, "unified_diff")
+                        .map(|diff| codex_diff_rows(diff, remaining))
+                        .unwrap_or_else(|| (json!([]), false, 0));
+                    remaining = remaining.saturating_sub(used);
+                    truncated |= cut;
+                    changes.push(json!({
+                        "path": codex_path(path, file.cwd.as_deref()),
+                        "move": field(change, "move_path").map(|path| codex_path(path, file.cwd.as_deref())),
+                        "diff": diff,
+                    }));
+                }
+            }
+            return Ok(json!({"changes": changes, "truncated": truncated}).to_string());
+        }
+        return Err(invalid());
+    };
     match part {
         "out" => {
             let reply = reply.as_ref().ok_or_else(invalid)?;
@@ -1038,6 +1308,444 @@ mod tests {
         assert_eq!(entries[4]["out"], "no status");
         assert_eq!(entries[6]["ret"]["to"], "lead");
         assert_eq!(entries[6]["ret"]["failed"], true);
+    }
+
+    #[test]
+    fn code_mode_exec_renders_its_completed_operations() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        let script = "const r = await Promise.allSettled([\ntools.exec_command({cmd:\"git status\"}),\ntools.exec_command({cmd:\"sed -n '1,9p' a.rs\"}),\n]);";
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-ops.jsonl",
+            &[
+                codex(
+                    ts(4, 0, 0),
+                    "session_meta",
+                    json!({"id":"ops","cwd":"/work/proj"}),
+                ),
+                codex(
+                    ts(4, 1, 0),
+                    "response_item",
+                    json!({"type":"custom_tool_call","call_id":"call_A","name":"exec","status":"completed","input":script}),
+                ),
+                codex(
+                    ts(4, 2, 0),
+                    "event_msg",
+                    json!({"type":"item_completed","item":{"type":"CommandExecution","id":"exec-1","command":["/bin/zsh","-lc","git status"],"cwd":"file:///work/proj","exit_code":0,"duration":{"secs":1,"nanos":200000000},"aggregated_output":"## main\n"}}),
+                ),
+                codex(
+                    ts(4, 2, 1),
+                    "event_msg",
+                    json!({"type":"item_completed","item":{"type":"CommandExecution","id":"exec-2","command":["/bin/zsh","-lc","sed -n '1,9p' a.rs"],"cwd":"file:///work/proj/src","exit_code":0,"duration":{"secs":0,"nanos":400000000},"aggregated_output":"a\n"}}),
+                ),
+                codex(
+                    ts(4, 2, 2),
+                    "event_msg",
+                    json!({"type":"item_completed","item":{"type":"FileChange","id":"exec-3","changes":{"/work/proj/src/a.rs":{"type":"update","unified_diff":"@@ -1 +1 @@\n-a\n+b\n","move_path":null}}}}),
+                ),
+                codex(
+                    ts(4, 3, 0),
+                    "response_item",
+                    json!({"type":"custom_tool_call_output","call_id":"call_A","output":[{"type":"input_text","text":"Script completed"}]}),
+                ),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "ops", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry["k"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["tool", "tool", "tool"]
+        );
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(3), Some(0))
+        );
+        assert_eq!(entries[0]["arg"], "git status");
+        assert_eq!(entries[0]["cwd"], ".");
+        assert_eq!(entries[0]["secs"], "1.2s");
+        assert_eq!(entries[0]["exit"], 0);
+        assert_eq!(entries[0]["out"], "## main\n");
+        assert_eq!(entries[1]["arg"], "sed -n '1,9p' a.rs");
+        assert_eq!(entries[1]["cwd"], "src");
+        assert_eq!(entries[2]["arg"], "src/a.rs");
+        assert_eq!(
+            entries[2]["changes"][0]["diff"],
+            json!([["del", "-a"], ["add", "+b"]])
+        );
+        assert!(entries[0]["script"].is_number());
+        let script_view: Value =
+            serde_json::from_str(&full_slot(&built, "ops", 0, "script").unwrap()).unwrap();
+        assert_eq!(script_view["text"], script);
+        assert_eq!(script_view["truncated"], false);
+    }
+
+    #[test]
+    fn operation_output_can_be_opened_in_full() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        let output = format!("{}tail", "x".repeat(PREVIEW_MAX + 32));
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-long-operation.jsonl",
+            &[
+                codex(ts(4, 0, 0), "session_meta", json!({"id":"long-operation","cwd":"/work/proj"})),
+                codex(ts(4, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"call","name":"exec","input":"tools.exec_command({cmd:'long'})"})),
+                codex(ts(4, 2, 0), "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"item","command":["/bin/zsh","-lc","long"],"exit_code":0,"aggregated_output":output}})),
+                codex(ts(4, 3, 0), "response_item", json!({"type":"custom_tool_call_output","call_id":"call","output":"done"})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "long-operation", &Anchor::Last);
+        let slot = page["entries"][0]["slot"].as_u64().unwrap() as usize;
+        assert!(
+            page["entries"][0]["more"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("out"))
+        );
+        let full: Value =
+            serde_json::from_str(&full_slot(&built, "long-operation", slot, "out").unwrap())
+                .unwrap();
+        assert_eq!(full["text"], output);
+        assert_eq!(full["truncated"], false);
+    }
+
+    #[test]
+    fn codex_diff_keeps_deleted_lines_that_look_like_headers() {
+        let (rows, cut, _) = codex_diff_rows("@@ -1 +0,0 @@\n--- note\n", FULL_MAX);
+        assert_eq!(rows, json!([["del", "--- note"]]));
+        assert!(!cut);
+    }
+
+    #[test]
+    fn code_mode_exec_errors_and_ambiguous_items_are_not_steps() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        let mut records = vec![codex(
+            ts(5, 0, 0),
+            "session_meta",
+            json!({"id":"overlap","cwd":"/work/proj"}),
+        )];
+        for (id, script, minute) in [
+            ("first", "const first = true;", 1),
+            ("second", "const second = true;", 2),
+        ] {
+            records.push(codex(
+                ts(5, minute, 0),
+                "response_item",
+                json!({"type":"custom_tool_call","call_id":id,"name":"exec","input":script}),
+            ));
+        }
+        records.push(codex(
+            ts(5, 3, 0),
+            "event_msg",
+            json!({"type":"item_completed","item":{"type":"CommandExecution","id":"unowned","command":["/bin/zsh","-lc","pwd"],"exit_code":0,"duration":{"secs":0,"nanos":100000000},"aggregated_output":"/work/proj\n"}}),
+        ));
+        records.push(codex(
+            ts(5, 4, 0),
+            "response_item",
+            json!({"type":"custom_tool_call_output","call_id":"second","output":"done"}),
+        ));
+        records.push(codex(
+            ts(5, 5, 0),
+            "event_msg",
+            json!({"type":"item_completed","item":{"type":"FileChange","id":"owned","changes":{"/work/proj/a.rs":{"unified_diff":"@@ -1 +1 @@\n-old\n+new\n"}}}}),
+        ));
+        records.push(codex(
+            ts(5, 6, 0),
+            "response_item",
+            json!({"type":"custom_tool_call_output","call_id":"first","output":"done"}),
+        ));
+        records.push(codex(
+            ts(5, 7, 0),
+            "response_item",
+            json!({"type":"custom_tool_call","call_id":"failed","name":"exec","input":"tools.exec_command({cmd:'false'})"}),
+        ));
+        records.push(codex(
+            ts(5, 8, 0),
+            "event_msg",
+            json!({"type":"item_completed","item":{"type":"CommandExecution","id":"exec-failed","command":["/bin/zsh","-lc","false"],"exit_code":1,"duration":{"secs":0,"nanos":200000000},"aggregated_output":"failed\n"}}),
+        ));
+        records.push(codex(
+            ts(5, 9, 0),
+            "response_item",
+            json!({"type":"custom_tool_call_output","call_id":"failed","output":"done"}),
+        ));
+        records.push(codex(
+            ts(5, 10, 0),
+            "response_item",
+            json!({"type":"custom_tool_call","call_id":"empty","name":"exec","input":"const empty = true;"}),
+        ));
+        records.push(codex(
+            ts(5, 11, 0),
+            "response_item",
+            json!({"type":"custom_tool_call_output","call_id":"empty","output":"done"}),
+        ));
+        home.lines("codex/sessions/2026/09/24/rollout-overlap.jsonl", &records);
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "overlap", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        // The item that completed while two calls were open has no exact
+        // owner: it is no step of its own, so it can't repeat its wrapper.
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(4), Some(1))
+        );
+        assert!(!entries.iter().any(|entry| entry["arg"] == "pwd"));
+        let owned = entries.iter().find(|entry| entry["arg"] == "a.rs").unwrap();
+        assert!(owned["script"].is_number());
+        let owned_script: Value = serde_json::from_str(
+            &full_slot(
+                &built,
+                "overlap",
+                owned["slot"].as_u64().unwrap() as usize,
+                "script",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(owned_script["text"], "const first = true;");
+        let failed = entries
+            .iter()
+            .find(|entry| entry["arg"] == "false")
+            .unwrap();
+        assert_eq!(failed["ok"], false);
+        assert_eq!(failed["exit"], 1);
+        assert_eq!(failed["secs"], "0.2s");
+        assert_eq!(failed["out"], "failed\n");
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry["name"] == "exec")
+                .count(),
+            2
+        );
+        assert_eq!(entries.iter().filter(|entry| entry["arg"] == "").count(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry["in"] == "const second = true;")
+                .unwrap()["name"],
+            "exec"
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry["in"] == "const empty = true;")
+                .unwrap()["name"],
+            "exec"
+        );
+    }
+
+    #[test]
+    fn direct_function_call_exec_command_keeps_its_existing_entry() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-old-exec.jsonl",
+            &[
+                codex(
+                    ts(6, 0, 0),
+                    "session_meta",
+                    json!({"id":"old-exec","cwd":"/work/proj"}),
+                ),
+                codex(
+                    ts(6, 1, 0),
+                    "response_item",
+                    json!({"type":"function_call","name":"exec_command","call_id":"old-call","arguments":"{\"cmd\":\"git status\"}"}),
+                ),
+                codex(
+                    ts(6, 1, 500),
+                    "response_item",
+                    json!({"type":"function_call_output","call_id":"old-call","output":"{\"output\":\"## main\\n\",\"metadata\":{\"exit_code\":0}}"}),
+                ),
+                codex(
+                    ts(6, 1, 750),
+                    "event_msg",
+                    json!({"type":"item_completed","item":{"type":"CommandExecution","id":"old-call","command":["/bin/zsh","-lc","git status"],"exit_code":1,"aggregated_output":"failed"}}),
+                ),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "old-exec", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "exec_command");
+        assert_eq!(entries[0]["arg"], "git status");
+        assert_eq!(entries[0]["out"], "## main\n");
+        assert_eq!(entries[0]["ok"], false);
+        assert_eq!(entries[0]["secs"], "0.5s");
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(1), Some(1))
+        );
+    }
+
+    #[test]
+    fn direct_function_call_apply_patch_keeps_one_entry_with_file_change_item() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-old-patch.jsonl",
+            &[
+                codex(ts(6, 0, 0), "session_meta", json!({"id":"old-patch","cwd":"/work/proj"})),
+                codex(ts(6, 1, 0), "response_item", json!({"type":"function_call","name":"apply_patch","call_id":"patch-call","arguments":"*** Begin Patch\\n*** Update File: a.rs\\n@@ -1 +1 @@\\n-old\\n+new\\n*** End Patch"})),
+                codex(ts(6, 1, 250), "event_msg", json!({"type":"item_completed","item":{"type":"FileChange","id":"patch-call","changes":{"/work/proj/a.rs":{"type":"update","unified_diff":"@@ -1 +1 @@\\n-old\\n+new\\n"}}}})),
+                codex(ts(6, 1, 500), "response_item", json!({"type":"function_call_output","call_id":"patch-call","output":"{\"output\":\"Success\",\"metadata\":{\"exit_code\":0}}"})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "old-patch", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "apply_patch");
+        assert_eq!(entries[0]["ok"], true);
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(1), Some(0))
+        );
+    }
+
+    #[test]
+    fn an_aborted_code_mode_call_does_not_claim_the_next_turns_items() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-interrupted.jsonl",
+            &[
+                codex(ts(7, 0, 0), "session_meta", json!({"id":"interrupted","cwd":"/work/proj"})),
+                codex(ts(7, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"old","name":"exec","input":"const old = true;"})),
+                codex(ts(7, 2, 0), "event_msg", json!({"type":"turn_aborted"})),
+                codex(ts(7, 3, 0), "response_item", json!({"type":"custom_tool_call","call_id":"new","name":"exec","input":"const next = true;"})),
+                codex(ts(7, 4, 0), "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"item-new","command":["/bin/zsh","-lc","next"],"exit_code":0,"aggregated_output":"ok"}})),
+                codex(ts(7, 5, 0), "response_item", json!({"type":"custom_tool_call_output","call_id":"new","output":"done"})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "interrupted", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(2), Some(1))
+        );
+        let operation = entries.iter().find(|entry| entry["arg"] == "next").unwrap();
+        assert_eq!(operation["name"], "exec_command");
+        let script: Value = serde_json::from_str(
+            &full_slot(
+                &built,
+                "interrupted",
+                operation["slot"].as_u64().unwrap() as usize,
+                "script",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(script["text"], "const next = true;");
+    }
+
+    #[test]
+    fn code_mode_wrapper_script_error_is_a_failed_tool() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-script-error.jsonl",
+            &[
+                codex(ts(8, 0, 0), "session_meta", json!({"id":"script-error","cwd":"/work/proj"})),
+                codex(ts(8, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"call","name":"exec","input":"throw new Error('boom')"})),
+                codex(ts(8, 2, 0), "response_item", json!({"type":"custom_tool_call_output","call_id":"call","output":[{"type":"input_text","text":"Script error: boom"}]})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "script-error", &Anchor::Last);
+        let entry = &page["entries"][0];
+        assert_eq!(entry["name"], "exec");
+        assert_eq!(entry["ok"], false);
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(1), Some(1))
+        );
+    }
+
+    #[test]
+    fn an_item_with_no_open_code_mode_call_is_not_a_step() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-unowned.jsonl",
+            &[
+                codex(ts(9, 0, 0), "session_meta", json!({"id":"unowned","cwd":"/work/proj"})),
+                codex(ts(9, 1, 0), "response_item", json!({"type":"function_call","name":"apply_patch","call_id":"patch-call","arguments":"*** Begin Patch\\n*** Update File: a.rs\\n@@ -1 +1 @@\\n-old\\n+new\\n*** End Patch"})),
+                codex(ts(9, 1, 250), "event_msg", json!({"type":"item_completed","item":{"type":"FileChange","id":"other-id","changes":{"/work/proj/a.rs":{"type":"update","unified_diff":"@@ -1 +1 @@\\n-old\\n+new\\n"}}}})),
+                codex(ts(9, 1, 500), "response_item", json!({"type":"function_call_output","call_id":"patch-call","output":"{\"output\":\"Success\",\"metadata\":{\"exit_code\":0}}"})),
+                codex(ts(9, 2, 0), "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"stray","command":["/bin/zsh","-lc","pwd"],"exit_code":1,"aggregated_output":"/work/proj\n"}})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "unowned", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "apply_patch");
+        assert_eq!(entries[0]["ok"], true);
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(1), Some(0))
+        );
+    }
+
+    #[test]
+    fn a_script_error_after_its_operations_is_a_failed_step() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-late-error.jsonl",
+            &[
+                codex(ts(9, 0, 0), "session_meta", json!({"id":"late-error","cwd":"/work/proj"})),
+                codex(ts(9, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"call","name":"exec","input":"await tools.exec_command({cmd:'ls'}); throw new Error('boom')"})),
+                codex(ts(9, 2, 0), "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"item","command":["/bin/zsh","-lc","ls"],"exit_code":0,"aggregated_output":"a.rs\n"}})),
+                codex(ts(9, 3, 0), "response_item", json!({"type":"custom_tool_call_output","call_id":"call","output":[{"type":"input_text","text":"Script error: boom"}]})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "late-error", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["arg"], "ls");
+        assert_eq!(entries[0]["ok"], true);
+        assert_eq!(entries[1]["name"], "exec");
+        assert_eq!(entries[1]["ok"], false);
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(2), Some(1))
+        );
+    }
+
+    #[test]
+    fn a_script_error_is_read_from_the_harness_header_only() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-printed-error.jsonl",
+            &[
+                codex(ts(9, 0, 0), "session_meta", json!({"id":"printed-error","cwd":"/work/proj"})),
+                codex(ts(9, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"call","name":"exec","input":"text('Script error: printed')"})),
+                codex(ts(9, 2, 0), "response_item", json!({"type":"custom_tool_call_output","call_id":"call","output":[{"type":"input_text","text":"Script completed"},{"type":"input_text","text":"Script error: printed"}]})),
+                codex(ts(9, 3, 0), "response_item", json!({"type":"custom_tool_call","call_id":"plain","name":"exec","input":"text('x')"})),
+                codex(ts(9, 4, 0), "response_item", json!({"type":"custom_tool_call_output","call_id":"plain","output":"Script error: a plain string is no header"})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "printed-error", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry["ok"] != false));
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(2), Some(0))
+        );
     }
 
     #[test]

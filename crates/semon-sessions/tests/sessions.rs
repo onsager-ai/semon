@@ -645,8 +645,8 @@ fn said(blocks: Value) -> Value {
 }
 
 /// A home with one of each: your message, a subagent that returns, a relay
-/// between two lanes, an answered question, a Codex run, and a live lane
-/// waiting on you with a result.
+/// between two lanes, an answered question, a Codex run, and a reply whose
+/// result can't be attributed exactly because other incoming events intervened.
 fn write_model_home(fixture: &Fixture, secrets: bool) {
     // A worktree path names its repo without touching the disk, and a fixed
     // path keeps the golden file's byte offsets independent of the temp dir.

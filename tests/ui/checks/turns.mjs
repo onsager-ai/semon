@@ -79,7 +79,7 @@ export default async function turnsCheck(browser) {
     const traceTurns = [];
     for (const sid of Object.keys(D.SESS)) {
       await goto(page, { v: "session", id: sid }, D0); T.sessions++;
-      const info = await page.evaluate(() => [...document.querySelectorAll(".turns > .turn")].map((t) => ({ id: t.dataset.turn, head: !!t.querySelector(":scope > .turn-h"), onward: t.querySelectorAll(":scope > .tx > .hcard:not(.start):not(.move)").length, btn: !!t.querySelector(":scope > .turn-end .tracebtn"), end: t.querySelector(":scope > .turn-end .stat")?.textContent ?? null })));
+      const info = await page.evaluate(() => [...document.querySelectorAll(".turns > .turn")].map((t) => ({ id: t.dataset.turn, head: !!t.querySelector(":scope > .turn-h"), onward: t.querySelectorAll(":scope > .tx > .hcard:not(.start):not(.move)").length + t.querySelectorAll(":scope > .tx > .result-marker").length, btn: !!t.querySelector(":scope > .turn-end .tracebtn"), end: t.querySelector(":scope > .turn-end .stat")?.textContent ?? null })));
       const exp = D.turns[sid] ?? [];
       if (info.length !== exp.length || info.some((t, i) => t.id !== exp[i].id || t.btn !== !!exp[i].out.length)) T.modelMismatch.push(sid.slice(0, 12));
       T.turns += info.length; T.perSession[D.SESS[sid].name.slice(0, 28)] = info.length;

@@ -120,6 +120,122 @@ export default async function (browser) {
     await page.context().close();
   }
 
+  // ---- Code-mode exec: unwrapped operations and its script control -----------------------------------------------
+  {
+    const page = await served(browser, { extras: true, path: "/s/codex/code-mode" });
+    await page.waitForFunction(() => !!document.querySelector(".turns"));
+    const data = await page.evaluate(async () => {
+      const token = new URLSearchParams(location.search).get("t");
+      const response = await fetch("/api/tx?sid=code-mode&t=" + encodeURIComponent(token));
+      const totals = await response.json();
+      document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click());
+      return {
+        calls: totals.calls,
+        errors: totals.errors,
+        steps: [...document.querySelectorAll(".step")].map((step) => ({
+          arg: step.querySelector(".sa")?.textContent ?? "",
+          err: step.classList.contains("err"),
+        })),
+        scriptButtons: [...document.querySelectorAll(".viewscript")].map((button) => button.textContent),
+      };
+    });
+    R.codeMode = data;
+    r.expect(data.calls === 3 && data.errors === 0, "three indexed operations are counted: " + JSON.stringify({ calls: data.calls, errors: data.errors }));
+    r.expect(data.steps.map((step) => step.arg).join("|") === "git status|sed -n '1,9p' a.rs|src/code-mode.rs", "the steps show unwrapped commands and the changed path: " + JSON.stringify(data.steps));
+    r.expect(data.steps.length === 3 && data.steps.every((step) => !step.err), "three ordinary, successful tool steps are shown");
+    r.expect(data.scriptButtons.length === 1 && data.scriptButtons[0] === "View script", "the operation group has one View script control: " + JSON.stringify(data.scriptButtons));
+    await page.click(".viewscript"); await page.waitForSelector("dialog.viewer[open]");
+    R.codeMode.script = await page.locator(".viewer pre.script").textContent();
+    r.expect(R.codeMode.script.includes("Promise.allSettled") && R.codeMode.script.includes("git status"), "View script opens the source in the existing sheet");
+    await page.click(".viewer .vclose");
+    r.expect(page.errors.length === 0, "code-mode page errors: " + page.errors.join(" | "));
+    await page.context().close();
+  }
+
+  // ---- Result handoff: the transcript keeps the reply once and shows a compact marker ----------------------------
+  {
+    const page = await served(browser, { extras: true, path: "/s/claude/result-card" });
+    await page.waitForFunction(() => !!document.querySelector(".result-marker"));
+    const result = await page.locator(".turns").evaluate((turns) => {
+      const phrase = "Unique result text for the transcript check.";
+      const text = turns.innerText;
+      const marker = turns.querySelector(".result-marker");
+      return {
+        phraseCount: text.split(phrase).length - 1,
+        markerText: marker?.innerText ?? "",
+        markerCount: turns.querySelectorAll(".result-marker").length,
+        markerHasCard: !!marker?.closest(".hcard"),
+        moreButtons: turns.querySelectorAll(".result-marker .more").length,
+      };
+    });
+    R.resultMarker = result;
+    r.expect(result.phraseCount === 1, "the reply text appears once in the transcript: " + JSON.stringify(result));
+    r.expect(result.markerCount === 1 && !result.markerHasCard && result.moreButtons === 0, "the result is one compact marker without a card or Show more: " + JSON.stringify(result));
+    const resultId = D.H.find((h) => h.from === "result-card" && h.ask === "result")?.id ?? "";
+    await page.click(".turn-end .tracebtn");
+    await page.waitForSelector('.flow .hop[data-h="' + resultId + '"]');
+    const trace = await page.locator(".flow").evaluate((flow, id) => {
+      const phrase = "Unique result text for the transcript check.";
+      const result = flow.querySelector('.hop[data-h="' + CSS.escape(id) + '"]');
+      return {
+        phraseCount: flow.innerText.split(phrase).length - 1,
+        hopText: result?.querySelector(".sent")?.innerText ?? "",
+        briefs: result?.querySelectorAll(".brief").length ?? 0,
+        moreButtons: result?.querySelectorAll(".more").length ?? 0,
+      };
+    }, resultId);
+    R.resultTrace = trace;
+    r.expect(trace.phraseCount === 0 && trace.hopText.length > 0 && trace.briefs === 0 && trace.moreButtons === 0, "the trace keeps result text out of its compact marker: " + JSON.stringify(trace));
+    r.expect(page.errors.length === 0, "result marker page errors: " + page.errors.join(" | "));
+    await page.context().close();
+  }
+
+  // ---- New results: opening the session persists its read state; unavailable storage leaves pages usable -----------
+  {
+    const resultHandoff = D.H.find((h) => h.kind === "toyou" && h.ask === "result" && h.from === "result-card");
+    r.expect(!!resultHandoff, "the synthetic human-started turn has a result handoff");
+    const page = await served(browser, { extras: true, path: "/" });
+    const selector = '.ib.new-result[data-h="' + (resultHandoff?.id ?? "") + '"]';
+    await page.waitForFunction((id) => [...document.querySelectorAll(".sec-h")].some((head) => head.firstChild?.textContent === "New results") && !!document.querySelector('.ib.new-result[data-h="' + CSS.escape(id) + '"]'), resultHandoff?.id ?? "");
+    const before = await page.locator(selector).evaluate((card) => ({
+      brief: card.querySelector(".q")?.innerText ?? "",
+      dots: card.querySelectorAll(".unread-dot").length,
+      badge: document.querySelector('.nav-item[data-go="home"] .cnt.hot')?.textContent ?? "",
+      waitingIds: [...([ ...document.querySelectorAll(".sec-h") ].find((head) => head.firstChild?.textContent === "Needs you")?.nextElementSibling?.querySelectorAll(".ib") ?? [])].map((item) => item.dataset.h),
+    }));
+    r.expect(before.brief.includes("Unique result text for the transcript check.") && before.dots === 1, "New results keeps the full card text and unread dot: " + JSON.stringify(before));
+    const waitingKinds = before.waitingIds.map((id) => D.H.find((h) => h.id === id)?.ask);
+    r.expect(waitingKinds.every((ask) => ask === "question" || ask === "decision"), "Needs you lists questions and decisions only: " + JSON.stringify(waitingKinds));
+    r.expect(Number(before.badge) === before.waitingIds.length, "the Home badge counts only waiting questions: " + JSON.stringify(before));
+
+    await page.goto(ENV.extraBase + "/s/claude/result-card?t=" + ENV.extraToken, { waitUntil: "load" });
+    await page.waitForFunction(() => !!document.querySelector(".result-marker"));
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("semon.seen") ?? "[]"));
+    const marker = await page.locator(".result-marker").innerText();
+    r.expect(stored.includes(resultHandoff?.id), "opening the session stores its result id as seen: " + JSON.stringify(stored));
+    r.expect(marker.includes("read"), "the opened session shows the result as read: " + marker);
+    await page.goto(ENV.extraBase + "/?t=" + ENV.extraToken, { waitUntil: "load" });
+    await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
+    const onHome = () => page.locator(selector).count();
+    r.expect(await onHome() === 0, "the read result leaves New results");
+    await page.reload({ waitUntil: "load" });
+    await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
+    r.expect(await onHome() === 0, "the read result stays cleared after reloading Home");
+    await page.context().close();
+
+    const blocked = await served(browser, { extras: true, path: "/" });
+    await blocked.addInitScript(() => {
+      Storage.prototype.getItem = function () { throw new Error("storage unavailable"); };
+      Storage.prototype.setItem = function () { throw new Error("storage unavailable"); };
+    });
+    await blocked.reload({ waitUntil: "load" });
+    await blocked.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
+    await blocked.goto(ENV.extraBase + "/s/claude/result-card?t=" + ENV.extraToken, { waitUntil: "load" });
+    await blocked.waitForFunction(() => !!document.querySelector(".result-marker"));
+    r.expect(blocked.errors.length === 0, "Home and the session page render when localStorage throws: " + blocked.errors.join(" | "));
+    await blocked.context().close();
+  }
+
   // ---- Injection -------------------------------------------------------------------------------------------------------
   {
     const X = { screens: 0, bad: [], payloadShown: 0 };

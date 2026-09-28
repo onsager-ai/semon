@@ -150,5 +150,21 @@
  {
   "gap": "tx ledger: served entry not in the sample: {\"k\":\"a\",\"text\":\"Rounding now happens once, after summing. 42 tests pass. Committed on `fix/rounding`.\"}",
   "why": "A result for you exists only while its session is live and waiting; ledger exited, so its last message is a reply."
+ },
+ {
+  "gap": "session principal.state: sample \"wait\", served \"idle\"",
+  "why": "Results no longer make a session wait (#21)."
+ },
+ {
+  "gap": "session atlas.state: sample \"wait\", served \"idle\"",
+  "why": "Results no longer make a session wait (#21)."
+ },
+ {
+  "gap": "handoff h11.status: sample \"wait\", served \"new\"",
+  "why": "Results no longer make a session wait (#21)."
+ },
+ {
+  "gap": "handoff h14.status: sample \"wait\", served \"new\"",
+  "why": "Results no longer make a session wait (#21)."
  }
 ]

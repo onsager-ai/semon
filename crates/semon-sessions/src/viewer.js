@@ -18,6 +18,16 @@
   const SESS = {};
   const H = [];
   const TX = {};
+  const SEEN_KEY = "semon.seen", SEEN_LIMIT = 2000;
+  const SEEN_RESULTS = (() => {
+    try {
+      const ids = JSON.parse(window.localStorage.getItem(SEEN_KEY) ?? "[]");
+      if (!Array.isArray(ids)) return new Set();
+      const clean = ids.filter((id) => typeof id === "string").slice(-SEEN_LIMIT), seen = new Set(clean);
+      if (seen.size !== ids.length) try { window.localStorage.setItem(SEEN_KEY, JSON.stringify([...seen])); } catch {}
+      return seen;
+    } catch { return new Set(); }
+  })();
 
   // ====================================================================================
   const $ = (s, r = document) => r.querySelector(s);
@@ -36,14 +46,24 @@
   const dur = (a, b) => { const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 60000)); return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor((d % 1440) / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };
   const tok = (m) => m >= 1 ? m.toFixed(1) + "M" : Math.round(m * 1000) + "k";
   const dot = (st) => { const d = el("span", "dot " + st); d.title = STATE[st] ?? st; d.setAttribute("role", "img"); d.setAttribute("aria-label", d.title); return d; };
-  const STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed" };
+  const STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed", new: "New result", read: "Read result" };
   const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
   const where = (s) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " · " + s.branch : "") : "No repo";
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
   const parentOf = (sid) => H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
   const RANK = { wait: 0, work: 1, err: 2, done: 3 };
-  const inbox = () => H.filter((h) => h.kind === "toyou" && h.status === "wait").sort((a, b) => b.at - a.at);
+  const isResult = (h) => h.kind === "toyou" && h.ask === "result";
+  function markSeenResults(handoffs) {
+    let changed = false;
+    for (const h of handoffs) if (isResult(h) && typeof h.id === "string" && !SEEN_RESULTS.has(h.id)) {
+      SEEN_RESULTS.add(h.id); changed = true;
+    }
+    while (SEEN_RESULTS.size > SEEN_LIMIT) SEEN_RESULTS.delete(SEEN_RESULTS.values().next().value);
+    if (changed) try { window.localStorage.setItem(SEEN_KEY, JSON.stringify([...SEEN_RESULTS])); } catch {}
+  }
+  const inbox = () => H.filter((h) => h.kind === "toyou" && (h.ask === "question" || h.ask === "decision") && h.status === "wait").sort((a, b) => b.at - a.at);
+  const unreadResults = () => H.filter((h) => isResult(h) && !SEEN_RESULTS.has(h.id)).sort((a, b) => b.at - a.at);
   const working = () => Object.values(SESS).filter((s) => s.state === "work");
   const clean = (t) => t.replace(/[`*]/g, "");
 
@@ -126,7 +146,7 @@
     const what = { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h.ask];
     return [h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from), el("span", "verb", what)]];
   }
-  const statWord = (h) => ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
+  const statWord = (h) => isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
 
   // ---- Turns and traces, computed from the transcripts ---------------------------------------------------
   // A turn starts at each incoming entry: your message, a relay from another session, or the brief that starts a
@@ -258,7 +278,7 @@
     const part = (as) => api("/api/entry?sid=" + enc(e.sid) + "&slot=" + e.slot + "&as=" + as).then((r) => [as, r]);
     return Promise.all((e.more ?? []).map(part)).then((rs) => {
       const f = { fullCut: [] };
-      for (const [k, r] of rs) { f[k] = k === "diff" ? r.diff : r.text; if (r.truncated) f.fullCut.push(k); }
+      for (const [k, r] of rs) { f[k] = k === "diff" ? r.diff : r.text; if (k === "diff" && r.changes) f.changes = r.changes; if (r.truncated) f.fullCut.push(k); }
       return f;
     });
   }
@@ -426,7 +446,7 @@
   const upCount = () => Object.keys(MACHINE).filter((m) => MACHINE_UP[m]).length;
   let allAnswered = false;
   function renderHome(page) {
-    const open = inbox(), w = working().sort((a, b) => b.last - a.last), many = Object.keys(MACHINE).length > 1;
+    const open = inbox(), fresh = unreadResults(), w = working().sort((a, b) => b.last - a.last), many = Object.keys(MACHINE).length > 1;
     const head = el("div", "ph"); const h1 = el("h1", null, "Home"); head.append(h1);
     const sub = el("div", "sub"); for (const [v, l] of [[open.length, "waiting on you"], [w.length, "working"], [upCount() + " of " + Object.keys(MACHINE).length, Object.keys(MACHINE).length === 1 ? "machine up" : "machines up"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
     head.append(sub); page.append(head); observeTitle(h1);
@@ -435,6 +455,12 @@
     for (const h of open) list.append(inboxItem(h, false));
     if (!open.length) list.append(el("p", "empty", "Nothing is waiting on you."));
     page.append(list);
+    if (fresh.length) {
+      page.append(secHead("New results", fresh.length));
+      const results = el("div", "list");
+      for (const h of fresh) results.append(inboxItem(h, false));
+      page.append(results);
+    }
     page.append(secHead("Working now", w.length));
     const live = el("div", "list");
     for (const s of w) live.append(liveRow(s, many));
@@ -454,14 +480,17 @@
     const sid = h.kind === "move" ? h.to : h.from, t = HOLDS.get(h.id);
     const r = el("div", "ib" + (quiet ? " quiet" : "")); r.tabIndex = 0; r.setAttribute("role", "link"); r.dataset.h = h.id;
     const [ic, parts] = sentence(h, "you");
-    r.append(icon(quiet && h.kind === "toyou" ? I.done : ic)); const ln = el("span", "ln"); ln.append(...parts); r.append(ln, el("span", "tm", ago(h.at)));
+    r.append(icon(quiet && h.kind === "toyou" ? I.done : ic)); const ln = el("span", "ln"); ln.append(...parts);
+    const unread = isResult(h) && !SEEN_RESULTS.has(h.id), time = el("span", "tm" + (unread ? " unread" : ""));
+    if (unread) { r.classList.add("new-result"); time.append(el("span", "unread-dot")); }
+    time.append(ago(h.at)); r.append(ln, time);
     r.append(rich("span", "q", preview(h.brief)));
     const an = quiet ? answersOf(h) : null; if (an) r.append(el("span", "ans", an.length ? "You answered: " + an.join(" · ") : "Answered · reply not in these logs"));
     if (t) r.append(originLine(t));
     const ctx = el("span", "ctx"); const s = SESS[sid];
     ctx.append(el("span", null, [HARNESS[s.harness], MACHINE[s.machine]].join(" · "))); if (t?.out.length) ctx.append(traceBtn(t));
     r.append(ctx);
-    const open = () => goSession(sid, t?.id);
+    const open = () => { if (isResult(h)) markSeenResults([h]); goSession(sid, t?.id); };
     r.addEventListener("click", () => { if (!getSelection().isCollapsed) return; open(); });
     r.addEventListener("keydown", (ev) => { if (ev.target === r && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); open(); } });
     return r;
@@ -538,6 +567,12 @@
     const root = TURN.get(id);
     const head = el("div", "ph sr"); const h1 = el("h1", null, "Trace"); head.append(h1); page.append(head); observeTitle(h1);
     if (!root) { page.append(el("p", "empty", "This turn isn't in the logs on this machine.")); return; }
+    const readTrace = (turn, visited = new Set()) => {
+      if (!turn || visited.has(turn.id)) return;
+      visited.add(turn.id); markSeenResults(turn.out);
+      for (const h of turn.out) if (h.kind === "spawn" || h.kind === "relay") readTrace(STARTS.get(h.id), visited);
+    };
+    readTrace(root);
     const flow = el("div", "flow"), seen = new Set([root.id]), sess = new Set([root.sid]); let n = 0;
     const hop = (cls, ic, hc, parts, at) => { const x = el("div", "hop " + cls); const node = el("div", "node " + hc); node.append(icon(ic)); const body = el("div", "body"); const sent = el("div", "sent"); sent.append(...parts); if (at != null) sent.append(el("span", "tm", clock(at))); body.append(sent); x.append(node, body); flow.append(x); return [x, body]; };
     const s0 = root.start, text = s0 ? s0.brief : root.u?.text;
@@ -547,13 +582,15 @@
     const e0 = turnEnd(root); traceMeta(b0, e0?.st ?? "idle", e0?.text ?? "Nothing recorded", root.sid, root);
     const walk = (t) => {
       for (const h of t.sent) {
-        const c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null, tgt = h.kind === "toyou" ? h.from : h.to, [ic, parts] = sentence(h, null);
+        const result = h.kind === "toyou" && h.ask === "result";
+        const c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null, tgt = h.kind === "toyou" ? h.from : h.to, [ic, parts] = result ? [I.result, [el("span", "verb", statWord(h))]] : sentence(h, null);
         const [x, b] = hop("child k-" + h.kind + " s-" + h.status + (c || h.kind === "toyou" || h.kind === "move" ? "" : " stub"), ic, hcls(tgt), parts, h.at); x.dataset.h = h.id; if (c) x.dataset.turn = c.id;
+        if (result) { n++; continue; }
         clampBrief(b, h.brief); const an = answerEl(h, "result"); if (an) b.append(an);
         if (h.result) { const r = el("div", "result"); r.append(el("span", "rl", "Result:")); const s = el("span"); inline(s, h.result); r.append(s); b.append(r); }
         if (h.kind === "move") { traceMeta(b, "done", "Moved", h.to, t); continue; }
         n++;
-        if (h.kind === "toyou") { traceMeta(b, h.status === "done" ? "done" : h.status, statWord(h), h.from, t); continue; }
+        if (h.kind === "toyou") { traceMeta(b, isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : h.status === "done" ? "done" : h.status, statWord(h), h.from, t); continue; }
         sess.add(h.to); const e = c && turnEnd(c);
         traceMeta(b, e ? e.st : h.status === "done" ? "done" : h.status, e ? e.text : statWord(h), h.to, c, c ? null : "Its turn isn't in these logs");
         if (c && !seen.has(c.id)) { seen.add(c.id); walk(c); } // a turn is drawn once, so a loop in the data can't recurse forever
@@ -567,6 +604,7 @@
 
   // ---- Session page --------------------------------------------------------------------------------------------------
   function renderSession(page, sid) {
+    markSeenResults(H.filter((h) => isResult(h) && h.from === sid));
     const head = el("div", "ph sr"); const h1 = el("h1", null, SESS[sid].name); head.append(h1); page.append(head); observeTitle(h1);
     page.append(transcript(sid));
   }
@@ -600,7 +638,9 @@
     const flush = () => {
       if (!run.length) return;
       const steps = el("div", "steps"); run.forEach((r) => steps.append(r.node));
-      if (run.length === 1 || find) { tx.append(steps); run = []; return; }
+      const scripts = [], scriptKeys = new Set();
+      for (const r of run) if (r.entry?.script != null && !scriptKeys.has(String(r.entry.script))) { scriptKeys.add(String(r.entry.script)); scripts.push(r.entry); }
+      if ((run.length === 1 && !scripts.length) || find) { tx.append(steps); run = []; return; }
       const counts = new Map(); for (const r of run) { const [, , p, one, many] = toolInfo(r.k), c = counts.get(p) ?? { n: 0, one, many }; c.n++; counts.set(p, c); }
       let text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
       text = text[0].toUpperCase() + text.slice(1);
@@ -612,7 +652,9 @@
       b.append(icon(I.chev, "chev"));
       steps.hidden = true;
       b.addEventListener("click", () => { steps.hidden = !steps.hidden; b.setAttribute("aria-expanded", String(!steps.hidden)); });
-      g.append(b, steps); tx.append(g); run = [];
+      g.append(b);
+      for (const e of scripts) { const view = el("button", "viewscript", "View script"); view.type = "button"; view.addEventListener("click", () => openScript(e)); g.append(view); }
+      g.append(steps); tx.append(g); run = [];
     };
     // A turn block: who started it, the work, and how it ended. While finding or filtering, a turn left with nothing drops out.
     const firsts = turnMode ? new Map((TURNS[sid] ?? []).map((t) => [t.entries[0], t])) : new Map(); let cur = null;
@@ -640,21 +682,29 @@
         const [ic, v] = verb(e.name);
         if (e.live) { const r = keyed(el("div", "step live"), e); r.dataset.live = sid; r.append(el("span", "spin"), el("span", "sv", v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd tick", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs, key: e.key }); continue; }
         const box = keyed(el("div", "step" + (e.ok || e.ok === null ? "" : " err")), e); const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
-        b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "no result" : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs), icon(I.chev, "chev"));
+        b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs), icon(I.chev, "chev"));
         const out = el("div", "out"); out.hidden = true;
         // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
         // eleven lines. When either is cut, "View all" opens the whole call in a sheet.
         const inLabel = /^(Bash|shell|exec_command|local_shell)$/.test(e.name) ? "Command" : "Input";
         if (e.in) out.append(el("div", "io", inLabel), el("pre", "in clip", e.in));
+        if (e.cwd) out.append(el("div", "io", "Working directory · " + e.cwd));
         if (e.in) out.append(el("div", "io", "Output"));
-        if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) out.append(el("pre", "clip", e.out)); else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
+        if (e.changes) {
+          for (const change of e.changes) {
+            out.append(el("div", "io", "Change · " + change.path + (change.move ? " → " + change.move : "")));
+            if (change.diff?.length) out.append(diffEl(change.diff, "clip")); else out.append(el("div", "noout", "No diff recorded"));
+          }
+          if (!e.changes.length) out.append(el("div", "noout", "No changes recorded"));
+        } else if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) out.append(el("pre", "clip", e.out)); else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
+        if (find && e.script != null) { const script = el("button", "viewscript", "View script"); script.type = "button"; script.addEventListener("click", () => openScript(e)); out.append(script); }
         const all = el("button", "viewall"); all.type = "button"; all.hidden = true; all.append(icon(I.expand), el("span", null, "View all"));
         all.addEventListener("click", () => openViewer(e, v, ic, inLabel)); out.append(all);
         b.addEventListener("click", () => { out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden));
           if (!out.hidden) { let cut = !!e.more?.length; out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; }); all.hidden = !cut;
             // Text cut when this copy was made, with nothing more to show: say so instead of ending on "…".
             if (!cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs")); } });
-        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key }); continue;
+        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key, entry: e }); continue;
       }
       flush();
       if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg user"), e); m.append(markdown(e.text)); tx.append(m); }
@@ -666,6 +716,11 @@
         const h = H.find((x) => x.id === e.id); if (!hit(h.brief + " " + (h.result ?? ""))) continue;
         // Your own ask is simply your message.
         if (h.kind === "ask") { if (!show.messages) continue; const m = keyed(el("div", "msg user"), e); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
+        if (h.kind === "toyou" && h.ask === "result") {
+          const marker = el("div", "result-marker " + (SEEN_RESULTS.has(h.id) ? "read" : "new"));
+          marker.append(icon(I.result), el("span", "word", statWord(h)), el("span", "tm", clock(h.at)));
+          tx.append(keyed(marker, e)); continue;
+        }
         // A relay or brief that starts a turn is that turn's message.
         if (cur && cur.t.start === h && e === cur.t.entries[0]) { if (!show.messages) continue; tx.append(keyed(handoffCard(h, sid, true), e)); continue; }
         if (h.kind === "move") { if (find) continue; tx.append(keyed(handoffCard(h, sid), e)); continue; }
@@ -709,9 +764,18 @@
         c.addEventListener("click", () => navigator.clipboard?.writeText(text).then(() => { c.lastChild.textContent = "Copied"; }, () => { c.lastChild.textContent = "Copy failed"; })); s.append(c); }
       body.append(s); };
     const cutNote = (text) => { if (!e.fullFailed && /…(\(truncated\))?\s*$/.test(text ?? "")) body.append(el("p", "vnote", "Cut short in this copy of the logs.")); };
-    if (e.in) { section(inLabel, e.in); body.append(el("pre", "in", e.in)); cutNote(e.in); }
-    if (e.diff) { section("Change", null); body.append(diffEl(e.diff)); }
-    else { section("Output", e.out); if (e.out) { body.append(el("pre", null, e.out)); cutNote(e.out); } else body.append(el("p", "vnote", e.unfinished ? "No result recorded." : "No output.")); }
+    if (e.scriptText !== undefined) {
+      section("Script", e.scriptText); body.append(el("pre", "script", e.scriptText));
+      if (e.scriptTruncated) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));
+    } else if (e.scriptFailed) body.append(el("p", "vnote", "Couldn't load the script from these logs."));
+    else {
+      if (e.in) { section(inLabel, e.in); body.append(el("pre", "in", e.in)); cutNote(e.in); }
+      if (e.changes) {
+        for (const change of e.changes) { section("Change · " + change.path + (change.move ? " → " + change.move : ""), null); body.append(diffEl(change.diff ?? [])); }
+        if (!e.changes.length) body.append(el("p", "vnote", "No changes recorded."));
+      } else if (e.diff) { section("Change", null); body.append(diffEl(e.diff)); }
+      else { section("Output", e.out); if (e.out) { body.append(el("pre", null, e.out)); cutNote(e.out); } else body.append(el("p", "vnote", e.unfinished ? "No result recorded." : "No output.")); }
+    }
     if (e.fullFailed) body.append(el("p", "vnote", "Couldn't load the full text: this is the preview."));
     if (e.fullCut?.length) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));
     d.append(head, body); document.body.append(d);
@@ -719,6 +783,13 @@
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
     try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
+  }
+
+  function openScript(e) {
+    const done = (fields) => openViewer({ ...e, ...fields, full: true }, "View script", "run", "Script");
+    api("/api/entry?sid=" + enc(e.sid) + "&slot=" + e.slot + "&as=script")
+      .then((result) => done({ scriptText: result.text, scriptTruncated: result.truncated }))
+      .catch(() => done({ scriptFailed: true }));
   }
 
   function handoffCard(h, viewer, start) {

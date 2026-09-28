@@ -1034,6 +1034,71 @@ fn states_follow_the_process_the_question_and_the_last_word() {
     );
     home.live(32, "answered", "idle", json!({}));
     home.top(
+        "relayed-reply",
+        &[
+            peer(
+                "relayed-reply",
+                ts(16, 4),
+                "relay-result",
+                "Advisor",
+                34,
+                "finish the check",
+            ),
+            assistant(
+                "relayed-reply",
+                ts(16, 5),
+                vec![text("The check is finished.")],
+            ),
+        ],
+    );
+    home.live(34, "relayed-reply", "idle", json!({}));
+    home.top(
+        "scheduled-reply",
+        &[
+            user("scheduled-reply", ts(16, 6), "scheduled prompt"),
+            assistant(
+                "scheduled-reply",
+                ts(16, 7),
+                vec![text("The scheduled check is finished.")],
+            ),
+        ],
+    );
+    home.live(35, "scheduled-reply", "idle", json!({}));
+    home.top(
+        "notified-reply",
+        &[
+            human("notified-reply", ts(16, 8), "check the task"),
+            notification(
+                "notified-reply",
+                ts(16, 9),
+                "task-check",
+                "completed",
+                "task finished",
+            ),
+            assistant(
+                "notified-reply",
+                ts(16, 10),
+                vec![text("The task is finished.")],
+            ),
+        ],
+    );
+    home.live(36, "notified-reply", "idle", json!({}));
+    home.top(
+        "handback-reply",
+        &[
+            human("handback-reply", ts(16, 11), "check the agent"),
+            json!({"type":"user","timestamp":ts(16, 12),"sessionId":"handback-reply",
+                "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/37.sock","handback":true,"senderTaskId":"agent-37","body":"agent handed back"},
+                "message":{"role":"user","content":"agent handed back"}}),
+            assistant(
+                "handback-reply",
+                ts(16, 13),
+                vec![text("The agent is finished.")],
+            ),
+        ],
+    );
+    home.live(37, "handback-reply", "idle", json!({}));
+    home.top(
         "idle",
         &[
             assistant("idle", ts(16, 0), vec![text("earlier")]),
@@ -1049,22 +1114,162 @@ fn states_follow_the_process_the_question_and_the_last_word() {
             state("working"),
             state("asking"),
             state("answered"),
+            state("relayed-reply"),
+            state("scheduled-reply"),
+            state("notified-reply"),
+            state("handback-reply"),
             state("idle"),
             state("ended")
         ],
-        ["work", "wait", "wait", "idle", "done"]
+        [
+            "work", "wait", "idle", "idle", "idle", "idle", "idle", "idle", "done"
+        ]
     );
     assert_eq!(by_brief(&built, "busy work").status, "work");
     assert_eq!(by_brief(&built, "Now?").status, "wait");
     let result = by_brief(&built, "All done: 3 files changed.");
     assert_eq!(
         (result.kind, result.ask, result.status),
-        ("toyou", Some("result"), "wait")
+        ("toyou", Some("result"), "new")
+    );
+    assert_eq!(built.sessions["answered"].state, "idle");
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.from == "answered" && handoff.ask == Some("result"))
+            .count(),
+        1
+    );
+    assert!(
+        !built
+            .handoffs
+            .iter()
+            .any(|handoff| { handoff.from == "relayed-reply" && handoff.ask == Some("result") })
+    );
+    assert!(
+        !built
+            .handoffs
+            .iter()
+            .any(|handoff| { handoff.from == "scheduled-reply" && handoff.ask == Some("result") })
+    );
+    assert!(
+        !built
+            .handoffs
+            .iter()
+            .any(|handoff| { handoff.from == "notified-reply" && handoff.ask == Some("result") })
+    );
+    assert!(
+        !built
+            .handoffs
+            .iter()
+            .any(|handoff| { handoff.from == "handback-reply" && handoff.ask == Some("result") })
     );
     let answered = turns_of(&built, "answered");
     assert_eq!(answered[0].end.why, "toyou");
-    assert_eq!(answered[0].end.st, "wait");
+    assert_eq!(answered[0].end.st, "done");
     assert_eq!(turns_of(&built, "working")[0].end.why, "working");
+}
+
+#[test]
+fn a_failed_codex_operation_ends_its_turn_as_a_failed_step() {
+    let home = Home::new();
+    home.codex(
+        "failed-operation",
+        json!({}),
+        &[
+            codex_user(ts(19, 0), "Run the command"),
+            codex_line(
+                ts(19, 1),
+                "response_item",
+                json!({"type":"custom_tool_call","call_id":"exec","name":"exec","input":"tools.exec_command({cmd:'false'})"}),
+            ),
+            codex_line(
+                ts(19, 2),
+                "event_msg",
+                json!({"type":"item_completed","item":{"type":"CommandExecution","id":"item","command":["/bin/zsh","-lc","false"],"exit_code":1,"aggregated_output":"failed"}}),
+            ),
+            codex_line(
+                ts(19, 3),
+                "response_item",
+                json!({"type":"custom_tool_call_output","call_id":"exec","output":"done"}),
+            ),
+        ],
+    );
+    let built = home.build();
+    let turns = turns_of(&built, "failed-operation");
+    let turn = turns.last().unwrap();
+    assert_eq!(turn.end.why, "failed_step");
+    assert_eq!(turn.end.st, "err");
+}
+
+#[test]
+fn a_script_error_after_its_operations_ends_the_turn_as_failed() {
+    let home = Home::new();
+    home.codex(
+        "late-script-error",
+        json!({}),
+        &[
+            codex_user(ts(19, 0), "Run the script"),
+            codex_line(
+                ts(19, 1),
+                "response_item",
+                json!({"type":"custom_tool_call","call_id":"exec","name":"exec","input":"await tools.exec_command({cmd:'ls'}); throw new Error('boom')"}),
+            ),
+            codex_line(
+                ts(19, 2),
+                "event_msg",
+                json!({"type":"item_completed","item":{"type":"CommandExecution","id":"item","command":["/bin/zsh","-lc","ls"],"exit_code":0,"aggregated_output":"a.rs"}}),
+            ),
+            codex_line(
+                ts(19, 3),
+                "response_item",
+                json!({"type":"custom_tool_call_output","call_id":"exec","output":[{"type":"input_text","text":"Script error: boom"}]}),
+            ),
+        ],
+    );
+    let built = home.build();
+    let turns = turns_of(&built, "late-script-error");
+    let turn = turns.last().unwrap();
+    assert_eq!((turn.end.st, turn.end.why), ("err", "failed_step"));
+    let tx = &built.tx["late-script-error"];
+    assert_eq!((tx.calls, tx.errors), (2, 1));
+}
+
+#[test]
+fn a_result_follows_the_last_block_of_its_reply() {
+    let home = Home::new();
+    home.top(
+        "blocks",
+        &[
+            human("blocks", ts(20, 0), "Summarise it"),
+            assistant(
+                "blocks",
+                ts(20, 1),
+                vec![text("First part."), text("Final part.")],
+            ),
+        ],
+    );
+    home.live(38, "blocks", "idle", json!({}));
+    let built = home.build();
+    let result = built
+        .handoffs
+        .iter()
+        .find(|handoff| handoff.from == "blocks" && handoff.ask == Some("result"))
+        .expect("a result for a reply to your message");
+    let slots = &built.tx["blocks"].slots;
+    let reply = slots
+        .iter()
+        .position(|slot| matches!(slot.kind, SlotKind::A) && slot.block == 1)
+        .expect("the reply's last block");
+    let marker = slots
+        .iter()
+        .position(|slot| matches!(&slot.kind, SlotKind::H(id) if *id == result.id))
+        .expect("the result in the transcript");
+    assert!(marker > reply, "result at {marker}, reply at {reply}");
+    let turns = turns_of(&built, "blocks");
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].end.why, "toyou");
 }
 
 #[test]
@@ -1168,6 +1373,25 @@ fn the_window_trims_output_but_not_links() {
             .iter()
             .all(|interval| interval.0 >= at(5, 30))
     );
+}
+
+#[test]
+fn an_unread_result_survives_the_since_window() {
+    let mut home = Home::new();
+    home.top(
+        "old-result",
+        &[
+            human("old-result", ts(0, 0), "Do this"),
+            assistant("old-result", ts(0, 1), vec![text("Finished long ago.")]),
+        ],
+    );
+    home.live(90, "old-result", "idle", json!({}));
+    home.options.all = false;
+    home.options.since = Duration::from_secs(3600);
+    let built = home.build_at(&home.options, NOW);
+    let handoff = by_brief(&built, "Finished long ago.");
+    assert_eq!((handoff.ask, handoff.status), (Some("result"), "new"));
+    assert!(built.sessions.contains_key("old-result"));
 }
 
 #[test]
