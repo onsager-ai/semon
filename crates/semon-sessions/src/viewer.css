@@ -580,8 +580,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .hmark.h-codex { font-size: 15px; }
 .page.wide-mode { max-width: 1400px; }
 
-.topbar .l2.session-meta { position: relative; gap: 12px; width: 100%; min-height: 36px; overflow: hidden; border: 0; border-radius: 8px; background: none; padding: 0; text-align: left; }
-.topbar .l2.session-meta .meta-hit { position: absolute; inset: 0; z-index: 0; border: 0; border-radius: 8px; background: none; padding: 0; }
+.topbar .l2.session-meta { position: relative; gap: 12px; width: 100%; min-height: 36px; overflow: hidden; border: 0; border-radius: 8px; background: none; padding: 0; text-align: left; pointer-events: none; }
+.topbar .l2.session-meta .meta-hit { position: absolute; inset: 0; z-index: 0; border: 0; border-radius: 8px; background: none; padding: 0; pointer-events: auto; }
 @media (hover: hover) { .topbar .l2.session-meta:hover .meta-hit { background: var(--sunken); } }
 .topbar .l2.session-meta .meta-item { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; flex: none; min-width: 0; pointer-events: none; }
 .topbar .l2.session-meta .meta-item .meta-value { display: block; min-width: 0; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
