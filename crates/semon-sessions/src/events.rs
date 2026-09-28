@@ -28,7 +28,9 @@ use crate::{Tokens, field};
 /// v3: every assistant text is its own event (v2 collapsed adjacent ones).
 /// v4: thinking blocks and Codex harness text are indexed apart, as `extras`.
 /// v5: completed Codex items carry their exact code-mode call parent, if known.
-const CACHE_VERSION: u32 = 5;
+/// v6: code-mode calls stop accepting item attribution at a turn boundary.
+/// v7: tool ids index all tool events for exact legacy item matching.
+const CACHE_VERSION: u32 = 7;
 
 /// One file's event index and the facts the model needs about it. Metadata
 /// only (risk:secret).
@@ -45,6 +47,9 @@ pub(crate) struct FileIndex {
     /// Tool calls still waiting for a result: call id -> event index.
     #[serde(default)]
     pub(crate) pending: BTreeMap<String, usize>,
+    /// Tool call id -> all event indices with that exact id.
+    #[serde(default)]
+    tool_ids: BTreeMap<String, Vec<usize>>,
     /// Line timestamps clustered into busy intervals (epoch ms).
     #[serde(default)]
     pub(crate) busy: Vec<(i64, i64)>,
@@ -353,6 +358,9 @@ pub(crate) struct Event {
     /// A Codex `custom_tool_call` named `exec`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) code_mode: bool,
+    /// Still open for operation attribution within the current turn.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) code_mode_open: bool,
     /// Operation: the exact index of its parent code-mode call, if unique.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<usize>,
@@ -790,7 +798,43 @@ fn resolve(summary: &mut FileIndex, id: &str, reply: impl FnOnce(Option<&str>) -
         && event.k == Kind::Tool
     {
         event.r = Some(reply(event.n.as_deref()));
+        event.code_mode_open = false;
     }
+}
+
+/// Stops unresolved code-mode calls from claiming items in a later turn.
+fn close_code_mode(summary: &mut FileIndex) {
+    for index in summary.pending.values().copied().collect::<Vec<_>>() {
+        if let Some(event) = summary.events.get_mut(index)
+            && event.k == Kind::Tool
+            && event.code_mode
+        {
+            event.code_mode_open = false;
+        }
+    }
+}
+
+fn non_code_mode_tool(summary: &FileIndex, id: &str) -> bool {
+    summary.tool_ids.get(id).is_some_and(|indices| {
+        indices.iter().any(|index| {
+            summary
+                .events
+                .get(*index)
+                .is_some_and(|event| event.k == Kind::Tool && !event.code_mode)
+        })
+    })
+}
+
+fn script_error(output: Option<&Value>) -> bool {
+    fn has_prefix(value: &Value) -> bool {
+        match value {
+            Value::String(text) => text.trim_start().starts_with("Script error"),
+            Value::Array(values) => values.iter().any(has_prefix),
+            Value::Object(fields) => fields.get("text").is_some_and(has_prefix),
+            _ => false,
+        }
+    }
+    output.is_some_and(has_prefix)
 }
 
 fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Option<i64>) {
@@ -819,7 +863,9 @@ fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Op
 
 fn tool_event(summary: &mut FileIndex, event: Event) {
     if let Some(id) = &event.id {
-        summary.pending.insert(id.clone(), summary.events.len());
+        let index = summary.events.len();
+        summary.tool_ids.entry(id.clone()).or_default().push(index);
+        summary.pending.insert(id.clone(), index);
     }
     summary.events.push(event);
 }
@@ -1121,15 +1167,17 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
         Some("event_msg") if field(payload, "type") == Some("item_completed") => {
             let item = &payload["item"];
             let operation = matches!(field(item, "type"), Some("CommandExecution" | "FileChange"));
-            if operation {
+            let legacy_tool = field(item, "id").is_some_and(|id| non_code_mode_tool(summary, id));
+            if operation && !legacy_tool {
                 let parent = summary
-                    .events
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, event)| {
-                        event.k == Kind::Tool && event.code_mode && event.r.is_none()
+                    .pending
+                    .values()
+                    .copied()
+                    .filter(|index| {
+                        summary.events.get(*index).is_some_and(|event| {
+                            event.k == Kind::Tool && event.code_mode && event.code_mode_open
+                        })
                     })
-                    .map(|(index, _)| index)
                     .collect::<Vec<_>>();
                 let code = item.get("exit_code").and_then(Value::as_i64);
                 let failed =
@@ -1177,7 +1225,11 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             }
         }
         Some("event_msg") if field(payload, "type") == Some("task_complete") => {
+            close_code_mode(summary);
             summary.failed = payload.get("error").is_some_and(|error| !error.is_null());
+        }
+        Some("event_msg") if field(payload, "type") == Some("turn_aborted") => {
+            close_code_mode(summary);
         }
         Some("response_item") => match field(payload, "type") {
             Some("message") => {
@@ -1192,26 +1244,30 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     })
                     .unwrap_or_default();
                 match field(payload, "role") {
-                    Some("user") if harness_tag(&text).is_some() => extra(
-                        summary,
-                        Event {
-                            k: Kind::Harness,
-                            o: offset,
-                            t: time,
-                            n: harness_tag(&text).map(str::to_owned),
-                            ..Event::default()
-                        },
-                    ),
-                    Some("user") if !text.trim().is_empty() => {
-                        push(
-                            summary,
-                            Event {
-                                k: Kind::U,
-                                o: offset,
-                                t: time,
-                                ..Event::default()
-                            },
-                        );
+                    Some("user") => {
+                        close_code_mode(summary);
+                        if let Some(tag) = harness_tag(&text) {
+                            extra(
+                                summary,
+                                Event {
+                                    k: Kind::Harness,
+                                    o: offset,
+                                    t: time,
+                                    n: Some(tag.to_owned()),
+                                    ..Event::default()
+                                },
+                            );
+                        } else if !text.trim().is_empty() {
+                            push(
+                                summary,
+                                Event {
+                                    k: Kind::U,
+                                    o: offset,
+                                    t: time,
+                                    ..Event::default()
+                                },
+                            );
+                        }
                     }
                     Some("assistant") if !text.trim().is_empty() => push(
                         summary,
@@ -1235,6 +1291,8 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     n: Some(field(payload, "name").unwrap_or("shell").to_owned()),
                     code_mode: field(payload, "type") == Some("custom_tool_call")
                         && field(payload, "name") == Some("exec"),
+                    code_mode_open: field(payload, "type") == Some("custom_tool_call")
+                        && field(payload, "name") == Some("exec"),
                     ..Event::default()
                 },
             ),
@@ -1256,7 +1314,8 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                         resolve(summary, id, |_| Reply {
                             o: offset,
                             t: time,
-                            e: code.is_some_and(|code| code != 0),
+                            e: code.is_some_and(|code| code != 0)
+                                || (code_mode_call && script_error(output)),
                             f: flags,
                             ..Reply::default()
                         });

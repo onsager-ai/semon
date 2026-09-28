@@ -1172,6 +1172,37 @@ fn states_follow_the_process_the_question_and_the_last_word() {
 }
 
 #[test]
+fn a_failed_codex_operation_ends_its_turn_as_a_failed_step() {
+    let home = Home::new();
+    home.codex(
+        "failed-operation",
+        json!({}),
+        &[
+            codex_user(ts(19, 0), "Run the command"),
+            codex_line(
+                ts(19, 1),
+                "response_item",
+                json!({"type":"custom_tool_call","call_id":"exec","name":"exec","input":"tools.exec_command({cmd:'false'})"}),
+            ),
+            codex_line(
+                ts(19, 2),
+                "event_msg",
+                json!({"type":"item_completed","item":{"type":"CommandExecution","id":"item","command":["/bin/zsh","-lc","false"],"exit_code":1,"aggregated_output":"failed"}}),
+            ),
+            codex_line(
+                ts(19, 3),
+                "response_item",
+                json!({"type":"custom_tool_call_output","call_id":"exec","output":"done"}),
+            ),
+        ],
+    );
+    let built = home.build();
+    let turn = turns_of(&built, "failed-operation").last().unwrap();
+    assert_eq!(turn.end.why, "failed_step");
+    assert_eq!(turn.end.st, "err");
+}
+
+#[test]
 fn turns_split_at_each_incoming_entry_and_at_a_gap() {
     let home = Home::new();
     let path = home.top(
@@ -1272,6 +1303,25 @@ fn the_window_trims_output_but_not_links() {
             .iter()
             .all(|interval| interval.0 >= at(5, 30))
     );
+}
+
+#[test]
+fn an_unread_result_survives_the_since_window() {
+    let mut home = Home::new();
+    home.top(
+        "old-result",
+        &[
+            human("old-result", ts(0, 0), "Do this"),
+            assistant("old-result", ts(0, 1), vec![text("Finished long ago.")]),
+        ],
+    );
+    home.live(90, "old-result", "idle", json!({}));
+    home.options.all = false;
+    home.options.since = Duration::from_secs(3600);
+    let built = home.build_at(&home.options, NOW);
+    let handoff = by_brief(&built, "Finished long ago.");
+    assert_eq!((handoff.ask, handoff.status), (Some("result"), "new"));
+    assert!(built.sessions.contains_key("old-result"));
 }
 
 #[test]

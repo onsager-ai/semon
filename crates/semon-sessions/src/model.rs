@@ -2855,6 +2855,18 @@ impl<'a> Builder<'a> {
                 }
             }
             owner = owners[position];
+            if matches!(entry.kind, EntryKind::Operation(_)) {
+                let operation = extras.get_mut(&entry.file).and_then(|queue| {
+                    let position = queue
+                        .iter()
+                        .position(|extra| extra.k == Kind::Operation && extra.o == entry.offset)?;
+                    queue.remove(position)
+                });
+                if let Some(operation) = operation {
+                    slots.push(extra_slot(operation, entry.file, owner, &mut started));
+                }
+                continue;
+            }
             if matches!(entry.kind, EntryKind::Tool(_))
                 && entry.at.is_some_and(|at| operation_parents.contains(&at))
             {
@@ -2884,6 +2896,7 @@ impl<'a> Builder<'a> {
                         reply: found.and_then(|found| found.r.clone()),
                     }
                 }
+                EntryKind::Operation(_) => unreachable!("operation slots are read from extras"),
             };
             let mut slot = Slot::new(kind, Some(entry.file), entry.offset, block, entry.t);
             slot.turn = turn_id(owner);
@@ -2926,6 +2939,16 @@ impl<'a> Builder<'a> {
     fn entries(&self, index: usize) -> Vec<Entry> {
         let mut entries = Vec::new();
         let refs = self.events_of(index);
+        let session_files = &self.sessions[index].files;
+        let mut event_times = BTreeMap::new();
+        for file in session_files {
+            let events = &self.files[*file].summary.events;
+            let mut time = events.iter().find_map(|event| event.t).unwrap_or(i64::MIN);
+            for (position, found) in events.iter().enumerate() {
+                time = found.t.unwrap_or(time);
+                event_times.insert((*file, position), time);
+            }
+        }
         if let Some(handoff) = self.head.get(&index) {
             let (file, offset) = refs
                 .first()
@@ -2978,6 +3001,69 @@ impl<'a> Builder<'a> {
                 });
             }
         }
+        for file in session_files {
+            for extra in &self.files[*file].summary.extras {
+                if extra.k != Kind::Operation {
+                    continue;
+                }
+                let state = match extra.r.as_ref() {
+                    Some(reply) if reply.e => ToolState::Err,
+                    Some(reply) if reply.f & UNKNOWN != 0 => ToolState::Unknown,
+                    Some(_) => ToolState::Ok,
+                    None => ToolState::Pending,
+                };
+                entries.push(Entry {
+                    kind: EntryKind::Operation(state),
+                    file: *file,
+                    offset: extra.o,
+                    t: extra.t,
+                    at: None,
+                });
+            }
+        }
+        let time_at = |file: usize, offset: u64| {
+            self.files[file]
+                .summary
+                .events
+                .iter()
+                .enumerate()
+                .take_while(|(_, event)| event.o <= offset)
+                .last()
+                .and_then(|(position, _)| event_times.get(&(file, position)).copied())
+                .or_else(|| {
+                    self.files[file]
+                        .summary
+                        .events
+                        .first()
+                        .and_then(|_| event_times.get(&(file, 0)).copied())
+                })
+                .unwrap_or(i64::MIN)
+        };
+        let file_order: BTreeMap<usize, usize> = session_files
+            .iter()
+            .enumerate()
+            .map(|(order, file)| (*file, order))
+            .collect();
+        entries.sort_by_key(|entry| {
+            let is_head = matches!(entry.kind, EntryKind::H(handoff) if self.head.get(&index) == Some(&handoff));
+            let (time, phase) = if is_head {
+                (i64::MIN, 0)
+            } else if let Some(at) = entry.at {
+                (*event_times.get(&at).unwrap_or(&i64::MIN), 1)
+            } else if matches!(entry.kind, EntryKind::H(_)) {
+                (entry.t.unwrap_or_else(|| time_at(entry.file, entry.offset)), 2)
+            } else {
+                (entry.t.unwrap_or_else(|| time_at(entry.file, entry.offset)), 1)
+            };
+            let block = entry.at.map_or(0, |at| event(self.files, at).b);
+            (
+                if session_files.len() > 1 { time } else { 0 },
+                *file_order.get(&entry.file).unwrap_or(&usize::MAX),
+                entry.offset,
+                block,
+                phase,
+            )
+        });
         entries
     }
 
@@ -3121,7 +3207,7 @@ impl<'a> Builder<'a> {
             .iter()
             .map(|position| &entries[*position])
             .filter(|entry| match entry.kind {
-                EntryKind::A | EntryKind::Tool(_) => true,
+                EntryKind::A | EntryKind::Tool(_) | EntryKind::Operation(_) => true,
                 EntryKind::H(handoff) => sent.contains(&handoff),
                 _ => false,
             })
@@ -3164,6 +3250,13 @@ impl<'a> Builder<'a> {
             });
         }
         match content.last().map(|entry| entry.kind) {
+            Some(EntryKind::Operation(ToolState::Err)) => {
+                return Some(End {
+                    st: "err",
+                    why: "failed_step",
+                    h: None,
+                });
+            }
             Some(EntryKind::Tool(ToolState::Err)) => {
                 return Some(End {
                     st: "err",
@@ -3230,6 +3323,7 @@ enum EntryKind {
     U,
     A,
     Tool(ToolState),
+    Operation(ToolState),
     Gap,
 }
 
@@ -3809,7 +3903,7 @@ pub(crate) fn build(
         handoffs.retain(|handoff| {
             handoff.at >= cutoff
                 || handoff.done.is_some_and(|done| done >= cutoff)
-                || matches!(handoff.status, "work" | "wait")
+                || matches!(handoff.status, "work" | "wait" | "new")
         });
         let mut keep: BTreeSet<String> = sessions
             .iter()
