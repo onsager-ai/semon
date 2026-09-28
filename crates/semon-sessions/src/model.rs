@@ -182,6 +182,11 @@ pub(crate) struct SessionFacts {
     pub(crate) alive: Option<bool>,
     /// The status the Claude pid file recorded (`busy`, `idle`, …).
     pub(crate) recorded_status: Option<String>,
+    /// The live process's run ids: the entries of its environment named in
+    /// [`crate::RUN_VARIABLES`], nothing else. Empty when it has none;
+    /// `None` when there is no live process or its environment couldn't be
+    /// read whole.
+    pub(crate) run: Option<BTreeMap<String, String>>,
     /// The earliest and latest log line's time (epoch ms); `None` without one.
     pub(crate) first: Option<i64>,
     pub(crate) last: Option<i64>,
@@ -846,10 +851,12 @@ impl SourceFile {
     }
 }
 
-struct PidFile {
-    pid: u32,
+pub(crate) struct PidFile {
+    pub(crate) pid: u32,
     session: String,
-    alive: bool,
+    pub(crate) alive: bool,
+    /// The process start time the file records.
+    pub(crate) start: Option<u64>,
     status: Option<String>,
     name: Option<String>,
 }
@@ -884,7 +891,7 @@ fn stamp_of(path: &Path) -> Stamp {
     }
 }
 
-fn pid_files(options: &Options, machine: &MachineFacts) -> Vec<PidFile> {
+pub(crate) fn pid_files(options: &Options, machine: &MachineFacts) -> Vec<PidFile> {
     let mut result = Vec::new();
     let Ok(entries) = fs::read_dir(options.claude_home.join("sessions")) else {
         return result;
@@ -918,6 +925,7 @@ fn pid_files(options: &Options, machine: &MachineFacts) -> Vec<PidFile> {
             pid,
             session: session.to_owned(),
             alive: start.is_some() && machine.proc_start(options, pid) == start,
+            start,
             status: field(&record, "status").map(str::to_owned),
             name: field(&record, "name").map(str::to_owned),
         });
@@ -1214,8 +1222,8 @@ struct Sess {
     names: BTreeSet<String>,
     refs: Vec<Ref>,
     parent: Option<usize>,
-    /// Every pid file that names this lineage: (pid, alive, status).
-    pid_files: Vec<(u32, bool, Option<String>)>,
+    /// Every pid file that names this lineage: (pid, alive, status, start).
+    pid_files: Vec<(u32, bool, Option<String>, Option<u64>)>,
     /// The earliest and latest line's time, when any line has one.
     first: Option<i64>,
     last: Option<i64>,
@@ -1494,39 +1502,50 @@ impl<'a> Builder<'a> {
     }
 
     /// Every session's facts for the agent read surface. `codex_process`
-    /// gives a Codex run's writer-lock holder and whether it runs.
+    /// gives a Codex run's writer-lock holder and whether it runs;
+    /// `run_of` a live process's run ids, given the start time its record
+    /// names, if any.
     fn session_facts(
         &self,
         skipped: &BTreeSet<String>,
         codex_process: impl Fn(&str) -> (Option<u32>, Option<bool>),
+        run_of: impl Fn(u32, Option<u64>) -> Option<BTreeMap<String, String>>,
     ) -> BTreeMap<String, SessionFacts> {
         self.sessions
             .iter()
             .map(|session| {
-                let (kind, pid, alive, recorded_status) = match session.kind {
+                let (kind, pid, alive, recorded_status, run) = match session.kind {
                     SessKind::Lineage => {
-                        let live = session.pid_files.iter().find(|(_, alive, _)| *alive);
+                        let live = session.pid_files.iter().find(|(_, alive, _, _)| *alive);
                         match (live, session.pid_files.as_slice()) {
-                            (Some((pid, _, status)), _) => {
-                                ("session", Some(*pid), Some(true), status.clone())
-                            }
+                            (Some((pid, _, status, start)), _) => (
+                                "session",
+                                Some(*pid),
+                                Some(true),
+                                status.clone(),
+                                run_of(*pid, *start),
+                            ),
                             // One pid file, and its process is gone.
-                            (None, [(pid, _, status)]) => {
-                                ("session", Some(*pid), Some(false), status.clone())
+                            (None, [(pid, _, status, _)]) => {
+                                ("session", Some(*pid), Some(false), status.clone(), None)
                             }
                             // No process record: nothing to check.
-                            (None, []) => ("session", None, None, None),
+                            (None, []) => ("session", None, None, None, None),
                             // Several, all gone: which one ran last isn't logged.
-                            (None, _) => ("session", None, Some(false), None),
+                            (None, _) => ("session", None, Some(false), None, None),
                         }
                     }
-                    // A subagent runs in its parent's process: no record of its own.
-                    SessKind::Agent => ("subagent", None, None, None),
+                    // A subagent runs in its parent's process: no record of
+                    // its own, and no run of its own.
+                    SessKind::Agent => ("subagent", None, None, None, None),
                     SessKind::Codex => {
                         let (pid, alive) = codex_process(&session.key);
-                        ("codex-run", pid, alive, None)
+                        let run = pid
+                            .filter(|_| alive == Some(true))
+                            .and_then(|pid| run_of(pid, None));
+                        ("codex-run", pid, alive, None, run)
                     }
-                    SessKind::Stub => ("stub", None, None, None),
+                    SessKind::Stub => ("stub", None, None, None, None),
                 };
                 let facts = SessionFacts {
                     kind,
@@ -1536,6 +1555,7 @@ impl<'a> Builder<'a> {
                     pid,
                     alive,
                     recorded_status,
+                    run,
                     first: session.first,
                     last: session.last,
                     tokens: (session.kind != SessKind::Stub).then(|| session.tokens.clone()),
@@ -1597,7 +1617,7 @@ impl<'a> Builder<'a> {
             let session = &mut self.sessions[index];
             session
                 .pid_files
-                .push((pid.pid, pid.alive, pid.status.clone()));
+                .push((pid.pid, pid.alive, pid.status.clone(), pid.start));
             if let Some(name) = &pid.name {
                 session.names.insert(plain_name(name));
             }
@@ -3650,21 +3670,26 @@ pub(crate) fn build(
             }
         }
     }
-    let session_facts = builder.session_facts(&skipped, |id| match lock_pids.as_ref() {
-        Some(locks) => match locks.get(id) {
-            Some(pid) => (Some(*pid), Some(true)),
-            // A lock file no process holds: its writer is gone. Without a
-            // lock file there is no process record.
-            None => (
-                None,
-                facts
-                    .codex_lock_file(options, id)
-                    .filter(|exists| *exists)
-                    .map(|_| false),
-            ),
+    let run_of = |pid, start| facts.run(options, pid, start);
+    let session_facts = builder.session_facts(
+        &skipped,
+        |id| match lock_pids.as_ref() {
+            Some(locks) => match locks.get(id) {
+                Some(pid) => (Some(*pid), Some(true)),
+                // A lock file no process holds: its writer is gone. Without a
+                // lock file there is no process record.
+                None => (
+                    None,
+                    facts
+                        .codex_lock_file(options, id)
+                        .filter(|exists| *exists)
+                        .map(|_| false),
+                ),
+            },
+            None => (None, None),
         },
-        None => (None, None),
-    });
+        run_of,
+    );
 
     let mut handoffs: Vec<Handoff> = builder
         .handoffs
