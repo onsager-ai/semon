@@ -30,7 +30,7 @@ use crate::{
     events::{
         ACK, ANSWERED, ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
-    facts::MachineFacts,
+    facts::{MachineFacts, ReportedModelUsage, ReportedRunSnapshot},
     field, file_list, matches_handoff, read_first_marker,
 };
 
@@ -61,6 +61,9 @@ pub(crate) struct Session {
     pub(crate) model: String,
     pub(crate) tokens: [f64; 3],
     pub(crate) tokens_by_model: BTreeMap<String, events::ModelTokens>,
+    pub(crate) cost: crate::pricing::Cost,
+    pub(crate) reported_runs: Vec<ReportedRun>,
+    pub(crate) cost_check: Vec<CostCheck>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rate_limits: Option<events::RateLimits>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +80,26 @@ pub(crate) struct Session {
     /// age from `activity[3]`.
     pub(crate) activity: Option<(String, String, i64, i64)>,
     pub(crate) busy: Vec<(i64, i64)>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ReportedRun {
+    pub(crate) start: i64,
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) api_ms: Option<u64>,
+    pub(crate) tool_ms: Option<u64>,
+    pub(crate) lines_added: Option<u64>,
+    pub(crate) lines_removed: Option<u64>,
+    pub(crate) by_model: BTreeMap<String, ReportedModelUsage>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CostCheck {
+    pub(crate) start: i64,
+    pub(crate) computed_usd: Option<f64>,
+    pub(crate) reported_usd: Option<f64>,
+    pub(crate) ok: Option<bool>,
 }
 
 /// One answered question: the values you picked or typed.
@@ -345,6 +368,9 @@ pub fn model_json_at(options: &Options, now: i64) -> io::Result<String> {
     let path = EventCache::path(&options.cache);
     let mut cache = EventCache::read(&path);
     let mut dirty = false;
+    if options.facts.is_none() {
+        cache.refresh_reported_runs(&options.claude_json, now, &mut dirty);
+    }
     let mut texts = Texts::default();
     let built = build(options, &mut cache, &mut dirty, &mut texts, now)?;
     if dirty {
@@ -1257,6 +1283,7 @@ struct Builder<'a> {
     now: i64,
     machine: String,
     facts: &'a MachineFacts,
+    reported_runs: &'a [ReportedRunSnapshot],
     home: Option<String>,
     sessions: Vec<Sess>,
     of_file: Vec<usize>,
@@ -1282,6 +1309,7 @@ impl<'a> Builder<'a> {
         now: i64,
         machine: String,
         facts: &'a MachineFacts,
+        reported_runs: &'a [ReportedRunSnapshot],
     ) -> Self {
         Self {
             files,
@@ -1290,6 +1318,7 @@ impl<'a> Builder<'a> {
             machine,
             home: facts.home(),
             facts,
+            reported_runs,
             sessions: Vec::new(),
             of_file: vec![usize::MAX; files.len()],
             by_key: HashMap::new(),
@@ -1316,6 +1345,9 @@ impl<'a> Builder<'a> {
             model: "—".into(),
             tokens: [0.0; 3],
             tokens_by_model: BTreeMap::new(),
+            cost: crate::pricing::Cost::default(),
+            reported_runs: Vec::new(),
+            cost_check: Vec::new(),
             rate_limits: None,
             parent: None,
             repo: None,
@@ -1754,6 +1786,59 @@ impl<'a> Builder<'a> {
                 .recorded_repo(cwd)
                 .unwrap_or_else(|| self.texts.repo(cwd))
         });
+        let billing_messages: Vec<events::MessageUsage> = usage.values().cloned().collect();
+        let codex_events: Vec<events::CodexUsageEvent> = if harness == "codex" {
+            files
+                .iter()
+                .flat_map(|file| file.summary.codex_usage_events().iter().cloned())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let cost = crate::pricing::calculate_cost(&billing_messages, &codex_events);
+        let mut reports: Vec<&ReportedRunSnapshot> = if harness == "claude" {
+            self.reported_runs
+                .iter()
+                .filter(|run| {
+                    files
+                        .iter()
+                        .any(|file| file.id.as_str() == run.last_session_id.as_str())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        reports.sort_by_key(|run| run.last_start_time);
+        let mut reported_runs = Vec::with_capacity(reports.len());
+        let mut cost_check = Vec::with_capacity(reports.len());
+        for run in reports {
+            let bounded_messages: Vec<events::MessageUsage> = billing_messages
+                .iter()
+                .filter(|message| {
+                    message.billing.timestamp.is_some_and(|timestamp| {
+                        timestamp >= run.last_start_time && timestamp <= run.capture_at
+                    })
+                })
+                .cloned()
+                .collect();
+            let computed = crate::pricing::calculate_cost(&bounded_messages, &[]).usd;
+            reported_runs.push(ReportedRun {
+                start: run.last_start_time,
+                cost_usd: run.last_cost,
+                duration_ms: run.last_duration,
+                api_ms: run.last_api_duration,
+                tool_ms: run.last_tool_duration,
+                lines_added: run.last_lines_added,
+                lines_removed: run.last_lines_removed,
+                by_model: run.last_model_usage.clone(),
+            });
+            cost_check.push(CostCheck {
+                start: run.last_start_time,
+                computed_usd: computed,
+                reported_usd: run.last_cost,
+                ok: crate::pricing::cost_check_ok(computed, run.last_cost),
+            });
+        }
         let session = &mut self.sessions[index];
         session.names.extend(names);
         session.tokens = tokens.clone();
@@ -1761,6 +1846,9 @@ impl<'a> Builder<'a> {
         session.last = (last != 0).then_some(last);
         let out = &mut session.out;
         out.tokens_by_model = tokens_by_model;
+        out.cost = cost;
+        out.reported_runs = reported_runs;
+        out.cost_check = cost_check;
         out.rate_limits = rate_limits;
         out.tokens = [
             million(tokens.input.saturating_sub(tokens.cached_input)),
@@ -3913,7 +4001,11 @@ pub(crate) fn build(
     let home = facts.home();
     let offline_since = facts.offline_since();
     let groups = lineages(&files);
-    let mut builder = Builder::new(&files, texts, now, machine.clone(), &facts);
+    let reported_runs: Vec<ReportedRunSnapshot> = match &facts {
+        MachineFacts::Local => cache.reported_runs().cloned().collect(),
+        MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
+    };
+    let mut builder = Builder::new(&files, texts, now, machine.clone(), &facts, &reported_runs);
     builder.sessions(groups, &pids, &held);
     builder.index_tools();
     builder.claude_spawns();

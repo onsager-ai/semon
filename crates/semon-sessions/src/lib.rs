@@ -24,7 +24,8 @@ mod tx;
 mod union;
 mod viewer;
 pub use facts::{
-    FACTS_VERSION, Facts, FactsSource, RUN_VARIABLES, local_facts, read_facts, write_facts,
+    FACTS_VERSION, Facts, FactsSource, RUN_VARIABLES, ReportedModelUsage, ReportedRunSnapshot,
+    local_facts, read_facts, write_facts,
 };
 pub use inputs::{Input, InputRoot, inputs, is_input_path};
 pub use mcp::serve_mcp;
@@ -36,6 +37,9 @@ pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve};
 #[derive(Clone, Debug)]
 pub struct Options {
     pub claude_home: PathBuf,
+    /// Claude Code's sibling state file. Only allowlisted last-run fields
+    /// are read; the default is the `.claude.json` beside `claude_home`.
+    pub claude_json: PathBuf,
     pub codex_home: PathBuf,
     pub proc_root: PathBuf,
     pub cache: PathBuf,
@@ -69,6 +73,7 @@ impl Default for Options {
             .join("semon/sessions-index.json");
         Self {
             claude_home: home.join(".claude"),
+            claude_json: home.join(".claude.json"),
             codex_home: home.join(".codex"),
             proc_root: PathBuf::from("/proc"),
             cache,
