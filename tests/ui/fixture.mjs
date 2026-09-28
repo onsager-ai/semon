@@ -282,6 +282,8 @@ export function write(out, { extras = false } = {}) {
       text: (t, text) => at(t, "response_item", { type: "message", role: "assistant", content: [{ type: "output_text", text }] }),
       think: (t, text) => at(t, "response_item", { type: "reasoning", summary: [{ type: "summary_text", text }], encrypted_content: null }),
       shell: (t, callId, command) => at(t, "response_item", { type: "function_call", name: "shell", arguments: JSON.stringify({ command: command.split(" ") }), call_id: callId }),
+      code: (t, callId, script) => at(t, "response_item", { type: "custom_tool_call", status: "completed", call_id: callId, name: "exec", input: script }),
+      item: (t, item) => at(t, "event_msg", { type: "item_completed", item }),
       patch: (t, callId, patch) => at(t, "response_item", { type: "custom_tool_call", status: "completed", call_id: callId, name: "apply_patch", input: patch }),
       output: (t, callId, text, code, custom) => at(t, "response_item", { type: custom ? "custom_tool_call_output" : "function_call_output", call_id: callId, output: out(text, code) }),
       busy: (a, b) => { for (let t = a; t < b; t += 4 * 60000) at(t, "turn_context", { cwd, model: "gpt-6-luna", approval_policy: "never" }); at(b, "turn_context", { cwd, model: "gpt-6-luna", approval_policy: "never" }); },
@@ -346,6 +348,27 @@ export function write(out, { extras = false } = {}) {
     c.save(); locked("deps");
   }
   if (extras) {
+    // result-card: an idle session that replied to your own message.
+    {
+      const c = claude("result-card", { cwd: role("result-card"), model: "opus-5.5", tokens: [0, 0, 0] });
+      c.title(ms(T(8, 48)), "Result card");
+      c.ask(ms(T(8, 49)), "Give one compact answer");
+      c.text(ms(T(8, 50)), "Unique result text for the transcript check.");
+      c.save(); live("result-card", "idle", "Result card");
+    }
+    // code-mode: one script whose two commands and file change are indexed as three transcript steps.
+    {
+      const cwd = repo("meridian"), c = codex("code-mode", ms(T(8, 0)), { cwd, branch: "feat/code-mode", tokens: [0, 0, 0] });
+      const script = "const r = await Promise.allSettled([\ntools.exec_command({cmd:\"git status\",workdir:\"/w\"}),\ntools.exec_command({cmd:\"sed -n '1,9p' a.rs\",workdir:\"/w\"}),\n]);";
+      c.user(ms(T(8, 0)), "Run the indexed operations");
+      c.code(ms(T(8, 1)), "script-call", script);
+      c.item(ms(T(8, 2)), { type: "CommandExecution", id: "command-1", command: ["/bin/zsh", "-lc", "git status"], cwd: "file://" + cwd, exit_code: 0, duration: { secs: 1, nanos: 200000000 }, aggregated_output: "## feature/code-mode\n" });
+      c.item(ms(T(8, 3)), { type: "CommandExecution", id: "command-2", command: ["/bin/zsh", "-lc", "sed -n '1,9p' a.rs"], cwd: "file://" + path.join(cwd, "src"), exit_code: 0, duration: { secs: 0, nanos: 400000000 }, aggregated_output: "a\n" });
+      c.item(ms(T(8, 4)), { type: "FileChange", id: "change-1", changes: { [path.join(cwd, "src/code-mode.rs")]: { type: "update", unified_diff: "@@ -1 +1 @@\n-old\n+new\n", move_path: null } } });
+      c.output(ms(T(8, 5)), "script-call", "Script completed", null, true);
+      c.text(ms(T(8, 6)), "Three operations completed.");
+      c.save();
+    }
     // backlog: a long transcript, two and a half pages of tool calls in ten turns, with one unreadable line.
     const b = claude("backlog", { cwd: role("backlog"), model: "sonnet-5", tokens: [0.01, 0.2, 0.01] });
     b.title(ms(T(5, 0)), "backlog");

@@ -2537,8 +2537,8 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Live top-level sessions: working, waiting on you (an open question or
-    /// a result), or idle.
+    /// Live top-level sessions: working, waiting on an open question or
+    /// decision, or idle.
     fn lineage_states(&mut self) {
         for index in 0..self.sessions.len() {
             let session = &self.sessions[index];
@@ -2556,6 +2556,7 @@ impl<'a> Builder<'a> {
             let open = self.handoffs.iter().any(|handoff| {
                 handoff.from == Some(index)
                     && handoff.out.kind == "toyou"
+                    && matches!(handoff.out.ask, Some("question" | "decision"))
                     && handoff.out.status == "wait"
             });
             if open {
@@ -2575,23 +2576,25 @@ impl<'a> Builder<'a> {
                     let text = self.text(at, "a", assistant_text);
                     let file = &self.files[at.0];
                     let found = event(self.files, at);
-                    let handoff = Handoff {
-                        ask: Some("result"),
-                        ..Handoff::new(
-                            stable_id(
-                                "q",
-                                &format!("toyou:result:{}:{}:{}", file.id, found.o, found.b),
-                            ),
-                            "toyou",
-                            (self.sessions[index].key.clone(), "you".into()),
-                            found.t.unwrap_or(self.sessions[index].out.last),
-                            "wait",
-                            text.as_deref().unwrap_or(""),
-                        )
-                    };
-                    let handoff = self.add_handoff(handoff, Some(index), None);
-                    self.after.insert(at, handoff);
-                    self.sessions[index].out.state = "wait";
+                    if self.reply_started_by_you(index, at) {
+                        let handoff = Handoff {
+                            ask: Some("result"),
+                            ..Handoff::new(
+                                stable_id(
+                                    "q",
+                                    &format!("toyou:result:{}:{}:{}", file.id, found.o, found.b),
+                                ),
+                                "toyou",
+                                (self.sessions[index].key.clone(), "you".into()),
+                                found.t.unwrap_or(self.sessions[index].out.last),
+                                "new",
+                                text.as_deref().unwrap_or(""),
+                            )
+                        };
+                        let handoff = self.add_handoff(handoff, Some(index), None);
+                        self.after.insert(at, handoff);
+                    }
+                    self.sessions[index].out.state = "idle";
                 }
                 _ => self.sessions[index].out.state = "idle",
             }
@@ -2611,6 +2614,55 @@ impl<'a> Builder<'a> {
                 self.handoffs[latest].out.status = "work";
             }
         }
+    }
+
+    /// A result belongs to a reply only when the existing turn grouping says
+    /// it began with your message. Some incoming events aren't transcript
+    /// entries; if one falls between that message and the reply, its turn
+    /// start is ambiguous and no result is inferred.
+    fn reply_started_by_you(&self, index: usize, reply: Ref) -> bool {
+        let entries = self.entries(index);
+        let Some(reply_entry) = entries
+            .iter()
+            .position(|entry| entry.at == Some(reply) && entry.kind == EntryKind::A)
+        else {
+            return false;
+        };
+        let groups = self.groups(index, &entries);
+        let Some(group) = groups
+            .iter()
+            .find(|group| group.entries.contains(&reply_entry))
+        else {
+            return false;
+        };
+        let Some(start) = group
+            .start
+            .filter(|start| self.handoffs[*start].out.kind == "ask")
+        else {
+            return false;
+        };
+        let Some(start_at) = group
+            .entries
+            .iter()
+            .find_map(|position| entries[*position].at)
+        else {
+            return false;
+        };
+        let refs = &self.sessions[index].refs;
+        let Some(start_position) = refs.iter().position(|at| *at == start_at) else {
+            return false;
+        };
+        let Some(reply_position) = refs.iter().position(|at| *at == reply) else {
+            return false;
+        };
+        if start_position > reply_position {
+            return false;
+        }
+        !refs[start_position..=reply_position].iter().any(|at| {
+            let event = event(self.files, *at);
+            matches!(event.k, Kind::Xsm | Kind::Agm | Kind::Tn)
+                || event.k == Kind::Tool && event.n.as_deref() == Some("SubagentHandback")
+        }) && self.handoffs[start].out.from == "you"
     }
 
     fn activity(&mut self) {
@@ -2743,6 +2795,16 @@ impl<'a> Builder<'a> {
     ) -> Transcript {
         let session = &self.sessions[index];
         let mut extras: BTreeMap<usize, std::collections::VecDeque<&Event>> = BTreeMap::new();
+        let mut operation_parents = BTreeSet::new();
+        for file in &session.files {
+            for extra in &self.files[*file].summary.extras {
+                if extra.k == Kind::Operation
+                    && let Some(parent) = extra.parent
+                {
+                    operation_parents.insert((*file, parent));
+                }
+            }
+        }
         for file in &session.files {
             extras.insert(*file, self.files[*file].summary.extras.iter().collect());
         }
@@ -2750,27 +2812,65 @@ impl<'a> Builder<'a> {
         let mut owner: Option<usize> = None;
         let mut started = BTreeSet::new();
         let turn_id = |turn: Option<usize>| turn.map(|turn| turns[turn].id.clone());
-        let extra_slot = |event: &Event, file: usize, owner: Option<usize>| {
-            let kind = match event.k {
-                Kind::Harness => SlotKind::Harness(event.n.clone().unwrap_or_default()),
-                _ => SlotKind::Think,
+        let extra_slot =
+            |event: &Event, file: usize, owner: Option<usize>, started: &mut BTreeSet<usize>| {
+                let kind = match event.k {
+                    Kind::Harness => SlotKind::Harness(event.n.clone().unwrap_or_default()),
+                    Kind::Operation => {
+                        let ok = event
+                            .r
+                            .as_ref()
+                            .and_then(|reply| (reply.f & events::UNKNOWN == 0).then_some(!reply.e));
+                        let script_offset = event
+                            .parent
+                            .and_then(|parent| self.files[file].summary.events.get(parent))
+                            .filter(|parent| parent.k == Kind::Tool && parent.code_mode)
+                            .map(|parent| parent.o);
+                        SlotKind::Operation {
+                            kind: event.n.clone().unwrap_or_default(),
+                            ok,
+                            script_offset,
+                        }
+                    }
+                    _ => SlotKind::Think,
+                };
+                let mut slot = Slot::new(kind, Some(file), event.o, event.b, event.t);
+                slot.turn = turn_id(owner);
+                if event.k == Kind::Operation
+                    && let Some(owner) = owner
+                {
+                    slot.first = started.insert(owner);
+                }
+                slot
             };
-            let mut slot = Slot::new(kind, Some(file), event.o, event.b, event.t);
-            slot.turn = turn_id(owner);
-            slot
-        };
         for (position, entry) in entries.iter().enumerate() {
             if let Some(queue) = extras.get_mut(&entry.file) {
-                let at = entry.at.map_or((entry.offset, 0), |at| {
-                    let found = event(self.files, at);
-                    (found.o, found.b)
-                });
+                let at = entry.pos;
                 while queue.front().is_some_and(|extra| (extra.o, extra.b) < at) {
                     let extra = queue.pop_front().expect("front");
-                    slots.push(extra_slot(extra, entry.file, owner));
+                    slots.push(extra_slot(extra, entry.file, owner, &mut started));
                 }
             }
             owner = owners[position];
+            if matches!(entry.kind, EntryKind::Operation(_)) {
+                let operation = extras.get_mut(&entry.file).and_then(|queue| {
+                    let position = queue
+                        .iter()
+                        .position(|extra| extra.k == Kind::Operation && extra.o == entry.offset)?;
+                    queue.remove(position)
+                });
+                if let Some(operation) = operation {
+                    slots.push(extra_slot(operation, entry.file, owner, &mut started));
+                }
+                continue;
+            }
+            // A code-mode call is drawn as its operations, unless it failed:
+            // then it is also the failed step, after them.
+            if matches!(entry.kind, EntryKind::Tool(state) if state != ToolState::Err)
+                && entry.at.is_some_and(|at| operation_parents.contains(&at))
+            {
+                continue;
+            }
             let block = entry.at.map_or(0, |at| event(self.files, at).b);
             let kind = match entry.kind {
                 EntryKind::H(handoff) => SlotKind::H(self.handoffs[handoff].out.id.clone()),
@@ -2795,6 +2895,7 @@ impl<'a> Builder<'a> {
                         reply: found.and_then(|found| found.r.clone()),
                     }
                 }
+                EntryKind::Operation(_) => unreachable!("operation slots are read from extras"),
             };
             let mut slot = Slot::new(kind, Some(entry.file), entry.offset, block, entry.t);
             slot.turn = turn_id(owner);
@@ -2808,7 +2909,7 @@ impl<'a> Builder<'a> {
             .collect();
         rest.sort_by_key(|(file, extra)| (extra.t, *file, extra.o, extra.b));
         for (file, extra) in rest {
-            slots.push(extra_slot(extra, file, owner));
+            slots.push(extra_slot(extra, file, owner, &mut started));
         }
         if let Some(spawn) = self.handoffs.iter().find(|handoff| {
             handoff.to == Some(index)
@@ -2834,24 +2935,87 @@ impl<'a> Builder<'a> {
         Transcript::from_slots(slots)
     }
 
+    /// A session's entries in transcript order: its events, each handoff
+    /// placed after the event it follows, and its Codex operations. Each
+    /// entry's sort key is computed once, where it is made.
     fn entries(&self, index: usize) -> Vec<Entry> {
-        let mut entries = Vec::new();
         let refs = self.events_of(index);
+        let session_files = &self.sessions[index].files;
+        let several = session_files.len() > 1;
+        // Each file's event times; an event without one takes the time before
+        // it, and events before a file's first time take that time.
+        let mut event_times: HashMap<usize, Vec<i64>> = HashMap::new();
+        for file in session_files {
+            let events = &self.files[*file].summary.events;
+            let mut time = events.iter().find_map(|event| event.t).unwrap_or(i64::MIN);
+            let times = events
+                .iter()
+                .map(|found| {
+                    time = found.t.unwrap_or(time);
+                    time
+                })
+                .collect();
+            event_times.insert(*file, times);
+        }
+        // The time of the last event at or before `offset` in `file`: events
+        // are in line order, so a binary search finds it.
+        let time_at = |file: usize, offset: u64| {
+            let events = &self.files[file].summary.events;
+            let before = events.partition_point(|found| found.o <= offset);
+            event_times
+                .get(&file)
+                .and_then(|times| times.get(before.saturating_sub(1)))
+                .copied()
+                .unwrap_or(i64::MIN)
+        };
+        let file_order: HashMap<usize, usize> = session_files
+            .iter()
+            .enumerate()
+            .map(|(order, file)| (*file, order))
+            .collect();
+        // Several files merge by time; within a file, line and block order.
+        // Phase 2 puts a handoff after the event it follows.
+        let key = |time: i64, file: usize, pos: (u64, u32), phase: u8| {
+            (
+                if several { time } else { 0 },
+                *file_order.get(&file).unwrap_or(&usize::MAX),
+                pos.0,
+                pos.1,
+                phase,
+            )
+        };
+        // Code-mode calls drawn as their operations.
+        let mut operation_parents = BTreeSet::new();
+        for file in session_files {
+            for extra in &self.files[*file].summary.extras {
+                if extra.k == Kind::Operation
+                    && let Some(parent) = extra.parent
+                {
+                    operation_parents.insert((*file, parent));
+                }
+            }
+        }
+        let mut keyed = Vec::new();
         if let Some(handoff) = self.head.get(&index) {
             let (file, offset) = refs
                 .first()
                 .map(|at| (at.0, event(self.files, *at).o))
                 .unwrap_or((self.sessions[index].files[0], 0));
-            entries.push(Entry {
-                kind: EntryKind::H(*handoff),
-                file,
-                offset,
-                t: None,
-                at: None,
-            });
+            keyed.push((
+                (i64::MIN, 0, 0, 0, 0),
+                Entry {
+                    kind: EntryKind::H(*handoff),
+                    file,
+                    offset,
+                    pos: (offset, 0),
+                    t: None,
+                    at: None,
+                },
+            ));
         }
         for at in refs {
             let found = event(self.files, at);
+            let time = event_times[&at.0][at.1];
             let kind = if let Some((handoff, _)) = self.placed.get(&at) {
                 Some(EntryKind::H(*handoff))
             } else {
@@ -2871,25 +3035,77 @@ impl<'a> Builder<'a> {
                 }
             };
             if let Some(kind) = kind {
-                entries.push(Entry {
-                    kind,
-                    file: at.0,
-                    offset: found.o,
-                    t: found.t,
-                    at: Some(at),
-                });
+                // A failed code-mode call drawn as its operations is still a
+                // failed step: it sits where its failure arrived, after them.
+                let (time, pos) = match (&kind, &found.r) {
+                    (EntryKind::Tool(ToolState::Err), Some(reply))
+                        if operation_parents.contains(&at) =>
+                    {
+                        (
+                            reply.t.unwrap_or_else(|| time_at(at.0, reply.o)),
+                            (reply.o, reply.b),
+                        )
+                    }
+                    _ => (time, (found.o, found.b)),
+                };
+                keyed.push((
+                    key(time, at.0, pos, 1),
+                    Entry {
+                        kind,
+                        file: at.0,
+                        offset: found.o,
+                        pos,
+                        t: found.t,
+                        at: Some(at),
+                    },
+                ));
             }
             if let Some(handoff) = self.after.get(&at) {
-                entries.push(Entry {
-                    kind: EntryKind::H(*handoff),
-                    file: at.0,
-                    offset: found.o,
-                    t: found.t,
-                    at: None,
-                });
+                // The event's own place, so the handoff follows it even when
+                // it is a later block of its line.
+                keyed.push((
+                    key(time, at.0, (found.o, found.b), 2),
+                    Entry {
+                        kind: EntryKind::H(*handoff),
+                        file: at.0,
+                        offset: found.o,
+                        pos: (found.o, found.b),
+                        t: found.t,
+                        at: None,
+                    },
+                ));
             }
         }
-        entries
+        for file in session_files {
+            for extra in &self.files[*file].summary.extras {
+                if extra.k != Kind::Operation {
+                    continue;
+                }
+                let state = match extra.r.as_ref() {
+                    Some(reply) if reply.e => ToolState::Err,
+                    Some(reply) if reply.f & UNKNOWN != 0 => ToolState::Unknown,
+                    Some(_) => ToolState::Ok,
+                    None => ToolState::Pending,
+                };
+                let time = extra.t.unwrap_or_else(|| time_at(*file, extra.o));
+                keyed.push((
+                    key(time, *file, (extra.o, extra.b), 1),
+                    Entry {
+                        kind: EntryKind::Operation(state),
+                        file: *file,
+                        offset: extra.o,
+                        pos: (extra.o, extra.b),
+                        t: extra.t,
+                        at: None,
+                    },
+                ));
+            }
+        }
+        // Stable, and linear when the entries are already in order (a
+        // session without operations). It isn't skipped for one file: a
+        // Codex file's operations come from its extras and must interleave.
+        keyed.sort_by_key(|(key, _)| *key);
+        keyed.into_iter().map(|(_, entry)| entry).collect()
     }
 
     /// The mockup's turn rule: a turn starts at each incoming entry (your
@@ -3032,7 +3248,7 @@ impl<'a> Builder<'a> {
             .iter()
             .map(|position| &entries[*position])
             .filter(|entry| match entry.kind {
-                EntryKind::A | EntryKind::Tool(_) => true,
+                EntryKind::A | EntryKind::Tool(_) | EntryKind::Operation(_) => true,
                 EntryKind::H(handoff) => sent.contains(&handoff),
                 _ => false,
             })
@@ -3075,6 +3291,13 @@ impl<'a> Builder<'a> {
             });
         }
         match content.last().map(|entry| entry.kind) {
+            Some(EntryKind::Operation(ToolState::Err)) => {
+                return Some(End {
+                    st: "err",
+                    why: "failed_step",
+                    h: None,
+                });
+            }
             Some(EntryKind::Tool(ToolState::Err)) => {
                 return Some(End {
                     st: "err",
@@ -3141,6 +3364,7 @@ enum EntryKind {
     U,
     A,
     Tool(ToolState),
+    Operation(ToolState),
     Gap,
 }
 
@@ -3172,6 +3396,13 @@ pub(crate) enum SlotKind {
         shown: Shown,
         name: String,
         reply: Option<events::Reply>,
+    },
+    /// A Codex code-mode command or file change, drawn in place of its
+    /// wrapper when exactly one code-mode call owns it.
+    Operation {
+        kind: String,
+        ok: Option<bool>,
+        script_offset: Option<u64>,
     },
     Gap,
     Think,
@@ -3233,6 +3464,11 @@ impl Transcript {
                 if matches!(shown, Shown::Err | Shown::Unfinished) {
                     errors += 1;
                 }
+            } else if let SlotKind::Operation { ok, .. } = &slot.kind {
+                calls += 1;
+                if *ok == Some(false) {
+                    errors += 1;
+                }
             }
         }
         Self {
@@ -3247,6 +3483,10 @@ struct Entry {
     kind: EntryKind,
     file: usize,
     offset: u64,
+    /// Where it sits in its file (line offset, block): its event's place, the
+    /// event a handoff follows, or where a failed code-mode call's failure
+    /// arrived.
+    pos: (u64, u32),
     t: Option<i64>,
     at: Option<Ref>,
 }
@@ -3696,6 +3936,11 @@ pub(crate) fn build(
         .iter()
         .map(|handoff| handoff.out.clone())
         .collect();
+    let handoff_by_id: HashMap<&str, &Handoff> = builder
+        .handoffs
+        .iter()
+        .map(|handoff| (handoff.out.id.as_str(), &handoff.out))
+        .collect();
     let mut sessions: BTreeMap<String, Session> = builder
         .sessions
         .iter()
@@ -3708,7 +3953,7 @@ pub(crate) fn build(
         handoffs.retain(|handoff| {
             handoff.at >= cutoff
                 || handoff.done.is_some_and(|done| done >= cutoff)
-                || matches!(handoff.status, "work" | "wait")
+                || matches!(handoff.status, "work" | "wait" | "new")
         });
         let mut keep: BTreeSet<String> = sessions
             .iter()
@@ -3722,8 +3967,8 @@ pub(crate) fn build(
             keep.extend(handoff.to.clone());
         }
         sessions.retain(|key, _| keep.contains(key));
-        tx.retain(|key, _| keep.contains(key));
-        let kept: BTreeSet<&str> = handoffs.iter().map(|handoff| handoff.id.as_str()).collect();
+        let mut kept: BTreeSet<String> =
+            handoffs.iter().map(|handoff| handoff.id.clone()).collect();
         turns.retain(|turn| {
             sessions.contains_key(&turn.sid)
                 && (turn.last
@@ -3733,6 +3978,29 @@ pub(crate) fn build(
                         .as_deref()
                         .is_some_and(|start| kept.contains(start)))
         });
+        // A retained turn names its incoming and outgoing handoffs even
+        // when those handoffs fall outside the time window. Keep those exact
+        // links so the turn remains self-contained.
+        for turn in &turns {
+            for id in turn.start.iter().chain(&turn.sent) {
+                if kept.insert(id.clone())
+                    && let Some(handoff) = handoff_by_id.get(id.as_str())
+                {
+                    handoffs.push((*handoff).clone());
+                    for endpoint in std::iter::once(&handoff.from).chain(handoff.to.iter()) {
+                        if !sessions.contains_key(endpoint)
+                            && let Some(session) = builder
+                                .sessions
+                                .iter()
+                                .find(|session| &session.key == endpoint)
+                        {
+                            sessions.insert(endpoint.clone(), session.out.clone());
+                        }
+                    }
+                }
+            }
+        }
+        tx.retain(|key, _| sessions.contains_key(key));
         for session in sessions.values_mut() {
             session.busy.retain(|interval| interval.1 >= cutoff);
             if let Some(first) = session.busy.first_mut() {

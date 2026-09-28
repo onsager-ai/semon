@@ -1,5 +1,5 @@
 {
-  "version": "346f1b2384b4db80",
+  "version": "b23ca4216765112b",
   "now": 0,
   "machine": {
     "id": "testbox",
@@ -58,7 +58,7 @@
       "harness": "claude",
       "lane": true,
       "machine": "testbox",
-      "state": "wait",
+      "state": "idle",
       "model": "opus-5.5",
       "tokens": [
         0.002,
@@ -174,16 +174,6 @@
       "status": "done",
       "brief": "Implement the flush",
       "result": "Flush implemented."
-    },
-    {
-      "id": "q4dbf42620ae59d8b",
-      "kind": "toyou",
-      "ask": "result",
-      "from": "harbor",
-      "to": "you",
-      "at": 1790245260000,
-      "status": "wait",
-      "brief": "All merged."
     }
   ],
   "turns": [
@@ -193,16 +183,15 @@
       "start": "a368026b39844b198",
       "at": 1790244000000,
       "end": {
-        "st": "wait",
+        "st": "done",
         "why": "toyou",
-        "h": "q4dbf42620ae59d8b"
+        "h": "qf84cb3bbd95c749a"
       },
       "sent": [
         "scf9085bcbd567a10",
         "ra4d4f55525170a57",
         "qf84cb3bbd95c749a",
-        "s249fde0718402de8",
-        "q4dbf42620ae59d8b"
+        "s249fde0718402de8"
       ],
       "file": "harbor",
       "offset": 0,
@@ -262,7 +251,7 @@
   "tx": {
     "a1": "3.566.0",
     "codex-run": "3.668.0",
-    "harbor": "9.4746.0",
+    "harbor": "8.4746.0",
     "quill": "2.1033.0"
   }
 }

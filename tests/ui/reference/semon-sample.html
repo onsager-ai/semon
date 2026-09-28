@@ -48,6 +48,8 @@ code { overflow-wrap: anywhere; }
 .dot.idle { border: 1.5px solid var(--done); }
 .dot.done { background: var(--done); opacity: .7; }
 .dot.err { background: var(--err); }
+.dot.new { background: var(--accent); }
+.dot.read { border: 1.5px solid var(--faint); }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--work) 55%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
 .spin { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--line); border-top-color: var(--work); animation: spin .9s linear infinite; flex: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -134,12 +136,16 @@ code { overflow-wrap: anywhere; }
 .chip-h::before { content: ""; width: 6px; height: 6px; border-radius: 2px; background: var(--h); }
 .stat { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; white-space: nowrap; }
 .stat.work { color: var(--work); } .stat.wait { color: var(--wait); } .stat.err { color: var(--err); } .stat.done, .stat.idle { color: var(--muted); }
+.stat.new { color: var(--accent); } .stat.read { color: var(--muted); }
 
 /* ---- Inbox ---------------------------------------------------------------- */
 .ib { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 3px 10px; align-items: start; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 14px 0; text-align: left; width: 100%; }
 .ib > svg { width: 18px; height: 18px; margin-top: 1px; color: var(--wait); }
 .ib .ln { min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
 .ib .tm { font-family: var(--mono); font-size: 12px; color: var(--faint); padding-top: 1px; }
+.ib .tm.unread { display: inline-flex; align-items: center; gap: 7px; }
+.ib .unread-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--accent); }
+.ib.new-result > svg { color: var(--accent); }
 .ib .q { grid-column: 2 / 4; font-family: var(--serif); font-size: 16px; line-height: 1.45; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .ib .ctx { grid-column: 2 / 4; font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: center; }
 .ib { cursor: pointer; }
@@ -276,6 +282,10 @@ code { overflow-wrap: anywhere; }
 .msg.user .body code { background: color-mix(in srgb, var(--ink) 7%, transparent); }
 .msg.assistant { max-width: 68ch; }
 .msg.assistant .body { font-family: var(--serif); font-size: 16px; color: var(--ink); }
+.result-marker { display: flex; align-items: center; gap: 7px; min-height: 24px; color: var(--muted); font-size: 12.5px; }
+.result-marker > svg { width: 15px; height: 15px; flex: none; color: var(--faint); }
+.result-marker .tm { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+.result-marker.new { color: var(--accent); }
 .think { justify-self: start; display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0; color: var(--muted); font-size: 13.5px; }
 .chev { width: 14px; height: 14px; flex: none; }
 .harness-note { font-size: 12.5px; color: var(--faint); font-style: italic; }
@@ -299,6 +309,9 @@ code { overflow-wrap: anywhere; }
 .tsum .chev { margin-left: auto; color: var(--faint); transition: transform .15s; }
 .tsum[aria-expanded="true"] .chev { transform: rotate(90deg); }
 .tgroup > .steps { margin-top: 2px; }
+.viewscript { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; border: 0; border-radius: 6px; background: none; padding: 3px 8px; color: var(--accent); font-size: 12.5px; }
+.tgroup > .viewscript { justify-self: end; margin: -2px 4px 2px; }
+@media (hover: hover) { .viewscript:hover { background: var(--sunken); } }
 .step .out { margin: 4px 0 8px; border-radius: 10px; background: var(--sunken); overflow: hidden; }
 .step .out pre { margin: 0; padding: 8px 12px; font: 12px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
 .step .out .io { padding: 7px 12px 0; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
@@ -312,6 +325,7 @@ code { overflow-wrap: anywhere; }
 .step .out .clip.clipped { -webkit-mask-image: linear-gradient(#000 calc(100% - 32px), transparent); mask-image: linear-gradient(#000 calc(100% - 32px), transparent); }
 .step .out .diff.clip { max-height: 16.5em; }
 .step .out .viewall { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 40px; border: 0; border-top: 1px solid var(--line); background: none; padding: 8px 12px; color: var(--accent); font-size: 13.5px; }
+.step .out .viewscript { width: 100%; min-height: 40px; border-top: 1px solid var(--line); border-radius: 0; }
 .step .out .viewall svg { width: 15px; height: 15px; }
 @media (hover: hover) { .step .out .viewall:hover { background: color-mix(in srgb, var(--sunken) 60%, var(--line)); } }
 /* The whole call: a full-screen sheet on phones, a dialog on wider screens. Text wraps; nothing scrolls sideways. */
@@ -629,14 +643,18 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   const dur = (a, b) => { const d = (b ?? NOW) - a; return d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };
   const tok = (m) => m >= 1 ? m.toFixed(1) + "M" : Math.round(m * 1000) + "k";
   const dot = (st) => { const d = el("span", "dot " + st); d.title = STATE[st] ?? st; d.setAttribute("role", "img"); d.setAttribute("aria-label", d.title); return d; };
-  const STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed" };
+  const STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed", new: "New result", read: "Read result" };
   const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
   const where = (s) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " · " + s.branch : "") : "No repo";
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
   const parentOf = (sid) => H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
   const RANK = { wait: 0, work: 1, err: 2, done: 3 };
-  const inbox = () => H.filter((h) => h.kind === "toyou" && h.status === "wait").sort((a, b) => b.at - a.at);
+  const SEEN_RESULTS = new Set();
+  const isResult = (h) => h.kind === "toyou" && h.ask === "result";
+  const markSeenResults = (handoffs) => { for (const h of handoffs) if (isResult(h)) SEEN_RESULTS.add(h.id); };
+  const inbox = () => H.filter((h) => h.kind === "toyou" && (h.ask === "question" || h.ask === "decision") && h.status === "wait").sort((a, b) => b.at - a.at);
+  const unreadResults = () => H.filter((h) => isResult(h) && !SEEN_RESULTS.has(h.id)).sort((a, b) => b.at - a.at);
   const working = () => Object.values(SESS).filter((s) => s.state === "work");
   const clean = (t) => t.replace(/[`*]/g, "");
 
@@ -719,7 +737,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
     const what = { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h.ask];
     return [h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from), el("span", "verb", what)]];
   }
-  const statWord = (h) => ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
+  const statWord = (h) => isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
 
   // ---- Turns and traces, computed from the transcripts ---------------------------------------------------
   // A turn starts at each incoming entry: your message, a relay from another session, or the brief that starts a
@@ -907,7 +925,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   const upCount = () => Object.keys(MACHINE).filter((m) => MACHINE_UP[m]).length;
   let allAnswered = false;
   function renderHome(page) {
-    const open = inbox(), w = working().sort((a, b) => b.last - a.last), many = Object.keys(MACHINE).length > 1;
+    const open = inbox(), fresh = unreadResults(), w = working().sort((a, b) => b.last - a.last), many = Object.keys(MACHINE).length > 1;
     const head = el("div", "ph"); const h1 = el("h1", null, "Home"); head.append(h1);
     const sub = el("div", "sub"); for (const [v, l] of [[open.length, "waiting on you"], [w.length, "working"], [upCount() + " of " + Object.keys(MACHINE).length, Object.keys(MACHINE).length === 1 ? "machine up" : "machines up"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
     head.append(sub); page.append(head); observeTitle(h1);
@@ -916,6 +934,12 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
     for (const h of open) list.append(inboxItem(h, false));
     if (!open.length) list.append(el("p", "empty", "Nothing is waiting on you."));
     page.append(list);
+    if (fresh.length) {
+      page.append(secHead("New results", fresh.length));
+      const results = el("div", "list");
+      for (const h of fresh) results.append(inboxItem(h, false));
+      page.append(results);
+    }
     page.append(secHead("Working now", w.length));
     const live = el("div", "list");
     for (const s of w) live.append(liveRow(s, many));
@@ -935,14 +959,17 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
     const sid = h.kind === "move" ? h.to : h.from, t = HOLDS.get(h.id);
     const r = el("div", "ib" + (quiet ? " quiet" : "")); r.tabIndex = 0; r.setAttribute("role", "link"); r.dataset.h = h.id;
     const [ic, parts] = sentence(h, "you");
-    r.append(icon(quiet && h.kind === "toyou" ? I.done : ic)); const ln = el("span", "ln"); ln.append(...parts); r.append(ln, el("span", "tm", ago(h.at)));
+    r.append(icon(quiet && h.kind === "toyou" ? I.done : ic)); const ln = el("span", "ln"); ln.append(...parts);
+    const unread = isResult(h) && !SEEN_RESULTS.has(h.id), time = el("span", "tm" + (unread ? " unread" : ""));
+    if (unread) { r.classList.add("new-result"); time.append(el("span", "unread-dot")); }
+    time.append(ago(h.at)); r.append(ln, time);
     r.append(rich("span", "q", preview(h.brief)));
     const an = quiet ? answersOf(h) : null; if (an) r.append(el("span", "ans", an.length ? "You answered: " + an.join(" · ") : "Answered · reply not in these logs"));
     if (t) r.append(originLine(t));
     const ctx = el("span", "ctx"); const s = SESS[sid];
     ctx.append(el("span", null, [HARNESS[s.harness], MACHINE[s.machine]].join(" · "))); if (t?.out.length) ctx.append(traceBtn(t));
     r.append(ctx);
-    const open = () => goSession(sid, t?.id);
+    const open = () => { if (isResult(h)) markSeenResults([h]); goSession(sid, t?.id); };
     r.addEventListener("click", () => { if (!getSelection().isCollapsed) return; open(); });
     r.addEventListener("keydown", (ev) => { if (ev.target === r && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); open(); } });
     return r;
@@ -1018,6 +1045,12 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
     const root = TURN.get(id);
     const head = el("div", "ph sr"); const h1 = el("h1", null, "Trace"); head.append(h1); page.append(head); observeTitle(h1);
     if (!root) { page.append(el("p", "empty", "This turn isn't in the logs on this machine.")); return; }
+    const markTraceResults = (turn, visited = new Set()) => {
+      if (!turn || visited.has(turn.id)) return;
+      visited.add(turn.id); markSeenResults(turn.out);
+      for (const h of turn.out) if (h.kind === "spawn" || h.kind === "relay") markTraceResults(STARTS.get(h.id), visited);
+    };
+    markTraceResults(root);
     const flow = el("div", "flow"), seen = new Set([root.id]), sess = new Set([root.sid]); let n = 0;
     const hop = (cls, ic, hc, parts, at) => { const x = el("div", "hop " + cls); const node = el("div", "node " + hc); node.append(icon(ic)); const body = el("div", "body"); const sent = el("div", "sent"); sent.append(...parts); if (at != null) sent.append(el("span", "tm", clock(at))); body.append(sent); x.append(node, body); flow.append(x); return [x, body]; };
     const s0 = root.start, text = s0 ? s0.brief : root.u?.text;
@@ -1027,13 +1060,15 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
     const e0 = turnEnd(root); traceMeta(b0, e0?.st ?? "idle", e0?.text ?? "Nothing recorded", root.sid, root);
     const walk = (t) => {
       for (const h of t.sent) {
-        const c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null, tgt = h.kind === "toyou" ? h.from : h.to, [ic, parts] = sentence(h, null);
+        const result = isResult(h);
+        const c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null, tgt = h.kind === "toyou" ? h.from : h.to, [ic, parts] = result ? [I.result, [el("span", "verb", statWord(h))]] : sentence(h, null);
         const [x, b] = hop("child k-" + h.kind + " s-" + h.status + (c || h.kind === "toyou" || h.kind === "move" ? "" : " stub"), ic, hcls(tgt), parts, h.at); x.dataset.h = h.id; if (c) x.dataset.turn = c.id;
+        if (result) { n++; continue; }
         clampBrief(b, h.brief); const an = answerEl(h, "result"); if (an) b.append(an);
         if (h.result) { const r = el("div", "result"); r.append(el("span", "rl", "Result:")); const s = el("span"); inline(s, h.result); r.append(s); b.append(r); }
         if (h.kind === "move") { traceMeta(b, "done", "Moved", h.to, t); continue; }
         n++;
-        if (h.kind === "toyou") { traceMeta(b, h.status === "done" ? "done" : h.status, statWord(h), h.from, t); continue; }
+        if (h.kind === "toyou") { traceMeta(b, isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : h.status === "done" ? "done" : h.status, statWord(h), h.from, t); continue; }
         sess.add(h.to); const e = c && turnEnd(c);
         traceMeta(b, e ? e.st : h.status === "done" ? "done" : h.status, e ? e.text : statWord(h), h.to, c, c ? null : "Its turn isn't in these logs");
         if (c && !seen.has(c.id)) { seen.add(c.id); walk(c); } // a turn is drawn once, so a loop in the data can't recurse forever
@@ -1047,6 +1082,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 
   // ---- Session page --------------------------------------------------------------------------------------------------
   function renderSession(page, sid) {
+    markSeenResults(H.filter((h) => isResult(h) && h.from === sid));
     const head = el("div", "ph sr"); const h1 = el("h1", null, SESS[sid].name); head.append(h1); page.append(head); observeTitle(h1);
     page.append(transcript(sid));
   }
@@ -1140,6 +1176,11 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
         const h = H.find((x) => x.id === e.id); if (!hit(h.brief + " " + (h.result ?? ""))) continue;
         // Your own ask is simply your message.
         if (h.kind === "ask") { if (!show.messages) continue; const m = el("div", "msg user"); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
+        if (isResult(h)) {
+          const marker = el("div", "result-marker " + (SEEN_RESULTS.has(h.id) ? "read" : "new"));
+          marker.append(icon(I.result), el("span", "word", statWord(h)), el("span", "tm", clock(h.at)));
+          tx.append(marker); continue;
+        }
         // A relay or brief that starts a turn is that turn's message.
         if (cur && cur.t.start === h && e === cur.t.entries[0]) { if (!show.messages) continue; tx.append(handoffCard(h, sid, true)); continue; }
         if (h.kind === "move") { if (find) continue; tx.append(handoffCard(h, sid)); continue; }
