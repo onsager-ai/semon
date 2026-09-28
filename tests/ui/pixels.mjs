@@ -54,6 +54,23 @@ const ANALYTICS_LINES = [
   ['  const analyticsAt = ([daysAgo, minute]) => ANALYTICS_DAY0 - daysAgo * DAY_MS + minute * 60000;',
     '  const analyticsAt = ([daysAgo, minute]) => Number(minute) > 1e11 ? Number(minute) : ANALYTICS_DAY0 - daysAgo * DAY_MS + minute * 60000;'],
 ];
+// The server's transcript endpoint owns the complete tool-call and error counts; the static mockup normally counts its
+// sample TX arrays directly. In port mode use the same per-session marks as the served viewer.
+const CALL_LINES = [
+  ['    const es = TX[s.id] ?? [], calls = es.filter((e) => e.k === "tool").length, errors = es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;',
+    '    const es = TX[s.id] ?? [], calls = TXM[s.id]?.calls ?? es.filter((e) => e.k === "tool").length, errors = TXM[s.id]?.errors ?? es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;'],
+  ['    const block = el("div", "child-return"), calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, finished =',
+    '    const block = el("div", "child-return"), calls = TXM[s.id]?.calls ?? (TX[s.id] ?? []).filter((e) => e.k === "tool").length, finished ='],
+  ['    const calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, origin = originHandoff(s.id), meta = el("span", "run-meta");',
+    '    const calls = TXM[s.id]?.calls ?? (TX[s.id] ?? []).filter((e) => e.k === "tool").length, origin = originHandoff(s.id), meta = el("span", "run-meta");'],
+  ['    if (child) { const calls = (TX[child.id] ?? []).filter((e) => e.k === "tool").length, meta = el("div", "child-meta");',
+    '    if (child) { const calls = TXM[child.id]?.calls ?? (TX[child.id] ?? []).filter((e) => e.k === "tool").length, meta = el("div", "child-meta");'],
+];
+// Parents show the API-equivalent cost of their own session and descendant runs, as the served viewer does.
+const COST_LINES = [
+  ['    const cost = costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", cost.unknown.length ? "—" : shortMoney(cost.usd))); costItem.title = COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));',
+    '    const kids = childSessions(s.id), allKids = descendantsOf(s.id, sessionChildren()), cost = kids.length ? costForSessions([s, ...allKids]) : costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", (kids.length ? "incl. runs " : "") + (cost.unknown.length ? "—" : shortMoney(cost.usd)))); costItem.title = "API-equivalent cost. " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + (kids.length ? ", including runs" : "") + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));'],
+];
 // The sample uses illustrative hostnames; in port mode the served model owns the machine names and the viewer
 // shortens those names in sidebar and line-2 labels.
 const HOST_LINES = [
@@ -93,9 +110,9 @@ function portReference(D) {
   const block = ["  const NOW = " + D.NOW + ";", "  const MACHINE = " + J(D.MACHINE) + ";", "  const MACHINE_UP = " + J(D.MACHINE_UP) + ";",
     "  const MACHINE_LAST = " + J(D.MACHINE_LAST ?? {}) + ";", "  const ADMIN = " + J(D.ADMIN ?? null) + ";",
     '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(SESS) + ";",
-    "  const API_PRICE = " + J(PRICING) + ";", "  const H = " + J(H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", ""].join("\n");
+    "  const API_PRICE = " + J(PRICING) + ";", "  const H = " + J(H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", "  const TXM = " + J(D.TXM ?? {}) + ";", ""].join("\n");
   let html = MOCKUP.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + MOCKUP.slice(end);
-  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
+  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES, ...CALL_LINES, ...COST_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
   for (const [a, replacement] of HOST_LINES) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, replacement(D)); }
   const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
   if (!histories.test(html)) throw new Error("mockup analytics history block moved");

@@ -81,16 +81,16 @@ export async function data({ extras = false } = {}) {
     return r.json();
   };
   const model = await get("/api/model");
-  const SESS = model.sessions, H = model.handoffs, TX = {};
+  const SESS = model.sessions, H = model.handoffs, TX = {}, TXM = {};
   for (const [id, s] of Object.entries(SESS)) s.id = id;
   for (const sid of Object.keys(SESS)) {
     let page = await get("/api/tx?sid=" + encodeURIComponent(sid)), entries = page.entries;
     while (page.from > 0) { page = await get("/api/tx?sid=" + encodeURIComponent(sid) + "&before=" + page.from); entries = page.entries.concat(entries); }
-    TX[sid] = entries;
+    TX[sid] = entries; TXM[sid] = { calls: page.calls, errors: page.errors };
   }
   const machines = model.machines ?? [model.machine];
   return {
-    model, SESS, H, TX, turns: model.turns, NOW: model.now,
+    model, SESS, H, TX, TXM, turns: model.turns, NOW: model.now,
     MACHINE: Object.fromEntries(machines.map((m) => [m.id, m.name])),
     MACHINE_UP: Object.fromEntries(machines.map((m) => [m.id, m.up])),
     MACHINE_LAST: Object.fromEntries(machines.filter((m) => m.last != null).map((m) => [m.id, m.last])),
