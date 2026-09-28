@@ -258,7 +258,7 @@
     const part = (as) => api("/api/entry?sid=" + enc(e.sid) + "&slot=" + e.slot + "&as=" + as).then((r) => [as, r]);
     return Promise.all((e.more ?? []).map(part)).then((rs) => {
       const f = { fullCut: [] };
-      for (const [k, r] of rs) { f[k] = k === "diff" ? r.diff : r.text; if (r.truncated) f.fullCut.push(k); }
+      for (const [k, r] of rs) { f[k] = k === "diff" ? r.diff : r.text; if (k === "diff" && r.changes) f.changes = r.changes; if (r.truncated) f.fullCut.push(k); }
       return f;
     });
   }
@@ -600,7 +600,9 @@
     const flush = () => {
       if (!run.length) return;
       const steps = el("div", "steps"); run.forEach((r) => steps.append(r.node));
-      if (run.length === 1 || find) { tx.append(steps); run = []; return; }
+      const scripts = [], scriptKeys = new Set();
+      for (const r of run) if (r.entry?.script != null && !scriptKeys.has(String(r.entry.script))) { scriptKeys.add(String(r.entry.script)); scripts.push(r.entry); }
+      if ((run.length === 1 && !scripts.length) || find) { tx.append(steps); run = []; return; }
       const counts = new Map(); for (const r of run) { const [, , p, one, many] = toolInfo(r.k), c = counts.get(p) ?? { n: 0, one, many }; c.n++; counts.set(p, c); }
       let text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
       text = text[0].toUpperCase() + text.slice(1);
@@ -612,7 +614,9 @@
       b.append(icon(I.chev, "chev"));
       steps.hidden = true;
       b.addEventListener("click", () => { steps.hidden = !steps.hidden; b.setAttribute("aria-expanded", String(!steps.hidden)); });
-      g.append(b, steps); tx.append(g); run = [];
+      g.append(b);
+      for (const e of scripts) { const view = el("button", "viewscript", "View script"); view.type = "button"; view.addEventListener("click", () => openScript(e)); g.append(view); }
+      g.append(steps); tx.append(g); run = [];
     };
     // A turn block: who started it, the work, and how it ended. While finding or filtering, a turn left with nothing drops out.
     const firsts = turnMode ? new Map((TURNS[sid] ?? []).map((t) => [t.entries[0], t])) : new Map(); let cur = null;
@@ -640,21 +644,29 @@
         const [ic, v] = verb(e.name);
         if (e.live) { const r = keyed(el("div", "step live"), e); r.dataset.live = sid; r.append(el("span", "spin"), el("span", "sv", v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd tick", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs, key: e.key }); continue; }
         const box = keyed(el("div", "step" + (e.ok || e.ok === null ? "" : " err")), e); const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
-        b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "no result" : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs), icon(I.chev, "chev"));
+        b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs), icon(I.chev, "chev"));
         const out = el("div", "out"); out.hidden = true;
         // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
         // eleven lines. When either is cut, "View all" opens the whole call in a sheet.
         const inLabel = /^(Bash|shell|exec_command|local_shell)$/.test(e.name) ? "Command" : "Input";
         if (e.in) out.append(el("div", "io", inLabel), el("pre", "in clip", e.in));
+        if (e.cwd) out.append(el("div", "io", "Working directory · " + e.cwd));
         if (e.in) out.append(el("div", "io", "Output"));
-        if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) out.append(el("pre", "clip", e.out)); else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
+        if (e.changes) {
+          for (const change of e.changes) {
+            out.append(el("div", "io", "Change · " + change.path + (change.move ? " → " + change.move : "")));
+            if (change.diff?.length) out.append(diffEl(change.diff, "clip")); else out.append(el("div", "noout", "No diff recorded"));
+          }
+          if (!e.changes.length) out.append(el("div", "noout", "No changes recorded"));
+        } else if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) out.append(el("pre", "clip", e.out)); else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
+        if (find && e.script != null) { const script = el("button", "viewscript", "View script"); script.type = "button"; script.addEventListener("click", () => openScript(e)); out.append(script); }
         const all = el("button", "viewall"); all.type = "button"; all.hidden = true; all.append(icon(I.expand), el("span", null, "View all"));
         all.addEventListener("click", () => openViewer(e, v, ic, inLabel)); out.append(all);
         b.addEventListener("click", () => { out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden));
           if (!out.hidden) { let cut = !!e.more?.length; out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; }); all.hidden = !cut;
             // Text cut when this copy was made, with nothing more to show: say so instead of ending on "…".
             if (!cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs")); } });
-        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key }); continue;
+        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key, entry: e }); continue;
       }
       flush();
       if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg user"), e); m.append(markdown(e.text)); tx.append(m); }
@@ -709,9 +721,18 @@
         c.addEventListener("click", () => navigator.clipboard?.writeText(text).then(() => { c.lastChild.textContent = "Copied"; }, () => { c.lastChild.textContent = "Copy failed"; })); s.append(c); }
       body.append(s); };
     const cutNote = (text) => { if (!e.fullFailed && /…(\(truncated\))?\s*$/.test(text ?? "")) body.append(el("p", "vnote", "Cut short in this copy of the logs.")); };
-    if (e.in) { section(inLabel, e.in); body.append(el("pre", "in", e.in)); cutNote(e.in); }
-    if (e.diff) { section("Change", null); body.append(diffEl(e.diff)); }
-    else { section("Output", e.out); if (e.out) { body.append(el("pre", null, e.out)); cutNote(e.out); } else body.append(el("p", "vnote", e.unfinished ? "No result recorded." : "No output.")); }
+    if (e.scriptText !== undefined) {
+      section("Script", e.scriptText); body.append(el("pre", "script", e.scriptText));
+      if (e.scriptTruncated) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));
+    } else if (e.scriptFailed) body.append(el("p", "vnote", "Couldn't load the script from these logs."));
+    else {
+      if (e.in) { section(inLabel, e.in); body.append(el("pre", "in", e.in)); cutNote(e.in); }
+      if (e.changes) {
+        for (const change of e.changes) { section("Change · " + change.path + (change.move ? " → " + change.move : ""), null); body.append(diffEl(change.diff ?? [])); }
+        if (!e.changes.length) body.append(el("p", "vnote", "No changes recorded."));
+      } else if (e.diff) { section("Change", null); body.append(diffEl(e.diff)); }
+      else { section("Output", e.out); if (e.out) { body.append(el("pre", null, e.out)); cutNote(e.out); } else body.append(el("p", "vnote", e.unfinished ? "No result recorded." : "No output.")); }
+    }
     if (e.fullFailed) body.append(el("p", "vnote", "Couldn't load the full text: this is the preview."));
     if (e.fullCut?.length) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));
     d.append(head, body); document.body.append(d);
@@ -719,6 +740,13 @@
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
     try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
+  }
+
+  function openScript(e) {
+    const done = (fields) => openViewer({ ...e, ...fields, full: true }, "View script", "run", "Script");
+    api("/api/entry?sid=" + enc(e.sid) + "&slot=" + e.slot + "&as=script")
+      .then((result) => done({ scriptText: result.text, scriptTruncated: result.truncated }))
+      .catch(() => done({ scriptFailed: true }));
   }
 
   function handoffCard(h, viewer, start) {

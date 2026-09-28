@@ -120,6 +120,38 @@ export default async function (browser) {
     await page.context().close();
   }
 
+  // ---- Code-mode exec: unwrapped operations and its script control -----------------------------------------------
+  {
+    const page = await served(browser, { extras: true, path: "/s/codex/code-mode" });
+    await page.waitForFunction(() => !!document.querySelector(".turns"));
+    const data = await page.evaluate(async () => {
+      const token = new URLSearchParams(location.search).get("t");
+      const response = await fetch("/api/tx?sid=code-mode&t=" + encodeURIComponent(token));
+      const totals = await response.json();
+      document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click());
+      return {
+        calls: totals.calls,
+        errors: totals.errors,
+        steps: [...document.querySelectorAll(".step")].map((step) => ({
+          arg: step.querySelector(".sa")?.textContent ?? "",
+          err: step.classList.contains("err"),
+        })),
+        scriptButtons: [...document.querySelectorAll(".viewscript")].map((button) => button.textContent),
+      };
+    });
+    R.codeMode = data;
+    r.expect(data.calls === 3 && data.errors === 0, "three indexed operations are counted: " + JSON.stringify({ calls: data.calls, errors: data.errors }));
+    r.expect(data.steps.map((step) => step.arg).join("|") === "git status|sed -n '1,9p' a.rs|src/code-mode.rs", "the steps show unwrapped commands and the changed path: " + JSON.stringify(data.steps));
+    r.expect(data.steps.length === 3 && data.steps.every((step) => !step.err), "three ordinary, successful tool steps are shown");
+    r.expect(data.scriptButtons.length === 1 && data.scriptButtons[0] === "View script", "the operation group has one View script control: " + JSON.stringify(data.scriptButtons));
+    await page.click(".viewscript"); await page.waitForSelector("dialog.viewer[open]");
+    R.codeMode.script = await page.locator(".viewer pre.script").textContent();
+    r.expect(R.codeMode.script.includes("Promise.allSettled") && R.codeMode.script.includes("git status"), "View script opens the source in the existing sheet");
+    await page.click(".viewer .vclose");
+    r.expect(page.errors.length === 0, "code-mode page errors: " + page.errors.join(" | "));
+    await page.context().close();
+  }
+
   // ---- Injection -------------------------------------------------------------------------------------------------------
   {
     const X = { screens: 0, bad: [], payloadShown: 0 };

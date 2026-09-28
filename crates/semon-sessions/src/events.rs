@@ -27,7 +27,8 @@ use crate::{Tokens, field};
 /// so `semon sessions`, `--watch` and `--json` never load or rewrite it.
 /// v3: every assistant text is its own event (v2 collapsed adjacent ones).
 /// v4: thinking blocks and Codex harness text are indexed apart, as `extras`.
-const CACHE_VERSION: u32 = 4;
+/// v5: completed Codex items carry their exact code-mode call parent, if known.
+const CACHE_VERSION: u32 = 5;
 
 /// One file's event index and the facts the model needs about it. Metadata
 /// only (risk:secret).
@@ -35,9 +36,10 @@ const CACHE_VERSION: u32 = 4;
 pub(crate) struct FileIndex {
     #[serde(default)]
     pub(crate) events: Vec<Event>,
-    /// Transcript-only markers the model's rules never read: thinking blocks
-    /// and harness text added before a Codex prompt. Kept apart from
-    /// `events` so they can't change how events collapse or turns split.
+    /// Transcript-only items the model's rules never read: thinking blocks,
+    /// harness text added before a Codex prompt, and completed Codex operations.
+    /// Kept apart from `events` so they can't change how events collapse or
+    /// turns split.
     #[serde(default)]
     pub(crate) extras: Vec<Event>,
     /// Tool calls still waiting for a result: call id -> event index.
@@ -272,6 +274,8 @@ pub(crate) enum Kind {
     A,
     /// A tool call, resolved in place when its result arrives.
     Tool,
+    /// A Codex command or file change completed by an `item_completed` event.
+    Operation,
     /// A relay received (`origin.kind == "peer"`, or a
     /// `<cross-session-message>` block).
     Xsm,
@@ -346,6 +350,12 @@ pub(crate) struct Event {
     /// tool: the tool name. xsm: the sender's `origin.name`. tn: the status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) n: Option<String>,
+    /// A Codex `custom_tool_call` named `exec`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) code_mode: bool,
+    /// Operation: the exact index of its parent code-mode call, if unique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) parent: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) r: Option<Reply>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1106,15 +1116,59 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                 };
             }
         }
-        // A finished command's structured exit code, when the rollout
-        // records one for a call.
+        // A finished command's structured exit code, and the completed
+        // operations emitted by code-mode `exec`.
         Some("event_msg") if field(payload, "type") == Some("item_completed") => {
             let item = &payload["item"];
+            let operation = matches!(field(item, "type"), Some("CommandExecution" | "FileChange"));
+            if operation {
+                let parent = summary
+                    .events
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, event)| {
+                        event.k == Kind::Tool && event.code_mode && event.r.is_none()
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                let code = item.get("exit_code").and_then(Value::as_i64);
+                let failed =
+                    code.is_some_and(|code| code != 0) || field(item, "status") == Some("failed");
+                let known = code.is_some()
+                    || field(item, "status") == Some("failed")
+                    || field(item, "type") == Some("FileChange");
+                extra(
+                    summary,
+                    Event {
+                        k: Kind::Operation,
+                        o: offset,
+                        t: time,
+                        id: field(item, "id").map(str::to_owned),
+                        n: field(item, "type").map(str::to_owned),
+                        parent: (parent.len() == 1).then(|| parent[0]),
+                        r: Some(Reply {
+                            o: offset,
+                            t: time,
+                            e: failed,
+                            f: if known { 0 } else { UNKNOWN },
+                            ..Reply::default()
+                        }),
+                        ..Event::default()
+                    },
+                );
+            }
             if let (Some(id), Some(code)) = (
                 field(item, "id"),
                 item.get("exit_code").and_then(Value::as_i64),
             ) {
-                exit_code(summary, id, code, offset, time);
+                let code_mode_call = summary
+                    .pending
+                    .get(id)
+                    .and_then(|index| summary.events.get(*index))
+                    .is_some_and(|event| event.code_mode);
+                if !code_mode_call {
+                    exit_code(summary, id, code, offset, time);
+                }
             }
         }
         Some("turn_context") => {
@@ -1179,6 +1233,8 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     t: time,
                     id: field(payload, "call_id").map(str::to_owned),
                     n: Some(field(payload, "name").unwrap_or("shell").to_owned()),
+                    code_mode: field(payload, "type") == Some("custom_tool_call")
+                        && field(payload, "name") == Some("exec"),
                     ..Event::default()
                 },
             ),
@@ -1190,13 +1246,21 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     if acknowledgement(output) {
                         flags |= ACK;
                     }
-                    resolve(summary, id, |_| Reply {
-                        o: offset,
-                        t: time,
-                        e: code.is_some_and(|code| code != 0),
-                        f: flags,
-                        ..Reply::default()
-                    });
+                    let code_mode_call = summary
+                        .pending
+                        .get(id)
+                        .and_then(|index| summary.events.get(*index))
+                        .is_some_and(|event| event.code_mode);
+                    if field(payload, "type") == Some("custom_tool_call_output") || !code_mode_call
+                    {
+                        resolve(summary, id, |_| Reply {
+                            o: offset,
+                            t: time,
+                            e: code.is_some_and(|code| code != 0),
+                            f: flags,
+                            ..Reply::default()
+                        });
+                    }
                 }
             }
             Some("reasoning")

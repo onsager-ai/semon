@@ -951,7 +951,7 @@ impl MachineView {
     }
 
     /// `/api/entry`: one entry in full. With `sid`, `slot` and
-    /// `as=in|out|diff`, one part of a transcript's tool call for "View all".
+    /// `as=in|out|diff|script`, one part of a transcript tool entry for "View all".
     fn expand(&mut self, query: &str) -> io::Result<String> {
         if let Some(part) = query_value(query, "as") {
             let sid = query_value(query, "sid")

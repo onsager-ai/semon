@@ -2743,6 +2743,16 @@ impl<'a> Builder<'a> {
     ) -> Transcript {
         let session = &self.sessions[index];
         let mut extras: BTreeMap<usize, std::collections::VecDeque<&Event>> = BTreeMap::new();
+        let mut operation_parents = BTreeSet::new();
+        for file in &session.files {
+            for extra in &self.files[*file].summary.extras {
+                if extra.k == Kind::Operation
+                    && let Some(parent) = extra.parent
+                {
+                    operation_parents.insert((*file, parent));
+                }
+            }
+        }
         for file in &session.files {
             extras.insert(*file, self.files[*file].summary.extras.iter().collect());
         }
@@ -2750,15 +2760,37 @@ impl<'a> Builder<'a> {
         let mut owner: Option<usize> = None;
         let mut started = BTreeSet::new();
         let turn_id = |turn: Option<usize>| turn.map(|turn| turns[turn].id.clone());
-        let extra_slot = |event: &Event, file: usize, owner: Option<usize>| {
-            let kind = match event.k {
-                Kind::Harness => SlotKind::Harness(event.n.clone().unwrap_or_default()),
-                _ => SlotKind::Think,
+        let extra_slot =
+            |event: &Event, file: usize, owner: Option<usize>, started: &mut BTreeSet<usize>| {
+                let kind = match event.k {
+                    Kind::Harness => SlotKind::Harness(event.n.clone().unwrap_or_default()),
+                    Kind::Operation => {
+                        let ok = event
+                            .r
+                            .as_ref()
+                            .and_then(|reply| (reply.f & events::UNKNOWN == 0).then_some(!reply.e));
+                        let script_offset = event
+                            .parent
+                            .and_then(|parent| self.files[file].summary.events.get(parent))
+                            .filter(|parent| parent.k == Kind::Tool && parent.code_mode)
+                            .map(|parent| parent.o);
+                        SlotKind::Operation {
+                            kind: event.n.clone().unwrap_or_default(),
+                            ok,
+                            script_offset,
+                        }
+                    }
+                    _ => SlotKind::Think,
+                };
+                let mut slot = Slot::new(kind, Some(file), event.o, event.b, event.t);
+                slot.turn = turn_id(owner);
+                if event.k == Kind::Operation
+                    && let Some(owner) = owner
+                {
+                    slot.first = started.insert(owner);
+                }
+                slot
             };
-            let mut slot = Slot::new(kind, Some(file), event.o, event.b, event.t);
-            slot.turn = turn_id(owner);
-            slot
-        };
         for (position, entry) in entries.iter().enumerate() {
             if let Some(queue) = extras.get_mut(&entry.file) {
                 let at = entry.at.map_or((entry.offset, 0), |at| {
@@ -2767,10 +2799,15 @@ impl<'a> Builder<'a> {
                 });
                 while queue.front().is_some_and(|extra| (extra.o, extra.b) < at) {
                     let extra = queue.pop_front().expect("front");
-                    slots.push(extra_slot(extra, entry.file, owner));
+                    slots.push(extra_slot(extra, entry.file, owner, &mut started));
                 }
             }
             owner = owners[position];
+            if matches!(entry.kind, EntryKind::Tool(_))
+                && entry.at.is_some_and(|at| operation_parents.contains(&at))
+            {
+                continue;
+            }
             let block = entry.at.map_or(0, |at| event(self.files, at).b);
             let kind = match entry.kind {
                 EntryKind::H(handoff) => SlotKind::H(self.handoffs[handoff].out.id.clone()),
@@ -2808,7 +2845,7 @@ impl<'a> Builder<'a> {
             .collect();
         rest.sort_by_key(|(file, extra)| (extra.t, *file, extra.o, extra.b));
         for (file, extra) in rest {
-            slots.push(extra_slot(extra, file, owner));
+            slots.push(extra_slot(extra, file, owner, &mut started));
         }
         if let Some(spawn) = self.handoffs.iter().find(|handoff| {
             handoff.to == Some(index)
@@ -3173,6 +3210,13 @@ pub(crate) enum SlotKind {
         name: String,
         reply: Option<events::Reply>,
     },
+    /// A Codex code-mode command or file change, drawn in place of its
+    /// wrapper when exactly one code-mode call owns it.
+    Operation {
+        kind: String,
+        ok: Option<bool>,
+        script_offset: Option<u64>,
+    },
     Gap,
     Think,
     Harness(String),
@@ -3231,6 +3275,11 @@ impl Transcript {
             if let SlotKind::Tool { shown, .. } = &slot.kind {
                 calls += 1;
                 if matches!(shown, Shown::Err | Shown::Unfinished) {
+                    errors += 1;
+                }
+            } else if let SlotKind::Operation { ok, .. } = &slot.kind {
+                calls += 1;
+                if *ok == Some(false) {
                     errors += 1;
                 }
             }
