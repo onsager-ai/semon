@@ -13,7 +13,7 @@
 //   - each new piece of work appears within 4 s: the message and the call in harbor's turn, the subagent's Timeline row,
 //     the relay's Timeline connector, the question in Home's Needs you;
 //   - harbor, scrolled up: the block at the top of the view moves by at most 1 px, what was expanded (steps, groups, child
-//     work) stays expanded, and a "N new ↓" pill appears (≥36 px tall, on screen); tapping it goes to the end;
+//     work) stays expanded, and a counted jump button appears (≥40 px, on screen); tapping it goes to the end;
 //   - harbor at its end: it stays pinned to the end with no pill; a running call's time ticks, and it becomes a finished
 //     step when its result lands;
 //   - an open View all sheet stays open with the same text while an update arrives, and the page under it changes only once
@@ -188,6 +188,7 @@ async function scheme(browser, name, opts, r, protocol) {
     for (const p of pages) await p.evaluate(() => window.__live.reset());
 
     // ---- 1. harbor's running call returns, and it says something; the reader is scrolled up ----
+    const beforeEntries = await S.evaluate(() => [...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .think, .think-masked, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
     let t0 = Date.now();
     harbor.append(harbor.result(at(12, 41), "toolu-b3", "test result: ok. 214 passed; 0 failed"), harbor.text(at(12, 41, 5), MESSAGE));
     R.message = await appear(S, t0, (m) => [...document.querySelectorAll("#page .msg.assistant")].some((x) => x.textContent.includes(m)), MESSAGE);
@@ -201,13 +202,14 @@ async function scheme(browser, name, opts, r, protocol) {
     const open1 = new Set(await openKeys(S));
     R.stillOpen1 = open0.filter((k) => !open1.has(k));
     r.expect(R.stillOpen1.length === 0, name + ": closed by the update: " + R.stillOpen1.join(", "));
-    R.pill = await S.evaluate(() => { const p = document.querySelector(".newpill"); if (!p) return null; const b = p.getBoundingClientRect(); return { text: p.textContent, h: b.height, left: b.left, right: b.right, bottom: b.bottom, vw: document.documentElement.clientWidth, vh: innerHeight }; });
-    r.expect(!!R.pill && /^[1-9]\d* new ↓$/.test(R.pill.text), name + ": no \"N new ↓\" pill while scrolled up: " + JSON.stringify(R.pill));
-    if (R.pill) r.expect(R.pill.h >= 36 && R.pill.left >= 0 && R.pill.right <= R.pill.vw + 0.5 && R.pill.bottom <= R.pill.vh, name + ": the pill is off screen or under 36 px: " + JSON.stringify(R.pill));
-    await S.screenshot({ path: path.join(ENV.out, "live-" + name + "-pill.png") });
-    await S.click(".newpill"); await sleep(250);
-    R.afterPill = await S.evaluate(() => ({ pill: !!document.querySelector(".newpill"), left: window.__left() }));
-    r.expect(!R.afterPill.pill && R.afterPill.left <= 80, name + ": tapping the pill didn't go to the end: " + JSON.stringify(R.afterPill));
+    R.jump = await S.evaluate((before) => { const p = document.querySelector(".jump-bottom"); if (!p || p.hidden) return null; const b = p.getBoundingClientRect(), keys = new Set([...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .think, .think-masked, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e)); return { text: p.textContent.trim(), added: [...keys].filter((key) => !before.includes(key)).length, w: b.width, h: b.height, top: b.top, left: b.left, right: b.right, bottom: b.bottom, vw: document.documentElement.clientWidth, vh: innerHeight }; }, beforeEntries);
+    const jumpCount = R.jump && /^([1-9]\d*) new$/.exec(R.jump.text);
+    r.expect(!!jumpCount && Number(jumpCount[1]) === R.jump.added, name + ": jump button count didn't match newly rendered entries: " + JSON.stringify(R.jump));
+    if (R.jump) r.expect(R.jump.w >= 40 && R.jump.h >= 40 && R.jump.top >= 0 && R.jump.left >= 0 && R.jump.right <= R.jump.vw + 0.5 && R.jump.bottom <= R.jump.vh, name + ": the jump button is off screen or under 40 px: " + JSON.stringify(R.jump));
+    await S.screenshot({ path: path.join(ENV.out, "live-" + name + "-jump.png") });
+    await S.click(".jump-bottom"); await S.waitForFunction(() => window.__left() <= 1, null, { timeout: 5000 });
+    R.afterJump = await S.evaluate(() => ({ hidden: document.querySelector(".jump-bottom")?.hidden, left: window.__left() }));
+    r.expect(R.afterJump.hidden && R.afterJump.left <= 1, name + ": tapping the jump button didn't go to the end: " + JSON.stringify(R.afterJump));
 
     // ---- 2. a new call while the reader is at the end: pinned, ticking, then finished ----
     // Child work closed with steps open inside it keeps them through a redraw of its turn.
@@ -221,9 +223,9 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.call != null, name + ": the new call didn't appear within 4 s");
     await sleep(300);
     const live1 = await S.evaluate(() => [...document.querySelectorAll(".step.live")].find((x) => x.querySelector(".sa")?.textContent.includes("sleep 30"))?.dataset.e ?? null);
-    R.pinned = await S.evaluate(() => ({ pill: !!document.querySelector(".newpill"), left: window.__left(), top: window.__sc().scrollTop }));
+    R.pinned = await S.evaluate(() => ({ hidden: document.querySelector(".jump-bottom")?.hidden, left: window.__left(), top: window.__sc().scrollTop }));
     R.pinned.before = top1;
-    r.expect(!R.pinned.pill && R.pinned.left <= 1 && R.pinned.top > top1, name + ": not kept at the end: " + JSON.stringify(R.pinned));
+    r.expect(R.pinned.hidden && R.pinned.left <= 1 && R.pinned.top > top1, name + ": not kept at the end: " + JSON.stringify(R.pinned));
     R.innerKept = await S.evaluate(({ cw, keys }) => { const w = document.querySelector('.childwork[data-e="' + cw + '"]'), t = w.querySelector(":scope > .cw-toggle"), closed = t.getAttribute("aria-expanded") === "false"; t.click();
       return { closed, open: keys.filter((k) => w.querySelector('.step[data-e="' + k + '"] > button')?.getAttribute("aria-expanded") === "true").length, of: keys.length }; }, inner0);
     r.expect(R.innerKept.closed && R.innerKept.open === R.innerKept.of, name + ": steps open inside closed child work didn't survive the redraw: " + JSON.stringify(R.innerKept));
