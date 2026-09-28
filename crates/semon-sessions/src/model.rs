@@ -2537,8 +2537,8 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Live top-level sessions: working, waiting on you (an open question or
-    /// a result), or idle.
+    /// Live top-level sessions: working, waiting on an open question or
+    /// decision, or idle.
     fn lineage_states(&mut self) {
         for index in 0..self.sessions.len() {
             let session = &self.sessions[index];
@@ -2556,6 +2556,7 @@ impl<'a> Builder<'a> {
             let open = self.handoffs.iter().any(|handoff| {
                 handoff.from == Some(index)
                     && handoff.out.kind == "toyou"
+                    && matches!(handoff.out.ask, Some("question" | "decision"))
                     && handoff.out.status == "wait"
             });
             if open {
@@ -2575,23 +2576,25 @@ impl<'a> Builder<'a> {
                     let text = self.text(at, "a", assistant_text);
                     let file = &self.files[at.0];
                     let found = event(self.files, at);
-                    let handoff = Handoff {
-                        ask: Some("result"),
-                        ..Handoff::new(
-                            stable_id(
-                                "q",
-                                &format!("toyou:result:{}:{}:{}", file.id, found.o, found.b),
-                            ),
-                            "toyou",
-                            (self.sessions[index].key.clone(), "you".into()),
-                            found.t.unwrap_or(self.sessions[index].out.last),
-                            "wait",
-                            text.as_deref().unwrap_or(""),
-                        )
-                    };
-                    let handoff = self.add_handoff(handoff, Some(index), None);
-                    self.after.insert(at, handoff);
-                    self.sessions[index].out.state = "wait";
+                    if self.reply_started_by_you(index, at) {
+                        let handoff = Handoff {
+                            ask: Some("result"),
+                            ..Handoff::new(
+                                stable_id(
+                                    "q",
+                                    &format!("toyou:result:{}:{}:{}", file.id, found.o, found.b),
+                                ),
+                                "toyou",
+                                (self.sessions[index].key.clone(), "you".into()),
+                                found.t.unwrap_or(self.sessions[index].out.last),
+                                "new",
+                                text.as_deref().unwrap_or(""),
+                            )
+                        };
+                        let handoff = self.add_handoff(handoff, Some(index), None);
+                        self.after.insert(at, handoff);
+                    }
+                    self.sessions[index].out.state = "idle";
                 }
                 _ => self.sessions[index].out.state = "idle",
             }
@@ -2611,6 +2614,55 @@ impl<'a> Builder<'a> {
                 self.handoffs[latest].out.status = "work";
             }
         }
+    }
+
+    /// A result belongs to a reply only when the existing turn grouping says
+    /// it began with your message. Some incoming events aren't transcript
+    /// entries; if one falls between that message and the reply, its turn
+    /// start is ambiguous and no result is inferred.
+    fn reply_started_by_you(&self, index: usize, reply: Ref) -> bool {
+        let entries = self.entries(index);
+        let Some(reply_entry) = entries
+            .iter()
+            .position(|entry| entry.at == Some(reply) && entry.kind == EntryKind::A)
+        else {
+            return false;
+        };
+        let groups = self.groups(index, &entries);
+        let Some(group) = groups
+            .iter()
+            .find(|group| group.entries.contains(&reply_entry))
+        else {
+            return false;
+        };
+        let Some(start) = group
+            .start
+            .filter(|start| self.handoffs[*start].out.kind == "ask")
+        else {
+            return false;
+        };
+        let Some(start_at) = group
+            .entries
+            .iter()
+            .find_map(|position| entries[*position].at)
+        else {
+            return false;
+        };
+        let refs = &self.sessions[index].refs;
+        let Some(start_position) = refs.iter().position(|at| *at == start_at) else {
+            return false;
+        };
+        let Some(reply_position) = refs.iter().position(|at| *at == reply) else {
+            return false;
+        };
+        if start_position > reply_position {
+            return false;
+        }
+        !refs[start_position..=reply_position].iter().any(|at| {
+            let event = event(self.files, *at);
+            matches!(event.k, Kind::Xsm | Kind::Agm | Kind::Tn)
+                || event.k == Kind::Tool && event.n.as_deref() == Some("SubagentHandback")
+        }) && self.handoffs[start].out.from == "you"
     }
 
     fn activity(&mut self) {

@@ -190,6 +190,52 @@ export default async function (browser) {
     await page.context().close();
   }
 
+  // ---- New results: opening the session persists its read state; unavailable storage leaves pages usable -----------
+  {
+    const resultHandoff = D.H.find((h) => h.kind === "toyou" && h.ask === "result" && h.from === "result-card");
+    r.expect(!!resultHandoff, "the synthetic human-started turn has a result handoff");
+    const page = await served(browser, { extras: true, path: "/" });
+    const selector = '.ib.new-result[data-h="' + (resultHandoff?.id ?? "") + '"]';
+    await page.waitForFunction((id) => [...document.querySelectorAll(".sec-h")].some((head) => head.firstChild?.textContent === "New results") && !!document.querySelector('.ib.new-result[data-h="' + CSS.escape(id) + '"]'), resultHandoff?.id ?? "");
+    const before = await page.locator(selector).evaluate((card) => ({
+      brief: card.querySelector(".q")?.innerText ?? "",
+      dots: card.querySelectorAll(".unread-dot").length,
+      badge: document.querySelector('.nav-item[data-go="home"] .cnt.hot')?.textContent ?? "",
+      waitingIds: [...([ ...document.querySelectorAll(".sec-h") ].find((head) => head.firstChild?.textContent === "Needs you")?.nextElementSibling?.querySelectorAll(".ib") ?? [])].map((item) => item.dataset.h),
+    }));
+    r.expect(before.brief.includes("Unique result text for the transcript check.") && before.dots === 1, "New results keeps the full card text and unread dot: " + JSON.stringify(before));
+    const waitingKinds = before.waitingIds.map((id) => D.H.find((h) => h.id === id)?.ask);
+    r.expect(waitingKinds.every((ask) => ask === "question" || ask === "decision"), "Needs you lists questions and decisions only: " + JSON.stringify(waitingKinds));
+    r.expect(Number(before.badge) === before.waitingIds.length, "the Home badge counts only waiting questions: " + JSON.stringify(before));
+
+    await page.goto(ENV.extraBase + "/s/claude/result-card?t=" + ENV.extraToken, { waitUntil: "load" });
+    await page.waitForFunction(() => !!document.querySelector(".result-marker"));
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("semon.seen") ?? "[]"));
+    const marker = await page.locator(".result-marker").innerText();
+    r.expect(stored.includes(resultHandoff?.id), "opening the session stores its result id as seen: " + JSON.stringify(stored));
+    r.expect(marker.includes("read"), "the opened session shows the result as read: " + marker);
+    await page.goto(ENV.extraBase + "/?t=" + ENV.extraToken, { waitUntil: "load" });
+    await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
+    const onHome = () => page.locator(selector).count();
+    r.expect(await onHome() === 0, "the read result leaves New results");
+    await page.reload({ waitUntil: "load" });
+    await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
+    r.expect(await onHome() === 0, "the read result stays cleared after reloading Home");
+    await page.context().close();
+
+    const blocked = await served(browser, { extras: true, path: "/" });
+    await blocked.addInitScript(() => {
+      Storage.prototype.getItem = function () { throw new Error("storage unavailable"); };
+      Storage.prototype.setItem = function () { throw new Error("storage unavailable"); };
+    });
+    await blocked.reload({ waitUntil: "load" });
+    await blocked.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
+    await blocked.goto(ENV.extraBase + "/s/claude/result-card?t=" + ENV.extraToken, { waitUntil: "load" });
+    await blocked.waitForFunction(() => !!document.querySelector(".result-marker"));
+    r.expect(blocked.errors.length === 0, "Home and the session page render when localStorage throws: " + blocked.errors.join(" | "));
+    await blocked.context().close();
+  }
+
   // ---- Injection -------------------------------------------------------------------------------------------------------
   {
     const X = { screens: 0, bad: [], payloadShown: 0 };

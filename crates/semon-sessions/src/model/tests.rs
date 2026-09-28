@@ -1034,6 +1034,71 @@ fn states_follow_the_process_the_question_and_the_last_word() {
     );
     home.live(32, "answered", "idle", json!({}));
     home.top(
+        "relayed-reply",
+        &[
+            peer(
+                "relayed-reply",
+                ts(16, 4),
+                "relay-result",
+                "Advisor",
+                34,
+                "finish the check",
+            ),
+            assistant(
+                "relayed-reply",
+                ts(16, 5),
+                vec![text("The check is finished.")],
+            ),
+        ],
+    );
+    home.live(34, "relayed-reply", "idle", json!({}));
+    home.top(
+        "scheduled-reply",
+        &[
+            user("scheduled-reply", ts(16, 6), "scheduled prompt"),
+            assistant(
+                "scheduled-reply",
+                ts(16, 7),
+                vec![text("The scheduled check is finished.")],
+            ),
+        ],
+    );
+    home.live(35, "scheduled-reply", "idle", json!({}));
+    home.top(
+        "notified-reply",
+        &[
+            human("notified-reply", ts(16, 8), "check the task"),
+            notification(
+                "notified-reply",
+                ts(16, 9),
+                "task-check",
+                "completed",
+                "task finished",
+            ),
+            assistant(
+                "notified-reply",
+                ts(16, 10),
+                vec![text("The task is finished.")],
+            ),
+        ],
+    );
+    home.live(36, "notified-reply", "idle", json!({}));
+    home.top(
+        "handback-reply",
+        &[
+            human("handback-reply", ts(16, 11), "check the agent"),
+            json!({"type":"user","timestamp":ts(16, 12),"sessionId":"handback-reply",
+                "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/37.sock","handback":true,"senderTaskId":"agent-37","body":"agent handed back"},
+                "message":{"role":"user","content":"agent handed back"}}),
+            assistant(
+                "handback-reply",
+                ts(16, 13),
+                vec![text("The agent is finished.")],
+            ),
+        ],
+    );
+    home.live(37, "handback-reply", "idle", json!({}));
+    home.top(
         "idle",
         &[
             assistant("idle", ts(16, 0), vec![text("earlier")]),
@@ -1049,21 +1114,60 @@ fn states_follow_the_process_the_question_and_the_last_word() {
             state("working"),
             state("asking"),
             state("answered"),
+            state("relayed-reply"),
+            state("scheduled-reply"),
+            state("notified-reply"),
+            state("handback-reply"),
             state("idle"),
             state("ended")
         ],
-        ["work", "wait", "wait", "idle", "done"]
+        [
+            "work", "wait", "idle", "idle", "idle", "idle", "idle", "idle", "done"
+        ]
     );
     assert_eq!(by_brief(&built, "busy work").status, "work");
     assert_eq!(by_brief(&built, "Now?").status, "wait");
     let result = by_brief(&built, "All done: 3 files changed.");
     assert_eq!(
         (result.kind, result.ask, result.status),
-        ("toyou", Some("result"), "wait")
+        ("toyou", Some("result"), "new")
+    );
+    assert_eq!(built.sessions["answered"].state, "idle");
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.from == "answered" && handoff.ask == Some("result"))
+            .count(),
+        1
+    );
+    assert!(
+        !built
+            .handoffs
+            .iter()
+            .any(|handoff| { handoff.from == "relayed-reply" && handoff.ask == Some("result") })
+    );
+    assert!(
+        !built
+            .handoffs
+            .iter()
+            .any(|handoff| { handoff.from == "scheduled-reply" && handoff.ask == Some("result") })
+    );
+    assert!(
+        !built
+            .handoffs
+            .iter()
+            .any(|handoff| { handoff.from == "notified-reply" && handoff.ask == Some("result") })
+    );
+    assert!(
+        !built
+            .handoffs
+            .iter()
+            .any(|handoff| { handoff.from == "handback-reply" && handoff.ask == Some("result") })
     );
     let answered = turns_of(&built, "answered");
     assert_eq!(answered[0].end.why, "toyou");
-    assert_eq!(answered[0].end.st, "wait");
+    assert_eq!(answered[0].end.st, "done");
     assert_eq!(turns_of(&built, "working")[0].end.why, "working");
 }
 

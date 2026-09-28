@@ -18,6 +18,16 @@
   const SESS = {};
   const H = [];
   const TX = {};
+  const SEEN_KEY = "semon.seen", SEEN_LIMIT = 2000;
+  const SEEN_RESULTS = (() => {
+    try {
+      const ids = JSON.parse(window.localStorage.getItem(SEEN_KEY) ?? "[]");
+      if (!Array.isArray(ids)) return new Set();
+      const clean = ids.filter((id) => typeof id === "string").slice(-SEEN_LIMIT), seen = new Set(clean);
+      if (seen.size !== ids.length) try { window.localStorage.setItem(SEEN_KEY, JSON.stringify([...seen])); } catch {}
+      return seen;
+    } catch { return new Set(); }
+  })();
 
   // ====================================================================================
   const $ = (s, r = document) => r.querySelector(s);
@@ -36,14 +46,24 @@
   const dur = (a, b) => { const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 60000)); return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor((d % 1440) / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };
   const tok = (m) => m >= 1 ? m.toFixed(1) + "M" : Math.round(m * 1000) + "k";
   const dot = (st) => { const d = el("span", "dot " + st); d.title = STATE[st] ?? st; d.setAttribute("role", "img"); d.setAttribute("aria-label", d.title); return d; };
-  const STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed" };
+  const STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed", new: "New result", read: "Read result" };
   const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
   const where = (s) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " · " + s.branch : "") : "No repo";
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
   const parentOf = (sid) => H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
   const RANK = { wait: 0, work: 1, err: 2, done: 3 };
-  const inbox = () => H.filter((h) => h.kind === "toyou" && h.status === "wait").sort((a, b) => b.at - a.at);
+  const isResult = (h) => h.kind === "toyou" && h.ask === "result";
+  function markSeenResults(handoffs) {
+    let changed = false;
+    for (const h of handoffs) if (isResult(h) && typeof h.id === "string" && !SEEN_RESULTS.has(h.id)) {
+      SEEN_RESULTS.add(h.id); changed = true;
+    }
+    while (SEEN_RESULTS.size > SEEN_LIMIT) SEEN_RESULTS.delete(SEEN_RESULTS.values().next().value);
+    if (changed) try { window.localStorage.setItem(SEEN_KEY, JSON.stringify([...SEEN_RESULTS])); } catch {}
+  }
+  const inbox = () => H.filter((h) => h.kind === "toyou" && (h.ask === "question" || h.ask === "decision") && h.status === "wait").sort((a, b) => b.at - a.at);
+  const unreadResults = () => H.filter((h) => isResult(h) && !SEEN_RESULTS.has(h.id)).sort((a, b) => b.at - a.at);
   const working = () => Object.values(SESS).filter((s) => s.state === "work");
   const clean = (t) => t.replace(/[`*]/g, "");
 
@@ -126,7 +146,7 @@
     const what = { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h.ask];
     return [h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from), el("span", "verb", what)]];
   }
-  const statWord = (h) => ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
+  const statWord = (h) => isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
 
   // ---- Turns and traces, computed from the transcripts ---------------------------------------------------
   // A turn starts at each incoming entry: your message, a relay from another session, or the brief that starts a
@@ -426,7 +446,7 @@
   const upCount = () => Object.keys(MACHINE).filter((m) => MACHINE_UP[m]).length;
   let allAnswered = false;
   function renderHome(page) {
-    const open = inbox(), w = working().sort((a, b) => b.last - a.last), many = Object.keys(MACHINE).length > 1;
+    const open = inbox(), fresh = unreadResults(), w = working().sort((a, b) => b.last - a.last), many = Object.keys(MACHINE).length > 1;
     const head = el("div", "ph"); const h1 = el("h1", null, "Home"); head.append(h1);
     const sub = el("div", "sub"); for (const [v, l] of [[open.length, "waiting on you"], [w.length, "working"], [upCount() + " of " + Object.keys(MACHINE).length, Object.keys(MACHINE).length === 1 ? "machine up" : "machines up"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
     head.append(sub); page.append(head); observeTitle(h1);
@@ -435,6 +455,12 @@
     for (const h of open) list.append(inboxItem(h, false));
     if (!open.length) list.append(el("p", "empty", "Nothing is waiting on you."));
     page.append(list);
+    if (fresh.length) {
+      page.append(secHead("New results", fresh.length));
+      const results = el("div", "list");
+      for (const h of fresh) results.append(inboxItem(h, false));
+      page.append(results);
+    }
     page.append(secHead("Working now", w.length));
     const live = el("div", "list");
     for (const s of w) live.append(liveRow(s, many));
@@ -454,14 +480,17 @@
     const sid = h.kind === "move" ? h.to : h.from, t = HOLDS.get(h.id);
     const r = el("div", "ib" + (quiet ? " quiet" : "")); r.tabIndex = 0; r.setAttribute("role", "link"); r.dataset.h = h.id;
     const [ic, parts] = sentence(h, "you");
-    r.append(icon(quiet && h.kind === "toyou" ? I.done : ic)); const ln = el("span", "ln"); ln.append(...parts); r.append(ln, el("span", "tm", ago(h.at)));
+    r.append(icon(quiet && h.kind === "toyou" ? I.done : ic)); const ln = el("span", "ln"); ln.append(...parts);
+    const unread = isResult(h) && !SEEN_RESULTS.has(h.id), time = el("span", "tm" + (unread ? " unread" : ""));
+    if (unread) { r.classList.add("new-result"); time.append(el("span", "unread-dot")); }
+    time.append(ago(h.at)); r.append(ln, time);
     r.append(rich("span", "q", preview(h.brief)));
     const an = quiet ? answersOf(h) : null; if (an) r.append(el("span", "ans", an.length ? "You answered: " + an.join(" · ") : "Answered · reply not in these logs"));
     if (t) r.append(originLine(t));
     const ctx = el("span", "ctx"); const s = SESS[sid];
     ctx.append(el("span", null, [HARNESS[s.harness], MACHINE[s.machine]].join(" · "))); if (t?.out.length) ctx.append(traceBtn(t));
     r.append(ctx);
-    const open = () => goSession(sid, t?.id);
+    const open = () => { if (isResult(h)) markSeenResults([h]); goSession(sid, t?.id); };
     r.addEventListener("click", () => { if (!getSelection().isCollapsed) return; open(); });
     r.addEventListener("keydown", (ev) => { if (ev.target === r && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); open(); } });
     return r;
@@ -538,6 +567,12 @@
     const root = TURN.get(id);
     const head = el("div", "ph sr"); const h1 = el("h1", null, "Trace"); head.append(h1); page.append(head); observeTitle(h1);
     if (!root) { page.append(el("p", "empty", "This turn isn't in the logs on this machine.")); return; }
+    const readTrace = (turn, visited = new Set()) => {
+      if (!turn || visited.has(turn.id)) return;
+      visited.add(turn.id); markSeenResults(turn.out);
+      for (const h of turn.out) if (h.kind === "spawn" || h.kind === "relay") readTrace(STARTS.get(h.id), visited);
+    };
+    readTrace(root);
     const flow = el("div", "flow"), seen = new Set([root.id]), sess = new Set([root.sid]); let n = 0;
     const hop = (cls, ic, hc, parts, at) => { const x = el("div", "hop " + cls); const node = el("div", "node " + hc); node.append(icon(ic)); const body = el("div", "body"); const sent = el("div", "sent"); sent.append(...parts); if (at != null) sent.append(el("span", "tm", clock(at))); body.append(sent); x.append(node, body); flow.append(x); return [x, body]; };
     const s0 = root.start, text = s0 ? s0.brief : root.u?.text;
@@ -555,7 +590,7 @@
         if (h.result) { const r = el("div", "result"); r.append(el("span", "rl", "Result:")); const s = el("span"); inline(s, h.result); r.append(s); b.append(r); }
         if (h.kind === "move") { traceMeta(b, "done", "Moved", h.to, t); continue; }
         n++;
-        if (h.kind === "toyou") { traceMeta(b, h.status === "done" ? "done" : h.status, statWord(h), h.from, t); continue; }
+        if (h.kind === "toyou") { traceMeta(b, isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : h.status === "done" ? "done" : h.status, statWord(h), h.from, t); continue; }
         sess.add(h.to); const e = c && turnEnd(c);
         traceMeta(b, e ? e.st : h.status === "done" ? "done" : h.status, e ? e.text : statWord(h), h.to, c, c ? null : "Its turn isn't in these logs");
         if (c && !seen.has(c.id)) { seen.add(c.id); walk(c); } // a turn is drawn once, so a loop in the data can't recurse forever
@@ -569,6 +604,7 @@
 
   // ---- Session page --------------------------------------------------------------------------------------------------
   function renderSession(page, sid) {
+    markSeenResults(H.filter((h) => isResult(h) && h.from === sid));
     const head = el("div", "ph sr"); const h1 = el("h1", null, SESS[sid].name); head.append(h1); page.append(head); observeTitle(h1);
     page.append(transcript(sid));
   }
@@ -681,7 +717,7 @@
         // Your own ask is simply your message.
         if (h.kind === "ask") { if (!show.messages) continue; const m = keyed(el("div", "msg user"), e); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
         if (h.kind === "toyou" && h.ask === "result") {
-          const marker = el("div", "result-marker " + h.status);
+          const marker = el("div", "result-marker " + (SEEN_RESULTS.has(h.id) ? "read" : "new"));
           marker.append(icon(I.result), el("span", "word", statWord(h)), el("span", "tm", clock(h.at)));
           tx.append(keyed(marker, e)); continue;
         }

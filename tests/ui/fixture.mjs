@@ -354,7 +354,7 @@ export function write(out, { extras = false } = {}) {
       c.title(ms(T(8, 48)), "Result card");
       c.ask(ms(T(8, 49)), "Give one compact answer");
       c.text(ms(T(8, 50)), "Unique result text for the transcript check.");
-      c.save(); live("result-card", "idle");
+      c.save(); live("result-card", "idle", "Result card");
     }
     // code-mode: one script whose two commands and file change are indexed as three transcript steps.
     {
