@@ -112,6 +112,13 @@ jobs:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
         run: node checks/live.mjs
 
+      - name: Long-session performance
+        if: ${{ !cancelled() }}
+        working-directory: tests/ui
+        env:
+          SEMON_BIN: ${{ github.workspace }}/target/debug/semon
+        run: node checks/perf.mjs
+
       # One viewer over two machines' homes (the sample and a second machine, `desktop`): its Machines screens, pixel
       # for pixel against the mockup's code on the same data, at 390×844 and 1280×860, light and dark.
       - name: Two machines in one viewer
