@@ -226,6 +226,14 @@ async function nav(page, route, D, mockup) {
   if (!mockup) return goto(page, route, D);
   await page.evaluate((r) => { history.pushState(r, ""); dispatchEvent(new PopStateEvent("popstate", { state: r })); }, route);
   await page.waitForTimeout(80);
+  // The served viewer opens an unlinked session at its latest entry; direct mockup routes need the same viewport.
+  if (route.v === "session" && !route.turn) {
+    await page.evaluate(() => {
+      if (matchMedia("(max-width: 760px)").matches) window.scrollTo(0, document.documentElement.scrollHeight);
+      else { const main = document.querySelector("#main"); main.scrollTop = main.scrollHeight; }
+    });
+    await page.waitForTimeout(80);
+  }
 }
 
 const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name + ".png"), PNG.sync.write(img)); };
