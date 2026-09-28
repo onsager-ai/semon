@@ -485,10 +485,6 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2.session-meta .meta-state .state-sep { margin: 0 -5px 0 -1px; }
 .topbar .l2.session-meta .meta-item svg, .topbar .l2.session-meta .meta-item .hmark { width: 15px; height: 15px; flex: none; color: var(--faint); }
 .topbar .l2.session-meta .meta-item .hmark { color: var(--h); }
-/* The kind chip and the state are the two items fitSessionLine() never drops. When even those two don't
-   fit the narrowest phones, let them shrink and ellipsize (existing meta-value rules) instead of the whole
-   line getting clipped mid-glyph by session-meta's overflow: hidden. */
-.topbar .l2.session-meta .meta-item.meta-kind, .topbar .l2.session-meta .meta-item.meta-state { flex: 0 1 auto; min-width: 0; }
 .topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, var(--h) 12%, transparent); color: var(--h); }
 .topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--h); }
 .topbar .l2.session-meta .meta-item.meta-cost { gap: 4px; }
@@ -502,7 +498,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2.session-meta .errs:empty { display: none; }
 /* fitSessionLine hides overflow items by setting the `hidden` attribute; these selectors must out-specify
    the display rules above so hiding actually takes effect. */
-.topbar .l2.session-meta .meta-item[hidden], .topbar .l2.session-meta .meta-runs[hidden], .topbar .l2.session-meta .errs[hidden] { display: none; }
+.topbar .l2.session-meta .meta-item[hidden], .topbar .l2.session-meta .meta-runs[hidden], .topbar .l2.session-meta .errs[hidden], .topbar .l2.session-meta .meta-value[hidden] { display: none; }
 .topbar .l1 .crumb { padding: 8px 0; margin: -8px 0; }
 .topbar.searching { gap: 8px; }
 .topbar .find { flex: 1 1 auto; min-width: 0; }
@@ -547,7 +543,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .facet-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .facet-field { display: grid; gap: 3px; min-width: 0; color: var(--muted); font-size: 11.5px; }
 .facet-field select { width: 100%; min-width: 0; height: 34px; border: 1px solid var(--line); border-radius: 8px; background: var(--ground); color: var(--ink); padding: 0 7px; font-size: 12.5px; }
-.analytics-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--line); }
+.analytics-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border-top: 1px solid var(--line); background: var(--line); }
 .analytics-metric { min-width: 0; min-height: 102px; padding: 11px 12px; background: var(--ground); }
 .analytics-metric .label { color: var(--muted); font-size: 12px; line-height: 1.3; }
 .analytics-metric .value { margin-top: 5px; font-size: 20px; line-height: 1.2; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -1168,15 +1164,25 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     }
     bar.append(group);
   }
-  // The kind chip and the state stay put; everything else drops from the right (in append order: model,
-  // machine, branch, tools, runs, tokens, cost) until the line fits, with the inline error count as a last resort.
+  // The kind chip and the state are the two items line 2 always shows something for. Everything else drops
+  // from the right (in append order: model, machine, branch, tools, runs, tokens, cost) until the line fits.
+  // If a kind chip and sibling-nav both eat into a phone's width, even kind+state can run out of room: the
+  // inline error count goes first, then the kind's word (its icon alone still says which harness), then the
+  // turn count, and only as a last resort the state's own word, leaving just its colour-coded dot.
   function fitSessionLine(l2) {
     const keep = new Set(["meta-kind", "meta-state"]);
     const droppable = [...l2.children].filter((n) => (n.classList.contains("meta-item") || n.classList.contains("meta-runs")) && ![...n.classList].some((c) => keep.has(c)));
     droppable.forEach((n) => { n.hidden = false; });
     const errs = l2.querySelector(".errs"); if (errs) errs.hidden = false;
-    for (let i = droppable.length - 1; i >= 0 && l2.scrollWidth > l2.clientWidth + 1; i--) droppable[i].hidden = true;
-    if (errs && l2.scrollWidth > l2.clientWidth + 1) errs.hidden = true;
+    const kindValue = l2.querySelector(".meta-kind .meta-value"); if (kindValue) kindValue.hidden = false;
+    const stateValues = [...l2.querySelectorAll(".meta-state .meta-value")]; const stateSep = l2.querySelector(".meta-state .state-sep");
+    stateValues.forEach((n) => { n.hidden = false; }); if (stateSep) stateSep.hidden = false;
+    const fits = () => l2.scrollWidth <= l2.clientWidth + 1;
+    for (let i = droppable.length - 1; i >= 0 && !fits(); i--) droppable[i].hidden = true;
+    if (!fits() && errs) errs.hidden = true;
+    if (!fits() && kindValue) kindValue.hidden = true;
+    if (!fits() && stateValues[1]) { stateValues[1].hidden = true; if (stateSep) stateSep.hidden = true; }
+    if (!fits() && stateValues[0]) stateValues[0].hidden = true;
   }
   function lineageOf(sid) { const path = [], seen = new Set(); let id = sid; while (id && SESS[id] && !seen.has(id)) { seen.add(id); path.push(SESS[id]); id = parentOf(id); } return path.reverse(); }
   function showLineageMenu(sid, bar) {
