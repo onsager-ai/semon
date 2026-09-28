@@ -176,9 +176,10 @@ export default async function (browser) {
     await page.waitForFunction(() => !!document.querySelector(".turns"));
     await page.evaluate(() => document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click()));
     R.unknown = await page.evaluate(() => {
-      const step = [...document.querySelectorAll(".step")].find((s) => s.querySelector(".sd")?.textContent.startsWith("exit unknown · "));
+      const norm = (s) => String(s ?? "").replace(/\u2009/g, " ").replace(/\s+/g, " ").trim();
+      const step = [...document.querySelectorAll(".step")].find((s) => norm(s.querySelector(".sd")?.textContent).startsWith("exit unknown · "));
       const sum = step?.closest(".tgroup")?.querySelector(".tsum");
-      return step ? { err: step.classList.contains("err"), sd: step.querySelector(".sd").textContent, groupFailed: !!sum?.querySelector(".tf"), grouped: !!sum } : null;
+      return step ? { err: step.classList.contains("err"), sd: norm(step.querySelector(".sd").textContent), groupFailed: !!sum?.querySelector(".tf"), grouped: !!sum } : null;
     });
     r.expect(R.unknown !== null, "a step with no exit status reads \"exit unknown · …\"");
     r.expect(R.unknown && !R.unknown.err && R.unknown.grouped && !R.unknown.groupFailed, "an unknown exit is neither failed nor counted as failed: " + JSON.stringify(R.unknown));

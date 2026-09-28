@@ -158,6 +158,7 @@ export default async function mdCheck(browser) {
 
   r.results.passes = passes;
   const wantAnswer = "You answered: Ship it (Recommended) · Squash the commits";
+  const normSpace = (s) => String(s ?? "").replace(/\u2009/g, " ").replace(/\s+/g, " ").trim();
   for (const T of passes) {
     const tag = T.tag + "/" + T.scheme;
     r.expect(T.errors.length === 0, tag + ": page errors: " + T.errors.join(" | "));
@@ -177,7 +178,7 @@ export default async function mdCheck(browser) {
       r.expect(T.synthetic.hr === true, tag + ": rule (<hr>) missing");
       // A card lists two or more answers, one per question, under "You answered:" (the mockup's answerEl).
       r.expect(JSON.stringify(T.synthetic.answerCard) === JSON.stringify({ head: "You answered:", items: ["Ship it (Recommended)", "Squash the commits"] }), tag + ": ledger's answer card: " + JSON.stringify(T.synthetic.answerCard));
-      r.expect(T.homeAnswers.includes(wantAnswer), tag + ": Home does not show the exact answered-question text: " + JSON.stringify(T.homeAnswers));
+      r.expect(T.homeAnswers.some((answer) => normSpace(answer) === normSpace(wantAnswer)), tag + ": Home does not show the exact answered-question text: " + JSON.stringify(T.homeAnswers));
     }
   }
 

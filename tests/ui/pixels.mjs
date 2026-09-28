@@ -88,6 +88,15 @@ const RESULT_LINES = [
   ['        if (h.kind === "ask") { if (!show.messages) continue; const m = el("div", "msg user"); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }\n        // A relay or brief that starts a turn is that turn\'s message.',
     '        if (h.kind === "ask") { if (!show.messages) continue; const m = el("div", "msg user"); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }\n        if (h.kind === "toyou" && h.ask === "result") { const marker = el("div", "result-marker " + (SEEN_RESULTS.has(h.id) ? "read" : "new")); marker.append(icon(I.result), el("span", "word", statWord(h)), el("span", "tm", clock(h.at))); tx.append(marker); continue; }\n        // A relay or brief that starts a turn is that turn\'s message.'],
 ];
+// The served trace marks result handoffs as read before it draws the compact row. Match that state and row in port mode.
+const TRACE_RESULT_LINES = [
+  ['    if (!root) { page.append(el("p", "empty", "This turn isn\'t in the logs on this machine.")); return; }\n    const flow = el("div", "flow"), seen = new Set([root.id]), sess = new Set([root.sid]); let n = 0;',
+    '    if (!root) { page.append(el("p", "empty", "This turn isn\'t in the logs on this machine.")); return; }\n    const readTrace = (turn, visited = new Set()) => { if (!turn || visited.has(turn.id)) return; visited.add(turn.id); markSeenResults(turn.sent); for (const h of turn.sent) if (h.kind === "spawn" || h.kind === "relay") readTrace(STARTS.get(h.id), visited); };\n    readTrace(root);\n    const flow = el("div", "flow"), seen = new Set([root.id]), sess = new Set([root.sid]); let n = 0;'],
+  ['        const c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null, tgt = h.kind === "toyou" ? h.from : h.to, [ic, parts] = sentence(h, null);',
+    '        const result = h.kind === "toyou" && h.ask === "result", c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null, tgt = h.kind === "toyou" ? h.from : h.to, [ic, parts] = result ? [I.result, [el("span", "verb", statWord(h))]] : sentence(h, null);'],
+  ['        const [x, b] = hop("child k-" + h.kind + " s-" + h.status + (c || h.kind === "toyou" || h.kind === "move" ? "" : " stub"), ic, hcls(tgt), parts, h.at); x.dataset.h = h.id; if (c) x.dataset.turn = c.id;\n        clampBrief(b, h.brief);',
+    '        const [x, b] = hop("child k-" + h.kind + " s-" + h.status + (c || h.kind === "toyou" || h.kind === "move" ? "" : " stub"), ic, hcls(tgt), parts, h.at); x.dataset.h = h.id; if (c) x.dataset.turn = c.id;\n        if (result) { n++; continue; }\n        clampBrief(b, h.brief);'],
+];
 const RESULT_CSS = [
   '.result-marker { display: flex; align-items: center; gap: 7px; min-height: 24px; color: var(--muted); font-size: 12.5px; }',
   '.result-marker > svg { width: 15px; height: 15px; flex: none; color: var(--faint); }',
@@ -138,7 +147,7 @@ function portReference(D) {
   const styleEnd = html.lastIndexOf("</style>");
   if (styleEnd < 0) throw new Error("mockup style block moved");
   html = html.slice(0, styleEnd) + RESULT_CSS + "\n" + html.slice(styleEnd);
-  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES, ...CALL_LINES, ...THOUGHT_LINES, ...COST_LINES, ...RESULT_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
+  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES, ...CALL_LINES, ...THOUGHT_LINES, ...COST_LINES, ...RESULT_LINES, ...TRACE_RESULT_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
   for (const [a, replacement] of HOST_LINES) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, replacement(D)); }
   const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
   if (!histories.test(html)) throw new Error("mockup analytics history block moved");
