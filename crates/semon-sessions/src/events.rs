@@ -23,6 +23,12 @@ use serde_json::Value;
 
 use crate::{Tokens, field};
 
+#[cfg(test)]
+thread_local! {
+    /// Reads of the persisted event cache on this thread.
+    pub(crate) static CACHE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The event cache sits beside V1's metadata cache and has its own version,
 /// so `semon sessions`, `--watch` and `--json` never load or rewrite it.
 /// v3: every assistant text is its own event (v2 collapsed adjacent ones).
@@ -148,6 +154,8 @@ impl EventCache {
     }
 
     pub(crate) fn read(path: &Path) -> Self {
+        #[cfg(test)]
+        CACHE_READS.with(|reads| reads.set(reads.get() + 1));
         fs::read(path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())

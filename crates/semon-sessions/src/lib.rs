@@ -22,7 +22,9 @@ pub mod shell;
 mod tx;
 mod union;
 mod viewer;
-pub use facts::{FACTS_VERSION, Facts, RUN_VARIABLES, local_facts, read_facts, write_facts};
+pub use facts::{
+    FACTS_VERSION, Facts, FactsSource, RUN_VARIABLES, local_facts, read_facts, write_facts,
+};
 pub use inputs::{Input, InputRoot, inputs, is_input_path};
 pub use mcp::serve_mcp;
 pub use model::{model_json, model_json_at};
