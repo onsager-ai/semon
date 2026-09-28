@@ -66,6 +66,11 @@ const CALL_LINES = [
   ['    if (child) { const calls = (TX[child.id] ?? []).filter((e) => e.k === "tool").length, meta = el("div", "child-meta");',
     '    if (child) { const calls = TXM[child.id]?.calls ?? (TX[child.id] ?? []).filter((e) => e.k === "tool").length, meta = el("div", "child-meta");'],
 ];
+// Port-mode entries already carry the server's measured duration; source-log timing fields stay in the sample only.
+const THOUGHT_LINES = [
+  ['  function thoughtSeconds(entries, i, sid) {\n    const e = entries[i];\n    if (SESS[sid]?.harness === "codex") return Number.isFinite(e.completed_at_ms) && Number.isFinite(e.started_at_ms) && e.completed_at_ms >= e.started_at_ms ? Math.round((e.completed_at_ms - e.started_at_ms) / 1000) : null;\n    const before = entryTimeMs(entries[i - 1]), at = entryTimeMs(e);\n    return Number.isFinite(before) && Number.isFinite(at) && at >= before ? Math.round((at - before) / 1000) : null;\n  }',
+    '  function thoughtSeconds(entries, i, sid) { const secs = entries[i]?.secs; return Number.isFinite(secs) && secs >= 0 ? secs : null; }'],
+];
 // Parents show the API-equivalent cost of their own session and descendant runs, as the served viewer does.
 const COST_LINES = [
   ['    const cost = costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", cost.unknown.length ? "—" : shortMoney(cost.usd))); costItem.title = COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));',
@@ -112,7 +117,7 @@ function portReference(D) {
     '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(SESS) + ";",
     "  const API_PRICE = " + J(PRICING) + ";", "  const H = " + J(H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", "  const TXM = " + J(D.TXM ?? {}) + ";", ""].join("\n");
   let html = MOCKUP.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + MOCKUP.slice(end);
-  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES, ...CALL_LINES, ...COST_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
+  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES, ...CALL_LINES, ...THOUGHT_LINES, ...COST_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
   for (const [a, replacement] of HOST_LINES) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, replacement(D)); }
   const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
   if (!histories.test(html)) throw new Error("mockup analytics history block moved");
@@ -221,7 +226,7 @@ const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.wr
     // The phone's navigation drawer, open on Home.
     if (size === "phone" && !ONLY.length) {
       await nav(page, { v: "home" }, D, false); await page.click("#lead-btn"); await page.waitForTimeout(350);
-      await nav(port, { v: "home" }, D, true); await port.click("#lead-btn"); await port.waitForTimeout(350);
+      await port.goto("http://reference.test/", { waitUntil: "load" }); await port.waitForSelector("#lead-btn"); await port.click("#lead-btn"); await port.waitForTimeout(350);
       const p = compare(await shot(page, "desktop"), await shot(port, "desktop"));
       const row = { scheme, screen: "drawer", port: { pixels: p.pixels, ratio: p.ratio, size: p.size, pass: p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size } };
       if (!row.port.pass) { const dir = path.join(OUT, "port", scheme); save(dir, "drawer-served", p.A); save(dir, "drawer-reference", p.B); save(dir, "drawer-diff", p.diff); }

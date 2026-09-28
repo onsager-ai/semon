@@ -90,9 +90,13 @@ export function gaps({ model, tx }) {
   }
   for (const v of model.handoffs) if (!used.has(v.id)) say("handoff " + v.kind + (v.ask ? " " + v.ask : "") + " " + v.from + "→" + v.to + " at " + min(v.at) + ": served, not in the sample");
   // Transcripts, entry by entry, with the served handoff ids read as the sample's.
+  // The sample records thought kind and timing from its source-log timestamps; the served model normalizes both
+  // harness formats to `think` and may precompute seconds. They are the same UI entry, so compare the shared content.
   const norm = (e) => {
-    const x = { k: e.k };
-    for (const f of ["text", "label", "name", "arg", "ok", "secs", "in", "out", "diff", "live", "unfinished"]) if (e[f] !== undefined) x[f] = e[f];
+    const k = e.k === "reasoning" ? "think" : e.k;
+    const x = { k };
+    for (const f of ["text", "label", "name", "arg", "ok", "in", "out", "diff", "live", "unfinished"]) if (e[f] !== undefined) x[f] = e[f];
+    if (k !== "think" && e.secs !== undefined) x.secs = e.secs;
     if (e.k === "h") x.id = ids.get(e.id) ?? e.id;
     if (e.ret) x.text = "Returned to " + (model.sessions[e.ret.to]?.name ?? e.ret.to) + (e.ret.failed ? " · failed" : "") + " · " + new Date(e.ret.at).toISOString().slice(11, 16);
     return J(x);

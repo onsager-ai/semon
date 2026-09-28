@@ -84,7 +84,7 @@ export default async function turnsCheck(browser) {
       const exp = D.turns[sid] ?? [];
       if (info.length !== exp.length || info.some((t, i) => t.id !== exp[i].id || t.btn !== !!exp[i].out.length)) {
         T.modelMismatch.push(sid.slice(0, 12));
-        T.mismatchDetails.push({ sid, expected: exp.map((t) => ({ id: t.id, out: t.out.map((h) => h.id) })), rendered: info });
+        T.mismatchDetails.push({ sid, expected: exp.map((t) => ({ id: t.id, out: t.out.map((h) => h.id) })), native: (D0.model.turns ?? []).filter((t) => t.sid === sid).map((t) => ({ id: t.id, start: t.start, sent: t.sent, end: t.end })), rendered: info });
       }
       T.turns += info.length; T.perSession[D.SESS[sid].name.slice(0, 28)] = info.length;
       for (const t of info) { if (t.onward) T.withOnward++; if (t.btn) { T.traceButtons++; traceTurns.push([sid, t.id]); } if (t.onward && !t.btn) T.onwardWithoutButton++; if (t.btn && !t.onward) T.buttonWithoutOnward++; }
