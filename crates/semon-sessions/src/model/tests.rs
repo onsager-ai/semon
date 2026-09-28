@@ -189,18 +189,9 @@ fn assistant(sid: &str, time: String, blocks: Vec<Value>) -> Value {
         "usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":2000,"output_tokens":500}}})
 }
 
-fn assistant_usage(
-    sid: &str,
-    time: String,
-    id: &str,
-    model: &str,
-    input: u64,
-    cache_write: u64,
-    cache_read: u64,
-    output: u64,
-) -> Value {
+fn assistant_usage(sid: &str, time: String, id: &str, model: &str, usage: Value) -> Value {
     json!({"type":"assistant","timestamp":time,"sessionId":sid,"message":{"id":id,"model":model,"role":"assistant","content":[],
-        "usage":{"input_tokens":input,"cache_creation_input_tokens":cache_write,"cache_read_input_tokens":cache_read,"output_tokens":output}}})
+        "usage":usage}})
 }
 
 fn uuid(mut record: Value, id: &str) -> Value {
@@ -287,30 +278,24 @@ fn tokens_by_model_keep_claude_message_models_and_deduplicate_message_ids() {
                 ts(1, 0),
                 "message-1",
                 "claude-opus-5-5",
-                90_000,
-                19_000,
-                29_000,
-                39_000,
+                json!({"input_tokens":90_000,"cache_creation_input_tokens":19_000,
+                    "cache_read_input_tokens":29_000,"output_tokens":39_000}),
             ),
             assistant_usage(
                 "claude-cost",
                 ts(1, 1),
                 "message-1",
                 "claude-opus-5-5",
-                100_000,
-                20_000,
-                30_000,
-                40_000,
+                json!({"input_tokens":100_000,"cache_creation_input_tokens":20_000,
+                    "cache_read_input_tokens":30_000,"output_tokens":40_000}),
             ),
             assistant_usage(
                 "claude-cost",
                 ts(1, 2),
                 "message-2",
                 "claude-sonnet-5",
-                200_000,
-                0,
-                50_000,
-                60_000,
+                json!({"input_tokens":200_000,"cache_creation_input_tokens":0,
+                    "cache_read_input_tokens":50_000,"output_tokens":60_000}),
             ),
         ],
     );
