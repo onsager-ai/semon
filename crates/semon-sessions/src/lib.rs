@@ -17,6 +17,7 @@ mod facts;
 mod inputs;
 mod mcp;
 mod model;
+pub mod pricing;
 mod query;
 pub mod shell;
 mod tx;

@@ -189,6 +189,11 @@ fn assistant(sid: &str, time: String, blocks: Vec<Value>) -> Value {
         "usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":2000,"output_tokens":500}}})
 }
 
+fn assistant_usage(sid: &str, time: String, id: &str, model: &str, usage: Value) -> Value {
+    json!({"type":"assistant","timestamp":time,"sessionId":sid,"message":{"id":id,"model":model,"role":"assistant","content":[],
+        "usage":usage}})
+}
+
 fn uuid(mut record: Value, id: &str) -> Value {
     record["uuid"] = json!(id);
     record
@@ -260,6 +265,250 @@ fn by_brief<'a>(built: &'a Built, brief: &str) -> &'a Handoff {
 
 fn turns_of<'a>(built: &'a Built, sid: &str) -> Vec<&'a Turn> {
     built.turns.iter().filter(|turn| turn.sid == sid).collect()
+}
+
+#[test]
+fn tokens_by_model_keep_claude_message_models_and_deduplicate_message_ids() {
+    let home = Home::new();
+    home.top(
+        "claude-cost",
+        &[
+            assistant_usage(
+                "claude-cost",
+                ts(1, 0),
+                "message-1",
+                "claude-opus-5-5",
+                json!({"input_tokens":90_000,"cache_creation_input_tokens":19_000,
+                    "cache_read_input_tokens":29_000,"output_tokens":39_000}),
+            ),
+            assistant_usage(
+                "claude-cost",
+                ts(1, 1),
+                "message-1",
+                "claude-opus-5-5",
+                json!({"input_tokens":100_000,"cache_creation_input_tokens":20_000,
+                    "cache_read_input_tokens":30_000,"output_tokens":40_000}),
+            ),
+            assistant_usage(
+                "claude-cost",
+                ts(1, 2),
+                "message-2",
+                "claude-sonnet-5",
+                json!({"input_tokens":200_000,"cache_creation_input_tokens":0,
+                    "cache_read_input_tokens":50_000,"output_tokens":60_000}),
+            ),
+        ],
+    );
+
+    let built = home.build();
+    let session = &built.sessions["claude-cost"];
+    assert_eq!(
+        session.tokens_by_model["claude-opus-5-5"],
+        crate::events::ModelTokens {
+            input: 100_000,
+            output: 40_000,
+            cache_write: 20_000,
+            cache_read: 30_000,
+        }
+    );
+    assert_eq!(
+        session.tokens_by_model["claude-sonnet-5"],
+        crate::events::ModelTokens {
+            input: 200_000,
+            output: 60_000,
+            cache_write: 0,
+            cache_read: 50_000,
+        }
+    );
+    assert_eq!(session.tokens, [0.32, 0.08, 0.1]);
+    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    assert_eq!(
+        model["sessions"]["claude-cost"]["tokens_by_model"]["claude-opus-5-5"]["cache_write"],
+        20_000
+    );
+}
+
+#[test]
+fn claude_dated_model_ids_strip_only_the_trailing_date_for_price_matching() {
+    let home = Home::new();
+    home.top(
+        "dated-model",
+        &[assistant_usage(
+            "dated-model",
+            ts(1, 0),
+            "message-dated",
+            "claude-sonnet-4-5-20250929",
+            json!({"input_tokens":90,"cache_creation_input_tokens":20,
+                "cache_read_input_tokens":30,"output_tokens":40}),
+        )],
+    );
+
+    let built = home.build();
+    let usage = &built.sessions["dated-model"].tokens_by_model;
+    assert_eq!(usage.len(), 1);
+    assert_eq!(
+        usage["claude-sonnet-4-5"],
+        crate::events::ModelTokens {
+            input: 90,
+            output: 40,
+            cache_write: 20,
+            cache_read: 30,
+        }
+    );
+    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    assert!(
+        model["sessions"]["dated-model"]["tokens_by_model"]
+            .get("claude-sonnet-4-5-20250929")
+            .is_none()
+    );
+    assert_eq!(
+        model["pricing"]["models"]["claude-sonnet-4-5"]["input"],
+        3.0
+    );
+}
+
+#[test]
+fn codex_model_switch_attributes_cumulative_token_deltas_to_the_current_model() {
+    let home = Home::new();
+    home.codex(
+        "model-switch",
+        json!({}),
+        &[
+            codex_line(ts(1, 0), "turn_context", json!({"model":"gpt-6-luna"})),
+            codex_line(
+                ts(1, 1),
+                "event_msg",
+                json!({"type":"token_count","info":{"total_token_usage":{
+                    "input_tokens":100_000,"cached_input_tokens":20_000,"output_tokens":10_000,
+                    "reasoning_output_tokens":2_000,"total_tokens":112_000
+                }}}),
+            ),
+            codex_line(ts(1, 2), "turn_context", json!({"model":"gpt-test"})),
+            codex_line(
+                ts(1, 3),
+                "event_msg",
+                json!({"type":"token_count","info":{"total_token_usage":{
+                    "input_tokens":300_000,"cached_input_tokens":70_000,"output_tokens":40_000,
+                    "reasoning_output_tokens":8_000,"total_tokens":348_000
+                }}}),
+            ),
+        ],
+    );
+
+    let built = home.build();
+    let session = &built.sessions["model-switch"];
+    assert_eq!(
+        session.tokens_by_model["gpt-6-luna"],
+        crate::events::ModelTokens {
+            input: 80_000,
+            output: 10_000,
+            cache_write: 0,
+            cache_read: 20_000,
+        }
+    );
+    assert_eq!(
+        session.tokens_by_model["gpt-test"],
+        crate::events::ModelTokens {
+            input: 150_000,
+            output: 30_000,
+            cache_write: 0,
+            cache_read: 50_000,
+        }
+    );
+    assert_eq!(session.tokens, [0.23, 0.07, 0.04]);
+}
+
+#[test]
+fn codex_rate_limits_keep_the_latest_windows_and_support_both_reset_forms() {
+    let home = Home::new();
+    let rate_event = |time: String, primary: f64, secondary: f64| {
+        codex_line(
+            time,
+            "event_msg",
+            json!({"type":"token_count","info":{
+                "total_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"total_tokens":0},
+                "rate_limits":{
+                    "primary":{"used_percent":primary,"window_minutes":10080,"resets_in_seconds":3600},
+                    "secondary":{"used_percent":secondary,"window_minutes":300,
+                        "resets_at":at(12,34) / 1000 + 86_400}
+                }
+            }}),
+        )
+    };
+    home.codex(
+        "limited",
+        json!({}),
+        &[
+            codex_line(ts(12, 0), "turn_context", json!({"model":"gpt-6-luna"})),
+            rate_event(ts(12, 30), 12.0, 20.0),
+            rate_event(ts(12, 34), 62.5, 37.0),
+        ],
+    );
+
+    let built = home.build();
+    let limits = built.sessions["limited"].rate_limits.as_ref().unwrap();
+    assert_eq!(limits.recorded_at, at(12, 34));
+    assert_eq!(limits.windows.len(), 2);
+    assert_eq!(limits.windows[0].minutes, 300);
+    assert_eq!(limits.windows[0].used_percent, 37.0);
+    assert_eq!(
+        limits.windows[0].resets_at,
+        (at(12, 34) / 1000 + 86_400) * 1000
+    );
+    assert_eq!(limits.windows[1].minutes, 10_080);
+    assert_eq!(limits.windows[1].used_percent, 62.5);
+    assert_eq!(limits.windows[1].resets_at, at(12, 34) + 3_600_000);
+    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    assert_eq!(
+        model["sessions"]["limited"]["rate_limits"]["recorded_at"],
+        at(12, 34)
+    );
+    assert_eq!(
+        model["sessions"]["limited"]["rate_limits"]["windows"][0]["minutes"],
+        300
+    );
+}
+
+#[test]
+fn unknown_models_keep_usage_but_have_no_price_row() {
+    let home = Home::new();
+    home.codex(
+        "unknown-model",
+        json!({}),
+        &[
+            codex_line(ts(1, 0), "turn_context", json!({"model":"gpt-test"})),
+            codex_line(
+                ts(1, 1),
+                "event_msg",
+                json!({"type":"token_count","info":{"total_token_usage":{
+                    "input_tokens":50_000,"cached_input_tokens":10_000,"output_tokens":4_000,
+                    "total_tokens":54_000
+                }}}),
+            ),
+        ],
+    );
+
+    let built = home.build();
+    assert_eq!(
+        built.sessions["unknown-model"].tokens_by_model["gpt-test"],
+        crate::events::ModelTokens {
+            input: 40_000,
+            output: 4_000,
+            cache_write: 0,
+            cache_read: 10_000,
+        }
+    );
+    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    assert!(model["pricing"]["models"].get("gpt-test").is_none());
+    assert_eq!(model["pricing"]["as_of"], "2026-09-28");
+    assert_eq!(
+        model["pricing"]["models"]["gpt-6-luna"]["cache_write"],
+        0.125
+    );
+    assert_eq!(
+        model["sessions"]["unknown-model"]["tokens_by_model"]["gpt-test"]["input"],
+        40_000
+    );
 }
 
 fn parent_with_agents(home: &Home) {
@@ -346,6 +595,7 @@ fn spawn_results_come_from_four_sources_in_order() {
     let home = Home::new();
     parent_with_agents(&home);
     let built = home.build();
+    assert_eq!(built.sessions["a1"].parent.as_deref(), Some("parent"));
     let spawn = |agent: &str| only(&built, "spawn", "parent", agent).clone();
     let one = spawn("a1");
     assert_eq!(one.brief, "brief one");
@@ -454,6 +704,7 @@ fn codex_runs_link_by_marker_or_parent_thread_and_otherwise_stay_unlinked() {
         &[codex_user(ts(4, 1), "go"), codex_reply(ts(4, 8), "done")],
     );
     let built = home.build();
+    assert_eq!(built.sessions["run-marked"].parent.as_deref(), Some("lead"));
     let marked = only(&built, "spawn", "lead", "run-marked");
     assert_eq!(marked.brief, "Implement the thing");
     assert_eq!(marked.result.as_deref(), Some("Implemented"));
