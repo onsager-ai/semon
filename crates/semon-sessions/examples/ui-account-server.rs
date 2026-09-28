@@ -29,13 +29,18 @@ fn request_header<'a>(request: &'a Request, name: &'static str) -> Option<&'a st
 }
 
 fn same_origin_request(request: &Request, origin: &str) -> bool {
-    request_header(request, "Origin") == Some(origin)
-        || request_header(request, "Referer").is_some_and(|referer| {
-            referer == origin
-                || referer
-                    .strip_prefix(origin)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-        })
+    if let Some(request_origin) = request_header(request, "Origin") {
+        return request_origin == origin;
+    }
+    if let Some(fetch_site) = request_header(request, "Sec-Fetch-Site") {
+        return fetch_site == "same-origin";
+    }
+    request_header(request, "Referer").is_some_and(|referer| {
+        referer == origin
+            || referer
+                .strip_prefix(origin)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    })
 }
 
 fn answer(
@@ -99,8 +104,16 @@ fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
     let valid_origin = same_origin_request(&request, &expected_origin);
     if is_post {
         eprintln!(
-            "POST {path}: host={valid_host} session={} action={post_action} same_origin={valid_origin}",
-            query_token || cookie_token
+            "POST {path}: host={valid_host} session={} action={post_action} same_origin={valid_origin} origin_matches={} fetch_site_same_origin={} referer_matches={}",
+            query_token || cookie_token,
+            request_header(&request, "Origin") == Some(expected_origin.as_str()),
+            request_header(&request, "Sec-Fetch-Site") == Some("same-origin"),
+            request_header(&request, "Referer").is_some_and(|referer| {
+                referer == expected_origin
+                    || referer
+                        .strip_prefix(&expected_origin)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            }),
         );
     }
     if !valid_host
