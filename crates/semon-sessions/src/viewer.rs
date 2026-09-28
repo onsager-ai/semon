@@ -217,7 +217,7 @@ const PAGE: &str = include_str!("viewer.html");
 
 /// The mockup's three families, vendored (D1): Instrument Sans, JetBrains
 /// Mono and Source Serif 4, each in its latin and latin-ext subsets.
-const FONTS: [(&str, &[u8]); 6] = [
+pub(crate) const FONTS: [(&str, &[u8]); 6] = [
     (
         "instrument-sans-latin",
         include_bytes!("fonts/instrument-sans/latin.woff2"),
@@ -813,6 +813,16 @@ impl MachineView {
                 200,
                 "text/css; charset=utf-8",
                 include_str!("viewer.css").into(),
+            )),
+            "/shell.js" => Ok((
+                200,
+                "text/javascript; charset=utf-8",
+                include_str!("shell.js").into(),
+            )),
+            "/shell.css" => Ok((
+                200,
+                "text/css; charset=utf-8",
+                include_str!("shell.css").into(),
             )),
             "/api/tree" => Ok((200, json, self.tree_json()?.into_bytes())),
             "/api/transcript" => Ok((200, json, serde_json::to_vec(&self.transcript(query)?)?)),
@@ -2268,6 +2278,8 @@ mod tests {
         for (path, content_type) in [
             ("/viewer.js", "text/javascript; charset=utf-8"),
             ("/viewer.css", "text/css; charset=utf-8"),
+            ("/shell.js", "text/javascript; charset=utf-8"),
+            ("/shell.css", "text/css; charset=utf-8"),
             ("/fonts/instrument-sans-latin.woff2", "font/woff2"),
             ("/fonts/instrument-sans-latin-ext.woff2", "font/woff2"),
             ("/fonts/jetbrains-mono-latin.woff2", "font/woff2"),
@@ -2307,6 +2319,23 @@ mod tests {
         for (_, bytes) in FONTS {
             assert_eq!(&bytes[..4], b"wOF2");
         }
+    }
+
+    #[test]
+    fn shell_font_api_matches_the_font_routes() {
+        let fixture = lane_fixture();
+        let mut viewer = fixture.viewer();
+        for name in crate::shell::FONT_FILES {
+            let library_bytes = crate::shell::font(name).expect(name);
+            let (status, content_type, route_bytes) = viewer
+                .route(&format!("/fonts/{name}"), "")
+                .expect("font route");
+            assert_eq!(status, 200, "{name}");
+            assert_eq!(content_type, "font/woff2", "{name}");
+            assert_eq!(route_bytes.as_slice(), library_bytes, "{name}");
+        }
+        assert!(crate::shell::font("unknown.woff2").is_none());
+        assert!(crate::shell::font("instrument-sans-latin").is_none());
     }
 
     #[test]
