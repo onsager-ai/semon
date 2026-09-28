@@ -400,7 +400,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .diff div { padding: 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .diff .add { background: var(--diff-add); } .diff .del { background: var(--diff-del); } .diff .ctx { color: var(--muted); }
 /* A handoff inside a transcript: flat, marked by direction icon and the counterpart's colour. */
-.hcard { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 3px 10px; align-items: start; border: 0; border-left: 2px solid var(--h); background: color-mix(in srgb, var(--sunken) 55%, transparent); border-radius: 0 10px 10px 0; padding: 9px 12px; text-align: left; width: 100%; }
+.hcard { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 3px 10px; align-items: start; border: 0; border-left: 2px solid var(--h); background: none; border-radius: 0; padding: 6px 0 6px 12px; text-align: left; width: 100%; }
 .hcard > svg { width: 16px; height: 16px; margin-top: 2px; color: var(--h); }
 .hcard .ln { font-size: 13.5px; min-width: 0; overflow-wrap: anywhere; }
 /* A brief is markdown: three lines show, then it fades; Show more opens it in place. */
@@ -413,7 +413,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .hcard .result { grid-column: 2 / 4; font-size: 13px; color: var(--muted); }
 .hcard .result b { font-weight: 500; color: var(--ink-2); }
 @media (hover: hover) { .hcard:hover .ln .who { color: var(--accent); } }
-.hcard.toyou { --h: var(--wait); background: var(--wait-soft); }
+.hcard.toyou { --h: var(--wait); }
 .hcard.move { --h: var(--accent); }
 /* The relay or brief that starts a turn: just its text. The turn header already says who sent it. */
 .hcard.start { grid-template-columns: minmax(0, 1fr); }
@@ -577,7 +577,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .child-actions button { min-height: 36px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; text-align: left; }
 .child-work { display: grid; grid-template-columns: minmax(0, 1fr); margin: 0; }
 .child-work .cw-toggle { min-height: 36px; }
-.child-work .cw-body { margin: 2px 0; padding-left: 12px; border-left: 1px solid var(--line); }
+.child-work .cw-body { margin: 2px 0 2px 2px; padding-left: 12px; border-left: 1px solid var(--line); }
 .child-work .show-all { justify-self: start; min-height: 36px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; }
 .child-intro, .child-return { min-width: 0; border-left: 3px solid var(--h); padding: 8px 0 8px 12px; }
 .child-intro .intro-title { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--ink-2); font-weight: 600; }
@@ -589,7 +589,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .child-intro .more { min-height: 36px; border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: 13px; }
 .child-intro .intro-open { min-height: 40px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; text-align: left; }
 .child-return { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 13px; }
-.child-return .stat { flex: 1 1 100%; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.child-return .stat { flex: none; }
 .child-page .transcript-linked { border-left: 3px solid var(--h); padding-left: 12px; }
 .analytics-range { display: inline-flex; align-items: center; gap: 2px; flex: none; padding: 2px; border-radius: 10px; background: var(--sunken); white-space: nowrap; }
 .analytics-range button { min-width: 38px; min-height: 32px; border: 0; border-radius: 8px; background: none; padding: 0 7px; color: var(--muted); font-size: 12.5px; }
