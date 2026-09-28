@@ -79,7 +79,7 @@ export default async function turnsCheck(browser) {
     for (const m of await page.evaluate(() => [...document.querySelectorAll(".page .nrow")].map((row) => row.dataset.m))) { await goto(page, { v: "machine", id: m }, D0); await screen("machine " + m); addTap("ib", await small(".ib")); }
 
     // Every session page: turns, trace buttons against the model, overflow collapsed and fully opened.
-    const T = { sessions: 0, turns: 0, perSession: {}, withOnward: 0, traceButtons: 0, onwardWithoutButton: 0, buttonWithoutOnward: 0, childTailOnwardWithoutButton: 0, expectedChildTailOnwardWithoutButton: Object.entries(D.turns).filter(([sid, ts]) => hasChildOrigin(sid) && ts.at(-1)?.last && ts.at(-1)?.out.length).length, modelMismatch: [], mismatchDetails: [] };
+    const T = { sessions: 0, turns: 0, perSession: {}, withOnward: 0, traceButtons: 0, onwardWithoutButton: 0, buttonWithoutOnward: 0, childTailOnwardWithoutButton: 0, expectedChildTailOnwardWithoutButton: Object.entries(D.turns).filter(([sid, ts]) => D.hasChildOrigin(sid) && ts.at(-1)?.last && ts.at(-1)?.out.length).length, modelMismatch: [], mismatchDetails: [] };
     const traceTurns = [];
     for (const sid of Object.keys(D.SESS)) {
       await goto(page, { v: "session", id: sid }, D0); T.sessions++;
