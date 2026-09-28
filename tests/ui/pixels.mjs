@@ -70,6 +70,14 @@ const CALL_LINES = [
 const THOUGHT_LINES = [
   ['  function thoughtSeconds(entries, i, sid) {\n    const e = entries[i];\n    if (SESS[sid]?.harness === "codex") return Number.isFinite(e.completed_at_ms) && Number.isFinite(e.started_at_ms) && e.completed_at_ms >= e.started_at_ms ? Math.round((e.completed_at_ms - e.started_at_ms) / 1000) : null;\n    const before = entryTimeMs(entries[i - 1]), at = entryTimeMs(e);\n    return Number.isFinite(before) && Number.isFinite(at) && at >= before ? Math.round((at - before) / 1000) : null;\n  }',
     '  function thoughtSeconds(entries, i, sid) { const secs = entries[i]?.secs; return Number.isFinite(secs) && secs >= 0 ? secs : null; }'],
+  ['  const isPendingThought = (e) => !!(e.pending || e.status === "thinking");\n  const isMaskedThought = (e) => isThought(e) && !isPendingThought(e) && !thoughtText(e);',
+    '  const isPendingThought = (e, entries, i, sid) => !!(e.pending || e.status === "thinking") || Array.isArray(entries) && e.k === "think" && !thoughtText(e) && i === entries.length - 1 && SESS[sid]?.state === "work";\n  const isMaskedThought = (e, entries, i, sid) => isThought(e) && !isPendingThought(e, entries, i, sid) && !thoughtText(e);'],
+  ['      const row = { ...e, k: "think", displaySecs: thoughtSeconds(entries, i, sid) };',
+    '      const pending = isPendingThought(e, entries, i, sid), row = { ...e, k: "think", ...(pending ? { pending: true } : {}), displaySecs: thoughtSeconds(entries, i, sid) };'],
+  ['      if (!isMaskedThought(e)) { out.push(row); continue; }',
+    '      if (!isMaskedThought(e, entries, i, sid)) { out.push(row); continue; }'],
+  ['      while (j < entries.length && isMaskedThought(entries[j])) { const seconds = thoughtSeconds(entries, j, sid);',
+    '      while (j < entries.length && isMaskedThought(entries[j], entries, j, sid)) { const seconds = thoughtSeconds(entries, j, sid);'],
 ];
 // Parents show the API-equivalent cost of their own session and descendant runs, as the served viewer does.
 const COST_LINES = [

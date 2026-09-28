@@ -1072,7 +1072,7 @@
       if (opts.excludeH && t.last) return;
       const end = turnEnd(t); if (!end && !t.out.length) return;
       const d = el("div", "turn-end");
-      if (end) { const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st), end.text); d.append(st); }
+      if (end) { const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st), spaced(end.text)); d.append(st); }
       if (t.out.length) d.append(traceBtn(t)); blk.append(d); };
     const openTurn = (t) => { closeTurn(); const blk = el("section", "turn"); blk.dataset.turn = t.id;
       // Your own message needs no header: the bubble is yours and its time sits under it. A relay or brief says who sent it.
