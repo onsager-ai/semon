@@ -878,7 +878,15 @@ fn operation_entry(
 }
 
 /// One slot as a `TX` entry; `None` for a slot with nothing to show.
-fn render(built: &Built, lines: &mut Lines, slot: &Slot, index: usize, now: i64) -> Option<Value> {
+fn render(
+    built: &Built,
+    lines: &mut Lines,
+    sid: &str,
+    slots: &[Slot],
+    slot: &Slot,
+    index: usize,
+    now: i64,
+) -> Option<Value> {
     let file = slot.file.and_then(|file| built.files.get(file));
     let mut record = || file.and_then(|file| lines.get(&file.path, slot.offset));
     let entry = match &slot.kind {
@@ -893,10 +901,19 @@ fn render(built: &Built, lines: &mut Lines, slot: &Slot, index: usize, now: i64)
             let text = record()
                 .and_then(|record| think_text(&record, slot.block as usize))
                 .unwrap_or_default();
-            if text.trim().is_empty() {
-                return None;
+            let mut entry = json!({"k": "think"});
+            if !text.trim().is_empty() {
+                entry["text"] = json!(cap(text.trim(), MSG_MAX));
             }
-            json!({"k": "think", "text": cap(text.trim(), MSG_MAX)})
+            if built
+                .sessions
+                .get(sid)
+                .is_some_and(|session| session.harness == "claude")
+                && let Some(secs) = thought_secs(slots, index)
+            {
+                entry["secs"] = json!(secs);
+            }
+            entry
         }
         SlotKind::Harness(label) => json!({"k": "harness", "label": label}),
         SlotKind::Gap => {
@@ -958,6 +975,13 @@ fn render(built: &Built, lines: &mut Lines, slot: &Slot, index: usize, now: i64)
         ),
     };
     Some(entry)
+}
+
+fn thought_secs(slots: &[Slot], index: usize) -> Option<i64> {
+    let before = slots.get(index.checked_sub(1)?)?.t?;
+    let at = slots.get(index)?.t?;
+    let elapsed = at.checked_sub(before)?;
+    (elapsed >= 0).then(|| elapsed.saturating_add(500) / 1000)
 }
 
 /// Every string a value holds, one per line: a tool input's text, whatever
@@ -1127,7 +1151,7 @@ pub(crate) fn page_limited(
     let mut bytes = 0;
     let (mut low, mut high) = (from, from);
     let mut take = |index: usize, picked: &mut Vec<(usize, Value)>| -> bool {
-        let Some(entry) = render(built, &mut lines, &slots[index], index, now) else {
+        let Some(entry) = render(built, &mut lines, sid, slots, &slots[index], index, now) else {
             return true;
         };
         let size = entry.to_string().len() + 1;

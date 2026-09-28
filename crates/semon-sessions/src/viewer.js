@@ -991,21 +991,23 @@
   }
 
   const thoughtText = (e) => String(e.text ?? "").trim();
-  const isPendingThought = (e) => !!(e.pending || e.status === "thinking");
-  const isMaskedThought = (e) => e.k === "think" && !isPendingThought(e) && !thoughtText(e);
+  const isPendingThought = (e, entries, i, sid) => !!(e.pending || e.status === "thinking") ||
+    e.k === "think" && !thoughtText(e) && i === entries.length - 1 && SESS[sid]?.state === "work";
+  const isMaskedThought = (e, entries, i, sid) => e.k === "think" && !isPendingThought(e, entries, i, sid) && !thoughtText(e);
   function thoughtSeconds(e) {
     if (Number.isFinite(e?.secs) && e.secs >= 0) return e.secs;
     if (typeof e?.secs === "string") { const m = /^(\d+(?:\.\d+)?)s?$/.exec(e.secs.trim()); if (m) return Number(m[1]); }
     return null;
   }
-  function transcriptEntries(entries) {
+  function transcriptEntries(entries, sid) {
     const out = [];
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i]; if (e.k !== "think") { out.push(e); continue; }
-      const row = { ...e, displaySecs: thoughtSeconds(e) };
-      if (!isMaskedThought(e)) { out.push(row); continue; }
+      const pending = isPendingThought(e, entries, i, sid);
+      const row = { ...e, ...(pending ? { pending: true } : {}), displaySecs: thoughtSeconds(e) };
+      if (!isMaskedThought(e, entries, i, sid)) { out.push(row); continue; }
       let j = i, sum = 0, measured = true;
-      while (j < entries.length && isMaskedThought(entries[j])) { const secs = thoughtSeconds(entries[j]); if (secs == null) measured = false; else sum += secs; j++; }
+      while (j < entries.length && isMaskedThought(entries[j], entries, j, sid)) { const secs = thoughtSeconds(entries[j]); if (secs == null) measured = false; else sum += secs; j++; }
       out.push({ ...row, displaySecs: measured ? Math.round(sum) : null, grouped: j - i }); i = j - 1;
     }
     return out;
@@ -1026,7 +1028,7 @@
   const verb = (name) => toolInfo(name).slice(0, 2);
   function transcript(sid, opts = {}) {
     const sec = el("section", opts.nested ? "nested" : parentOf(sid) ? "transcript-linked" : null); sec.setAttribute("aria-label", opts.nested ? SESS[sid].name + " transcript" : "Transcript"); Object.assign(sec.style, { display: "grid", gap: "10px", gridTemplateColumns: "minmax(0, 1fr)" });
-    const entries = transcriptEntries(opts.entries ?? TX[sid] ?? []);
+    const entries = transcriptEntries(opts.entries ?? TX[sid] ?? [], sid);
     const turnMode = !opts.nested;
     // On a session page the transcript is a list of turns, each with its own entries; a nested one is a plain list.
     const box = el("div", turnMode ? "turns" : "tx"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);

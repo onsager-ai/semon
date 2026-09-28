@@ -125,6 +125,7 @@ export function write(out, { extras = false } = {}) {
     // The sample includes two masked Claude thinking blocks before this turn's first tool call.
     c.think(ms(T(7, 30), 12), "");
     c.think(ms(T(7, 30), 20), "");
+    c.think(ms(T(7, 30), 40), "");
     c.tool(ms(T(7, 31)), "toolu-p1", "Bash", { command: tx("principal")[6].arg, description: "List open PRs" });
     c.result(ms(T(7, 31), 2, 300), "toolu-p1", tx("principal")[6].out);
     c.busy(ms(T(7, 30)), ms(T(7, 48)));
@@ -364,6 +365,7 @@ export function write(out, { extras = false } = {}) {
     c.user(ms(T(12, 36)), "Semon-Parent: claude:h-review:toolu-h19\n" + brief("h19"));
     c.call(ms(T(12, 37)), "call-h19", "Read", { file_path: path.join(harborCwd, rt[1].arg) });
     c.output(ms(T(12, 37), 0, 300), "call-h19", rt[1].out, 0);
+    c.think(ms(T(12, 39), 30), "");
     c.busy(ms(T(12, 36)), ms(T(12, 40)));
     c.tokens(ms(T(12, 38)));
     c.save(); locked("h-review-codex");
