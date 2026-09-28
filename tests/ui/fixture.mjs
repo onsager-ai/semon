@@ -200,7 +200,7 @@ export function write(out, { extras = false } = {}) {
     r.tool(ms(T(12, 32)), "toolu-v1", "Bash", { command: rt[1].arg });
     r.result(ms(T(12, 32), 0, 200), "toolu-v1", rt[1].out);
     r.busy(ms(T(12, 31)), ms(T(12, 40)));
-    r.tool(ms(T(12, 39), 58), "toolu-v2", "Read", { file_path: path.join(harborCwd, rt[2].arg) });
+    r.tool(ms(T(12, 39), 58), "toolu-v2", "Read", { file_path: path.join(harborCwd, SESS["h-review"].activity[1]) });
     r.tool(ms(T(12, 36)), "toolu-h19", "Agent", { description: SESS["h-review-codex"].name, subagent_type: "general-purpose", prompt: brief("h19"), run_in_background: true });
     r.result(ms(T(12, 36), 10), "toolu-h19", "Async agent launched successfully.", { extra: { toolUseResult: { status: "async_launched", agentId: "h-review-codex" } } });
     r.tokens(ms(T(12, 33)));
