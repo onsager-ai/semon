@@ -11,7 +11,8 @@
 // Assertions:
 //  - no page errors, in any mode.
 //  - the bar stays pinned at the top after scrolling (notPinned is empty), is never sideways (sideways === 0), and
-//    every one of its controls is at least 36px (smallControls is empty) — the tap-target floor this suite measures.
+//    controls are at least 36px, except line 2 which uses the approved 30px desktop / 44px phone hit area and the
+//    inline error link which uses 28px desktop / 40px phone.
 //  - line 2 fits in one row; session metadata is ordered state/model/machine/branch/tools/tokens, while other detail
 //    pages keep their ellipsized summary.
 //  - zero overflow screens.
@@ -84,14 +85,17 @@ export default async function barCheck(browser) {
       const scrolled = phone ? scrollY : main.scrollTop;
       const l2 = bar.querySelector(".l2"), rest = l2?.querySelector(".rest"), sessionMeta = !!l2?.classList.contains("session-meta");
       const ctl = [...bar.querySelectorAll("button, input, [role=link]")].filter((x) => x.offsetParent || getComputedStyle(x).position === "absolute").map((x) => [x.className || x.tagName, x.getBoundingClientRect().height]);
-      const small = ctl.filter(([, h]) => h < 35.5);
+      const small = ctl.filter(([c, h]) => h < 35.5 && !String(c).split(/\s+/).some((x) => x === "meta-hit" || x === "errs"));
+      const detailsTarget = bar.querySelector(".l2.session-meta .meta-hit"), errorsTarget = bar.querySelector(".l2.session-meta .errs");
+      const line2Targets = { details: detailsTarget ? Math.round(detailsTarget.getBoundingClientRect().height) : null, errors: errorsTarget ? Math.round(errorsTarget.getBoundingClientRect().height) : null };
       const side = [...bar.querySelectorAll("*")].filter((x) => { const r = x.getBoundingClientRect(); return r.width && (r.right > vw + 0.5 || r.left < -0.5) && !x.closest(".rest"); }).length + (bar.scrollWidth > bar.clientWidth + 1 ? 1 : 0);
       const out = { pinned: Math.abs(br.top) < 0.5 && br.height > 30 && br.bottom > 0 && getComputedStyle(bar).visibility !== "hidden", scrolled: scrolled > 0, barH: Math.round(br.height), small: small.map(([c, h]) => c + ":" + Math.round(h)), side,
+        line2Targets,
         l2: l2 ? { h: Math.round(l2.getBoundingClientRect().height), oneLine: l2.scrollHeight <= l2.clientHeight + 1, sessionMeta, metaOrder: [...l2.querySelectorAll(":scope > .meta-item")].map((x) => [...x.classList].find((c) => c.startsWith("meta-") && c !== "meta-item")), ellipsis: rest ? getComputedStyle(rest).textOverflow === "ellipsis" : null, overflows: l2.scrollWidth > l2.clientWidth + 1 } : null };
       if (phone) window.scrollTo(0, 0); else main.scrollTop = 0; return out;
     });
-    const R = { mode, pages: 0, notPinned: [], l2Pages: 0, l2NotOneLine: [], l2Overflowing: 0, l2NoEllipsis: 0, metaOrderFailures: [], sessionMetaPages: 0, sideways: 0, smallControls: [], overflowScreens: 0 };
-    const measure = async (name) => { const c = await barCheckOnce(); R.pages++; if (!c.pinned) R.notPinned.push(name + (c.scrolled ? "" : "(no scroll)")); if (c.l2) { R.l2Pages++; if (!c.l2.oneLine) R.l2NotOneLine.push(name + ":" + c.l2.h); if (c.l2.overflows) R.l2Overflowing++; if (c.l2.ellipsis === false) R.l2NoEllipsis++; if (c.l2.sessionMeta) { R.sessionMetaPages++; const want = ["meta-kind", "meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", "meta-runs", "meta-tokens", "meta-cost"], got = c.l2.metaOrder, ordered = got.every((x) => want.includes(x)) && got.every((x, i) => i === 0 || want.indexOf(got[i - 1]) < want.indexOf(x)); if (!ordered || ["meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", "meta-tokens", "meta-cost"].some((x) => !got.includes(x))) R.metaOrderFailures.push(name + ":" + JSON.stringify(got)); } } R.sideways += c.side; if (c.small.length) R.smallControls.push(name + " " + c.small.join(",")); if (await over()) R.overflowScreens++; return c; };
+    const R = { mode, pages: 0, notPinned: [], l2Pages: 0, l2NotOneLine: [], l2Overflowing: 0, l2NoEllipsis: 0, metaOrderFailures: [], sessionMetaPages: 0, sideways: 0, smallControls: [], line2TargetFailures: [], overflowScreens: 0 };
+    const measure = async (name) => { const c = await barCheckOnce(); R.pages++; if (!c.pinned) R.notPinned.push(name + (c.scrolled ? "" : "(no scroll)")); if (c.l2) { R.l2Pages++; if (!c.l2.oneLine) R.l2NotOneLine.push(name + ":" + c.l2.h); if (c.l2.overflows) R.l2Overflowing++; if (c.l2.ellipsis === false) R.l2NoEllipsis++; if (c.l2.sessionMeta) { R.sessionMetaPages++; const want = ["meta-kind", "meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", "meta-runs", "meta-tokens", "meta-cost"], got = c.l2.metaOrder, ordered = got.every((x) => want.includes(x)) && got.every((x, i) => i === 0 || want.indexOf(got[i - 1]) < want.indexOf(x)); if (!ordered || ["meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", "meta-tokens", "meta-cost"].some((x) => !got.includes(x))) R.metaOrderFailures.push(name + ":" + JSON.stringify(got)); const expected = { details: phone ? 44 : 30, errors: phone ? 40 : 28 }; for (const [key, value] of Object.entries(expected)) if (c.line2Targets[key] != null && Math.abs(c.line2Targets[key] - value) > 1) R.line2TargetFailures.push(name + " " + key + ":" + c.line2Targets[key] + "px, expected " + value + "px"); if (c.line2Targets.details == null) R.line2TargetFailures.push(name + ": missing line-2 details target"); } } R.sideways += c.side; if (c.small.length) R.smallControls.push(name + " " + c.small.join(",")); if (await over()) R.overflowScreens++; return c; };
     const sids = Object.keys(D.SESS), traceTurns = [];
     const F = { youTurns: 0, youWithHeader: 0, msgTimes: 0, relayHeaders: 0, gapMarkersBetweenTurns: 0, gapMarkersInsideTurns: 0, tables: 0, tsum: 0, tsumFallback: [], tsumLowercasedUnknown: 0 };
     for (const sid of sids) {
@@ -311,6 +315,7 @@ export default async function barCheck(browser) {
     r.expect(m.notPinned.length === 0, m.mode + ": bar not pinned: " + JSON.stringify(m.notPinned));
     r.expect(m.sideways === 0, m.mode + ": bar sideways=" + m.sideways);
     r.expect(m.smallControls.length === 0, m.mode + ": controls under 36px: " + JSON.stringify(m.smallControls));
+    r.expect(m.line2TargetFailures.length === 0, m.mode + ": approved line-2 target sizes differ: " + JSON.stringify(m.line2TargetFailures));
     r.expect(m.l2NotOneLine.length === 0, m.mode + ": l2 not one line: " + JSON.stringify(m.l2NotOneLine));
     r.expect(m.l2NoEllipsis === 0, m.mode + ": l2 missing ellipsis count=" + m.l2NoEllipsis);
     r.expect(m.l2Overflowing === 0, m.mode + ": l2 content overflow count=" + m.l2Overflowing);
