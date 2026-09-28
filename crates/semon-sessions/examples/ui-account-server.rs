@@ -28,6 +28,16 @@ fn request_header<'a>(request: &'a Request, name: &'static str) -> Option<&'a st
         .map(|header| header.value.as_str())
 }
 
+fn same_origin_request(request: &Request, origin: &str) -> bool {
+    request_header(request, "Origin") == Some(origin)
+        || request_header(request, "Referer").is_some_and(|referer| {
+            referer == origin
+                || referer
+                    .strip_prefix(origin)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+}
+
 fn answer(
     request: Request,
     status: u16,
@@ -86,7 +96,7 @@ fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
         "/workspaces/research" | "/workspaces/writing" | "/account/sign-out"
     );
     let expected_origin = format!("http://{expected_host}");
-    let valid_origin = request_header(&request, "Origin") == Some(expected_origin.as_str());
+    let valid_origin = same_origin_request(&request, &expected_origin);
     if !valid_host
         || !(query_token || cookie_token)
         || (!is_get && !(is_post && post_action && valid_origin))

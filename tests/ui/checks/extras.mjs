@@ -71,8 +71,10 @@ export default async function (browser) {
     await desktop.locator("#topbar .account-avatar-button").click();
     await desktop.locator("#topbar .account-workspace-form button").first().click();
     const workspaceResponse = await workspacePost;
-    await desktop.waitForURL((url) => url.pathname === "/" && url.search === "");
-    r.expect(workspaceResponse.status() === 303 && new URL(desktop.url()).pathname === "/" && new URL(desktop.url()).search === "", "submitting the workspace form follows its 303 back to /: " + workspaceResponse.status() + " " + desktop.url());
+    const landedAtRoot = await desktop.waitForURL((url) => url.pathname === "/" && url.search === "").then(() => true, () => false);
+    const responseBody = await workspaceResponse.text().catch(() => "");
+    const landing = { status: workspaceResponse.status(), location: workspaceResponse.headers()["location"] ?? null, body: responseBody, url: desktop.url(), landedAtRoot };
+    r.expect(landing.status === 303 && landedAtRoot, "submitting the workspace form follows its 303 back to /: " + JSON.stringify(landing));
 
     await desktop.route("**/account/workspaces", (route) => route.fulfill({ status: 200, contentType: "text/plain", body: "workspaces destination" }));
     await desktop.locator('.nav-item[data-go="machines"]').click();
