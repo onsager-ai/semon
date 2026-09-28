@@ -1,0 +1,50 @@
+name: Mockup screenshots
+
+on:
+  push:
+    branches:
+      - 'design/**'
+  pull_request:
+    paths:
+      - 'tests/ui/reference/**'
+      - 'tests/ui/shots.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  screenshots:
+    name: Render mockup screenshots
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: tests/ui/package-lock.json
+
+      - name: Install the check tooling and Chromium
+        working-directory: tests/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Render mockup screenshots
+        run: node tests/ui/shots.mjs
+
+      - name: Upload mockup screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mockup-shots
+          path: tests/ui/out/shots
+          retention-days: 14
+          if-no-files-found: warn
