@@ -53,7 +53,7 @@ export async function served(browser, opts = {}) {
 
 // The screen a route draws has its title in the bar, its transcript loaded, and its fonts in.
 export function titleOf(route, D) {
-  return { home: "Home", timeline: "Timeline", sessions: "Sessions", machines: "Machines", trace: "Trace" }[route.v]
+  return { home: "Home", analytics: "Analytics", sessions: "Sessions", machines: "Machines", trace: "Trace" }[route.v]
     ?? (route.v === "machine" ? D.MACHINE[route.id] : D.SESS[route.id]?.name);
 }
 export async function settled(page) {

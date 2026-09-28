@@ -29,6 +29,10 @@ export default async function homeCheck(browser) {
   const r = reporter("home");
   const spawned = new Set(D.H.filter((h) => h.kind === "spawn").map((h) => h.to));
   const roots = Object.values(D.SESS).filter((s) => s.lane && !spawned.has(s.id)).sort((a, b) => b.last - a.last);
+  const parentOf = (sid) => D.SESS[sid]?.parent ?? D.H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === sid)?.from;
+  const shownRoots = new Set(roots.slice(0, 8).map((s) => s.id));
+  const treeRoot = (sid) => { const seen = new Set(); while (parentOf(sid) && !seen.has(sid)) { seen.add(sid); sid = parentOf(sid); } return sid; };
+  const expectedTreeRows = Object.values(D.SESS).filter((s) => shownRoots.has(treeRoot(s.id))).length;
   const treePair = D.H.find((h) => h.kind === "spawn" && roots.slice(0, 8).some((s) => s.id === h.from) && D.SESS[h.to]);
   const out = {};
   const errs = [];
@@ -46,7 +50,7 @@ export default async function homeCheck(browser) {
     await page.click("#lead-btn"); await page.waitForTimeout(280);
     out.sidebar = await page.evaluate(() => ({ nav: [...document.querySelectorAll(".nav-item")].map((n) => n.textContent), head: document.querySelector(".side-h")?.textContent, treeRole: document.querySelector("#lanes")?.getAttribute("role"), sidebarChips: document.querySelectorAll(".sidebar .groupby button").length, allLink: document.querySelector("#all-sessions")?.textContent, gheads: document.querySelectorAll("#lanes .ghead").length, rows: document.querySelectorAll("#lanes .treeitem").length, roots: document.querySelectorAll("#lanes > .treeitem").length, children: document.querySelectorAll("#lanes .tree-group .treeitem").length, sorted: [...document.querySelectorAll("#lanes > .treeitem .srow .ag")].slice(0, 5).map((a) => a.textContent) }));
     await page.screenshot({ path: path.join(ENV.out, "sample-drawer.png") });
-    out.tree = { expectedRoots: Math.min(8, roots.length), pair: treePair ? { parent: treePair.from, child: treePair.to } : null };
+    out.tree = { expectedRoots: Math.min(8, roots.length), expectedTreeRows, pair: treePair ? { parent: treePair.from, child: treePair.to } : null };
     if (treePair) {
       out.tree.collapse = await page.evaluate(({ parent, child }) => { const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === parent), toggle = item?.querySelector(":scope > .tree-row .tree-toggle"); if (!item || !toggle) return null; if (item.getAttribute("aria-expanded") !== "true") toggle.click(); toggle.click(); return { expanded: item.getAttribute("aria-expanded"), childUnderParent: [...item.querySelectorAll(":scope > .tree-group .treeitem")].some((x) => x.dataset.id === child), stored: JSON.parse(localStorage.getItem("semon.tree") ?? "{}")[parent]?.open }; }, out.tree.pair);
       await page.reload({ waitUntil: "load" }); await settled(page);
@@ -124,6 +128,7 @@ export default async function homeCheck(browser) {
   r.expect(out.machinesOver === 0, "machines overflow=" + out.machinesOver);
   for (const mp of out.machinePages) r.expect(mp.over === 0, "machine page overflow=" + mp.over + " (" + mp.h1 + ")");
   r.expect(out.sidebar.roots === out.tree.expectedRoots, "sidebar top-level rows=" + out.sidebar.roots + " expected up to 8, got " + out.tree.expectedRoots);
+  r.expect(out.sidebar.rows === out.tree.expectedTreeRows && out.sidebar.children === out.tree.expectedTreeRows - out.tree.expectedRoots, "sidebar tree does not render the eight most recent top-level sessions with all children nested: " + JSON.stringify({ sidebar: out.sidebar, expectedTreeRows: out.tree.expectedTreeRows, expectedRoots: out.tree.expectedRoots }));
   r.expect(out.sidebar.treeRole === "tree", "sidebar session rows are missing their tree role");
   r.expect(out.sidebar.children > 0 && !!out.tree.pair, "sidebar tree has no child session under a parent");
   if (out.tree.pair) {

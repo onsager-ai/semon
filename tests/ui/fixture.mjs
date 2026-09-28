@@ -25,11 +25,16 @@ export function sample() {
   const start = html.indexOf("  const T = (h, m) => h * 60 + m;");
   const end = html.indexOf("  // ====================================================================================\n  const $ = ");
   if (start < 0 || end < start) throw new Error("the sample's data block moved");
-  return vm.runInNewContext("(() => {\n" + html.slice(start, end) + "\nreturn { NOW, MACHINE, MACHINE_UP, SESS, H, TX };\n})()");
+  const values = vm.runInNewContext("(() => {\n" + html.slice(start, end) + "\nreturn { NOW, MACHINE, MACHINE_UP, SESS, H, TX, API_PRICE };\n})()");
+  const historyStart = html.indexOf("  const ANALYTICS_HISTORY = {");
+  const historyEnd = html.indexOf("  function analyticsSessions()", historyStart);
+  if (historyStart < 0 || historyEnd < historyStart) throw new Error("the sample's analytics history moved");
+  const history = vm.runInNewContext("(() => { const T = (h, m) => h * 60 + m;\n" + html.slice(historyStart, historyEnd) + "\nreturn { ANALYTICS_HISTORY, ANALYTICS_WAIT_SAMPLES };\n})()");
+  return { ...values, ...history };
 }
 
-// Sample minutes since midnight map to 2026-09-24 UTC.
-export const BASE = Date.UTC(2026, 8, 24);
+// Sample minutes since midnight map to 2026-09-28 UTC, the date pinned by the approved mockup's allowance sample.
+export const BASE = Date.UTC(2026, 8, 28);
 export const ms = (minutes, seconds = 0, millis = 0) => BASE + minutes * 60000 + seconds * 1000 + millis;
 const T = (h, m) => h * 60 + m;
 const iso = (t) => new Date(t).toISOString();
@@ -42,7 +47,7 @@ export const XSS = '<img src=x onerror="window.__xss=1"><script>window.__xss=2</
 export const XSS_KEY = "<img src=x onerror=window.__xss=4>";
 
 export function write(out, { extras = false } = {}) {
-  const { NOW, SESS, H, TX } = sample();
+  const { NOW, SESS, H, TX, ANALYTICS_HISTORY } = sample();
   const HB = Object.fromEntries(H.map((h) => [h.id, h]));
   const brief = (id) => HB[id].brief;
   const rm = (p) => fs.rmSync(p, { recursive: true, force: true });
@@ -53,6 +58,7 @@ export function write(out, { extras = false } = {}) {
   // Repositories are directories with a .git; roles work outside any repository.
   const repo = (name) => { fs.mkdirSync(path.join(out, "work", name, ".git"), { recursive: true }); return path.join(out, "work", name); };
   const role = (name) => { fs.mkdirSync(path.join(out, "roles", name), { recursive: true }); return path.join(out, "roles", name); };
+  const historyAt = ([daysAgo, minute]) => BASE - daysAgo * 86400000 + minute * 60000;
   put("proc/sys/kernel/hostname", "laptop\n");
   let locks = "";
 
@@ -78,7 +84,10 @@ export function write(out, { extras = false } = {}) {
       busy: (a, b) => { for (let t = a; t < b; t += 4 * 60000) s.filler(t); s.filler(b); },
     };
     // Token use: one usage record, as the model counts tokens by message id.
-    s.tokens = (t) => lines.push([t, { type: "assistant", timestamp: iso(t), sessionId: agent ? agent.parent : sid, cwd, uuid: "u-" + sid + "-usage", message: { id: "msg-" + sid + "-usage", model: models[model], role: "assistant", content: [], usage: { input_tokens: Math.round(tokens[0] * 1e6), cache_creation_input_tokens: 0, cache_read_input_tokens: Math.round(tokens[1] * 1e6), output_tokens: Math.round(tokens[2] * 1e6) } } }]);
+    s.tokens = (t) => {
+      const target = Object.values(SESS[sid]?.tokensByModel ?? {})[0] ?? { input: tokens[0] * 1e6, cache_write: 0, cache_read: tokens[1] * 1e6, output: tokens[2] * 1e6 };
+      lines.push([t, { type: "assistant", timestamp: iso(t), sessionId: agent ? agent.parent : sid, cwd, uuid: "u-" + sid + "-usage", message: { id: "msg-" + sid + "-usage", model: models[model], role: "assistant", content: [], usage: { input_tokens: target.input, cache_creation_input_tokens: target.cache_write, cache_read_input_tokens: target.cache_read, output_tokens: target.output } } }]);
+    };
     s.save = () => {
       if (agent) {
         const dir = "claude/projects/" + agent.slug + "/" + agent.parent + "/subagents/agent-" + sid;
@@ -86,6 +95,9 @@ export function write(out, { extras = false } = {}) {
         put(dir + ".meta.json", JSON.stringify({ agentType: "general-purpose", description: agent.description ?? SESS[sid].name, toolUseId: agent.tool }));
       } else jsonl("claude/projects/" + slug(cwd) + "/" + sid + ".jsonl", lines);
     };
+    const history = ANALYTICS_HISTORY[sid];
+    if (history?.started) s.title(historyAt(history.started), SESS[sid]?.name ?? sid);
+    for (const [daysAgo, a, b] of history?.busy ?? []) s.busy(historyAt([daysAgo, a]), historyAt([daysAgo, b]));
     return s;
   }
   const slug = (cwd) => cwd.replace(/[^A-Za-z0-9]/g, "-");
@@ -174,6 +186,8 @@ export function write(out, { extras = false } = {}) {
     c.tool(ms(T(11, 52)), "toolu-h2", "Bash", { command: "codex exec --full-auto < /tmp/handoff-offline-sync.md", run_in_background: true });
     c.tool(ms(T(12, 31)), "toolu-h3", "Agent", { description: SESS["h-review"].name, subagent_type: "general-purpose", prompt: brief("h3"), run_in_background: true });
     c.result(ms(T(12, 31), 0, 500), "toolu-h3", "Async agent launched successfully.", { extra: { toolUseResult: { status: "async_launched", agentId: "h-review" } } });
+    c.tool(ms(T(12, 33)), "toolu-h20", "Agent", { description: SESS["h-failed"].name, subagent_type: "general-purpose", prompt: brief("h20"), run_in_background: true });
+    c.result(ms(T(12, 36)), "toolu-h20", "Failed before producing a reproducer: the review sandbox could not read the test fixture.", { error: true });
     if (extras) c.text(ms(T(12, 31), 30), MARKDOWN);
     c.text(ms(T(12, 32)), t[9].text);
     c.tool(ms(T(12, 39), 18), "toolu-b3", "Bash", { command: t[10].arg });
@@ -187,8 +201,16 @@ export function write(out, { extras = false } = {}) {
     r.result(ms(T(12, 32), 0, 200), "toolu-v1", rt[1].out);
     r.busy(ms(T(12, 31)), ms(T(12, 40)));
     r.tool(ms(T(12, 39), 58), "toolu-v2", "Read", { file_path: path.join(harborCwd, rt[2].arg) });
+    r.tool(ms(T(12, 36)), "toolu-h19", "Agent", { description: SESS["h-review-codex"].name, subagent_type: "general-purpose", prompt: brief("h19"), run_in_background: true });
+    r.result(ms(T(12, 36), 10), "toolu-h19", "Async agent launched successfully.", { extra: { toolUseResult: { status: "async_launched", agentId: "h-review-codex" } } });
     r.tokens(ms(T(12, 33)));
     r.save();
+    const f = claude("h-failed", { cwd: harborCwd, model: "sonnet-5", tokens: SESS["h-failed"].tokens, agent: { parent: "harbor", slug: slug(harborCwd), tool: "toolu-h20" } });
+    f.prompt(ms(T(12, 33)), brief("h20"));
+    f.tool(ms(T(12, 34)), "toolu-f1", "Read", { file_path: path.join(harborCwd, "crates/sync/tests/fixtures/retry.log") });
+    f.result(ms(T(12, 36)), "toolu-f1", "permission denied: retry.log", { error: true });
+    f.tokens(ms(T(12, 35)));
+    f.save();
   }
   // quill: your ask, a planning subagent, a Codex run that failed two layout tests, and a question for you.
   const quillCwd = repo("quill");
@@ -282,6 +304,7 @@ export function write(out, { extras = false } = {}) {
       text: (t, text) => at(t, "response_item", { type: "message", role: "assistant", content: [{ type: "output_text", text }] }),
       think: (t, text) => at(t, "response_item", { type: "reasoning", summary: [{ type: "summary_text", text }], encrypted_content: null }),
       shell: (t, callId, command) => at(t, "response_item", { type: "function_call", name: "shell", arguments: JSON.stringify({ command: command.split(" ") }), call_id: callId }),
+      call: (t, callId, name, input) => at(t, "response_item", { type: "function_call", name, arguments: JSON.stringify(input), call_id: callId }),
       code: (t, callId, script) => at(t, "response_item", { type: "custom_tool_call", status: "completed", call_id: callId, name: "exec", input: script }),
       item: (t, item) => at(t, "event_msg", { type: "item_completed", item }),
       patch: (t, callId, patch) => at(t, "response_item", { type: "custom_tool_call", status: "completed", call_id: callId, name: "apply_patch", input: patch }),
@@ -289,9 +312,19 @@ export function write(out, { extras = false } = {}) {
       busy: (a, b) => { for (let t = a; t < b; t += 4 * 60000) at(t, "turn_context", { cwd, model: "gpt-6-luna", approval_policy: "never" }); at(b, "turn_context", { cwd, model: "gpt-6-luna", approval_policy: "never" }); },
       handback: (t, text) => at(t, "response_item", { type: "agent_message", author: agentPath, content: [{ type: "output_text", text }] }),
       failed: (t) => at(t, "event_msg", { type: "task_complete", error: { message: "the layout suite failed" } }),
-      tokens: (t) => at(t, "event_msg", { type: "token_count", info: { total_token_usage: { input_tokens: Math.round((tokens[0] + tokens[1]) * 1e6), cached_input_tokens: Math.round(tokens[1] * 1e6), output_tokens: Math.round(tokens[2] * 1e6), reasoning_output_tokens: 0, total_tokens: 0 } } }),
-      save: () => jsonl("codex/sessions/2026/09/24/rollout-2026-09-24T" + iso(start).slice(11, 19).replace(/:/g, "-") + "-" + id + ".jsonl", lines),
+      tokens: (t) => {
+        const modelsUsed = Object.values(SESS[id]?.tokensByModel ?? {});
+        const use = modelsUsed.reduce((sum, value) => ({ input: sum.input + value.input, cache_read: sum.cache_read + value.cache_read, output: sum.output + value.output }), { input: 0, cache_read: 0, output: 0 });
+        const input = modelsUsed.length ? use.input : Math.round(tokens[0] * 1e6), cached = modelsUsed.length ? use.cache_read : Math.round(tokens[1] * 1e6), output = modelsUsed.length ? use.output : Math.round(tokens[2] * 1e6);
+        const limits = SESS[id]?.rate_limits;
+        const window = (source) => ({ window_minutes: source.minutes, used_percent: source.used_percent, resets_in_seconds: (Date.parse(source.resets_at) - Date.parse(limits.recorded_at)) / 1000 });
+        at(t, "event_msg", { type: "token_count", info: { total_token_usage: { input_tokens: input + cached, cached_input_tokens: cached, output_tokens: output, reasoning_output_tokens: 0, total_tokens: input + cached + output }, ...(limits ? { rate_limits: { primary: window({ minutes: 300, ...limits.five_hour }), secondary: window({ minutes: 10080, ...limits.weekly }) } } : {}) } });
+      },
+      save: () => jsonl("codex/sessions/2026/09/28/rollout-2026-09-28T" + iso(start).slice(11, 19).replace(/:/g, "-") + "-" + id + ".jsonl", lines),
     };
+    const history = ANALYTICS_HISTORY[id];
+    if (history?.started) at(historyAt(history.started), "turn_context", { cwd, model: "gpt-6-luna", approval_policy: "never" });
+    for (const [daysAgo, a, b] of history?.busy ?? []) c.busy(historyAt([daysAgo, a]), historyAt([daysAgo, b]));
     return c;
   }
   // A running Codex run holds its thread's writer lock: a lock file, and a /proc/locks line naming its inode.
@@ -316,6 +349,16 @@ export function write(out, { extras = false } = {}) {
     c.patch(ms(T(12, 39), 54), "call-x3", "*** Begin Patch\n*** Update File: " + t[5].arg + "\n@@\n-        self.pending.pop_front()\n+        self.pending.pop_front().filter(|batch| !batch.acked)\n*** End Patch\n");
     c.tokens(ms(T(12, 30)));
     c.save(); locked("h-codex");
+  }
+  // h-review-codex: the review's Codex run, launched by its child Claude session.
+  {
+    const c = codex("h-review-codex", ms(T(12, 36)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-review-codex"].tokens });
+    c.user(ms(T(12, 36)), "Semon-Parent: claude:h-review:toolu-h19\n" + brief("h19"));
+    c.call(ms(T(12, 37)), "call-h19", "Read", { file_path: path.join(harborCwd, "crates/sync/src/flush.rs") });
+    c.output(ms(T(12, 37), 300), "call-h19", "while let Some(batch) = queue.oldest() { /* stop on Nack */ }", 0);
+    c.busy(ms(T(12, 36)), ms(T(12, 40)));
+    c.tokens(ms(T(12, 39)));
+    c.save(); locked("h-review-codex");
   }
   // q-codex: quill's Codex run; the layout suite failed and it handed back.
   {
@@ -344,7 +387,7 @@ export function write(out, { extras = false } = {}) {
       c.output(ms(T(12, 30), 2, 100), "call-z0", "{\"packages\":[{\"name\":\"meridian\"}]}", null);
     }
     c.shell(ms(T(12, 39), 49), "call-z1", t[2].arg);
-    c.tokens(ms(T(12, 30)));
+    c.tokens(ms(T(12, 38)));
     c.save(); locked("deps");
   }
   if (extras) {

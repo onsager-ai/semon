@@ -8,7 +8,7 @@
 //   - a command longer than its summary (harbor) shows its "Command" section with the whole command.
 //   - View all whose fetch fails shows the preview with the "Couldn't load the full text" note; when the fetch works,
 //     no note, and the sheet's text is longer than the preview's.
-//   - injection: on every screen reached (Home, Timeline, Sessions, Machines, every session including the payload lane,
+//   - injection: on every screen reached (Home, Analytics, Sessions, Machines, every session including the payload lane,
 //     its subagent and the failed send's stub, with every step, card and child run opened, and the details menu, and
 //     every trace), the document holds exactly one script (/viewer.js), no img and no iframe,
 //     nothing set window.__xss, and the payload shows as text. The payload lane and the failed-send stub also load from
@@ -343,7 +343,7 @@ export default async function (browser) {
     const openEverything = (page) => page.evaluate(() => { for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"], .step > button[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll(".hcard .more:not([hidden]), .hop .more:not([hidden])").forEach((x) => x.click()); });
     for (const [size, dark] of [["phone", false], ["desktop", true]]) {
       const page = await served(browser, { extras: true, size, dark });
-      for (const v of ["home", "timeline", "sessions", "machines"]) { await goto(page, { v }, D); await scan(page, size + " " + v); }
+      for (const v of ["home", "analytics", "sessions", "machines"]) { await goto(page, { v }, D); await scan(page, size + " " + v); }
       const sids = [...Object.keys(D.SESS), "unsent:" + XSS];
       for (const id of sids) {
         await goto(page, { v: "session", id }, D); await page.waitForTimeout(100); await openEverything(page); await page.waitForTimeout(80);

@@ -3,8 +3,8 @@
 // Two references, both the committed sample mockup (reference/semon-sample.html) rendered in the same browser:
 //
 //   port    The mockup's own code on the served data: the sample file with its data block replaced by what /api/model and
-//           /api/tx serve, and with the three clock lines and the "Thought" line of the approved real-data mockup (the only
-//           code the served data needs changed, since its times are epoch milliseconds). This isolates the frontend port:
+//           /api/tx serve, and with the clock formatters and Analytics timestamp adapter changed for served epoch milliseconds.
+//           This isolates the frontend port:
 //           the served page must match it within the anti-aliasing tolerance. Enforced.
 //   sample  The sample mockup exactly as committed, with its own data. The differences are the fixture's gaps (gaps.json:
 //           one machine, no moves, …), so this one is reported with its diff images, not enforced.
@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { PNG } from "pngjs";
 import pixelmatch from "pixelmatch";
 import { ENV, launch, context, served, goto, data } from "./lib.mjs";
-import { sample } from "./fixture.mjs";
+import { sample, BASE } from "./fixture.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const J = JSON.stringify;
@@ -35,7 +35,7 @@ const MARK_SVG = fs.readFileSync(path.join(here, "../../crates/semon-sessions/sr
 const OUT = path.join(ENV.out, "pixels");
 
 const MOCKUP = fs.readFileSync(path.join(here, "reference/semon-sample.html"), "utf8");
-const DATA_START = "  const T = (h, m) => h * 60 + m;";
+const DATA_START = "  const T = (h, m) => h * 60 + m; const ST = (h, m, s = 0) => (T(h, m) * 60 + s) * 1000; const NOW = T(12, 40);";
 const DATA_END = "  // ====================================================================================\n  const $ = ";
 const CLOCKS = [
   ['  const clock = (m) => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");',
@@ -44,7 +44,10 @@ const CLOCKS = [
     '  const ago = (t) => { const d = Math.floor((NOW - t) / 60000); return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d"; };'],
   ['  const dur = (a, b) => { const d = (b ?? NOW) - a; return d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };',
     '  const dur = (a, b) => { const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 60000)); return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor((d % 1440) / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };'],
-  ['el("span", null, "Thought for " + e.secs + "s")', 'el("span", null, e.secs != null ? "Thought for " + e.secs + "s" : "Thought")'],
+];
+const ANALYTICS_LINES = [
+  ['  const analyticsAt = ([daysAgo, minute]) => ANALYTICS_DAY0 - daysAgo * DAY_MS + minute * 60000;',
+    '  const analyticsAt = ([daysAgo, minute]) => Number(minute) > 1e11 ? Number(minute) : ANALYTICS_DAY0 - daysAgo * DAY_MS + minute * 60000;'],
 ];
 // The served viewer's other deliberate differences on the Machines screens (several machines from the server): an
 // offline machine's last-seen time where the sample had a move, and the embedding server's management link.
@@ -58,15 +61,31 @@ const MACHINE_LINES = [
 // The mockup file with the served data in its data block.
 function portReference(D) {
   const start = MOCKUP.indexOf(DATA_START), end = MOCKUP.indexOf(DATA_END);
+  if (start < 0 || end < start) throw new Error("mockup data block markers moved");
   const hhmm = (t) => new Date(t).toISOString().slice(11, 16);
+  const asIso = (t) => new Date(t).toISOString();
   const TX = {};
   for (const [sid, es] of Object.entries(D.TX)) TX[sid] = es.map((e) => (e.ret ? { k: "end", text: "Returned to " + D.SESS[e.ret.to].name + (e.ret.failed ? " · failed" : "") + " · " + hhmm(e.ret.at) } : e));
+  const PRICING = Object.fromEntries(Object.entries(D.model.pricing?.models ?? {}).map(([id, p]) => [id, { input: p.input, output: p.output, cacheWrite: p.cache_write, cacheRead: p.cache_read }]));
+  const SESS = Object.fromEntries(Object.entries(D.SESS).map(([id, source]) => {
+    const s = { ...source, id, modelId: Object.keys(source.tokens_by_model ?? {})[0] ?? source.model };
+    s.tokensByModel = Object.fromEntries(Object.entries(source.tokens_by_model ?? {}).map(([model, usage]) => [model, { input: usage.input, output: usage.output, cacheWrite: usage.cache_write, cacheRead: usage.cache_read }]));
+    if (source.rate_limits) {
+      const windows = source.rate_limits.windows ?? [], byMinutes = (minutes) => windows.find((w) => w.minutes === minutes);
+      const shape = (window) => window ? { used_percent: window.used_percent, resets_at: asIso(window.resets_at) } : undefined;
+      s.rate_limits = { recorded_at: asIso(source.rate_limits.recorded_at), five_hour: shape(byMinutes(300)), weekly: shape(byMinutes(10080)) };
+    }
+    return [id, s];
+  }));
   const block = ["  const NOW = " + D.NOW + ";", "  const MACHINE = " + J(D.MACHINE) + ";", "  const MACHINE_UP = " + J(D.MACHINE_UP) + ";",
     "  const MACHINE_LAST = " + J(D.MACHINE_LAST ?? {}) + ";", "  const ADMIN = " + J(D.ADMIN ?? null) + ";",
-    '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(D.SESS) + ";", "  for (const [id, s] of Object.entries(SESS)) s.id = id;",
-    "  const H = " + J(D.H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", ""].join("\n");
+    '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(SESS) + ";",
+    "  const API_PRICE = " + J(PRICING) + ";", "  const H = " + J(D.H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", ""].join("\n");
   let html = MOCKUP.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + MOCKUP.slice(end);
-  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
+  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
+  const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
+  if (!histories.test(html)) throw new Error("mockup analytics history block moved");
+  html = html.replace(histories, "  const ANALYTICS_HISTORY = {};\n  const ANALYTICS_WAIT_SAMPLES = [];");
   return html;
 }
 
@@ -114,7 +133,7 @@ function compare(a, b) {
 
 // Every screen, as routes on the served viewer and on each reference.
 function screens(D, S, ids) {
-  const list = [["home", { v: "home" }], ["timeline", { v: "timeline" }], ["sessions", { v: "sessions" }], ["machines", { v: "machines" }]];
+  const list = [["home", { v: "home" }], ["analytics", { v: "analytics" }], ["sessions", { v: "sessions" }], ["machines", { v: "machines" }]];
   for (const m of Object.keys(D.MACHINE)) list.push(["machine-" + m, { v: "machine", id: m }]);
   for (const sid of Object.keys(D.SESS)) list.push(["session-" + sid, { v: "session", id: sid }]);
   for (const t of D.turns) {
@@ -131,7 +150,7 @@ function screens(D, S, ids) {
 
 // The sample's handoff for each served one, matched as gaps.mjs matches them.
 function sampleIds(D, S) {
-  const min = (t) => Math.round(((t - Date.UTC(2026, 8, 24)) / 60000) * 1000) / 1000, ids = new Map();
+  const min = (t) => Math.round(((t - BASE) / 60000) * 1000) / 1000, ids = new Map();
   for (const h of S.H) { const v = D.H.find((x) => !ids.has(x.id) && x.kind === h.kind && x.from === h.from && x.to === h.to && min(x.at) === h.at); if (v) ids.set(v.id, h.id); }
   return ids;
 }
