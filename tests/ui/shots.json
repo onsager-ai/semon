@@ -17,7 +17,7 @@
       },
       {
         "name": "analytics-slice",
-        "eval": "document.querySelector('button[data-go=\"analytics\"]').click(); [...document.querySelectorAll('.analytics-range button')].find((b) => b.textContent.trim() === '7 d').click(); var hit = document.querySelector('.chart-hit'); var rect = hit.getBoundingClientRect(); var x = rect.left + rect.width * 0.5, y = rect.top + rect.height * 0.5; hit.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x, clientY: y }));"
+        "eval": "document.querySelector('button[data-go=\"analytics\"]').click(); [...document.querySelectorAll('.analytics-range button')].find((b) => b.textContent.trim() === '7 d').click(); var hit = [...document.querySelectorAll('.chart-hit')].sort((a, b) => b.dataset.v - a.dataset.v)[0]; hit.dispatchEvent(new MouseEvent('click', { bubbles: true }));"
       },
       {
         "name": "session-jump",
@@ -34,11 +34,13 @@
       },
       {
         "name": "child-session",
-        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.hcard[data-h=\"h2\"]').click();"
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.hcard[data-h=\"h2\"]').click();",
+        "wait": 2000
       },
       {
         "name": "grandchild-session",
-        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.hcard[data-h=\"h3\"]').click(); document.querySelector('.hcard[data-h=\"h19\"]').click();"
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.hcard[data-h=\"h3\"]').click(); document.querySelector('.hcard[data-h=\"h19\"]').click();",
+        "wait": 2000
       },
       {
         "name": "trace",
