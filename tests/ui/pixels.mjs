@@ -35,6 +35,11 @@ const MARK_SVG = fs.readFileSync(path.join(here, "../../crates/semon-sessions/sr
 const OUT = path.join(ENV.out, "pixels");
 
 const MOCKUP = fs.readFileSync(path.join(here, "reference/semon-sample.html"), "utf8");
+function stableMockup(html) {
+  const liveDemo = 'if (route.v !== "session") return;';
+  if (html.split(liveDemo).length !== 2) throw new Error("mockup demo tick guard moved");
+  return html.replace(liveDemo, 'if (window.__SEMON_PIXEL_COMPARE || route.v !== "session") return;');
+}
 const DATA_START = "  const T = (h, m) => h * 60 + m; const ST = (h, m, s = 0) => (T(h, m) * 60 + s) * 1000; const NOW = T(12, 40);";
 const DATA_END = "  // ====================================================================================\n  const $ = ";
 const CLOCKS = [
@@ -106,9 +111,10 @@ async function referencePage(browser, size, dark, html) {
   page.errors = [];
   page.on("pageerror", (e) => page.errors.push(e.message.split("\n")[0]));
   await page.clock.setFixedTime(ENV.now);
+  await page.addInitScript(() => { window.__SEMON_PIXEL_COMPARE = true; });
   await page.route(/.*/, async (r) => {
     const url = new URL(r.request().url());
-    if (url.href === "http://reference.test/") return r.fulfill({ contentType: "text/html; charset=utf-8", body: html });
+    if (url.href === "http://reference.test/") return r.fulfill({ contentType: "text/html; charset=utf-8", body: stableMockup(html) });
     if (url.href === "http://reference.test/mark.svg") return r.fulfill({ contentType: "image/svg+xml", body: MARK_SVG });
     if (url.host === "fonts.googleapis.com") return r.fulfill({ contentType: "text/css", body: FACES.replaceAll('url("/fonts/', 'url("http://reference.test/fonts/') });
     const font = /^\/fonts\/(instrument-sans|jetbrains-mono|source-serif-4)-(latin-ext|latin)\.woff2$/.exec(url.pathname);
