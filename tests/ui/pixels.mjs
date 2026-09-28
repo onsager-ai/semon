@@ -76,6 +76,18 @@ const COST_LINES = [
   ['    const cost = costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", cost.unknown.length ? "—" : shortMoney(cost.usd))); costItem.title = COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));',
     '    const directRunsForCost = childSessions(s.id), descendantRunsForCost = descendantsOf(s.id, sessionChildren()), cost = directRunsForCost.length ? costForSessions([s, ...descendantRunsForCost]) : costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", (directRunsForCost.length ? "incl. runs " : "") + (cost.unknown.length ? "—" : shortMoney(cost.usd)))); costItem.title = "API-equivalent cost. " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + (directRunsForCost.length ? ", including runs" : "") + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));'],
 ];
+// The served model marks results read when their session opens and draws them as compact transcript markers. The mockup
+// keeps them as waiting cards; port mode mirrors the served result state and row so the image comparison covers the chrome.
+const RESULT_LINES = [
+  ['  const inbox = () => H.filter((h) => h.kind === "toyou" && h.status === "wait").sort((a, b) => b.at - a.at);',
+    '  const inbox = () => H.filter((h) => h.kind === "toyou" && h.status === "wait" && !(h.ask === "result" && SEEN_RESULTS.has(h.id))).sort((a, b) => b.at - a.at);'],
+  ['  const statWord = (h) => ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];',
+    '  const statWord = (h) => h.kind === "toyou" && h.ask === "result" ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];'],
+  ['  function renderSession(page, sid) {\n    const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr");',
+    '  function renderSession(page, sid) {\n    markSeenResults(H.filter((h) => h.kind === "toyou" && h.ask === "result" && h.from === sid));\n    const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr");'],
+  ['        if (h.kind === "ask") { if (!show.messages) continue; const m = el("div", "msg user"); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }\n        // A relay or brief that starts a turn is that turn\'s message.',
+    '        if (h.kind === "ask") { if (!show.messages) continue; const m = el("div", "msg user"); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }\n        if (h.kind === "toyou" && h.ask === "result") { const marker = el("div", "result-marker " + (SEEN_RESULTS.has(h.id) ? "read" : "new")); marker.append(icon(I.result), el("span", "word", statWord(h)), el("span", "tm", clock(h.at))); tx.append(marker); continue; }\n        // A relay or brief that starts a turn is that turn\'s message.'],
+];
 // The sample uses illustrative hostnames; in port mode the served model owns the machine names and the viewer
 // shortens those names in sidebar and line-2 labels.
 const HOST_LINES = [
@@ -117,7 +129,7 @@ function portReference(D) {
     '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(SESS) + ";",
     "  const API_PRICE = " + J(PRICING) + ";", "  const H = " + J(H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", "  const TXM = " + J(D.TXM ?? {}) + ";", ""].join("\n");
   let html = MOCKUP.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + MOCKUP.slice(end);
-  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES, ...CALL_LINES, ...THOUGHT_LINES, ...COST_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
+  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES, ...CALL_LINES, ...THOUGHT_LINES, ...COST_LINES, ...RESULT_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
   for (const [a, replacement] of HOST_LINES) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, replacement(D)); }
   const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
   if (!histories.test(html)) throw new Error("mockup analytics history block moved");
