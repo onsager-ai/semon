@@ -744,6 +744,7 @@ fn model_json_matches_the_golden_file() {
     let json = model_json(&fixture.options).unwrap();
     let mut model: Value = serde_json::from_str(&json).unwrap();
     assert!(model["now"].as_i64().unwrap() > 1_790_000_000_000);
+    let model_version = model["version"].clone();
     model["now"] = json!(0);
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/model.json");
     let update = std::env::var_os("SEMON_UPDATE_GOLDEN").is_some();
@@ -770,7 +771,7 @@ fn model_json_matches_the_golden_file() {
     assert_eq!(actual, expected);
     // A second run from the warm cache gives the same model and version.
     let again: Value = serde_json::from_str(&model_json(&fixture.options).unwrap()).unwrap();
-    assert_eq!(again["version"], model["version"]);
+    assert_eq!(again["version"], model_version);
 }
 
 /// Every other content path the model reads: task-notification results,
