@@ -14,6 +14,7 @@ import homeCheck from "./home.mjs";
 import timelineCheck from "./timeline.mjs";
 import checkReal from "./check-real.mjs";
 import extras from "./extras.mjs";
+import shellCheck from "./shell.mjs";
 
 const checks = [
   ["home", homeCheck],
@@ -25,6 +26,7 @@ const checks = [
   ["full", full],
   ["check-real", checkReal],
   ["extras", extras],
+  ["shell", shellCheck],
 ];
 
 const browser = await launch();

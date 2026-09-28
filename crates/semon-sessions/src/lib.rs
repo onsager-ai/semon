@@ -18,6 +18,7 @@ mod inputs;
 mod mcp;
 mod model;
 mod query;
+pub mod shell;
 mod tx;
 mod union;
 mod viewer;
