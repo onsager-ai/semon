@@ -110,14 +110,14 @@ code { overflow-wrap: anywhere; }
 .topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 6px; min-height: 52px; padding: 8px 20px; background: color-mix(in srgb, var(--ground) 92%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid transparent; }
 .topbar.scrolled { border-bottom-color: var(--line); }
 .topbar .ttl { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; justify-content: center; font-weight: 600; font-size: 16px; min-width: 0; }
-.topbar .ttl .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.topbar .ttl .t { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .ibtn { display: inline-grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 9px; background: none; color: var(--ink-2); flex: none; }
 @media (hover: hover) { .ibtn:hover { background: var(--sunken); } }
 .ibtn[aria-expanded="true"] { background: var(--sunken); }
 .ibtn svg { width: 20px; height: 20px; }
 .lead { display: none; }
 /* The page title lives only in the top bar. A parent crumb before it ("quill ›") is the way up a level. */
-.topbar .crumb { flex: none; max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 500; }
+.topbar .crumb { flex: 0 1000 auto; min-width: 2.5em; max-width: 12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 500; }
 @media (hover: hover) { .topbar .crumb:hover { text-decoration: underline; text-underline-offset: 3px; } }
 .topbar .sep { color: var(--faint); font-weight: 400; flex: none; }
 .lineage-menu { position: absolute; left: 16px; top: calc(100% + 4px); z-index: 22; width: min(260px, calc(100vw - 32px)); padding: 5px; background: var(--ground); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 32px color-mix(in srgb, var(--ink) 14%, transparent); }
@@ -269,6 +269,7 @@ code { overflow-wrap: anywhere; }
 .menu { position: absolute; right: 16px; top: calc(100% + 4px); z-index: 20; width: min(300px, calc(100vw - 32px)); background: var(--ground); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgb(0 0 0 / .12); padding: 6px; }
 .menu button { display: flex; width: 100%; align-items: center; gap: 10px; border: 0; background: none; padding: 9px 10px; border-radius: 8px; text-align: left; color: var(--ink); font-size: 14px; }
 @media (hover: hover) { .menu button:hover { background: var(--sunken); } }
+.menu .menu-note { margin-left: auto; color: var(--accent); font-size: 12.5px; }
 .menu dl { margin: 6px 0 2px; padding: 8px 10px 4px; border-top: 1px solid var(--line); display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 13px; }
 .menu dt { color: var(--faint); } .menu dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 
@@ -383,7 +384,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .viewer pre.in { color: var(--ink); }
 .viewer .diff { border-radius: 10px; background: var(--sunken); }
 .viewer .vnote { margin: 8px 0 0; font-size: 12.5px; color: var(--faint); }
-.session-details .vb { padding-top: 4px; }
+.session-details .vb { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; padding: 4px 16px 18px; }
 .session-details .vh { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 8px; padding: 10px 8px 10px 16px; border-bottom: 1px solid var(--line); }
 .session-details .vt { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 15px; font-weight: 600; }
 .session-details .vt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -456,6 +457,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .child-intro .intro-title { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--ink-2); font-weight: 600; }
 .child-intro .intro-title button, .child-return button { min-height: 36px; min-width: 0; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .child-intro .intro-title .tm { margin-left: auto; flex: none; color: var(--faint); font: 11.5px var(--mono); }
+.child-intro .intro-title .sibling-nav { margin: -4px -12px -4px auto; }
+.child-intro .intro-title:has(.sibling-nav) .tm { margin-left: 6px; }
 .child-intro .brief { max-height: 5.8em; margin-top: 3px; overflow: hidden; color: var(--ink-2); font: 15px/1.45 var(--serif); }
 .child-intro .brief.open { max-height: none; }
 .child-intro .more { min-height: 36px; border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: 13px; }
@@ -475,14 +478,14 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2 .stat { gap: 5px; font-size: 12.5px; }
 .topbar .l2 .sep { white-space: pre; }
 .topbar .l2 .rest { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.topbar .l2.session-meta { position: relative; gap: 10px; width: 100%; min-height: 30px; overflow: hidden; border: 0; border-radius: 8px; background: none; padding: 0; text-align: left; }
+.topbar .l2.session-meta { position: relative; gap: 12px; width: 100%; min-height: 30px; overflow: hidden; border: 0; border-radius: 8px; background: none; padding: 0; text-align: left; }
 .topbar .l2.session-meta .meta-hit { position: absolute; inset: 0; z-index: 0; border: 0; border-radius: 8px; background: none; padding: 0; }
 @media (hover: hover) { .topbar .l2.session-meta:hover .meta-hit { background: var(--sunken); } }
 .topbar .l2.session-meta .meta-item { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; flex: none; min-width: 0; pointer-events: none; }
 .topbar .l2.session-meta .meta-item .meta-value { display: block; min-width: 4ch; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .l2.session-meta .meta-state { gap: 5px; }
 .topbar .l2.session-meta .meta-state .meta-value { max-width: none; }
-.topbar .l2.session-meta .meta-state .state-sep { margin: 0 -5px 0 -1px; }
+.topbar .l2.session-meta .meta-state .state-sep { color: var(--faint); }
 .topbar .l2.session-meta .meta-item svg, .topbar .l2.session-meta .meta-item .hmark { width: 15px; height: 15px; flex: none; color: var(--faint); }
 .topbar .l2.session-meta .meta-item .hmark { color: var(--h); }
 .topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, var(--h) 12%, transparent); color: var(--h); }
@@ -494,8 +497,9 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2.session-meta .meta-runs svg { width: 15px; height: 15px; color: var(--faint); }
 .topbar .l2.session-meta .meta-runs .dot { width: 6px; height: 6px; }
 .topbar .l2.session-meta .meta-runs .meta-value { font: inherit; }
-.topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; min-height: 28px; margin: 0 0 0 -5px; border: 0; background: none; padding: 0 2px; font: inherit; font-weight: 500; color: var(--err); pointer-events: auto; }
+.topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; margin: 0; border: 0; background: none; padding: 0 2px; font: inherit; font-weight: 500; color: var(--err); pointer-events: auto; }
 .topbar .l2.session-meta .errs:empty { display: none; }
+.topbar .l2.session-meta .errs::before { content: "·"; color: var(--faint); font-weight: 400; }
 /* fitSessionLine hides overflow items by setting the `hidden` attribute; these selectors must out-specify
    the display rules above so hiding actually takes effect. */
 .topbar .l2.session-meta .meta-item[hidden], .topbar .l2.session-meta .meta-runs[hidden], .topbar .l2.session-meta .errs[hidden], .topbar .l2.session-meta .meta-value[hidden] { display: none; }
@@ -543,11 +547,19 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .facet-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .facet-field { display: grid; gap: 3px; min-width: 0; color: var(--muted); font-size: 11.5px; }
 .facet-field select { width: 100%; min-width: 0; height: 34px; border: 1px solid var(--line); border-radius: 8px; background: var(--ground); color: var(--ink); padding: 0 7px; font-size: 12.5px; }
-.analytics-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border-top: 1px solid var(--line); background: var(--line); }
-.analytics-metric { min-width: 0; min-height: 102px; padding: 11px 12px; background: var(--ground); }
-.analytics-metric .label { color: var(--muted); font-size: 12px; line-height: 1.3; }
-.analytics-metric .value { margin-top: 5px; font-size: 20px; line-height: 1.2; font-weight: 600; font-variant-numeric: tabular-nums; }
-.analytics-metric .note { min-height: 17px; margin-top: 4px; color: var(--faint); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
+.analytics-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; border-top: 1px solid var(--line); }
+.analytics-metric { min-width: 0; padding: 12px 0 13px; border-bottom: 1px solid var(--line); }
+.analytics-metric .label { display: flex; align-items: center; min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.3; white-space: nowrap; }
+.analytics-metric .label > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.analytics-metric[data-more] .label > span { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; cursor: help; }
+.analytics-metric .value { margin-top: 4px; font-size: 20px; line-height: 1.2; font-weight: 600; font-variant-numeric: tabular-nums; }
+.analytics-metric .note { margin-top: 3px; color: var(--muted); font-size: 11.5px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.analytics-metric .note .up, .analytics-metric .note .down { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.analytics-bd-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 16px 0 0; border-top: 1px solid var(--line); }
+.analytics-bd-head h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.analytics-bd-head .panel-sub { margin-top: 2px; color: var(--muted); font-size: 12px; }
+.analytics-breakdowns .analytics-panel { padding-top: 4px; border-top: 0; }
+.analytics-breakdowns .analytics-panel h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink-2); }
 .analytics-measure { display: inline-flex; align-items: center; gap: 2px; justify-self: start; padding: 2px; border-radius: 9px; background: var(--sunken); }
 .analytics-measure button { min-height: 36px; border: 0; border-radius: 7px; background: none; padding: 0 10px; color: var(--muted); font-size: 12.5px; }
 .analytics-measure button[aria-pressed="true"] { background: var(--ground); color: var(--ink); font-weight: 600; }
@@ -555,19 +567,18 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .analytics-panel h2 { margin: 0; font-size: 14px; font-weight: 600; }
 .analytics-panel .panel-sub { margin-top: 2px; color: var(--muted); font-size: 12px; }
 .analytics-chart { position: relative; min-width: 0; margin-top: 7px; }
-.analytics-chart svg { width: 100%; height: 184px; overflow: visible; }
+.analytics-chart svg { width: 100%; height: auto; overflow: visible; }
 .analytics-chart .gridline { stroke: var(--line); stroke-width: 1; }
 .analytics-chart .axis-label { fill: var(--muted); font: 11px var(--mono); }
-.analytics-chart .area-claude { fill: var(--claude); fill-opacity: .76; }
-.analytics-chart .area-codex { fill: var(--codex); fill-opacity: .82; }
 .analytics-chart .cost-claude { fill: var(--claude); }
 .analytics-chart .cost-codex { fill: var(--codex); }
 .analytics-chart .chart-hit { fill: transparent; cursor: pointer; }
+@media (hover: hover) { .analytics-chart .chart-hit[data-v]:not([data-v="0"]):hover { fill: color-mix(in srgb, var(--ink) 6%, transparent); } }
 .analytics-legend { display: flex; align-items: center; gap: 14px; margin-top: 4px; color: var(--muted); font-size: 12px; }
 .analytics-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .analytics-legend i { width: 8px; height: 8px; border-radius: 2px; background: var(--h); }
 .analytics-breakdowns { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
-.analytics-breakdown-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 7px; padding: 7px 0 3px; color: var(--faint); font-size: 9.5px; line-height: 1.2; text-align: right; }
+.analytics-breakdown-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 7px; padding: 7px 0 3px; color: var(--faint); font-size: 11px; line-height: 1.2; text-align: right; }
 .analytics-breakdown-head span:first-child { text-align: left; }
 .allowance-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
 .allowance-window { min-width: 0; padding-top: 8px; border-top: 1px solid var(--line); }
@@ -590,17 +601,13 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .analytics-session .no-price { grid-column: 2 / -1; margin-top: -3px; }
 .analytics-slice .session-name { white-space: normal; overflow-wrap: anywhere; }
 @media (min-width: 761px) {
-  .analytics-metrics { grid-template-columns: repeat(7, minmax(0, 1fr)); }
-  .analytics-metric { min-height: 112px; padding: 11px 10px; }
-  .analytics-metric .value { font-size: 19px; }
+  .analytics-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 20px; }
   .analytics-breakdowns { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .analytics-split { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
   .facet-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .facet-field select { height: 44px; }
-  /* An odd count of headline figures (point 12 added a 7th) would otherwise leave one empty cell. */
-  .analytics-metrics > :last-child:nth-child(odd) { grid-column: 1 / -1; }
   .topbar .analytics-range button { min-width: 38px; min-height: 44px; padding: 0 5px; }
   .topbar .l2.session-meta { min-height: 44px; }
   .topbar .l2.session-meta .meta-runs { min-height: 44px; }
@@ -608,7 +615,6 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-return button, .child-work .cw-toggle { min-height: 44px; }
   .lineage-menu button { min-height: 44px; }
   .analytics-measure button { min-height: 44px; }
-  .analytics-chart svg { height: 170px; }
   dialog.viewer.analytics-slice { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
   .analytics-slice .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
   .analytics-slice .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
@@ -635,7 +641,9 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .nav-item { padding-block: 10px; }
   .srow { padding-block: 8px; }
   .groupby button { padding: 6px 8px; }
-  .topbar { top: env(safe-area-inset-top, 0px); padding: 6px 10px; min-height: 50px; }
+  .topbar { top: env(safe-area-inset-top, 0px); padding: 6px 6px; gap: 2px; min-height: 50px; }
+  .topbar > .ibtn { width: 44px; height: 44px; }
+  .topbar .ttl { padding: 0 4px; }
   .topbar.detail { min-height: 56px; }
   .lead { display: inline-grid; }
   .sidebar-head { display: contents; }
@@ -644,6 +652,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .msg.user { max-width: 88%; }
   .step > button, .step.live { min-height: 36px; }
   .menu, .filters.pop { right: 10px; }
+  .menu button { min-height: 44px; }
+  .filters.pop label { min-height: 44px; }
   .topbar .l2.session-meta { min-height: 44px; }
   .topbar .l2.session-meta .errs { min-height: 40px; }
   .wide-toggle { display: none; }
@@ -813,7 +823,10 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 
   // ====================================================================================
   const $ = (s, r = document) => r.querySelector(s);
-  const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+  // Instrument Sans sets "·" with almost no side bearing, so " · " reads as one squeezed word. Every "a · b" gets a
+  // thin space on each side of the dot (text in code and pre is left alone).
+  const spaced = (t) => String(t).replace(/ · /g, "\u2009 · \u2009").replace(/^· /, "·\u2009 ");
+  const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = tag === "code" || tag === "pre" ? text : spaced(text); return n; };
   const SVGNS = "http://www.w3.org/2000/svg";
   function icon(d, cls) { const s = document.createElementNS(SVGNS, "svg"); s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("aria-hidden", "true"); s.setAttribute("fill", "none"); s.setAttribute("stroke", "currentColor"); s.setAttribute("stroke-width", "1.8"); s.setAttribute("stroke-linecap", "round"); s.setAttribute("stroke-linejoin", "round"); if (cls) s.setAttribute("class", cls); const p = document.createElementNS(SVGNS, "path"); p.setAttribute("d", d); s.append(p); return s; }
   const I = {
@@ -825,6 +838,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     down: "M12 4v15M5 12l7 7 7-7", branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
     wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z",
     wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7",
+    tokens: "M5 5h14M12 5v14M9 19h6",
     coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5", relay: "M4 7h13l-3-3M20 17H7l3 3M17 4l-3 3 3 3M7 14l3 3-3 3",
   };
   const clock = (m) => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");
@@ -1190,14 +1204,15 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     path.forEach((s, i) => { const b = el("button"); b.type = "button"; b.setAttribute("role", "menuitem"); if (i === path.length - 1) b.setAttribute("aria-current", "page"); b.append(harnessMark(s.harness), el("span", null, s.name)); b.addEventListener("click", () => { menu.remove(); goSession(s.id); }); menu.append(b); });
     bar.append(menu); const close = (e) => { if (!menu.contains(e.target) && !e.target.closest?.(".lineage-parent")) { menu.remove(); document.removeEventListener("click", close); } }; setTimeout(() => document.addEventListener("click", close), 0);
   }
-  function appendSiblingNav(bar, s) {
-    const parent = parentOf(s.id); if (!parent) return;
-    const siblings = childSessions(parent), at = siblings.findIndex((x) => x.id === s.id); if (siblings.length < 2 || at < 0) return;
+  function siblingNav(s) {
+    const parent = parentOf(s.id); if (!parent) return null;
+    const siblings = childSessions(parent), at = siblings.findIndex((x) => x.id === s.id); if (siblings.length < 2 || at < 0) return null;
     const nav = el("div", "sibling-nav"); nav.setAttribute("role", "group"); nav.setAttribute("aria-label", "Sibling sessions");
     for (const [delta, label, path] of [[-1, "Previous sibling", I.back], [1, "Next sibling", I.chev]]) {
       const target = siblings[at + delta], b = el("button", "ibtn"); b.type = "button"; b.disabled = !target; b.setAttribute("aria-label", target ? label + ": " + target.name : label); b.append(icon(path)); if (target) b.addEventListener("click", () => goSession(target.id)); nav.append(b);
     }
-    nav.append(el("span", "sibling-count", (at + 1) + " of " + siblings.length)); bar.append(nav);
+    // "‹ 1 of 3 ›": the count sits between its two arrows.
+    nav.insertBefore(el("span", "sibling-count", (at + 1) + " of " + siblings.length), nav.lastChild); return nav;
   }
   function renderTopbar(title, crumb, opts = {}) {
     const bar = $("#topbar"), s = opts.session; bar.replaceChildren(); bar.classList.remove("scrolled");
@@ -1212,20 +1227,23 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const tt = el("span", "t", title); tt.title = title; l1.append(tt); t.append(l1);
     if (opts.line2) { const l2 = el("div", "l2" + (s ? " session-meta" : "")); if (s) { const hit = el("button", "meta-hit"); hit.type = "button"; hit.setAttribute("aria-label", s.name + ": open Session details"); hit.addEventListener("click", () => openSessionDetails(s)); l2.append(hit); }
       opts.line2(l2); t.append(l2); if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); }); }
-    bar.append(t); if (s) appendSiblingNav(bar, s);
+    bar.append(t); if (s && !phone.matches) { const nav = siblingNav(s); if (nav) bar.append(nav); }
     if (opts.analytics) { appendAnalyticsRange(bar); appendWideToggle(bar); return; }
     if (!s) { appendWideToggle(bar); return; }
     const fb = el("button", "ibtn"); fb.type = "button"; fb.setAttribute("aria-label", "Find in transcript"); fb.append(icon(I.search));
     fb.addEventListener("click", () => { findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
     const pop = el("div", "filters pop"); pop.hidden = !filterOpen;
     for (const [key, label] of [["messages", "Messages"], ["tools", "Tool steps"], ["thinking", "Thinking"]]) { const l = el("label"); const cb = el("input"); cb.type = "checkbox"; cb.checked = show[key]; cb.id = "f-" + key; cb.addEventListener("change", () => { show[key] = cb.checked; render(); }); l.append(cb, label); pop.append(l); }
-    const tb = el("button", "ibtn" + (show.messages && show.tools && show.thinking ? "" : " on")); tb.id = "filter-btn"; tb.type = "button"; tb.setAttribute("aria-label", "Filter transcript"); tb.setAttribute("aria-expanded", String(filterOpen)); tb.append(icon(I.filter));
+    const filtered = !(show.messages && show.tools && show.thinking);
+    const tb = el("button", "ibtn" + (filtered ? " on" : "")); tb.id = "filter-btn"; tb.type = "button"; tb.setAttribute("aria-label", "Filter transcript"); tb.setAttribute("aria-expanded", String(filterOpen)); tb.append(icon(I.filter));
     tb.addEventListener("click", () => { $(".menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); filterOpen = pop.hidden; pop.hidden = !filterOpen; tb.setAttribute("aria-expanded", String(filterOpen)); });
-    const more = el("button", "ibtn"); more.id = "more-btn"; more.type = "button"; more.setAttribute("aria-label", "Session details and actions"); more.setAttribute("aria-expanded", "false"); more.append(icon(I.more)); more.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(s, more); });
+    const more = el("button", "ibtn" + (phone.matches && filtered ? " on" : "")); more.id = "more-btn"; more.type = "button"; more.setAttribute("aria-label", "Session details and actions"); more.setAttribute("aria-expanded", "false"); more.append(icon(I.more)); more.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(s, more); });
     // The dropdown hangs from the filter button's right edge, wherever the bar's padding and the buttons after it put it.
-    const place = () => { pop.style.right = Math.max(0, bar.getBoundingClientRect().right - tb.getBoundingClientRect().right) + "px"; };
+    // On phones search and filter are items in the ⋯ menu, and the filter hangs from ⋯ instead.
+    const place = () => { const anchor = phone.matches ? more : tb; pop.style.right = Math.max(0, bar.getBoundingClientRect().right - anchor.getBoundingClientRect().right) + "px"; };
     tb.addEventListener("click", place);
-    bar.append(fb, tb, more, pop); appendWideToggle(bar); if (filterOpen) place();
+    if (phone.matches) bar.append(more, pop); else bar.append(fb, tb, more, pop);
+    appendWideToggle(bar); if (filterOpen) place();
   }
   function closeFilter() { if (!filterOpen) return; filterOpen = false; const p = $(".filters.pop"); if (p) p.hidden = true; $("#filter-btn")?.setAttribute("aria-expanded", "false"); }
   // Search takes over the bar: back, the field, and how many entries match. Back (or Escape) restores the bar.
@@ -1252,7 +1270,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const tools = el("span", "meta-item meta-tools"); tools.append(icon(I.wrench), el("span", "meta-value", String(calls))); tools.setAttribute("aria-label", calls + (calls === 1 ? " tool call" : " tool calls"));
     const kids = childSessions(s.id), allKids = descendantsOf(s.id, sessionChildren());
     let runs = null; if (kids.length) { runs = el("button", "meta-item meta-runs"); runs.type = "button"; runs.setAttribute("aria-label", kids.length + (kids.length === 1 ? " child session" : " child sessions") + (allKids.some((x) => x.state === "work") ? ", work in progress" : "") + ": open runs"); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); if (allKids.some((x) => x.state === "work")) runs.append(dot("work")); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
-    const tokens = el("span", "meta-item meta-tokens"); tokens.append(icon(I.stack), el("span", "meta-value", tok(usageTotal(s) / 1e6))); tokens.title = usageTotal(s).toLocaleString() + " sample tokens";
+    const tokens = el("span", "meta-item meta-tokens"); tokens.append(icon(I.tokens), el("span", "meta-value", tok(usageTotal(s) / 1e6))); tokens.title = usageTotal(s).toLocaleString() + " sample tokens";
     const cost = costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", cost.unknown.length ? "—" : shortMoney(cost.usd))); costItem.title = COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));
     l2.append(...(kind ? [kind] : []), st, model, machine, branch, tools, ...(runs ? [runs] : []), tokens, costItem);
   };
@@ -1302,6 +1320,14 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   function toggleMenu(s, btn) {
     const ex = $(".menu"); if (ex) { ex.remove(); btn.setAttribute("aria-expanded", "false"); return; }
     const m = el("div", "menu"); m.setAttribute("role", "menu");
+    if (phone.matches) {
+      const findItem = el("button"); findItem.type = "button"; findItem.setAttribute("role", "menuitem"); findItem.append(icon(I.search, "icon"), el("span", null, "Find in transcript"));
+      findItem.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
+      const filtered = !(show.messages && show.tools && show.thinking), filterItem = el("button"); filterItem.type = "button"; filterItem.setAttribute("role", "menuitem"); filterItem.append(icon(I.filter, "icon"), el("span", null, "Filter transcript"));
+      if (filtered) filterItem.append(el("span", "menu-note", "On"));
+      filterItem.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); const pop = $(".filters.pop"); if (!pop) return; filterOpen = true; pop.hidden = false; pop.style.right = Math.max(0, $("#topbar").getBoundingClientRect().right - btn.getBoundingClientRect().right) + "px"; pop.querySelector("input")?.focus(); });
+      m.append(findItem, filterItem);
+    }
     const copy = el("button"); copy.type = "button"; copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command"));
     const cmd = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + s.id;
     copy.addEventListener("click", () => { navigator.clipboard?.writeText(cmd).then(() => { copy.lastChild.textContent = "Copied"; }, () => { copy.lastChild.textContent = cmd; }); });
@@ -1469,7 +1495,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   function openParentAtHandoff(h) { pendingFlashHandoff = h.id; const turn = HOLDS.get(h.id); goSession(h.from, turn?.id); }
   function childBriefBlock(h) {
     const parent = SESS[h.from], block = el("section", "child-intro"); block.setAttribute("aria-label", "Brief from " + parent.name);
-    const title = el("div", "intro-title"), open = el("button", null, parent.name); open.type = "button"; open.addEventListener("click", () => openParentAtHandoff(h)); title.append("Brief from ", open, el("span", "tm", clock(h.at))); block.append(title);
+    const title = el("div", "intro-title"), open = el("button", null, parent.name); open.type = "button"; open.addEventListener("click", () => openParentAtHandoff(h)); title.append("Brief from ", open, el("span", "tm", clock(h.at))); if (phone.matches && SESS[h.to]) { const nav = siblingNav(SESS[h.to]); if (nav) title.append(nav); } block.append(title);
     const brief = markdown(h.brief, "brief"), more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
     more.addEventListener("click", () => { const expanded = brief.classList.toggle("open"); more.textContent = expanded ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(expanded)); });
     new ResizeObserver(() => { if (brief.classList.contains("open") || !brief.clientHeight) return; const clipped = brief.scrollHeight > brief.clientHeight + 1; more.hidden = !clipped; brief.classList.toggle("clipped", clipped); }).observe(brief);
@@ -1479,7 +1505,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const block = el("div", "child-return"), calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, finished = s.state === "done" || s.state === "err" || h.status === "done" || h.status === "err";
     const status = finished ? (s.state === "err" || h.status === "err" ? "err" : "done") : "work";
     const text = finished ? (status === "err" ? "Failed" : "Done") : "Working · " + calls + (calls === 1 ? " tool call" : " tool calls") + " · " + dur(s.start, null);
-    const state = el("span", "stat " + status); state.append(status === "work" ? el("span", "spin") : dot(status), finished ? "Returned to " + nameOf(h.from) + " · " + text + " · " + dur(s.start, s.last) : text); block.append(state);
+    const state = el("span", "stat " + status); state.append(status === "work" ? el("span", "spin") : dot(status), spaced(finished ? "Returned to " + nameOf(h.from) + " · " + text + " · " + dur(s.start, s.last) : text)); block.append(state);
     if (finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
     return block;
   }
@@ -1529,7 +1555,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .think, .think-masked, .think-pending")) { blk.remove(); return; }
       if (opts.excludeH && t.last) return;
       const end = turnEnd(t); if (!end) return;
-      const d = el("div", "turn-end"); const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st), end.text); d.append(st);
+      const d = el("div", "turn-end"); const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st), spaced(end.text)); d.append(st);
       if (t.out.length) d.append(traceBtn(t)); blk.append(d); };
     const openTurn = (t) => { closeTurn(); const blk = el("section", "turn"); blk.dataset.turn = t.id;
       // Your own message needs no header: the bubble is yours and its time sits under it. A relay or brief says who sent it.
@@ -1820,34 +1846,48 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       apiCost: costUnknown.length ? null : costRows.reduce((sum, x) => sum + x.cost.knownUsd, 0),
     };
   }
-  const hoursText = (ms) => (ms / 3600000).toFixed(1) + "h";
+  const hoursText = (ms) => (ms / 3600000).toFixed(1) + " h";
+  const rangeName = () => analyticsRange === 1 ? "24 h" : analyticsRange + " d";
+  // A headline figure's second line: its change against the previous period of the same length, and nothing else.
+  function deltaNote(value, previous, format) {
+    const d = value - previous, n = el("div", "note");
+    if (Math.abs(d) < 1e-9) { n.textContent = "No change vs previous " + rangeName(); return n; }
+    n.append(el("span", d > 0 ? "up" : "down", (d > 0 ? "+" : "−") + format(Math.abs(d))), " vs previous " + rangeName()); return n;
+  }
+  // The most sessions busy at the same moment: concurrency only rises where an interval starts.
+  function peakBusy(rows, from, to) {
+    const starts = rows.flatMap((r) => r.busy.filter(([a, b]) => a < to && b > from).map(([a]) => Math.max(a, from)));
+    return starts.reduce((best, t) => Math.max(best, rows.filter((r) => r.busy.some(([a, b]) => a <= t && t < b)).length), 0);
+  }
+  // Charts draw in pixels of the column they sit in, so their text is never stretched.
+  function chartWidth() { const page = $("#page"), cs = getComputedStyle(page); return Math.max(280, Math.round(page.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight))); }
+  const niceStep = (max) => [.25, .5, 1, 2, 5, 10, 20, 50, 100, 200, 500].find((x) => x * 3 >= max) ?? 1000;
+  const svgEl = (tag, attrs, text) => { const n = document.createElementNS(SVGNS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, String(v)); if (text != null) n.textContent = text; return n; };
   function timeText(ms) { const mins = Math.max(0, Math.round(ms / 60000)), days = Math.floor(mins / 1440), hours = Math.floor(mins % 1440 / 60), rem = mins % 60; return days ? days + "d " + hours + "h" : hours ? hours + "h " + rem + "m" : mins + "m"; }
   const countText = (n) => Math.round(n).toLocaleString();
-  function deltaText(value, previous, format) { const d = value - previous, sign = d > 0 ? "+" : d < 0 ? "−" : ""; return "Δ " + sign + format(Math.abs(d)) + " · prev " + format(previous); }
-  function analyticsPath(points, upper, lower) {
-    const top = points.map((p, i) => (i ? "L" : "M") + p.x + " " + upper(p));
-    const bottom = [...points].reverse().map((p) => "L" + p.x + " " + lower(p)); return [...top, ...bottom, "Z"].join(" ");
-  }
+  // Agent-hours per bucket, stacked by harness: an hour a column over 24 h, six hours over 7 d, a day over 30 d.
+  const agentBuckets = () => analyticsRange === 1 ? [24, "per hour"] : analyticsRange === 7 ? [28, "per 6 hours"] : [30, "per day"];
+  const hLabel = (n) => n ? +n.toFixed(2) + " h" : "0";
   function renderAgentsChart(rows, from, to) {
-    const panel = el("section", "analytics-panel"), title = el("h2", null, "Agents at work"); panel.append(title, el("div", "panel-sub", "Concurrent busy sessions, stacked by harness"));
-    const svg = document.createElementNS(SVGNS, "svg"); svg.setAttribute("viewBox", "0 0 720 190"); svg.setAttribute("preserveAspectRatio", "none"); svg.setAttribute("role", "group"); svg.setAttribute("aria-label", "Concurrent busy sessions over the selected range");
-    const left = 40, right = 708, top = 12, bottom = 151, steps = analyticsRange === 1 ? 36 : 56, spanMs = to - from;
-    const points = Array.from({ length: steps + 1 }, (_, i) => {
-      const t = from + spanMs * i / steps, active = rows.filter((r) => r.busy.some(([a, b]) => a <= t && t < b));
-      return { t, x: left + (right - left) * i / steps, claude: active.filter((r) => r.s.harness === "claude").length, codex: active.filter((r) => r.s.harness === "codex").length };
+    const [count, unit] = agentBuckets(), span = (to - from) / count, panel = el("section", "analytics-panel");
+    panel.append(el("h2", null, "Agents at work"), el("div", "panel-sub", "Agent-hours " + unit + " · stacked by harness"));
+    const bins = Array.from({ length: count }, (_, i) => { const a = from + i * span, b = a + span, hrs = (h) => rows.filter((r) => r.s.harness === h).reduce((n, r) => n + busyMsIn(r, a, b), 0) / 3600000; return { a, b, claude: hrs("claude"), codex: hrs("codex") }; });
+    const W = chartWidth(), H = 190, left = 40, right = W - 4, top = 12, bottom = 151, most = Math.max(...bins.map((x) => x.claude + x.codex)), stepY = niceStep(most || 1), max = Math.max(stepY, Math.ceil(most / stepY - 1e-9) * stepY);
+    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "group", "aria-label": "Agent-hours " + unit + " over the selected range, stacked by harness" });
+    const yOf = (n) => bottom - (bottom - top) * n / max;
+    for (let n = 0; n <= max + 1e-9; n += stepY) { svg.append(svgEl("line", { x1: left, x2: right, y1: yOf(n), y2: yOf(n), class: "gridline" }), svgEl("text", { x: 0, y: yOf(n) + 4, class: "axis-label" }, hLabel(n))); }
+    const step = (right - left) / count, w = Math.max(2, step * .64), fmt = (t) => new Date(t).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }), clockOf = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    bins.forEach((bin, i) => {
+      const x = left + i * step + (step - w) / 2, ch = (bottom - top) * bin.claude / max, xh = (bottom - top) * bin.codex / max, total = bin.claude + bin.codex;
+      if (ch > 0) svg.append(svgEl("rect", { x, y: bottom - ch, width: w, height: ch, class: "cost-claude" }));
+      if (xh > 0) svg.append(svgEl("rect", { x, y: bottom - ch - xh, width: w, height: xh, class: "cost-codex" }));
+      const label = fmt(bin.a) + "–" + clockOf(bin.b) + ": " + hLabel(+total.toFixed(2)) + (total ? " (Claude " + hLabel(+bin.claude.toFixed(2)) + ", Codex " + hLabel(+bin.codex.toFixed(2)) + ")" : "");
+      const hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit", "data-v": total.toFixed(3) }); hit.append(svgEl("title", {}, label));
+      if (total > 0) { hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", label + ". Open the sessions busy then"); }
+      const open = () => { if (total > 0) openAnalyticsSlice(bin.a, bin.b, rows.filter((r) => busyMsIn(r, bin.a, bin.b) > 0)); };
+      hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
     });
-    const max = Math.max(1, ...points.map((p) => p.claude + p.codex)), y = (n) => bottom - (bottom - top) * n / (max + .55);
-    for (let n = 0; n <= max; n++) { const gy = y(n), line = document.createElementNS(SVGNS, "line"); line.setAttribute("x1", String(left)); line.setAttribute("x2", String(right)); line.setAttribute("y1", String(gy)); line.setAttribute("y2", String(gy)); line.setAttribute("class", "gridline"); svg.append(line);
-      const label = document.createElementNS(SVGNS, "text"); label.setAttribute("x", "4"); label.setAttribute("y", String(gy + 4)); label.setAttribute("class", "axis-label"); label.textContent = String(n); svg.append(label); }
-    const claude = document.createElementNS(SVGNS, "path"); claude.setAttribute("d", analyticsPath(points, (p) => y(p.claude), () => y(0))); claude.setAttribute("class", "area-claude"); svg.append(claude);
-    const codex = document.createElementNS(SVGNS, "path"); codex.setAttribute("d", analyticsPath(points, (p) => y(p.claude + p.codex), (p) => y(p.claude))); codex.setAttribute("class", "area-codex"); svg.append(codex);
-    const startLabel = document.createElementNS(SVGNS, "text"), nowLabel = document.createElementNS(SVGNS, "text");
-    startLabel.setAttribute("x", String(left)); startLabel.setAttribute("y", "178"); startLabel.setAttribute("class", "axis-label"); startLabel.textContent = analyticsRange === 1 ? "24h ago" : analyticsRange + "d ago";
-    nowLabel.setAttribute("x", String(right)); nowLabel.setAttribute("y", "178"); nowLabel.setAttribute("text-anchor", "end"); nowLabel.setAttribute("class", "axis-label"); nowLabel.textContent = "Now"; svg.append(startLabel, nowLabel);
-    const hit = document.createElementNS(SVGNS, "rect"); hit.setAttribute("x", String(left)); hit.setAttribute("y", String(top)); hit.setAttribute("width", String(right - left)); hit.setAttribute("height", String(bottom - top)); hit.setAttribute("class", "chart-hit"); hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", "Open the sessions working at a time in this chart");
-    const open = (t) => { const active = rows.filter((r) => r.busy.some(([a, b]) => a <= t && t < b)); openAnalyticsSlice(t, active); };
-    hit.addEventListener("click", (e) => { const rect = hit.getBoundingClientRect(), ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)); open(from + ratio * spanMs); });
-    hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(to - spanMs / 2); } }); svg.append(hit);
+    svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, analyticsRange === 1 ? "24 h ago" : analyticsRange + " d ago"), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart);
     const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"); const swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend); return panel;
   }
@@ -1860,15 +1900,15 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       if (!inRange(row.costAt, from, to)) continue; const cost = costForSession(row.id); if (cost.usd == null) { cost.unknown.forEach((m) => unpriced.add(m)); continue; }
       const at = Math.min(count - 1, Math.floor((row.costAt - from) / (to - from) * count)); bins[at][row.s.harness] += cost.usd;
     }
-    const svg = document.createElementNS(SVGNS, "svg"); svg.setAttribute("viewBox", "0 0 720 190"); svg.setAttribute("preserveAspectRatio", "none"); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "API-equivalent cost " + unit + ", stacked by harness");
-    const left = 42, right = 708, top = 12, bottom = 151, max = Math.max(.01, ...bins.map((b) => b.claude + b.codex)), step = (right - left) / count;
+    const W = chartWidth(), svg = document.createElementNS(SVGNS, "svg"); svg.setAttribute("viewBox", "0 0 " + W + " 190"); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "API-equivalent cost " + unit + ", stacked by harness");
+    const left = 46, right = W - 4, top = 12, bottom = 151, max = Math.max(.01, ...bins.map((b) => b.claude + b.codex)), step = (right - left) / count;
     for (let n = 0; n <= 2; n++) { const y = bottom - (bottom - top) * n / 2, line = document.createElementNS(SVGNS, "line"); line.setAttribute("x1", String(left)); line.setAttribute("x2", String(right)); line.setAttribute("y1", String(y)); line.setAttribute("y2", String(y)); line.setAttribute("class", "gridline"); svg.append(line);
-      const label = document.createElementNS(SVGNS, "text"); label.setAttribute("x", "3"); label.setAttribute("y", String(y + 4)); label.setAttribute("class", "axis-label"); label.textContent = "$" + (max * n / 2).toFixed(2); svg.append(label); }
-    bins.forEach((b, i) => { const x = left + i * step + step * .22, w = Math.max(1, step * .56), claudeH = (b.claude / max) * (bottom - top), codexH = (b.codex / max) * (bottom - top);
+      const label = document.createElementNS(SVGNS, "text"); label.setAttribute("x", "0"); label.setAttribute("y", String(y + 4)); label.setAttribute("class", "axis-label"); label.textContent = "$" + (max * n / 2).toFixed(2); svg.append(label); }
+    bins.forEach((b, i) => { const w = Math.max(2, step * .64), x = left + i * step + (step - w) / 2, claudeH = (b.claude / max) * (bottom - top), codexH = (b.codex / max) * (bottom - top);
       if (claudeH) { const r = document.createElementNS(SVGNS, "rect"); r.setAttribute("x", String(x)); r.setAttribute("y", String(bottom - claudeH)); r.setAttribute("width", String(w)); r.setAttribute("height", String(claudeH)); r.setAttribute("class", "cost-claude"); svg.append(r); }
       if (codexH) { const r = document.createElementNS(SVGNS, "rect"); r.setAttribute("x", String(x)); r.setAttribute("y", String(bottom - claudeH - codexH)); r.setAttribute("width", String(w)); r.setAttribute("height", String(codexH)); r.setAttribute("class", "cost-codex"); svg.append(r); }
     });
-    const startLabel = document.createElementNS(SVGNS, "text"), nowLabel = document.createElementNS(SVGNS, "text"); startLabel.setAttribute("x", String(left)); startLabel.setAttribute("y", "178"); startLabel.setAttribute("class", "axis-label"); startLabel.textContent = analyticsRange === 1 ? "24h ago" : analyticsRange + "d ago"; nowLabel.setAttribute("x", String(right)); nowLabel.setAttribute("y", "178"); nowLabel.setAttribute("text-anchor", "end"); nowLabel.setAttribute("class", "axis-label"); nowLabel.textContent = "Now"; svg.append(startLabel, nowLabel);
+    const startLabel = document.createElementNS(SVGNS, "text"), nowLabel = document.createElementNS(SVGNS, "text"); startLabel.setAttribute("x", String(left)); startLabel.setAttribute("y", "178"); startLabel.setAttribute("class", "axis-label"); startLabel.textContent = analyticsRange === 1 ? "24 h ago" : analyticsRange + " d ago"; nowLabel.setAttribute("x", String(right)); nowLabel.setAttribute("y", "178"); nowLabel.setAttribute("text-anchor", "end"); nowLabel.setAttribute("class", "axis-label"); nowLabel.textContent = "Now"; svg.append(startLabel, nowLabel);
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart);
     const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"); const swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend); if (unpriced.size) panel.append(el("div", "no-price", "no price for " + [...unpriced].join(", ") + "; unpriced usage is omitted from bars.")); return panel;
   }
@@ -1880,16 +1920,16 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       box.append(el("div", "window-name", label), el("div", "window-used", limit.used_percent + "% used"), el("div", "window-reset", "Resets " + reset.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))); grid.append(box); }
     panel.append(grid); return panel;
   }
-  function openAnalyticsSlice(at, active) {
+  function openAnalyticsSlice(a, b, active) {
     const d = el("dialog", "viewer analytics-slice"), head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose");
-    d.setAttribute("aria-label", "Sessions at " + new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })); title.append(el("span", null, "Sessions at this time"));
+    const when = new Date(a).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) + "–" + new Date(b).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    d.setAttribute("aria-label", "Sessions busy " + when); title.append(el("span", null, "Sessions busy · " + when));
     close.type = "button"; close.setAttribute("aria-label", "Close sessions list"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
     const body = el("div", "vb"), list = el("div", "analytics-list");
-    const when = new Date(at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }); body.append(el("p", "panel-sub", when));
-    if (!active.length) body.append(el("p", "empty", "No sessions were busy at this slice."));
-    for (const row of active.sort((a, b) => a.s.name.localeCompare(b.s.name))) {
-      const s = row.s, b = el("button", "analytics-session analytics-slice"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", MACHINE[s.machine]));
-      b.addEventListener("click", () => { pendingSessionOpen = s.id; d.close(); }); list.append(b);
+    if (!active.length) body.append(el("p", "empty", "No sessions were busy then."));
+    for (const row of active.map((r) => ({ r, ms: busyMsIn(r, a, b) })).sort((x, y) => y.ms - x.ms || x.r.s.name.localeCompare(y.r.s.name))) {
+      const s = row.r.s, item = el("button", "analytics-session analytics-slice"); item.type = "button"; item.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", timeText(row.ms) + " busy"));
+      item.addEventListener("click", () => { pendingSessionOpen = s.id; d.close(); }); list.append(item);
     }
     if (active.length) body.append(list); d.append(head, body); document.body.append(d);
     d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
@@ -1909,7 +1949,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     }
     const selected = (x) => analyticsMeasure === "cost" ? x.cost : x.ms;
     const items = [...groups.values()].sort((a, b) => selected(b) - selected(a) || labelFor(a.key).localeCompare(labelFor(b.key))), max = Math.max(1, ...items.map(selected));
-    const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title));
+    const panel = el("section", "analytics-panel"); panel.append(el("h3", null, title));
     const heads = el("div", "analytics-breakdown-head"); heads.append(el("span", null, ""), el("span", null, "Agent-hours")); const costHead = el("span", null, "API-equivalent cost"); costHead.append(costInfoTip()); heads.append(costHead); panel.append(heads);
     const list = el("div", "analytics-list");
     for (const item of items) {
@@ -1933,28 +1973,34 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days"))); page.append(head); observeTitle(h1);
     page.append(renderFacetFilters(() => render()));
     const measure = el("div", "analytics-measure"); measure.setAttribute("role", "group"); measure.setAttribute("aria-label", "Breakdown bar measure");
-    for (const [key, label] of [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]]) { const b = el("button", null, label); b.type = "button"; b.setAttribute("aria-pressed", String(analyticsMeasure === key)); b.addEventListener("click", () => { if (analyticsMeasure === key) return; const top = currentScroll(); analyticsMeasure = key; render(); restoreScroll(top); }); measure.append(b); } page.append(measure);
+    for (const [key, label] of [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]]) { const b = el("button", null, label); b.type = "button"; b.setAttribute("aria-pressed", String(analyticsMeasure === key)); b.addEventListener("click", () => { if (analyticsMeasure === key) return; const top = currentScroll(); analyticsMeasure = key; render(); restoreScroll(top); }); measure.append(b); }
+    // Eight headline figures: two columns of four on a phone, four columns of two on a wider screen. Each is one value and
+    // one line of change; what else there is to say about it (error rate, median wait, which session) is its tooltip.
     const metrics = el("div", "analytics-metrics");
-    const addMetric = (label, value, note, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label", label); if (tip) l.append(costInfoTip()); m.append(l, el("div", "value", value), el("div", "note", note)); metrics.append(m); };
-    const rate = now.tools ? now.errors / now.tools * 100 : 0, oldRate = previous.tools ? previous.errors / previous.tools * 100 : 0;
-    addMetric("Agent-hours", hoursText(now.agentMs), deltaText(now.agentMs, previous.agentMs, hoursText));
-    addMetric("Sessions started", countText(now.started), deltaText(now.started, previous.started, countText));
-    addMetric("Turns", countText(now.turns), deltaText(now.turns, previous.turns, countText));
-    addMetric("Tool calls", countText(now.tools), countText(now.errors) + " errors · " + deltaText(now.tools, previous.tools, countText) + " · rate " + Math.round(rate) + "% · " + deltaText(rate, oldRate, (n) => n.toFixed(1) + "pp"));
-    addMetric("Time agents waited on you", timeText(now.waitsMs), "median " + timeText(now.medianWaitMs) + " · total " + deltaText(now.waitsMs, previous.waitsMs, timeText) + " · median " + deltaText(now.medianWaitMs, previous.medianWaitMs, timeText));
+    const addMetric = (label, value, note, more, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label"); l.append(el("span", null, label)); if (tip) l.append(costInfoTip()); if (more) { m.dataset.more = ""; m.title = more; } m.append(l, el("div", "value", value), note); metrics.append(m); };
+    const pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
+    addMetric("Agent-hours", hoursText(now.agentMs), deltaNote(now.agentMs, previous.agentMs, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
+    const costNote = now.apiCost == null || previous.apiCost == null ? el("div", "note", "no price for " + [...new Set([...now.costUnknown, ...previous.costUnknown])].join(", ")) : deltaNote(now.apiCost, previous.apiCost, asMoney);
+    addMetric("API-equivalent cost", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, null, true);
+    addMetric("Sessions started", countText(now.started), deltaNote(now.started, previous.started, countText));
+    addMetric("Turns", countText(now.turns), deltaNote(now.turns, previous.turns, countText));
+    addMetric("Tool calls", countText(now.tools), deltaNote(now.tools, previous.tools, countText), countText(now.errors) + " failed (" + pct(now.errors, now.tools) + ") · previous " + rangeName() + ": " + countText(previous.errors) + " failed (" + pct(previous.errors, previous.tools) + ")");
+    const peak = peakBusy(all, from, to), peakBefore = peakBusy(all, from - rangeMs(analyticsRange), from);
+    addMetric("Peak concurrency", countText(peak), deltaNote(peak, peakBefore, countText), "The most sessions busy at the same moment");
+    addMetric("Waited on you", timeText(now.waitsMs), deltaNote(now.waitsMs, previous.waitsMs, timeText), "Median wait " + timeText(now.medianWaitMs) + " · previous " + rangeName() + ": " + timeText(previous.medianWaitMs));
     const currentWait = now.longestCurrent;
-    addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", currentWait ? currentWait.s.name + " · " + deltaText(currentWait.ms, previous.longestWaitMs, timeText) : "No session is waiting on you · " + deltaText(0, previous.longestWaitMs, timeText));
-    const costDelta = now.apiCost == null || previous.apiCost == null ? "no price for " + [...new Set([...now.costUnknown, ...previous.costUnknown])].join(", ") : deltaText(now.apiCost, previous.apiCost, asMoney);
-    addMetric("API-equivalent cost", now.apiCost == null ? "—" : asMoney(now.apiCost), costDelta, true);
+    addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longestWaitMs, timeText), currentWait ? currentWait.s.name + " has waited on you for " + timeText(currentWait.ms) + ". Compared with the longest wait in the previous " + rangeName() + "." : "No session is waiting on you");
     page.append(metrics);
     const chart = renderAgentsChart(all, from, to), breakdowns = el("div", "analytics-breakdowns");
     breakdowns.append(analyticsBreakdown("By repo", all, from, to, "repo"), analyticsBreakdown("By machine", all, from, to, "machine"), analyticsBreakdown("By harness and model", all, from, to, "harness"));
+    // The measure toggle sits on the breakdowns it switches.
+    const bdHead = el("div", "analytics-bd-head"), bdTitle = el("div"); bdTitle.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Bars show the selected measure")); bdHead.append(bdTitle, measure);
     const busyTop = [...all].map((r) => ({ ...r, value: busyMsIn(r, from, to) })).filter((r) => r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5);
     const waitTop = [...now.waitBy].map(([id, ms]) => ({ s: SESS[id], id, value: ms })).filter((r) => r.s && r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5);
     const costTop = all.filter((r) => inRange(r.costAt, from, to)).map((r) => { const cost = costForSession(r.id); return { ...r, cost, value: cost.usd }; }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5);
     const bottomPanels = el("div", "analytics-split"); bottomPanels.append(analyticsList("Top sessions · busy time", busyTop, (x) => timeText(x.value)), analyticsList("Top sessions · waited on", waitTop, (x) => timeText(x.value)), analyticsList("Most expensive sessions · API-equivalent cost", costTop, (x) => x.value == null ? "—" : asMoney(x.value)));
     const allowance = renderCodexAllowance();
-    page.append(chart, renderCostChart(all, from, to), breakdowns, bottomPanels); if (allowance) page.append(allowance);
+    page.append(chart, renderCostChart(all, from, to), bdHead, breakdowns, bottomPanels); if (allowance) page.append(allowance);
   }
 
   // ---- Sessions: every top-level session and its child runs ---------------------------------------------------------------
@@ -2004,7 +2050,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   // The sidebar search narrows the Recent list as you type; Enter opens the Sessions page with the same query.
   $("#q").addEventListener("input", (e) => { query = e.target.value.trim(); renderLanes(); });
   $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); query = e.target.value.trim(); go({ v: "sessions" }); } });
-  phone.addEventListener("change", () => { closeDrawer(true); syncLayoutPrefs(); if (route.v === "analytics") render(); else { renderLanes(); const l2 = $("#topbar .l2"); if (l2) fitSessionLine(l2); syncJump(); } });
+  phone.addEventListener("change", () => { closeDrawer(true); syncLayoutPrefs(); if (route.v === "analytics" || route.v === "session") { const top = currentScroll(); render(); restoreScroll(top); } else { renderLanes(); const l2 = $("#topbar .l2"); if (l2) fitSessionLine(l2); syncJump(); } });
 
   try { history.scrollRestoration = "manual"; history.replaceState({ ...route, scrollTop: 0 }, ""); } catch {}
   render();
