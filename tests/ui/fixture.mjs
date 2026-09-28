@@ -212,9 +212,9 @@ export function write(out, { extras = false } = {}) {
     const f = claude("h-failed", { cwd: harborCwd, model: "sonnet-5", tokens: SESS["h-failed"].tokens, agent: { parent: "harbor", slug: slug(harborCwd), tool: "toolu-h20" } });
     f.prompt(ms(T(12, 33)), brief("h20"));
     const failedTool = tx("h-failed")[1];
-    f.tool(ms(T(12, 33)), "toolu-f1", "Read", { file_path: path.join(harborCwd, failedTool.arg) });
-    f.result(ms(T(12, 33), 2, 800), "toolu-f1", failedTool.out, { error: true });
-    f.tokens(ms(T(12, 35)));
+    f.tool(ms(T(12, 35), 57, 200), "toolu-f1", "Read", { file_path: path.join(harborCwd, failedTool.arg) });
+    f.result(ms(T(12, 36)), "toolu-f1", failedTool.out, { error: true });
+    f.tokens(ms(T(12, 36)));
     f.save();
   }
   // quill: your ask, a planning subagent, a Codex run that failed two layout tests, and a question for you.
@@ -296,10 +296,10 @@ export function write(out, { extras = false } = {}) {
   }
 
   // ---- Codex ---------------------------------------------------------------------------------------------------------
-  function codex(id, start, { cwd, branch, tokens, nickname, agentPath, parentThread }) {
+  function codex(id, start, { cwd, branch, tokens, nickname, agentPath }) {
     const lines = [];
     const at = (t, type, payload) => lines.push([t, { timestamp: iso(t), type, payload }]);
-    lines.push([start - 1, { timestamp: iso(start), type: "session_meta", payload: { id, timestamp: iso(start), cwd, originator: "codex_exec", cli_version: "0.120.0", source: "exec", ...(nickname ? { agent_nickname: nickname } : {}), ...(agentPath ? { agent_path: agentPath } : {}), ...(parentThread ? { parent_thread_id: parentThread } : {}), git: { branch } } }]);
+    lines.push([start - 1, { timestamp: iso(start), type: "session_meta", payload: { id, timestamp: iso(start), cwd, originator: "codex_exec", cli_version: "0.120.0", source: "exec", ...(nickname ? { agent_nickname: nickname } : {}), ...(agentPath ? { agent_path: agentPath } : {}), git: { branch } } }]);
     at(start, "turn_context", { cwd, model: "gpt-6-luna", approval_policy: "never" });
     // No code: an output with no exit status, as some Codex calls record.
     const out = (text, code) => (code == null ? text : JSON.stringify({ output: text, metadata: { exit_code: code, duration_seconds: 0 } }));
@@ -342,7 +342,7 @@ export function write(out, { extras = false } = {}) {
   const patchOf = (file, diff) => "*** Begin Patch\n*** Update File: " + file + "\n@@\n" + diff.map(([, x]) => x).join("\n") + "\n*** End Patch\n";
   // h-codex: harbor's Codex run, implementing the offline flush; a patch is being applied now.
   {
-    const t = tx("h-codex"), c = codex("h-codex", ms(T(11, 52)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-codex"].tokens, parentThread: "harbor" });
+    const t = tx("h-codex"), c = codex("h-codex", ms(T(11, 52)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-codex"].tokens });
     c.user(ms(T(11, 52)), "Semon-Parent: claude:harbor:toolu-h2\n" + brief("h2"));
     c.harness(ms(T(11, 52), 1), t[1].label);
     c.think(ms(T(11, 52), 19), "Flush in queue order and stop at the first Nack; commit only after an Ack.");
@@ -357,18 +357,17 @@ export function write(out, { extras = false } = {}) {
   }
   // h-review-codex: the review's Codex run, launched by its child Claude session.
   {
-    const rt = tx("h-review-codex"), c = codex("h-review-codex", ms(T(12, 36)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-review-codex"].tokens, nickname: SESS["h-review-codex"].name, parentThread: "h-review" });
+    const rt = tx("h-review-codex"), c = codex("h-review-codex", ms(T(12, 36)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-review-codex"].tokens, nickname: SESS["h-review-codex"].name });
     c.user(ms(T(12, 36)), "Semon-Parent: claude:h-review:toolu-h19\n" + brief("h19"));
     c.call(ms(T(12, 37)), "call-h19", "Read", { file_path: path.join(harborCwd, rt[1].arg) });
     c.output(ms(T(12, 37), 0, 300), "call-h19", rt[1].out, 0);
-    c.call(ms(T(12, 39), 57), "call-h19-live", "Read", { file_path: path.join(harborCwd, rt[1].arg) });
-    c.busy(ms(T(12, 36)), ms(T(12, 38)));
+    c.busy(ms(T(12, 36)), ms(T(12, 40)));
     c.tokens(ms(T(12, 38)));
     c.save(); locked("h-review-codex");
   }
   // q-codex: quill's Codex run; the layout suite failed and it handed back.
   {
-    const t = tx("q-codex"), c = codex("q-codex", ms(T(11, 20)), { cwd: quillCwd, branch: "feat/pdf-export", tokens: SESS["q-codex"].tokens, agentPath: "workers/pdf-export", parentThread: "quill" });
+    const t = tx("q-codex"), c = codex("q-codex", ms(T(11, 20)), { cwd: quillCwd, branch: "feat/pdf-export", tokens: SESS["q-codex"].tokens, agentPath: "workers/pdf-export" });
     c.user(ms(T(11, 20)), "Semon-Parent: claude:quill:toolu-h6\n" + brief("h6"));
     c.harness(ms(T(11, 20), 1), t[1].label);
     c.shell(ms(T(11, 22)), "call-y1", t[2].arg);

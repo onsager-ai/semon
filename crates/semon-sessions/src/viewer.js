@@ -73,8 +73,7 @@
     while (SEEN_RESULTS.size > SEEN_LIMIT) SEEN_RESULTS.delete(SEEN_RESULTS.values().next().value);
     if (changed) try { window.localStorage.setItem(SEEN_KEY, JSON.stringify([...SEEN_RESULTS])); } catch {}
   }
-  const inbox = () => H.filter((h) => h.kind === "toyou" && (h.ask === "question" || h.ask === "decision") && h.status === "wait").sort((a, b) => b.at - a.at);
-  const unreadResults = () => H.filter((h) => isResult(h) && !SEEN_RESULTS.has(h.id)).sort((a, b) => b.at - a.at);
+  const inbox = () => H.filter((h) => h.kind === "toyou" && (h.status === "wait" || (isResult(h) && !SEEN_RESULTS.has(h.id)))).sort((a, b) => b.at - a.at);
   const working = () => Object.values(SESS).filter((s) => s.state === "work");
   const clean = (t) => t.replace(/[`*]/g, "");
 
@@ -816,7 +815,7 @@
   const upCount = () => Object.keys(MACHINE).filter((m) => MACHINE_UP[m]).length;
   let allAnswered = false;
   function renderHome(page) {
-    const open = inbox(), fresh = unreadResults(), w = working().sort((a, b) => b.last - a.last), many = Object.keys(MACHINE).length > 1;
+    const open = inbox(), w = working().sort((a, b) => b.last - a.last), many = Object.keys(MACHINE).length > 1;
     const head = el("div", "ph"); const h1 = el("h1", null, "Home"); head.append(h1);
     const sub = el("div", "sub"); for (const [v, l] of [[open.length, "waiting on you"], [w.length, "working"], [upCount() + " of " + Object.keys(MACHINE).length, Object.keys(MACHINE).length === 1 ? "machine up" : "machines up"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
     head.append(sub); page.append(head); observeTitle(h1);
@@ -825,12 +824,6 @@
     for (const h of open) list.append(inboxItem(h, false));
     if (!open.length) list.append(el("p", "empty", "Nothing is waiting on you."));
     page.append(list);
-    if (fresh.length) {
-      page.append(secHead("New results", fresh.length));
-      const results = el("div", "list");
-      for (const h of fresh) results.append(inboxItem(h, false));
-      page.append(results);
-    }
     page.append(secHead("Working now", w.length));
     const live = el("div", "list");
     for (const s of w) live.append(liveRow(s, many));
@@ -851,8 +844,7 @@
     const r = el("div", "ib" + (quiet ? " quiet" : "")); r.tabIndex = 0; r.setAttribute("role", "link"); r.dataset.h = h.id;
     const [ic, parts] = sentence(h, "you");
     r.append(icon(quiet && h.kind === "toyou" ? I.done : ic)); const ln = el("span", "ln"); ln.append(...parts);
-    const unread = isResult(h) && !SEEN_RESULTS.has(h.id), time = el("span", "tm" + (unread ? " unread" : ""));
-    if (unread) { r.classList.add("new-result"); time.append(el("span", "unread-dot")); }
+    const time = el("span", "tm");
     time.append(ago(h.at)); r.append(ln, time);
     r.append(rich("span", "q", preview(h.brief)));
     const an = quiet ? answersOf(h) : null; if (an) r.append(el("span", "ans", an.length ? "You answered: " + an.join(" · ") : "Answered · reply not in these logs"));

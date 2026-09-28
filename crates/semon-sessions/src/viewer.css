@@ -588,6 +588,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .facet-field { display: grid; gap: 3px; min-width: 0; color: var(--muted); font-size: 11.5px; }
 .facet-field select { width: 100%; min-width: 0; height: 34px; border: 1px solid var(--line); border-radius: 8px; background: var(--ground); color: var(--ink); padding: 0 7px; font-size: 12.5px; }
 .analytics-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; margin-top: -6px; }
+.analytics-metric:nth-last-child(-n+2) { border-bottom: 0; }
 .analytics-metric { min-width: 0; padding: 12px 0 13px; border-bottom: 1px solid var(--line); }
 .analytics-metric .label { display: flex; align-items: center; min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.3; white-space: nowrap; }
 .analytics-metric .label > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -607,8 +608,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .analytics-panel { min-width: 0; padding: 16px 0 0; border-top: 1px solid var(--line); }
 .analytics-panel h2 { margin: 0; font-size: 14px; font-weight: 600; }
 .analytics-panel .panel-sub { margin-top: 2px; color: var(--muted); font-size: 12px; }
-.analytics-chart { position: relative; min-width: 0; max-width: 100%; margin-top: 7px; overflow: hidden; }
-.analytics-chart svg { display: block; width: 100%; max-width: 100%; height: auto; overflow: visible; }
+.analytics-chart { position: relative; min-width: 0; margin-top: 7px; }
+.analytics-chart svg { width: 100%; height: auto; overflow: visible; }
 .analytics-chart .gridline { stroke: var(--line); stroke-width: 1; }
 .analytics-chart .axis-label { fill: var(--muted); font: 11px var(--mono); }
 .analytics-chart .cost-claude { fill: var(--claude); } .analytics-chart .cost-codex { fill: var(--codex); }
@@ -635,7 +636,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .analytics-session .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-size: 12.5px; color: var(--ink-2); }
 .analytics-session .session-value { color: var(--muted); font: 11px var(--mono); white-space: nowrap; }
 .analytics-session .no-price { grid-column: 2 / -1; margin-top: -3px; } .analytics-slice .session-name { white-space: normal; overflow-wrap: anywhere; }
-@media (min-width: 761px) { .analytics-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 20px; } .analytics-breakdowns, .analytics-split { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 761px) { .analytics-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 20px; } .analytics-metric:nth-last-child(-n+4) { border-bottom: 0; } .analytics-breakdowns, .analytics-split { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 760px) {
   .facet-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .facet-field select { height: 44px; }
   .topbar .analytics-range button, .analytics-measure button, .topbar .l2.session-meta .meta-runs { min-height: 44px; }

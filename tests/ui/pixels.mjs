@@ -65,6 +65,8 @@ function portReference(D) {
   const hhmm = (t) => new Date(t).toISOString().slice(11, 16);
   const asIso = (t) => new Date(t).toISOString();
   const TX = {};
+  // The service calls unseen results `new`; the mockup groups them with its `wait` inbox items.
+  const H = D.H.map((h) => h.kind === "toyou" && h.status === "new" ? { ...h, status: "wait" } : h);
   for (const [sid, es] of Object.entries(D.TX)) TX[sid] = es.map((e) => (e.ret ? { k: "end", text: "Returned to " + D.SESS[e.ret.to].name + (e.ret.failed ? " · failed" : "") + " · " + hhmm(e.ret.at) } : e));
   const PRICING = Object.fromEntries(Object.entries(D.model.pricing?.models ?? {}).map(([id, p]) => [id, { input: p.input, output: p.output, cacheWrite: p.cache_write, cacheRead: p.cache_read }]));
   const SESS = Object.fromEntries(Object.entries(D.SESS).map(([id, source]) => {
@@ -80,7 +82,7 @@ function portReference(D) {
   const block = ["  const NOW = " + D.NOW + ";", "  const MACHINE = " + J(D.MACHINE) + ";", "  const MACHINE_UP = " + J(D.MACHINE_UP) + ";",
     "  const MACHINE_LAST = " + J(D.MACHINE_LAST ?? {}) + ";", "  const ADMIN = " + J(D.ADMIN ?? null) + ";",
     '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(SESS) + ";",
-    "  const API_PRICE = " + J(PRICING) + ";", "  const H = " + J(D.H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", ""].join("\n");
+    "  const API_PRICE = " + J(PRICING) + ";", "  const H = " + J(H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", ""].join("\n");
   let html = MOCKUP.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + MOCKUP.slice(end);
   for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
   const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;

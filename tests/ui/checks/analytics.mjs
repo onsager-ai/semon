@@ -5,6 +5,7 @@ import { served, data, reporter, overflow, goto } from "../lib.mjs";
 export default async function analyticsCheck(browser) {
   const D = await data(), r = reporter("analytics"), modes = [];
   const expectedLabels = ["Agent-hours", "API-equivalent cost", "Sessions started", "Turns", "Tool calls", "Peak concurrency", "Waited on you", "Longest current wait"];
+  const expectedHarborIds = Object.values(D.SESS).filter((s) => s.repo === "harbor").map((s) => s.id).sort();
   r.expect(!!D.SESS.deps?.rate_limits, "the fixture must serve Codex rate limits for the allowance panel");
 
   for (const [mode, size, dark] of [["phone", "phone", false], ["desktop", "desktop", false]]) {
@@ -35,7 +36,7 @@ export default async function analyticsCheck(browser) {
     record.repoRow = await repoRow.count();
     if (record.repoRow) await repoRow.click();
     await page.waitForFunction(() => history.state?.v === "sessions");
-    record.filtered = await page.evaluate(() => ({ title: document.querySelector(".page h1")?.textContent, repo: document.querySelector('.facet-field select[aria-label="Repo"]')?.value, rows: [...document.querySelectorAll(".page .nrow")].map((x) => x.dataset.id) }));
+    record.filtered = await page.evaluate(() => ({ title: document.querySelector(".page h1")?.textContent, rows: [...document.querySelectorAll(".page .nrow")].map((x) => x.dataset.id).sort() }));
     modes.push({ ...record, errors: page.errors });
     await page.context().close();
   }
@@ -53,7 +54,7 @@ export default async function analyticsCheck(browser) {
     r.expect(m.charts.length === 2 && m.charts.every((chart) => chart.columns > 0), m.mode + ": expected both charts to render vertical columns: " + JSON.stringify(m.charts));
     r.expect(m.slice?.open && m.slice.sessions > 0, m.mode + ": an Analytics slice did not open with busy sessions: " + JSON.stringify(m.slice));
     if (m.mode === "phone") r.expect(m.slice?.bottomSheet && m.sideways === 0, "phone: the slice must be a bottom sheet with no sideways page scroll: " + JSON.stringify({ slice: m.slice, sideways: m.sideways }));
-    r.expect(m.repoRow === 1 && m.filtered?.title === "Sessions" && m.filtered.repo === "harbor" && m.filtered.rows.length > 0 && m.filtered.rows.every((id) => D.SESS[id]?.repo === "harbor"), m.mode + ": a repo breakdown did not filter the Sessions list: " + JSON.stringify({ found: m.repoRow, filtered: m.filtered }));
+    r.expect(m.repoRow === 1 && m.filtered?.title === "Sessions" && m.filtered.rows.length === expectedHarborIds.length && m.filtered.rows.join(",") === expectedHarborIds.join(",") && m.filtered.rows.length < Object.keys(D.SESS).length, m.mode + ": a repo breakdown did not filter the Sessions list to every harbor session: " + JSON.stringify({ found: m.repoRow, expected: expectedHarborIds, filtered: m.filtered }));
     r.expect(m.costMode?.pressed === "API-equivalent cost" && m.costMode.costRows > 0 && m.costMode.hoursRows === 0, m.mode + ": the cost measure did not switch breakdown columns: " + JSON.stringify(m.costMode));
     r.expect(m.allowance.heading === "Codex allowance" && m.allowance.windows.includes("5-hour window") && m.allowance.windows.includes("Weekly window") && m.allowance.used.length === 2, m.mode + ": served rate limits did not render both allowance windows: " + JSON.stringify(m.allowance));
   }
