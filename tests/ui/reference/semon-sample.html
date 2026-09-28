@@ -485,6 +485,10 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2.session-meta .meta-state .state-sep { margin: 0 -5px 0 -1px; }
 .topbar .l2.session-meta .meta-item svg, .topbar .l2.session-meta .meta-item .hmark { width: 15px; height: 15px; flex: none; color: var(--faint); }
 .topbar .l2.session-meta .meta-item .hmark { color: var(--h); }
+/* The kind chip and the state are the two items fitSessionLine() never drops. When even those two don't
+   fit the narrowest phones, let them shrink and ellipsize (existing meta-value rules) instead of the whole
+   line getting clipped mid-glyph by session-meta's overflow: hidden. */
+.topbar .l2.session-meta .meta-item.meta-kind, .topbar .l2.session-meta .meta-item.meta-state { flex: 0 1 auto; min-width: 0; }
 .topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, var(--h) 12%, transparent); color: var(--h); }
 .topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--h); }
 .topbar .l2.session-meta .meta-item.meta-cost { gap: 4px; }
@@ -543,7 +547,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .facet-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .facet-field { display: grid; gap: 3px; min-width: 0; color: var(--muted); font-size: 11.5px; }
 .facet-field select { width: 100%; min-width: 0; height: 34px; border: 1px solid var(--line); border-radius: 8px; background: var(--ground); color: var(--ink); padding: 0 7px; font-size: 12.5px; }
-.analytics-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--line); }
+.analytics-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--line); }
 .analytics-metric { min-width: 0; min-height: 102px; padding: 11px 12px; background: var(--ground); }
 .analytics-metric .label { color: var(--muted); font-size: 12px; line-height: 1.3; }
 .analytics-metric .value { margin-top: 5px; font-size: 20px; line-height: 1.2; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -551,7 +555,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .analytics-measure { display: inline-flex; align-items: center; gap: 2px; justify-self: start; padding: 2px; border-radius: 9px; background: var(--sunken); }
 .analytics-measure button { min-height: 36px; border: 0; border-radius: 7px; background: none; padding: 0 10px; color: var(--muted); font-size: 12.5px; }
 .analytics-measure button[aria-pressed="true"] { background: var(--ground); color: var(--ink); font-weight: 600; }
-.analytics-panel { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 12px; }
+.analytics-panel { min-width: 0; padding: 16px 0 0; border-top: 1px solid var(--line); }
 .analytics-panel h2 { margin: 0; font-size: 14px; font-weight: 600; }
 .analytics-panel .panel-sub { margin-top: 2px; color: var(--muted); font-size: 12px; }
 .analytics-chart { position: relative; min-width: 0; margin-top: 7px; }
@@ -599,6 +603,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 @media (max-width: 760px) {
   .facet-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .facet-field select { height: 44px; }
+  /* An odd count of headline figures (point 12 added a 7th) would otherwise leave one empty cell. */
+  .analytics-metrics > :last-child:nth-child(odd) { grid-column: 1 / -1; }
   .topbar .analytics-range button { min-width: 38px; min-height: 44px; padding: 0 5px; }
   .topbar .l2.session-meta { min-height: 44px; }
   .topbar .l2.session-meta .meta-runs { min-height: 44px; }
