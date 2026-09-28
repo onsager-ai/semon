@@ -176,7 +176,22 @@
   // How a turn ended: still working, a message to you, a failure, a return or reply, or nothing recorded.
   const TOYOU = { question: "Asked you", result: "Sent you a result", decision: "Needs your decision" };
   function turnEnd(t) {
-    if (!hasTurn(t) || !t.end) return null;
+    if (!hasTurn(t)) return null;
+    // The model leaves an active or partially indexed turn without an end record. Keep the mockup's
+    // transcript-derived fallback so outgoing work remains traceable while the run is in progress.
+    if (!t.end) {
+      if (t.last && SESS[t.sid]?.state === "work") return { st: "work", text: "Still working" };
+      const ty = t.out.filter((h) => h.kind === "toyou").at(-1);
+      if (ty) return { st: ty.status === "wait" ? "wait" : "done", text: (TOYOU[ty.ask] ?? "Sent you a message") + " · " + statWord(ty) + " · " + clock(ty.at) };
+      const entries = t.entries.filter((e) => e.k === "a" || e.k === "tool" || (e.k === "h" && t.out.includes(HID.get(e.id))));
+      const last = entries.at(-1), h = last?.k === "h" ? HID.get(last.id) : null;
+      if (t.start?.status === "err") return { st: "err", text: "Failed" + (t.start.done ? " · " + clock(t.start.done) : "") };
+      if (last?.k === "tool" && last.ok === false && !last.live) return { st: "err", text: last.unfinished ? "Stopped on a step with no result" : "Stopped on a failed step" };
+      if (h?.status === "err") return { st: "err", text: "Handoff to " + nameOf(h.to) + " failed" };
+      if (t.start?.kind === "spawn" && t.start.status === "done") return { st: "done", text: "Returned to " + nameOf(t.start.from) + (t.start.done ? " · " + clock(t.start.done) : "") };
+      if (entries.some((e) => e.k === "a")) return { st: "done", text: "Replied" };
+      return { st: "idle", text: "No reply in these logs" };
+    }
     const { st, why } = t.end, mh = t.end.h ? HID.get(t.end.h) : null;
     if (why === "working") return { st: "work", text: "Still working" };
     if (why === "toyou" && mh) return { st: mh.status === "wait" ? "wait" : "done", text: (TOYOU[mh.ask] ?? "Sent you a message") + " · " + statWord(mh) + " · " + clock(mh.at) };
