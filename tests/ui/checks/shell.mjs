@@ -2,7 +2,7 @@
 // are exercised exactly as they are for an ordinary page served beside the viewer.
 import fs from "node:fs";
 import path from "node:path";
-import { ENV, reporter } from "../lib.mjs";
+import { ENV, reporter, served } from "../lib.mjs";
 
 const pages = [
   ["shell-gallery", new URL("../shell-gallery.html", import.meta.url)],
@@ -14,6 +14,7 @@ const sizes = [
 ];
 const schemes = ["light", "dark"];
 const output = path.join(ENV.out, "shell");
+const PHONE_TARGET_SELECTOR = ".btn, .field input, .code .copy, dialog.sheet button";
 fs.mkdirSync(output, { recursive: true });
 
 async function galleryPage(browser, html, width, height, mobile, scheme) {
@@ -51,10 +52,6 @@ const geometry = (page) => page.evaluate(() => {
     const box = element.getBoundingClientRect();
     if (box.width && box.height && box.right > width + 0.5) right.push({ selector: selector(element), right: Math.round(box.right * 10) / 10 });
   }
-  const targets = [...document.querySelectorAll("button, a, input")]
-    .filter((element) => element.getClientRects().length && getComputedStyle(element).visibility !== "hidden")
-    .map((element) => ({ selector: selector(element), height: Math.round(element.getBoundingClientRect().height * 10) / 10 }));
-  const smallTargets = targets.filter((target) => target.height < 44);
   const smallInputs = [...document.querySelectorAll("input")]
     .filter((element) => element.getClientRects().length && Number.parseFloat(getComputedStyle(element).fontSize) < 16)
     .map(selector);
@@ -62,9 +59,28 @@ const geometry = (page) => page.evaluate(() => {
     scrollWidth: document.documentElement.scrollWidth,
     innerWidth,
     right,
-    targets,
-    smallTargets,
     smallInputs,
+  };
+});
+
+const phoneTargets = (page) => page.evaluate((targetSelector) => {
+  const selector = (element) => element.id
+    ? "#" + CSS.escape(element.id)
+    : element.tagName.toLowerCase() + [...element.classList].map((name) => "." + CSS.escape(name)).join("");
+  return [...document.querySelectorAll(targetSelector)]
+    .filter((element) => element.getClientRects().length && getComputedStyle(element).visibility !== "hidden")
+    .map((element) => ({ selector: selector(element), height: Math.round(element.getBoundingClientRect().height * 10) / 10 }));
+}, PHONE_TARGET_SELECTOR);
+
+const chromeDimensions = (page) => page.evaluate(() => {
+  const computed = (element) => {
+    if (!element) return null;
+    const style = getComputedStyle(element);
+    return { width: Number.parseFloat(style.width), height: Number.parseFloat(style.height) };
+  };
+  return {
+    lead: computed(document.querySelector("#lead-btn")),
+    nav: computed(document.querySelector(".nav-item")),
   };
 });
 
@@ -92,11 +108,37 @@ export default async function shellCheck(browser) {
         r.expect(audit.scrollWidth <= audit.innerWidth, key + " document scrollWidth=" + audit.scrollWidth + " innerWidth=" + audit.innerWidth);
         r.expect(audit.right.length === 0, key + " elements past the right edge: " + JSON.stringify(audit.right));
         if (mobile) {
-          r.expect(audit.smallTargets.length === 0, key + " targets shorter than 44px: " + JSON.stringify(audit.smallTargets));
+          const targets = await phoneTargets(page);
+          const shortTargets = targets.filter((target) => target.height < 44);
+          results[key].phoneTargets = targets;
+          r.expect(shortTargets.length === 0, key + " shell targets shorter than 44px: " + JSON.stringify(shortTargets));
           r.expect(audit.smallInputs.length === 0, key + " inputs below 16px: " + JSON.stringify(audit.smallInputs));
         }
 
         if (mobile && name === "shell-gallery") {
+          const links = await page.evaluate(() => ["#paragraph-link", "#notice-link"].map((id) => {
+            const element = document.querySelector(id);
+            if (!element) return { id, missing: true };
+            return { id, height: element.getBoundingClientRect().height, fontSize: Number.parseFloat(getComputedStyle(element).fontSize) };
+          }));
+          results[key].inlineLinks = links;
+          r.expect(links.length === 2 && links.every((link) => !link.missing), key + " expected both inline links: " + JSON.stringify(links));
+          for (const link of links) {
+            if (!link.missing) r.expect(link.height <= link.fontSize * 1.6, key + " " + link.id + " is taller than inline text: " + JSON.stringify(link));
+          }
+
+          const viewerPage = await served(browser, { size: "phone", dark: scheme === "dark", path: "/" });
+          await viewerPage.waitForSelector("#lead-btn");
+          await viewerPage.waitForSelector(".nav-item", { state: "attached" });
+          const [galleryChrome, viewerChrome] = await Promise.all([chromeDimensions(page), chromeDimensions(viewerPage)]);
+          results[key].chromeDimensions = { gallery: galleryChrome, viewer: viewerChrome };
+          for (const part of ["lead", "nav"]) {
+            const gallerySize = galleryChrome[part], viewerSize = viewerChrome[part];
+            r.expect(!!gallerySize && !!viewerSize && Math.abs(gallerySize.width - viewerSize.width) <= 0.01 && Math.abs(gallerySize.height - viewerSize.height) <= 0.01,
+              key + " " + part + " dimensions differ from viewer: " + JSON.stringify({ gallery: gallerySize, viewer: viewerSize }));
+          }
+          await viewerPage.context().close();
+
           const line = await page.evaluate(() => {
             window.scrollTo(0, document.documentElement.scrollHeight);
             return new Promise((resolve) => requestAnimationFrame(() => resolve(document.querySelector("#topbar").classList.contains("scrolled"))));
@@ -109,10 +151,12 @@ export default async function shellCheck(browser) {
           await page.click("#lead-btn");
           const drawerOpen = await page.evaluate(() => document.body.classList.contains("drawer-open"));
           const drawerAudit = await geometry(page);
+          const drawerTargets = await phoneTargets(page);
+          const shortDrawerTargets = drawerTargets.filter((target) => target.height < 44);
           results[key].drawerGeometry = drawerAudit;
           r.expect(drawerAudit.scrollWidth <= drawerAudit.innerWidth, key + " drawer document scrollWidth=" + drawerAudit.scrollWidth + " innerWidth=" + drawerAudit.innerWidth);
           r.expect(drawerAudit.right.length === 0, key + " drawer elements past the right edge: " + JSON.stringify(drawerAudit.right));
-          r.expect(drawerAudit.smallTargets.length === 0, key + " drawer targets shorter than 44px: " + JSON.stringify(drawerAudit.smallTargets));
+          r.expect(shortDrawerTargets.length === 0, key + " drawer shell targets shorter than 44px: " + JSON.stringify(shortDrawerTargets));
           await page.screenshot({ path: path.join(output, key + "-drawer.png"), fullPage: true });
           await page.keyboard.press("Escape");
           const drawerAfterEscape = await page.evaluate(() => ({
@@ -134,18 +178,31 @@ export default async function shellCheck(browser) {
           r.expect(sheet.open, key + " confirm sheet did not open");
           r.expect(Math.abs(sheet.bottom - sheet.viewport) <= 1, key + " confirm sheet bottom=" + sheet.bottom + " viewport=" + sheet.viewport);
           const openAudit = await geometry(page);
+          const sheetTargets = await phoneTargets(page);
+          const shortSheetTargets = sheetTargets.filter((target) => target.height < 44);
           r.expect(openAudit.scrollWidth <= openAudit.innerWidth, key + " sheet document scrollWidth=" + openAudit.scrollWidth + " innerWidth=" + openAudit.innerWidth);
           r.expect(openAudit.right.length === 0, key + " sheet elements past the right edge: " + JSON.stringify(openAudit.right));
-          r.expect(openAudit.smallTargets.length === 0, key + " open sheet targets shorter than 44px: " + JSON.stringify(openAudit.smallTargets));
+          r.expect(shortSheetTargets.length === 0, key + " open sheet shell targets shorter than 44px: " + JSON.stringify(shortSheetTargets));
           await page.screenshot({ path: path.join(output, key + "-sheet.png"), fullPage: true });
-          await page.click('#remove-sheet [data-close]');
-          await page.waitForFunction(() => !document.querySelector("#remove-sheet").open);
+          const clickPoints = await page.evaluate(() => {
+            const box = document.querySelector("#remove-sheet").getBoundingClientRect();
+            return { paddingX: box.left + 8, paddingY: box.top + box.height / 2, backdropX: innerWidth / 2, backdropY: box.top - 8 };
+          });
+          await page.mouse.click(clickPoints.paddingX, clickPoints.paddingY);
+          const stayedOpen = await page.evaluate(() => document.querySelector("#remove-sheet").open);
+          results[key].sheetPaddingClick = { points: clickPoints, stayedOpen };
+          r.expect(stayedOpen, key + " click inside sheet padding closed the sheet");
+          await page.mouse.click(clickPoints.backdropX, clickPoints.backdropY);
+          const backdropClosed = await page.evaluate(() => !document.querySelector("#remove-sheet").open);
+          results[key].sheetBackdropClick = { points: clickPoints, closed: backdropClosed };
+          r.expect(backdropClosed, key + " click above the sheet did not close it");
 
           await page.click('button[data-open="details-sheet"]');
           const detailsOpen = await page.evaluate(() => document.querySelector("#details-sheet").open);
           r.expect(detailsOpen, key + " data-open did not open its sheet");
-          const detailsAudit = await geometry(page);
-          r.expect(detailsAudit.smallTargets.length === 0, key + " details sheet targets shorter than 44px: " + JSON.stringify(detailsAudit.smallTargets));
+          const detailsTargets = await phoneTargets(page);
+          const shortDetailsTargets = detailsTargets.filter((target) => target.height < 44);
+          r.expect(shortDetailsTargets.length === 0, key + " details sheet targets shorter than 44px: " + JSON.stringify(shortDetailsTargets));
           await page.click('#details-sheet [data-close]');
 
           await page.click("[data-copy]");

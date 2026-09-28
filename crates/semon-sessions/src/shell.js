@@ -130,7 +130,9 @@
 
     const dialog = target?.closest?.("dialog");
     if (dialog instanceof HTMLDialogElement && target === dialog) {
-      dialog.close();
+      if (event.clientX === 0 && event.clientY === 0) return;
+      const box = dialog.getBoundingClientRect();
+      if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) dialog.close();
       return;
     }
 
