@@ -1,0 +1,32 @@
+[
+  {
+    "file": "tests/ui/reference/semon-sample.html",
+    "shots": [
+      { "name": "home" },
+      {
+        "name": "sessions",
+        "eval": "/* Invoke the mockup's own go() through its stable navigation control. */ document.querySelector('button[data-go=\"sessions\"]').click()"
+      },
+      {
+        "name": "machines",
+        "eval": "/* Invoke the mockup's own go() through its stable navigation control. */ document.querySelector('button[data-go=\"machines\"]').click()"
+      },
+      {
+        "name": "long-session",
+        "eval": "/* Open the long transcript through the session list's goSession() click handler. */ document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click()"
+      },
+      {
+        "name": "child-session",
+        "eval": "/* Open harbor, then its h2 handoff calls goSession() for the child run. */ document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.hcard[data-h=\"h2\"]').click()"
+      },
+      {
+        "name": "trace",
+        "eval": "/* The home Trace button invokes the mockup's own goTrace() router path. */ document.querySelector('[aria-label=\"Trace what this turn set off\"]').click()"
+      },
+      {
+        "name": "timeline",
+        "eval": "/* Invoke the mockup's own go() through its stable navigation control. */ document.querySelector('button[data-go=\"timeline\"]').click()"
+      }
+    ]
+  }
+]
