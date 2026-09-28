@@ -83,6 +83,15 @@ pub fn format_timestamp_ns(nanoseconds: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
+/// Formats nanoseconds since the Unix epoch as its UTC calendar date alone
+/// (`YYYY-MM-DD`), with no time-of-day component — the same UTC day
+/// [`day_bounds_ns`] and `--day` both operate on.
+pub fn format_day_ns(nanoseconds: i64) -> String {
+    let days = nanoseconds.div_euclid(86_400 * 1_000_000_000);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
 /// The zero-based count of days since the Unix epoch (1970-01-01) for one
 /// UTC calendar date. Howard Hinnant's `days_from_civil`.
 pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
@@ -149,5 +158,13 @@ mod tests {
         assert_eq!(format_timestamp_ns(start), "2026-09-19T00:00:00Z");
         assert_eq!(format_timestamp_ns(end - 1), "2026-09-19T23:59:59Z");
         assert_eq!(format_timestamp_ns(end), "2026-09-20T00:00:00Z");
+    }
+
+    #[test]
+    fn format_day_ns_drops_the_time_of_day() {
+        let (start, end) = day_bounds_ns(2026, 9, 19);
+        assert_eq!(format_day_ns(start), "2026-09-19");
+        assert_eq!(format_day_ns(end - 1), "2026-09-19");
+        assert_eq!(format_day_ns(end), "2026-09-20");
     }
 }
