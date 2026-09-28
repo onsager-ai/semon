@@ -823,7 +823,9 @@ impl MachineView {
         let html = "text/html; charset=utf-8";
         let json = "application/json; charset=utf-8";
         match path {
-            "/" | "/timeline" | "/sessions" | "/machines" => Ok((200, html, PAGE.into())),
+            "/" | "/timeline" | "/analytics" | "/sessions" | "/machines" => {
+                Ok((200, html, PAGE.into()))
+            }
             "/viewer.js" => Ok((
                 200,
                 "text/javascript; charset=utf-8",
@@ -3011,6 +3013,7 @@ mod tests {
             ("/machines/bravo", 200),
             ("/machines/gamma", 404),
             ("/timeline", 200),
+            ("/analytics", 200),
         ] {
             assert_eq!(core.respond("GET", path, "", None).status, status, "{path}");
         }

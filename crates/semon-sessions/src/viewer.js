@@ -14,6 +14,7 @@
   // An offline machine's last-seen time (epoch ms), and the embedding server's machine-management link, when served.
   const MACHINE_LAST = {};
   let ADMIN = null;
+  let PRICING = {};
   let ACCOUNT = null;
   let NAV_MACHINES = null;
   const HARNESS = { claude: "Claude Code", codex: "Codex" };
@@ -43,7 +44,7 @@
     machine: "M3 5h18v11H3zM8 20h8M12 16v4", repo: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6", role: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6",
     out: "M7 17L17 7M9 7h8v8", in: "M17 7L7 17M15 17H7V9", move: "M4 8h13l-3-3M20 16H7l3 3", ask: "M5 18l-1 3 3-1 11-11-2-2zM14 6l4 4", you: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6", q: "M9 9a3 3 0 1 1 4 2.8c-.7.3-1 .9-1 1.7V14M12 18h.01", check: "M5 12l4 4 10-10", qc: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4M12 17h.01", decide: "M12 21v-6M12 15L6 9M12 15l6-6M6 9V4M18 9V4M4 6l2-2 2 2M16 6l2-2 2 2", result: "M14 3H6v18h12V7zM14 3v4h4M9 12h6M9 16h6", done: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12.5l2.7 2.7L16 9.8", x: "M6 6l12 12M18 6L6 18", expand: "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7", copy: "M9 9h11v11H9zM5 15H4V4h11v1", ext: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
     down: "M12 4v15M5 12l7 7 7-7", branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
-    wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z", wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", tokens: "M5 5h14M12 5v14M9 19h6",
+    wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z", wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", tokens: "M5 5h14M12 5v14M9 19h6", chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7", coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5", relay: "M4 7h13l-3-3M20 17H7l3 3M17 4l-3 3 3 3M7 14l3 3-3 3",
   };
   const clock = (t) => { const d = new Date(t), n = new Date(NOW); const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(undefined, { weekday: "short" }) + " " + hm; };
   const ago = (t) => { const d = Math.floor((NOW - t) / 60000); return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d"; };
@@ -60,7 +61,8 @@
   const shortModel = (model) => String(model ?? "Unknown model").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
   const harnessMark = (harness) => { const mark = el("span", "hmark h-" + harness, harness === "claude" ? "✳" : "⌘"); mark.setAttribute("aria-hidden", "true"); mark.title = HARNESS[harness] ?? harness; return mark; };
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
-  const parentOf = (sid) => H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
+  const parentOf = (sid) => SESS[sid]?.parent ?? H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
+  const originHandoff = (sid) => H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === sid && h.from !== sid && (h.kind === "spawn" || SESS[sid]?.kind === "Relayed" || !SESS[sid]?.lane));
   const RANK = { wait: 0, work: 1, err: 2, done: 3 };
   const isResult = (h) => h.kind === "toyou" && h.ask === "result";
   function markSeenResults(handoffs) {
@@ -199,6 +201,7 @@
 
   // ---- Loading: the model from /api/model, transcripts a page at a time from /api/tx --------------------------
   const TXM = {}; // per session: the loaded range of its transcript { from, to, total } and its totals { calls, errors }
+  const ANALYTICS_COUNTS = {}; // aggregate tool calls and errors from /api/tx, binned at each session's start
   let serverNow = 0, fetchedAt = 0;
   let TOK = {}; // per session: its transcript's growth mark in the model; a loaded transcript is tailed only when it moved
   const enc = encodeURIComponent;
@@ -220,7 +223,7 @@
     for (const s of Object.values(SESS)) if (s.activity && s.activity[3] != null) s.activity[2] = Math.floor((NOW - s.activity[3]) / 1000);
   }
   function adopt(m) {
-    serverNow = m.now; fetchedAt = Date.now(); TOK = m.tx ?? {};
+    serverNow = m.now; fetchedAt = Date.now(); TOK = m.tx ?? {}; PRICING = m.pricing?.models ?? {};
     for (const k of Object.keys(MACHINE)) { delete MACHINE[k]; delete MACHINE_UP[k]; delete MACHINE_LAST[k]; }
     // Several machines come as `machines`; one comes as `machine` alone.
     for (const x of m.machines ?? [m.machine]) { MACHINE[x.id] = x.name; MACHINE_UP[x.id] = x.up; if (x.last != null) MACHINE_LAST[x.id] = x.last; }
@@ -241,7 +244,7 @@
     for (const k of Object.keys(TURNS)) delete TURNS[k];
     TURN.clear(); STARTS.clear(); HOLDS.clear();
     for (const x of m.turns) {
-      const t = { id: x.id, sid: x.sid, start: x.start ? HID.get(x.start) ?? null : null, u: x.u ? { k: "u", text: x.text ?? "" } : null, entries: [], out: [], sent: [], end: x.end };
+      const t = { id: x.id, sid: x.sid, start: x.start ? HID.get(x.start) ?? null : null, at: x.at, u: x.u ? { k: "u", text: x.text ?? "" } : null, entries: [], out: [], sent: [], end: x.end };
       t.sent = x.sent.map((id) => HID.get(id)).filter(Boolean); t.out = t.sent.filter((h) => h.kind !== "move"); if (x.last) t.last = true;
       (TURNS[x.sid] ??= []).push(t); TURN.set(t.id, t); if (t.start) STARTS.set(t.start.id, t); for (const h of t.sent) HOLDS.set(h.id, t);
     }
@@ -278,10 +281,18 @@
   }
   // What a route needs before it can draw: a session's page (the one holding a deep-linked turn), and its child work.
   function load(r) {
+    if (r.v === "analytics") return loadAnalyticsCounts();
     if (r.v !== "session" || !SESS[r.id]) return null;
     const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
     if (TX[r.id] && !deep) return kids(r.id);
     return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "").then(() => kids(r.id));
+  }
+  function loadAnalyticsCounts() {
+    const ids = Object.keys(SESS), live = new Set(ids);
+    for (const id of Object.keys(ANALYTICS_COUNTS)) if (!live.has(id)) delete ANALYTICS_COUNTS[id];
+    return ids.filter((id) => ANALYTICS_COUNTS[id]?.mark !== TOK[id]).reduce((chain, id) => chain.then(() =>
+      api("/api/tx?sid=" + enc(id)).then((page) => { ANALYTICS_COUNTS[id] = { calls: page.calls ?? 0, errors: page.errors ?? 0, mark: TOK[id] }; })
+    ), Promise.resolve());
   }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
   function pager(sid, where, label) {
@@ -306,14 +317,14 @@
   // Real URLs: every screen has one, and the server serves this page for each.
   function urlOf(r) {
     const hs = (id) => SESS[id]?.harness ?? "claude";
-    return r.v === "home" ? "/" : r.v === "timeline" ? "/timeline" : r.v === "sessions" ? "/sessions" : r.v === "machines" ? "/machines"
+    return r.v === "home" ? "/" : r.v === "analytics" ? "/analytics" : r.v === "sessions" ? "/sessions" : r.v === "machines" ? "/machines"
       : r.v === "machine" ? "/machines/" + enc(r.id)
       : r.v === "session" ? "/s/" + hs(r.id) + "/" + enc(r.id) + (r.turn ? "?turn=" + enc(r.turn) : "")
       : "/trace/" + hs(r.sid) + "/" + enc(r.sid) + "/" + enc(r.turn);
   }
   function routeOf(loc) {
     const p = loc.pathname.split("/").filter(Boolean).map((x) => { try { return decodeURIComponent(x); } catch { return x; } }), turn = new URLSearchParams(loc.search).get("turn");
-    if (p[0] === "timeline") return { v: "timeline" };
+    if (p[0] === "timeline" || p[0] === "analytics") return { v: "analytics" };
     if (p[0] === "sessions") return { v: "sessions" };
     if (p[0] === "machines") return p[1] && MACHINE[p[1]] ? { v: "machine", id: p[1] } : { v: "machines" };
     if (p[0] === "s" && SESS[p[2]]) return turn ? { v: "session", id: p[2], turn } : { v: "session", id: p[2] };
@@ -352,7 +363,9 @@
     try { localStorage.setItem("semon.tree", JSON.stringify(treePrefs)); } catch {}
   }
   const railToggle = $("#rail-toggle"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("title", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
-  let route = { v: "home" }; let groupBy = "recent"; let query = "";
+  let route = { v: "home" }; let groupBy = "recent"; let query = ""; let analyticsRange = 7, analyticsMeasure = "hours";
+  const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
+  let pendingSessionOpen = null, pendingFlashHandoff = null;
   let accountOpen = false;
   try { history.scrollRestoration = "manual"; } catch {}
   let show = { messages: true, tools: true, thinking: true }; let find = ""; let findOpen = false; let filterOpen = false;
@@ -366,12 +379,12 @@
   const quietTop = () => { if (phone.matches) window.scrollTo(0, 0); else $("#main").scrollTop = 0; };
   const openSessionAtEnd = () => { if (phone.matches) window.scrollTo(0, document.documentElement.scrollHeight); else { const m = $("#main"); m.scrollTop = m.scrollHeight; } saveHistoryScroll(); };
   function go(r, fromHistory) {
+    if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
     closeAccountMenu();
     route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
-    if (r.v === "timeline" && !fromHistory) tlView.left = null;
     const done = () => {
       if (route !== r) return;
       render();
@@ -380,11 +393,15 @@
       else if (r.v === "session") openSessionAtEnd();
       else quietTop();
       syncJump();
+      if (pendingFlashHandoff && r.v === "session" && HID.get(pendingFlashHandoff)?.from === r.id) {
+        const id = pendingFlashHandoff; pendingFlashHandoff = null;
+        requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1500); });
+      }
     };
     const p = load(r); if (p) p.then(done, done); else done();
   }
   window.addEventListener("popstate", (e) => {
-    if (skipPop) { skipPop = false; return; }                        // our own history.back() after closing the viewer
+    if (skipPop) { skipPop = false; if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close a sheet before opening its session
     if (viewerEl) { const d = viewerEl; viewerEl = null; d.close(); return; } // back gesture closes the viewer, page stays
     if (e.state?.v) go(e.state, true); });
   const goSession = (id, turn) => go(turn ? { v: "session", id, turn } : { v: "session", id });
@@ -478,10 +495,10 @@
   function renderNav() {
     const nav = $("#nav"); nav.replaceChildren();
     // A session or a trace sits under Sessions, a machine under Machines.
-    const under = { home: ["home"], timeline: ["timeline"], sessions: ["sessions", "session", "trace"], machines: ["machines", "machine"] };
+    const under = { home: ["home"], analytics: ["analytics"], sessions: ["sessions", "session", "trace"], machines: ["machines", "machine"] };
     const item = (v, label, ic, count, hot) => { const b = el("button", "nav-item"); b.type = "button"; b.dataset.go = v; if (under[v].includes(route.v)) b.setAttribute("aria-current", "page"); b.append(icon(ic, "icon"), el("span", null, label)); if (count) b.append(el("span", "cnt" + (hot ? " hot" : ""), String(count))); b.addEventListener("click", () => go({ v })); nav.append(b); };
     item("home", "Home", I.home, inbox().length, true);
-    item("timeline", "Timeline", I.now);
+    item("analytics", "Analytics", I.chart);
     item("sessions", "Sessions", I.sessions, Object.values(SESS).filter((s) => s.lane).length);
     item("machines", "Machines", I.machine, Object.keys(MACHINE).filter((m) => !MACHINE_UP[m]).length, true);
   }
@@ -493,10 +510,31 @@
     for (const xs of children.values()) xs.sort((a, b) => b.last - a.last);
     return children;
   };
+  const childSessions = (sid) => sessionChildren().get(sid) ?? [];
   const descendantsOf = (sid, children, out = [], seen = new Set([sid])) => {
     for (const child of children.get(sid) ?? []) if (!seen.has(child.id)) { seen.add(child.id); out.push(child); descendantsOf(child.id, children, out, seen); }
     return out;
   };
+  const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cache_write", "Cache write"], ["cache_read", "Cache read"]];
+  const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
+  const usageTotal = (s) => Object.values(s.tokens_by_model ?? {}).reduce((sum, usage) => sum + TOKEN_KINDS.reduce((n, [key]) => n + (Number(usage[key]) || 0), 0), 0);
+  function costForSessions(sessions) {
+    const kinds = Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), models = new Map(), unknown = new Set(); let knownUsd = 0;
+    for (const s of sessions) for (const [modelId, usage] of Object.entries(s.tokens_by_model ?? {})) {
+      const price = PRICING[modelId], current = models.get(modelId) ?? { modelId, kinds: Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), usd: 0, priced: !!price };
+      if (!price) { unknown.add(modelId); current.priced = false; }
+      for (const [key] of TOKEN_KINDS) {
+        const tokens = Number(usage[key]) || 0; current.kinds[key].tokens += tokens; kinds[key].tokens += tokens;
+        if (price) { const amount = tokens * price[key] / 1e6; current.kinds[key].usd += amount; kinds[key].usd += amount; current.usd += amount; knownUsd += amount; }
+      }
+      models.set(modelId, current);
+    }
+    return { usd: unknown.size ? null : knownUsd, knownUsd, kinds, models: [...models.values()], unknown: [...unknown] };
+  }
+  const costForSession = (sid, includeRuns = false) => costForSessions(SESS[sid] ? [SESS[sid], ...(includeRuns ? descendantsOf(sid, sessionChildren()) : [])] : []);
+  const costText = (cost) => cost.unknown.length ? "—" : asMoney(cost.usd);
+  const COST_TIP = "What these tokens would cost at API rates. Subscriptions (Claude Max, ChatGPT plans) aren't billed this way.";
+  function costInfoTip() { const b = el("span", "cost-info"); b.title = COST_TIP; b.setAttribute("role", "img"); b.setAttribute("aria-label", COST_TIP); b.append(icon(I.q)); return b; }
   const TREE_RANK = { wait: 0, work: 1, err: 2, idle: 3, done: 4 };
   const urgentDescendant = (sid, children) => descendantsOf(sid, children).filter((s) => s.state in TREE_RANK).sort((a, b) => TREE_RANK[a.state] - TREE_RANK[b.state] || b.last - a.last)[0]?.state;
   const defaultTreeOpen = (sid, children) => descendantsOf(sid, children).some((s) => s.state === "wait" || s.state === "work");
@@ -555,7 +593,10 @@
     if (s && findOpen) { searchBar(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
     const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); bar.append(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
-    if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
+    if (opts.lineage?.length) {
+      if (phone.matches) { const parent = opts.lineage.at(-1), c = el("button", "crumb lineage-parent", parent.name); c.type = "button"; c.setAttribute("aria-label", "Open session path through " + parent.name); c.addEventListener("click", () => showLineageMenu(s.id, bar)); l1.append(c, el("span", "sep", "›")); }
+      else opts.lineage.forEach((item) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); });
+    } else if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
     const tt = el("span", "t", title); tt.title = title; l1.append(tt); t.append(l1);
     if (opts.line2) {
       const l2 = el("div", "l2" + (s ? " session-meta" : ""));
@@ -563,7 +604,8 @@
       opts.line2(l2); t.append(l2);
       if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); });
     }
-    bar.append(t);
+    bar.append(t); if (s && !phone.matches) { const nav = siblingNav(s); if (nav) bar.append(nav); }
+    if (opts.analytics) { appendAnalyticsRange(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
     if (!s) { appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
     const fb = el("button", "ibtn"); fb.type = "button"; fb.setAttribute("aria-label", "Find in transcript"); fb.append(icon(I.search));
     fb.addEventListener("click", () => { findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
@@ -584,15 +626,45 @@
     const b = el("button", "ibtn wide-toggle"); b.type = "button"; b.setAttribute("aria-label", "Wide reading mode"); b.setAttribute("aria-pressed", String(wideMode)); b.title = "Wide reading mode"; b.append(icon(I.wide));
     b.addEventListener("click", () => setWideMode(!wideMode)); bar.append(b);
   }
-  // State remains first; model, machine, branch, tools and tokens drop from the right until the line fits.
-  // The state word and turn count are the last readable values to go, leaving its dot on the narrowest screens.
+  function appendAnalyticsRange(bar) {
+    const group = el("div", "analytics-range"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Analytics range");
+    for (const [days, label] of [[1, "24 h"], [7, "7 d"], [30, "30 d"]]) {
+      const b = el("button", null, label); b.type = "button"; b.setAttribute("aria-pressed", String(analyticsRange === days));
+      b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); }); group.append(b);
+    }
+    bar.append(group);
+  }
+  function lineageOf(sid) {
+    const path = [], seen = new Set(); let id = sid;
+    while (id && SESS[id] && !seen.has(id)) { seen.add(id); path.push(SESS[id]); id = parentOf(id); }
+    return path.reverse();
+  }
+  function showLineageMenu(sid, bar) {
+    bar.querySelector(".lineage-menu")?.remove(); const path = lineageOf(sid), menu = el("div", "lineage-menu"); menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", "Session path");
+    path.forEach((s, i) => { const b = el("button"); b.type = "button"; b.setAttribute("role", "menuitem"); if (i === path.length - 1) b.setAttribute("aria-current", "page"); b.append(harnessMark(s.harness), el("span", null, s.name)); b.addEventListener("click", () => { menu.remove(); goSession(s.id); }); menu.append(b); });
+    bar.append(menu); const close = (e) => { if (!menu.contains(e.target) && !e.target.closest?.(".lineage-parent")) { menu.remove(); document.removeEventListener("click", close); } }; setTimeout(() => document.addEventListener("click", close), 0);
+  }
+  function siblingNav(s) {
+    const parent = parentOf(s.id); if (!parent) return null;
+    const siblings = childSessions(parent), at = siblings.findIndex((x) => x.id === s.id); if (siblings.length < 2 || at < 0) return null;
+    const nav = el("div", "sibling-nav"); nav.setAttribute("role", "group"); nav.setAttribute("aria-label", "Sibling sessions");
+    for (const [delta, label, path] of [[-1, "Previous sibling", I.back], [1, "Next sibling", I.chev]]) {
+      const target = siblings[at + delta], b = el("button", "ibtn"); b.type = "button"; b.disabled = !target; b.setAttribute("aria-label", target ? label + ": " + target.name : label); b.append(icon(path)); if (target) b.addEventListener("click", () => goSession(target.id)); nav.append(b);
+    }
+    nav.insertBefore(el("span", "sibling-count", (at + 1) + " of " + siblings.length), nav.lastChild); return nav;
+  }
+  // Kind and state are the two items line 2 always keeps. Everything else drops from the right in append order
+  // (model, machine, branch, tools, runs, tokens, cost); errors, the kind word, turn count, then state word give way last.
   function fitSessionLine(l2) {
-    const keep = new Set(["meta-state"]), droppable = [...l2.children].filter((n) => n.classList.contains("meta-item") && ![...n.classList].some((c) => keep.has(c)));
+    const keep = new Set(["meta-kind", "meta-state"]), droppable = [...l2.children].filter((n) => (n.classList.contains("meta-item") || n.classList.contains("meta-runs")) && ![...n.classList].some((c) => keep.has(c)));
     droppable.forEach((n) => { n.hidden = false; });
+    const errs = l2.querySelector(".errs"); if (errs) errs.hidden = false;
+    const kindValue = l2.querySelector(".meta-kind .meta-value"); if (kindValue) kindValue.hidden = false;
     const stateValues = [...l2.querySelectorAll(".meta-state .meta-value")], sep = l2.querySelector(".meta-state .state-sep"); stateValues.forEach((n) => { n.hidden = false; }); if (sep) sep.hidden = false;
     const fits = () => l2.scrollWidth <= l2.clientWidth + 1;
     for (let i = droppable.length - 1; i >= 0 && !fits(); i--) droppable[i].hidden = true;
-    const errs = l2.querySelector(".errs"); if (!fits() && errs) errs.hidden = true;
+    if (!fits() && errs) errs.hidden = true;
+    if (!fits() && kindValue) kindValue.hidden = true;
     if (!fits() && stateValues[1]) { stateValues[1].hidden = true; if (sep) sep.hidden = true; }
     if (!fits() && stateValues[0]) stateValues[0].hidden = true;
   }
@@ -607,20 +679,30 @@
     const c = el("span", "fcount", find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""); c.setAttribute("aria-live", "polite");
     bar.append(back, fr, c);
   }
-  // A session's compact metadata line: state, model, machine, branch, tool calls, token usage.
+  function childKindChip(s, meta = false) {
+    const c = el("span", meta ? "meta-item meta-kind" : "child-kind"); c.style.setProperty("--h", "var(--" + s.harness + ")");
+    const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : harnessMark(s.harness);
+    c.append(mark, el("span", meta ? "meta-value" : null, s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"))); return c;
+  }
+  // A session's compact metadata line: state, model, machine, branch, tools, runs, tokens and API-equivalent cost.
   const sessionLine = (s) => (l2) => {
     const es = TX[s.id] ?? [], m = TXM[s.id], calls = m ? m.calls : es.filter((e) => e.k === "tool").length, errors = m ? m.errors : es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
     const st = el("span", "meta-item meta-state"); st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", nT + (nT === 1 ? " turn" : " turns")));
     if (errors) { const j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")); j.type = "button"; j.setAttribute("aria-label", j.textContent + ": jump to the first failed step");
       j.addEventListener("click", (ev) => { ev.stopPropagation(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
       st.append(j); }
+    const kind = s.kind ? childKindChip(s, true) : null;
     const model = el("span", "meta-item meta-model"); model.append(harnessMark(s.harness), el("span", "meta-value", shortModel(s.model))); model.title = s.model ?? "Unknown model";
     const machine = el("span", "meta-item meta-machine"); machine.append(icon(I.machine), el("span", "meta-value", shortHost(s))); machine.title = hostOf(s);
     const branch = el("span", "meta-item meta-branch"); branch.append(icon(I.branch), el("span", "meta-value", branchOf(s))); branch.title = branchOf(s);
     const tools = el("span", "meta-item meta-tools"); tools.append(icon(I.wrench), el("span", "meta-value", String(calls))); tools.setAttribute("aria-label", calls + (calls === 1 ? " tool call" : " tool calls"));
-    const totalTokens = (s.tokens ?? []).reduce((sum, n) => sum + (Number(n) || 0), 0);
-    const tokens = el("span", "meta-item meta-tokens"); tokens.append(icon(I.tokens), el("span", "meta-value", tok(totalTokens))); tokens.title = totalTokens.toLocaleString() + " tokens";
-    l2.append(st, model, machine, branch, tools, tokens);
+    const kids = childSessions(s.id), allKids = descendantsOf(s.id, sessionChildren());
+    let runs = null;
+    if (kids.length) { runs = el("button", "meta-item meta-runs"); runs.type = "button"; runs.setAttribute("aria-label", kids.length + (kids.length === 1 ? " child session" : " child sessions") + (allKids.some((x) => x.state === "work") ? ", work in progress" : "") + ": open runs"); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); if (allKids.some((x) => x.state === "work")) runs.append(dot("work")); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
+    const totalTokens = usageTotal(s);
+    const tokens = el("span", "meta-item meta-tokens"); tokens.append(icon(I.tokens), el("span", "meta-value", tok(totalTokens / 1e6))); tokens.title = totalTokens.toLocaleString() + " tokens";
+    const parentCost = kids.length ? costForSessions([s, ...allKids]) : costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", (kids.length ? "incl. runs " : "") + (parentCost.unknown.length ? "—" : shortMoney(parentCost.usd)))); costItem.title = "API-equivalent cost. " + COST_TIP + (parentCost.unknown.length ? " no price for " + parentCost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(parentCost) + (kids.length ? ", including runs" : "") + ". " + COST_TIP + (parentCost.unknown.length ? " no price for " + parentCost.unknown.join(", ") : ""));
+    l2.append(...(kind ? [kind] : []), st, model, machine, branch, tools, ...(runs ? [runs] : []), tokens, costItem);
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
     const st = el("span", "stat " + (!up ? "err" : w ? "work" : "idle")); st.append(dot(!up ? "err" : w ? "work" : "idle"), !up ? "Not responding" : w ? "Up" : "Idle"); l2.append(st, el("span", "sep", " · "));
@@ -672,11 +754,56 @@
     if (s.pid != null && s.pid !== "") rows.push(["Process id", String(s.pid)]);
     rows.push(["Session id", s.sessionId ?? s.id], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Last activity", clock(s.last)], ["Tokens in / out", tok(s.tokens?.[0] ?? 0) + " / " + tok(s.tokens?.[2] ?? 0)], ["Cached context", tok(s.tokens?.[1] ?? 0)]);
     for (const [label, value] of rows) { const row = el("div", "detail-row"); row.append(el("span", "detail-label", label), el("span", "detail-value", String(value))); list.append(row); }
+    const ownCost = costForSession(s.id), allCost = costForSession(s.id, true), hasRuns = childSessions(s.id).length > 0;
+    const costRow = el("button", "detail-row cost-row"); costRow.type = "button"; costRow.setAttribute("aria-expanded", "false");
+    const costLabel = el("span", "detail-label", "API-equivalent cost"); costLabel.append(costInfoTip());
+    costRow.append(costLabel, el("span", "detail-value", hasRuns ? costText(ownCost) + " own · " + costText(allCost) + " incl. runs" : costText(ownCost)));
+    const breakdown = costBreakdown(s.id, true); breakdown.hidden = true;
+    costRow.addEventListener("click", () => { breakdown.hidden = !breakdown.hidden; costRow.setAttribute("aria-expanded", String(!breakdown.hidden)); });
+    list.append(costRow); if (allCost.unknown.length) list.append(el("div", "no-price", "no price for " + allCost.unknown.join(", "))); list.append(breakdown);
     body.append(list); d.append(head, body); document.body.append(d);
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
     try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
+  }
+  function costBreakdown(sid, includeRuns) {
+    const cost = costForSession(sid, includeRuns), box = el("div", "cost-breakdown");
+    box.append(el("div", "cost-breakdown-head", includeRuns && childSessions(sid).length ? "Tokens and API-equivalent cost · incl. runs" : "Tokens and API-equivalent cost"));
+    for (const model of cost.models) {
+      const group = el("section", "cost-model"); group.append(el("div", "cost-model-name", model.modelId));
+      for (const [key, label] of TOKEN_KINDS) {
+        const item = model.kinds[key], row = el("div", "cost-line"); row.append(el("span", null, label), el("span", "cost-amount", item.tokens.toLocaleString() + " tokens"), el("span", "cost-value", model.priced ? asMoney(item.usd) : "—")); group.append(row);
+      }
+      if (!model.priced) group.append(el("div", "no-price", "no price for " + model.modelId));
+      box.append(group);
+    }
+    if (!cost.models.length) box.append(el("p", "empty", "No token usage recorded.")); return box;
+  }
+  function runRow(s, depth, sheet) {
+    const row = el("button", "runs-row"); row.type = "button"; row.style.paddingLeft = Math.min(depth, 3) * 14 + "px";
+    const name = el("span", "run-name"); name.append(dot(s.state), childKindChip(s), el("span", null, s.name));
+    const cost = costForSession(s.id); row.append(name, el("span", "run-cost", costText(cost)));
+    const calls = TXM[s.id]?.calls ?? ANALYTICS_COUNTS[s.id]?.calls ?? (TX[s.id] ?? []).filter((e) => e.k === "tool").length, origin = originHandoff(s.id), meta = el("span", "run-meta");
+    meta.append(el("span", null, STATE[s.state]), el("span", null, dur(s.start, s.state === "work" ? null : s.last)), el("span", null, calls + (calls === 1 ? " tool call" : " tool calls"))); row.append(meta);
+    if (origin?.brief) row.append(el("span", "run-brief", oneLine(origin.brief)));
+    if (cost.unknown.length) row.append(el("span", "no-price", "no price for " + cost.unknown.join(", ")));
+    row.setAttribute("aria-label", [s.name, s.kind, STATE[s.state], dur(s.start, s.state === "work" ? null : s.last), origin?.brief ? oneLine(origin.brief) : "", "API-equivalent cost " + costText(cost)].filter(Boolean).join(" · "));
+    row.addEventListener("click", () => { if (sheet) { pendingSessionOpen = s.id; sheet.close(); } else { $(".runs-popover")?.remove(); goSession(s.id); } }); return row;
+  }
+  function appendRunsTree(parent, box, sheet, seen = new Set([parent.id])) {
+    const children = [...(sessionChildren().get(parent.id) ?? [])].sort((a, b) => b.last - a.last);
+    for (const child of children) { if (seen.has(child.id)) continue; seen.add(child.id); box.append(runRow(child, 0, sheet)); const nested = sessionChildren().get(child.id) ?? []; if (nested.length) { const group = el("div", "runs-group"); appendRunsTree(child, group, sheet, seen); box.append(group); } }
+  }
+  function openRuns(s, anchor) {
+    $(".runs-popover")?.remove(); if (viewerEl) return; const children = sessionChildren().get(s.id) ?? []; if (!children.length) return;
+    if (!phone.matches) { const pop = el("div", "runs-popover"); pop.setAttribute("role", "dialog"); pop.setAttribute("aria-label", "Runs under " + s.name); pop.append(el("h2", null, "Runs · " + children.length + " · API-equivalent cost")); const tree = el("div", "runs-tree"); appendRunsTree(s, tree, false); pop.append(tree); $("#topbar").append(pop);
+      const close = (e) => { if (!pop.contains(e.target) && e.target !== anchor) { pop.remove(); document.removeEventListener("click", close); } }; setTimeout(() => document.addEventListener("click", close), 0); return; }
+    const d = el("dialog", "viewer runs-sheet"); d.setAttribute("aria-label", "Runs under " + s.name); const head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose");
+    title.append(el("span", null, "Runs · " + children.length + " · API-equivalent cost")); close.type = "button"; close.setAttribute("aria-label", "Close runs"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
+    const body = el("div", "vb"), tree = el("div", "runs-tree"); appendRunsTree(s, tree, d); body.append(tree); d.append(head, body); document.body.append(d); d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
+    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } });
+    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
   }
   document.addEventListener("click", (e) => {
     const account = $(".account-popover"); if (account && !account.parentElement.contains(e.target)) closeAccountMenu();
@@ -848,8 +975,10 @@
   // ---- Session page --------------------------------------------------------------------------------------------------
   function renderSession(page, sid) {
     markSeenResults(H.filter((h) => isResult(h) && h.from === sid));
-    const head = el("div", "ph sr"); const h1 = el("h1", null, SESS[sid].name); head.append(h1); page.append(head); observeTitle(h1);
-    page.append(transcript(sid));
+    const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr"); const h1 = el("h1", null, s.name); head.append(h1); page.append(head); observeTitle(h1);
+    if (origin) { page.classList.add("child-page"); page.style.setProperty("--h", "var(--" + s.harness + ")"); page.append(childBriefBlock(origin)); }
+    page.append(transcript(sid, origin ? { excludeH: origin.id } : {}));
+    if (origin && (s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err")) page.append(childReturnBlock(s, origin));
   }
 
   const thoughtText = (e) => String(e.text ?? "").trim();
@@ -887,7 +1016,7 @@
   const toolInfo = (name) => { if (TOOLS[name]) return TOOLS[name]; const m = /^mcp__(.+?)__/.exec(name); if (m) { const srv = m[1].replace(/^claude_ai_/, "").replace(/_/g, " "); return ["ext", "Used " + srv, "used " + srv, "time", "times"]; } return ["run", name, name, "step", "steps"]; };
   const verb = (name) => toolInfo(name).slice(0, 2);
   function transcript(sid, opts = {}) {
-    const sec = el("section", opts.nested ? "nested" : null); sec.setAttribute("aria-label", opts.nested ? SESS[sid].name + " transcript" : "Transcript"); Object.assign(sec.style, { display: "grid", gap: "10px", gridTemplateColumns: "minmax(0, 1fr)" });
+    const sec = el("section", opts.nested ? "nested" : parentOf(sid) ? "transcript-linked" : null); sec.setAttribute("aria-label", opts.nested ? SESS[sid].name + " transcript" : "Transcript"); Object.assign(sec.style, { display: "grid", gap: "10px", gridTemplateColumns: "minmax(0, 1fr)" });
     const entries = transcriptEntries(opts.entries ?? TX[sid] ?? []);
     const turnMode = !opts.nested;
     // On a session page the transcript is a list of turns, each with its own entries; a nested one is a plain list.
@@ -926,6 +1055,7 @@
     const owner = opts.only ? new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : null;
     const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
       if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .think, .think-masked, .think-pending")) { blk.remove(); return; }
+      if (opts.excludeH && t.last) return;
       const end = turnEnd(t); if (!end) return;
       const d = el("div", "turn-end"); const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st), end.text); d.append(st);
       if (t.out.length) d.append(traceBtn(t)); blk.append(d); };
@@ -933,12 +1063,14 @@
       // Your own message needs no header: the bubble is yours and its time sits under it. A relay or brief says who sent it.
       const h = t.start;
       if (t.u || h?.kind === "ask") blk.setAttribute("aria-label", "Your message" + (h ? " at " + clock(h.at) : ""));
-      else if (h) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in), l, el("span", "tm", clock(h.at))); blk.append(hd); }
+      else if (h && h.id !== opts.excludeH) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in), l, el("span", "tm", clock(h.at))); blk.append(hd); }
       tx = el("div", "tx"); blk.append(tx); box.append(blk); cur = { t, blk }; };
     for (const e of entries) {
       if (owner && !opts.only.has(owner.get(e.key))) continue;
       if (turnMode && isGap(e)) { closeTurn(); if (!find) box.append(el("div", "divider", e.text)); continue; }
       if (turnMode && firsts.has(e.key)) openTurn(firsts.get(e.key));
+      if (opts.excludeH && e.k === "h" && e.id === opts.excludeH) continue;
+      if (opts.excludeH && e.k === "end" && /^Returned to /.test(e.text ?? "")) continue;
       // Entries that render nothing (empty thinking, hidden kinds) must not split a run of tool calls.
       if (e.k === "think" && (!show.thinking || find)) continue;
       if (e.k === "tool") {
@@ -1064,12 +1196,36 @@
       .catch(() => done({ scriptFailed: true }));
   }
 
+  function openParentAtHandoff(h) { pendingFlashHandoff = h.id; const turn = HOLDS.get(h.id); goSession(h.from, turn?.id); }
+  function childBriefBlock(h) {
+    const parent = SESS[h.from], block = el("section", "child-intro"); block.setAttribute("aria-label", "Brief from " + parent.name);
+    const title = el("div", "intro-title"), open = el("button", null, parent.name); open.type = "button"; open.addEventListener("click", () => openParentAtHandoff(h));
+    title.append("Brief from ", open, el("span", "tm", clock(h.at)));
+    if (phone.matches && SESS[h.to]) { const nav = siblingNav(SESS[h.to]); if (nav) title.append(nav); }
+    block.append(title);
+    const brief = markdown(h.brief, "brief"), more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", () => { const expanded = brief.classList.toggle("open"); more.textContent = expanded ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(expanded)); });
+    new ResizeObserver(() => { if (brief.classList.contains("open") || !brief.clientHeight) return; const clipped = brief.scrollHeight > brief.clientHeight + 1; more.hidden = !clipped; brief.classList.toggle("clipped", clipped); }).observe(brief);
+    const parentLink = el("button", "intro-open", "Open in " + parent.name); parentLink.type = "button"; parentLink.addEventListener("click", () => openParentAtHandoff(h)); block.append(brief, more, parentLink); return block;
+  }
+  function childReturnBlock(s, h) {
+    const block = el("div", "child-return"), calls = TXM[s.id]?.calls ?? (TX[s.id] ?? []).filter((e) => e.k === "tool").length, finished = s.state === "done" || s.state === "err" || h.status === "done" || h.status === "err";
+    const status = finished ? (s.state === "err" || h.status === "err" ? "err" : "done") : "work";
+    const text = finished ? (status === "err" ? "Failed" : "Done") : "Working · " + calls + (calls === 1 ? " tool call" : " tool calls") + " · " + dur(s.start, null);
+    const state = el("span", "stat " + status); state.append(status === "work" ? el("span", "spin") : dot(status), el("span", null, finished ? "Returned to " + nameOf(h.from) + " · " + text + " · " + dur(s.start, s.last) : text)); block.append(state);
+    if (finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
+    return block;
+  }
+
   function handoffCard(h, viewer, start) {
     const other = h.kind === "move" ? null : viewer === h.from ? h.to : h.from;
-    const c = el("div", "hcard " + (h.kind === "toyou" ? "toyou" : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
+    const child = h.kind === "spawn" && viewer === h.from ? SESS[h.to] : null;
+    const c = el("div", "hcard " + (child ? "child-card " + hcls(h.to) : h.kind === "toyou" ? "toyou" : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
     const [ic, parts] = sentence(h, viewer);
-    c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln);
-    const sw = el("span", "stat " + h.status); sw.append(h.status === "work" ? el("span", "spin") : dot(h.status === "done" ? "done" : h.status), statWord(h)); c.append(sw);
+    if (child) { c.append(childKindChip(child)); const ln = el("span", "ln", child.name); ln.append(el("span", "verb", " · " + (child.kind ?? HARNESS[child.harness]))); c.append(ln); }
+    else { c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln); }
+    const shownState = child?.state ?? h.status, sw = el("span", "stat " + shownState); sw.append(shownState === "work" ? el("span", "spin") : dot(shownState === "done" ? "done" : shownState), child ? STATE[shownState] : statWord(h)); c.append(sw);
+    if (child) { const calls = TXM[child.id]?.calls ?? (TX[child.id] ?? []).filter((e) => e.k === "tool").length, meta = el("div", "child-meta"); meta.append(el("span", null, dur(child.start, child.state === "work" ? null : child.last)), el("span", null, calls + (calls === 1 ? " tool call" : " tool calls"))); c.append(meta); }
     const br = markdown(h.brief, "brief"); c.append(br);
     // Long messages open in place; the rest of the card still goes to the other session.
     const more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
@@ -1078,6 +1234,18 @@
     c.append(more);
     if (h.result) { const r = el("span", "result"); r.append(el("b", null, (h.status === "err" ? "Failed" : "Returned") + ": ")); inline(r, h.result); c.append(r); }
     const an = answerEl(h, "result"); if (an) c.append(an);
+    if (child) {
+      const actions = el("div", "child-actions"), openChild = el("button", null, "Open"); openChild.type = "button"; openChild.addEventListener("click", (e) => { e.stopPropagation(); goSession(child.id); }); actions.append(openChild);
+      const entries = (STARTS.get(h.id)?.entries ?? TX[child.id] ?? []).filter((e) => !(e.k === "h" && e.id === h.id));
+      if (entries.length) {
+        const group = el("div", "child-work"), toggle = el("button", "cw-toggle"); toggle.type = "button"; toggle.setAttribute("aria-expanded", "false"); toggle.append(icon(I.chev, "chev"), "What " + child.name + " did");
+        const inner = el("div", "cw-body"); inner.hidden = true; let showAll = false;
+        const paint = () => { inner.replaceChildren(transcript(child.id, { nested: true, entries: showAll ? entries : entries.slice(-5) })); if (!showAll && entries.length > 5) { const all = el("button", "show-all", "Show all " + entries.length); all.type = "button"; all.addEventListener("click", (e) => { e.stopPropagation(); showAll = true; paint(); }); inner.append(all); } };
+        toggle.addEventListener("click", (e) => { e.stopPropagation(); if (inner.hidden && !inner.childElementCount) paint(); inner.hidden = !inner.hidden; toggle.setAttribute("aria-expanded", String(!inner.hidden)); });
+        group.append(toggle, inner); actions.append(group);
+      }
+      c.append(actions);
+    }
     // Received: the sender's turn that sent it. Sent on: the turn it started there. To you: this turn's trace. A move: the machine it left.
     const open = () => { if (h.kind === "move") go({ v: "machine", id: h.fromMachine }); else if (h.kind === "toyou") { const t = HOLDS.get(h.id); if (t) goTrace(t.id); } else if (viewer === h.to) openSender(h); else if (SESS[other]) goSession(other, STARTS.get(h.id)?.id); };
     c.addEventListener("click", (ev) => { if (!getSelection().isCollapsed) return; open(); });
@@ -1089,182 +1257,186 @@
   function render() {
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
     closeAccountMenu();
-    tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; page.replaceChildren(); page.classList.toggle("wide", r.v === "timeline");
+    tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; page.replaceChildren(); page.classList.remove("child-page"); page.style.removeProperty("--h");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
-    else if (r.v === "timeline") { renderTimeline(page); renderTopbar("Timeline"); }
+    else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
     else if (r.v === "sessions") { renderSessions(page); renderTopbar("Sessions"); }
     else if (r.v === "machines") { renderMachines(page); renderTopbar("Machines"); }
     else if (r.v === "machine") { renderMachine(page, r.id); renderTopbar(MACHINE[r.id], { label: "Machines", go: () => go({ v: "machines" }) }, { line2: machineLine(r.id) }); }
     else if (r.v === "trace") { const sum = renderTrace(page, r.turn) ?? ""; renderTopbar("Trace", { label: SESS[r.sid].name, go: () => goSession(r.sid, r.turn) }, { line2: (l2) => l2.append(el("span", "rest", sum)) }); }
-    else if (r.v === "session") { const p = parentOf(r.id), s = SESS[r.id]; renderSession(page, r.id); renderTopbar(s.name, p ? { label: SESS[p].name, go: () => goSession(p) } : null, { session: s, line2: sessionLine(s) }); }
+    else if (r.v === "session") { const s = SESS[r.id], lineage = lineageOf(r.id).slice(0, -1); renderSession(page, r.id); renderTopbar(s.name, null, { session: s, lineage, line2: sessionLine(s) }); }
     document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px");
-    syncBarLine(); renderNav(); renderLanes(); renderDrawerAccount();
+    syncLayoutPrefs(); syncBarLine(); renderNav(); renderLanes(); renderDrawerAccount(); syncJump();
   }
 
-  // ---- Timeline: sessions as rows, time across ------------------------------------------------------------------------
-  // Each top-level session is a row with its subagents and Codex runs indented beneath it. Bars are the session's busy
-  // intervals (log activity clustered at 5 minutes); marks are handoffs. Time runs left to right, but a stretch over 2
-  // hours with nothing anywhere collapses to a 28 px break, so days of logs fit. The labels stay put and only the chart
-  // scrolls sideways; its axis follows it. Every position comes from one time-to-x map, so rows, marks and axis agree.
-  const MIN = NOW > 1e11 ? 60000 : 1; // the real data counts epoch milliseconds, the sample minutes
-  const HOUR = 60 * MIN;
-  const two = (x) => String(x).padStart(2, "0");
-  const hhmm = (t) => MIN === 1 ? clock(t) : two(new Date(t).getHours()) + ":" + two(new Date(t).getMinutes());
-  const span = (m) => m >= 1440 ? Math.floor(m / 1440) + "d" + (Math.round((m % 1440) / 60) ? " " + Math.round((m % 1440) / 60) + "h" : "") : m >= 60 ? Math.round(m / 60) + "h" : Math.round(m) + "m";
-  // A relay's gist: its brief on one line, less a leading "<Sender>:" or "<Sender> here:" that the label already says.
-  const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const unsigned = (h) => { const name = SESS[h.from]?.name; return name ? h.brief.replace(new RegExp("^\\s*" + escRe(name) + "( here)?:\\s*", "i"), "") : h.brief; };
-  // One sender relaying the same text to several sessions within 2 minutes is a broadcast: drawn once, not per
-  // recipient. Same text means the same first 80 characters once whitespace is normalised and that prefix dropped.
-  function groupBroadcasts(evs) {
-    const out = [], open = new Map();
-    for (const e of evs) {
-      if (e.k !== "relay") { out.push(e); continue; }
-      const key = e.h.from + "\u0000" + unsigned(e.h).replace(/\s+/g, " ").trim().slice(0, 80), g = open.get(key);
-      if (g && e.t - g.t <= 2 * MIN && !g.hs.some((x) => x.to === e.h.to)) { g.hs.push(e.h); continue; }
-      const ng = { ...e, hs: [e.h] }; open.set(key, ng); out.push(ng);
-    }
-    return out;
-  }
-  const ZOOM = [15, 30, 60, 120, 240]; // px per hour
-  const tlView = { pph: 60, left: null, centre: null, rel: true, open: new Map() };
-  // A session's bars: its busy intervals; while it works, the last one runs to now.
+  // Analytics uses epoch milliseconds from the served model. While a session is still working, extend its last
+  // recorded busy interval to the model clock so the figures and charts include live work.
+  const MIN = 60000, HOUR = 60 * MIN;
   const busyOf = (s) => { const iv = (s.busy ?? []).map(([a, b]) => [a, b]); if (s.state === "work" && iv.length) iv.at(-1)[1] = Math.max(iv.at(-1)[1], NOW); return iv; };
-  const turnAt = (sid, t) => (TURNS[sid] ?? []).filter((x) => x.start?.at != null && x.start.at <= t).at(-1);
-  // The time-to-x map: busy intervals and handoff times, merged; gaps over 2 hours become 28 px breaks.
-  function tlMap(pph) {
-    const pts = []; for (const s of Object.values(SESS)) pts.push(...busyOf(s));
-    for (const h of H) { if (h.at != null) pts.push([h.at, h.at]); if (h.done != null) pts.push([h.done, h.done]); }
-    pts.push([NOW, NOW]); pts.sort((p, q) => p[0] - q[0]);
-    const segs = []; for (const [a, b] of pts) { const l = segs.at(-1); if (l && a - l[1] <= 2 * HOUR) l[1] = Math.max(l[1], b); else segs.push([a, b]); }
-    const PAD = 10 * MIN, pieces = []; let x = 16;
-    segs.forEach(([a0, b0], i) => { const a = a0 - PAD, b = b0 + PAD; if (i) { pieces.push({ a: pieces.at(-1).b, b: a, x0: x, w: 28, gap: true }); x += 28; } const w = (b - a) / HOUR * pph; pieces.push({ a, b, x0: x, w }); x += w; });
-    const X = (t) => { for (const p of pieces) if (t <= p.b) return p.x0 + Math.max(0, t - p.a) / ((p.b - p.a) || 1) * p.w; const q = pieces.at(-1); return q.x0 + q.w; };
-    const xT = (v) => { for (const p of pieces) if (v <= p.x0 + p.w) return p.a + Math.max(0, v - p.x0) / (p.w || 1) * (p.b - p.a); return pieces.at(-1).b; };
-    return { pieces, X, xT, width: x + 24 };
+
+  // Analytics is computed from the served model's sessions, busy intervals, turn index and handoffs.
+  // The tx endpoint gives per-session aggregate tool counts, so (as in the approved mockup) those calls are attributed to session start.
+  const DAY_MS = 86400000;
+  const rangeMs = (days) => days * DAY_MS;
+  const inRange = (t, from, to) => Number.isFinite(t) && t >= from && t < to;
+  function analyticsSessions() {
+    return Object.values(SESS).map((s) => {
+      const startedAt = Number(s.start) || 0, calls = ANALYTICS_COUNTS[s.id]?.calls ?? TXM[s.id]?.calls ?? 0;
+      const errors = ANALYTICS_COUNTS[s.id]?.errors ?? TXM[s.id]?.errors ?? 0;
+      const turns = (TURNS[s.id] ?? []).filter(hasTurn);
+      return { s, id: s.id, startedAt, costAt: startedAt, busy: busyOf(s),
+        turnEvents: turns.map((t) => Number.isFinite(t.at) ? t.at : Number.isFinite(t.start?.at) ? t.start.at : startedAt),
+        toolEvents: Array.from({ length: Math.max(0, calls) }, (_, i) => ({ at: startedAt, error: i < errors })) };
+    });
   }
-  // Rows: top-level sessions by latest activity, each followed by its child runs in start order; a parent with children
-  // gets a disclosure row, open by default for 3 or fewer.
-  function tlRows() {
-    const kids = new Map(); for (const s of Object.values(SESS)) { const p = parentOf(s.id); if (p && SESS[p]) { if (!kids.has(p)) kids.set(p, []); kids.get(p).push(s); } }
-    const desc = (sid) => (kids.get(sid) ?? []).flatMap((c) => [c, ...desc(c.id)]);
-    const tops = Object.values(SESS).filter((s) => !parentOf(s.id) || !SESS[parentOf(s.id)]).sort((a, b) => b.last - a.last);
-    const rows = [];
-    const add = (s, depth, hidden) => {
-      if (!hidden) rows.push({ k: "s", s, depth, h: depth ? 36 : 40 });
-      const ks = (kids.get(s.id) ?? []).sort((a, b) => a.start - b.start); if (!ks.length) return;
-      const all = desc(s.id), open = tlView.open.get(s.id) ?? all.length <= 3;
-      if (!hidden) rows.push({ k: "d", s, depth, h: 36, open, all });
-      for (const c of ks) add(c, depth + 1, hidden || !open);
-    };
-    tops.forEach((s) => add(s, 0, false));
-    return rows;
+  function analyticsWaits() {
+    return H.filter((h) => h.kind === "toyou" && (h.ask === "question" || h.ask === "decision") && SESS[h.from])
+      .map((h) => ({ sid: h.from, startAt: h.at, endAt: h.status === "wait" ? null : Number.isFinite(h.done) ? h.done : null }));
   }
-  const kidsText = (all) => { const sub = all.filter((x) => x.kind === "Subagent").length, cdx = all.filter((x) => x.kind === "Codex run").length, other = all.length - sub - cdx;
-    return [sub ? sub + (sub === 1 ? " subagent" : " subagents") : "", cdx ? cdx + (cdx === 1 ? " Codex run" : " Codex runs") : "", other ? other + (other === 1 ? " other run" : " other runs") : ""].filter(Boolean).join(" · "); };
-  function renderTimeline(page) {
-    const map = tlMap(tlView.pph), X = map.X, rows = tlRows(), at = new Map(); let y = 0;
-    for (const r of rows) { r.y = y; y += r.h; if (r.k === "s") at.set(r.s.id, r); }
-    // Where a session's marks go: its own row, or its nearest visible ancestor's while it is collapsed.
-    const rowOf = (sid) => { let x = sid; const seen = new Set(); while (x && !at.has(x) && !seen.has(x)) { seen.add(x); x = parentOf(x); } return at.get(x); };
-    const cy = (r) => r.y + r.h / 2, nm = (x) => x === "you" ? "You" : SESS[x]?.name ?? x;
-    const busyMin = Object.values(SESS).reduce((a, s) => a + busyOf(s).reduce((u, [p, q]) => u + (q - p), 0), 0) / MIN;
-    const head = el("div", "ph"); const h1 = el("h1", null, "Timeline"); head.append(h1);
-    const sub = el("div", "sub"); for (const [v, l] of [[Object.keys(SESS).length, "sessions"], [span(busyMin), "busy"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
-    const first = map.pieces[0].a + 10 * MIN; sub.append(el("span", null, clock(first) + " – " + clock(NOW)));
-    head.append(sub, el("div", "tl-legend", "Bars: busy · ● your message · ◆ to you · ┗ started · ┆ message")); page.append(head); observeTitle(h1);
-    // Controls: zoom (the time under the middle of the view stays put) and the messages toggle.
-    const ctl = el("div", "tl-ctl"), zi = ZOOM.indexOf(tlView.pph);
-    const zb = (d, label, path) => { const b = el("button", "ibtn"); b.type = "button"; b.setAttribute("aria-label", label); b.append(icon(path)); b.disabled = !ZOOM[zi + d]; b.addEventListener("click", () => zoom(d)); return b; };
-    const tog = el("button", "tl-tog", "Messages"); tog.type = "button"; tog.setAttribute("aria-pressed", String(tlView.rel));
-    ctl.append(zb(-1, "Zoom out", "M5 12h14"), el("span", "zl", tlView.pph + " px/h"), zb(1, "Zoom in", "M12 5v14M5 12h14"), tog); page.append(ctl);
-    const tl = el("div", "tl" + (tlView.rel ? "" : " norel"));
-    tog.addEventListener("click", () => { tlView.rel = !tlView.rel; tog.setAttribute("aria-pressed", String(tlView.rel)); tl.classList.toggle("norel", !tlView.rel); });
-    // The axis: a sticky row whose inside follows the chart's horizontal scroll.
-    const axRow = el("div", "tl-axisrow"), clip = el("div", "tl-axisclip"), axis = el("div", "tl-axis"); axis.style.width = map.width + "px";
-    const step = tlView.pph >= 44 ? 1 : tlView.pph >= 22 ? 2 : tlView.pph >= 15 ? 3 : 6; let lastDay = null;
-    for (const p of map.pieces) {
-      if (p.gap) { const g = el("div", "tl-axgap", "≈" + span((p.b - p.a + 20 * MIN) / MIN)); g.style.left = p.x0 + "px"; axis.append(g); lastDay = null; continue; } // after a break, say the date again
-      // Whole local hours inside this stretch (the sample's clock is minutes since midnight).
-      let t0 = Math.ceil(p.a / HOUR) * HOUR; if (MIN !== 1) { const d0 = new Date(p.a); d0.setMinutes(0, 0, 0); t0 = +d0 < p.a ? +d0 + HOUR : +d0; }
-      for (let t = t0; t <= p.b; t += HOUR) {
-        const d = MIN === 1 ? null : new Date(t), hr = MIN === 1 ? Math.round(t / HOUR) % 24 : d.getHours(), x = X(t);
-        const tk = el("span", "tl-tick"); tk.style.left = x + "px"; axis.append(tk);
-        if (hr % step === 0) { const l = el("span", "tl-hr", two(hr) + ":00"); l.style.left = x + "px"; axis.append(l); }
-        if (d && d.toDateString() !== lastDay) { lastDay = d.toDateString(); const dl = el("span", "tl-day", d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" })); dl.style.left = x + "px"; axis.append(dl); }
-      }
+  function busyMsIn(row, from, to) { return row.busy.reduce((sum, [a, b]) => sum + Math.max(0, Math.min(b, to) - Math.max(a, from)), 0); }
+  const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
+  function matchesSessionFacets(s) { return Object.keys(sessionFilters).every((key) => !sessionFilters[key] || sessionFacetValue(s, key) === sessionFilters[key]); }
+  function renderFacetFilters(onChange) {
+    const box = el("div", "facet-filters"); box.setAttribute("aria-label", "Filter sessions");
+    const specs = [
+      ["repo", "Repo", "All repos", [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "repo")))].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
+      ["machine", "Machine", "All machines", [...new Set(Object.values(SESS).map((s) => s.machine ?? ""))].sort(), (v) => MACHINE[v] ?? v],
+      ["harness", "Harness", "All harnesses", [...new Set(Object.values(SESS).map((s) => s.harness ?? ""))].sort(), (v) => HARNESS[v] ?? v],
+      ["model", "Model", "All models", [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "model")))].sort(), shortModel],
+    ];
+    for (const [key, label, allLabel, values, showValue] of specs) {
+      const field = el("label", "facet-field"); field.append(el("span", null, label)); const select = el("select"); select.setAttribute("aria-label", label);
+      const all = el("option", null, allLabel); all.value = ""; select.append(all);
+      for (const value of values) { const option = el("option", null, showValue(value)); option.value = value; select.append(option); }
+      select.value = sessionFilters[key]; select.addEventListener("change", () => { sessionFilters[key] = select.value; onChange(); }); field.append(select); box.append(field);
     }
-    clip.append(axis); axRow.append(el("span"), clip);
-    clip.addEventListener("wheel", (e) => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { scroller.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
-    // Labels (fixed) and the chart (scrolls sideways).
-    const body = el("div", "tl-body"), labels = el("div", "tl-labels"), scroller = el("div", "tl-scroll"), canvas = el("div", "tl-canvas");
-    canvas.style.width = map.width + "px"; canvas.style.height = y + "px"; canvas.dataset.map = JSON.stringify(map.pieces);
-    for (const r of rows) {
-      const tr = el("div", "tl-track" + (r.k === "d" ? " disc" : "")); tr.style.top = r.y + "px"; tr.style.height = r.h + "px"; tr.dataset.sid = r.s.id; tr.dataset.k = r.k; canvas.append(tr);
-      const gd = el("span", "gd"); gd.style.width = (r.depth * 12 + (r.k === "d" ? 22 : 4)) + "px";
-      if (r.k === "s") {
-        const s = r.s, b = el("button", "tl-lab" + (r.depth ? " child" : " top")); b.type = "button"; b.style.height = r.h + "px"; Object.assign(b.dataset, { sid: s.id, depth: r.depth, parent: parentOf(s.id) ?? "" });
-        const d = dot(s.state); if (s.stub) d.classList.add("hollow"); b.append(gd, d, el("span", "nm", s.name)); b.title = s.name; b.setAttribute("aria-label", "Open " + s.name);
-        b.addEventListener("click", () => goSession(s.id)); labels.append(b);
-      } else {
-        const b = el("button", "tl-disc"); b.type = "button"; b.style.height = r.h + "px"; b.dataset.sid = r.s.id; b.setAttribute("aria-expanded", String(r.open));
-        b.append(gd, el("span", null, (r.open ? "▾ " : "▸ ") + kidsText(r.all))); b.title = kidsText(r.all); b.addEventListener("click", () => { tlView.open.set(r.s.id, !r.open); render(); }); labels.append(b);
-        // Collapsed: a faint summary of the hidden runs' bars on the disclosure row.
-        if (!r.open) for (const k of r.all) for (const [p, q] of busyOf(k)) { const v = el("span", "tl-sum"); v.style.left = X(p) + "px"; v.style.width = Math.max(3, X(q) - X(p)) + "px"; tr.append(v); }
-      }
-    }
-    for (const p of map.pieces) if (p.gap) { const g = el("div", "tl-gap"); g.style.left = p.x0 + "px"; canvas.append(g); }
-    const nowL = el("div", "tl-now"); nowL.style.left = X(NOW) + "px"; canvas.append(nowL);
-    const open = (sid, t) => () => { if (SESS[sid]) goSession(sid, t?.id); };
-    const hit = (cls, box, say, go, data) => { const b = el("button", "tl-hit " + cls); b.type = "button"; Object.assign(b.style, box); b.title = say; b.setAttribute("aria-label", say); b.addEventListener("click", go); Object.assign(b.dataset, data); canvas.append(b); return b; };
-    // Bars: one per busy interval, at least 3 px wide, with at least a 36 px hit area.
-    const failed = new Set(H.filter((h) => h.kind === "spawn" && h.status === "err").map((h) => h.to));
-    for (const r of rows) {
-      if (r.k !== "s") continue; const s = r.s, iv = busyOf(s);
-      iv.forEach(([a, b], i) => {
-        const x1 = X(a), w = Math.max(3, X(b) - x1), ext = Math.max(0, (36 - w) / 2), last = i === iv.length - 1, live = last && s.state === "work";
-        const say = s.name + " busy " + hhmm(a) + "–" + hhmm(b) + (live ? ", still working" : "");
-        const bt = hit("tl-barhit", { left: x1 - ext + "px", top: r.y + "px", width: w + 2 * ext + "px", height: r.h + "px" }, say, (ev) => {
-          const t = ev.detail ? Math.min(b, Math.max(a, map.xT(ev.clientX - canvas.getBoundingClientRect().left))) : (a + b) / 2; open(s.id, turnAt(s.id, t))(); }, { sid: s.id, i: String(i), a: String(a), b: String(b) });
-        const v = el("span", "tl-bar " + hcls(s.id) + (live ? " live" : "") + (last && failed.has(s.id) ? " fail" : "")); v.style.left = ext + "px"; v.style.width = w + "px"; bt.append(v);
-      });
-    }
-    // Marks and connectors, one per handoff (a broadcast once), each opening its turn as in a trace.
-    const evs = groupBroadcasts(H.filter((h) => h.at != null).map((h, i) => ({ t: h.at, h, k: h.kind, i })).sort((p, q) => p.t - q.t || p.i - q.i));
-    for (const e of evs) {
-      const h = e.h, x = X(e.t), tm = hhmm(e.t);
-      if (e.k === "ask") { const r = rowOf(h.to); if (!r) continue; const t = STARTS.get(h.id);
-        hit("tl-mark ask", { left: x - 18 + "px", top: cy(r) - 18 + "px" }, tm + " You asked " + nm(h.to) + ": " + oneLine(h.brief), open(h.to, t), { k: "ask", hs: h.id, to: h.to, turn: t?.id ?? "", row: r.s.id }).append(el("span", "vis")); }
-      else if (e.k === "toyou") { const r = rowOf(h.from); if (!r) continue; const t = HOLDS.get(h.id), w = h.status === "wait", an = answersOf(h);
-        const say = tm + " " + nm(h.from) + " " + (TOYOU[h.ask] ?? "Sent you a message").toLowerCase() + (w ? ", waiting on you" : an?.length ? ", answered: " + an.join(" · ") : an ? ", answered" : "");
-        hit("tl-mark ty" + (w ? "" : " done"), { left: x - 18 + "px", top: cy(r) - 18 + "px" }, say, open(h.from, t), { k: "toyou", hs: h.id, to: h.from, turn: t?.id ?? "", row: r.s.id }).append(el("span", "vis")); }
-      else if (e.k === "spawn" || e.k === "relay") {
-        const hs = e.hs ?? [h], from = rowOf(h.from), tos = hs.map((x) => rowOf(x.to)); if (!from || tos.some((r) => !r)) continue;
-        const y0 = cy(from), ends = tos.map((r) => ({ r, y: cy(r) }));
-        let top = Math.min(y0, ...ends.map((q) => q.y)), bot = Math.max(y0, ...ends.map((q) => q.y));
-        if (bot === top) top = y0 - 14; // to its own row (a collapsed child attaches to its parent): a short stub from above
-        const hb = Math.max(36, bot - top), ht = (top + bot) / 2 - hb / 2;
-        let sid = h.to, t = null, say;
-        if (e.k === "spawn") { t = STARTS.get(h.id); say = tm + " " + nm(h.from) + " started " + nm(h.to); }
-        else if (hs.length > 1) { t = HOLDS.get(h.id); sid = h.from; say = tm + " " + nm(h.from) + " messaged " + hs.map((x) => nm(x.to)).join(", ") + ": " + oneLine(unsigned(h)); }
-        else { t = STARTS.get(h.id); if (!t) { t = HOLDS.get(h.id); if (t) sid = h.from; } say = tm + " " + nm(h.from) + " messaged " + nm(h.to) + ": " + oneLine(unsigned(h)); }
-        const c = hit("tl-conn " + (e.k === "spawn" ? "sp" : "rel"), { left: x - 18.75 + "px", top: ht + "px", width: "36px", height: hb + "px" }, say, open(sid, t), { k: e.k, hs: hs.map((q) => q.id).join(","), to: sid, turn: t?.id ?? "", x: String(x) });
-        const ln = el("span", "ln"); ln.style.top = top - ht + "px"; ln.style.height = bot - top + "px"; c.append(ln);
-        for (const q of ends) {
-          if (e.k === "spawn") { const f = el("span", "ft"); f.style.top = q.y - ht + "px"; f.dataset.row = q.r.s.id; f.dataset.y = String(q.y); c.append(f); }
-          else { const up = q.y < y0, hd = el("span", "hd " + (up ? "up" : "dn")); hd.style.top = q.y - ht + "px"; hd.dataset.row = q.r.s.id; hd.dataset.y = String(q.y); c.append(hd); }
-        }
-      }
-    }
-    scroller.append(canvas); body.append(labels, scroller); tl.append(axRow, body); page.append(tl);
-    const sync = () => { axis.style.transform = "translateX(" + -scroller.scrollLeft + "px)"; tlView.left = scroller.scrollLeft; };
-    scroller.addEventListener("scroll", sync, { passive: true });
-    scroller.addEventListener("wheel", (e) => { if (e.shiftKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) { scroller.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
-    // Opening position: the latest activity (the right edge); after a zoom, the same time in the middle; after Back, as it was.
-    if (tlView.centre != null) { scroller.scrollLeft = X(tlView.centre) - scroller.clientWidth / 2; tlView.centre = null; }
-    else scroller.scrollLeft = tlView.left ?? scroller.scrollWidth;
-    sync();
-    function zoom(d) { const i = ZOOM.indexOf(tlView.pph) + d; if (!ZOOM[i]) return; tlView.centre = map.xT(scroller.scrollLeft + scroller.clientWidth / 2); tlView.pph = ZOOM[i]; render(); }
+    return box;
+  }
+  function analyticsStats(rows, from, to) {
+    const relevant = rows.filter((r) => inRange(r.startedAt, from, to) || r.busy.some(([a, b]) => a < to && b > from));
+    const waits = analyticsWaits().filter((w) => rows.some((r) => r.id === w.sid) && w.startAt < to && (w.endAt ?? to) > from);
+    const durations = waits.map((w) => Math.max(0, Math.min(w.endAt ?? to, to) - Math.max(w.startAt, from))).filter((x) => x > 0).sort((a, b) => a - b);
+    const median = durations.length ? durations.length % 2 ? durations[(durations.length - 1) / 2] : (durations[durations.length / 2 - 1] + durations[durations.length / 2]) / 2 : 0;
+    const waitBy = new Map(); for (const w of waits) { const ms = Math.max(0, Math.min(w.endAt ?? to, to) - Math.max(w.startAt, from)); waitBy.set(w.sid, (waitBy.get(w.sid) ?? 0) + ms); }
+    const current = analyticsWaits().filter((w) => !w.endAt && rows.some((r) => r.id === w.sid)).map((w) => ({ ...w, ms: Math.max(0, NOW - w.startAt), s: SESS[w.sid] })).sort((a, b) => b.ms - a.ms);
+    const agentMs = relevant.reduce((sum, r) => sum + busyMsIn(r, from, to), 0);
+    const costRows = rows.filter((r) => inRange(r.costAt, from, to)).map((r) => ({ row: r, cost: costForSession(r.id) }));
+    const costUnknown = [...new Set(costRows.flatMap((x) => x.cost.unknown))];
+    return { rows: relevant, agentMs, started: rows.filter((r) => inRange(r.startedAt, from, to)).length,
+      turns: rows.reduce((sum, r) => sum + r.turnEvents.filter((at) => inRange(at, from, to)).length, 0),
+      tools: rows.reduce((sum, r) => sum + r.toolEvents.filter((e) => inRange(e.at, from, to)).length, 0),
+      errors: rows.reduce((sum, r) => sum + r.toolEvents.filter((e) => inRange(e.at, from, to) && e.error).length, 0),
+      waitsMs: durations.reduce((sum, x) => sum + x, 0), medianWaitMs: median, longestWaitMs: durations.at(-1) ?? 0,
+      longestCurrent: current[0] ?? null, waitBy, costUnknown,
+      apiCost: costUnknown.length ? null : costRows.reduce((sum, x) => sum + x.cost.knownUsd, 0) };
+  }
+  const hoursText = (ms) => (ms / HOUR).toFixed(1) + " h", rangeName = () => analyticsRange === 1 ? "24 h" : analyticsRange + " d";
+  function deltaNote(value, previous, format) {
+    const delta = value - previous, note = el("div", "note");
+    if (Math.abs(delta) < 1e-9) { note.textContent = "No change vs previous " + rangeName(); return note; }
+    note.append(el("span", delta > 0 ? "up" : "down", (delta > 0 ? "+" : "−") + format(Math.abs(delta))), " vs previous " + rangeName()); return note;
+  }
+  function peakBusy(rows, from, to) {
+    const starts = rows.flatMap((r) => r.busy.filter(([a, b]) => a < to && b > from).map(([a]) => Math.max(a, from)));
+    return starts.reduce((best, at) => Math.max(best, rows.filter((r) => r.busy.some(([a, b]) => a <= at && at < b)).length), 0);
+  }
+  function chartWidth() { const page = $("#page"), style = getComputedStyle(page); return Math.max(280, Math.round(page.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight))); }
+  const niceStep = (max) => [.25, .5, 1, 2, 5, 10, 20, 50, 100, 200, 500].find((x) => x * 3 >= max) ?? 1000;
+  const svgEl = (tag, attrs, text) => { const node = document.createElementNS(SVGNS, tag); for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value)); if (text != null) node.textContent = text; return node; };
+  function timeText(ms) { const mins = Math.max(0, Math.round(ms / MIN)), days = Math.floor(mins / 1440), hours = Math.floor(mins % 1440 / 60), rem = mins % 60; return days ? days + "d " + hours + "h" : hours ? hours + "h " + rem + "m" : mins + "m"; }
+  const countText = (n) => Math.round(n).toLocaleString(), hLabel = (n) => n ? +n.toFixed(2) + " h" : "0";
+  const agentBuckets = () => analyticsRange === 1 ? [24, "per hour"] : analyticsRange === 7 ? [28, "per 6 hours"] : [30, "per day"];
+  function renderAgentsChart(rows, from, to) {
+    const [count, unit] = agentBuckets(), span = (to - from) / count, panel = el("section", "analytics-panel");
+    panel.append(el("h2", null, "Agents at work"), el("div", "panel-sub", "Agent-hours " + unit + " · stacked by harness"));
+    const bins = Array.from({ length: count }, (_, i) => { const a = from + i * span, b = a + span, hrs = (h) => rows.filter((r) => r.s.harness === h).reduce((n, r) => n + busyMsIn(r, a, b), 0) / HOUR; return { a, b, claude: hrs("claude"), codex: hrs("codex") }; });
+    const W = chartWidth(), height = 190, left = 40, right = W - 4, top = 12, bottom = 151, most = Math.max(0, ...bins.map((x) => x.claude + x.codex)), stepY = niceStep(most || 1), max = Math.max(stepY, Math.ceil(most / stepY) * stepY);
+    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + height, role: "group", "aria-label": "Agent-hours " + unit + " over the selected range, stacked by harness" }), yOf = (n) => bottom - (bottom - top) * n / max;
+    for (let n = 0; n <= max + 1e-9; n += stepY) svg.append(svgEl("line", { x1: left, x2: right, y1: yOf(n), y2: yOf(n), class: "gridline" }), svgEl("text", { x: 0, y: yOf(n) + 4, class: "axis-label" }, hLabel(n)));
+    const step = (right - left) / count, w = Math.max(2, step * .64);
+    bins.forEach((bin, i) => { const x = left + i * step + (step - w) / 2, ch = (bottom - top) * bin.claude / max, xh = (bottom - top) * bin.codex / max, total = bin.claude + bin.codex;
+      if (ch) svg.append(svgEl("rect", { x, y: bottom - ch, width: w, height: ch, class: "cost-claude" })); if (xh) svg.append(svgEl("rect", { x, y: bottom - ch - xh, width: w, height: xh, class: "cost-codex" }));
+      const label = clock(bin.a) + "–" + clock(bin.b) + ": " + hLabel(total), hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); hit.append(svgEl("title", {}, label));
+      if (total > 0) { hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", label + ". Open the sessions busy then"); }
+      const open = () => { if (total > 0) openAnalyticsSlice(bin.a, bin.b, rows.filter((r) => busyMsIn(r, bin.a, bin.b) > 0)); };
+      hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
+    });
+    svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, analyticsRange === 1 ? "24 h ago" : analyticsRange + " d ago"), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
+    const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart);
+    const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend); return panel;
+  }
+  function renderCostChart(rows, from, to) {
+    const panel = el("section", "analytics-panel"), title = el("h2", null, "Cost over time"); title.append(costInfoTip());
+    const count = analyticsRange === 1 ? 24 : analyticsRange, unit = analyticsRange === 1 ? "per hour" : "per day"; panel.append(title, el("div", "panel-sub", "API-equivalent cost " + unit + " · stacked by harness"));
+    const bins = Array.from({ length: count }, (_, i) => ({ a: from + (to - from) * i / count, b: from + (to - from) * (i + 1) / count, claude: 0, codex: 0, rows: [] })), unknown = new Set();
+    for (const row of rows) { if (!inRange(row.costAt, from, to)) continue; const cost = costForSession(row.id); if (cost.usd == null) { cost.unknown.forEach((model) => unknown.add(model)); continue; } const index = Math.min(count - 1, Math.floor((row.costAt - from) / (to - from) * count)); bins[index][row.s.harness] += cost.usd; bins[index].rows.push(row); }
+    const W = chartWidth(), svg = svgEl("svg", { viewBox: "0 0 " + W + " 190", role: "img", "aria-label": "API-equivalent cost " + unit + ", stacked by harness" });
+    const left = 46, right = W - 4, top = 12, bottom = 151, max = Math.max(.01, ...bins.map((b) => b.claude + b.codex)), step = (right - left) / count;
+    for (let n = 0; n <= 2; n++) { const y = bottom - (bottom - top) * n / 2; svg.append(svgEl("line", { x1: left, x2: right, y1: y, y2: y, class: "gridline" }), svgEl("text", { x: 0, y: y + 4, class: "axis-label" }, "$" + (max * n / 2).toFixed(2))); }
+    bins.forEach((bin, i) => { const w = Math.max(2, step * .64), x = left + i * step + (step - w) / 2, ch = bin.claude / max * (bottom - top), xh = bin.codex / max * (bottom - top);
+      if (ch) svg.append(svgEl("rect", { x, y: bottom - ch, width: w, height: ch, class: "cost-claude" })); if (xh) svg.append(svgEl("rect", { x, y: bottom - ch - xh, width: w, height: xh, class: "cost-codex" }));
+      const hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); if (bin.rows.length) { hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", clock(bin.a) + " to " + clock(bin.b) + ": " + asMoney(bin.claude + bin.codex)); }
+      const open = () => { if (bin.rows.length) openAnalyticsSlice(bin.a, bin.b, bin.rows); }; hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
+    });
+    svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, analyticsRange === 1 ? "24 h ago" : analyticsRange + " d ago"), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
+    const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart); const legend = el("div", "analytics-legend");
+    for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend);
+    if (unknown.size) panel.append(el("div", "no-price", "no price for " + [...unknown].join(", ") + "; unpriced usage is omitted from bars.")); return panel;
+  }
+  function renderCodexAllowance() {
+    const latest = Object.values(SESS).filter((s) => s.harness === "codex" && s.rate_limits?.recorded_at != null).sort((a, b) => b.rate_limits.recorded_at - a.rate_limits.recorded_at)[0]; if (!latest) return null;
+    const limits = latest.rate_limits, panel = el("section", "analytics-panel"), grid = el("div", "allowance-grid"); panel.append(el("h2", null, "Codex allowance"), el("div", "panel-sub", "Latest recorded rate limits · " + new Date(limits.recorded_at).toLocaleString([], { hour: "numeric", minute: "2-digit" })));
+    for (const limit of limits.windows ?? []) { const label = limit.minutes === 300 ? "5-hour window" : limit.minutes === 10080 ? "Weekly window" : limit.minutes + "-minute window", box = el("div", "allowance-window");
+      box.append(el("div", "window-name", label), el("div", "window-used", limit.used_percent + "% used"), el("div", "window-reset", "Resets " + new Date(limit.resets_at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))); grid.append(box); }
+    if (!grid.childElementCount) return null; panel.append(grid); return panel;
+  }
+  function openAnalyticsSlice(a, b, active) {
+    const d = el("dialog", "viewer analytics-slice"), head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose"), when = new Date(a).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) + "–" + new Date(b).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    d.setAttribute("aria-label", "Sessions busy " + when); title.append(el("span", null, "Sessions busy · " + when)); close.type = "button"; close.setAttribute("aria-label", "Close sessions list"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
+    const body = el("div", "vb"), list = el("div", "analytics-list"); if (!active.length) body.append(el("p", "empty", "No sessions were busy then."));
+    for (const row of active.map((r) => ({ r, ms: busyMsIn(r, a, b) })).sort((x, y) => y.ms - x.ms || x.r.s.name.localeCompare(y.r.s.name))) { const s = row.r.s, item = el("button", "analytics-session analytics-slice"); item.type = "button"; item.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", timeText(row.ms) + " busy")); item.addEventListener("click", () => { pendingSessionOpen = s.id; d.close(); }); list.append(item); }
+    if (active.length) body.append(list); d.append(head, body); document.body.append(d); d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
+    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } });
+    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
+  }
+  function analyticsBreakdown(title, rows, from, to, groupKey) {
+    const groups = new Map(), keyFor = (s) => groupKey === "repo" ? s.repo ?? "__none__" : groupKey === "machine" ? s.machine : s.harness + "\u0000" + (s.model ?? s.modelId ?? "Unknown model");
+    const labelFor = (key) => groupKey === "repo" ? key === "__none__" ? "No repo (roles)" : key : groupKey === "machine" ? MACHINE[key] ?? key : (HARNESS[key.split("\u0000")[0]] ?? key.split("\u0000")[0]) + " · " + shortModel(key.split("\u0000")[1]);
+    for (const row of rows) { const ms = busyMsIn(row, from, to); if (!ms && !inRange(row.startedAt, from, to)) continue; const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);
+      if (inRange(row.costAt, from, to)) { const c = costForSession(row.id); g.cost += c.knownUsd; c.unknown.forEach((x) => g.unknown.add(x)); } groups.set(key, g); }
+    const selected = (x) => analyticsMeasure === "cost" ? x.cost : x.ms, items = [...groups.values()].sort((a, b) => selected(b) - selected(a) || labelFor(a.key).localeCompare(labelFor(b.key))), max = Math.max(1, ...items.map(selected));
+    const panel = el("section", "analytics-panel"); panel.append(el("h3", null, title)); const list = el("div", "analytics-list");
+    for (const item of items) { const b = el("button", "analytics-row"); b.type = "button"; b.append(el("span", "row-title", labelFor(item.key)), el("span", "row-count", item.sessions.size + (item.sessions.size === 1 ? " session" : " sessions")));
+      const measure = selected(item), track = el("span", "row-track"), bar = el("i", "row-bar"); bar.style.width = Math.max(measure ? 2 : 0, measure / max * 100) + "%"; if (groupKey === "harness") bar.style.background = item.key.startsWith("claude") ? "var(--claude)" : "var(--codex)"; track.append(bar);
+      b.append(track, el("span", "row-hours" + (analyticsMeasure === "hours" ? " on" : ""), hoursText(item.ms)), el("span", "row-cost" + (analyticsMeasure === "cost" ? " on" : ""), item.unknown.size ? "—" : asMoney(item.cost))); if (item.unknown.size) b.append(el("span", "no-price", "no price for " + [...item.unknown].join(", ")));
+      b.dataset.breakdown = groupKey; b.dataset.key = item.key;
+      b.addEventListener("click", () => { if (groupKey === "repo") sessionFilters.repo = item.key; else if (groupKey === "machine") sessionFilters.machine = item.key; else { const [harness, model] = item.key.split("\u0000"); sessionFilters.harness = harness; sessionFilters.model = model; } query = ""; groupBy = "recent"; go({ v: "sessions" }); }); list.append(b); }
+    if (!items.length) list.append(el("p", "empty", "No activity in this range.")); panel.append(list); return panel;
+  }
+  function analyticsList(title, items, value) {
+    const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title)); const list = el("div", "analytics-list"); if (!items.length) list.append(el("p", "empty", "No sessions in this range."));
+    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", value(item))); if (item.cost?.unknown.length) b.append(el("span", "no-price", "no price for " + item.cost.unknown.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); } panel.append(list); return panel;
+  }
+  function renderAnalytics(page) {
+    const all = analyticsSessions().filter((row) => matchesSessionFacets(row.s)), to = NOW, from = to - rangeMs(analyticsRange), now = analyticsStats(all, from, to), previous = analyticsStats(all, from - rangeMs(analyticsRange), from);
+    const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days"))); page.append(head); observeTitle(h1); page.append(renderFacetFilters(() => render()));
+    const measure = el("div", "analytics-measure"); measure.setAttribute("role", "group"); measure.setAttribute("aria-label", "Breakdown bar measure");
+    for (const [key, label] of [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]]) { const b = el("button", null, label); b.type = "button"; b.setAttribute("aria-pressed", String(analyticsMeasure === key)); b.addEventListener("click", () => { if (analyticsMeasure === key) return; const top = currentScroll(); analyticsMeasure = key; render(); restoreScroll(top); }); measure.append(b); }
+    const metrics = el("div", "analytics-metrics"), addMetric = (label, value, note, more, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label"); l.append(el("span", null, label)); if (tip) l.append(costInfoTip()); if (more) { m.dataset.more = ""; m.title = more; } m.append(l, el("div", "value", value), note); metrics.append(m); }, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
+    addMetric("Agent-hours", hoursText(now.agentMs), deltaNote(now.agentMs, previous.agentMs, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
+    const costNote = now.apiCost == null || previous.apiCost == null ? el("div", "note", "no price for " + [...new Set([...now.costUnknown, ...previous.costUnknown])].join(", ")) : deltaNote(now.apiCost, previous.apiCost, asMoney);
+    addMetric("API-equivalent cost", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, null, true);
+    addMetric("Sessions started", countText(now.started), deltaNote(now.started, previous.started, countText)); addMetric("Turns", countText(now.turns), deltaNote(now.turns, previous.turns, countText));
+    addMetric("Tool calls", countText(now.tools), deltaNote(now.tools, previous.tools, countText), countText(now.errors) + " failed (" + pct(now.errors, now.tools) + ") · previous " + rangeName() + ": " + countText(previous.errors) + " failed (" + pct(previous.errors, previous.tools) + ")");
+    addMetric("Peak concurrency", countText(peakBusy(all, from, to)), deltaNote(peakBusy(all, from, to), peakBusy(all, from - rangeMs(analyticsRange), from), countText), "The most sessions busy at the same moment.");
+    addMetric("Waited on you", timeText(now.waitsMs), deltaNote(now.waitsMs, previous.waitsMs, timeText), "Median wait " + timeText(now.medianWaitMs) + " · previous " + rangeName() + ": " + timeText(previous.medianWaitMs));
+    const currentWait = now.longestCurrent; addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longestWaitMs, timeText), currentWait ? currentWait.s.name + " has waited on you for " + timeText(currentWait.ms) : "No session is waiting on you"); page.append(metrics);
+    const breakdowns = el("div", "analytics-breakdowns"); breakdowns.append(analyticsBreakdown("By repo", all, from, to, "repo"), analyticsBreakdown("By machine", all, from, to, "machine"), analyticsBreakdown("By harness and model", all, from, to, "harness"));
+    const bdHead = el("div", "analytics-bd-head"), bdTitle = el("div"); bdTitle.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Agent-hours and API-equivalent cost; bars follow the toggle")); bdHead.append(bdTitle, measure);
+    const busyTop = [...all].map((r) => ({ ...r, value: busyMsIn(r, from, to) })).filter((r) => r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5), waitTop = [...now.waitBy].map(([id, ms]) => ({ s: SESS[id], id, value: ms })).filter((r) => r.s && r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5);
+    const costTop = all.filter((r) => inRange(r.costAt, from, to)).map((r) => { const cost = costForSession(r.id); return { ...r, cost, value: cost.usd }; }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5), bottom = el("div", "analytics-split");
+    bottom.append(analyticsList("Top sessions · busy time", busyTop, (x) => timeText(x.value)), analyticsList("Top sessions · waited on", waitTop, (x) => timeText(x.value)), analyticsList("Most expensive sessions · API-equivalent cost", costTop, (x) => x.value == null ? "—" : asMoney(x.value)));
+    page.append(renderAgentsChart(all, from, to), renderCostChart(all, from, to), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(); if (allowance) page.append(allowance);
   }
 
   // ---- Sessions: every top-level session and its child runs ---------------------------------------------------------------
@@ -1274,7 +1446,7 @@
     return [sub ? sub + (sub === 1 ? " subagent" : " subagents") : null, cdx ? cdx + (cdx === 1 ? " Codex run" : " Codex runs") : null, other ? other + (other === 1 ? " other run" : " other runs") : null].filter(Boolean).join(" · ");
   }
   function renderSessions(page) {
-    const all = Object.values(SESS).filter((s) => s.lane);
+    const all = Object.values(SESS).filter(matchesSessionFacets);
     const head = el("div", "ph"); const h1 = el("h1", null, "Sessions"); head.append(h1);
     const sub = el("div", "sub"); for (const [v, l] of [[all.length, all.length === 1 ? "session" : "sessions"], [all.filter((s) => s.state === "work").length, "working"], [all.filter((s) => s.state === "wait").length, "waiting on you"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
     head.append(sub); page.append(head); observeTitle(h1);
@@ -1316,7 +1488,7 @@
   $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); query = e.target.value.trim(); go({ v: "sessions" }); } });
   phone.addEventListener("change", () => {
     closeDrawer(true); syncLayoutPrefs();
-    if (route.v === "session" || route.v === "timeline") { const top = currentScroll(); render(); restoreScroll(top); }
+    if (route.v === "session" || route.v === "analytics") { const top = currentScroll(); render(); restoreScroll(top); }
     else renderLanes();
     const l2 = $("#topbar .l2"); if (l2?.classList.contains("session-meta")) fitSessionLine(l2); syncJump();
   });
@@ -1325,7 +1497,7 @@
   // Every screen polls /api/model?since= every 2 s while the tab is visible, one request at a time: it backs off up to 30 s
   // on errors and stops on 403 (the server restarted with a new token). A new model swaps the globals and draws the screen
   // again with its view state kept: the scroll position, anchored to the first visible block; what is open, by stable keys;
-  // the Timeline's zoom, scroll and rows; focus, find and filters; the drawer. A session page follows its transcript's tail
+  // focus, find and filters; the drawer. A session page follows its transcript's tail
   // with /api/tx?after= and replaces only the turns that changed. An open View all sheet holds the redraw until it closes.
   const LIVE = { version: null, timer: null, busy: false, delay: 2000, ended: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
   // The turn index as last drawn, to tell which turns an update changed.
@@ -1368,6 +1540,7 @@
     for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
     // Only transcripts whose mark in the model moved are asked for, one at a time.
     let chain = Promise.resolve();
+    if (route.v === "analytics") chain = chain.then(loadAnalyticsCounts);
     // A mark with fewer entries or bytes than the one loaded means the file was cut or rewritten: load it again.
     const shrank = (a, b) => { const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number); return s1 < s0 || b1 < b0; };
     for (const sid of view) if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
@@ -1436,7 +1609,7 @@
   // View state. A block's identity: its class and keys, or its own text when it has no key (a section heading).
   const scroller = () => (phone.matches ? document.scrollingElement : $("#main"));
   const edge = () => $("#topbar").getBoundingClientRect().bottom;
-  const ANCHORS = "[data-e], .turn, .hop, .ib, .nrow, .sec-h, .ph, .divider, .tl-lab, .tl-disc, .tl-ctl, .groupby, .find, .empty";
+  const ANCHORS = "[data-e], .turn, .hop, .ib, .nrow, .sec-h, .ph, .divider, .analytics-metric, .analytics-panel, .facet-filters, .groupby, .find, .empty";
   const HOSTS = "[data-e], [data-h], [data-id], [data-sid], [data-go], [data-turn], [data-g], [data-m]";
   const FOCUSABLE = "button, input, [tabindex]";
   const identOf = (n) => { const d = n.dataset, keys = [d.e, d.turn, d.h, d.id, d.m, d.sid, d.go, d.g];
@@ -1460,11 +1633,6 @@
       if (opener(n)?.getAttribute("aria-expanded") === "true" || (n.classList.contains("hcard") && n.classList.contains("open"))) st.open.add(n.dataset.e);
     }
     for (const n of $("#page").querySelectorAll(".hop")) if (n.querySelector(".brief.open")) st.open.add("hop:" + identOf(n));
-    // The Timeline's child rows keep how they are shown, even where that is the default a new child run would change.
-    for (const b of $("#page").querySelectorAll(".tl-disc")) tlView.open.set(b.dataset.sid, b.getAttribute("aria-expanded") === "true");
-    // At the chart's right edge (within 8 px) it follows new activity, as a session page at its end does; elsewhere it keeps
-    // its position in pixels (tlView.left).
-    const tl = $("#page .tl-scroll"); if (tl && tl.scrollWidth - tl.scrollLeft - tl.clientWidth <= 8) tlView.left = null;
     // Child work opened and then closed keeps what was open inside it, for when it opens again.
     st.shut = new Set([...$("#page").querySelectorAll(".childwork[data-e]")].filter((n) => opener(n).getAttribute("aria-expanded") === "false" && n.querySelector(":scope > .cw-body").childElementCount).map((n) => n.dataset.e));
     const a = document.activeElement;
