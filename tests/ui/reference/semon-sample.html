@@ -588,12 +588,13 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .allowance-window .window-reset { margin-top: 2px; color: var(--faint); font-size: 11.5px; }
 .analytics-list { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 8px; border-top: 1px solid var(--line); }
 .analytics-breakdowns .analytics-list { margin-top: 6px; }
-.analytics-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 3px 7px; width: 100%; min-width: 0; min-height: 48px; align-content: center; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 7px 0; text-align: left; }
+.analytics-row { display: grid; grid-template-columns: minmax(0, 1fr) 7ch 8ch; gap: 3px 7px; width: 100%; min-width: 0; min-height: 48px; align-content: center; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 7px 0; text-align: left; }
 .analytics-row .row-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 12.5px; }
-.analytics-row .row-count { grid-column: 2 / 4; color: var(--faint); font: 11px var(--mono); white-space: nowrap; }
+.analytics-row .row-count { grid-column: 2 / 4; color: var(--faint); font: 11px var(--mono); white-space: nowrap; text-align: right; }
 .analytics-row .row-track { grid-column: 1; height: 4px; overflow: hidden; border-radius: 3px; background: var(--sunken); }
 .analytics-row .row-bar { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: var(--accent); }
-.analytics-row .row-hours, .analytics-row .row-cost { grid-row: 2; align-self: center; color: var(--muted); font: 10.5px var(--mono); white-space: nowrap; }
+.analytics-row .row-hours, .analytics-row .row-cost { grid-row: 2; align-self: center; color: var(--muted); font: 10.5px var(--mono); white-space: nowrap; text-align: right; }
+.analytics-row .on { color: var(--ink); }
 .analytics-row .row-hours { grid-column: 2; }
 .analytics-row .row-cost { grid-column: 3; }
 .analytics-split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
@@ -1957,7 +1958,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     for (const item of items) {
       const b = el("button", "analytics-row"); b.type = "button"; b.append(el("span", "row-title", labelFor(item.key)), el("span", "row-count", item.sessions.size + (item.sessions.size === 1 ? " session" : " sessions")));
       const measure = selected(item), track = el("span", "row-track"), bar = el("i", "row-bar"); bar.style.width = Math.max(measure ? 2 : 0, measure / max * 100) + "%"; if (groupKey === "harness") bar.style.background = item.key.startsWith("claude") ? "var(--claude)" : "var(--codex)"; track.append(bar);
-      b.append(track, el("span", "row-hours", hoursText(item.ms)), el("span", "row-cost", item.unknown.size ? "—" : asMoney(item.cost)));
+      b.append(track, el("span", "row-hours" + (analyticsMeasure === "hours" ? " on" : ""), hoursText(item.ms)), el("span", "row-cost" + (analyticsMeasure === "cost" ? " on" : ""), item.unknown.size ? "—" : asMoney(item.cost)));
       if (item.unknown.size) b.append(el("span", "no-price", "no price for " + [...item.unknown].join(", ")));
       b.addEventListener("click", () => { if (groupKey === "repo") sessionFilters.repo = item.key; else if (groupKey === "machine") sessionFilters.machine = item.key; else { const [harness, model] = item.key.split("\u0000"); sessionFilters.harness = harness; sessionFilters.model = model; } query = ""; groupBy = "recent"; go({ v: "sessions" }); }); list.append(b);
     }
