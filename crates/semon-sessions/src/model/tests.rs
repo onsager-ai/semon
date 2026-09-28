@@ -1197,7 +1197,8 @@ fn a_failed_codex_operation_ends_its_turn_as_a_failed_step() {
         ],
     );
     let built = home.build();
-    let turn = turns_of(&built, "failed-operation").last().unwrap();
+    let turns = turns_of(&built, "failed-operation");
+    let turn = turns.last().unwrap();
     assert_eq!(turn.end.why, "failed_step");
     assert_eq!(turn.end.st, "err");
 }
