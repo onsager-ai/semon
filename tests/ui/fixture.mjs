@@ -175,7 +175,7 @@ export function write(out, { extras = false } = {}) {
     c.ask(ms(T(11, 40)), brief("h1"));
     c.think(ms(T(11, 40), 9), t[1].text);
     c.text(ms(T(11, 40), 10), t[2].text);
-    c.tool(ms(T(11, 40), 11), "toolu-b1", "Bash", { command: t[3].arg });
+    c.tool(ms(T(11, 40), 11), "toolu-b1", "Bash", { command: "cd ~/work/harbor && RUST_BACKTRACE=1 cargo test -p harbor-sync -- --test-threads=4" });
     c.result(ms(T(11, 40), 49, 200), "toolu-b1", t[3].out, { error: true });
     c.tool(ms(T(11, 41)), "toolu-r1", "Read", { file_path: path.join(harborCwd, t[4].arg) });
     c.result(ms(T(11, 41), 0, 100), "toolu-r1", t[4].out);

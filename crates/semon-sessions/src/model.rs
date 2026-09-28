@@ -4045,6 +4045,26 @@ pub(crate) fn relative(path: &str, cwd: Option<&str>, home: Option<&str>) -> Str
     path.to_owned()
 }
 
+/// The command summary shown for a shell step. Keep a setup prefix in the
+/// expanded input while showing the actual command in the one-line preview.
+fn shell_summary(command: &str) -> String {
+    let mut summary = command.trim();
+    if let Some((_, tail)) = summary.rsplit_once("&&") {
+        summary = tail.trim();
+    }
+    if let Some((head, _)) = summary.split_once(" -- ") {
+        summary = head.trim();
+    }
+    let mut words: Vec<&str> = summary.split_whitespace().collect();
+    while words
+        .first()
+        .is_some_and(|word| word.contains('=') && !word.starts_with('-'))
+    {
+        words.remove(0);
+    }
+    words.join(" ")
+}
+
 /// The one-line argument the mockup shows for a running tool.
 pub(crate) fn arg_summary(
     name: &str,
@@ -4056,14 +4076,14 @@ pub(crate) fn arg_summary(
     let summary = match name {
         "Bash" | "shell" | "exec_command" | "local_shell" => {
             match input.get("command").or_else(|| input.get("cmd")) {
-                Some(Value::Array(parts)) => Some(
-                    parts
+                Some(Value::Array(parts)) => Some(shell_summary(
+                    &parts
                         .iter()
                         .filter_map(Value::as_str)
                         .collect::<Vec<_>>()
                         .join(" "),
-                ),
-                Some(Value::String(command)) => Some(command.clone()),
+                )),
+                Some(Value::String(command)) => Some(shell_summary(command)),
                 _ => None,
             }
         }

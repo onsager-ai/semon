@@ -95,8 +95,10 @@ export function gaps({ model, tx }) {
   const norm = (e) => {
     const k = e.k === "reasoning" ? "think" : e.k;
     const x = { k };
-    for (const f of ["text", "label", "name", "arg", "ok", "in", "out", "diff", "live", "unfinished"]) if (e[f] !== undefined) x[f] = e[f];
-    if (k !== "think" && e.secs !== undefined) x.secs = e.secs;
+    for (const f of ["text", "label", "name", "arg", "ok", "secs", "in", "out", "diff", "live", "unfinished"]) {
+      if (f === "secs" && k === "think") continue;
+      if (e[f] !== undefined) x[f] = e[f];
+    }
     if (e.k === "h") x.id = ids.get(e.id) ?? e.id;
     if (e.ret) x.text = "Returned to " + (model.sessions[e.ret.to]?.name ?? e.ret.to) + (e.ret.failed ? " · failed" : "") + " · " + new Date(e.ret.at).toISOString().slice(11, 16);
     return J(x);

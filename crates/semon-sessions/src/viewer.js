@@ -992,7 +992,7 @@
 
   const thoughtText = (e) => String(e.text ?? "").trim();
   const isPendingThought = (e, entries, i, sid) => !!(e.pending || e.status === "thinking") ||
-    e.k === "think" && !thoughtText(e) && i === entries.length - 1 && SESS[sid]?.state === "work";
+    Array.isArray(entries) && e.k === "think" && !thoughtText(e) && i === entries.length - 1 && SESS[sid]?.state === "work";
   const isMaskedThought = (e, entries, i, sid) => e.k === "think" && !isPendingThought(e, entries, i, sid) && !thoughtText(e);
   function thoughtSeconds(e) {
     if (Number.isFinite(e?.secs) && e.secs >= 0) return e.secs;
