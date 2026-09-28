@@ -438,6 +438,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .topbar .l1 .crumb, .topbar .l2 .errs { pointer-events: auto; }
 .topbar .l1 .crumb { padding: 8px 0; margin: -8px 0; }
 .topbar .l2 .errs { display: inline-flex; align-items: center; min-height: 36px; margin: -10px 0; border: 0; background: none; padding: 0; font: inherit; font-weight: 500; color: var(--err); text-decoration: underline; text-underline-offset: 3px; }
+.cost-info { display: inline-grid; place-items: center; width: 18px; height: 18px; margin-left: 4px; border: 0; border-radius: 50%; background: none; color: var(--faint); vertical-align: middle; }
+.cost-info svg { width: 15px; height: 15px; }
 .topbar.searching { gap: 8px; }
 .topbar .find { flex: 1 1 auto; min-width: 0; }
 .topbar .fcount { flex: none; font-family: var(--mono); font-size: 12px; color: var(--muted); padding-right: 4px; }
@@ -525,7 +527,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .topbar .l2.session-meta .meta-hit { position: absolute; inset: 0; z-index: 0; border: 0; border-radius: 8px; background: none; padding: 0; pointer-events: auto; }
 @media (hover: hover) { .topbar .l2.session-meta:hover .meta-hit { background: var(--sunken); } }
 .topbar .l2.session-meta .meta-item { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; flex: none; min-width: 0; pointer-events: none; }
-.topbar .l2.session-meta .meta-runs { border: 0; background: none; padding: 0; color: inherit; font: inherit; pointer-events: auto; }
+.topbar .l2.session-meta .meta-runs { min-height: 36px; border: 0; background: none; padding: 0; color: inherit; font: inherit; pointer-events: auto; }
 .topbar .l2.session-meta .meta-item .meta-value { display: block; min-width: 0; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .l2.session-meta .meta-state { gap: 5px; }
 .topbar .l2.session-meta .meta-state .meta-value { max-width: none; }
@@ -577,6 +579,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .child-intro .more { min-height: 36px; border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: 13px; }
 .child-intro .intro-open { min-height: 40px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; text-align: left; }
 .child-return { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 13px; }
+.child-return .stat { flex: 1 1 100%; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
 .child-page .transcript-linked { border-left: 3px solid var(--h); padding-left: 12px; }
 .analytics-range { display: inline-flex; align-items: center; gap: 2px; flex: none; padding: 2px; border-radius: 10px; background: var(--sunken); white-space: nowrap; }
 .analytics-range button { min-width: 38px; min-height: 32px; border: 0; border-radius: 8px; background: none; padding: 0 7px; color: var(--muted); font-size: 12.5px; }

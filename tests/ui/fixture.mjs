@@ -54,7 +54,11 @@ export function write(out, { extras = false } = {}) {
   for (const d of ["claude", "codex", "proc", "work", "roles"]) rm(path.join(out, d));
   const put = (rel, text) => { const p = path.join(out, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); return p; };
   // A line given as { raw } is written as is: an unreadable line the log lost.
-  const jsonl = (rel, lines) => put(rel, lines.sort((a, b) => a[0] - b[0]).map(([, v]) => (v.raw != null ? v.raw : JSON.stringify(v))).join("\n") + "\n");
+  const jsonl = (rel, lines) => {
+    // Codex reads session_meta from the first line; history may predate the active session by a week.
+    const meta = lines.filter(([, value]) => value.type === "session_meta"), rest = lines.filter(([, value]) => value.type !== "session_meta").sort((a, b) => a[0] - b[0]);
+    return put(rel, [...meta, ...rest].map(([, v]) => (v.raw != null ? v.raw : JSON.stringify(v))).join("\n") + "\n");
+  };
   // Repositories are directories with a .git; roles work outside any repository.
   const repo = (name) => { fs.mkdirSync(path.join(out, "work", name, ".git"), { recursive: true }); return path.join(out, "work", name); };
   const role = (name) => { fs.mkdirSync(path.join(out, "roles", name), { recursive: true }); return path.join(out, "roles", name); };
@@ -85,8 +89,8 @@ export function write(out, { extras = false } = {}) {
     };
     // Token use: one usage record, as the model counts tokens by message id.
     s.tokens = (t) => {
-      const target = Object.values(SESS[sid]?.tokensByModel ?? {})[0] ?? { input: tokens[0] * 1e6, cache_write: 0, cache_read: tokens[1] * 1e6, output: tokens[2] * 1e6 };
-      lines.push([t, { type: "assistant", timestamp: iso(t), sessionId: agent ? agent.parent : sid, cwd, uuid: "u-" + sid + "-usage", message: { id: "msg-" + sid + "-usage", model: models[model], role: "assistant", content: [], usage: { input_tokens: target.input, cache_creation_input_tokens: target.cache_write, cache_read_input_tokens: target.cache_read, output_tokens: target.output } } }]);
+      const target = Object.values(SESS[sid]?.tokensByModel ?? {})[0] ?? { input: tokens[0] * 1e6, cacheWrite: 0, cacheRead: tokens[1] * 1e6, output: tokens[2] * 1e6 };
+      lines.push([t, { type: "assistant", timestamp: iso(t), sessionId: agent ? agent.parent : sid, cwd, uuid: "u-" + sid + "-usage", message: { id: "msg-" + sid + "-usage", model: models[model], role: "assistant", content: [], usage: { input_tokens: target.input, cache_creation_input_tokens: target.cacheWrite ?? target.cache_write ?? 0, cache_read_input_tokens: target.cacheRead ?? target.cache_read ?? 0, output_tokens: target.output } } }]);
     };
     s.save = () => {
       if (agent) {
@@ -151,7 +155,7 @@ export function write(out, { extras = false } = {}) {
     const c = claude("advisor", { cwd: role("advisor"), model: "opus-5.5", tokens: SESS.advisor.tokens });
     c.title(ms(T(9, 10)), "Advisor");
     c.peer(ms(T(9, 10)), 101, "Principal", "m-h10", brief("h10"));
-    c.think(ms(T(9, 10), 30), "Weighing what a SQLite queue buys against a migration that touches every client.");
+    c.think(ms(T(9, 10), 30), tx("advisor")[1].text);
     c.busy(ms(T(9, 10)), ms(T(9, 45)));
     c.text(ms(T(9, 45)), tx("advisor")[2].text);
     c.tokens(ms(T(9, 44)));
@@ -190,7 +194,7 @@ export function write(out, { extras = false } = {}) {
     c.result(ms(T(12, 36)), "toolu-h20", "Failed before producing a reproducer: the review sandbox could not read the test fixture.", { error: true });
     if (extras) c.text(ms(T(12, 31), 30), MARKDOWN);
     c.text(ms(T(12, 32)), t[9].text);
-    c.tool(ms(T(12, 39), 18), "toolu-b3", "Bash", { command: t[10].arg });
+    c.tool(ms(T(12, 39), 18), "toolu-b3", "Bash", { command: SESS.harbor.activity[1] });
     c.tokens(ms(T(12, 32)));
     c.save(); live("harbor", "busy");
     // h-review: the reviewer subagent, reading the diff as it lands.
@@ -207,8 +211,9 @@ export function write(out, { extras = false } = {}) {
     r.save();
     const f = claude("h-failed", { cwd: harborCwd, model: "sonnet-5", tokens: SESS["h-failed"].tokens, agent: { parent: "harbor", slug: slug(harborCwd), tool: "toolu-h20" } });
     f.prompt(ms(T(12, 33)), brief("h20"));
-    f.tool(ms(T(12, 34)), "toolu-f1", "Read", { file_path: path.join(harborCwd, "crates/sync/tests/fixtures/retry.log") });
-    f.result(ms(T(12, 36)), "toolu-f1", "permission denied: retry.log", { error: true });
+    const failedTool = tx("h-failed")[1];
+    f.tool(ms(T(12, 33)), "toolu-f1", "Read", { file_path: path.join(harborCwd, failedTool.arg) });
+    f.result(ms(T(12, 33), 2, 800), "toolu-f1", failedTool.out, { error: true });
     f.tokens(ms(T(12, 35)));
     f.save();
   }
@@ -291,10 +296,10 @@ export function write(out, { extras = false } = {}) {
   }
 
   // ---- Codex ---------------------------------------------------------------------------------------------------------
-  function codex(id, start, { cwd, branch, tokens, nickname, agentPath }) {
+  function codex(id, start, { cwd, branch, tokens, nickname, agentPath, parentThread }) {
     const lines = [];
     const at = (t, type, payload) => lines.push([t, { timestamp: iso(t), type, payload }]);
-    lines.push([start - 1, { timestamp: iso(start), type: "session_meta", payload: { id, timestamp: iso(start), cwd, originator: "codex_exec", cli_version: "0.120.0", source: "exec", ...(nickname ? { agent_nickname: nickname } : {}), ...(agentPath ? { agent_path: agentPath } : {}), git: { branch } } }]);
+    lines.push([start - 1, { timestamp: iso(start), type: "session_meta", payload: { id, timestamp: iso(start), cwd, originator: "codex_exec", cli_version: "0.120.0", source: "exec", ...(nickname ? { agent_nickname: nickname } : {}), ...(agentPath ? { agent_path: agentPath } : {}), ...(parentThread ? { parent_thread_id: parentThread } : {}), git: { branch } } }]);
     at(start, "turn_context", { cwd, model: "gpt-6-luna", approval_policy: "never" });
     // No code: an output with no exit status, as some Codex calls record.
     const out = (text, code) => (code == null ? text : JSON.stringify({ output: text, metadata: { exit_code: code, duration_seconds: 0 } }));
@@ -314,7 +319,7 @@ export function write(out, { extras = false } = {}) {
       failed: (t) => at(t, "event_msg", { type: "task_complete", error: { message: "the layout suite failed" } }),
       tokens: (t) => {
         const modelsUsed = Object.values(SESS[id]?.tokensByModel ?? {});
-        const use = modelsUsed.reduce((sum, value) => ({ input: sum.input + value.input, cache_read: sum.cache_read + value.cache_read, output: sum.output + value.output }), { input: 0, cache_read: 0, output: 0 });
+        const use = modelsUsed.reduce((sum, value) => ({ input: sum.input + value.input, cache_read: sum.cache_read + (value.cacheRead ?? value.cache_read ?? 0), output: sum.output + value.output }), { input: 0, cache_read: 0, output: 0 });
         const input = modelsUsed.length ? use.input : Math.round(tokens[0] * 1e6), cached = modelsUsed.length ? use.cache_read : Math.round(tokens[1] * 1e6), output = modelsUsed.length ? use.output : Math.round(tokens[2] * 1e6);
         const limits = SESS[id]?.rate_limits;
         const window = (source) => ({ window_minutes: source.minutes, used_percent: source.used_percent, resets_in_seconds: (Date.parse(source.resets_at) - Date.parse(limits.recorded_at)) / 1000 });
@@ -337,7 +342,7 @@ export function write(out, { extras = false } = {}) {
   const patchOf = (file, diff) => "*** Begin Patch\n*** Update File: " + file + "\n@@\n" + diff.map(([, x]) => x).join("\n") + "\n*** End Patch\n";
   // h-codex: harbor's Codex run, implementing the offline flush; a patch is being applied now.
   {
-    const t = tx("h-codex"), c = codex("h-codex", ms(T(11, 52)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-codex"].tokens });
+    const t = tx("h-codex"), c = codex("h-codex", ms(T(11, 52)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-codex"].tokens, parentThread: "harbor" });
     c.user(ms(T(11, 52)), "Semon-Parent: claude:harbor:toolu-h2\n" + brief("h2"));
     c.harness(ms(T(11, 52), 1), t[1].label);
     c.think(ms(T(11, 52), 19), "Flush in queue order and stop at the first Nack; commit only after an Ack.");
@@ -352,17 +357,18 @@ export function write(out, { extras = false } = {}) {
   }
   // h-review-codex: the review's Codex run, launched by its child Claude session.
   {
-    const c = codex("h-review-codex", ms(T(12, 36)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-review-codex"].tokens });
+    const rt = tx("h-review-codex"), c = codex("h-review-codex", ms(T(12, 36)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-review-codex"].tokens, nickname: SESS["h-review-codex"].name, parentThread: "h-review" });
     c.user(ms(T(12, 36)), "Semon-Parent: claude:h-review:toolu-h19\n" + brief("h19"));
-    c.call(ms(T(12, 37)), "call-h19", "Read", { file_path: path.join(harborCwd, "crates/sync/src/flush.rs") });
-    c.output(ms(T(12, 37), 300), "call-h19", "while let Some(batch) = queue.oldest() { /* stop on Nack */ }", 0);
-    c.busy(ms(T(12, 36)), ms(T(12, 40)));
-    c.tokens(ms(T(12, 39)));
+    c.call(ms(T(12, 37)), "call-h19", "Read", { file_path: path.join(harborCwd, rt[1].arg) });
+    c.output(ms(T(12, 37), 0, 300), "call-h19", rt[1].out, 0);
+    c.call(ms(T(12, 39), 57), "call-h19-live", "Read", { file_path: path.join(harborCwd, rt[1].arg) });
+    c.busy(ms(T(12, 36)), ms(T(12, 38)));
+    c.tokens(ms(T(12, 38)));
     c.save(); locked("h-review-codex");
   }
   // q-codex: quill's Codex run; the layout suite failed and it handed back.
   {
-    const t = tx("q-codex"), c = codex("q-codex", ms(T(11, 20)), { cwd: quillCwd, branch: "feat/pdf-export", tokens: SESS["q-codex"].tokens, agentPath: "workers/pdf-export" });
+    const t = tx("q-codex"), c = codex("q-codex", ms(T(11, 20)), { cwd: quillCwd, branch: "feat/pdf-export", tokens: SESS["q-codex"].tokens, agentPath: "workers/pdf-export", parentThread: "quill" });
     c.user(ms(T(11, 20)), "Semon-Parent: claude:quill:toolu-h6\n" + brief("h6"));
     c.harness(ms(T(11, 20), 1), t[1].label);
     c.shell(ms(T(11, 22)), "call-y1", t[2].arg);

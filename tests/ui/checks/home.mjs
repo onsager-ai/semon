@@ -62,6 +62,7 @@ export default async function homeCheck(browser) {
       await page.click("#lead-btn"); await page.waitForTimeout(280);
       await page.evaluate((id) => [...document.querySelectorAll("#lanes > .treeitem .srow")].find((x) => x.dataset.id === id)?.click(), treePair.from);
       await afterTitle(page, D.SESS[treePair.from].name);
+      await page.waitForFunction(() => { const s = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main"); return s && s.scrollHeight - s.scrollTop - s.clientHeight <= 1; });
       out.tree.sidebarOpensAtEnd = await page.evaluate(() => { const s = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main"); return s.scrollHeight - s.scrollTop - s.clientHeight <= 1; });
     }
     await nav("sessions");
