@@ -730,6 +730,7 @@ mod tests {
                 since: Duration::from_secs(86400),
                 session: None,
                 facts: None,
+                scan_window: false,
             };
             let home = Self { root, options };
             home.write("proc/locks", "");
@@ -1231,6 +1232,7 @@ mod tests {
             since: Duration::from_secs(86400),
             session: None,
             facts: None,
+            scan_window: false,
         };
         let mut cache = EventCache::default();
         let built = build(&options, &mut cache, &mut false, &mut Texts::default(), now).unwrap();

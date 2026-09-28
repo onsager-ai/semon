@@ -187,6 +187,9 @@ pub(crate) struct SessionFacts {
     pub(crate) last: Option<i64>,
     /// Exact token counts; `None` for a stub, which has no logs.
     pub(crate) tokens: Option<crate::Tokens>,
+    /// A log line names an earlier file of this session (its `session_id`)
+    /// that the scan window didn't read: the turns in it are missing.
+    pub(crate) turns_truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -223,6 +226,9 @@ pub(crate) struct Built {
     pub(crate) tx: BTreeMap<String, Transcript>,
     /// Each session's facts for the agent read surface, by session key.
     pub(crate) facts: BTreeMap<String, SessionFacts>,
+    /// Where the scan window started (epoch ms): files last modified before
+    /// it weren't read. `None` when every file was.
+    pub(crate) window_start: Option<i64>,
     #[cfg(test)]
     pub(crate) handoffs: Vec<Handoff>,
     #[cfg(test)]
@@ -928,7 +934,8 @@ pub(crate) fn working_dirs(
     cache: &mut EventCache,
     dirty: &mut bool,
 ) -> io::Result<BTreeSet<String>> {
-    let files = scan(options, cache, dirty, &mut Texts::default())?;
+    let cutoff = scan_cutoff(options, now_ms());
+    let (files, _) = scan(options, cache, dirty, &mut Texts::default(), cutoff)?;
     let mut cwds = BTreeSet::new();
     for file in &files {
         cwds.extend(file.summary.cwd.clone());
@@ -941,18 +948,49 @@ pub(crate) fn working_dirs(
     Ok(cwds)
 }
 
+/// Where a scan window starts at `now` (epoch ms): `None` when every file
+/// is read ([`Options::scan_window`] off, or `all`).
+pub(crate) fn scan_cutoff(options: &Options, now: i64) -> Option<i64> {
+    (options.scan_window && !options.all)
+        .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)))
+}
+
+/// A file's modification time (epoch ms).
+fn modified_ms(path: &Path) -> Option<i64> {
+    let time = fs::metadata(path).ok()?.modified().ok()?;
+    i64::try_from(time.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
+}
+
+/// Every source file, with its event index. A file last modified before
+/// `cutoff` isn't read at all: its cached index is kept (it counts as seen)
+/// for builds that read every file. Also returns the ids of the top-level
+/// Claude files so skipped.
 fn scan(
     options: &Options,
     cache: &mut EventCache,
     dirty: &mut bool,
     texts: &mut Texts,
-) -> io::Result<Vec<SourceFile>> {
+    cutoff: Option<i64>,
+) -> io::Result<(Vec<SourceFile>, BTreeSet<String>)> {
     let projects = options.claude_home.join("projects");
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut skipped = BTreeSet::new();
+    let outside = |path: &Path| {
+        cutoff.is_some_and(|cutoff| modified_ms(path).is_some_and(|modified| modified < cutoff))
+    };
     let mut paths = Vec::new();
     file_list(&projects, &mut paths, "jsonl")?;
     for path in paths {
+        if outside(&path) {
+            seen.insert(path.to_string_lossy().into_owned());
+            if path.parent().and_then(Path::parent) == Some(projects.as_path())
+                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+            {
+                skipped.insert(stem.to_owned());
+            }
+            continue;
+        }
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
@@ -1021,6 +1059,10 @@ fn scan(
     let mut paths = Vec::new();
     file_list(&options.codex_home.join("sessions"), &mut paths, "jsonl")?;
     for path in paths {
+        if outside(&path) {
+            seen.insert(path.to_string_lossy().into_owned());
+            continue;
+        }
         let Ok(meta) = texts.meta(&path, true, codex_meta) else {
             continue;
         };
@@ -1068,7 +1110,7 @@ fn scan(
         };
         seen.contains(file.to_string_lossy().as_ref())
     });
-    Ok(files)
+    Ok((files, skipped))
 }
 
 // ---- Lineages: exact links only (M0, D4, D5) ---------------------------------------------
@@ -1455,6 +1497,7 @@ impl<'a> Builder<'a> {
     /// gives a Codex run's writer-lock holder and whether it runs.
     fn session_facts(
         &self,
+        skipped: &BTreeSet<String>,
         codex_process: impl Fn(&str) -> (Option<u32>, Option<bool>),
     ) -> BTreeMap<String, SessionFacts> {
         self.sessions
@@ -1496,6 +1539,14 @@ impl<'a> Builder<'a> {
                     first: session.first,
                     last: session.last,
                     tokens: (session.kind != SessKind::Stub).then(|| session.tokens.clone()),
+                    turns_truncated: session.files.iter().any(|file| {
+                        self.files[*file]
+                            .summary
+                            .links
+                            .session_ids
+                            .iter()
+                            .any(|id| skipped.contains(id))
+                    }),
                 };
                 (session.key.clone(), facts)
             })
@@ -3541,8 +3592,9 @@ pub(crate) fn arg_summary(
 // ---- Build -------------------------------------------------------------------------------
 
 /// Builds the model from the whole of `~/.claude` and `~/.codex`: links need
-/// both ends, so every file is indexed whatever the window. The window only
-/// trims what is returned.
+/// both ends, so every file is indexed whatever the window, and the window
+/// only trims what is returned. With [`Options::scan_window`], files last
+/// modified before the window aren't read at all.
 pub(crate) fn build(
     options: &Options,
     cache: &mut EventCache,
@@ -3550,7 +3602,8 @@ pub(crate) fn build(
     texts: &mut Texts,
     now: i64,
 ) -> io::Result<Built> {
-    let files = scan(options, cache, dirty, texts)?;
+    let window_start = scan_cutoff(options, now);
+    let (files, skipped) = scan(options, cache, dirty, texts, window_start)?;
     #[cfg(test)]
     {
         BUILDS.with(|builds| builds.set(builds.get() + 1));
@@ -3597,7 +3650,7 @@ pub(crate) fn build(
             }
         }
     }
-    let session_facts = builder.session_facts(|id| match lock_pids.as_ref() {
+    let session_facts = builder.session_facts(&skipped, |id| match lock_pids.as_ref() {
         Some(locks) => match locks.get(id) {
             Some(pid) => (Some(*pid), Some(true)),
             // A lock file no process holds: its writer is gone. Without a
@@ -3623,7 +3676,9 @@ pub(crate) fn build(
         .iter()
         .map(|session| (session.key.clone(), session.out.clone()))
         .collect();
-    if !options.all {
+    // A scan window already chose the files; what it read is returned
+    // whole, so an answer is never trimmed inside a session.
+    if !options.all && !options.scan_window {
         let cutoff = now - i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX);
         handoffs.retain(|handoff| {
             handoff.at >= cutoff
@@ -3789,6 +3844,7 @@ pub(crate) fn build(
         files: slot_files,
         tx,
         facts: session_facts,
+        window_start,
         #[cfg(test)]
         handoffs,
         #[cfg(test)]

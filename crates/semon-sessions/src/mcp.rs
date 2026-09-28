@@ -27,7 +27,9 @@ const INVALID_PARAMS: i64 = -32602;
 const INSTRUCTIONS: &str = "Semon reads the local Claude Code and Codex session logs, read-only. \
     list_sessions and stalls give facts about sessions (state, last log line, process, parent and children); \
     get_session adds its turns and handoffs; read_transcript and find read what the sessions said. \
-    Times are epoch milliseconds. A field Semon can't know exactly is null.";
+    Times are epoch milliseconds. A field Semon can't know exactly is null. \
+    The tools read a window of recent logs (30 days unless the server was started with --since or --all); \
+    every answer names its window_start, and a since before it is the error outside_window.";
 
 /// Serves MCP over `input` and `output` until `input` ends.
 pub fn serve_mcp(
@@ -169,6 +171,7 @@ mod tests {
             since: Duration::from_secs(86400),
             session: None,
             facts: None,
+            scan_window: false,
         };
         (Query::new(options), root)
     }

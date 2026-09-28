@@ -48,6 +48,7 @@ impl Home {
             since: Duration::from_secs(86400),
             session: None,
             facts: None,
+            scan_window: false,
         };
         let home = Self { root, options };
         home.write("proc/locks", "");

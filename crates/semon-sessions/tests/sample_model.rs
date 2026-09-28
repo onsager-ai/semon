@@ -25,6 +25,7 @@ fn print_sample_model() {
         since: Duration::from_secs(24 * 60 * 60),
         session: None,
         facts: None,
+        scan_window: false,
     };
     println!("{}", model_json_at(&options, now).expect("model"));
 }

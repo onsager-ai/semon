@@ -43,6 +43,9 @@ struct HomeArgs {
     options: semon_sessions::Options,
     /// `--machine DIR`, repeated: several machines' homes in one model.
     machines: Vec<PathBuf>,
+    /// `--since DURATION`: how far back the model reads (the window).
+    /// `--all` (in `options`) reads everything.
+    window: Option<std::time::Duration>,
 }
 
 impl HomeArgs {
@@ -60,17 +63,31 @@ impl HomeArgs {
             "--cache" => self.options.cache = value()?.into(),
             "--facts" => self.options.facts = Some(value()?.into()),
             "--machine" => self.machines.push(PathBuf::from(value()?)),
+            "--since" => self.window = Some(semon_sessions::parse_duration(&value()?)?),
+            "--all" => self.options.all = true,
             _ => return Ok(false),
         }
         Ok(true)
     }
 
-    /// The read surface over these homes.
+    fn check(&self) -> Result<(), String> {
+        if self.options.all && self.window.is_some() {
+            return Err("--since and --all are exclusive".into());
+        }
+        Ok(())
+    }
+
+    /// The read surface over these homes, within the window: `--since`,
+    /// 30 days by default, or everything with `--all`.
     fn query(&self) -> semon_sessions::Query {
+        let options = semon_sessions::Options {
+            since: self.window.unwrap_or(semon_sessions::DEFAULT_WINDOW),
+            ..self.options.clone()
+        };
         if self.machines.is_empty() {
-            semon_sessions::Query::new(self.options.clone())
+            semon_sessions::Query::new(options)
         } else {
-            semon_sessions::Query::with_machines(machine_options(&self.options, &self.machines))
+            semon_sessions::Query::with_machines(machine_options(&options, &self.machines))
         }
     }
 }
@@ -252,7 +269,11 @@ fn parse_query_args(mut arguments: impl Iterator<Item = String>) -> Result<Query
             "--json" => json = true,
             "-h" | "--help" => return Err(query_usage()),
             flag if flag.starts_with("--") => {
-                let key = flag["--".len()..].replace('-', "_");
+                // `--since` is the window; a tool's own `since` is `--newer-than`.
+                let key = match flag {
+                    "--newer-than" => "since".to_owned(),
+                    _ => flag["--".len()..].replace('-', "_"),
+                };
                 let Some(property) = spec.input_schema["properties"].get(&key) else {
                     return Err(format!("{tool} has no argument {flag}\n{}", query_usage()));
                 };
@@ -281,6 +302,7 @@ fn parse_query_args(mut arguments: impl Iterator<Item = String>) -> Result<Query
             }
         }
     }
+    home.check()?;
     Ok(QueryArgs {
         home,
         tool,
@@ -305,6 +327,7 @@ fn parse_mcp_args(mut arguments: impl Iterator<Item = String>) -> Result<HomeArg
             _ => format!("unknown argument: {argument}"),
         });
     }
+    home.check()?;
     Ok(home)
 }
 
@@ -900,7 +923,10 @@ fn query_usage() -> String {
                 .into_iter()
                 .flatten()
                 .filter(|(name, _)| Some(name.as_str()) != tool.positional)
-                .map(|(name, _)| format!("[--{} VALUE]", name.replace('_', "-")))
+                .map(|(name, _)| match name.as_str() {
+                    "since" => "[--newer-than VALUE]".to_owned(),
+                    _ => format!("[--{} VALUE]", name.replace('_', "-")),
+                })
                 .collect();
             if !flags.is_empty() {
                 line.push(' ');
@@ -910,8 +936,10 @@ fn query_usage() -> String {
         })
         .collect();
     format!(
-        "Usage: semon query TOOL [ARGUMENTS] [--json] [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
-         The agent read surface: one tool's answer as JSON (one line with --json). The tools:\n{}",
+        "Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
+         The agent read surface: one tool's answer as JSON (one line with --json). It reads the log files modified\n\
+         within the window, --since (30d by default), or all of them with --all. A tool's own since argument is\n\
+         --newer-than, a filter inside the window. The tools:\n{}",
         tools.join("\n")
     )
 }
@@ -924,12 +952,13 @@ fn usage() -> String {
          --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
          --machine DIR (repeated, with --model-json or --serve): one view over several machines' homes, DIR/{{claude,codex,proc}}.\n\
          \n\
-         Usage: semon query TOOL [ARGUMENTS] [--json] [home options as for sessions, and --machine DIR]\n\
+         Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [home options as for sessions, and --machine DIR]\n\
          The agent read surface over the same session model: list_sessions, get_session, read_transcript, find,\n\
          stalls. `semon query` alone lists each tool's arguments.\n\
          \n\
-         Usage: semon mcp [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
-         The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener.\n\
+         Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
+         The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener. Both read\n\
+         the log files modified within the window, --since (30d by default), or all of them with --all.\n\
          \n\
          Usage: semon push --to URL --token-file PATH [--watch] [--state PATH] [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\
