@@ -180,7 +180,12 @@ async function referencePage(browser, size, dark, html) {
 const FACE_LOADS = ['400 14px "Instrument Sans"', '500 14px "Instrument Sans"', '600 14px "Instrument Sans"', '400 12px "JetBrains Mono"', '500 12px "JetBrains Mono"', '400 14px "Source Serif 4"', '600 14px "Source Serif 4"'];
 async function ready(page) {
   await page.evaluate((faces) => Promise.all(faces.map((f) => document.fonts.load(f))).then(() => document.fonts.ready), FACE_LOADS);
-  await page.evaluate(() => { window.scrollTo(0, 0); const m = document.querySelector("#main"); if (m) m.scrollTop = 0; });
+  await page.evaluate(() => {
+    const state = history.state, sessionAtEnd = state?.v === "session" && !state.turn, main = document.querySelector("#main");
+    if (!sessionAtEnd) { window.scrollTo(0, 0); if (main) main.scrollTop = 0; }
+    else if (matchMedia("(max-width: 760px)").matches) window.scrollTo(0, document.documentElement.scrollHeight);
+    else if (main) main.scrollTop = main.scrollHeight;
+  });
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
   await page.waitForTimeout(120);
 }
@@ -226,14 +231,6 @@ async function nav(page, route, D, mockup) {
   if (!mockup) return goto(page, route, D);
   await page.evaluate((r) => { history.pushState(r, ""); dispatchEvent(new PopStateEvent("popstate", { state: r })); }, route);
   await page.waitForTimeout(80);
-  // The served viewer opens an unlinked session at its latest entry; direct mockup routes need the same viewport.
-  if (route.v === "session" && !route.turn) {
-    await page.evaluate(() => {
-      if (matchMedia("(max-width: 760px)").matches) window.scrollTo(0, document.documentElement.scrollHeight);
-      else { const main = document.querySelector("#main"); main.scrollTop = main.scrollHeight; }
-    });
-    await page.waitForTimeout(80);
-  }
 }
 
 const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name + ".png"), PNG.sync.write(img)); };
