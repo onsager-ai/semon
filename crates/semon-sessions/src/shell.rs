@@ -43,6 +43,50 @@ mod tests {
         })
     }
 
+    /// Every class name written as `.name` in `css`, in the same "word" sense as [`has_class`]: a dot followed by a
+    /// run of ASCII alphanumerics, `-` or `_`, not itself preceded by one of those characters (so `12.5px` and
+    /// `step-num` do not yield a spurious `5px` or split `step`/`num`).
+    fn defined_classes(css: &str) -> std::collections::BTreeSet<&str> {
+        let mut classes = std::collections::BTreeSet::new();
+        for (start, _) in css.match_indices('.') {
+            let prev = css[..start].chars().next_back();
+            if prev.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                continue; // part of a longer token (a decimal number, or another class's tail)
+            }
+            let rest = &css[start + 1..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                .unwrap_or(rest.len());
+            if end == 0 || rest.as_bytes()[0].is_ascii_digit() {
+                continue; // not a class name (empty, or a number like ".5")
+            }
+            classes.insert(&rest[..end]);
+        }
+        classes
+    }
+
+    #[test]
+    fn shell_classes_do_not_collide_with_viewer_classes() {
+        // Chrome classes the shell's contract deliberately shares with the viewer; everything else shell.css
+        // defines must be its own name so cascading shell.css after viewer.css never inherits unrelated rules
+        // (as bare .steps/.step once did, leaking the transcript's rail into the shell's steps component).
+        const SHARED_CHROME: [&str; 17] = [
+            "app", "sidebar", "brandrow", "mark", "scrim", "main", "topbar", "ttl", "ibtn", "lead",
+            "nav-item", "page", "ph", "sec-h", "list", "empty", "dot",
+        ];
+        let viewer_classes = defined_classes(include_str!("viewer.css"));
+        let shell_classes = defined_classes(include_str!("shell.css"));
+        for class in &shell_classes {
+            if SHARED_CHROME.contains(class) {
+                continue;
+            }
+            assert!(
+                !viewer_classes.contains(class),
+                "shell.css class .{class} is also defined by viewer.css; rename the shell.css one (e.g. with an sh- prefix)"
+            );
+        }
+    }
+
     #[test]
     fn documented_classes_are_defined_by_the_stylesheets() {
         const VIEWER_CLASSES: [&str; 17] = [

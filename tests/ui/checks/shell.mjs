@@ -72,6 +72,30 @@ const phoneTargets = (page) => page.evaluate((targetSelector) => {
     .map((element) => ({ selector: selector(element), height: Math.round(element.getBoundingClientRect().height * 10) / 10 }));
 }, PHONE_TARGET_SELECTOR);
 
+// Polls a selector's bounding rect (rounded to a tenth of a pixel) until it holds for three consecutive animation
+// frames, or a timeout passes. Used so a screenshot or an assertion never lands mid-transition: a CSS transition
+// (the drawer's slide, in this codebase) keeps changing the rect every frame until it finishes, so waiting for it
+// to stop moving is equivalent to waiting for the transition to end, without depending on a "transitionend" event
+// firing for the right property (or at all, if a browser coalesces or skips it).
+const stableRect = (page, selector, timeout = 1500) => page.evaluate(({ selector, timeout }) => new Promise((resolve) => {
+  const deadline = performance.now() + timeout;
+  let lastKey = null, stableFrames = 0;
+  const read = () => {
+    const element = document.querySelector(selector);
+    if (!element) return null;
+    const box = element.getBoundingClientRect();
+    return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+  };
+  const step = () => {
+    const box = read();
+    const key = box ? [box.left, box.top, box.width, box.height].map((n) => Math.round(n * 10)).join(",") : "none";
+    if (key === lastKey) stableFrames += 1; else { stableFrames = 0; lastKey = key; }
+    if (stableFrames >= 3 || performance.now() > deadline) { resolve(box); return; }
+    requestAnimationFrame(step);
+  };
+  step();
+}), { selector, timeout });
+
 const chromeDimensions = (page) => page.evaluate(() => {
   const computed = (element) => {
     if (!element) return null;
@@ -101,7 +125,7 @@ export default async function shellCheck(browser) {
         const audit = await geometry(page);
         results[key].geometry = audit;
         if (name === "shell-gallery") {
-          const longNameLength = await page.locator(".rows .row:last-child .nm").evaluate((element) => element.textContent.length);
+          const longNameLength = await page.locator(".rows .row:last-child .sh-nm").evaluate((element) => element.textContent.length);
           results[key].longNameLength = longNameLength;
           r.expect(longNameLength === 90, key + " long row name length=" + longNameLength + " expected 90");
         }
@@ -149,7 +173,20 @@ export default async function shellCheck(browser) {
           await page.waitForTimeout(30);
 
           await page.click("#lead-btn");
+          const openSidebarRect = await stableRect(page, "#sidebar");
           const drawerOpen = await page.evaluate(() => document.body.classList.contains("drawer-open"));
+          const { scrimVisible, innerWidth: viewportWidth } = await page.evaluate(() => {
+            const scrim = document.getElementById("scrim");
+            const box = scrim?.getBoundingClientRect();
+            const style = scrim ? getComputedStyle(scrim) : null;
+            const scrimVisible = !!scrim && box.width > 0 && box.height > 0 && Number.parseFloat(style.opacity) > 0 && style.pointerEvents !== "none";
+            return { scrimVisible, innerWidth };
+          });
+          results[key].drawerSidebar = { rect: openSidebarRect, scrimVisible };
+          r.expect(!!openSidebarRect && openSidebarRect.left >= -0.5, key + " open drawer sidebar left=" + openSidebarRect?.left + " expected >= 0");
+          r.expect(!!openSidebarRect && openSidebarRect.right <= viewportWidth + 0.5, key + " open drawer sidebar right=" + openSidebarRect?.right + " expected <= " + viewportWidth);
+          r.expect(!!openSidebarRect && openSidebarRect.width >= 240, key + " open drawer sidebar width=" + openSidebarRect?.width + " expected >= 240");
+          r.expect(scrimVisible, key + " scrim is not visible while the drawer is open");
           const drawerAudit = await geometry(page);
           const drawerTargets = await phoneTargets(page);
           const shortDrawerTargets = drawerTargets.filter((target) => target.height < 44);
@@ -157,33 +194,42 @@ export default async function shellCheck(browser) {
           r.expect(drawerAudit.scrollWidth <= drawerAudit.innerWidth, key + " drawer document scrollWidth=" + drawerAudit.scrollWidth + " innerWidth=" + drawerAudit.innerWidth);
           r.expect(drawerAudit.right.length === 0, key + " drawer elements past the right edge: " + JSON.stringify(drawerAudit.right));
           r.expect(shortDrawerTargets.length === 0, key + " drawer shell targets shorter than 44px: " + JSON.stringify(shortDrawerTargets));
-          await page.screenshot({ path: path.join(output, key + "-drawer.png"), fullPage: true });
+          // A viewport screenshot, not fullPage: the drawer and scrim are fixed-position, so only the viewport shows
+          // them where the user actually sees them.
+          await page.screenshot({ path: path.join(output, key + "-drawer.png"), fullPage: false });
           await page.keyboard.press("Escape");
+          const closedSidebarRect = await stableRect(page, "#sidebar");
           const drawerAfterEscape = await page.evaluate(() => ({
             open: document.body.classList.contains("drawer-open"),
             focus: document.activeElement?.id,
             expanded: document.querySelector("#lead-btn")?.getAttribute("aria-expanded"),
           }));
-          results[key].drawer = { drawerOpen, ...drawerAfterEscape };
+          results[key].drawer = { drawerOpen, ...drawerAfterEscape, closedSidebarRect };
           r.expect(drawerOpen, key + " menu button did not open the drawer");
           r.expect(!drawerAfterEscape.open && drawerAfterEscape.focus === "lead-btn" && drawerAfterEscape.expanded === "false", key + " Escape did not close the drawer and restore focus: " + JSON.stringify(drawerAfterEscape));
+          r.expect(!!closedSidebarRect && closedSidebarRect.right <= 0.5, key + " sidebar was not fully off screen after closing: " + JSON.stringify(closedSidebarRect));
 
           await page.click('#remove-form button[type="submit"]');
+          await page.waitForFunction(() => document.querySelector("#remove-sheet")?.open === true);
+          await stableRect(page, "#remove-sheet");
           const sheet = await page.evaluate(() => {
             const dialog = document.querySelector("#remove-sheet");
             const box = dialog.getBoundingClientRect();
-            return { open: dialog.open, bottom: box.bottom, height: box.height, viewport: innerHeight };
+            const main = document.getElementById("main");
+            return { open: dialog.open, bottom: box.bottom, height: box.height, viewport: innerHeight, mainLeft: main ? main.getBoundingClientRect().left : null };
           });
           results[key].sheet = sheet;
           r.expect(sheet.open, key + " confirm sheet did not open");
           r.expect(Math.abs(sheet.bottom - sheet.viewport) <= 1, key + " confirm sheet bottom=" + sheet.bottom + " viewport=" + sheet.viewport);
+          r.expect(sheet.mainLeft != null && Math.abs(sheet.mainLeft) <= 0.5, key + " main was shifted to left=" + sheet.mainLeft + " while the sheet was open (the page behind it must not move)");
           const openAudit = await geometry(page);
           const sheetTargets = await phoneTargets(page);
           const shortSheetTargets = sheetTargets.filter((target) => target.height < 44);
           r.expect(openAudit.scrollWidth <= openAudit.innerWidth, key + " sheet document scrollWidth=" + openAudit.scrollWidth + " innerWidth=" + openAudit.innerWidth);
           r.expect(openAudit.right.length === 0, key + " sheet elements past the right edge: " + JSON.stringify(openAudit.right));
           r.expect(shortSheetTargets.length === 0, key + " open sheet shell targets shorter than 44px: " + JSON.stringify(shortSheetTargets));
-          await page.screenshot({ path: path.join(output, key + "-sheet.png"), fullPage: true });
+          // A viewport screenshot, not fullPage: dialog.sheet is fixed-position.
+          await page.screenshot({ path: path.join(output, key + "-sheet.png"), fullPage: false });
           const clickPoints = await page.evaluate(() => {
             const box = document.querySelector("#remove-sheet").getBoundingClientRect();
             return { paddingX: box.left + 8, paddingY: box.top + box.height / 2, backdropX: innerWidth / 2, backdropY: box.top - 8 };

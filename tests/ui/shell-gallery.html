@@ -18,14 +18,26 @@
       </button>
     </div>
     <nav id="nav" aria-label="Pages">
-      <a class="nav-item" href="#overview">Overview</a>
-      <a class="nav-item" href="#devices" aria-current="page">Devices</a>
-      <a class="nav-item" href="#activity">Activity</a>
-      <a class="nav-item" href="#settings">Settings</a>
+      <a class="nav-item" href="#overview">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-7 8 7M6 9.5V20h12V9.5M10 20v-5h4v5"></path></svg>
+        <span>Overview</span>
+      </a>
+      <a class="nav-item" href="#devices" aria-current="page">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h18v11H3zM8 20h8M12 16v4"></path></svg>
+        <span>Devices</span>
+      </a>
+      <a class="nav-item" href="#activity">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"></path></svg>
+        <span>Activity</span>
+      </a>
+      <a class="nav-item" href="#settings">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6"></path></svg>
+        <span>Settings</span>
+      </a>
     </nav>
     <div class="account">
       <span class="account-login">sample.user@example.invalid</span>
-      <button class="btn quiet" type="button">Sign out</button>
+      <button class="btn sh-quiet" type="button">Sign out</button>
     </div>
   </aside>
   <div class="scrim" id="scrim"></div>
@@ -55,13 +67,13 @@
 
       <section aria-labelledby="steps-title">
         <h2 class="sec-h" id="steps-title">Getting started</h2>
-        <ol class="steps">
-          <li class="step done">
+        <ol class="sh-steps">
+          <li class="sh-step sh-done">
             <span class="step-num" aria-hidden="true"></span>
             <span class="step-title">Create your profile</span>
             <div class="step-body">Your profile is ready.</div>
           </li>
-          <li class="step current">
+          <li class="sh-step current">
             <span class="step-num" aria-hidden="true"></span>
             <span class="step-title">Connect a device</span>
             <div class="step-body">
@@ -74,7 +86,7 @@
               </div>
             </div>
           </li>
-          <li class="step pending">
+          <li class="sh-step pending">
             <span class="step-num" aria-hidden="true"></span>
             <span class="step-title">Review activity</span>
             <div class="step-body">Recent events will appear after your device connects.</div>
@@ -88,22 +100,22 @@
         <div class="rows">
           <div class="row">
             <span class="dot work" aria-hidden="true"></span>
-            <div class="row-main"><span class="nm">Living room display</span><span class="meta">Working · Seen just now</span></div>
+            <div class="row-main"><span class="sh-nm">Living room display</span><span class="sh-meta">Working · Seen just now</span></div>
             <div class="actions"><span class="status">Online</span></div>
           </div>
           <div class="row">
             <span class="dot idle" aria-hidden="true"></span>
-            <div class="row-main"><span class="nm">Kitchen sensor</span><span class="meta">Idle · Seen 12 minutes ago</span></div>
-            <div class="actions"><button class="btn quiet" type="button">Details</button></div>
+            <div class="row-main"><span class="sh-nm">Kitchen sensor</span><span class="sh-meta">Idle · Seen 12 minutes ago</span></div>
+            <div class="actions"><button class="btn sh-quiet" type="button">Details</button></div>
           </div>
           <div class="row">
             <span class="dot done" aria-hidden="true"></span>
-            <div class="row-main"><span class="nm">Office light</span><span class="meta">Complete · Seen yesterday</span></div>
+            <div class="row-main"><span class="sh-nm">Office light</span><span class="sh-meta">Complete · Seen yesterday</span></div>
             <div class="actions"><span class="status">Ready</span></div>
           </div>
           <div class="row">
             <span class="dot err" aria-hidden="true"></span>
-            <div class="row-main"><span class="nm" aria-label="Sample device with a long name">devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename</span><span class="meta">Error · Check the connection and try again</span></div>
+            <div class="row-main"><span class="sh-nm" aria-label="Sample device with a long name">devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename</span><span class="sh-meta">Error · Check the connection and try again</span></div>
             <div class="actions"><button class="btn danger" type="button">Remove</button></div>
           </div>
         </div>
@@ -123,7 +135,7 @@
             <span class="error">Enter a location with at least two characters.</span>
           </label>
           <div class="btn-row">
-            <button class="btn quiet" type="reset">Reset</button>
+            <button class="btn sh-quiet" type="reset">Reset</button>
             <button class="btn primary" type="submit">Save changes</button>
           </div>
         </form>
@@ -131,7 +143,7 @@
 
       <section aria-label="Messages">
         <div class="notice ok">Saved. See the <a href="#" id="notice-link">devices</a>.</div>
-        <div class="notice err">We could not reach this device. Try again in a moment.</div>
+        <div class="notice sh-err">We could not reach this device. Try again in a moment.</div>
       </section>
 
       <section aria-label="Confirmation">
@@ -144,7 +156,7 @@
           <div class="sheet-h"><span id="remove-title">Remove this device?</span><button class="ibtn" type="button" data-close aria-label="Close sheet">×</button></div>
           <div class="sheet-body"><p>This removes the sample device from the list.</p></div>
           <div class="btn-row">
-            <button class="btn quiet" type="button" data-close>Cancel</button>
+            <button class="btn sh-quiet" type="button" data-close>Cancel</button>
             <button class="btn danger" type="button" value="confirm">Remove device</button>
           </div>
         </dialog>

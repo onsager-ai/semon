@@ -12,6 +12,10 @@ The Rust API exposes `semon_sessions::shell::{VIEWER_CSS, CSS, JS, FONT_FILES, f
 
 Keep the sidebar, scrim, and main content as siblings inside `.app`. The menu button belongs in the top bar. The example page content can be replaced with the server's own content.
 
+The viewer's own nav rows are `<button class="nav-item">` with a leading 18px icon (`<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">`, then a `<span>` label). A served page links between pages instead, so it uses `<a class="nav-item">` with the same icon and label markup; `shell.css` gives `a.nav-item` the viewer's `.nav-item` colours without the browser's underline, and `a.nav-item[aria-current="page"]` the active row's ink colour.
+
+Links inside `.page`, `.signin`, and `.notice` content use `var(--accent)` instead of the browser default, in both the link and visited states.
+
 ```html
 <!doctype html>
 <html lang="en">
@@ -33,14 +37,26 @@ Keep the sidebar, scrim, and main content as siblings inside `.app`. The menu bu
       </button>
     </div>
     <nav id="nav" aria-label="Pages">
-      <a class="nav-item" href="/overview">Overview</a>
-      <a class="nav-item" href="/devices" aria-current="page">Devices</a>
-      <a class="nav-item" href="/activity">Activity</a>
-      <a class="nav-item" href="/settings">Settings</a>
+      <a class="nav-item" href="/overview">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-7 8 7M6 9.5V20h12V9.5M10 20v-5h4v5"></path></svg>
+        <span>Overview</span>
+      </a>
+      <a class="nav-item" href="/devices" aria-current="page">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h18v11H3zM8 20h8M12 16v4"></path></svg>
+        <span>Devices</span>
+      </a>
+      <a class="nav-item" href="/activity">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"></path></svg>
+        <span>Activity</span>
+      </a>
+      <a class="nav-item" href="/settings">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6"></path></svg>
+        <span>Settings</span>
+      </a>
     </nav>
     <div class="account">
       <span class="account-login">sample.user@example.invalid</span>
-      <button class="btn quiet" type="button">Sign out</button>
+      <button class="btn sh-quiet" type="button">Sign out</button>
     </div>
   </aside>
   <div class="scrim" id="scrim"></div>
@@ -129,7 +145,7 @@ dot
 btn
 primary
 danger
-quiet
+sh-quiet
 copied
 btn-row
 field
@@ -138,8 +154,8 @@ error
 rows
 row
 row-main
-nm
-meta
+sh-nm
+sh-meta
 actions
 status
 code
@@ -149,18 +165,21 @@ sheet-h
 sheet-body
 notice
 ok
+sh-err
 hero
-steps
-step
+sh-steps
+sh-step
 step-num
 step-title
 step-body
-done
+sh-done
 current
 pending
 signin
 account
 account-login
 ```
+
+Classes prefixed `sh-` are renamed from a shorter name because `viewer.css` already defines a class of that name for its own, unrelated chrome (for example, the transcript's `.steps`/`.step` draw a numbered rail with a different meaning). A Rust test in `shell.rs` fails the build if a class `shell.css` defines, other than the shared chrome list above, is also defined by `viewer.css`.
 
 Everything else in `viewer.css` is private to the viewer and may change.
