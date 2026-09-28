@@ -5,27 +5,64 @@
       { "name": "home" },
       {
         "name": "sessions",
-        "eval": "/* Invoke the mockup's own go() through its stable navigation control. */ document.querySelector('button[data-go=\"sessions\"]').click()"
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click()"
       },
       {
         "name": "machines",
-        "eval": "/* Invoke the mockup's own go() through its stable navigation control. */ document.querySelector('button[data-go=\"machines\"]').click()"
+        "eval": "document.querySelector('button[data-go=\"machines\"]').click()"
       },
       {
-        "name": "long-session",
-        "eval": "/* Open the long transcript through the session list's goSession() click handler. */ document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click()"
+        "name": "analytics-7d",
+        "eval": "document.querySelector('button[data-go=\"analytics\"]').click(); [...document.querySelectorAll('.analytics-range button')].find((b) => b.textContent.trim() === '7 d').click();"
+      },
+      {
+        "name": "analytics-slice",
+        "eval": "document.querySelector('button[data-go=\"analytics\"]').click(); [...document.querySelectorAll('.analytics-range button')].find((b) => b.textContent.trim() === '7 d').click(); var hit = document.querySelector('.chart-hit'); var rect = hit.getBoundingClientRect(); var x = rect.left + rect.width * 0.5, y = rect.top + rect.height * 0.5; hit.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x, clientY: y }));"
+      },
+      {
+        "name": "session-jump",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); var phone = window.matchMedia('(max-width: 760px)').matches; if (phone) { window.scrollBy(0, -320); } else { document.querySelector('#main').scrollTop -= 320; }",
+        "wait": 6500
+      },
+      {
+        "name": "session-details-cost",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.meta-hit').click(); document.querySelector('.session-details .cost-row').click();"
+      },
+      {
+        "name": "parent-runs",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.meta-runs').click();"
       },
       {
         "name": "child-session",
-        "eval": "/* Open harbor, then its h2 handoff calls goSession() for the child run. */ document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.hcard[data-h=\"h2\"]').click()"
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.hcard[data-h=\"h2\"]').click();"
+      },
+      {
+        "name": "grandchild-session",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.hcard[data-h=\"h3\"]').click(); document.querySelector('.hcard[data-h=\"h19\"]').click();"
       },
       {
         "name": "trace",
-        "eval": "/* The home Trace button invokes the mockup's own goTrace() router path. */ document.querySelector('[aria-label=\"Trace what this turn set off\"]').click()"
+        "eval": "document.querySelector('[aria-label=\"Trace what this turn set off\"]').click()"
       },
       {
-        "name": "timeline",
-        "eval": "/* Invoke the mockup's own go() through its stable navigation control. */ document.querySelector('button[data-go=\"timeline\"]').click()"
+        "name": "desktop-rail",
+        "eval": "document.querySelector('#rail-toggle').click()"
+      },
+      {
+        "name": "wide-mode",
+        "eval": "document.querySelector('.wide-toggle').click()"
+      },
+      {
+        "name": "sidebar-tree",
+        "eval": "document.querySelector('#lead-btn').click(); document.querySelector('[data-tree-toggle=\"ledger\"]').click();"
+      },
+      {
+        "name": "thinking-unmasked",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); var b = document.querySelector('.think'); if (b) { b.scrollIntoView({ block: 'center' }); b.click(); }"
+      },
+      {
+        "name": "thinking-masked",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"principal\"]').click(); var m = document.querySelector('.think-masked'); if (m) m.scrollIntoView({ block: 'center' });"
       }
     ]
   }
