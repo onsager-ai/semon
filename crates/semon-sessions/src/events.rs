@@ -39,7 +39,8 @@ thread_local! {
 /// v8: an item is an operation only when exactly one code-mode call owns it,
 /// and a script error is read from the harness header alone.
 /// v9: token usage is retained by model and Codex rate limits are indexed.
-const CACHE_VERSION: u32 = 9;
+/// v10: assistant billing splits, timestamps and Codex token-count deltas.
+const CACHE_VERSION: u32 = 10;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +68,32 @@ pub(crate) struct MessageUsage {
     pub(crate) model: Option<String>,
     pub(crate) tokens: Tokens,
     pub(crate) model_tokens: ModelTokens,
+    pub(crate) billing: BillingUsage,
+}
+
+/// Per-message facts used only for price calculation.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct BillingUsage {
+    pub(crate) input: u64,
+    pub(crate) output: u64,
+    pub(crate) cache_read: u64,
+    pub(crate) cache_write_5m: u64,
+    pub(crate) cache_write_1h: u64,
+    pub(crate) web_search_requests: u64,
+    pub(crate) speed: Option<String>,
+    pub(crate) service_tier: Option<String>,
+    pub(crate) prompt_size: u64,
+    pub(crate) timestamp: Option<i64>,
+    pub(crate) split_unknown: bool,
+}
+
+/// One Codex cumulative `token_count` event converted to the delta since the
+/// preceding event in its file.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct CodexUsageEvent {
+    pub(crate) model: String,
+    pub(crate) tokens: ModelTokens,
+    pub(crate) timestamp: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -132,6 +159,8 @@ pub(crate) struct FileIndex {
     #[serde(default)]
     codex_tokens_by_model: BTreeMap<String, ModelTokens>,
     #[serde(default)]
+    codex_usage_events: Vec<CodexUsageEvent>,
+    #[serde(default)]
     pub(crate) rate_limits: Option<RateLimits>,
 }
 
@@ -143,6 +172,10 @@ impl FileIndex {
 
     pub(crate) fn codex_usage(&self) -> &BTreeMap<String, ModelTokens> {
         &self.codex_tokens_by_model
+    }
+
+    pub(crate) fn codex_usage_events(&self) -> &[CodexUsageEvent] {
+        &self.codex_usage_events
     }
 
     pub(crate) fn tokens(&self, harness: &str) -> Tokens {
@@ -196,6 +229,40 @@ mod shared {
 pub(crate) struct EventCache {
     version: u32,
     files: BTreeMap<String, CachedFile>,
+    #[serde(default)]
+    reported_runs: BTreeMap<String, BTreeMap<i64, crate::facts::ReportedRunSnapshot>>,
+    #[serde(default)]
+    claude_json_stamp: Option<ReportedFileStamp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ReportedFileStamp {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    modified_ns: u128,
+}
+
+/// Only the named fields deserialize. Other account and project values are
+/// consumed as ignored JSON and never enter the session model or facts.
+#[derive(Deserialize)]
+struct ClaudeJson {
+    #[serde(default)]
+    projects: BTreeMap<String, LastProjectRun>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LastProjectRun {
+    last_session_id: Option<String>,
+    last_start_time: Option<i64>,
+    last_cost: Option<f64>,
+    last_duration: Option<u64>,
+    last_api_duration: Option<u64>,
+    last_tool_duration: Option<u64>,
+    last_lines_added: Option<u64>,
+    last_lines_removed: Option<u64>,
+    last_model_usage: Option<BTreeMap<String, crate::facts::ReportedModelUsage>>,
 }
 
 impl EventCache {
@@ -213,6 +280,8 @@ impl EventCache {
             .unwrap_or_else(|| Self {
                 version: CACHE_VERSION,
                 files: BTreeMap::new(),
+                reported_runs: BTreeMap::new(),
+                claude_json_stamp: None,
             })
     }
 
@@ -222,6 +291,68 @@ impl EventCache {
 
     pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
         self.files.keys().map(String::as_str)
+    }
+
+    pub(crate) fn reported_runs(&self) -> impl Iterator<Item = &crate::facts::ReportedRunSnapshot> {
+        self.reported_runs.values().flat_map(|runs| runs.values())
+    }
+
+    /// Reads only selected fields from the sibling state file when its
+    /// identity, size or modified time changes. A missing/unreadable file is
+    /// an empty input and leaves prior snapshots intact.
+    pub(crate) fn refresh_reported_runs(&mut self, path: &Path, capture_at: i64, dirty: &mut bool) {
+        let Ok(metadata) = fs::metadata(path) else {
+            return;
+        };
+        let modified_ns = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |time| time.as_nanos());
+        #[cfg(unix)]
+        let (dev, ino) = (metadata.dev(), metadata.ino());
+        #[cfg(not(unix))]
+        let (dev, ino) = (0, 0);
+        let stamp = ReportedFileStamp {
+            dev,
+            ino,
+            size: metadata.len(),
+            modified_ns,
+        };
+        if self.claude_json_stamp.as_ref() == Some(&stamp) {
+            return;
+        }
+        let Ok(file) = fs::File::open(path) else {
+            return;
+        };
+        let Ok(root) = serde_json::from_reader::<_, ClaudeJson>(file) else {
+            return;
+        };
+        self.claude_json_stamp = Some(stamp);
+        *dirty = true;
+        for project in root.projects.into_values() {
+            let (Some(session_id), Some(start)) =
+                (project.last_session_id, project.last_start_time)
+            else {
+                continue;
+            };
+            let snapshot = crate::facts::ReportedRunSnapshot {
+                last_session_id: session_id.clone(),
+                last_start_time: start,
+                last_cost: project.last_cost,
+                last_duration: project.last_duration,
+                last_api_duration: project.last_api_duration,
+                last_tool_duration: project.last_tool_duration,
+                last_lines_added: project.last_lines_added,
+                last_lines_removed: project.last_lines_removed,
+                last_model_usage: project.last_model_usage.unwrap_or_default(),
+                capture_at,
+            };
+            self.reported_runs
+                .entry(session_id)
+                .or_default()
+                .insert(start, snapshot);
+        }
     }
 
     /// Drops files that are gone, so the cache doesn't grow without bound.
@@ -1053,6 +1184,27 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
         let cache_write = number(usage, "cache_creation_input_tokens");
         let cache_read = number(usage, "cache_read_input_tokens");
         let output = number(usage, "output_tokens");
+        let split = usage
+            .get("cache_creation")
+            .and_then(Value::as_object)
+            .and_then(|cache_creation| {
+                let five = cache_creation
+                    .get("ephemeral_5m_input_tokens")
+                    .and_then(Value::as_u64)?;
+                let one = cache_creation
+                    .get("ephemeral_1h_input_tokens")
+                    .and_then(Value::as_u64)?;
+                (five.saturating_add(one) == cache_write).then_some((five, one))
+            });
+        let (cache_write_5m, cache_write_1h, split_unknown) = split
+            .map(|(five, one)| (five, one, false))
+            .unwrap_or((cache_write, 0, true));
+        let web_search_requests = usage
+            .get("server_tool_use")
+            .and_then(|tools| tools.get("web_search_requests"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let timestamp = time;
         summary.usage_by_id.insert(
             id.to_owned(),
             MessageUsage {
@@ -1069,6 +1221,22 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                     output,
                     cache_write,
                     cache_read,
+                },
+                billing: BillingUsage {
+                    input,
+                    output,
+                    cache_read,
+                    cache_write_5m,
+                    cache_write_1h,
+                    web_search_requests,
+                    speed: field(usage, "speed").map(str::to_owned),
+                    service_tier: field(usage, "service_tier").map(str::to_owned),
+                    prompt_size: input
+                        .saturating_add(cache_read)
+                        .saturating_add(cache_write_5m)
+                        .saturating_add(cache_write_1h),
+                    timestamp,
+                    split_unknown,
                 },
             },
         );
@@ -1320,6 +1488,11 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                             .entry(model.clone())
                             .or_default()
                             .add(&counts);
+                        summary.codex_usage_events.push(CodexUsageEvent {
+                            model: model.clone(),
+                            tokens: counts,
+                            timestamp: time,
+                        });
                     }
                     summary.codex_tokens = current;
                 }
@@ -1726,6 +1899,147 @@ mod tests {
                 .all(|event| event.u.as_deref() == Some("u-1"))
         );
         assert_eq!(index.events.len(), 2);
+    }
+
+    #[test]
+    fn assistant_billing_facts_split_cache_writes_and_keep_thinking_in_output_once() {
+        let mut index = FileIndex::default();
+        let record = serde_json::json!({
+            "type":"assistant",
+            "timestamp":"2026-09-28T12:00:00.000Z",
+            "message":{
+                "id":"billing-1",
+                "model":"claude-opus-5",
+                "usage":{
+                    "input_tokens":2,
+                    "cache_creation_input_tokens":15,
+                    "cache_read_input_tokens":20,
+                    "output_tokens":7,
+                    "output_tokens_details":{"thinking_tokens":6},
+                    "server_tool_use":{"web_search_requests":3},
+                    "service_tier":"standard",
+                    "speed":"fast",
+                    "cache_creation":{"ephemeral_1h_input_tokens":10,"ephemeral_5m_input_tokens":5}
+                }
+            }
+        });
+        claude(&mut index, &record, 0);
+        let fact = index.usage().get("billing-1").unwrap();
+        assert_eq!(fact.model_tokens.output, 7);
+        assert_eq!(fact.billing.cache_write_5m, 5);
+        assert_eq!(fact.billing.cache_write_1h, 10);
+        assert_eq!(fact.billing.prompt_size, 37);
+        assert_eq!(fact.billing.web_search_requests, 3);
+        assert_eq!(fact.billing.speed.as_deref(), Some("fast"));
+        assert_eq!(fact.billing.service_tier.as_deref(), Some("standard"));
+        assert!(!fact.billing.split_unknown);
+
+        let fallback = serde_json::json!({
+            "type":"assistant",
+            "timestamp":"2026-09-28T12:01:00.000Z",
+            "message":{"id":"billing-2","model":"claude-opus-5","usage":{
+                "input_tokens":1,"cache_creation_input_tokens":9,"cache_read_input_tokens":0,"output_tokens":2
+            }}
+        });
+        claude(&mut index, &fallback, 1);
+        let fact = index.usage().get("billing-2").unwrap();
+        assert_eq!(fact.billing.cache_write_5m, 9);
+        assert_eq!(fact.billing.cache_write_1h, 0);
+        assert!(fact.billing.split_unknown);
+    }
+
+    #[test]
+    fn claude_state_reader_keeps_allowlisted_snapshots_across_overwrites() {
+        let root = std::env::temp_dir().join(format!(
+            "semon-reported-runs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let claude_json = root.join(".claude.json");
+        let cache_path = EventCache::path(&root.join("index.json"));
+        let secrets = ["fixture-secret@example.invalid", "fixture-account-uuid"];
+        let first = serde_json::json!({
+            "oauthAccount":{"emailAddress":secrets[0],"accountUuid":secrets[1]},
+            "projects":{"/private/project/path":{
+                "lastSessionId":"run-one","lastStartTime":1000,"lastCost":1.25,
+                "lastDuration":2000,"lastAPIDuration":1500,"lastToolDuration":300,
+                "lastLinesAdded":4,"lastLinesRemoved":2,"projectSecret":"unlisted-project-value",
+                "lastModelUsage":{"claude-opus-5[1m]":{
+                    "inputTokens":10,"outputTokens":5,"thinkingTokens":3,
+                    "cacheReadInputTokens":20,"cacheCreationInputTokens":4,
+                    "webSearchRequests":1,"costUSD":1.25,"accountSecret":"unlisted-model-value"
+                }}
+            }},
+            "unlistedRootSecret":"unlisted-root-value"
+        });
+        fs::write(&claude_json, first.to_string()).unwrap();
+        let mut cache = EventCache::read(&cache_path);
+        let mut dirty = false;
+        cache.refresh_reported_runs(&claude_json, 2000, &mut dirty);
+        assert!(dirty);
+        cache.save(&cache_path).unwrap();
+        cache = EventCache::read(&cache_path);
+        assert_eq!(cache.reported_runs().count(), 1);
+        let serialized = serde_json::to_string(&cache).unwrap();
+        for secret in secrets.into_iter().chain([
+            "unlisted-project-value",
+            "unlisted-model-value",
+            "unlisted-root-value",
+            "/private/project/path",
+        ]) {
+            assert!(!serialized.contains(secret));
+        }
+        let snapshot = cache.reported_runs().next().unwrap();
+        assert_eq!(
+            snapshot.last_model_usage["claude-opus-5[1m]"].thinking_tokens,
+            3
+        );
+
+        let second = serde_json::json!({
+            "projects":{"/private/project/path":{
+                "lastSessionId":"run-two","lastStartTime":3000,"lastCost":2.0,
+                "lastDuration":4000,"lastAPIDuration":3000,"lastToolDuration":600,
+                "lastLinesAdded":8,"lastLinesRemoved":1,"lastModelUsage":{}
+            }},
+            "oauthAccount":{"emailAddress":secrets[0],"accountUuid":secrets[1]}
+        });
+        fs::write(&claude_json, second.to_string()).unwrap();
+        cache.refresh_reported_runs(&claude_json, 5000, &mut dirty);
+        assert_eq!(cache.reported_runs().count(), 2);
+        cache.save(&cache_path).unwrap();
+        let reopened = EventCache::read(&cache_path);
+        let ids: BTreeSet<_> = reopened
+            .reported_runs()
+            .map(|snapshot| snapshot.last_session_id.as_str())
+            .collect();
+        assert_eq!(ids, ["run-one", "run-two"].into_iter().collect());
+        let serialized = serde_json::to_string(&reopened).unwrap();
+        assert!(!serialized.contains(secrets[0]));
+        assert!(!serialized.contains(secrets[1]));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_or_unreadable_claude_state_is_an_empty_input() {
+        let root = std::env::temp_dir().join(format!(
+            "semon-reported-runs-missing-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let cache_path = EventCache::path(&root.join("index.json"));
+        let mut cache = EventCache::read(&cache_path);
+        let mut dirty = false;
+        cache.refresh_reported_runs(&root.join("missing.json"), 1000, &mut dirty);
+        assert!(cache.reported_runs().next().is_none());
+        fs::create_dir(root.join("unreadable.json")).unwrap();
+        cache.refresh_reported_runs(&root.join("unreadable.json"), 2000, &mut dirty);
+        assert!(cache.reported_runs().next().is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

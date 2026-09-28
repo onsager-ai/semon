@@ -41,6 +41,7 @@ impl Home {
         fs::create_dir_all(&root).unwrap();
         let options = Options {
             claude_home: root.join("claude"),
+            claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
             proc_root: root.join("proc"),
             cache: root.join("index.json"),
@@ -127,6 +128,9 @@ impl Home {
         let path = EventCache::path(&options.cache);
         let mut cache = EventCache::read(&path);
         let mut dirty = false;
+        if options.facts.is_none() {
+            cache.refresh_reported_runs(&options.claude_json, now, &mut dirty);
+        }
         let built = build(options, &mut cache, &mut dirty, &mut Texts::default(), now).unwrap();
         if dirty {
             cache.save(&path).unwrap();
@@ -1710,18 +1714,35 @@ fn a_subagent_message_to_a_sibling_names_its_sender_agent() {
 }
 
 fn golden(name: &str, built: &Built) {
-    let actual =
-        serde_json::to_string_pretty(&serde_json::from_str::<Value>(&built.json(NOW)).unwrap())
-            .unwrap()
-            + "\n";
+    let mut expected_shape: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    // These snapshots cover the legacy model surface. The cost additions
+    // have focused synthetic assertions below and stay out of old fixtures.
+    if let Some(sessions) = expected_shape["sessions"].as_object_mut() {
+        for session in sessions.values_mut() {
+            if let Some(session) = session.as_object_mut() {
+                session.shift_remove("cost");
+                session.shift_remove("reported_runs");
+                session.shift_remove("cost_check");
+            }
+        }
+    }
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/model/golden")
         .join(format!("{name}.json"));
-    if std::env::var_os("SEMON_UPDATE_GOLDEN").is_some() {
+    let expected = fs::read_to_string(&path).unwrap();
+    let previous: Value = serde_json::from_str(&expected).unwrap();
+    // The model version now also covers the cost keys, which were not part
+    // of these compatibility snapshots.
+    let update = std::env::var_os("SEMON_UPDATE_GOLDEN").is_some();
+    if !update {
+        expected_shape["version"] = previous["version"].clone();
+    }
+    let actual = serde_json::to_string_pretty(&expected_shape).unwrap() + "\n";
+    if update {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, &actual).unwrap();
     }
-    assert_eq!(actual, fs::read_to_string(&path).unwrap(), "{name} golden");
+    assert_eq!(actual, expected, "{name} golden");
 }
 
 #[test]
@@ -2220,6 +2241,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         repos: BTreeMap::new(),
         offline_since: None,
         runs: BTreeMap::new(),
+        reported_runs: Vec::new(),
     };
     crate::write_facts(&path, &facts).unwrap();
     let mut options = home.options.clone();
@@ -2238,6 +2260,119 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
     let unknown = home.build_at(&options, NOW);
     assert_eq!(unknown.machine_id, "localhost");
     assert_ne!(unknown.sessions["reader"].state, "work");
+}
+
+#[test]
+fn reported_cost_checks_keep_overwritten_runs_and_drop_account_values() {
+    let home = Home::new();
+    let real_usage = json!({
+        "input_tokens":1034,
+        "output_tokens":2080,
+        "output_tokens_details":{"thinking_tokens":1900},
+        "cache_read_input_tokens":518410,
+        "cache_creation_input_tokens":151872,
+        "cache_creation":{"ephemeral_1h_input_tokens":151872,"ephemeral_5m_input_tokens":0},
+        "server_tool_use":{"web_search_requests":0},
+        "speed":"standard","service_tier":"standard"
+    });
+    home.top(
+        "run-one",
+        &[assistant_usage(
+            "run-one",
+            ts(0, 10),
+            "m-run-one",
+            "claude-opus-5",
+            real_usage.clone(),
+        )],
+    );
+    let first_file = json!({
+        "oauthAccount":{"emailAddress":"fixture-model@example.invalid","accountUuid":"fixture-model-account"},
+        "projects":{"/private/fixture/project":{
+            "lastSessionId":"run-one","lastStartTime":at(0,0),"lastCost":1.835095,
+            "lastDuration":9000,"lastAPIDuration":8000,"lastToolDuration":1000,
+            "lastLinesAdded":12,"lastLinesRemoved":3,"privateProjectValue":"private-project-value",
+            "lastModelUsage":{"claude-opus-5[1m]":{
+                "inputTokens":1034,"outputTokens":2080,"thinkingTokens":1900,
+                "cacheReadInputTokens":518410,"cacheCreationInputTokens":151872,
+                "webSearchRequests":0,"costUSD":1.835095,"privateModelValue":"private-model-value"
+            }}
+        }},
+        "privateRootValue":"private-root-value"
+    });
+    home.write(".claude.json", &first_file.to_string());
+    let first = home.build();
+    assert!((first.sessions["run-one"].cost.usd.unwrap() - 1.835095).abs() < 1e-12);
+    assert_eq!(first.sessions["run-one"].cost_check[0].ok, Some(true));
+    assert_eq!(
+        first.sessions["run-one"].reported_runs[0].by_model["claude-opus-5[1m]"].thinking_tokens,
+        1900
+    );
+    assert_eq!(first.sessions["run-one"].cost.split_unknown_messages, 0);
+
+    home.top(
+        "run-two",
+        &[assistant_usage(
+            "run-two",
+            ts(0, 20),
+            "m-run-two",
+            "claude-opus-5",
+            real_usage,
+        )],
+    );
+    let mut overwritten = first_file;
+    overwritten["projects"]["/private/fixture/project"]["lastSessionId"] = json!("run-two");
+    overwritten["projects"]["/private/fixture/project"]["lastStartTime"] = json!(at(0, 15));
+    overwritten["projects"]["/private/fixture/project"]["lastCost"] = json!(2.0);
+    home.write(".claude.json", &overwritten.to_string());
+    let second = home.build();
+    assert_eq!(second.sessions["run-one"].reported_runs.len(), 1);
+    assert_eq!(second.sessions["run-one"].cost_check[0].ok, Some(true));
+    assert_eq!(second.sessions["run-two"].reported_runs.len(), 1);
+    assert_eq!(second.sessions["run-two"].cost_check[0].ok, Some(false));
+
+    let served = second.json(NOW);
+    let served_json: Value = serde_json::from_str(&served).unwrap();
+    assert!(
+        (served_json["sessions"]["run-one"]["cost"]["usd"]
+            .as_f64()
+            .unwrap()
+            - 1.835095)
+            .abs()
+            < 1e-12
+    );
+    assert_eq!(
+        served_json["sessions"]["run-one"]["cost"]["by_model"]["claude-opus-5"]["tokens"]["cache_write_1h"],
+        151872
+    );
+    assert_eq!(
+        served_json["sessions"]["run-one"]["reported_runs"][0]["duration_ms"],
+        9000
+    );
+    assert_eq!(
+        served_json["sessions"]["run-one"]["cost_check"][0]["ok"],
+        true
+    );
+    assert!(
+        served_json["sessions"]["run-one"]["tokens_by_model"]["claude-opus-5"]
+            .get("cache_write")
+            .is_some()
+    );
+    for secret in [
+        "fixture-model@example.invalid",
+        "fixture-model-account",
+        "/private/fixture/project",
+        "private-project-value",
+        "private-model-value",
+        "private-root-value",
+    ] {
+        assert!(!served.contains(secret));
+    }
+    let facts = crate::local_facts(&home.options).unwrap();
+    let facts_json = serde_json::to_string(&facts).unwrap();
+    assert_eq!(facts.reported_runs.len(), 2);
+    assert!(!facts_json.contains("fixture-model@example.invalid"));
+    assert!(!facts_json.contains("fixture-model-account"));
+    assert!(!facts_json.contains("/private/fixture/project"));
 }
 
 #[test]
@@ -2278,4 +2413,16 @@ fn input_paths_are_the_builders_and_nothing_else() {
     ] {
         assert!(!crate::is_input_path(root, path), "{root}/{path:?}");
     }
+    let home = Home::new();
+    home.write(
+        ".claude.json",
+        r#"{"oauthAccount":{"emailAddress":"fixture@example.invalid"}}"#,
+    );
+    home.top("input-check", &[human("input-check", ts(0, 0), "fixture")]);
+    let inputs = crate::inputs(&home.options).unwrap();
+    assert!(
+        inputs
+            .iter()
+            .all(|input| { input.full_path(&home.options) != home.options.claude_json })
+    );
 }
