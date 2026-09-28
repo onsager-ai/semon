@@ -84,6 +84,11 @@ export default async function shellCheck(browser) {
 
         const audit = await geometry(page);
         results[key].geometry = audit;
+        if (name === "shell-gallery") {
+          const longNameLength = await page.locator(".rows .row:last-child .nm").evaluate((element) => element.textContent.length);
+          results[key].longNameLength = longNameLength;
+          r.expect(longNameLength === 90, key + " long row name length=" + longNameLength + " expected 90");
+        }
         r.expect(audit.scrollWidth <= audit.innerWidth, key + " document scrollWidth=" + audit.scrollWidth + " innerWidth=" + audit.innerWidth);
         r.expect(audit.right.length === 0, key + " elements past the right edge: " + JSON.stringify(audit.right));
         if (mobile) {
