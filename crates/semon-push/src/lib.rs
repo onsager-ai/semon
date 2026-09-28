@@ -133,7 +133,7 @@ fn loopback(host: &str) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct FileState {
     /// Bytes of the original acknowledged by the receiver.
     sent: u64,
@@ -148,19 +148,6 @@ struct FileState {
     dev: u64,
     #[serde(default)]
     ino: u64,
-}
-
-impl Default for FileState {
-    fn default() -> Self {
-        Self {
-            sent: 0,
-            raw_head: String::new(),
-            len: 0,
-            mtime_ns: None,
-            dev: 0,
-            ino: 0,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -815,16 +802,15 @@ pub fn push(options: &PushOptions, watch: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::Read,
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicU64, Ordering},
-        },
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
     };
 
     use serde_json::json;
     use tiny_http::{Header, Response, Server};
+
+    use crate::wire::base64_decode;
 
     use super::*;
 
