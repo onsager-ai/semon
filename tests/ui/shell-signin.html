@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Sign in</title>
+  <link rel="stylesheet" href="/viewer.css">
+  <link rel="stylesheet" href="/shell.css">
+  <script src="/shell.js" defer></script>
+</head>
+<body>
+<main class="signin">
+  <span class="mark" aria-hidden="true"></span>
+  <h1>Sign in</h1>
+  <p>Enter your details to continue to your device list.</p>
+  <form action="#continue" method="get">
+    <label class="field">
+      <span>Email address</span>
+      <input type="email" name="email" value="sample.user@example.invalid" autocomplete="email">
+      <span class="hint">Use the email you check regularly.</span>
+    </label>
+    <label class="field">
+      <span>Password</span>
+      <input type="password" name="password" value="example-value-123" autocomplete="current-password">
+    </label>
+    <div class="btn-row"><button class="btn primary" type="submit">Continue</button></div>
+  </form>
+  <p>Need help? <a href="#help">Contact support</a></p>
+</main>
+</body>
+</html>

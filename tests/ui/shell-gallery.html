@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Shell component gallery</title>
+  <link rel="stylesheet" href="/viewer.css">
+  <link rel="stylesheet" href="/shell.css">
+  <script src="/shell.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar" aria-label="Navigation">
+    <div class="brandrow">
+      <span class="mark" aria-hidden="true"></span><span>Devices</span>
+      <button class="ibtn close" id="drawer-close" type="button" aria-label="Close menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+      </button>
+    </div>
+    <nav id="nav" aria-label="Pages">
+      <a class="nav-item" href="#overview">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-7 8 7M6 9.5V20h12V9.5M10 20v-5h4v5"></path></svg>
+        <span>Overview</span>
+      </a>
+      <a class="nav-item" href="#devices" aria-current="page">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h18v11H3zM8 20h8M12 16v4"></path></svg>
+        <span>Devices</span>
+      </a>
+      <a class="nav-item" href="#activity">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"></path></svg>
+        <span>Activity</span>
+      </a>
+      <a class="nav-item" href="#settings">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6"></path></svg>
+        <span>Settings</span>
+      </a>
+    </nav>
+    <div class="account">
+      <span class="account-login">sample.user@example.invalid</span>
+      <button class="btn sh-quiet" type="button">Sign out</button>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+  <main class="main" id="main">
+    <header class="topbar" id="topbar">
+      <button class="ibtn lead" id="lead-btn" type="button" aria-label="Open menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+      </button>
+      <div class="ttl"><span class="t">Devices</span></div>
+    </header>
+    <div class="page" id="page">
+      <div class="ph"><h1>Devices</h1></div>
+      <section class="hero">
+        <span class="mark" aria-hidden="true"></span>
+        <h1>Your devices</h1>
+        <p>See status and recent activity for devices connected to your account.</p>
+        <p>See the <a href="#" id="paragraph-link">device guide</a>.</p>
+        <div class="btn-row">
+          <button class="btn primary" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+            Add device
+          </button>
+          <button class="btn" type="button">Learn more</button>
+          <button class="btn" type="button" disabled>Unavailable</button>
+        </div>
+      </section>
+
+      <section aria-labelledby="steps-title">
+        <h2 class="sec-h" id="steps-title">Getting started</h2>
+        <ol class="sh-steps">
+          <li class="sh-step sh-done">
+            <span class="step-num" aria-hidden="true"></span>
+            <span class="step-title">Create your profile</span>
+            <div class="step-body">Your profile is ready.</div>
+          </li>
+          <li class="sh-step current">
+            <span class="step-num" aria-hidden="true"></span>
+            <span class="step-title">Connect a device</span>
+            <div class="step-body">
+              <span>Use this sample value to try the copy control.</span>
+              <div class="code" data-secret>
+                <pre id="sample-code">example-value-123</pre>
+                <button class="ibtn copy" type="button" data-copy="sample-code" aria-label="Copy sample value">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"></path></svg>
+                </button>
+              </div>
+            </div>
+          </li>
+          <li class="sh-step pending">
+            <span class="step-num" aria-hidden="true"></span>
+            <span class="step-title">Review activity</span>
+            <div class="step-body">Recent events will appear after your device connects.</div>
+          </li>
+        </ol>
+      </section>
+
+      <section aria-labelledby="rows-title">
+        <h2 class="sec-h" id="rows-title">Device status</h2>
+        <p class="status"><span class="dot work" aria-hidden="true"></span>Available now</p>
+        <div class="rows">
+          <div class="row">
+            <span class="dot work" aria-hidden="true"></span>
+            <div class="row-main"><span class="sh-nm">Living room display</span><span class="sh-meta">Working · Seen just now</span></div>
+            <div class="actions"><span class="status">Online</span></div>
+          </div>
+          <div class="row">
+            <span class="dot idle" aria-hidden="true"></span>
+            <div class="row-main"><span class="sh-nm">Kitchen sensor</span><span class="sh-meta">Idle · Seen 12 minutes ago</span></div>
+            <div class="actions"><button class="btn sh-quiet" type="button">Details</button></div>
+          </div>
+          <div class="row">
+            <span class="dot done" aria-hidden="true"></span>
+            <div class="row-main"><span class="sh-nm">Office light</span><span class="sh-meta">Complete · Seen yesterday</span></div>
+            <div class="actions"><span class="status">Ready</span></div>
+          </div>
+          <div class="row">
+            <span class="dot err" aria-hidden="true"></span>
+            <div class="row-main"><span class="sh-nm" aria-label="Sample device with a long name">devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename<!-- -->devicename</span><span class="sh-meta">Error · Check the connection and try again</span></div>
+            <div class="actions"><button class="btn danger" type="button">Remove</button></div>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="form-title">
+        <h2 class="sec-h" id="form-title">Device details</h2>
+        <form action="#saved" method="get">
+          <label class="field">
+            <span>Device name</span>
+            <input type="text" name="name" value="Office light">
+            <span class="hint">Choose a name that is easy to recognize.</span>
+          </label>
+          <label class="field">
+            <span>Location</span>
+            <input type="text" name="location" value="Upstairs">
+            <span class="error">Enter a location with at least two characters.</span>
+          </label>
+          <div class="btn-row">
+            <button class="btn sh-quiet" type="reset">Reset</button>
+            <button class="btn primary" type="submit">Save changes</button>
+          </div>
+        </form>
+      </section>
+
+      <section aria-label="Messages">
+        <div class="notice ok">Saved. See the <a href="#" id="notice-link">devices</a>.</div>
+        <div class="notice sh-err">We could not reach this device. Try again in a moment.</div>
+      </section>
+
+      <section aria-label="Confirmation">
+        <form id="remove-form" action="#removed" method="get" data-confirm="remove-sheet">
+          <input type="hidden" name="device" value="sample-device">
+          <div class="btn-row"><button class="btn danger" type="submit">Remove device</button></div>
+        </form>
+        <button class="btn" type="button" data-open="details-sheet">Open details sheet</button>
+        <dialog class="sheet" id="remove-sheet" aria-labelledby="remove-title">
+          <div class="sheet-h"><span id="remove-title">Remove this device?</span><button class="ibtn" type="button" data-close aria-label="Close sheet">×</button></div>
+          <div class="sheet-body"><p>This removes the sample device from the list.</p></div>
+          <div class="btn-row">
+            <button class="btn sh-quiet" type="button" data-close>Cancel</button>
+            <button class="btn danger" type="button" value="confirm">Remove device</button>
+          </div>
+        </dialog>
+        <dialog class="sheet" id="details-sheet" aria-labelledby="details-title">
+          <div class="sheet-h"><span id="details-title">Device details</span><button class="ibtn" type="button" data-close aria-label="Close sheet">×</button></div>
+          <div class="sheet-body"><p>This is a sample details sheet opened by a button.</p></div>
+          <div class="btn-row"><button class="btn primary" type="button" data-close>Done</button></div>
+        </dialog>
+      </section>
+    </div>
+  </main>
+</div>
+</body>
+</html>
