@@ -239,13 +239,14 @@ export default async function barCheck(browser) {
     const nextId = await page.evaluate(() => history.state?.id);
 
     await goto(page, { v: "session", id: "harbor" }, D);
-    const runsButton = page.locator("#topbar .meta-runs"), runsVisible = await runsButton.isVisible();
+    const runsButton = page.locator("#topbar .meta-runs"), runsVisible = await runsButton.isVisible(); let runsViaMenu = false;
     if (runsVisible) await runsButton.click();
+    else if (size === "phone") { await page.click("#more-btn"); runsViaMenu = await page.locator(".session-menu .menu-runs").isVisible(); if (runsViaMenu) await page.locator(".session-menu .menu-runs").click(); }
     const runsSelector = size === "phone" ? "dialog.runs-sheet" : ".runs-popover";
-    if (runsVisible) await page.waitForSelector(runsSelector);
-    const runs = runsVisible ? await page.evaluate((selector) => { const box = document.querySelector(selector); return { open: !!box, rows: box?.querySelectorAll(".runs-row").length ?? 0, nested: box?.querySelectorAll(".runs-group .runs-row").length ?? 0, costs: box?.querySelectorAll(".run-cost").length ?? 0, apiLabel: box?.textContent.includes("API-equivalent cost") ?? false }; }, runsSelector) : { open: false, rows: 0, nested: 0, costs: 0, apiLabel: false };
+    if (runsVisible || runsViaMenu) await page.waitForSelector(runsSelector);
+    const runs = runsVisible || runsViaMenu ? await page.evaluate((selector) => { const box = document.querySelector(selector); return { open: !!box, rows: box?.querySelectorAll(".runs-row").length ?? 0, nested: box?.querySelectorAll(".runs-group .runs-row").length ?? 0, costs: box?.querySelectorAll(".run-cost").length ?? 0, apiLabel: box?.textContent.includes("API-equivalent cost") ?? false }; }, runsSelector) : { open: false, rows: 0, nested: 0, costs: 0, apiLabel: false };
     const expectedRuns = Object.values(D.SESS).filter((s) => { let p = parentOf(s.id); while (p && p !== "harbor") p = parentOf(p); return p === "harbor"; }).length;
-    childAssertions.push({ size, pathNames, expectedPath, pathOk, briefCard, openedParent, returnRow, returnParent, siblingNav, prevId, nextId, expectedPrev: parentKids[middleIndex - 1].id, expectedNext: parentKids[middleIndex + 1].id, runs, expectedRuns });
+    childAssertions.push({ size, pathNames, expectedPath, pathOk, briefCard, openedParent, returnRow, returnParent, siblingNav, prevId, nextId, expectedPrev: parentKids[middleIndex - 1].id, expectedNext: parentKids[middleIndex + 1].id, runs, runsViaMenu, expectedRuns });
     await page.context().close();
   }
 

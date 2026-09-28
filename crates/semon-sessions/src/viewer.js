@@ -726,6 +726,8 @@
       if (filtered) filterItem.append(el("span", "menu-note", "On"));
       filterItem.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); const pop = $(".filters.pop"); if (!pop) return; filterOpen = filterWasOpen ? false : pop.hidden; pop.hidden = !filterOpen; if (filterOpen) { pop.style.right = Math.max(0, $("#topbar").getBoundingClientRect().right - btn.getBoundingClientRect().right) + "px"; pop.querySelector("input")?.focus(); } });
       m.append(findItem, filterItem);
+      const runs = $("#topbar .meta-runs"), kids = childSessions(s.id);
+      if (runs?.hidden && kids.length) { const item = el("button", "menu-runs"); item.type = "button"; item.setAttribute("role", "menuitem"); item.append(icon(I.stack, "icon"), el("span", null, "Runs · " + kids.length)); item.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); openRuns(s, runs); }); m.append(item); }
     }
     const copy = el("button"); copy.type = "button"; copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command"));
     const cmd = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + s.id;
@@ -1123,20 +1125,6 @@
         if (!show.tools && h.kind !== "toyou") continue;
         if (opts.nested && h.kind === "spawn" && h.to === sid) continue; // the parent's card already shows this brief
         tx.append(keyed(handoffCard(h, sid), e));
-        // A subagent's or Codex run's own work opens inline under its handoff: the turn that brief started there.
-        const cw = turnMode && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id)?.entries ?? TX[h.to] ?? [] : [];
-        if (cw.length) {
-          const n = cw.filter((x) => x.k === "tool").length;
-          const w = el("div", "childwork"); if (e.key) w.dataset.e = "cw:" + e.key; const lastCw = cw.at(-1);
-          // What the child did, as far as loaded (a change redraws its turn): how many entries, the last one and its state, and how
-          // many calls are running or failed, so a parallel call that finishes earlier in the child counts too.
-          w.dataset.sum = [cw.length, lastCw.key, lastCw.live ? "live" : lastCw.unfinished ? "open" : String(lastCw.ok), cw.filter((x) => x.live).length, cw.filter((x) => x.ok === false).length].join(" ");
-          const b = el("button", "cw-toggle"); b.type = "button"; b.setAttribute("aria-expanded", "false");
-          b.append(icon(I.chev, "chev"), el("span", null, "What " + SESS[h.to].name + " did" + (n ? " · " + n + (n === 1 ? " tool call" : " tool calls") : "")));
-          const inner = el("div", "cw-body"); inner.hidden = true;
-          b.addEventListener("click", () => { if (!inner.childElementCount) inner.append(transcript(h.to, { nested: true, entries: cw })); inner.hidden = !inner.hidden; b.setAttribute("aria-expanded", String(!inner.hidden)); });
-          w.append(b, inner); tx.append(w);
-        }
       }
     }
     closeTurn();
@@ -1230,7 +1218,7 @@
       const actions = el("div", "child-actions"), openChild = el("button", null, "Open"); openChild.type = "button"; openChild.addEventListener("click", (e) => { e.stopPropagation(); goSession(child.id); }); actions.append(openChild);
       const entries = (STARTS.get(h.id)?.entries ?? TX[child.id] ?? []).filter((e) => !(e.k === "h" && e.id === h.id));
       if (entries.length) {
-        const group = el("div", "child-work"), toggle = el("button", "cw-toggle"); toggle.type = "button"; toggle.setAttribute("aria-expanded", "false"); toggle.append(icon(I.chev, "chev"), "What " + child.name + " did");
+        const group = el("div", "child-work"); group.dataset.e = "cw:" + h.id; const toggle = el("button", "cw-toggle"); toggle.type = "button"; toggle.setAttribute("aria-expanded", "false"); toggle.append(icon(I.chev, "chev"), "What " + child.name + " did");
         const inner = el("div", "cw-body"); inner.hidden = true; let showAll = false;
         const paint = () => { inner.replaceChildren(transcript(child.id, { nested: true, entries: showAll ? entries : entries.slice(-5) })); if (!showAll && entries.length > 5) { const all = el("button", "show-all", "Show all " + entries.length); all.type = "button"; all.addEventListener("click", (e) => { e.stopPropagation(); showAll = true; paint(); }); inner.append(all); } };
         toggle.addEventListener("click", (e) => { e.stopPropagation(); if (inner.hidden && !inner.childElementCount) paint(); inner.hidden = !inner.hidden; toggle.setAttribute("aria-expanded", String(!inner.hidden)); });
@@ -1462,7 +1450,7 @@
       renderLanes();
     };
     fi.addEventListener("input", () => { query = fi.value.trim(); draw(); });
-    page.append(fr, gb, out); draw();
+    page.append(renderFacetFilters(() => draw()), fr, gb, out); draw();
   }
 
   // ---- Drawer (phone) ---------------------------------------------------------------------------------------------------------
@@ -1608,7 +1596,7 @@
     return [n.classList[0], ...keys, keys.some((x) => x != null) ? "" : n.firstChild?.nodeType === 3 ? n.firstChild.data : ""].map((x) => x ?? "").join("|"); };
   // Each anchor candidate on the page, in order, with its identity made unique by how many came before it.
   function anchors(fn) { const seen = new Map(); for (const n of $("#page").querySelectorAll(ANCHORS)) { const id = identOf(n), k = seen.get(id) ?? 0; seen.set(id, k + 1); if (fn(n, id + "#" + k)) return; } }
-  const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : n.classList.contains("childwork") ? n.querySelector(":scope > .cw-toggle") : null;
+  const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : n.classList.contains("child-work") ? n.querySelector(":scope > .cw-toggle") : null;
   function capture() {
     const sc = scroller(), line = edge();
     const st = { top: sc.scrollTop, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80, anchor: null, open: new Set(), groups: new Set(), focus: null, drawer: document.body.classList.contains("drawer-open") };
@@ -1626,7 +1614,7 @@
     }
     for (const n of $("#page").querySelectorAll(".hop")) if (n.querySelector(".brief.open")) st.open.add("hop:" + identOf(n));
     // Child work opened and then closed keeps what was open inside it, for when it opens again.
-    st.shut = new Set([...$("#page").querySelectorAll(".childwork[data-e]")].filter((n) => opener(n).getAttribute("aria-expanded") === "false" && n.querySelector(":scope > .cw-body").childElementCount).map((n) => n.dataset.e));
+    st.shut = new Set([...$("#page").querySelectorAll(".child-work[data-e]")].filter((n) => opener(n).getAttribute("aria-expanded") === "false" && n.querySelector(":scope > .cw-body").childElementCount).map((n) => n.dataset.e));
     const a = document.activeElement;
     if (a && a !== document.body && !a.closest("dialog")) {
       const host = a.id ? null : a.closest(HOSTS), sel = host && host !== a ? a.tagName.toLowerCase() + [...a.classList].map((c) => "." + CSS.escape(c)).join("") : null;
@@ -1647,8 +1635,8 @@
     // Child work first (opening it draws its steps), then groups (a new one opens if it holds an open step), then steps and cards.
     // Child work that was closed with something open inside is opened for the restore (so its steps measure as shown) and
     // closed again below, in the same task: it is never drawn open.
-    const shut = all(".childwork[data-e]").filter((n) => st.shut.has(n.dataset.e) && opener(n).getAttribute("aria-expanded") === "false");
-    for (const n of all(".childwork[data-e]")) if ((st.open.has(n.dataset.e) || shut.includes(n)) && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
+    const shut = all(".child-work[data-e]").filter((n) => st.shut.has(n.dataset.e) && opener(n).getAttribute("aria-expanded") === "false");
+    for (const n of all(".child-work[data-e]")) if ((st.open.has(n.dataset.e) || shut.includes(n)) && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
     for (const n of all(".tgroup[data-e]")) {
       const want = st.groups.has(n.dataset.e) ? st.open.has(n.dataset.e) : [...n.querySelectorAll(".step[data-e]")].some((x) => st.open.has(x.dataset.e));
       if (want && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();

@@ -131,7 +131,7 @@ async function updated(page, before, limit = 4000) {
   await sleep(700); return page.updates > before;
 }
 const openKeys = (page) => page.evaluate(() => [...document.querySelectorAll("#page [data-e]")].filter((n) => {
-  const t = n.matches(".step") ? n.querySelector(":scope > button") : n.matches(".tgroup") ? n.querySelector(":scope > .tsum") : n.matches(".childwork") ? n.querySelector(":scope > .cw-toggle") : null;
+  const t = n.matches(".step") ? n.querySelector(":scope > button") : n.matches(".tgroup") ? n.querySelector(":scope > .tsum") : n.matches(".child-work") ? n.querySelector(":scope > .cw-toggle") : null;
   return t?.getAttribute("aria-expanded") === "true"; }).map((n) => n.dataset.e));
 const topOf = (page, sel) => page.evaluate((sel) => document.querySelector(sel)?.getBoundingClientRect().top ?? null, sel);
 const byKey = (k) => '[data-e="' + k.replace(/["\\]/g, "\\$&") + '"]';
@@ -213,7 +213,7 @@ async function scheme(browser, name, opts, r, protocol) {
 
     // ---- 2. a new call while the reader is at the end: pinned, ticking, then finished ----
     // Child work closed with steps open inside it keeps them through a redraw of its turn.
-    const inner0 = await S.evaluate(() => { const w = document.querySelector('.childwork[data-e] > .cw-toggle[aria-expanded="true"]').parentElement;
+    const inner0 = await S.evaluate(() => { const w = document.querySelector('.child-work[data-e] > .cw-toggle[aria-expanded="true"]').parentElement;
       const keys = [...w.querySelectorAll('.step[data-e] > button[aria-expanded="true"]')].map((b) => b.parentElement.dataset.e); w.querySelector(":scope > .cw-toggle").click(); return { cw: w.dataset.e, keys }; });
     r.expect(inner0.keys.length >= 1, name + ": no step open inside child work to close it over");
     await sleep(200); const top1 = await S.evaluate(() => window.__sc().scrollTop);
@@ -226,7 +226,7 @@ async function scheme(browser, name, opts, r, protocol) {
     R.pinned = await S.evaluate(() => ({ hidden: document.querySelector(".jump-bottom")?.hidden, left: window.__left(), top: window.__sc().scrollTop }));
     R.pinned.before = top1;
     r.expect(R.pinned.hidden && R.pinned.left <= 1 && R.pinned.top > top1, name + ": not kept at the end: " + JSON.stringify(R.pinned));
-    R.innerKept = await S.evaluate(({ cw, keys }) => { const w = document.querySelector('.childwork[data-e="' + cw + '"]'), t = w.querySelector(":scope > .cw-toggle"), closed = t.getAttribute("aria-expanded") === "false"; t.click();
+    R.innerKept = await S.evaluate(({ cw, keys }) => { const w = document.querySelector('.child-work[data-e="' + cw + '"]'), t = w.querySelector(":scope > .cw-toggle"), closed = t.getAttribute("aria-expanded") === "false"; t.click();
       return { closed, open: keys.filter((k) => w.querySelector('.step[data-e="' + k + '"] > button')?.getAttribute("aria-expanded") === "true").length, of: keys.length }; }, inner0);
     r.expect(R.innerKept.closed && R.innerKept.open === R.innerKept.of, name + ": steps open inside closed child work didn't survive the redraw: " + JSON.stringify(R.innerKept));
     const sd = () => S.evaluate((k) => document.querySelector('.step.live[data-e="' + k + '"] .sd')?.textContent ?? null, live1);
@@ -273,7 +273,7 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(!R.underSheet.card, name + ": the page under the View all sheet was redrawn while it was open");
     delete R.underSheet.text;
     t0 = Date.now(); await S.click(".viewer .vclose");
-    R.afterSheet = await appear(S, t0, (id) => { const c = document.querySelector('.hcard[data-h="' + id + '"]'); return !!c && c.nextElementSibling?.classList.contains("childwork"); }, spawn?.id ?? "", 2000);
+    R.afterSheet = await appear(S, t0, (id) => { const c = document.querySelector('.hcard[data-h="' + id + '"]'); return !!c?.querySelector(".child-work"); }, spawn?.id ?? "", 2000);
     r.expect(R.afterSheet != null, name + ": the subagent's card and child work didn't appear once the sheet closed");
     const open3 = new Set(await openKeys(S));
     R.stillOpen3 = open0.filter((k) => k !== live0 && !open3.has(k));
@@ -283,7 +283,7 @@ async function scheme(browser, name, opts, r, protocol) {
     // The first block in view is the card after h-codex's open child work (h-review's), its top 10 px under the bar; the
     // Codex run then says something, so its child work grows above the view. Plenty of the turn is below it.
     await S.setViewportSize({ width: opts.size === "phone" ? 390 : 1280, height: 480 }); await sleep(200);
-    const above = await S.evaluate(() => { const cws = [...document.querySelectorAll("#page .turns .childwork")].filter((x) => !x.parentElement.closest(".cw-body")), n = cws[1]?.previousElementSibling;
+    const above = await S.evaluate(() => { const cards = [...document.querySelectorAll("#page .turns .hcard.child-card")].filter((x) => !x.closest(".cw-body")), cws = cards.map((x) => x.querySelector(":scope .child-work")).filter(Boolean), n = cards[1];
       const s = window.__sc(); s.scrollTop += n.getBoundingClientRect().top - window.__line() + 10;
       return { e: n.dataset.e, card: n.matches(".hcard"), off: n.getBoundingClientRect().top - window.__line(), left: window.__left(), cw: cws[0].querySelector(":scope > .cw-toggle").getAttribute("aria-expanded") === "true" }; });
     r.expect(above.card && Math.abs(above.off + 10) < 1.5 && above.left > 80 && above.cw, name + ": couldn't put the card under open child work at the top, away from the end: " + JSON.stringify(above));

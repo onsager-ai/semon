@@ -35,16 +35,19 @@ export default async function viewerCheck(browser) {
   const r = reporter("viewer");
   const R = {};
 
-  // ---- Phone, dark: census, then the "View all" sheet on the first lane. ----
+  // ---- Phone, dark: census on the sample lanes, then the "View all" sheet on the extras fixture's long output. ----
   {
-    const page = await served(browser, { size: "phone", dark: true });
+    const page = await served(browser, { size: "phone", dark: true, extras: true });
     const lanes = Object.keys(D.SESS);
     const C = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0 }; const cutLanes = [];
     for (const id of lanes) {
       await goto(page, { v: "session", id }, D); await page.waitForTimeout(150);
+      await page.evaluate(() => { for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"]').forEach((x) => x.click());
+        document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => x.click()); });
+      // ResizeObserver measures previews after their containing turn opens; inspect the resulting state on a later frame.
+      await page.waitForTimeout(100);
       const rr = await page.evaluate(() => { const r = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0 };
-        for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"]').forEach((x) => x.click());
-        document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => { x.click(); r.steps++; const o = x.parentElement.querySelector('.out');
+        document.querySelectorAll('.step > button[aria-expanded="true"]').forEach((x) => { r.steps++; const o = x.parentElement.querySelector('.out');
           const cut = [...o.querySelectorAll('.clip')].some((c) => c.scrollHeight > c.clientHeight + 1); const shown = !o.querySelector('.viewall').hidden;
           if (cut) r.cut++; if (shown) r.viewAllShown++; if (cut !== shown) r.mismatch++; }); return r; });
       for (const k in C) C[k] += rr[k];
@@ -52,10 +55,10 @@ export default async function viewerCheck(browser) {
     }
     R.census = C;
     R.cutLanes = cutLanes;
+    r.expect(C.cut > 0, "the phone census found no measured cut preview in the extras fixture");
 
-    // Open the "View all" sheet on whichever lane the census above actually found a cut preview on (per gaps.json,
-    // previews are short in this fixture except harbor's first Bash output — but the lane is found from the census,
-    // not hardcoded, so this still works if the fixture changes which step is long).
+    // The extras fixture contains a long Harbor output, so the sheet check exercises fetched text that exceeds its preview.
+    // The lane is still discovered at runtime, never hardcoded to "harbor".
     const targetId = cutLanes[0];
     r.expect(!!targetId, "no lane had a cut preview to open 'View all' on (census.cut=" + C.cut + ")");
     if (targetId) {
