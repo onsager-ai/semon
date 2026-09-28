@@ -122,14 +122,14 @@ export function write(out, { extras = false } = {}) {
     c.peer(ms(T(7, 12)), 102, "Sentinel", "m-h9", brief("h9"));
     c.text(ms(T(7, 14)), tx("principal")[1].text);
     c.ask(ms(T(7, 30)), brief("h8"));
-    c.tool(ms(T(7, 31)), "toolu-p1", "Bash", { command: tx("principal")[3].arg, description: "List open PRs" });
-    c.result(ms(T(7, 31), 2, 300), "toolu-p1", tx("principal")[3].out);
+    c.tool(ms(T(7, 31)), "toolu-p1", "Bash", { command: tx("principal")[6].arg, description: "List open PRs" });
+    c.result(ms(T(7, 31), 2, 300), "toolu-p1", tx("principal")[6].out);
     c.busy(ms(T(7, 30)), ms(T(7, 48)));
     c.busy(ms(T(9, 8)), ms(T(9, 12)));
     c.tool(ms(T(9, 10)), "toolu-h10", "SendMessage", { to: "Advisor", message: brief("h10") });
     c.result(ms(T(9, 10), 0, 200), "toolu-h10", "Message sent to Advisor", { extra: { toolUseResult: { success: true, msg_id: "m-h10" } } });
     c.busy(ms(T(9, 46)), ms(T(9, 50)));
-    c.text(ms(T(9, 48)), tx("principal")[5].text);
+    c.text(ms(T(9, 48)), tx("principal")[8].text);
     c.text(ms(T(9, 50)), brief("h11"));
     c.tokens(ms(T(9, 50)));
     c.save(); live("principal", "idle");
@@ -169,7 +169,7 @@ export function write(out, { extras = false } = {}) {
     c.title(ms(T(8, 5)), "harbor");
     c.busy(ms(T(8, 5)), ms(T(8, 12)));
     c.ask(ms(T(11, 40)), brief("h1"));
-    c.think(ms(T(11, 40), 9), "The backoff test failed on a seed before; check whether the delay overflows.");
+    c.think(ms(T(11, 40), 9), t[1].text);
     c.text(ms(T(11, 40), 10), t[2].text);
     c.tool(ms(T(11, 40), 11), "toolu-b1", "Bash", { command: t[3].arg });
     c.result(ms(T(11, 40), 49, 200), "toolu-b1", t[3].out, { error: true });
@@ -193,7 +193,7 @@ export function write(out, { extras = false } = {}) {
     c.tool(ms(T(12, 33)), "toolu-h20", "Agent", { description: SESS["h-failed"].name, subagent_type: "general-purpose", prompt: brief("h20"), run_in_background: true });
     c.result(ms(T(12, 36)), "toolu-h20", "Failed before producing a reproducer: the review sandbox could not read the test fixture.", { error: true });
     if (extras) c.text(ms(T(12, 31), 30), MARKDOWN);
-    c.text(ms(T(12, 32)), t[9].text);
+    c.text(ms(T(12, 32)), t[10].text);
     c.tool(ms(T(12, 39), 18), "toolu-b3", "Bash", { command: SESS.harbor.activity[1] });
     c.tokens(ms(T(12, 32)));
     c.save(); live("harbor", "busy");
@@ -345,7 +345,7 @@ export function write(out, { extras = false } = {}) {
     const t = tx("h-codex"), c = codex("h-codex", ms(T(11, 52)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-codex"].tokens });
     c.user(ms(T(11, 52)), "Semon-Parent: claude:harbor:toolu-h2\n" + brief("h2"));
     c.harness(ms(T(11, 52), 1), t[1].label);
-    c.think(ms(T(11, 52), 19), "Flush in queue order and stop at the first Nack; commit only after an Ack.");
+    c.think(ms(T(11, 52), 19), t[2].text);
     c.patch(ms(T(11, 53)), "call-x1", patchOf(t[3].arg, t[3].diff));
     c.output(ms(T(11, 53)), "call-x1", "Success. Updated the following files:\nM " + t[3].arg, 0, true);
     c.shell(ms(T(11, 55)), "call-x2", t[4].arg);

@@ -498,7 +498,7 @@
     const item = (v, label, ic, count, hot) => { const b = el("button", "nav-item"); b.type = "button"; b.dataset.go = v; if (under[v].includes(route.v)) b.setAttribute("aria-current", "page"); b.append(icon(ic, "icon"), el("span", null, label)); if (count) b.append(el("span", "cnt" + (hot ? " hot" : ""), String(count))); b.addEventListener("click", () => go({ v })); nav.append(b); };
     item("home", "Home", I.home, inbox().length, true);
     item("analytics", "Analytics", I.chart);
-    item("sessions", "Sessions", I.sessions, Object.values(SESS).filter((s) => s.lane).length);
+    item("sessions", "Sessions", I.sessions, Object.keys(SESS).length);
     item("machines", "Machines", I.machine, Object.keys(MACHINE).filter((m) => !MACHINE_UP[m]).length, true);
   }
   // Sessions match by name, repo, branch, machine, harness and the messages that started their turns.
@@ -1282,7 +1282,7 @@
     });
   }
   function analyticsWaits() {
-    return H.filter((h) => h.kind === "toyou" && (h.ask === "question" || h.ask === "decision") && SESS[h.from])
+    return H.filter((h) => h.kind === "toyou" && SESS[h.from])
       .map((h) => ({ sid: h.from, startAt: h.at, endAt: h.status === "wait" ? null : Number.isFinite(h.done) ? h.done : null }));
   }
   function busyMsIn(row, from, to) { return row.busy.reduce((sum, [a, b]) => sum + Math.max(0, Math.min(b, to) - Math.max(a, from)), 0); }

@@ -420,6 +420,10 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .hcard.start { grid-template-columns: minmax(0, 1fr); }
 .hcard.start > svg, .hcard.start > .ln, .hcard.start > .stat { display: none; }
 .hcard.start > .brief, .hcard.start > .more, .hcard.start > .result { grid-column: 1 / -1; }
+.hcard.child-card { --h: var(--claude); grid-template-columns: minmax(0, 1fr) auto; gap: 5px 10px; border-left-width: 3px; border-radius: 0; background: none; padding: 10px 0 10px 12px; }
+.hcard.child-card .ln, .hcard.child-card .brief, .hcard.child-card .more, .hcard.child-card .result, .hcard.child-card .child-kind, .hcard.child-card .child-actions, .hcard.child-card .child-work { grid-column: 1 / -1; }
+.hcard.child-card .ln { font-size: 14px; font-weight: 600; color: var(--ink); }
+.hcard.child-card .brief { max-height: 5.8em; }
 
 /* ---- Top bar: always visible. A detail page's title is two lines: its name, then a summary that ellipsizes. ---- */
 .topbar .l1 { display: flex; align-items: baseline; gap: 6px; min-width: 0; line-height: 20px; }

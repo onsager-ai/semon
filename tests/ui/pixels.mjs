@@ -49,6 +49,12 @@ const ANALYTICS_LINES = [
   ['  const analyticsAt = ([daysAgo, minute]) => ANALYTICS_DAY0 - daysAgo * DAY_MS + minute * 60000;',
     '  const analyticsAt = ([daysAgo, minute]) => Number(minute) > 1e11 ? Number(minute) : ANALYTICS_DAY0 - daysAgo * DAY_MS + minute * 60000;'],
 ];
+// The sample uses illustrative hostnames; in port mode the served model owns the machine names and the viewer
+// shortens those names in sidebar and line-2 labels.
+const HOST_LINES = [
+  ['  const HOST = { laptop: "marvin-mbp.local", studio: "studio.onsager.dev", buildbox: "buildbox.onsager.ai", cloud: "claude.ai-cloud.onsager.dev" };',
+    (D) => "  const HOST = " + J(D.MACHINE) + ";"],
+];
 // The served viewer's other deliberate differences on the Machines screens (several machines from the server): an
 // offline machine's last-seen time where the sample had a move, and the embedding server's management link.
 const MACHINE_LINES = [
@@ -85,6 +91,7 @@ function portReference(D) {
     "  const API_PRICE = " + J(PRICING) + ";", "  const H = " + J(H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", ""].join("\n");
   let html = MOCKUP.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + MOCKUP.slice(end);
   for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
+  for (const [a, replacement] of HOST_LINES) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, replacement(D)); }
   const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
   if (!histories.test(html)) throw new Error("mockup analytics history block moved");
   html = html.replace(histories, "  const ANALYTICS_HISTORY = {};\n  const ANALYTICS_WAIT_SAMPLES = [];");

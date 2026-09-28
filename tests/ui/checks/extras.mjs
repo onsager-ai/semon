@@ -286,23 +286,24 @@ export default async function (browser) {
     await page.context().close();
   }
 
-  // ---- New results: opening the session persists its read state; unavailable storage leaves pages usable -----------
+  // ---- Needs you: opening a result persists its read state; unavailable storage leaves pages usable -----------------
   {
     const resultHandoff = D.H.find((h) => h.kind === "toyou" && h.ask === "result" && h.from === "result-card");
     r.expect(!!resultHandoff, "the synthetic human-started turn has a result handoff");
     const page = await served(browser, { extras: true, path: "/" });
-    const selector = '.ib.new-result[data-h="' + (resultHandoff?.id ?? "") + '"]';
-    await page.waitForFunction((id) => [...document.querySelectorAll(".sec-h")].some((head) => head.firstChild?.textContent === "New results") && !!document.querySelector('.ib.new-result[data-h="' + CSS.escape(id) + '"]'), resultHandoff?.id ?? "");
+    const selector = '.sec-h + .list .ib[data-h="' + (resultHandoff?.id ?? "") + '"]';
+    await page.waitForFunction((id) => [...document.querySelectorAll(".sec-h")].some((head) => head.firstChild?.textContent === "Needs you") && !!document.querySelector('.sec-h + .list .ib[data-h="' + CSS.escape(id) + '"]'), resultHandoff?.id ?? "");
     const before = await page.locator(selector).evaluate((card) => ({
       brief: card.querySelector(".q")?.innerText ?? "",
-      dots: card.querySelectorAll(".unread-dot").length,
+      resultIds: [...(card.parentElement.querySelectorAll(".ib[data-h]") ?? [])].map((item) => item.dataset.h),
       badge: document.querySelector('.nav-item[data-go="home"] .cnt.hot')?.textContent ?? "",
-      waitingIds: [...([ ...document.querySelectorAll(".sec-h") ].find((head) => head.firstChild?.textContent === "Needs you")?.nextElementSibling?.querySelectorAll(".ib") ?? [])].map((item) => item.dataset.h),
+      needsYou: card.parentElement.innerText,
     }));
-    r.expect(before.brief.includes("Unique result text for the transcript check.") && before.dots === 1, "New results keeps the full card text and unread dot: " + JSON.stringify(before));
-    const waitingKinds = before.waitingIds.map((id) => D.H.find((h) => h.id === id)?.ask);
-    r.expect(waitingKinds.every((ask) => ask === "question" || ask === "decision"), "Needs you lists questions and decisions only: " + JSON.stringify(waitingKinds));
-    r.expect(Number(before.badge) === before.waitingIds.length, "the Home badge counts only waiting questions: " + JSON.stringify(before));
+    r.expect(before.brief.includes("Unique result text for the transcript check.") && before.needsYou.includes("Unique result text for the transcript check."), "Needs you shows the full result card text: " + JSON.stringify(before));
+    r.expect(before.resultIds.includes(resultHandoff?.id), "the unread result is grouped with Needs you: " + JSON.stringify(before));
+    const waitingKinds = before.resultIds.map((id) => D.H.find((h) => h.id === id)?.ask);
+    r.expect(waitingKinds.every((ask) => ask === "question" || ask === "decision" || ask === "result") && waitingKinds.includes("result"), "Needs you lists open questions, decisions, and results: " + JSON.stringify(waitingKinds));
+    r.expect(Number(before.badge) === before.resultIds.length, "the Home badge counts all open inbox items: " + JSON.stringify(before));
 
     await page.goto(ENV.extraBase + "/s/claude/result-card?t=" + ENV.extraToken, { waitUntil: "load" });
     await page.waitForFunction(() => !!document.querySelector(".result-marker"));
@@ -312,8 +313,8 @@ export default async function (browser) {
     r.expect(marker.includes("read"), "the opened session shows the result as read: " + marker);
     await page.goto(ENV.extraBase + "/?t=" + ENV.extraToken, { waitUntil: "load" });
     await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
-    const onHome = () => page.locator(selector).count();
-    r.expect(await onHome() === 0, "the read result leaves New results");
+    const onHome = () => page.evaluate((id) => { const head = [...document.querySelectorAll(".sec-h")].find((item) => item.firstChild?.textContent === "Needs you"); return head?.nextElementSibling?.querySelector('.ib[data-h="' + CSS.escape(id) + '"]') ? 1 : 0; }, resultHandoff?.id ?? "");
+    r.expect(await onHome() === 0, "the read result leaves the Needs-you inbox");
     await page.reload({ waitUntil: "load" });
     await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
     r.expect(await onHome() === 0, "the read result stays cleared after reloading Home");
