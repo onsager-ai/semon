@@ -993,6 +993,7 @@ mod tests {
             ));
             let options = Options {
                 claude_home: root.join("claude"),
+                claude_json: root.join(".claude.json"),
                 codex_home: root.join("codex"),
                 proc_root: root.join("proc"),
                 cache: root.join("index.json"),
@@ -1933,6 +1934,7 @@ mod tests {
         let now: i64 = env::var("SEMON_SAMPLE_NOW").unwrap().parse().unwrap();
         let options = Options {
             claude_home: root.join("claude"),
+            claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
             proc_root: root.join("proc"),
             cache: root.join("tx-index.json"),

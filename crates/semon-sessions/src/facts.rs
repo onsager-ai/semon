@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Options, events::EventCache, lock_pid, model, proc_start};
 
-pub const FACTS_VERSION: u32 = 1;
+pub const FACTS_VERSION: u32 = 2;
 
 /// The environment variables Semon reads from a session's process, by exact
 /// name: Ostrom's run contract (its `docs/loops.md`, "The run environment is
@@ -31,7 +31,7 @@ const ENVIRON_MAX: u64 = 256 * 1024;
 const CACHE_SAVE_EVERY: Duration = Duration::from_secs(300);
 
 /// The machine's side of a model, as JSON.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Facts {
     pub version: u32,
     /// What the model names the machine by.
@@ -56,6 +56,42 @@ pub struct Facts {
     /// its environment couldn't be read whole.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub runs: BTreeMap<u32, BTreeMap<String, String>>,
+    /// Extracted run snapshots from the sibling Claude state file. The
+    /// reader retains only the session/run fields and model usage allowlist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reported_runs: Vec<ReportedRunSnapshot>,
+}
+
+/// The allowlisted values of one `projects.*` last-run record. The project
+/// path is intentionally not retained. `captureAt` is generated locally so
+/// a later comparison can stop at the exact snapshot boundary.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportedRunSnapshot {
+    pub last_session_id: String,
+    pub last_start_time: i64,
+    pub last_cost: Option<f64>,
+    pub last_duration: Option<u64>,
+    pub last_api_duration: Option<u64>,
+    pub last_tool_duration: Option<u64>,
+    pub last_lines_added: Option<u64>,
+    pub last_lines_removed: Option<u64>,
+    #[serde(default)]
+    pub last_model_usage: BTreeMap<String, ReportedModelUsage>,
+    pub capture_at: i64,
+}
+
+/// The explicitly allowed fields within one `lastModelUsage` value.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ReportedModelUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub thinking_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub web_search_requests: u64,
+    pub cost_usd: Option<f64>,
 }
 
 impl Facts {
@@ -110,6 +146,11 @@ impl FactsSource {
 
     /// Reads this machine's current facts, using the in-memory event cache.
     pub fn facts(&mut self) -> io::Result<Facts> {
+        self.cache.refresh_reported_runs(
+            &self.options.claude_json,
+            model::now_ms(),
+            &mut self.dirty,
+        );
         let facts = collect_facts(&self.options, &mut self.cache, &mut self.dirty)?;
         self.save_if_due()?;
         Ok(facts)
@@ -182,6 +223,7 @@ fn collect_facts(
         repos,
         offline_since: None,
         runs,
+        reported_runs: cache.reported_runs().cloned().collect(),
     })
 }
 
@@ -498,6 +540,7 @@ mod tests {
         ));
         let options = crate::Options {
             claude_home: root.join("claude"),
+            claude_json: root.join(".claude.json"),
             codex_home: root.join("codex"),
             proc_root: root.join("proc"),
             cache: root.join("index.json"),
@@ -521,6 +564,66 @@ mod tests {
         assert_eq!(first, second);
         crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 1));
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn facts_carry_only_allowlisted_claude_run_values() {
+        let root = env::temp_dir().join(format!(
+            "semon-facts-reported-runs-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let options = crate::Options {
+            claude_home: root.join("claude"),
+            claude_json: root.join(".claude.json"),
+            codex_home: root.join("codex"),
+            proc_root: root.join("proc"),
+            cache: root.join("index.json"),
+            all: true,
+            since: Duration::from_secs(86_400),
+            session: None,
+            facts: None,
+            scan_window: false,
+        };
+        fs::create_dir_all(options.proc_root.join("sys/kernel")).unwrap();
+        fs::write(options.proc_root.join("locks"), "").unwrap();
+        fs::write(options.proc_root.join("sys/kernel/hostname"), "fixture\n").unwrap();
+        fs::create_dir_all(&options.claude_home).unwrap();
+        fs::create_dir_all(&options.codex_home).unwrap();
+        fs::write(
+            &options.claude_json,
+            serde_json::json!({
+                "oauthAccount":{"emailAddress":"fixture-facts@example.invalid","accountUuid":"fixture-facts-account"},
+                "projects":{"/private/project/path":{
+                    "lastSessionId":"fixture-run","lastStartTime":1234,"lastCost":0.5,
+                    "lastDuration":10,"lastAPIDuration":7,"lastToolDuration":2,
+                    "lastLinesAdded":3,"lastLinesRemoved":1,"privateProjectValue":"project-secret",
+                    "lastModelUsage":{"claude-opus-5[1m]":{
+                        "inputTokens":10,"outputTokens":20,"thinkingTokens":4,
+                        "cacheReadInputTokens":30,"cacheCreationInputTokens":5,
+                        "webSearchRequests":1,"costUSD":0.5,"privateModelValue":"model-secret"
+                    }}
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let facts = local_facts(&options).unwrap();
+        assert_eq!(facts.reported_runs.len(), 1);
+        let serialized = serde_json::to_string(&facts).unwrap();
+        for secret in [
+            "fixture-facts@example.invalid",
+            "fixture-facts-account",
+            "/private/project/path",
+            "project-secret",
+            "model-secret",
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+        assert!(serialized.contains("fixture-run"));
+        assert!(serialized.contains("inputTokens"));
         fs::remove_dir_all(root).unwrap();
     }
 }
