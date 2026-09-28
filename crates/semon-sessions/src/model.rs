@@ -3891,6 +3891,11 @@ pub(crate) fn build(
         .iter()
         .map(|handoff| handoff.out.clone())
         .collect();
+    let handoff_by_id: HashMap<&str, &Handoff> = builder
+        .handoffs
+        .iter()
+        .map(|handoff| (handoff.out.id.as_str(), &handoff.out))
+        .collect();
     let mut sessions: BTreeMap<String, Session> = builder
         .sessions
         .iter()
@@ -3917,8 +3922,8 @@ pub(crate) fn build(
             keep.extend(handoff.to.clone());
         }
         sessions.retain(|key, _| keep.contains(key));
-        tx.retain(|key, _| keep.contains(key));
-        let kept: BTreeSet<&str> = handoffs.iter().map(|handoff| handoff.id.as_str()).collect();
+        let mut kept: BTreeSet<String> =
+            handoffs.iter().map(|handoff| handoff.id.clone()).collect();
         turns.retain(|turn| {
             sessions.contains_key(&turn.sid)
                 && (turn.last
@@ -3928,6 +3933,29 @@ pub(crate) fn build(
                         .as_deref()
                         .is_some_and(|start| kept.contains(start)))
         });
+        // A retained turn names its incoming and outgoing handoffs even
+        // when those handoffs fall outside the time window. Keep those exact
+        // links so the turn remains self-contained.
+        for turn in &turns {
+            for id in turn.start.iter().chain(&turn.sent) {
+                if kept.insert(id.clone())
+                    && let Some(handoff) = handoff_by_id.get(id.as_str())
+                {
+                    handoffs.push((*handoff).clone());
+                    for endpoint in std::iter::once(&handoff.from).chain(handoff.to.iter()) {
+                        if !sessions.contains_key(endpoint)
+                            && let Some(session) = builder
+                                .sessions
+                                .iter()
+                                .find(|session| &session.key == endpoint)
+                        {
+                            sessions.insert(endpoint.clone(), session.out.clone());
+                        }
+                    }
+                }
+            }
+        }
+        tx.retain(|key, _| sessions.contains_key(key));
         for session in sessions.values_mut() {
             session.busy.retain(|interval| interval.1 >= cutoff);
             if let Some(first) = session.busy.first_mut() {

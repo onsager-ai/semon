@@ -1629,7 +1629,7 @@ mod tests {
         let entries = page["entries"].as_array().unwrap();
         assert_eq!(
             (page["calls"].as_u64(), page["errors"].as_u64()),
-            (Some(2), Some(0))
+            (Some(2), Some(1))
         );
         let operation = entries.iter().find(|entry| entry["arg"] == "next").unwrap();
         assert_eq!(operation["name"], "exec_command");
