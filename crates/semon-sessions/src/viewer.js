@@ -547,8 +547,10 @@
     const e0 = turnEnd(root); traceMeta(b0, e0?.st ?? "idle", e0?.text ?? "Nothing recorded", root.sid, root);
     const walk = (t) => {
       for (const h of t.sent) {
-        const c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null, tgt = h.kind === "toyou" ? h.from : h.to, [ic, parts] = sentence(h, null);
+        const result = h.kind === "toyou" && h.ask === "result";
+        const c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null, tgt = h.kind === "toyou" ? h.from : h.to, [ic, parts] = result ? [I.result, [el("span", "verb", statWord(h))]] : sentence(h, null);
         const [x, b] = hop("child k-" + h.kind + " s-" + h.status + (c || h.kind === "toyou" || h.kind === "move" ? "" : " stub"), ic, hcls(tgt), parts, h.at); x.dataset.h = h.id; if (c) x.dataset.turn = c.id;
+        if (result) { n++; continue; }
         clampBrief(b, h.brief); const an = answerEl(h, "result"); if (an) b.append(an);
         if (h.result) { const r = el("div", "result"); r.append(el("span", "rl", "Result:")); const s = el("span"); inline(s, h.result); r.append(s); b.append(r); }
         if (h.kind === "move") { traceMeta(b, "done", "Moved", h.to, t); continue; }
@@ -678,6 +680,11 @@
         const h = H.find((x) => x.id === e.id); if (!hit(h.brief + " " + (h.result ?? ""))) continue;
         // Your own ask is simply your message.
         if (h.kind === "ask") { if (!show.messages) continue; const m = keyed(el("div", "msg user"), e); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
+        if (h.kind === "toyou" && h.ask === "result") {
+          const marker = el("div", "result-marker " + h.status);
+          marker.append(icon(I.result), el("span", "word", statWord(h)), el("span", "tm", clock(h.at)));
+          tx.append(keyed(marker, e)); continue;
+        }
         // A relay or brief that starts a turn is that turn's message.
         if (cur && cur.t.start === h && e === cur.t.entries[0]) { if (!show.messages) continue; tx.append(keyed(handoffCard(h, sid, true), e)); continue; }
         if (h.kind === "move") { if (find) continue; tx.append(keyed(handoffCard(h, sid), e)); continue; }

@@ -348,6 +348,14 @@ export function write(out, { extras = false } = {}) {
     c.save(); locked("deps");
   }
   if (extras) {
+    // result-card: an idle session that replied to your own message.
+    {
+      const c = claude("result-card", { cwd: role("result-card"), model: "opus-5.5", tokens: [0, 0, 0] });
+      c.title(ms(T(8, 48)), "Result card");
+      c.ask(ms(T(8, 49)), "Give one compact answer");
+      c.text(ms(T(8, 50)), "Unique result text for the transcript check.");
+      c.save(); live("result-card", "idle");
+    }
     // code-mode: one script whose two commands and file change are indexed as three transcript steps.
     {
       const cwd = repo("meridian"), c = codex("code-mode", ms(T(8, 0)), { cwd, branch: "feat/code-mode", tokens: [0, 0, 0] });

@@ -152,6 +152,44 @@ export default async function (browser) {
     await page.context().close();
   }
 
+  // ---- Result handoff: the transcript keeps the reply once and shows a compact marker ----------------------------
+  {
+    const page = await served(browser, { extras: true, path: "/s/claude/result-card" });
+    await page.waitForFunction(() => !!document.querySelector(".result-marker"));
+    const result = await page.locator(".turns").evaluate((turns) => {
+      const phrase = "Unique result text for the transcript check.";
+      const text = turns.innerText;
+      const marker = turns.querySelector(".result-marker");
+      return {
+        phraseCount: text.split(phrase).length - 1,
+        markerText: marker?.innerText ?? "",
+        markerCount: turns.querySelectorAll(".result-marker").length,
+        markerHasCard: !!marker?.closest(".hcard"),
+        moreButtons: turns.querySelectorAll(".result-marker .more").length,
+      };
+    });
+    R.resultMarker = result;
+    r.expect(result.phraseCount === 1, "the reply text appears once in the transcript: " + JSON.stringify(result));
+    r.expect(result.markerCount === 1 && !result.markerHasCard && result.moreButtons === 0, "the result is one compact marker without a card or Show more: " + JSON.stringify(result));
+    const resultId = D.H.find((h) => h.from === "result-card" && h.ask === "result")?.id ?? "";
+    await page.click(".turn-end .tracebtn");
+    await page.waitForSelector('.flow .hop[data-h="' + resultId + '"]');
+    const trace = await page.locator(".flow").evaluate((flow, id) => {
+      const phrase = "Unique result text for the transcript check.";
+      const result = flow.querySelector('.hop[data-h="' + CSS.escape(id) + '"]');
+      return {
+        phraseCount: flow.innerText.split(phrase).length - 1,
+        hopText: result?.querySelector(".sent")?.innerText ?? "",
+        briefs: result?.querySelectorAll(".brief").length ?? 0,
+        moreButtons: result?.querySelectorAll(".more").length ?? 0,
+      };
+    }, resultId);
+    R.resultTrace = trace;
+    r.expect(trace.phraseCount === 0 && trace.hopText.length > 0 && trace.briefs === 0 && trace.moreButtons === 0, "the trace keeps result text out of its compact marker: " + JSON.stringify(trace));
+    r.expect(page.errors.length === 0, "result marker page errors: " + page.errors.join(" | "));
+    await page.context().close();
+  }
+
   // ---- Injection -------------------------------------------------------------------------------------------------------
   {
     const X = { screens: 0, bad: [], payloadShown: 0 };
