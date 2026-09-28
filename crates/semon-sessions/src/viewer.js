@@ -628,7 +628,7 @@
   function appendAnalyticsRange(bar) {
     const group = el("div", "analytics-range"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Analytics range");
     for (const [days, label] of [[1, "24 h"], [7, "7 d"], [30, "30 d"]]) {
-      const b = el("button", null, label); b.type = "button"; b.setAttribute("aria-pressed", String(analyticsRange === days));
+      const b = el("button", null, label); b.type = "button"; b.dataset.e = "analytics-range:" + days; b.setAttribute("aria-pressed", String(analyticsRange === days));
       b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); }); group.append(b);
     }
     bar.append(group);

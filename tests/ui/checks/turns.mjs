@@ -76,13 +76,16 @@ export default async function turnsCheck(browser) {
     for (const m of await page.evaluate(() => [...document.querySelectorAll(".page .nrow")].map((row) => row.dataset.m))) { await goto(page, { v: "machine", id: m }, D0); await screen("machine " + m); addTap("ib", await small(".ib")); }
 
     // Every session page: turns, trace buttons against the model, overflow collapsed and fully opened.
-    const T = { sessions: 0, turns: 0, perSession: {}, withOnward: 0, traceButtons: 0, onwardWithoutButton: 0, buttonWithoutOnward: 0, modelMismatch: [] };
+    const T = { sessions: 0, turns: 0, perSession: {}, withOnward: 0, traceButtons: 0, onwardWithoutButton: 0, buttonWithoutOnward: 0, modelMismatch: [], mismatchDetails: [] };
     const traceTurns = [];
     for (const sid of Object.keys(D.SESS)) {
       await goto(page, { v: "session", id: sid }, D0); T.sessions++;
       const info = await page.evaluate(() => [...document.querySelectorAll(".turns > .turn")].map((t) => ({ id: t.dataset.turn, head: !!t.querySelector(":scope > .turn-h"), onward: t.querySelectorAll(":scope > .tx > .hcard:not(.start):not(.move)").length + t.querySelectorAll(":scope > .tx > .result-marker").length, btn: !!t.querySelector(":scope > .turn-end .tracebtn"), end: t.querySelector(":scope > .turn-end .stat")?.textContent ?? null })));
       const exp = D.turns[sid] ?? [];
-      if (info.length !== exp.length || info.some((t, i) => t.id !== exp[i].id || t.btn !== !!exp[i].out.length)) T.modelMismatch.push(sid.slice(0, 12));
+      if (info.length !== exp.length || info.some((t, i) => t.id !== exp[i].id || t.btn !== !!exp[i].out.length)) {
+        T.modelMismatch.push(sid.slice(0, 12));
+        T.mismatchDetails.push({ sid, expected: exp.map((t) => ({ id: t.id, out: t.out.map((h) => h.id) })), rendered: info });
+      }
       T.turns += info.length; T.perSession[D.SESS[sid].name.slice(0, 28)] = info.length;
       for (const t of info) { if (t.onward) T.withOnward++; if (t.btn) { T.traceButtons++; traceTurns.push([sid, t.id]); } if (t.onward && !t.btn) T.onwardWithoutButton++; if (t.btn && !t.onward) T.buttonWithoutOnward++; }
       await screen("session " + sid.slice(0, 8)); addTap(".tracebtn", await small(".turn-end .tracebtn")); addTap(".turn-h .from", await small(".turn-h .from"));
