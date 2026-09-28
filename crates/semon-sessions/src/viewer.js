@@ -1218,7 +1218,7 @@
       const actions = el("div", "child-actions"), openChild = el("button", null, "Open"); openChild.type = "button"; openChild.addEventListener("click", (e) => { e.stopPropagation(); goSession(child.id); }); actions.append(openChild);
       const entries = (STARTS.get(h.id)?.entries ?? TX[child.id] ?? []).filter((e) => !(e.k === "h" && e.id === h.id));
       if (entries.length) {
-        const group = el("div", "child-work"); group.dataset.e = "cw:" + h.id; const toggle = el("button", "cw-toggle"); toggle.type = "button"; toggle.setAttribute("aria-expanded", "false"); toggle.append(icon(I.chev, "chev"), "What " + child.name + " did");
+        const group = el("div", "child-work"); group.dataset.e = "cw:" + h.id; group.addEventListener("click", (e) => e.stopPropagation()); const toggle = el("button", "cw-toggle"); toggle.type = "button"; toggle.setAttribute("aria-expanded", "false"); toggle.append(icon(I.chev, "chev"), "What " + child.name + " did");
         const inner = el("div", "cw-body"); inner.hidden = true; let showAll = false;
         const paint = () => { inner.replaceChildren(transcript(child.id, { nested: true, entries: showAll ? entries : entries.slice(-5) })); if (!showAll && entries.length > 5) { const all = el("button", "show-all", "Show all " + entries.length); all.type = "button"; all.addEventListener("click", (e) => { e.stopPropagation(); showAll = true; paint(); }); inner.append(all); } };
         toggle.addEventListener("click", (e) => { e.stopPropagation(); if (inner.hidden && !inner.childElementCount) paint(); inner.hidden = !inner.hidden; toggle.setAttribute("aria-expanded", String(!inner.hidden)); });
