@@ -3,7 +3,7 @@
 use std::{env, net::SocketAddr, path::PathBuf, time::Duration};
 
 use semon_sessions::{
-    AccountLink, AccountMenu, AccountWorkspace, Options, SECURITY_HEADERS, ViewerCore,
+    AccountLink, AccountMenu, AccountWorkspace, LinkMethod, Options, SECURITY_HEADERS, ViewerCore,
 };
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
@@ -53,6 +53,15 @@ fn answer(
     let _ = request.respond(response);
 }
 
+fn redirect_to_root(request: Request) {
+    let mut response = Response::empty(StatusCode(303));
+    response.add_header(header("Location", "/"));
+    for (name, value) in SECURITY_HEADERS {
+        response.add_header(header(name, value));
+    }
+    let _ = request.respond(response);
+}
+
 fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
     let url = request.url().to_owned();
     let (path, query) = url.split_once('?').unwrap_or((&url, ""));
@@ -70,7 +79,18 @@ fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
             .split(';')
             .any(|part| part.trim().strip_prefix("semon_session=") == Some(TOKEN))
     });
-    if request.method() != &Method::Get || !valid_host || !(query_token || cookie_token) {
+    let is_get = request.method() == &Method::Get;
+    let is_post = request.method() == &Method::Post;
+    let post_action = matches!(
+        path,
+        "/workspaces/research" | "/workspaces/writing" | "/account/sign-out"
+    );
+    let expected_origin = format!("http://{expected_host}");
+    let valid_origin = request_header(&request, "Origin") == Some(expected_origin.as_str());
+    if !valid_host
+        || !(query_token || cookie_token)
+        || (!is_get && !(is_post && post_action && valid_origin))
+    {
         answer(
             request,
             403,
@@ -79,6 +99,10 @@ fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
             None,
             false,
         );
+        return;
+    }
+    if is_post {
+        redirect_to_root(request);
         return;
     }
     let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
@@ -145,11 +169,19 @@ fn main() {
                 AccountLink {
                     label: "Profile".into(),
                     href: "/account/profile".into(),
+                    method: LinkMethod::default(),
                     danger: false,
                 },
                 AccountLink {
-                    label: "<script>window.__accountXss=2</script>".into(),
-                    href: "/account/remove".into(),
+                    label: "Machines".into(),
+                    href: "/machines".into(),
+                    method: LinkMethod::default(),
+                    danger: false,
+                },
+                AccountLink {
+                    label: "Sign out".into(),
+                    href: "/account/sign-out".into(),
+                    method: LinkMethod::Post,
                     danger: true,
                 },
             ],

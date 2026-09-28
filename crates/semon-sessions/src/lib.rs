@@ -27,7 +27,7 @@ pub use inputs::{Input, InputRoot, inputs, is_input_path};
 pub use mcp::serve_mcp;
 pub use model::{model_json, model_json_at};
 pub use query::{DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools};
-pub use union::{AccountLink, AccountMenu, AccountWorkspace, AdminLink, ViewerCore};
+pub use union::{AccountLink, AccountMenu, AccountWorkspace, AdminLink, LinkMethod, ViewerCore};
 pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve};
 
 #[derive(Clone, Debug)]

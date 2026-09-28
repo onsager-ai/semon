@@ -67,6 +67,8 @@ fn valid_href(href: &str) -> bool {
 }
 
 /// One named workspace listed by an embedding server in an account menu.
+/// Selecting it submits a POST to `switch_href`; the embedding server should
+/// apply its same-origin check before changing the active workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountWorkspace {
     /// The name shown in the list.
@@ -75,8 +77,27 @@ pub struct AccountWorkspace {
     pub role: String,
     /// Whether this is the account's current workspace.
     pub current: bool,
-    /// Same-origin path opened when this item is selected.
+    /// Same-origin form action submitted with POST when this item is selected.
     pub switch_href: String,
+}
+
+/// The HTTP method used by an account link.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkMethod {
+    /// Navigate with a link. This is the default.
+    #[default]
+    Get,
+    /// Submit a same-origin form to the link's action.
+    Post,
+}
+
+impl LinkMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Post => "post",
+        }
+    }
 }
 
 /// A link listed at the end of an account menu.
@@ -84,8 +105,10 @@ pub struct AccountWorkspace {
 pub struct AccountLink {
     /// The text shown for the link.
     pub label: String,
-    /// Same-origin path opened when this link is selected.
+    /// Same-origin path used as the link destination or form action.
     pub href: String,
+    /// Method used to select this link. Defaults to [`LinkMethod::Get`].
+    pub method: LinkMethod,
     /// Whether the link is shown with the error color.
     pub danger: bool,
 }
@@ -108,8 +131,11 @@ impl AccountMenu {
     /// [`AdminLink`] label checks (1–80 characters). Login and workspace roles
     /// allow 0–80 characters; initials allow 1–3. Display text rejects
     /// controls. `avatar_href`, `switch_href`, and link `href` values use the
-    /// [`AdminLink`] same-origin path checks. The menu accepts up to 50
-    /// workspaces and 12 links, and does not keep a partial list.
+    /// [`AdminLink`] same-origin path checks. Workspaces always submit their
+    /// `switch_href` with POST; account links default to GET and can use POST
+    /// with [`LinkMethod::Post`]. The embedding server must enforce its
+    /// same-origin check on POST actions. The menu accepts up to 50 workspaces
+    /// and 12 links, and does not keep a partial list.
     pub fn new(
         name: &str,
         login: &str,
@@ -399,6 +425,7 @@ fn with_model_extras(
                 "links": account.links.iter().map(|link| json!({
                     "label": link.label,
                     "href": link.href,
+                    "method": link.method.as_str(),
                     "danger": link.danger,
                 })).collect::<Vec<_>>(),
             }),
@@ -829,6 +856,7 @@ mod tests {
         let link = || AccountLink {
             label: "Profile".into(),
             href: "/account/profile".into(),
+            method: LinkMethod::default(),
             danger: false,
         };
         let menu = || {
@@ -856,6 +884,7 @@ mod tests {
                 "workspace href {href:?}"
             );
             let mut bad_link = link();
+            bad_link.method = LinkMethod::Post;
             bad_link.href = href.to_owned();
             assert!(
                 AccountMenu::new("Morgan", "", "M", None, vec![], vec![bad_link]).is_none(),

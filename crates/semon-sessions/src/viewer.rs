@@ -2817,11 +2817,20 @@ mod tests {
                     current: true,
                     switch_href: "/workspaces/research".into(),
                 }],
-                vec![crate::AccountLink {
-                    label: "Profile".into(),
-                    href: "/account/profile".into(),
-                    danger: false,
-                }],
+                vec![
+                    crate::AccountLink {
+                        label: "Profile".into(),
+                        href: "/account/profile".into(),
+                        method: crate::LinkMethod::default(),
+                        danger: false,
+                    },
+                    crate::AccountLink {
+                        label: "Sign out".into(),
+                        href: "/account/sign-out".into(),
+                        method: crate::LinkMethod::Post,
+                        danger: true,
+                    },
+                ],
             )
             .unwrap()
         };
@@ -2847,6 +2856,8 @@ mod tests {
             "/account/profile"
         );
         assert_eq!(first_model["account"]["links"][0]["danger"], false);
+        assert_eq!(first_model["account"]["links"][0]["method"], "get");
+        assert_eq!(first_model["account"]["links"][1]["method"], "post");
         assert_eq!(
             first_model["nav"],
             json!({"machines":"/account/workspaces"})

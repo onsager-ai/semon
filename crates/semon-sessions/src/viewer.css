@@ -264,11 +264,16 @@ code { overflow-wrap: anywhere; }
 .account-section { border-top: 1px solid var(--line); padding: 5px 0 2px; }
 .account-heading { padding: 4px 8px; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
 .account-menu-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 42px; border-bottom: 1px solid var(--line); padding: 5px 8px; color: var(--ink); font-size: 13.5px; text-decoration: none; }
+.account-menu-form { width: 100%; margin: 0; }
+.menu button.account-menu-row { appearance: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; padding: 5px 8px; text-align: left; color: var(--ink); font-size: 13.5px; font-family: inherit; font-weight: inherit; }
 .account-menu-row:last-child { border-bottom: 0; }
+.account-menu-form:last-child .account-menu-row { border-bottom: 0; }
 @media (hover: hover) { .account-menu-row:hover { background: var(--sunken); } }
+@media (hover: hover) { .menu button.account-menu-row:hover { background: var(--sunken); } }
 .account-menu-row[aria-current="page"] { color: var(--ink); }
 .account-check { flex: none; color: var(--accent); font-size: 16px; }
 .account-menu-row.danger { color: var(--err); }
+.menu button.account-menu-row.danger { color: var(--err); }
 .account-links .account-menu-row { min-height: 40px; }
 
 /* Transcript, modelled on Claude's chat */

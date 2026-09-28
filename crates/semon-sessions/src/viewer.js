@@ -202,7 +202,7 @@
     if (value.avatar_href != null && !safePath(value.avatar_href)) return null;
     if (!Array.isArray(value.workspaces) || value.workspaces.length > 50 || !Array.isArray(value.links) || value.links.length > 12) return null;
     if (value.workspaces.some((w) => !w || !textField(w.name, 1, 80) || !w.name.trim() || !textField(w.role, 0, 80) || typeof w.current !== "boolean" || !safePath(w.switch_href))) return null;
-    if (value.links.some((a) => !a || !textField(a.label, 1, 80) || !a.label.trim() || !safePath(a.href) || typeof a.danger !== "boolean")) return null;
+    if (value.links.some((a) => !a || !textField(a.label, 1, 80) || !a.label.trim() || !safePath(a.href) || (a.method !== "get" && a.method !== "post") || typeof a.danger !== "boolean")) return null;
     return value;
   }
   // An error carries the HTTP status (0: no response), so live polling can tell a 403 from a dropped connection.
@@ -370,18 +370,27 @@
     const details = el("span", "account-identity-text"); details.append(el("span", "account-name", ACCOUNT.name), el("span", "account-login-value", ACCOUNT.login)); identity.append(details); menu.append(identity);
     const workspaces = el("section", "account-section"); workspaces.append(el("div", "account-heading", "Workspaces"));
     for (const workspace of ACCOUNT.workspaces) {
-      const row = el("a", "account-menu-row"); row.setAttribute("role", "menuitem"); row.setAttribute("href", workspace.switch_href);
+      if (!safePath(workspace.switch_href)) continue;
+      const form = el("form", "account-menu-form account-workspace-form"); form.setAttribute("method", "post"); form.setAttribute("action", workspace.switch_href);
+      const row = el("button", "account-menu-row"); row.type = "submit"; row.setAttribute("role", "menuitem");
       if (workspace.current) row.setAttribute("aria-current", "page");
       const name = el("span", "account-row-main"); name.append(el("span", "account-workspace-name", workspace.name), el("span", "account-role", workspace.role)); row.append(name);
       if (workspace.current) row.append(el("span", "account-check", "✓"));
-      workspaces.append(row);
+      form.append(row); workspaces.append(form);
     }
     menu.append(workspaces);
     if (ACCOUNT.links.length) {
       const links = el("section", "account-section account-links");
       for (const link of ACCOUNT.links) {
-        const row = el("a", "account-menu-row" + (link.danger ? " danger" : ""), link.label);
-        row.setAttribute("role", "menuitem"); row.setAttribute("href", link.href); links.append(row);
+        if (!safePath(link.href)) continue;
+        const row = el(link.method === "post" ? "button" : "a", "account-menu-row" + (link.danger ? " danger" : ""), link.label);
+        row.setAttribute("role", "menuitem");
+        if (link.method === "post") {
+          const form = el("form", "account-menu-form account-link-form"); form.setAttribute("method", "post"); form.setAttribute("action", link.href);
+          row.type = "submit"; form.append(row); links.append(form);
+        } else {
+          row.setAttribute("href", link.href); links.append(row);
+        }
       }
       menu.append(links);
     }

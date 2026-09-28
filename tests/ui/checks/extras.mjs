@@ -29,7 +29,6 @@ export default async function (browser) {
   // ---- Embedding server account menu and Machines destination -----------------------------------------------------
   {
     const name = '<img src=x onerror="window.__accountXss=1">';
-    const injectedLabel = "<script>window.__accountXss=2</script>";
     r.expect(!!ENV.accountBase && !!ENV.accountToken, "the account fixture server is required");
     const desktop = await served(browser, { account: true, size: "desktop" });
     const topbarAvatar = await desktop.locator("#topbar .account-avatar-button").evaluate((button) => {
@@ -38,28 +37,42 @@ export default async function (browser) {
     });
     const servedAccount = await desktop.evaluate(async () => (await (await fetch("/api/model")).json()).account);
     const servedNav = await desktop.evaluate(async () => (await (await fetch("/api/model")).json()).nav);
-    r.expect(servedAccount?.name === name && servedNav?.machines === "/account/workspaces", "the embedding fixture serves account and nav model values");
+    r.expect(servedAccount?.name === name && servedAccount.links?.map((link) => link.method).join(",") === "get,get,post" && servedNav?.machines === "/account/workspaces", "the embedding fixture serves account methods and nav model values");
     r.expect(topbarAvatar.width === 32 && topbarAvatar.height === 32 && topbarAvatar.visible && topbarAvatar.right === 20, "desktop has a 32px avatar button at the top bar's right end: " + JSON.stringify(topbarAvatar));
     await desktop.locator("#topbar .account-avatar-button").click();
     const desktopMenu = await desktop.locator("#topbar .account-popover").evaluate((menu) => ({
       name: menu.querySelector(".account-name")?.textContent,
       login: menu.querySelector(".account-login-value")?.textContent,
-      workspaces: [...menu.querySelectorAll(".account-menu-row[aria-current]")].map((row) => ({ name: row.querySelector(".account-workspace-name")?.textContent, href: row.getAttribute("href"), current: row.getAttribute("aria-current") })),
+      workspaces: [...menu.querySelectorAll(".account-workspace-form")].map((form) => {
+        const row = form.querySelector(".account-menu-row");
+        return { name: row.querySelector(".account-workspace-name")?.textContent, method: form.getAttribute("method"), action: form.getAttribute("action"), tag: row.tagName, type: row.getAttribute("type"), role: row.getAttribute("role"), current: row.getAttribute("aria-current"), controls: form.elements.length, hidden: form.querySelectorAll("input").length };
+      }),
       allWorkspaces: [...menu.querySelectorAll(".account-workspace-name")].map((row) => row.textContent),
-      links: [...menu.querySelectorAll(".account-links a")].map((row) => ({ label: row.textContent, href: row.getAttribute("href"), danger: row.classList.contains("danger") })),
+      links: [...menu.querySelectorAll(".account-links > a, .account-links > form")].map((container) => {
+        const form = container.matches("form") ? container : null;
+        const row = form ? form.querySelector(".account-menu-row") : container;
+        return { label: row.textContent, tag: row.tagName, href: row.getAttribute("href"), method: form?.getAttribute("method") ?? null, action: form?.getAttribute("action") ?? null, danger: row.classList.contains("danger"), role: row.getAttribute("role"), type: row.getAttribute("type"), controls: form?.elements.length ?? null };
+      }),
       expanded: document.querySelector("#topbar .account-avatar-button")?.getAttribute("aria-expanded"),
       payloadNodes: { img: menu.querySelectorAll("img").length, script: menu.querySelectorAll("script").length },
     }));
     R.accountDesktop = { topbarAvatar, desktopMenu };
     r.expect(desktopMenu.name === name && desktopMenu.login === "reader@example.invalid", "the menu shows identity strings as text: " + JSON.stringify(desktopMenu));
-    r.expect(desktopMenu.allWorkspaces.join(",") === "Research,Writing" && desktopMenu.workspaces.length === 1 && desktopMenu.workspaces[0].name === "Research" && desktopMenu.workspaces[0].href === "/workspaces/research" && desktopMenu.workspaces[0].current === "page", "workspaces list their destinations and mark the current one: " + JSON.stringify(desktopMenu));
-    r.expect(desktopMenu.links.length === 2 && desktopMenu.links[0].label === "Profile" && desktopMenu.links[1].label === injectedLabel && desktopMenu.links[1].danger && desktopMenu.links[1].href === "/account/remove", "links and danger styling render from the account data: " + JSON.stringify(desktopMenu.links));
-    r.expect(desktopMenu.payloadNodes.img === 0 && desktopMenu.payloadNodes.script === 0 && (await desktop.evaluate(() => window.__accountXss ?? null)) === null, "the injected name and label stay text nodes");
+    r.expect(desktopMenu.allWorkspaces.join(",") === "Research,Writing" && desktopMenu.workspaces.length === 2 && desktopMenu.workspaces.every((row) => row.method === "post" && row.tag === "BUTTON" && row.type === "submit" && row.role === "menuitem" && row.controls === 1 && row.hidden === 0) && desktopMenu.workspaces[0].name === "Research" && desktopMenu.workspaces[0].action === "/workspaces/research" && desktopMenu.workspaces[0].current === "page" && desktopMenu.workspaces[1].action === "/workspaces/writing", "workspace rows are POST forms and mark the current one: " + JSON.stringify(desktopMenu.workspaces));
+    r.expect(desktopMenu.links.length === 3 && desktopMenu.links[0].label === "Profile" && desktopMenu.links[0].tag === "A" && desktopMenu.links[0].href === "/account/profile" && desktopMenu.links[1].label === "Machines" && desktopMenu.links[1].tag === "A" && desktopMenu.links[1].href === "/machines" && desktopMenu.links[2].label === "Sign out" && desktopMenu.links[2].tag === "BUTTON" && desktopMenu.links[2].method === "post" && desktopMenu.links[2].action === "/account/sign-out" && desktopMenu.links[2].controls === 1 && desktopMenu.links[2].role === "menuitem" && desktopMenu.links[2].type === "submit" && desktopMenu.links[2].danger, "GET account links remain anchors and Sign out is a POST form: " + JSON.stringify(desktopMenu.links));
+    r.expect(desktopMenu.payloadNodes.img === 0 && desktopMenu.payloadNodes.script === 0 && (await desktop.evaluate(() => window.__accountXss ?? null)) === null, "the injected name stays a text node");
     await desktop.keyboard.press("Escape");
     r.expect(await desktop.locator("#topbar .account-popover").count() === 0, "Escape closes the account menu");
     await desktop.locator("#topbar .account-avatar-button").click();
     await desktop.locator("#page").click({ position: { x: 8, y: 8 } });
     r.expect(await desktop.locator("#topbar .account-popover").count() === 0, "a click outside closes the account menu");
+
+    const workspacePost = desktop.waitForResponse((response) => new URL(response.url()).pathname === "/workspaces/research" && response.request().method() === "POST");
+    await desktop.locator("#topbar .account-avatar-button").click();
+    await desktop.locator("#topbar .account-workspace-form button").first().click();
+    const workspaceResponse = await workspacePost;
+    await desktop.waitForURL((url) => url.pathname === "/" && url.search === "");
+    r.expect(workspaceResponse.status() === 303 && new URL(desktop.url()).pathname === "/" && new URL(desktop.url()).search === "", "submitting the workspace form follows its 303 back to /: " + workspaceResponse.status() + " " + desktop.url());
 
     await desktop.route("**/account/workspaces", (route) => route.fulfill({ status: 200, contentType: "text/plain", body: "workspaces destination" }));
     await desktop.locator('.nav-item[data-go="machines"]').click();
@@ -92,11 +105,12 @@ export default async function (browser) {
       workspaces: [...menu.querySelectorAll(".account-workspace-name")].map((row) => row.textContent),
       current: menu.querySelector('.account-menu-row[aria-current="page"] .account-workspace-name')?.textContent,
       targets: [...menu.querySelectorAll(".account-menu-row")].map((row) => Math.round(row.getBoundingClientRect().height)),
+      postForms: [...menu.querySelectorAll("form")].map((form) => ({ method: form.getAttribute("method"), action: form.getAttribute("action"), controls: form.elements.length })),
       visible: getComputedStyle(menu).display !== "none",
     }));
     R.accountPhone = { drawerRow, phoneMenu };
-    r.expect(phoneMenu.visible && phoneMenu.workspaces.join(",") === "Research,Writing" && phoneMenu.current === "Research", "phone footer expands to the same workspace menu: " + JSON.stringify(phoneMenu));
-    r.expect(phoneMenu.targets.length === 4 && phoneMenu.targets.every((height) => height >= 44), "phone account links have 44px targets: " + JSON.stringify(phoneMenu.targets));
+    r.expect(phoneMenu.visible && phoneMenu.workspaces.join(",") === "Research,Writing" && phoneMenu.current === "Research" && phoneMenu.postForms.length === 3 && phoneMenu.postForms.every((form) => form.method === "post" && form.controls === 1) && phoneMenu.postForms[2].action === "/account/sign-out", "phone footer expands to the same account menu with POST forms: " + JSON.stringify(phoneMenu));
+    r.expect(phoneMenu.targets.length === 5 && phoneMenu.targets.every((height) => height >= 44), "phone account links have 44px targets: " + JSON.stringify(phoneMenu.targets));
     r.expect(phone.errors.length === 0, "phone account page errors: " + phone.errors.join(" | "));
     await phone.context().close();
   }
