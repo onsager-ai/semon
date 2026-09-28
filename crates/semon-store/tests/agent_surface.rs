@@ -34,6 +34,8 @@ fn ts(hour: i64, minute: i64) -> String {
 
 struct Home {
     root: PathBuf,
+    /// The window flags every command gets: `--all` unless a test says.
+    window: Vec<&'static str>,
 }
 
 impl Home {
@@ -45,7 +47,10 @@ impl Home {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let home = Self { root };
+        let home = Self {
+            root,
+            window: vec!["--all"],
+        };
         home.write("proc/locks", "");
         home.write("proc/sys/kernel/hostname", "testbox\n");
         home.lines(
@@ -138,6 +143,7 @@ impl Home {
         Command::new(env!("CARGO_BIN_EXE_semon"))
             .args(args)
             .args(self.flags())
+            .args(&self.window)
             .stdin(Stdio::null())
             .output()
             .unwrap()
@@ -235,7 +241,7 @@ fn summaries(model: &Value) -> BTreeMap<&'static str, Value> {
     let claude = |id: &str| {
         json!({"id": id, "harness": "claude", "kind": "session", "model": "opus-5.5", "repo": null, "branch": null,
             "machine": "testbox", "parent": null, "children": [], "exit": null,
-            "tokens": {"input": 1000, "cached": 2000, "output": 500}, "run": null})
+            "tokens": {"input": 1000, "cached": 2000, "output": 500}, "run": null, "turns_truncated": false})
     };
     let mut done = claude("done");
     for (key, value) in [
@@ -267,14 +273,17 @@ fn summaries(model: &Value) -> BTreeMap<&'static str, Value> {
     let cx = json!({"id": "cx", "harness": "codex", "kind": "codex-run", "name": "Codex run", "model": "codex",
         "repo": null, "branch": null, "machine": "testbox", "parent": null, "children": [], "state": "ended",
         "start": at(5, 0), "last_activity": at(5, 2), "pid": null, "alive": null, "exit": null,
-        "open_question": null, "tokens": {"input": 0, "cached": 0, "output": 0}, "run": null});
+        "open_question": null, "tokens": {"input": 0, "cached": 0, "output": 0}, "run": null,
+        "turns_truncated": false});
     BTreeMap::from([("done", done), ("asker", asker), ("cx", cx)])
 }
 
-/// Drops what depends on the clock: `now`, and each stall's `idle_ms`.
+/// Drops what depends on the clock: `now`, and each stall's `idle_ms`;
+/// and `window_start`, which every answer has, null with `--all`.
 fn timeless(mut value: Value) -> Value {
     if let Some(fields) = value.as_object_mut() {
         fields.remove("now");
+        assert_eq!(fields.remove("window_start"), Some(Value::Null));
     }
     if let Some(rows) = value.get_mut("stalls").and_then(Value::as_array_mut) {
         for row in rows {
@@ -450,6 +459,7 @@ impl Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_semon"))
             .arg("mcp")
             .args(home.flags())
+            .args(&home.window)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -727,4 +737,58 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         before,
         "the agent homes and /proc are unchanged"
     );
+}
+
+/// The window flags: 30 days by default, `--since`, or `--all`; a tool's
+/// `since` (`--newer-than` on the command line) that reaches before the
+/// window is the error `outside_window`, over the CLI and MCP alike.
+#[test]
+fn the_window_is_30_days_unless_widened_and_since_stays_inside_it() {
+    const DAY_MS: i64 = 86_400_000;
+    let mut home = Home::new();
+    let window_of =
+        |answer: &Value| answer["now"].as_i64().unwrap() - answer["window_start"].as_i64().unwrap();
+    home.window = vec![];
+    let answer = home.query(&["query", "list_sessions"]);
+    assert_eq!(window_of(&answer), 30 * DAY_MS);
+    let output = home.semon(&["query", "list_sessions", "--newer-than", "40d", "--json"]);
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "outside_window");
+    assert!(error["error"]["window_start"].is_i64());
+    let inside = home.query(&["query", "find", "lexer", "--newer-than", "29d"]);
+    assert_eq!(window_of(&inside), 30 * DAY_MS);
+
+    home.window = vec!["--since", "60d"];
+    let wider = home.query(&["query", "list_sessions", "--newer-than", "40d"]);
+    assert_eq!(window_of(&wider), 60 * DAY_MS);
+
+    home.window = vec!["--all"];
+    let all = home.query(&[
+        "query",
+        "stalls",
+        "--idle-minutes",
+        "5",
+        "--newer-than",
+        "400d",
+    ]);
+    assert_eq!(all["window_start"], Value::Null);
+
+    home.window = vec!["--all", "--since", "7d"];
+    assert!(!home.semon(&["query", "list_sessions"]).status.success());
+    assert!(!home.semon(&["mcp"]).status.success());
+    home.window = vec!["--since", "soon"];
+    assert!(!home.semon(&["query", "list_sessions"]).status.success());
+
+    home.window = vec![];
+    let mut server = Server::start(&home);
+    server.request(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}));
+    let (answer, failed) = content(&server.call(2, "list_sessions", json!({})));
+    assert!(!failed);
+    assert_eq!(window_of(&answer), 30 * DAY_MS);
+    let (error, failed) =
+        content(&server.call(3, "stalls", json!({"idle_minutes": 5, "since": "31d"})));
+    assert!(failed);
+    assert_eq!(error["error"]["code"], "outside_window");
+    server.finish();
 }

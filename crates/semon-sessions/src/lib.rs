@@ -25,7 +25,7 @@ pub use facts::{FACTS_VERSION, Facts, local_facts, read_facts, write_facts};
 pub use inputs::{Input, InputRoot, inputs, is_input_path};
 pub use mcp::serve_mcp;
 pub use model::{model_json, model_json_at};
-pub use query::{Query, QueryError, QueryTool, query_tools};
+pub use query::{DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools};
 pub use union::{AdminLink, ViewerCore};
 pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve};
 
@@ -43,6 +43,14 @@ pub struct Options {
     /// working directories on this disk. For logs copied from another
     /// machine.
     pub facts: Option<PathBuf>,
+    /// Index only the log files modified within the window (`since`, unless
+    /// `all`), instead of every file. A cold build on a large home then
+    /// reads weeks, not years, of logs; but a link whose other end is in an
+    /// older file isn't made, and that end shows as a stub or unlinked. What
+    /// is read is returned whole: the window doesn't trim sessions, turns,
+    /// handoffs or busy intervals as well. Off for the viewer and
+    /// `--model-json`; the agent read surface turns it on.
+    pub scan_window: bool,
 }
 
 impl Default for Options {
@@ -64,6 +72,7 @@ impl Default for Options {
             since: Duration::from_secs(24 * 60 * 60),
             session: None,
             facts: None,
+            scan_window: false,
         }
     }
 }

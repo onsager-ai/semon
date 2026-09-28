@@ -49,6 +49,7 @@ impl Home {
             since: Duration::from_secs(86400),
             session: None,
             facts: None,
+            scan_window: false,
         };
         let home = Self { root, options };
         home.write("proc/locks", "");
@@ -284,7 +285,7 @@ fn summary(id: &str, question: &str) -> Value {
     let base = json!({
         "id": id, "harness": "claude", "kind": "session", "model": "opus-5.5", "repo": null, "branch": null,
         "machine": "testbox", "parent": null, "children": [], "pid": null, "alive": null, "exit": null,
-        "open_question": null, "tokens": tokens, "run": null,
+        "open_question": null, "tokens": tokens, "run": null, "turns_truncated": false,
     });
     let fields = match id {
         "lead" => {
@@ -344,6 +345,7 @@ fn list_sessions_summarizes_every_session_newest_first() {
         all,
         json!({
             "now": NOW,
+            "window_start": null,
             "total": 6,
             "truncated": false,
             "sessions": order.iter().map(|id| summary(id, &question)).collect::<Vec<_>>(),
@@ -380,7 +382,7 @@ fn list_sessions_summarizes_every_session_newest_first() {
     let empty = call(&mut query, "list_sessions", json!({"state": "error"}));
     assert_eq!(
         empty,
-        json!({"now": NOW, "total": 0, "truncated": false, "sessions": []})
+        json!({"now": NOW, "window_start": null, "total": 0, "truncated": false, "sessions": []})
     );
     assert_eq!(
         failure(&mut query, "list_sessions", json!({"parent": "nobody"})),
@@ -414,7 +416,10 @@ fn get_session_adds_busy_turns_and_handoffs_from_the_model() {
     expected["busy"] = json!([[at(2, 0), at(2, 1)]]);
     expected["turns"] = turns.clone();
     expected["handoffs"] = handoffs.clone();
-    assert_eq!(got, json!({"now": NOW, "session": expected}));
+    assert_eq!(
+        got,
+        json!({"now": NOW, "window_start": null, "session": expected})
+    );
     // The model's own turn and handoffs: your message, then the question.
     assert_eq!(turns.as_array().unwrap().len(), 1);
     assert_eq!(turns[0]["end"]["why"], "toyou");
@@ -457,7 +462,7 @@ fn read_transcript_pages_as_the_viewer_does() {
         json!({"sid": "done", "from": 0, "to": 2, "total": 2, "calls": 0, "errors": 0, "entries": [
             {"k": "h", "id": ask, "turn": ask},
             {"k": "a", "text": "The design keeps the frontend and replaces the data."},
-        ]})
+        ], "window_start": null})
     );
     // The same page the viewer serves at /api/tx.
     let mut core = ViewerCore::new(home.options.clone());
@@ -476,7 +481,10 @@ fn read_transcript_pages_as_the_viewer_does() {
         let served = core.respond("GET", "/api/tx", &url, None);
         assert_eq!(served.status, 200, "{url}");
         let served: Value = serde_json::from_slice(&served.body).unwrap();
-        assert_eq!(call(&mut query, "read_transcript", args), served, "{url}");
+        let mut ours = call(&mut query, "read_transcript", args);
+        let window = ours.as_object_mut().unwrap().remove("window_start");
+        assert_eq!(window, Some(Value::Null));
+        assert_eq!(ours, served, "{url}");
     }
     let last = call(
         &mut query,
@@ -544,6 +552,7 @@ fn find_searches_entries_newest_first_within_its_bounds() {
         found,
         json!({
             "now": NOW,
+            "window_start": null,
             "text": "LEXER",
             "matches": [
                 {"session": "cx", "position": 1, "turn": cx, "kind": "a", "part": "text", "at": at(5, 2),
@@ -650,6 +659,7 @@ fn stalls_give_one_closed_reason_per_session() {
         stalls,
         json!({
             "now": NOW,
+            "window_start": null,
             "idle_minutes": 60,
             "rule": STALL_RULE,
             "stalls": [
@@ -759,4 +769,327 @@ fn several_machines_answer_as_one_model() {
         failure(&mut query, "read_transcript", json!({"id": "nobody"})),
         "unknown_session"
     );
+}
+
+/// `ms` (epoch ms, UTC) as RFC 3339, as the logs write it.
+fn iso(ms: i64) -> String {
+    let days = ms.div_euclid(86_400_000);
+    let of_day = ms.rem_euclid(86_400_000);
+    // Civil from days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        of_day / 3_600_000,
+        of_day / 60_000 % 60,
+        of_day / 1000 % 60,
+        of_day % 1000
+    )
+}
+
+#[test]
+fn iso_writes_what_the_logs_parse() {
+    for ms in [BASE, at(13, 7) + 250, 951_782_400_000, 1_709_164_800_999] {
+        assert_eq!(crate::events::parse_ms(&iso(ms)), Some(ms), "{}", iso(ms));
+    }
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+/// A home on the real clock: `recent` wrote an hour ago; `old` wrote 60
+/// days ago, and so did its file.
+fn aged() -> Home {
+    let home = Home::new("testbox");
+    let now = now_ms();
+    let session = |id: &str, at: i64| {
+        [
+            human(id, iso(at), &format!("Work on {id}")),
+            assistant(id, iso(at + 60_000), vec![text(&format!("{id} is done"))]),
+        ]
+    };
+    home.top("recent", &session("recent", now - 3_600_000));
+    home.top("old", &session("old", now - 60 * DAY_MS));
+    let old = home.root.join("claude/projects/-work-proj/old.jsonl");
+    fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(60 * 86_400))
+        .unwrap();
+    home
+}
+
+fn windowed(home: &Home, all: bool) -> Query {
+    Query::new(Options {
+        all,
+        since: DEFAULT_WINDOW,
+        ..home.options.clone()
+    })
+}
+
+fn ids_of(answer: &Value) -> Vec<&str> {
+    answer["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect()
+}
+
+/// Whether the event cache holds a file's index: whether a build read it.
+fn indexed(home: &Home, file: &str) -> bool {
+    let cache = crate::events::EventCache::path(&home.options.cache);
+    fs::read_to_string(cache).is_ok_and(|cache| cache.contains(file))
+}
+
+#[test]
+fn the_window_bounds_what_is_read_and_says_where_it_starts() {
+    let home = aged();
+    let mut query = windowed(&home, false);
+    let listed = query.call("list_sessions", &json!({})).unwrap();
+    assert_eq!(ids_of(&listed), ["recent"]);
+    assert_eq!(
+        listed["now"].as_i64().unwrap() - listed["window_start"].as_i64().unwrap(),
+        30 * DAY_MS
+    );
+    assert!(indexed(&home, "recent.jsonl"));
+    assert!(
+        !indexed(&home, "old.jsonl"),
+        "a file outside the window is not read"
+    );
+    // Every tool names the window.
+    for (tool, args) in [
+        ("get_session", json!({"id": "recent"})),
+        ("read_transcript", json!({"id": "recent"})),
+        ("find", json!({"text": "recent", "since": "10d"})),
+        ("stalls", json!({"idle_minutes": 1, "since": "30d"})),
+    ] {
+        let answer = query.call(tool, &args).unwrap();
+        assert!(answer["window_start"].is_i64(), "{tool}: {answer}");
+    }
+    assert_eq!(
+        query
+            .call("get_session", &json!({"id": "old"}))
+            .unwrap_err()
+            .code,
+        "unknown_session"
+    );
+    // --all reads everything and has no start; a windowed build after it
+    // keeps the older file's index for the next full build.
+    let mut all = windowed(&home, true);
+    let everything = all.call("list_sessions", &json!({})).unwrap();
+    assert_eq!(ids_of(&everything), ["recent", "old"]);
+    assert_eq!(everything["window_start"], Value::Null);
+    assert!(indexed(&home, "old.jsonl"));
+    let mut again = windowed(&home, false);
+    assert_eq!(
+        ids_of(&again.call("list_sessions", &json!({})).unwrap()),
+        ["recent"]
+    );
+    assert!(indexed(&home, "old.jsonl"));
+}
+
+#[test]
+fn a_since_before_the_window_is_refused_not_cut_short() {
+    let home = aged();
+    let mut query = windowed(&home, false);
+    let before = iso(now_ms() - 40 * DAY_MS);
+    for (tool, args) in [
+        ("list_sessions", json!({"since": "40d"})),
+        ("list_sessions", json!({"since": before})),
+        ("find", json!({"text": "old", "since": "31d"})),
+        ("stalls", json!({"idle_minutes": 5, "since": "6w"})),
+    ] {
+        let error = query.call(tool, &args).unwrap_err();
+        assert_eq!(error.code, "outside_window", "{tool} {args}");
+        let start = error.window_start.unwrap();
+        assert!((now_ms() - 30 * DAY_MS - start).abs() < 60_000);
+        assert_eq!(error.to_json()["error"]["window_start"], start);
+    }
+    let inside = query
+        .call("list_sessions", &json!({"since": "29d"}))
+        .unwrap();
+    assert_eq!(ids_of(&inside), ["recent"]);
+    // With --all there is no window to reach outside of.
+    let mut all = windowed(&home, true);
+    let old = all.call("list_sessions", &json!({"since": "90d"})).unwrap();
+    assert_eq!(ids_of(&old), ["recent", "old"]);
+}
+
+/// `path`'s modification time, `ago_ms` before now.
+fn age(path: &std::path::Path, ago_ms: i64) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(
+            std::time::SystemTime::now() - Duration::from_millis(u64::try_from(ago_ms).unwrap()),
+        )
+        .unwrap();
+}
+
+#[test]
+fn the_window_start_itself_is_inside_the_window() {
+    let home = aged();
+    let mut query = windowed(&home, false);
+    let now = now_ms();
+    let listed = query.call_at("list_sessions", &json!({}), now).unwrap();
+    let start = listed["window_start"].as_i64().unwrap();
+    // Built on this call's clock: the start is exactly 30 days back.
+    assert_eq!(start, now - 30 * DAY_MS);
+    for since in [json!("30d"), json!(iso(start))] {
+        let answer = query
+            .call_at("list_sessions", &json!({"since": since}), now)
+            .unwrap();
+        assert_eq!(ids_of(&answer), ["recent"], "{since}");
+    }
+    let error = query
+        .call_at("list_sessions", &json!({"since": iso(start - 1)}), now)
+        .unwrap_err();
+    assert_eq!(
+        (error.code, error.window_start),
+        ("outside_window", Some(start))
+    );
+}
+
+#[test]
+fn a_session_that_crosses_the_window_start_keeps_every_turn() {
+    let home = Home::new("testbox");
+    let now = now_ms();
+    let early = now - 40 * DAY_MS;
+    let late = now - 3_600_000;
+    // One file, written an hour ago, with a turn from 40 days back.
+    home.top(
+        "long",
+        &[
+            human("long", iso(early), "Start the migration"),
+            assistant("long", iso(early + 60_000), vec![text("Started.")]),
+            human("long", iso(late), "Finish the migration"),
+            assistant("long", iso(late + 60_000), vec![text("Finished.")]),
+        ],
+    );
+    // A session split over two files: the first written 60 days ago, the
+    // second naming it by `session_id`.
+    let first = now - 60 * DAY_MS;
+    home.top(
+        "first",
+        &[
+            human("first", iso(first), "Plan the release"),
+            assistant("first", iso(first + 60_000), vec![text("Planned.")]),
+        ],
+    );
+    age(
+        &home.root.join("claude/projects/-work-proj/first.jsonl"),
+        60 * DAY_MS,
+    );
+    let resumed_at = now - 7_200_000;
+    let mut resumed = human("second", iso(resumed_at), "Ship the release");
+    resumed["session_id"] = json!("first");
+    let mut shipped = assistant("second", iso(resumed_at + 60_000), vec![text("Shipped.")]);
+    shipped["session_id"] = json!("first");
+    home.top("second", &[resumed, shipped]);
+
+    let mut query = windowed(&home, false);
+    let long = query
+        .call_at("get_session", &json!({"id": "long"}), now)
+        .unwrap();
+    let session = &long["session"];
+    let turns: Vec<i64> = session["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| turn["at"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        turns,
+        [early, late],
+        "no turn is trimmed at the window's start"
+    );
+    assert_eq!(session["handoffs"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        session["busy"],
+        json!([[early, early + 60_000], [late, late + 60_000]])
+    );
+    assert_eq!(session["start"], early);
+    assert_eq!(session["turns_truncated"], false);
+    // The resumed session's earlier file wasn't read: it says so.
+    let listed = query.call_at("list_sessions", &json!({}), now).unwrap();
+    let rows: Vec<(&str, bool)> = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["id"].as_str().unwrap(),
+                row["turns_truncated"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(rows, [("long", false), ("second", true)]);
+    // Everything read: one session under its first file's id, whole.
+    let mut all = windowed(&home, true);
+    let listed = all.call_at("list_sessions", &json!({}), now).unwrap();
+    let rows: Vec<(&str, bool)> = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["id"].as_str().unwrap(),
+                row["turns_truncated"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(rows, [("long", false), ("first", false)]);
+    let whole = all
+        .call_at("get_session", &json!({"id": "first"}), now)
+        .unwrap();
+    assert_eq!(whole["session"]["turns"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn each_machine_keeps_its_own_window_and_the_latest_start_answers() {
+    let now = now_ms();
+    let wide = Home::new("wide");
+    let narrow = Home::new("narrow");
+    for (home, id) in [(&wide, "wide-ten"), (&narrow, "narrow-ten")] {
+        let at = now - 10 * DAY_MS;
+        home.top(
+            id,
+            &[
+                human(id, iso(at), "Ten days ago"),
+                assistant(id, iso(at + 60_000), vec![text("Done.")]),
+            ],
+        );
+        age(
+            &home
+                .root
+                .join(format!("claude/projects/-work-proj/{id}.jsonl")),
+            10 * DAY_MS,
+        );
+    }
+    let options = |home: &Home, days: u64| Options {
+        all: false,
+        since: Duration::from_secs(days * 86_400),
+        ..home.options.clone()
+    };
+    let mut query = Query::with_machines(vec![
+        ("wide".into(), options(&wide, 30)),
+        ("narrow".into(), options(&narrow, 7)),
+    ]);
+    let listed = query.call_at("list_sessions", &json!({}), now).unwrap();
+    // The narrow machine read only its last 7 days; the wide one, 30.
+    assert_eq!(ids_of(&listed), ["wide-ten"]);
+    assert_eq!(listed["window_start"], now - 7 * DAY_MS);
+    let error = query
+        .call_at("list_sessions", &json!({"since": "10d"}), now)
+        .unwrap_err();
+    assert_eq!(error.code, "outside_window");
 }
