@@ -294,7 +294,7 @@ const PRICE_ROWS: &[(&str, Price, LegacyPrice, &str)] = &[
 pub(crate) fn normalize_model_id(model: &str) -> &str {
     let model = model
         .rfind('[')
-        .filter(|start| model.ends_with(']'))
+        .filter(|_| model.ends_with(']'))
         .map_or(model, |start| &model[..start]);
     let Some((base, date)) = model.rsplit_once('-') else {
         return model;
@@ -418,14 +418,14 @@ impl CostBuild {
                 "input",
                 usage.input,
                 price.and_then(|p| {
-                    select_rate(p.input, p.long_context.map(|l| l.input), prompt_long)
+                    select_rate(p.input, p.long_context.and_then(|l| l.input), prompt_long)
                 }),
             ),
             (
                 "output",
                 usage.output,
                 price.and_then(|p| {
-                    select_rate(p.output, p.long_context.map(|l| l.output), prompt_long)
+                    select_rate(p.output, p.long_context.and_then(|l| l.output), prompt_long)
                 }),
             ),
             (
@@ -434,7 +434,7 @@ impl CostBuild {
                 price.and_then(|p| {
                     select_rate(
                         p.cache_read,
-                        p.long_context.map(|l| l.cache_read),
+                        p.long_context.and_then(|l| l.cache_read),
                         prompt_long,
                     )
                 }),
@@ -445,7 +445,7 @@ impl CostBuild {
                 price.and_then(|p| {
                     select_rate(
                         p.cache_write_5m,
-                        p.long_context.map(|l| l.cache_write_5m),
+                        p.long_context.and_then(|l| l.cache_write_5m),
                         prompt_long,
                     )
                 }),
@@ -456,7 +456,7 @@ impl CostBuild {
                 price.and_then(|p| {
                     select_rate(
                         p.cache_write_1h,
-                        p.long_context.map(|l| l.cache_write_1h),
+                        p.long_context.and_then(|l| l.cache_write_1h),
                         prompt_long,
                     )
                 }),
@@ -619,8 +619,8 @@ pub(crate) fn cost_check_ok(computed: Option<f64>, reported: Option<f64>) -> Opt
 #[cfg(test)]
 mod tests {
     use super::{
-        FastPrice, LongContextPrice, Price, calculate_cost, cost_check_ok, normalize_model_id,
-        table,
+        FastPrice, LongContextPrice, Price, calculate_cost, calculate_cost_with, cost_check_ok,
+        normalize_model_id, table,
     };
     use crate::events::{BillingUsage, CodexUsageEvent, MessageUsage, ModelTokens};
 
