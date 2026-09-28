@@ -584,6 +584,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .child-intro .intro-title button, .child-return button { min-height: 36px; min-width: 0; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .child-intro .intro-title .tm { margin-left: auto; flex: none; color: var(--faint); font: 11.5px var(--mono); }
 .child-intro .intro-title .sibling-nav { margin: -4px -12px -4px auto; }
+.child-intro .intro-title:has(.sibling-nav) .tm { margin-left: 6px; }
 .child-intro .brief { max-height: 5.8em; margin-top: 3px; overflow: hidden; color: var(--ink-2); font: 15px/1.45 var(--serif); }
 .child-intro .brief.open { max-height: none; }
 .child-intro .more { min-height: 36px; border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: 13px; }

@@ -79,7 +79,7 @@ const COST_LINES = [
 // Port mode keeps the served result status and read behavior so the image comparison covers the chrome faithfully.
 const RESULT_LINES = [
   ['  const inbox = () => H.filter((h) => h.kind === "toyou" && h.status === "wait").sort((a, b) => b.at - a.at);',
-    '  const inbox = () => H.filter((h) => h.kind === "toyou" && (h.status === "wait" || (h.ask === "result" && !SEEN_RESULTS.has(h.id)))).sort((a, b) => b.at - a.at);'],
+    '  const inbox = () => H.filter((h) => h.kind === "toyou" && (h.portStatus === "wait" || (h.ask === "result" && !SEEN_RESULTS.has(h.id)))).sort((a, b) => b.at - a.at);'],
   ['  const statWord = (h) => ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];',
     '  const statWord = (h) => h.kind === "toyou" && h.ask === "result" ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];'],
   ['  function renderSession(page, sid) {\n    const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr");',
@@ -129,7 +129,7 @@ function portReference(D) {
   const hhmm = (t) => new Date(t).toISOString().slice(11, 16);
   const asIso = (t) => new Date(t).toISOString();
   const TX = {};
-  const H = D.H;
+  const H = D.H.map((h) => ({ ...h, portStatus: h.status, ...(h.kind === "toyou" && h.status === "new" ? { status: "wait" } : {}) }));
   for (const [sid, es] of Object.entries(D.TX)) TX[sid] = es.map((e) => (e.ret ? { k: "end", text: "Returned to " + D.SESS[e.ret.to].name + (e.ret.failed ? " · failed" : "") + " · " + hhmm(e.ret.at) } : e));
   const PRICING = Object.fromEntries(Object.entries(D.model.pricing?.models ?? {}).map(([id, p]) => [id, { input: p.input, output: p.output, cacheWrite: p.cache_write, cacheRead: p.cache_read }]));
   const SESS = Object.fromEntries(Object.entries(D.SESS).map(([id, source]) => {
