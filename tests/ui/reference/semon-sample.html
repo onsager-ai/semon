@@ -120,6 +120,24 @@ code { overflow-wrap: anywhere; }
 .topbar .crumb { flex: none; max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 500; }
 @media (hover: hover) { .topbar .crumb:hover { text-decoration: underline; text-underline-offset: 3px; } }
 .topbar .sep { color: var(--faint); font-weight: 400; flex: none; }
+.lineage-menu { position: absolute; left: 16px; top: calc(100% + 4px); z-index: 22; width: min(260px, calc(100vw - 32px)); padding: 5px; background: var(--ground); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 32px color-mix(in srgb, var(--ink) 14%, transparent); }
+.lineage-menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 40px; border: 0; border-radius: 7px; background: none; padding: 7px 9px; text-align: left; }
+.lineage-menu button[aria-current="page"] { background: var(--sunken); }
+.lineage-menu button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sibling-nav { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+.sibling-nav .sibling-count { min-width: 4ch; color: var(--muted); font: 11.5px var(--mono); text-align: center; white-space: nowrap; }
+.sibling-nav .ibtn { width: 36px; height: 36px; }
+.runs-popover { position: absolute; top: calc(100% + 4px); right: 12px; z-index: 22; width: min(400px, calc(100vw - 24px)); max-height: min(72vh, 620px); overflow: auto; overscroll-behavior: contain; background: var(--ground); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px color-mix(in srgb, var(--ink) 16%, transparent); padding: 12px 14px; }
+.runs-popover h2 { margin: 0; font-size: 14px; }
+.runs-tree { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 6px; }
+.runs-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; align-items: center; width: 100%; min-width: 0; min-height: 48px; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 6px 0; text-align: left; }
+.runs-row .run-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.runs-row .run-name > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.runs-row .run-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 9px; grid-column: 1 / -1; padding-left: 24px; color: var(--muted); font-size: 11.5px; }
+.runs-row .run-meta .child-kind { font-size: 11px; }
+.runs-row .run-brief { grid-column: 1 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 24px; color: var(--faint); font-size: 12px; }
+.runs-row .run-cost { color: var(--muted); font: 11.5px var(--mono); white-space: nowrap; }
+.runs-group { min-width: 0; margin-left: 13px; padding-left: 10px; border-left: 1px solid var(--line); }
 
 .page { max-width: 760px; margin: 0 auto; padding: 4px 28px 72px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
 .page.wide-mode { max-width: 1400px; }
@@ -373,6 +391,16 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .session-details .vclose svg { width: 20px; height: 20px; }
 .session-details .detail-list { display: grid; grid-template-columns: minmax(0, 1fr); }
 .session-details .detail-row { display: grid; grid-template-columns: minmax(94px, .3fr) minmax(0, 1fr); gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); user-select: text; -webkit-user-select: text; }
+.session-details .cost-row { width: 100%; min-height: 44px; align-items: center; border: 0; border-bottom: 1px solid var(--line); background: none; text-align: left; }
+.session-details .cost-row[aria-expanded="true"] { color: var(--ink); }
+.cost-breakdown { grid-column: 1 / -1; padding: 8px 0 12px; border-bottom: 1px solid var(--line); }
+.cost-breakdown-head { margin-bottom: 7px; color: var(--muted); font-size: 12px; }
+.cost-model + .cost-model { margin-top: 12px; }
+.cost-model-name { color: var(--ink-2); font: 12px var(--mono); overflow-wrap: anywhere; }
+.cost-line { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 5px 8px; min-width: 0; padding: 4px 0; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.cost-amount, .cost-value { white-space: nowrap; font: 11.5px var(--mono); }
+.cost-value { color: var(--ink-2); }
+.no-price { grid-column: 1 / -1; margin-top: 4px; color: var(--faint); font-size: 11.5px; }
 .session-details .detail-label { color: var(--faint); font-size: 13px; }
 .session-details .detail-value { min-width: 0; overflow-wrap: anywhere; color: var(--ink-2); font-size: 13.5px; user-select: text; -webkit-user-select: text; }
 @media (max-width: 760px) {
@@ -410,6 +438,33 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .hcard.start { grid-template-columns: minmax(0, 1fr); }
 .hcard.start > svg, .hcard.start > .ln, .hcard.start > .stat { display: none; }
 .hcard.start > .brief, .hcard.start > .more, .hcard.start > .result { grid-column: 1 / -1; }
+.hcard.child-card { --h: var(--claude); grid-template-columns: minmax(0, 1fr) auto; gap: 5px 10px; border-left-width: 3px; border-radius: 0; background: none; padding: 10px 0 10px 12px; }
+.hcard.child-card .ln, .hcard.child-card .brief, .hcard.child-card .more, .hcard.child-card .result, .hcard.child-card .child-kind, .hcard.child-card .child-actions, .hcard.child-card .child-work { grid-column: 1 / -1; }
+.hcard.child-card .ln { font-size: 14px; font-weight: 600; }
+.hcard.child-card .ln { color: var(--ink); }
+.hcard.child-card .brief { max-height: 5.8em; }
+.child-kind { display: inline-flex; align-items: center; gap: 5px; width: fit-content; max-width: 100%; color: var(--h); font-size: 12px; }
+.child-kind svg, .child-kind .hmark { width: 15px; height: 15px; flex: none; color: var(--h); }
+.child-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 12px; }
+.child-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
+.child-actions button { min-height: 36px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; text-align: left; }
+.child-work { display: grid; grid-template-columns: minmax(0, 1fr); margin: 0; }
+.child-work .cw-toggle { min-height: 36px; }
+.child-work .cw-body { margin: 2px 0 2px 2px; padding-left: 12px; border-left: 1px solid var(--line); }
+.child-work .show-all { justify-self: start; min-height: 36px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; }
+.child-intro, .child-return { min-width: 0; border-left: 3px solid var(--h); padding: 8px 0 8px 12px; }
+.child-intro .intro-title { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--ink-2); font-weight: 600; }
+.child-intro .intro-title button, .child-return button { min-height: 36px; min-width: 0; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.child-intro .intro-title .tm { margin-left: auto; flex: none; color: var(--faint); font: 11.5px var(--mono); }
+.child-intro .brief { max-height: 5.8em; margin-top: 3px; overflow: hidden; color: var(--ink-2); font: 15px/1.45 var(--serif); }
+.child-intro .brief.open { max-height: none; }
+.child-intro .more { min-height: 36px; border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: 13px; }
+.child-intro .intro-open { min-height: 40px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; text-align: left; }
+.child-return { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 13px; }
+.child-return .stat { flex: none; }
+.child-page .transcript-linked { border-left: 3px solid var(--h); padding-left: 12px; }
+.flash.hcard, .child-card.flash { background: color-mix(in srgb, var(--h) 12%, var(--ground)); }
+@media (prefers-reduced-motion: reduce) { .cw-toggle .chev, .think .chev { transition: none; } }
 
 /* ---- Top bar: always visible. A detail page's title is two lines: its name, then a summary that ellipsizes. ---- */
 .topbar .l1 { display: flex; align-items: baseline; gap: 6px; min-width: 0; line-height: 20px; }
@@ -430,6 +485,15 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2.session-meta .meta-state .state-sep { margin: 0 -5px 0 -1px; }
 .topbar .l2.session-meta .meta-item svg, .topbar .l2.session-meta .meta-item .hmark { width: 15px; height: 15px; flex: none; color: var(--faint); }
 .topbar .l2.session-meta .meta-item .hmark { color: var(--h); }
+.topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, var(--h) 12%, transparent); color: var(--h); }
+.topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--h); }
+.topbar .l2.session-meta .meta-item.meta-cost { gap: 4px; }
+.topbar .l2.session-meta .meta-cost .meta-value { min-width: 0; max-width: 7ch; }
+.topbar .l2.session-meta .meta-item.meta-tokens .meta-value { min-width: 0; max-width: 7ch; }
+.topbar .l2.session-meta .meta-runs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 30px; border: 0; background: none; padding: 0; color: var(--muted); font: inherit; pointer-events: auto; }
+.topbar .l2.session-meta .meta-runs svg { width: 15px; height: 15px; color: var(--faint); }
+.topbar .l2.session-meta .meta-runs .dot { width: 6px; height: 6px; }
+.topbar .l2.session-meta .meta-runs .meta-value { font: inherit; }
 .topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; min-height: 28px; margin: 0 0 0 -5px; border: 0; background: none; padding: 0 2px; font: inherit; font-weight: 500; color: var(--err); pointer-events: auto; }
 .topbar .l2.session-meta .errs:empty { display: none; }
 .topbar .l1 .crumb { padding: 8px 0; margin: -8px 0; }
@@ -438,6 +502,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .fcount { flex: none; font-family: var(--mono); font-size: 12px; color: var(--muted); padding-right: 4px; }
 .ibtn.on { color: var(--accent); }
 .wide-toggle { margin-left: auto; }
+.cost-info { display: inline-grid; place-items: center; width: 18px; height: 18px; margin-left: 4px; border: 0; border-radius: 50%; background: none; color: var(--faint); vertical-align: middle; }
+.cost-info svg { width: 15px; height: 15px; }
 .jump-bottom { position: fixed; right: 16px; bottom: 16px; z-index: 15; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 20px; background: var(--ground); padding: 0 10px; color: var(--ink-2); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 12%, transparent); }
 .jump-bottom svg { width: 18px; height: 18px; flex: none; }
 .jump-bottom .new-count { font-size: 12.5px; font-weight: 500; white-space: nowrap; }
@@ -479,6 +545,9 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .analytics-metric .label { color: var(--muted); font-size: 12px; line-height: 1.3; }
 .analytics-metric .value { margin-top: 5px; font-size: 20px; line-height: 1.2; font-weight: 600; font-variant-numeric: tabular-nums; }
 .analytics-metric .note { min-height: 17px; margin-top: 4px; color: var(--faint); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
+.analytics-measure { display: inline-flex; align-items: center; gap: 2px; justify-self: start; padding: 2px; border-radius: 9px; background: var(--sunken); }
+.analytics-measure button { min-height: 36px; border: 0; border-radius: 7px; background: none; padding: 0 10px; color: var(--muted); font-size: 12.5px; }
+.analytics-measure button[aria-pressed="true"] { background: var(--ground); color: var(--ink); font-weight: 600; }
 .analytics-panel { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 12px; }
 .analytics-panel h2 { margin: 0; font-size: 14px; font-weight: 600; }
 .analytics-panel .panel-sub { margin-top: 2px; color: var(--muted); font-size: 12px; }
@@ -488,39 +557,60 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .analytics-chart .axis-label { fill: var(--muted); font: 11px var(--mono); }
 .analytics-chart .area-claude { fill: var(--claude); fill-opacity: .76; }
 .analytics-chart .area-codex { fill: var(--codex); fill-opacity: .82; }
+.analytics-chart .cost-claude { fill: var(--claude); }
+.analytics-chart .cost-codex { fill: var(--codex); }
 .analytics-chart .chart-hit { fill: transparent; cursor: pointer; }
 .analytics-legend { display: flex; align-items: center; gap: 14px; margin-top: 4px; color: var(--muted); font-size: 12px; }
 .analytics-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .analytics-legend i { width: 8px; height: 8px; border-radius: 2px; background: var(--h); }
 .analytics-breakdowns { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
+.analytics-breakdown-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 7px; padding: 7px 0 3px; color: var(--faint); font-size: 9.5px; line-height: 1.2; text-align: right; }
+.analytics-breakdown-head span:first-child { text-align: left; }
+.allowance-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+.allowance-window { min-width: 0; padding-top: 8px; border-top: 1px solid var(--line); }
+.allowance-window .window-name { color: var(--muted); font-size: 12px; }
+.allowance-window .window-used { margin-top: 2px; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.allowance-window .window-reset { margin-top: 2px; color: var(--faint); font-size: 11.5px; }
 .analytics-list { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 8px; border-top: 1px solid var(--line); }
-.analytics-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; width: 100%; min-width: 0; min-height: 46px; align-content: center; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 7px 0; text-align: left; }
+.analytics-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 3px 7px; width: 100%; min-width: 0; min-height: 48px; align-content: center; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 7px 0; text-align: left; }
 .analytics-row .row-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 12.5px; }
-.analytics-row .row-count { color: var(--faint); font: 11px var(--mono); white-space: nowrap; }
+.analytics-row .row-count { grid-column: 2 / 4; color: var(--faint); font: 11px var(--mono); white-space: nowrap; }
 .analytics-row .row-track { grid-column: 1; height: 4px; overflow: hidden; border-radius: 3px; background: var(--sunken); }
 .analytics-row .row-bar { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: var(--accent); }
-.analytics-row .row-hours { grid-column: 2; grid-row: 2; align-self: center; color: var(--muted); font: 11px var(--mono); white-space: nowrap; }
+.analytics-row .row-hours, .analytics-row .row-cost { grid-row: 2; align-self: center; color: var(--muted); font: 10.5px var(--mono); white-space: nowrap; }
+.analytics-row .row-hours { grid-column: 2; }
+.analytics-row .row-cost { grid-column: 3; }
 .analytics-split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
 .analytics-session { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 44px; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 5px 0; text-align: left; }
 .analytics-session .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-size: 12.5px; color: var(--ink-2); }
 .analytics-session .session-value { color: var(--muted); font: 11px var(--mono); white-space: nowrap; }
+.analytics-session .no-price { grid-column: 2 / -1; margin-top: -3px; }
 .analytics-slice .session-name { white-space: normal; overflow-wrap: anywhere; }
 @media (min-width: 761px) {
-  .analytics-metrics { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .analytics-metrics { grid-template-columns: repeat(7, minmax(0, 1fr)); }
   .analytics-metric { min-height: 112px; padding: 11px 10px; }
   .analytics-metric .value { font-size: 19px; }
   .analytics-breakdowns { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .analytics-split { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .analytics-split { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
   .facet-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .facet-field select { height: 44px; }
   .topbar .analytics-range button { min-width: 38px; min-height: 44px; padding: 0 5px; }
+  .topbar .l2.session-meta { min-height: 44px; }
+  .topbar .l2.session-meta .meta-runs { min-height: 44px; }
+  .sibling-nav .ibtn { width: 44px; height: 44px; }
+  .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-return button, .child-work .cw-toggle { min-height: 44px; }
+  .lineage-menu button { min-height: 44px; }
+  .analytics-measure button { min-height: 44px; }
   .analytics-chart svg { height: 170px; }
   dialog.viewer.analytics-slice { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
   .analytics-slice .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
   .analytics-slice .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
   .analytics-slice .vclose { width: 44px; height: 44px; }
+  dialog.viewer.runs-sheet { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
+  .runs-sheet .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
+  .runs-sheet .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
 }
 /* ---- Phone: sidebar becomes a left drawer; the top bar stays ---- */
 @media (max-width: 760px) {
@@ -598,20 +688,39 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   const SESS = {
     principal: { busy: [[T(7, 12), T(7, 14)], [T(7, 30), T(7, 48)], [T(9, 8), T(9, 12)], [T(9, 46), T(9, 50)]], name: "Principal", role: true, lane: true, harness: "claude", machine: "laptop", model: "opus-5.5", state: "wait", start: T(7, 30), last: T(9, 50), tokens: [0.52, 44.1, 0.23] },
     sentinel:  { busy: [[T(6, 0), T(6, 4)], [T(6, 30), T(6, 32)], [T(7, 0), T(7, 13)], [T(7, 40), T(7, 42)], [T(8, 20), T(8, 22)], [T(9, 0), T(9, 2)], [T(9, 40), T(9, 42)], [T(10, 20), T(10, 22)], [T(11, 0), T(11, 2)], [T(11, 40), T(11, 42)], [T(12, 20), T(12, 22)], [T(12, 38), NOW]], name: "Sentinel", role: true, lane: true, harness: "claude", machine: "cloud", model: "sonnet-5", state: "work", start: T(6, 0), last: NOW, tokens: [0.12, 9.4, 0.03], activity: ["Bash", "gh run list --status failure", 1] },
-    advisor:   { busy: [[T(9, 10), T(9, 45)]], name: "Advisor", role: true, lane: true, harness: "claude", machine: "laptop", model: "opus-5.5", state: "idle", start: T(9, 10), last: T(9, 45), tokens: [0.07, 3.1, 0.04] },
+    advisor:   { busy: [[T(9, 10), T(9, 45)]], name: "Advisor", role: true, kind: "Relayed", harness: "claude", machine: "laptop", model: "opus-5.5", state: "idle", start: T(9, 10), last: T(9, 45), tokens: [0.07, 3.1, 0.04] },
     harbor:    { busy: [[T(8, 5), T(8, 12)], [T(11, 40), NOW]], name: "harbor", repo: "harbor", branch: "main", lane: true, harness: "claude", machine: "laptop", model: "opus-5.5", state: "work", start: T(8, 5), last: NOW, tokens: [0.41, 38.2, 0.19], activity: ["Bash", "cargo test -p harbor-sync", 42] },
     "h-codex": { busy: [[T(11, 52), NOW]], name: "feat/offline-sync", repo: "harbor", branch: "feat/offline-sync", kind: "Codex run", harness: "codex", machine: "laptop", model: "gpt-6-luna", state: "work", start: T(11, 52), last: NOW, tokens: [0.9, 11.4, 0.06], activity: ["apply_patch", "crates/sync/src/queue.rs", 6] },
     "h-review":{ busy: [[T(12, 31), NOW]], name: "Review offline-sync diff", repo: "harbor", kind: "Subagent", harness: "claude", machine: "laptop", model: "sonnet-5", state: "work", start: T(12, 31), last: NOW, tokens: [0.05, 1.8, 0.01], activity: ["Read", "crates/sync/src/flush.rs", 2] },
     "h-review-codex": { busy: [[T(12, 36), NOW]], name: "Check flush ordering", repo: "harbor", branch: "feat/offline-sync", kind: "Codex run", harness: "codex", machine: "laptop", model: "gpt-6-luna", state: "work", start: T(12, 36), last: NOW, tokens: [0.18, 2.4, 0.02], activity: ["Read", "crates/sync/src/flush.rs", 3] },
+    "h-failed": { busy: [[T(12, 33), T(12, 36)]], name: "Check retry safety", repo: "harbor", kind: "Subagent", harness: "claude", machine: "laptop", model: "sonnet-5", state: "err", start: T(12, 33), last: T(12, 36), tokens: [0.04, 0.42, 0.01] },
     quill:     { busy: [[T(10, 10), T(10, 41)], [T(11, 15), T(11, 21)], [T(12, 5), T(12, 32)]], name: "quill", repo: "quill", branch: "feat/pdf-export", lane: true, harness: "claude", machine: "studio", model: "opus-5.5", state: "wait", start: T(10, 10), last: T(12, 32), tokens: [0.22, 19.7, 0.11] },
     "q-plan":  { busy: [[T(10, 40), T(11, 15)]], name: "Draft the migration plan", repo: "quill", kind: "Subagent", harness: "claude", machine: "studio", model: "opus-5.5", state: "done", start: T(10, 40), last: T(11, 15), tokens: [0.12, 5.3, 0.03] },
     "q-codex": { busy: [[T(11, 20), T(12, 5)]], name: "feat/pdf-export", repo: "quill", branch: "feat/pdf-export", kind: "Codex run", harness: "codex", machine: "studio", model: "gpt-6-luna", state: "err", start: T(11, 20), last: T(12, 5), tokens: [0.7, 9.8, 0.05] },
     atlas:     { busy: [[T(10, 30), T(11, 2)], [T(11, 7), T(11, 8)]], name: "atlas", repo: "atlas", branch: "infra/staging-net", lane: true, harness: "claude", machine: "laptop", movedFrom: "buildbox", model: "opus-5.5", state: "wait", start: T(10, 30), last: T(11, 8), tokens: [0.18, 12.6, 0.07] },
-    deps:      { busy: [[T(12, 20), NOW]], name: "deps audit", repo: "meridian", branch: "chore/deps-audit", lane: true, harness: "codex", machine: "laptop", model: "gpt-6-luna", state: "work", start: T(12, 20), last: NOW, tokens: [0.3, 2.2, 0.02], activity: ["shell", "cargo audit --json", 11] },
+    deps:      { busy: [[T(12, 20), NOW]], name: "deps audit", repo: "meridian", branch: "chore/deps-audit", lane: true, harness: "codex", machine: "laptop", model: "gpt-6-luna", state: "work", start: T(12, 20), last: NOW, tokens: [0.3, 2.2, 0.02], activity: ["shell", "cargo audit --json", 11], rate_limits: { recorded_at: "2026-09-28T12:38:00+08:00", five_hour: { used_percent: 64, resets_at: "2026-09-28T16:30:00+08:00" }, weekly: { used_percent: 37, resets_at: "2026-10-02T09:00:00+08:00" } } },
     ledger:    { busy: [[T(7, 10), T(7, 23)], [T(7, 31), T(8, 2)]], name: "ledger", repo: "ledger", branch: "fix/rounding", lane: true, harness: "claude", machine: "laptop", model: "opus-5.5", state: "idle", start: T(7, 10), last: T(8, 2), tokens: [0.06, 3.9, 0.03] },
     "l-sub":   { busy: [[T(7, 22), T(7, 31)]], name: "Find rounding call sites", repo: "ledger", kind: "Subagent", harness: "claude", machine: "laptop", model: "haiku-4.5", state: "done", start: T(7, 22), last: T(7, 31), tokens: [0.02, 0.6, 0.01] },
   };
   for (const [id, s] of Object.entries(SESS)) s.id = id;
+
+  // Illustrative sample API pricing as of 2026-09-28, USD per million tokens. Standard/global rates;
+  // Claude cache writes use the 5-minute rate and GPT-6 rates use the short-context tier. This is not a bill.
+  // Sources: platform.claude.com/docs/en/about-claude/pricing and developers.openai.com/api/docs/pricing.
+  // Rates are pinned to the official model pricing pages for the sample IDs; unknown IDs stay unpriced.
+  const API_PRICE = {
+    "claude-opus-5-5": { input: 4, output: 20, cacheWrite: 5, cacheRead: .2 },
+    "claude-sonnet-5": { input: 2, output: 10, cacheWrite: 2.5, cacheRead: .2 },
+    "claude-haiku-4-5": { input: 1, output: 5, cacheWrite: 1.25, cacheRead: .1 },
+    "gpt-6-luna": { input: .1, output: .5, cacheWrite: .125, cacheRead: .01 },
+  };
+  const CACHE_WRITE_M = { principal: .12, harbor: .2, "h-codex": .06, quill: .08, "q-codex": .04, deps: .03 };
+  for (const s of Object.values(SESS)) {
+    s.modelId = s.modelId ?? (s.harness === "codex" ? s.model : "claude-" + String(s.model).replace(/^opus-/, "opus-").replace(/^sonnet-/, "sonnet-").replace(/^haiku-/, "haiku-").replace(/\./g, "-"));
+    const [input = 0, cached = 0, output = 0] = s.tokens ?? [];
+    const write = Math.min(cached, CACHE_WRITE_M[s.id] ?? 0);
+    s.tokensByModel = s.tokensByModel ?? { [s.modelId]: { input: Math.round(input * 1e6), output: Math.round(output * 1e6), cacheWrite: Math.round(write * 1e6), cacheRead: Math.round((cached - write) * 1e6) } };
+  }
 
   // Handoffs. kind: ask (you → session), spawn (session → subagent / Codex run), relay (lane → lane),
   // move (takeover to another machine), toyou (session → you: question, result or decision).
@@ -619,6 +728,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     { id: "h1", t: "t1", kind: "ask", from: "you", to: "harbor", at: T(11, 40), status: "work", brief: "Run the sync tests again; if `retry_backoff` still fails, fix it and hand the offline flush to Codex." },
     { id: "h2", t: "t1", kind: "spawn", from: "harbor", to: "h-codex", at: T(11, 52), status: "work", brief: "Implement the offline queue flush (#212): flush oldest first, stop at the first `Nack`. Acceptance: the new `flush_*` tests pass." },
     { id: "h3", t: "t1", kind: "spawn", from: "harbor", to: "h-review", at: T(12, 31), status: "work", brief: "Review Codex's diff on `feat/offline-sync` as it lands: ordering, `Nack` handling, no commit before `Ack`." },
+    { id: "h20", t: "t1", kind: "spawn", from: "harbor", to: "h-failed", at: T(12, 33), done: T(12, 36), status: "err", brief: "Check whether the retry cap can overflow under repeated Nacks, then report the smallest reproducer.", result: "Failed before producing a reproducer: the review sandbox could not read the test fixture." },
     { id: "h19", t: "t7", kind: "spawn", from: "h-review", to: "h-review-codex", at: T(12, 36), status: "work", brief: "Check the flush loop's ordering and stop behavior against the review notes." },
     { id: "h4", t: "t2", kind: "ask", from: "you", to: "quill", at: T(10, 10), status: "done", brief: "Add PDF export for invoices. Plan the migration first, then have Codex implement it." },
     { id: "h5", t: "t2", kind: "spawn", from: "quill", to: "q-plan", at: T(10, 40), status: "done", done: T(11, 15), brief: "Draft a migration plan for an `export_jobs` table: columns, indexes, rollback, backfill.", result: "`export_jobs` with a nullable `pdf_path`, one index, no backfill." },
@@ -650,7 +760,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       {k:"tool",name:"Read",arg:"crates/sync/src/queue.rs",ok:true,secs:"0.1s",out:"fn next_delay(attempt: u32) -> Duration {\n    let delay = BASE * 2u32.pow(attempt);\n    Duration::from_millis(delay as u64)\n}"},
       {k:"tool",name:"Edit",arg:"crates/sync/src/queue.rs",ok:true,secs:"0.0s",diff:[["ctx"," fn next_delay(attempt: u32) -> Duration {"],["del","-    let delay = BASE * 2u32.pow(attempt);"],["add","+    let delay = BASE.saturating_mul(2u32.saturating_pow(attempt)).min(MAX_DELAY);"]]},
       {k:"tool",name:"Bash",arg:"cargo test -p harbor-sync",ok:true,secs:"41.6s",out:"test result: ok. 128 passed; 0 failed"},
-      {k:"h",id:"h2"}, {k:"h",id:"h3"},
+      {k:"h",id:"h2"}, {k:"h",id:"h3"}, {k:"h",id:"h20"},
       {k:"a",text:"The backoff overflow is fixed: **128 passed**. Codex is implementing the offline flush, and a reviewer subagent checks its diff as it lands. I'll rerun the suite once both finish."},
       {k:"tool",name:"Bash",arg:"cargo test -p harbor-sync",live:true,secs:"42s"} ],
     "h-codex": [ {k:"h",id:"h2"}, {k:"harness",label:"recommended_plugins"}, {k:"think",started_at_ms:ST(11,52),completed_at_ms:ST(11,52,18),text:"Keep the flush oldest-first and stop at the first Nack."},
@@ -659,6 +769,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       {k:"tool",name:"apply_patch",arg:"crates/sync/src/queue.rs",live:true,secs:"6s"} ],
     "h-review": [ {k:"h",id:"h3"}, {k:"tool",name:"Bash",arg:"git diff main --stat",ok:true,secs:"0.2s",out:" crates/sync/src/flush.rs | 14 ++++++++++++--"}, {k:"h",id:"h19"}, {k:"tool",name:"Read",arg:"crates/sync/src/flush.rs",live:true,secs:"2s"} ],
     "h-review-codex": [ {k:"h",id:"h19"}, {k:"tool",name:"Read",arg:"crates/sync/src/flush.rs",ok:true,secs:"0.3s",out:"while let Some(batch) = queue.oldest() { /* stop on Nack */ }"}, {k:"think",pending:true} ],
+    "h-failed": [ {k:"h",id:"h20"}, {k:"tool",name:"Read",arg:"crates/sync/tests/fixtures/retry.log",ok:false,secs:"2.8s",out:"permission denied: retry.log"}, {k:"end",text:"Returned to harbor · failed · 12:36"} ],
     quill: [ {k:"h",id:"h4"}, {k:"h",id:"h5"},
       {k:"a",text:"The plan adds `export_jobs` with a nullable `pdf_path` and no backfill. Handing the implementation to Codex."},
       {k:"h",id:"h6"},
@@ -709,6 +820,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     down: "M12 4v15M5 12l7 7 7-7", branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
     wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z",
     wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7",
+    coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5", relay: "M4 7h13l-3-3M20 17H7l3 3M17 4l-3 3 3 3M7 14l3 3-3 3",
   };
   const clock = (m) => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");
   const ago = (m) => { const d = NOW - m; return d < 1 ? "now" : d < 60 ? d + "m" : Math.floor(d / 60) + "h"; };
@@ -719,6 +831,11 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
   const harnessMark = (harness) => { const m = el("span", "hmark h-" + harness, harness === "claude" ? "✳" : "⌘"); m.setAttribute("aria-hidden", "true"); m.title = HARNESS[harness]; return m; };
+  function childKindChip(s, meta = false) {
+    const c = el("span", (meta ? "meta-item meta-kind" : "child-kind")); c.style.setProperty("--h", "var(--" + s.harness + ")");
+    const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : harnessMark(s.harness);
+    c.append(mark, el("span", meta ? "meta-value" : null, s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"))); return c;
+  }
   const HOST = { laptop: "marvin-mbp.local", studio: "studio.onsager.dev", buildbox: "buildbox.onsager.ai", cloud: "claude.ai-cloud.onsager.dev" };
   const hostOf = (s) => s.host ?? HOST[s.machine] ?? MACHINE[s.machine] ?? "Unknown host";
   const shortHost = (s) => { const h = hostOf(s).split(".")[0]; return h.length > 14 ? h.slice(0, 14) + "…" : h; };
@@ -729,7 +846,9 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   const sessionIdOf = (s) => s.sessionId ?? "session_20260928_" + s.id;
   const where = (s) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " · " + s.branch : "") : "No repo";
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
-  const parentOf = (sid) => H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
+  const originHandoff = (sid) => H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === sid && h.from !== sid && (h.kind === "spawn" || SESS[sid]?.kind === "Relayed" || !SESS[sid]?.lane));
+  const parentOf = (sid) => originHandoff(sid)?.from;
+  const childSessions = (sid) => H.filter((h) => (h.kind === "spawn" || h.kind === "relay") && h.from === sid && parentOf(h.to) === sid && SESS[h.to]).sort((a, b) => a.at - b.at).map((h) => SESS[h.to]);
   const RANK = { wait: 0, work: 1, err: 2, done: 3 };
   const inbox = () => H.filter((h) => h.kind === "toyou" && h.status === "wait").sort((a, b) => b.at - a.at);
   const working = () => Object.values(SESS).filter((s) => s.state === "work");
@@ -903,9 +1022,9 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     treePrefs = Object.fromEntries(Object.entries(treePrefs).sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0)).slice(0, 500));
     try { localStorage.setItem("semon.tree", JSON.stringify(treePrefs)); } catch {}
   }
-  let route = { v: "home" }; let groupBy = "recent"; let query = ""; let analyticsRange = 7;
+  let route = { v: "home" }; let groupBy = "recent"; let query = ""; let analyticsRange = 7, analyticsMeasure = "hours";
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
-  let pendingSessionOpen = null;
+  let pendingSessionOpen = null, pendingFlashHandoff = null;
   let show = { messages: true, tools: true, thinking: true }; let find = ""; let findOpen = false; let filterOpen = false;
   const railToggle = $("#rail-toggle"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("title", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
   const currentScroll = () => phone.matches ? window.scrollY : $("#main").scrollTop;
@@ -924,6 +1043,10 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     else if (r.v === "session" && r.turn) revealTurn(r.turn, true);
     else if (r.v === "session") { openSessionAtEnd(); syncJump(); }
     else quietTop();
+    if (pendingFlashHandoff && r.v === "session" && HID.get(pendingFlashHandoff)?.from === r.id) {
+      const id = pendingFlashHandoff; pendingFlashHandoff = null;
+      requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1500); });
+    }
   }
   window.addEventListener("popstate", (e) => {
     if (skipPop) { skipPop = false; if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close the chart sheet before opening its session
@@ -958,7 +1081,27 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   // The sidebar keeps the 8 most recently active top-level sessions, with each spawn below its parent.
   const sessionChildren = () => { const map = new Map(); for (const s of Object.values(SESS)) { const p = parentOf(s.id); if (p && SESS[p]) { if (!map.has(p)) map.set(p, []); map.get(p).push(s); } } for (const xs of map.values()) xs.sort((a, b) => b.last - a.last); return map; };
   const descendantsOf = (sid, children, out = []) => { for (const c of children.get(sid) ?? []) { out.push(c); descendantsOf(c.id, children, out); } return out; };
-  const TREE_RANK = { wait: 0, err: 1, work: 2, idle: 3, done: 4 };
+  const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cacheWrite", "Cache write"], ["cacheRead", "Cache read"]];
+  const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
+  const usageTotal = (s) => Object.values(s.tokensByModel ?? {}).reduce((sum, m) => sum + TOKEN_KINDS.reduce((n, [k]) => n + (Number(m[k]) || 0), 0), 0);
+  function costForSessions(sessions) {
+    const kinds = Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), models = new Map(), unknown = new Set(); let usd = 0;
+    for (const s of sessions) for (const [modelId, usage] of Object.entries(s.tokensByModel ?? {})) {
+      const price = API_PRICE[modelId], current = models.get(modelId) ?? { modelId, kinds: Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), usd: 0, priced: !!price };
+      if (!price) { unknown.add(modelId); current.priced = false; }
+      for (const [key] of TOKEN_KINDS) {
+        const tokens = Number(usage[key]) || 0; current.kinds[key].tokens += tokens; kinds[key].tokens += tokens;
+        if (price) { const amount = tokens * price[key] / 1e6; current.kinds[key].usd += amount; kinds[key].usd += amount; current.usd += amount; usd += amount; }
+      }
+      models.set(modelId, current);
+    }
+    return { usd: unknown.size ? null : usd, knownUsd: usd, kinds, models: [...models.values()], unknown: [...unknown] };
+  }
+  const costForSession = (sid, includeRuns = false) => costForSessions(SESS[sid] ? [SESS[sid], ...(includeRuns ? descendantsOf(sid, sessionChildren()) : [])] : []);
+  const costText = (cost) => cost.unknown.length ? "—" : asMoney(cost.usd);
+  const COST_TIP = "What these tokens would cost at API rates. Subscriptions (Claude Max, ChatGPT plans) aren't billed this way.";
+  function costInfoTip() { const b = el("span", "cost-info"); b.title = COST_TIP; b.setAttribute("role", "img"); b.setAttribute("aria-label", COST_TIP); b.append(icon(I.q)); return b; }
+  const TREE_RANK = { wait: 0, work: 1, err: 2, idle: 3, done: 4 };
   const urgentDescendant = (sid, children) => descendantsOf(sid, children).filter((s) => s.state in TREE_RANK).sort((a, b) => TREE_RANK[a.state] - TREE_RANK[b.state] || b.last - a.last)[0]?.state;
   const defaultTreeOpen = (sid, children) => descendantsOf(sid, children).some((s) => s.state === "wait" || s.state === "work");
   const matchesTree = (sid, children) => sessMatch(SESS[sid], query) || (children.get(sid) ?? []).some((s) => matchesTree(s.id, children));
@@ -1017,9 +1160,24 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     bar.append(group);
   }
   function fitSessionLine(l2) {
-    const drop = [".meta-tools", ".meta-branch", ".meta-machine"].map((s) => l2.querySelector(s)).filter(Boolean);
+    const drop = [".meta-cost", ".meta-tools", ".meta-branch", ".meta-machine"].map((s) => l2.querySelector(s)).filter(Boolean);
     drop.forEach((n) => { n.hidden = false; });
     for (const n of drop) { if (l2.scrollWidth <= l2.clientWidth + 1) break; n.hidden = true; }
+  }
+  function lineageOf(sid) { const path = [], seen = new Set(); let id = sid; while (id && SESS[id] && !seen.has(id)) { seen.add(id); path.push(SESS[id]); id = parentOf(id); } return path.reverse(); }
+  function showLineageMenu(sid, bar) {
+    bar.querySelector(".lineage-menu")?.remove(); const path = lineageOf(sid), menu = el("div", "lineage-menu"); menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", "Session path");
+    path.forEach((s, i) => { const b = el("button"); b.type = "button"; b.setAttribute("role", "menuitem"); if (i === path.length - 1) b.setAttribute("aria-current", "page"); b.append(harnessMark(s.harness), el("span", null, s.name)); b.addEventListener("click", () => { menu.remove(); goSession(s.id); }); menu.append(b); });
+    bar.append(menu); const close = (e) => { if (!menu.contains(e.target) && !e.target.closest?.(".lineage-parent")) { menu.remove(); document.removeEventListener("click", close); } }; setTimeout(() => document.addEventListener("click", close), 0);
+  }
+  function appendSiblingNav(bar, s) {
+    const parent = parentOf(s.id); if (!parent) return;
+    const siblings = childSessions(parent), at = siblings.findIndex((x) => x.id === s.id); if (siblings.length < 2 || at < 0) return;
+    const nav = el("div", "sibling-nav"); nav.setAttribute("role", "group"); nav.setAttribute("aria-label", "Sibling sessions");
+    for (const [delta, label, path] of [[-1, "Previous sibling", I.back], [1, "Next sibling", I.chev]]) {
+      const target = siblings[at + delta], b = el("button", "ibtn"); b.type = "button"; b.disabled = !target; b.setAttribute("aria-label", target ? label + ": " + target.name : label); b.append(icon(path)); if (target) b.addEventListener("click", () => goSession(target.id)); nav.append(b);
+    }
+    nav.append(el("span", "sibling-count", (at + 1) + " of " + siblings.length)); bar.append(nav);
   }
   function renderTopbar(title, crumb, opts = {}) {
     const bar = $("#topbar"), s = opts.session; bar.replaceChildren(); bar.classList.remove("scrolled");
@@ -1027,11 +1185,14 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     if (s && findOpen) { searchBar(bar); appendWideToggle(bar); return; }
     const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); bar.append(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
-    if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
+    if (opts.lineage?.length) {
+      if (phone.matches) { const parent = opts.lineage.at(-1), c = el("button", "crumb lineage-parent", parent.name); c.type = "button"; c.setAttribute("aria-label", "Open session path through " + parent.name); c.addEventListener("click", () => showLineageMenu(s.id, bar)); l1.append(c, el("span", "sep", "›")); }
+      else { const path = opts.lineage; path.forEach((item, i) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); }); }
+    } else if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
     const tt = el("span", "t", title); tt.title = title; l1.append(tt); t.append(l1);
     if (opts.line2) { const l2 = el("div", "l2" + (s ? " session-meta" : "")); if (s) { const hit = el("button", "meta-hit"); hit.type = "button"; hit.setAttribute("aria-label", s.name + ": open Session details"); hit.addEventListener("click", () => openSessionDetails(s)); l2.append(hit); }
       opts.line2(l2); t.append(l2); if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); }); }
-    bar.append(t);
+    bar.append(t); if (s) appendSiblingNav(bar, s);
     if (opts.analytics) { appendAnalyticsRange(bar); appendWideToggle(bar); return; }
     if (!s) { appendWideToggle(bar); return; }
     const fb = el("button", "ibtn"); fb.type = "button"; fb.setAttribute("aria-label", "Find in transcript"); fb.append(icon(I.search));
@@ -1064,11 +1225,16 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     if (errors) { const j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")); j.type = "button"; j.setAttribute("aria-label", j.textContent + ": jump to the first failed step");
       j.addEventListener("click", (ev) => { ev.stopPropagation(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
       st.append(j); }
+    const kind = s.kind ? childKindChip(s, true) : null;
     const model = el("span", "meta-item meta-model"); model.append(harnessMark(s.harness), el("span", "meta-value", shortModel(s.model)));
     const machine = el("span", "meta-item meta-machine"); machine.append(icon(I.machine), el("span", "meta-value", shortHost(s))); machine.title = hostOf(s);
     const branch = el("span", "meta-item meta-branch"); branch.append(icon(I.branch), el("span", "meta-value", branchOf(s))); branch.title = branchOf(s);
     const tools = el("span", "meta-item meta-tools"); tools.append(icon(I.wrench), el("span", "meta-value", String(calls))); tools.setAttribute("aria-label", calls + (calls === 1 ? " tool call" : " tool calls"));
-    l2.append(st, model, machine, branch, tools);
+    const kids = childSessions(s.id), allKids = descendantsOf(s.id, sessionChildren());
+    let runs = null; if (kids.length) { runs = el("button", "meta-item meta-runs"); runs.type = "button"; runs.setAttribute("aria-label", kids.length + (kids.length === 1 ? " child session" : " child sessions") + (allKids.some((x) => x.state === "work") ? ", work in progress" : "") + ": open runs"); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); if (allKids.some((x) => x.state === "work")) runs.append(dot("work")); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
+    const tokens = el("span", "meta-item meta-tokens"); tokens.append(icon(I.stack), el("span", "meta-value", tok(usageTotal(s) / 1e6))); tokens.title = usageTotal(s).toLocaleString() + " sample tokens";
+    const cost = costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", cost.unknown.length ? "—" : shortMoney(cost.usd))); costItem.title = COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));
+    l2.append(...(kind ? [kind] : []), st, model, machine, branch, tools, ...(runs ? [runs] : []), tokens, costItem);
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
     const st = el("span", "stat " + (!up ? "err" : w ? "work" : "idle")); st.append(dot(!up ? "err" : w ? "work" : "idle"), !up ? "Not responding" : w ? "Up" : "Idle"); l2.append(st, el("span", "sep", " · "));
@@ -1274,8 +1440,28 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 
   // ---- Session page --------------------------------------------------------------------------------------------------
   function renderSession(page, sid) {
-    const head = el("div", "ph sr"); const h1 = el("h1", null, SESS[sid].name); head.append(h1); page.append(head); observeTitle(h1);
-    page.append(transcript(sid));
+    const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr"); const h1 = el("h1", null, s.name); head.append(h1); page.append(head); observeTitle(h1);
+    if (origin) { page.classList.add("child-page"); page.style.setProperty("--h", "var(--" + s.harness + ")"); page.append(childBriefBlock(origin)); }
+    page.append(transcript(sid, origin ? { excludeH: origin.id } : {}));
+    if (origin && (s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err")) page.append(childReturnBlock(s, origin));
+  }
+
+  function openParentAtHandoff(h) { pendingFlashHandoff = h.id; const turn = HOLDS.get(h.id); goSession(h.from, turn?.id); }
+  function childBriefBlock(h) {
+    const parent = SESS[h.from], block = el("section", "child-intro"); block.setAttribute("aria-label", "Brief from " + parent.name);
+    const title = el("div", "intro-title"), open = el("button", null, parent.name); open.type = "button"; open.addEventListener("click", () => openParentAtHandoff(h)); title.append("Brief from ", open, el("span", "tm", clock(h.at))); block.append(title);
+    const brief = markdown(h.brief, "brief"), more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", () => { const expanded = brief.classList.toggle("open"); more.textContent = expanded ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(expanded)); });
+    new ResizeObserver(() => { if (brief.classList.contains("open") || !brief.clientHeight) return; const clipped = brief.scrollHeight > brief.clientHeight + 1; more.hidden = !clipped; brief.classList.toggle("clipped", clipped); }).observe(brief);
+    const parentLink = el("button", "intro-open", "Open in " + parent.name); parentLink.type = "button"; parentLink.addEventListener("click", () => openParentAtHandoff(h)); block.append(brief, more, parentLink); return block;
+  }
+  function childReturnBlock(s, h) {
+    const block = el("div", "child-return"), calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, finished = s.state === "done" || s.state === "err" || h.status === "done" || h.status === "err";
+    const status = finished ? (s.state === "err" || h.status === "err" ? "err" : "done") : "work";
+    const text = finished ? (status === "err" ? "Failed" : "Done") : "Working · " + calls + (calls === 1 ? " tool call" : " tool calls") + " · " + dur(s.start, null);
+    const state = el("span", "stat " + status); state.append(status === "work" ? el("span", "spin") : dot(status), finished ? "Returned to " + nameOf(h.from) + " · " + text + " · " + dur(s.start, s.last) : text); block.append(state);
+    if (finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
+    return block;
   }
 
   // What a tool call did: an icon and verb for its step row, and a phrase and nouns for a group summary
@@ -1292,9 +1478,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   const toolInfo = (name) => { if (TOOLS[name]) return TOOLS[name]; const m = /^mcp__(.+?)__/.exec(name); if (m) { const srv = m[1].replace(/^claude_ai_/, "").replace(/_/g, " "); return ["ext", "Used " + srv, "used " + srv, "time", "times"]; } return ["run", name, name, "step", "steps"]; };
   const verb = (name) => toolInfo(name).slice(0, 2);
   function transcript(sid, opts = {}) {
-    const sec = el("section", opts.nested ? "nested" : null); sec.setAttribute("aria-label", opts.nested ? SESS[sid].name + " transcript" : "Transcript"); Object.assign(sec.style, { display: "grid", gap: "10px", gridTemplateColumns: "minmax(0, 1fr)" });
-    const entries = transcriptEntries(opts.entries ?? TX[sid] ?? [], sid);
-    const turnMode = !opts.nested;
+    const sec = el("section", opts.nested ? "nested" : parentOf(sid) ? "transcript-linked" : null); sec.setAttribute("aria-label", opts.nested ? SESS[sid].name + " transcript" : "Transcript"); Object.assign(sec.style, { display: "grid", gap: "10px", gridTemplateColumns: "minmax(0, 1fr)" });
+    const turnMode = !opts.nested, entries = transcriptEntries(opts.entries ?? TX[sid] ?? [], sid);
     // On a session page the transcript is a list of turns, each with its own entries; a nested one is a plain list.
     const box = el("div", turnMode ? "turns" : "tx"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);
     if (!find && turnMode) box.append(el("div", "divider", "Started " + clock(SESS[sid].start) + " on " + MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine]));
@@ -1322,6 +1507,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const firsts = turnMode ? new Map((TURNS[sid] ?? []).map((t) => [t.entries[0], t])) : new Map(); let cur = null;
     const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
       if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .think, .think-masked, .think-pending")) { blk.remove(); return; }
+      if (opts.excludeH && t.last) return;
       const end = turnEnd(t); if (!end) return;
       const d = el("div", "turn-end"); const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st), end.text); d.append(st);
       if (t.out.length) d.append(traceBtn(t)); blk.append(d); };
@@ -1329,11 +1515,13 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       // Your own message needs no header: the bubble is yours and its time sits under it. A relay or brief says who sent it.
       const h = t.start;
       if (t.u || h?.kind === "ask") blk.setAttribute("aria-label", "Your message" + (h ? " at " + clock(h.at) : ""));
-      else if (h) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in), l, el("span", "tm", clock(h.at))); blk.append(hd); }
+      else if (h && h.id !== opts.excludeH) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in), l, el("span", "tm", clock(h.at))); blk.append(hd); }
       tx = el("div", "tx"); blk.append(tx); box.append(blk); cur = { t, blk }; };
     for (const e of entries) {
       if (turnMode && isGap(e)) { closeTurn(); if (!find) box.append(el("div", "divider", e.text)); continue; }
       if (firsts.has(e)) openTurn(firsts.get(e));
+      if (opts.excludeH && e.k === "h" && e.id === opts.excludeH) continue;
+      if (opts.excludeH && e.k === "end" && /^Returned to /.test(e.text ?? "")) continue;
       // Entries that render nothing (empty thinking, hidden kinds) must not split a run of tool calls.
       if (isThought(e) && (!show.thinking || find)) continue;
       if (e.k === "tool") {
@@ -1379,16 +1567,6 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
         if (!show.tools && h.kind !== "toyou") continue;
         if (opts.nested && h.kind === "spawn" && h.to === sid) continue; // the parent's card already shows this brief
         tx.append(handoffCard(h, sid));
-        // A subagent's or Codex run's own work opens inline under its handoff: the turn that brief started there.
-        const cw = turnMode && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id)?.entries ?? TX[h.to] ?? [] : [];
-        if (cw.length) {
-          const n = cw.filter((x) => x.k === "tool").length;
-          const w = el("div", "childwork"); const b = el("button", "cw-toggle"); b.type = "button"; b.setAttribute("aria-expanded", "false");
-          b.append(icon(I.chev, "chev"), el("span", null, "What " + SESS[h.to].name + " did" + (n ? " · " + n + (n === 1 ? " tool call" : " tool calls") : "")));
-          const inner = el("div", "cw-body"); inner.hidden = true;
-          b.addEventListener("click", () => { if (!inner.childElementCount) inner.append(transcript(h.to, { nested: true, entries: cw })); inner.hidden = !inner.hidden; b.setAttribute("aria-expanded", String(!inner.hidden)); });
-          w.append(b, inner); tx.append(w);
-        }
       }
     }
     closeTurn();
@@ -1427,8 +1605,15 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     close.type = "button"; close.setAttribute("aria-label", "Close session details"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
     const body = el("div", "vb"), list = el("div", "detail-list");
     const branchLabel = s.worktree ? "Worktree" : "Branch";
-    const rows = [["Harness", HARNESS[s.harness]], ["Model", s.model], ["Machine", MACHINE[s.machine] + " · " + hostOf(s)], ["Directory", dirOf(s)], [branchLabel, branchOf(s)], ["Process id", pidOf(s)], ["Session id", sessionIdOf(s)], ["Started", clock(s.start)], ["Last activity", clock(s.last)]];
+    const rows = [["Harness", HARNESS[s.harness]], ["Model", s.modelId], ["Machine", MACHINE[s.machine] + " · " + hostOf(s)], ["Directory", dirOf(s)], [branchLabel, branchOf(s)], ["Process id", pidOf(s)], ["Session id", sessionIdOf(s)], ["Started", clock(s.start)], ["Last activity", clock(s.last)]];
     for (const [label, value] of rows) { const row = el("div", "detail-row"); row.append(el("span", "detail-label", label), el("span", "detail-value", value)); list.append(row); }
+    const ownCost = costForSession(s.id), allCost = costForSession(s.id, true), hasRuns = childSessions(s.id).length > 0;
+    const costRow = el("button", "detail-row cost-row"); costRow.type = "button"; costRow.setAttribute("aria-expanded", "false");
+    const label = el("span", "detail-label", "API-equivalent cost"); label.append(costInfoTip());
+    costRow.append(label, el("span", "detail-value", hasRuns ? costText(ownCost) + " own · " + costText(allCost) + " incl. runs" : costText(ownCost)));
+    const breakdown = costBreakdown(s.id, true); breakdown.hidden = true;
+    costRow.addEventListener("click", () => { breakdown.hidden = !breakdown.hidden; costRow.setAttribute("aria-expanded", String(!breakdown.hidden)); });
+    list.append(costRow); if (allCost.unknown.length) list.append(el("div", "no-price", "no price for " + allCost.unknown.join(", "))); list.append(breakdown);
     body.append(list); d.append(head, body); document.body.append(d);
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } });
@@ -1436,12 +1621,59 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
   }
 
+  function costBreakdown(sid, includeRuns) {
+    const cost = costForSession(sid, includeRuns), box = el("div", "cost-breakdown");
+    box.append(el("div", "cost-breakdown-head", includeRuns && childSessions(sid).length ? "Tokens and API-equivalent cost · incl. runs" : "Tokens and API-equivalent cost"));
+    for (const model of cost.models) {
+      const group = el("section", "cost-model"); group.append(el("div", "cost-model-name", model.modelId));
+      for (const [key, label] of TOKEN_KINDS) {
+        const item = model.kinds[key], row = el("div", "cost-line"); row.append(el("span", null, label), el("span", "cost-amount", item.tokens.toLocaleString() + " tokens"), el("span", "cost-value", model.priced ? asMoney(item.usd) : "—")); group.append(row);
+      }
+      if (!model.priced) group.append(el("div", "no-price", "no price for " + model.modelId));
+      box.append(group);
+    }
+    if (!cost.models.length) box.append(el("p", "empty", "No token usage recorded.")); return box;
+  }
+
+  function runRow(s, depth, sheet) {
+    const row = el("button", "runs-row"); row.type = "button"; row.style.paddingLeft = Math.min(depth, 3) * 14 + "px";
+    const name = el("span", "run-name"); name.append(dot(s.state), childKindChip(s), el("span", null, s.name));
+    const cost = costForSession(s.id); row.append(name, el("span", "run-cost", costText(cost)));
+    const calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, origin = originHandoff(s.id);
+    const meta = el("span", "run-meta"); meta.append(el("span", null, STATE[s.state]), el("span", null, dur(s.start, s.state === "work" ? null : s.last)), el("span", null, calls + (calls === 1 ? " tool call" : " tool calls"))); row.append(meta);
+    if (origin?.brief) row.append(el("span", "run-brief", oneLine(origin.brief)));
+    if (cost.unknown.length) row.append(el("span", "no-price", "no price for " + cost.unknown.join(", ")));
+    row.setAttribute("aria-label", [s.name, s.kind, STATE[s.state], dur(s.start, s.state === "work" ? null : s.last), origin?.brief ? oneLine(origin.brief) : ""].filter(Boolean).join(" · "));
+    row.addEventListener("click", () => { if (sheet) { pendingSessionOpen = s.id; sheet.close(); } else { $(".runs-popover")?.remove(); goSession(s.id); } }); return row;
+  }
+  function appendRunsTree(parent, box, sheet) {
+    const kids = [...(sessionChildren().get(parent.id) ?? [])].sort((a, b) => b.last - a.last);
+    for (const child of kids) { box.append(runRow(child, 0, sheet)); const nested = sessionChildren().get(child.id) ?? []; if (nested.length) { const group = el("div", "runs-group"); appendRunsTree(child, group, sheet); box.append(group); } }
+  }
+  function openRuns(s, anchor) {
+    $(".runs-popover")?.remove(); if (viewerEl) return;
+    const kids = sessionChildren().get(s.id) ?? []; if (!kids.length) return;
+    if (!phone.matches) { const pop = el("div", "runs-popover"); pop.setAttribute("role", "dialog"); pop.setAttribute("aria-label", "Runs under " + s.name); pop.append(el("h2", null, "Runs · " + kids.length + " · API-equivalent cost")); const tree = el("div", "runs-tree"); appendRunsTree(s, tree, false); pop.append(tree); $("#topbar").append(pop);
+      const close = (e) => { if (!pop.contains(e.target) && e.target !== anchor) { pop.remove(); document.removeEventListener("click", close); } }; setTimeout(() => document.addEventListener("click", close), 0); return; }
+    const d = el("dialog", "viewer runs-sheet"); d.setAttribute("aria-label", "Runs under " + s.name);
+    const head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose"); title.append(el("span", null, "Runs · " + kids.length + " · API-equivalent cost"));
+    close.type = "button"; close.setAttribute("aria-label", "Close runs"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
+    const body = el("div", "vb"), tree = el("div", "runs-tree"); appendRunsTree(s, tree, d); body.append(tree); d.append(head, body); document.body.append(d);
+    d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
+    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } });
+    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
+    try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
+  }
+
   function handoffCard(h, viewer, start) {
     const other = h.kind === "move" ? null : viewer === h.from ? h.to : h.from;
-    const c = el("div", "hcard " + (h.kind === "toyou" ? "toyou" : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
+    const child = h.kind === "spawn" && viewer === h.from ? SESS[h.to] : null;
+    const c = el("div", "hcard " + (child ? "child-card " + hcls(h.to) : h.kind === "toyou" ? "toyou" : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
     const [ic, parts] = sentence(h, viewer);
-    c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln);
-    const sw = el("span", "stat " + h.status); sw.append(h.status === "work" ? el("span", "spin") : dot(h.status === "done" ? "done" : h.status), statWord(h)); c.append(sw);
+    if (child) { c.append(childKindChip(child)); const ln = el("span", "ln", child.name); ln.append(el("span", "verb", " · " + (child.kind ?? HARNESS[child.harness]))); c.append(ln); }
+    else { c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln); }
+    const shownState = child?.state ?? h.status, sw = el("span", "stat " + shownState); sw.append(shownState === "work" ? el("span", "spin") : dot(shownState === "done" ? "done" : shownState), child ? STATE[shownState] : statWord(h)); c.append(sw);
+    if (child) { const calls = (TX[child.id] ?? []).filter((e) => e.k === "tool").length, meta = el("div", "child-meta"); meta.append(el("span", null, dur(child.start, child.state === "work" ? null : child.last)), el("span", null, calls + (calls === 1 ? " tool call" : " tool calls"))); c.append(meta); }
     const br = markdown(h.brief, "brief"); c.append(br);
     // Long messages open in place; the rest of the card still goes to the other session.
     const more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
@@ -1450,6 +1682,18 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     c.append(more);
     if (h.result) { const r = el("span", "result"); r.append(el("b", null, (h.status === "err" ? "Failed" : "Returned") + ": ")); inline(r, h.result); c.append(r); }
     const an = answerEl(h, "result"); if (an) c.append(an);
+    if (child) {
+      const actions = el("div", "child-actions"), openChild = el("button", null, "Open"); openChild.type = "button"; openChild.addEventListener("click", (e) => { e.stopPropagation(); goSession(child.id); }); actions.append(openChild);
+      const entries = (STARTS.get(h.id)?.entries ?? TX[child.id] ?? []).filter((e) => !(e.k === "h" && e.id === h.id));
+      if (entries.length) {
+        const group = el("div", "child-work"), toggle = el("button", "cw-toggle"); toggle.type = "button"; toggle.setAttribute("aria-expanded", "false"); toggle.append(icon(I.chev, "chev"), "What " + child.name + " did");
+        const inner = el("div", "cw-body"); inner.hidden = true; let showAll = false;
+        const paint = () => { inner.replaceChildren(transcript(child.id, { nested: true, entries: showAll ? entries : entries.slice(-5) })); if (!showAll && entries.length > 5) { const all = el("button", "show-all", "Show all " + entries.length); all.type = "button"; all.addEventListener("click", (e) => { e.stopPropagation(); showAll = true; paint(); }); inner.append(all); } };
+        toggle.addEventListener("click", (e) => { e.stopPropagation(); if (inner.hidden && !inner.childElementCount) paint(); inner.hidden = !inner.hidden; toggle.setAttribute("aria-expanded", String(!inner.hidden)); });
+        group.append(toggle, inner); actions.append(group);
+      }
+      c.append(actions);
+    }
     // Received: the sender's turn that sent it. Sent on: the turn it started there. To you: this turn's trace. A move: the machine it left.
     const open = () => { if (h.kind === "move") go({ v: "machine", id: h.fromMachine }); else if (h.kind === "toyou") { const t = HOLDS.get(h.id); if (t) goTrace(t.id); } else if (viewer === h.to) openSender(h); else if (SESS[other]) goSession(other, STARTS.get(h.id)?.id); };
     c.addEventListener("click", (ev) => { if (!getSelection().isCollapsed) return; open(); });
@@ -1460,14 +1704,14 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   // ---- Render --------------------------------------------------------------------------------------------------------
   function render() {
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
-    const page = $("#page"), r = route; page.replaceChildren(); syncLayoutPrefs();
+    const page = $("#page"), r = route; page.replaceChildren(); page.classList.remove("child-page"); page.style.removeProperty("--h"); syncLayoutPrefs();
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
     else if (r.v === "sessions") { renderSessions(page); renderTopbar("Sessions"); }
     else if (r.v === "machines") { renderMachines(page); renderTopbar("Machines"); }
     else if (r.v === "machine") { renderMachine(page, r.id); renderTopbar(MACHINE[r.id], { label: "Machines", go: () => go({ v: "machines" }) }, { line2: machineLine(r.id) }); }
     else if (r.v === "trace") { const sum = renderTrace(page, r.turn) ?? ""; renderTopbar("Trace", { label: SESS[r.sid].name, go: () => goSession(r.sid, r.turn) }, { line2: (l2) => l2.append(el("span", "rest", sum)) }); }
-    else if (r.v === "session") { const p = parentOf(r.id), s = SESS[r.id]; renderSession(page, r.id); renderTopbar(s.name, p ? { label: SESS[p].name, go: () => goSession(p) } : null, { session: s, line2: sessionLine(s) }); }
+    else if (r.v === "session") { const s = SESS[r.id], lineage = lineageOf(r.id); renderSession(page, r.id); renderTopbar(s.name, null, { session: s, lineage: lineage.length > 1 ? lineage.slice(0, -1) : null, line2: sessionLine(s) }); }
     document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px");
     syncBarLine(); renderNav(); renderLanes(); syncJump();
   }
@@ -1505,7 +1749,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
         const t = turns.find((x) => x.entries.includes(e));
         return { at: analyticsAt([e.demo ? 0 : eventDay, Number.isFinite(t?.start?.at) ? t.start.at : s.start]), error: e.ok === false };
       });
-      return { s, id: s.id, startedAt: analyticsAt(history?.started ?? [0, s.start]), busy, turnEvents, toolEvents };
+      const startedAt = analyticsAt(history?.started ?? [0, s.start]);
+      return { s, id: s.id, startedAt, costAt: startedAt, busy, turnEvents, toolEvents };
     });
   }
   function analyticsWaits() {
@@ -1542,6 +1787,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const waitBy = new Map(); for (const w of waits) { const ms = Math.max(0, Math.min(w.endAt ?? to, to) - Math.max(w.startAt, from)); waitBy.set(w.sid, (waitBy.get(w.sid) ?? 0) + ms); }
     const current = analyticsWaits().filter((w) => !w.endAt && rows.some((r) => r.id === w.sid)).map((w) => ({ ...w, ms: Math.max(0, ANALYTICS_NOW - w.startAt) })).sort((a, b) => b.ms - a.ms);
     const activity = relevant.reduce((sum, r) => sum + busyMsIn(r, from, to), 0);
+    const costRows = rows.filter((r) => inRange(r.costAt, from, to)).map((r) => ({ row: r, cost: costForSession(r.id) }));
+    const costUnknown = [...new Set(costRows.flatMap((x) => x.cost.unknown))];
     return {
       rows: relevant, agentMs: activity,
       started: rows.filter((r) => inRange(r.startedAt, from, to)).length,
@@ -1549,7 +1796,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       tools: rows.reduce((sum, r) => sum + r.toolEvents.filter((e) => inRange(e.at, from, to)).length, 0),
       errors: rows.reduce((sum, r) => sum + r.toolEvents.filter((e) => inRange(e.at, from, to) && e.error).length, 0),
       waitsMs: durations.reduce((sum, x) => sum + x, 0), medianWaitMs: median, longestWaitMs: durations.at(-1) ?? 0,
-      longestCurrent: current[0] ?? null, waitBy,
+      longestCurrent: current[0] ?? null, waitBy, costRows, costUnknown,
+      apiCost: costUnknown.length ? null : costRows.reduce((sum, x) => sum + x.cost.knownUsd, 0),
     };
   }
   const hoursText = (ms) => (ms / 3600000).toFixed(1) + "h";
@@ -1583,6 +1831,35 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart);
     const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"); const swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend); return panel;
   }
+  function renderCostChart(rows, from, to) {
+    const panel = el("section", "analytics-panel"), title = el("h2", null, "Cost over time"); title.append(costInfoTip());
+    const count = analyticsRange === 1 ? 24 : analyticsRange, unit = analyticsRange === 1 ? "per hour" : "per day";
+    panel.append(title, el("div", "panel-sub", "API-equivalent cost " + unit + " · stacked by harness"));
+    const bins = Array.from({ length: count }, () => ({ claude: 0, codex: 0 })), unpriced = new Set();
+    for (const row of rows) {
+      if (!inRange(row.costAt, from, to)) continue; const cost = costForSession(row.id); if (cost.usd == null) { cost.unknown.forEach((m) => unpriced.add(m)); continue; }
+      const at = Math.min(count - 1, Math.floor((row.costAt - from) / (to - from) * count)); bins[at][row.s.harness] += cost.usd;
+    }
+    const svg = document.createElementNS(SVGNS, "svg"); svg.setAttribute("viewBox", "0 0 720 190"); svg.setAttribute("preserveAspectRatio", "none"); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "API-equivalent cost " + unit + ", stacked by harness");
+    const left = 42, right = 708, top = 12, bottom = 151, max = Math.max(.01, ...bins.map((b) => b.claude + b.codex)), step = (right - left) / count;
+    for (let n = 0; n <= 2; n++) { const y = bottom - (bottom - top) * n / 2, line = document.createElementNS(SVGNS, "line"); line.setAttribute("x1", String(left)); line.setAttribute("x2", String(right)); line.setAttribute("y1", String(y)); line.setAttribute("y2", String(y)); line.setAttribute("class", "gridline"); svg.append(line);
+      const label = document.createElementNS(SVGNS, "text"); label.setAttribute("x", "3"); label.setAttribute("y", String(y + 4)); label.setAttribute("class", "axis-label"); label.textContent = "$" + (max * n / 2).toFixed(2); svg.append(label); }
+    bins.forEach((b, i) => { const x = left + i * step + step * .22, w = Math.max(1, step * .56), claudeH = (b.claude / max) * (bottom - top), codexH = (b.codex / max) * (bottom - top);
+      if (claudeH) { const r = document.createElementNS(SVGNS, "rect"); r.setAttribute("x", String(x)); r.setAttribute("y", String(bottom - claudeH)); r.setAttribute("width", String(w)); r.setAttribute("height", String(claudeH)); r.setAttribute("class", "cost-claude"); svg.append(r); }
+      if (codexH) { const r = document.createElementNS(SVGNS, "rect"); r.setAttribute("x", String(x)); r.setAttribute("y", String(bottom - claudeH - codexH)); r.setAttribute("width", String(w)); r.setAttribute("height", String(codexH)); r.setAttribute("class", "cost-codex"); svg.append(r); }
+    });
+    const startLabel = document.createElementNS(SVGNS, "text"), nowLabel = document.createElementNS(SVGNS, "text"); startLabel.setAttribute("x", String(left)); startLabel.setAttribute("y", "178"); startLabel.setAttribute("class", "axis-label"); startLabel.textContent = analyticsRange === 1 ? "24h ago" : analyticsRange + "d ago"; nowLabel.setAttribute("x", String(right)); nowLabel.setAttribute("y", "178"); nowLabel.setAttribute("text-anchor", "end"); nowLabel.setAttribute("class", "axis-label"); nowLabel.textContent = "Now"; svg.append(startLabel, nowLabel);
+    const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart);
+    const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"); const swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend); if (unpriced.size) panel.append(el("div", "no-price", "no price for " + [...unpriced].join(", ") + "; unpriced usage is omitted from bars.")); return panel;
+  }
+  function renderCodexAllowance() {
+    const latest = Object.values(SESS).filter((s) => s.harness === "codex" && s.rate_limits?.recorded_at).sort((a, b) => Date.parse(b.rate_limits.recorded_at) - Date.parse(a.rate_limits.recorded_at))[0];
+    if (!latest) return null;
+    const panel = el("section", "analytics-panel"), title = el("h2", null, "Codex allowance"), grid = el("div", "allowance-grid"); panel.append(title, el("div", "panel-sub", "Latest recorded rate limits · " + new Date(latest.rate_limits.recorded_at).toLocaleString([], { hour: "numeric", minute: "2-digit" })));
+    for (const [key, label] of [["five_hour", "5-hour window"], ["weekly", "Weekly window"]]) { const limit = latest.rate_limits[key]; if (!limit) continue; const box = el("div", "allowance-window"), reset = new Date(limit.resets_at);
+      box.append(el("div", "window-name", label), el("div", "window-used", limit.used_percent + "% used"), el("div", "window-reset", "Resets " + reset.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))); grid.append(box); }
+    panel.append(grid); return panel;
+  }
   function openAnalyticsSlice(at, active) {
     const d = el("dialog", "viewer analytics-slice"), head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose");
     d.setAttribute("aria-label", "Sessions at " + new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })); title.append(el("span", null, "Sessions at this time"));
@@ -1606,13 +1883,20 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const labelFor = (key) => groupKey === "repo" ? key === "__none__" ? "No repo (roles)" : key : groupKey === "machine" ? MACHINE[key] : HARNESS[key.split("\u0000")[0]] + " · " + shortModel(key.split("\u0000")[1]);
     for (const row of rows) {
       const ms = busyMsIn(row, from, to); if (!ms && !inRange(row.startedAt, from, to)) continue;
-      const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, sessions: new Set() }; g.ms += ms; g.sessions.add(row.id); groups.set(key, g);
+      const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);
+      if (inRange(row.costAt, from, to)) { const c = costForSession(row.id); g.cost += c.knownUsd; c.unknown.forEach((x) => g.unknown.add(x)); }
+      groups.set(key, g);
     }
-    const items = [...groups.values()].sort((a, b) => b.ms - a.ms || labelFor(a.key).localeCompare(labelFor(b.key))), max = Math.max(1, ...items.map((x) => x.ms));
-    const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title)); const list = el("div", "analytics-list");
+    const selected = (x) => analyticsMeasure === "cost" ? x.cost : x.ms;
+    const items = [...groups.values()].sort((a, b) => selected(b) - selected(a) || labelFor(a.key).localeCompare(labelFor(b.key))), max = Math.max(1, ...items.map(selected));
+    const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title));
+    const heads = el("div", "analytics-breakdown-head"); heads.append(el("span", null, ""), el("span", null, "Agent-hours")); const costHead = el("span", null, "API-equivalent cost"); costHead.append(costInfoTip()); heads.append(costHead); panel.append(heads);
+    const list = el("div", "analytics-list");
     for (const item of items) {
       const b = el("button", "analytics-row"); b.type = "button"; b.append(el("span", "row-title", labelFor(item.key)), el("span", "row-count", item.sessions.size + (item.sessions.size === 1 ? " session" : " sessions")));
-      const track = el("span", "row-track"), bar = el("i", "row-bar"); bar.style.width = Math.max(item.ms ? 2 : 0, item.ms / max * 100) + "%"; if (groupKey === "harness") bar.style.background = item.key.startsWith("claude") ? "var(--claude)" : "var(--codex)"; track.append(bar); b.append(track, el("span", "row-hours", hoursText(item.ms)));
+      const measure = selected(item), track = el("span", "row-track"), bar = el("i", "row-bar"); bar.style.width = Math.max(measure ? 2 : 0, measure / max * 100) + "%"; if (groupKey === "harness") bar.style.background = item.key.startsWith("claude") ? "var(--claude)" : "var(--codex)"; track.append(bar);
+      b.append(track, el("span", "row-hours", hoursText(item.ms)), el("span", "row-cost", item.unknown.size ? "—" : asMoney(item.cost)));
+      if (item.unknown.size) b.append(el("span", "no-price", "no price for " + [...item.unknown].join(", ")));
       b.addEventListener("click", () => { if (groupKey === "repo") sessionFilters.repo = item.key; else if (groupKey === "machine") sessionFilters.machine = item.key; else { const [harness, model] = item.key.split("\u0000"); sessionFilters.harness = harness; sessionFilters.model = model; } query = ""; groupBy = "recent"; go({ v: "sessions" }); }); list.append(b);
     }
     if (!items.length) list.append(el("p", "empty", "No activity in this range.")); panel.append(list); return panel;
@@ -1620,7 +1904,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   function analyticsList(title, items, value) {
     const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title)); const list = el("div", "analytics-list");
     if (!items.length) list.append(el("p", "empty", "No sessions in this range."));
-    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", value(item))); b.addEventListener("click", () => goSession(s.id)); list.append(b); }
+    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", value(item))); if (item.cost?.unknown.length) b.append(el("span", "no-price", "no price for " + item.cost.unknown.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); }
     panel.append(list); return panel;
   }
   function renderAnalytics(page) {
@@ -1628,8 +1912,10 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const now = analyticsStats(all, from, to), previous = analyticsStats(all, from - rangeMs(analyticsRange), from);
     const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days"))); page.append(head); observeTitle(h1);
     page.append(renderFacetFilters(() => render()));
+    const measure = el("div", "analytics-measure"); measure.setAttribute("role", "group"); measure.setAttribute("aria-label", "Breakdown bar measure");
+    for (const [key, label] of [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]]) { const b = el("button", null, label); b.type = "button"; b.setAttribute("aria-pressed", String(analyticsMeasure === key)); b.addEventListener("click", () => { if (analyticsMeasure === key) return; const top = currentScroll(); analyticsMeasure = key; render(); restoreScroll(top); }); measure.append(b); } page.append(measure);
     const metrics = el("div", "analytics-metrics");
-    const addMetric = (label, value, note) => { const m = el("div", "analytics-metric"); m.append(el("div", "label", label), el("div", "value", value), el("div", "note", note)); metrics.append(m); };
+    const addMetric = (label, value, note, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label", label); if (tip) l.append(costInfoTip()); m.append(l, el("div", "value", value), el("div", "note", note)); metrics.append(m); };
     const rate = now.tools ? now.errors / now.tools * 100 : 0, oldRate = previous.tools ? previous.errors / previous.tools * 100 : 0;
     addMetric("Agent-hours", hoursText(now.agentMs), deltaText(now.agentMs, previous.agentMs, hoursText));
     addMetric("Sessions started", countText(now.started), deltaText(now.started, previous.started, countText));
@@ -1638,13 +1924,17 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     addMetric("Time agents waited on you", timeText(now.waitsMs), "median " + timeText(now.medianWaitMs) + " · total " + deltaText(now.waitsMs, previous.waitsMs, timeText) + " · median " + deltaText(now.medianWaitMs, previous.medianWaitMs, timeText));
     const currentWait = now.longestCurrent;
     addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", currentWait ? currentWait.s.name + " · " + deltaText(currentWait.ms, previous.longestWaitMs, timeText) : "No session is waiting on you · " + deltaText(0, previous.longestWaitMs, timeText));
+    const costDelta = now.apiCost == null || previous.apiCost == null ? "no price for " + [...new Set([...now.costUnknown, ...previous.costUnknown])].join(", ") : deltaText(now.apiCost, previous.apiCost, asMoney);
+    addMetric("API-equivalent cost", now.apiCost == null ? "—" : asMoney(now.apiCost), costDelta, true);
     page.append(metrics);
     const chart = renderAgentsChart(all, from, to), breakdowns = el("div", "analytics-breakdowns");
     breakdowns.append(analyticsBreakdown("By repo", all, from, to, "repo"), analyticsBreakdown("By machine", all, from, to, "machine"), analyticsBreakdown("By harness and model", all, from, to, "harness"));
     const busyTop = [...all].map((r) => ({ ...r, value: busyMsIn(r, from, to) })).filter((r) => r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5);
     const waitTop = [...now.waitBy].map(([id, ms]) => ({ s: SESS[id], id, value: ms })).filter((r) => r.s && r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5);
-    const bottomPanels = el("div", "analytics-split"); bottomPanels.append(analyticsList("Top sessions · busy time", busyTop, (x) => timeText(x.value)), analyticsList("Top sessions · waited on", waitTop, (x) => timeText(x.value)));
-    page.append(chart, breakdowns, bottomPanels);
+    const costTop = all.filter((r) => inRange(r.costAt, from, to)).map((r) => { const cost = costForSession(r.id); return { ...r, cost, value: cost.usd }; }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5);
+    const bottomPanels = el("div", "analytics-split"); bottomPanels.append(analyticsList("Top sessions · busy time", busyTop, (x) => timeText(x.value)), analyticsList("Top sessions · waited on", waitTop, (x) => timeText(x.value)), analyticsList("Most expensive sessions · API-equivalent cost", costTop, (x) => x.value == null ? "—" : asMoney(x.value)));
+    const allowance = renderCodexAllowance();
+    page.append(chart, renderCostChart(all, from, to), breakdowns, bottomPanels); if (allowance) page.append(allowance);
   }
 
   // ---- Sessions: every top-level session and its child runs ---------------------------------------------------------------
