@@ -48,6 +48,8 @@ code { overflow-wrap: anywhere; }
 .dot.idle { border: 1.5px solid var(--done); }
 .dot.done { background: var(--done); opacity: .7; }
 .dot.err { background: var(--err); }
+.dot.new { background: var(--accent); }
+.dot.read { border: 1.5px solid var(--faint); }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--work) 55%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
 .spin { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--line); border-top-color: var(--work); animation: spin .9s linear infinite; flex: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -134,6 +136,7 @@ code { overflow-wrap: anywhere; }
 .chip-h::before { content: ""; width: 6px; height: 6px; border-radius: 2px; background: var(--h); }
 .stat { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; white-space: nowrap; }
 .stat.work { color: var(--work); } .stat.wait { color: var(--wait); } .stat.err { color: var(--err); } .stat.done, .stat.idle { color: var(--muted); }
+.stat.new { color: var(--accent); } .stat.read { color: var(--muted); }
 
 /* ---- Inbox ---------------------------------------------------------------- */
 .ib { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 3px 10px; align-items: start; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 14px 0; text-align: left; width: 100%; }
@@ -306,6 +309,9 @@ code { overflow-wrap: anywhere; }
 .tsum .chev { margin-left: auto; color: var(--faint); transition: transform .15s; }
 .tsum[aria-expanded="true"] .chev { transform: rotate(90deg); }
 .tgroup > .steps { margin-top: 2px; }
+.viewscript { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; border: 0; border-radius: 6px; background: none; padding: 3px 8px; color: var(--accent); font-size: 12.5px; }
+.tgroup > .viewscript { justify-self: end; margin: -2px 4px 2px; }
+@media (hover: hover) { .viewscript:hover { background: var(--sunken); } }
 .step .out { margin: 4px 0 8px; border-radius: 10px; background: var(--sunken); overflow: hidden; }
 .step .out pre { margin: 0; padding: 8px 12px; font: 12px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
 .step .out .io { padding: 7px 12px 0; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
@@ -319,6 +325,7 @@ code { overflow-wrap: anywhere; }
 .step .out .clip.clipped { -webkit-mask-image: linear-gradient(#000 calc(100% - 32px), transparent); mask-image: linear-gradient(#000 calc(100% - 32px), transparent); }
 .step .out .diff.clip { max-height: 16.5em; }
 .step .out .viewall { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 40px; border: 0; border-top: 1px solid var(--line); background: none; padding: 8px 12px; color: var(--accent); font-size: 13.5px; }
+.step .out .viewscript { width: 100%; min-height: 40px; border-top: 1px solid var(--line); border-radius: 0; }
 .step .out .viewall svg { width: 15px; height: 15px; }
 @media (hover: hover) { .step .out .viewall:hover { background: color-mix(in srgb, var(--sunken) 60%, var(--line)); } }
 /* The whole call: a full-screen sheet on phones, a dialog on wider screens. Text wraps; nothing scrolls sideways. */
