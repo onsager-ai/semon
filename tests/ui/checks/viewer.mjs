@@ -61,12 +61,12 @@ export default async function viewerCheck(browser) {
     if (targetId) {
     await goto(page, { v: "session", id: targetId }, D); await page.waitForTimeout(200);
     await page.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => x.click()); });
-    const hashBefore = await page.evaluate(() => JSON.stringify(history.state));
     const btn = page.locator(".viewall:visible").first();
     const btnCount = await btn.count();
     r.expect(btnCount > 0, "no 'View all' button visible on " + targetId + " despite a cut preview in the census");
     if (btnCount > 0) {
       await btn.scrollIntoViewIfNeeded(); await page.evaluate(() => window.scrollBy(0, -250)); await page.waitForTimeout(300);
+      const hashBefore = await page.evaluate(() => JSON.stringify(history.state));
       await page.screenshot({ path: path.join(ENV.out, "v-preview.png") });
       const expected = await btn.evaluate((x) => [...x.parentElement.querySelectorAll("pre")].map((q) => q.textContent.length));
       await btn.click(); await page.waitForTimeout(350);
