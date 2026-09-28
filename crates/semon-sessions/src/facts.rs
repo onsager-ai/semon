@@ -7,7 +7,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs, io,
+    env, fs,
+    io::{self, Read},
     path::Path,
 };
 
@@ -16,6 +17,16 @@ use serde::{Deserialize, Serialize};
 use crate::{Options, events::EventCache, lock_pid, model, proc_start};
 
 pub const FACTS_VERSION: u32 = 1;
+
+/// The environment variables Semon reads from a session's process, by exact
+/// name: Ostrom's run contract (its `docs/loops.md`, "The run environment is
+/// a contract"). Every other entry of the environment is dropped as it is
+/// parsed, never kept, logged or compared beyond its name.
+pub const RUN_VARIABLES: [&str; 2] = ["OSTROM_RUN_ID", "OSTROM_WORK_ORDER_ID"];
+
+/// The most of `/proc/<pid>/environ` that is read. A larger environment
+/// isn't read at all: a cut one could hold a cut value.
+const ENVIRON_MAX: u64 = 256 * 1024;
 
 /// The machine's side of a model, as JSON.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +49,11 @@ pub struct Facts {
     /// was last seen (epoch ms). The machine then counts as offline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offline_since: Option<i64>,
+    /// Each live session process's run ids ([`RUN_VARIABLES`] only), by
+    /// pid: empty when its environment holds none. A pid is missing when
+    /// its environment couldn't be read whole.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runs: BTreeMap<u32, BTreeMap<String, String>>,
 }
 
 impl Facts {
@@ -47,6 +63,7 @@ impl Facts {
         Self {
             proc_starts: BTreeMap::new(),
             codex_locks: BTreeMap::new(),
+            runs: BTreeMap::new(),
             offline_since: Some(last_seen),
             ..self.clone()
         }
@@ -78,14 +95,32 @@ pub fn local_facts(options: &Options) -> io::Result<Facts> {
             proc_starts.insert(pid, start);
         }
     }
+    let codex_locks = codex_locks(options);
+    // Run ids of the processes the model counts as live: a Claude pid file
+    // whose start time matches, and each Codex writer lock's holder.
+    let machine = MachineFacts::Local;
+    let mut runs = BTreeMap::new();
+    for pid in model::pid_files(options, &machine) {
+        if pid.alive
+            && let Some(run) = machine.run(options, pid.pid, pid.start)
+        {
+            runs.insert(pid.pid, run);
+        }
+    }
+    for pid in codex_locks.values() {
+        if let Some(run) = machine.run(options, *pid, None) {
+            runs.insert(*pid, run);
+        }
+    }
     Ok(Facts {
         version: FACTS_VERSION,
         hostname: model::local_hostname(options),
         home: env_home(),
         proc_starts,
-        codex_locks: codex_locks(options),
+        codex_locks,
         repos,
         offline_since: None,
+        runs,
     })
 }
 
@@ -210,6 +245,27 @@ impl MachineFacts {
         }
     }
 
+    /// A live process's run ids. On this machine they are read from
+    /// `/proc/<pid>/environ`; when `start` is given, the process must still
+    /// have that start time after the read, or it isn't the one the record
+    /// names. Recorded facts give what the machine recorded.
+    pub(crate) fn run(
+        &self,
+        options: &Options,
+        pid: u32,
+        start: Option<u64>,
+    ) -> Option<BTreeMap<String, String>> {
+        match self {
+            Self::Local => {
+                let run = read_run(&options.proc_root, pid)?;
+                start
+                    .is_none_or(|start| proc_start(&options.proc_root, pid) == Some(start))
+                    .then_some(run)
+            }
+            Self::Recorded(facts) => facts.runs.get(&pid).cloned(),
+        }
+    }
+
     /// Whether a Codex thread has a writer-lock file. `None` for recorded
     /// facts, which name only the held locks.
     pub(crate) fn codex_lock_file(&self, options: &Options, id: &str) -> Option<bool> {
@@ -266,6 +322,59 @@ fn local_codex_lock(_: &Options, _: Option<&str>, _: &str) -> Lock {
     Lock::Unknown
 }
 
+/// The run ids in `<proc_root>/<pid>/environ`. `None` when it can't be
+/// read, is larger than [`ENVIRON_MAX`], or holds a run id that isn't UTF-8.
+pub(crate) fn read_run(proc_root: &Path, pid: u32) -> Option<BTreeMap<String, String>> {
+    let file = fs::File::open(proc_root.join(pid.to_string()).join("environ")).ok()?;
+    // One buffer, big enough for the whole read: a growing one would leave
+    // copies of the environment in freed memory that the wipe below never
+    // reaches.
+    let mut environ = Vec::with_capacity(ENVIRON_MAX as usize + 1);
+    let read = file.take(ENVIRON_MAX + 1).read_to_end(&mut environ);
+    let run = (read.is_ok() && environ.len() as u64 <= ENVIRON_MAX)
+        .then(|| run_of(&environ))
+        .flatten();
+    wipe(&mut environ);
+    run
+}
+
+/// Zeroes a buffer that held a process environment, so nothing else of it
+/// outlives the parse in this process's memory. Volatile writes and a fence
+/// keep the optimiser from dropping the stores as dead before the free.
+/// Best-effort: the kernel's copy, and anything read before, are out of
+/// reach.
+fn wipe(bytes: &mut [u8]) {
+    for byte in bytes.iter_mut() {
+        // SAFETY: `byte` is a valid, aligned, exclusive reference to a u8.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The [`RUN_VARIABLES`] entries of a NUL-separated environment, by exact
+/// name; the first of a repeated name wins, as `getenv` has it. Every other
+/// entry is skipped by its name alone.
+fn run_of(environ: &[u8]) -> Option<BTreeMap<String, String>> {
+    let mut run = BTreeMap::new();
+    for entry in environ.split(|byte| *byte == 0) {
+        let Some(equals) = entry.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        let Some(name) = RUN_VARIABLES
+            .into_iter()
+            .find(|name| entry[..equals] == *name.as_bytes())
+        else {
+            continue;
+        };
+        if run.contains_key(name) {
+            continue;
+        }
+        let value = std::str::from_utf8(&entry[equals + 1..]).ok()?;
+        run.insert(name.to_owned(), value.to_owned());
+    }
+    Some(run)
+}
+
 /// Reads a facts file written by [`write_facts`] (or received as JSON).
 pub fn read_facts(path: &Path) -> io::Result<Facts> {
     let bytes = fs::read(path)?;
@@ -276,4 +385,43 @@ pub fn read_facts(path: &Path) -> io::Result<Facts> {
 /// Writes facts as JSON, atomically.
 pub fn write_facts(path: &Path, facts: &Facts) -> io::Result<()> {
     crate::save_json(path, facts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wipe_zeroes_every_byte() {
+        let mut bytes = b"OSTROM_RUN_ID=r1\0SECRET=x".to_vec();
+        wipe(&mut bytes);
+        assert!(bytes.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn only_the_run_variables_are_kept_by_exact_name() {
+        let run = run_of(
+            b"A=1\0OSTROM_RUN_ID=r1\0OSTROM_RUN_ID=later\0ostrom_run_id=lower\0OSTROM_RUN_ID_X=no\0\
+              =empty\0NOEQUALS\0OSTROM_WORK_ORDER_ID=\0SECRET=OSTROM_RUN_ID=x",
+        )
+        .unwrap();
+        assert_eq!(
+            run,
+            BTreeMap::from([
+                ("OSTROM_RUN_ID".to_owned(), "r1".to_owned()),
+                ("OSTROM_WORK_ORDER_ID".to_owned(), String::new()),
+            ])
+        );
+        assert_eq!(run_of(b"PATH=/bin\0"), Some(BTreeMap::new()));
+        assert_eq!(run_of(b""), Some(BTreeMap::new()));
+        assert_eq!(run_of(b"OSTROM_RUN_ID=\xff\0"), None);
+        // A non-UTF-8 entry that isn't a run variable is only skipped.
+        assert_eq!(
+            run_of(b"BLOB=\xff\0OSTROM_RUN_ID=r2"),
+            Some(BTreeMap::from([(
+                "OSTROM_RUN_ID".to_owned(),
+                "r2".to_owned()
+            )]))
+        );
+    }
 }

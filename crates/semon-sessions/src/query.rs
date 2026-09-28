@@ -444,7 +444,10 @@ impl View {
             "last_activity": facts.and_then(|facts| facts.last),
             "pid": facts.and_then(|facts| facts.pid),
             "alive": facts.and_then(|facts| facts.alive),
-            // Q3: a Codex rollout's recorded exit status, and Claude's if its logs hold one.
+            // No log records a run's exit status: a Codex rollout's
+            // `task_complete` error is a turn's outcome (the state `error`),
+            // not a process's exit, and Claude's logs hold none. Never
+            // inferred.
             "exit": Value::Null,
             "open_question": self.open.get(id).cloned().unwrap_or(Value::Null),
             "turns_truncated": facts.is_some_and(|facts| facts.turns_truncated),
@@ -453,8 +456,8 @@ impl View {
                 "cached": tokens.cached_input,
                 "output": tokens.output,
             })),
-            // Q3: orchestrator ids from an allowlisted set of environment variables.
-            "run": Value::Null,
+            // The live process's run ids (RUN_VARIABLES only), or null.
+            "run": facts.and_then(|facts| facts.run.clone()),
         })
     }
 

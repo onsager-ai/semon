@@ -1093,3 +1093,252 @@ fn each_machine_keeps_its_own_window_and_the_latest_start_answers() {
         .unwrap_err();
     assert_eq!(error.code, "outside_window");
 }
+
+/// Names and values an environment holds that must never reach an answer,
+/// a facts file or a log.
+const SECRETS: [&str; 6] = [
+    "AWS_SECRET_ACCESS_KEY",
+    "aws-secret-value",
+    "GITHUB_TOKEN",
+    "ghp_notarealtoken",
+    "wrong-run",
+    "run-huge",
+];
+
+/// `/proc/<pid>/environ` of the fixture's proc root.
+fn environ(home: &Home, pid: u32, bytes: &[u8]) {
+    let path = home.root.join(format!("proc/{pid}/environ"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bytes).unwrap();
+}
+
+#[cfg(unix)]
+fn hold_lock(home: &Home, id: &str, pid: u32) {
+    use std::os::unix::fs::MetadataExt;
+    let path = home.write(&format!("codex/thread-writer-locks/{id}.lock"), "");
+    let meta = fs::metadata(path).unwrap();
+    let dev = meta.dev();
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
+    let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
+    home.write(
+        "proc/locks",
+        &format!(
+            "12: FLOCK ADVISORY WRITE {pid} {major:x}:{minor:x}:{} 0 EOF\n",
+            meta.ino()
+        ),
+    );
+}
+
+/// Every live process's environment, each a case: the run ids among other
+/// secrets, none, an oversized one, a gone process, an unreadable one, a
+/// value that isn't UTF-8, and a Codex writer lock's holder.
+#[cfg(unix)]
+fn with_runs() -> Home {
+    let home = Home::new("testbox");
+    for (pid, id) in [
+        (40, "ostrom"),
+        (41, "plain"),
+        (42, "huge"),
+        (43, "gone"),
+        (44, "unreadable"),
+        (45, "binary"),
+    ] {
+        home.top(
+            id,
+            &[
+                human(id, ts(9, 0), "Go"),
+                assistant(id, ts(9, 1), vec![text("Going.")]),
+            ],
+        );
+        home.pid_file(pid, id, "busy", 777);
+        if id != "gone" {
+            home.process(pid, 777);
+        }
+    }
+    home.agent(
+        "ostrom",
+        "helper",
+        "t9",
+        &[
+            user("helper", ts(9, 1), "Help"),
+            assistant("helper", ts(9, 2), vec![text("Helped.")]),
+        ],
+    );
+    environ(
+        &home,
+        40,
+        b"PATH=/usr/bin\0AWS_SECRET_ACCESS_KEY=aws-secret-value\0OSTROM_RUN_ID=run-1\0\
+GITHUB_TOKEN=ghp_notarealtoken\0OSTROM_RUN_IDX=wrong-run\0XOSTROM_RUN_ID=wrong-run\0\
+OSTROM_WORK_ORDER_ID=order-7\0OSTROM_RUN_ID=wrong-run\0NOEQUALS\0",
+    );
+    environ(&home, 41, b"PATH=/usr/bin\0HOME=/home/fake-user\0");
+    let mut huge = b"OSTROM_RUN_ID=run-huge\0PAD=".to_vec();
+    huge.extend(std::iter::repeat_n(b'x', 300_000));
+    huge.push(0);
+    environ(&home, 42, &huge);
+    fs::create_dir_all(home.root.join("proc/44/environ")).unwrap();
+    environ(&home, 45, b"OSTROM_RUN_ID=\xff\xfe\0");
+    home.lines(
+        "codex/sessions/2026/09/24/rollout-cx.jsonl",
+        &[
+            codex_line(
+                ts(9, 0),
+                "session_meta",
+                json!({"id": "cx", "cwd": "/work/proj", "originator": "codex_exec", "thread_source": "user"}),
+            ),
+            codex_line(
+                ts(9, 1),
+                "response_item",
+                json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Go"}]}),
+            ),
+        ],
+    );
+    hold_lock(&home, "cx", 4242);
+    environ(
+        &home,
+        4242,
+        b"OSTROM_RUN_ID=run-cx\0GITHUB_TOKEN=ghp_notarealtoken\0OSTROM_WORK_ORDER_ID=order-cx\0",
+    );
+    home
+}
+
+fn runs_of(answer: &Value) -> BTreeMap<String, Value> {
+    answer["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| (row["id"].as_str().unwrap().to_owned(), row["run"].clone()))
+        .collect()
+}
+
+fn expected_runs() -> BTreeMap<String, Value> {
+    [
+        (
+            "ostrom",
+            json!({"OSTROM_RUN_ID": "run-1", "OSTROM_WORK_ORDER_ID": "order-7"}),
+        ),
+        ("helper", Value::Null),
+        ("plain", json!({})),
+        ("huge", Value::Null),
+        ("gone", Value::Null),
+        ("unreadable", Value::Null),
+        ("binary", Value::Null),
+        (
+            "cx",
+            json!({"OSTROM_RUN_ID": "run-cx", "OSTROM_WORK_ORDER_ID": "order-cx"}),
+        ),
+    ]
+    .into_iter()
+    .map(|(id, run)| (id.to_owned(), run))
+    .collect()
+}
+
+fn assert_no_secrets(what: &str, text: &str) {
+    for secret in SECRETS {
+        assert!(!text.contains(secret), "{what} holds {secret}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn run_ids_come_from_the_allowlist_and_nothing_else() {
+    let home = with_runs();
+    let mut query = home.query();
+    let listed = query.call_at("list_sessions", &json!({}), NOW).unwrap();
+    assert_eq!(runs_of(&listed), expected_runs());
+    let rows = listed["sessions"].as_array().unwrap();
+    let row = |id: &str| rows.iter().find(|row| row["id"] == id).unwrap();
+    assert_eq!(
+        (&row("gone")["alive"], &row("cx")["pid"]),
+        (&json!(false), &json!(4242))
+    );
+    // No exit status is in these logs: never inferred.
+    assert!(rows.iter().all(|row| row["exit"].is_null()));
+    // Nothing else of any environment reaches any answer.
+    for (tool, args) in [
+        ("list_sessions", json!({})),
+        ("get_session", json!({"id": "ostrom"})),
+        ("get_session", json!({"id": "cx"})),
+        ("read_transcript", json!({"id": "ostrom"})),
+        ("find", json!({"text": "o"})),
+        ("stalls", json!({"idle_minutes": 1})),
+    ] {
+        let answer = query.call_at(tool, &args, NOW).unwrap();
+        assert_no_secrets(tool, &answer.to_string());
+    }
+    // Over MCP, the same run ids and nothing else.
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_sessions","arguments":{}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_session","arguments":{"id":"ostrom"}}}"#,
+        "\n",
+    );
+    let mut output = Vec::new();
+    crate::serve_mcp(&mut query, input.as_bytes(), &mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert_no_secrets("MCP output", &output);
+    let replies: Vec<Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let text = |reply: &Value| -> Value {
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    assert_eq!(runs_of(&text(&replies[1])), expected_runs());
+    assert_eq!(
+        text(&replies[2])["session"]["run"],
+        json!({"OSTROM_RUN_ID": "run-1", "OSTROM_WORK_ORDER_ID": "order-7"})
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_ids_travel_in_the_facts_and_a_mirror_reads_no_proc() {
+    let home = with_runs();
+    let facts = crate::local_facts(&home.options).unwrap();
+    let run = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    };
+    assert_eq!(
+        facts.runs,
+        BTreeMap::from([
+            (
+                40,
+                run(&[
+                    ("OSTROM_RUN_ID", "run-1"),
+                    ("OSTROM_WORK_ORDER_ID", "order-7")
+                ])
+            ),
+            (41, run(&[])),
+            (
+                4242,
+                run(&[
+                    ("OSTROM_RUN_ID", "run-cx"),
+                    ("OSTROM_WORK_ORDER_ID", "order-cx")
+                ])
+            ),
+        ])
+    );
+    let path = home.root.join("facts.json");
+    crate::write_facts(&path, &facts).unwrap();
+    assert_no_secrets("the facts file", &fs::read_to_string(&path).unwrap());
+    assert_eq!(crate::read_facts(&path).unwrap(), facts);
+    // A mirror: the same logs, the recorded facts, and no /proc at all.
+    let mirror = Options {
+        proc_root: home.root.join("no-proc"),
+        cache: home.root.join("mirror/index.json"),
+        facts: Some(path),
+        ..home.options.clone()
+    };
+    let mut query = Query::new(mirror);
+    let listed = query.call_at("list_sessions", &json!({}), NOW).unwrap();
+    assert_eq!(runs_of(&listed), expected_runs());
+    // The offline machine has no live process, so no run.
+    let offline = facts.offline(NOW);
+    assert!(offline.runs.is_empty());
+}

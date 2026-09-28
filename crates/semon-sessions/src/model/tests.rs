@@ -1744,6 +1744,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         codex_locks: BTreeMap::new(),
         repos: BTreeMap::new(),
         offline_since: None,
+        runs: BTreeMap::new(),
     };
     crate::write_facts(&path, &facts).unwrap();
     let mut options = home.options.clone();
