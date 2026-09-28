@@ -250,6 +250,26 @@ code { overflow-wrap: anywhere; }
 @media (hover: hover) { .menu button:hover { background: var(--sunken); } }
 .menu dl { margin: 6px 0 2px; padding: 8px 10px 4px; border-top: 1px solid var(--line); display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 13px; }
 .menu dt { color: var(--faint); } .menu dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.account-widget-desktop { position: relative; flex: none; display: flex; align-items: center; }
+.account-widget-phone { display: none; }
+.account-trigger { display: flex; align-items: center; border: 0; background: none; color: var(--ink); }
+.account-avatar-button { width: 32px; height: 32px; justify-content: center; padding: 0; border-radius: 50%; }
+.account-avatar { position: relative; display: grid; place-items: center; flex: none; width: 32px; height: 32px; overflow: hidden; border-radius: 50%; background: var(--sunken); color: var(--ink-2); font-size: 12px; font-weight: 600; line-height: 1; }
+.account-avatar img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; }
+.account-popover { right: 0; width: min(320px, calc(100vw - 32px)); padding: 6px 10px; }
+.account-identity { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 5px 4px 9px; }
+.account-identity-text, .account-row-main { display: flex; flex-direction: column; min-width: 0; }
+.account-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.account-login-value, .account-role { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12.5px; }
+.account-section { border-top: 1px solid var(--line); padding: 5px 0 2px; }
+.account-heading { padding: 4px 8px; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
+.account-menu-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 42px; border-bottom: 1px solid var(--line); padding: 5px 8px; color: var(--ink); font-size: 13.5px; text-decoration: none; }
+.account-menu-row:last-child { border-bottom: 0; }
+@media (hover: hover) { .account-menu-row:hover { background: var(--sunken); } }
+.account-menu-row[aria-current="page"] { color: var(--ink); }
+.account-check { flex: none; color: var(--accent); font-size: 16px; }
+.account-menu-row.danger { color: var(--err); }
+.account-links .account-menu-row { min-height: 40px; }
 
 /* Transcript, modelled on Claude's chat */
 .find { display: flex; align-items: center; height: 38px; background: var(--sunken); border-radius: 9px; padding: 0 10px; overflow: hidden; }
@@ -508,6 +528,15 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .msg.user { max-width: 88%; }
   .step > button, .step.live { min-height: 36px; }
   .menu, .filters.pop { right: 10px; }
+  .account-widget-desktop { display: none; }
+  .account-widget-phone { position: relative; display: flex; flex: none; flex-direction: column; margin-top: auto; padding: 8px 8px 0; border-top: 1px solid var(--line); }
+  .account-widget-phone .account-trigger { width: 100%; min-height: 52px; gap: 10px; padding: 4px 8px; text-align: left; }
+  .account-widget-phone .account-summary { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; }
+  .account-summary-name, .account-summary-workspace { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .account-summary-name { font-weight: 600; }
+  .account-summary-workspace { color: var(--muted); font-size: 12.5px; }
+  .account-widget-phone .account-popover { position: static; width: 100%; max-height: min(58vh, 440px); overflow-y: auto; margin: 0 0 6px; padding: 0 2px; border: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); border-radius: 0; box-shadow: none; }
+  .account-widget-phone .account-menu-row, .account-widget-phone .account-links .account-menu-row { min-height: 44px; }
 }
 
 /* ---- Live updates (deliberate difference 3) -------------------------------------------------------------------------

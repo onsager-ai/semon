@@ -14,6 +14,8 @@
   // An offline machine's last-seen time (epoch ms), and the embedding server's machine-management link, when served.
   const MACHINE_LAST = {};
   let ADMIN = null;
+  let ACCOUNT = null;
+  let NAV_MACHINES = null;
   const HARNESS = { claude: "Claude Code", codex: "Codex" };
   const SESS = {};
   const H = [];
@@ -193,6 +195,16 @@
   let serverNow = 0, fetchedAt = 0;
   let TOK = {}; // per session: its transcript's growth mark in the model; a loaded transcript is tailed only when it moved
   const enc = encodeURIComponent;
+  const safePath = (href) => typeof href === "string" && href.startsWith("/") && !href.startsWith("//") && !href.includes("\\") && !/[\u0000-\u001f\u007f-\u009f]/.test(href) && href.length <= 512;
+  const textField = (value, min, max) => typeof value === "string" && [...value].length >= min && [...value].length <= max && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+  function accountOf(value) {
+    if (!value || !textField(value.name, 1, 80) || !value.name.trim() || !textField(value.login, 0, 80) || !textField(value.initials, 1, 3) || !value.initials.trim()) return null;
+    if (value.avatar_href != null && !safePath(value.avatar_href)) return null;
+    if (!Array.isArray(value.workspaces) || value.workspaces.length > 50 || !Array.isArray(value.links) || value.links.length > 12) return null;
+    if (value.workspaces.some((w) => !w || !textField(w.name, 1, 80) || !w.name.trim() || !textField(w.role, 0, 80) || typeof w.current !== "boolean" || !safePath(w.switch_href))) return null;
+    if (value.links.some((a) => !a || !textField(a.label, 1, 80) || !a.label.trim() || !safePath(a.href) || typeof a.danger !== "boolean")) return null;
+    return value;
+  }
   // An error carries the HTTP status (0: no response), so live polling can tell a 403 from a dropped connection.
   const api = (path) => fetch(path, { credentials: "same-origin" }).then((r) => { if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status }); return r.json(); }, (e) => { throw Object.assign(e, { status: 0 }); });
   // NOW follows the client clock from the model's `now`, so every "ago" keeps moving; a running tool's age follows NOW.
@@ -205,7 +217,9 @@
     for (const k of Object.keys(MACHINE)) { delete MACHINE[k]; delete MACHINE_UP[k]; delete MACHINE_LAST[k]; }
     // Several machines come as `machines`; one comes as `machine` alone.
     for (const x of m.machines ?? [m.machine]) { MACHINE[x.id] = x.name; MACHINE_UP[x.id] = x.up; if (x.last != null) MACHINE_LAST[x.id] = x.last; }
-    ADMIN = m.admin && typeof m.admin.href === "string" && m.admin.href.startsWith("/") && !m.admin.href.startsWith("//") ? m.admin : null;
+    ADMIN = m.admin && safePath(m.admin.href) ? m.admin : null;
+    ACCOUNT = accountOf(m.account);
+    NAV_MACHINES = m.nav && safePath(m.nav.machines) ? m.nav.machines : null;
     for (const k of Object.keys(SESS)) delete SESS[k];
     for (const [id, s] of Object.entries(m.sessions)) { s.id = id; SESS[id] = s; }
     H.length = 0; H.push(...m.handoffs);
@@ -302,6 +316,7 @@
   function boot() {
     api("/api/model").then((m) => {
       adopt(m); route = routeOf(location); LIVE.version = m.version; remember(m);
+      if (route.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
       try { history.replaceState(route, "", urlOf(route)); } catch {}
       const done = () => { render(); if (route.v === "session" && route.turn) revealTurn(route.turn, true); schedule(2000); setInterval(ticker, 1000); };
       const p = load(route); if (p) p.then(done, done); else done();
@@ -311,10 +326,13 @@
   // ---- State & navigation ---------------------------------------------------------------
   const phone = window.matchMedia("(max-width: 760px)");
   let route = { v: "home" }; let groupBy = "recent"; let query = "";
+  let accountOpen = false;
   let show = { messages: true, tools: true, thinking: true }; let find = ""; let findOpen = false; let filterOpen = false;
   const quietTop = () => { if (phone.matches) window.scrollTo(0, 0); else $("#main").scrollTop = 0; };
   function go(r, fromHistory) {
-    route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".menu")?.remove(); clearPill();
+    if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
+    closeAccountMenu();
+    route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearPill();
     if (!fromHistory) { try { history.pushState(r, "", urlOf(r)); } catch {} }
     if (r.v === "timeline" && !fromHistory) tlView.left = null;
     const done = () => { if (route !== r) return; render(); if (r.v === "session" && r.turn) revealTurn(r.turn, !fromHistory); else quietTop(); };
@@ -338,6 +356,70 @@
   }
 
   // ---- Sidebar ----------------------------------------------------------------------------------
+  function accountAvatar(account) {
+    const avatar = el("span", "account-avatar", account.initials);
+    if (safePath(account.avatar_href)) {
+      const image = el("img"); image.alt = ""; image.setAttribute("src", account.avatar_href);
+      image.addEventListener("error", () => image.remove()); avatar.append(image);
+    }
+    return avatar;
+  }
+  function accountPopover() {
+    const menu = el("div", "menu account-popover"); menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", "Account");
+    const identity = el("div", "account-identity"); identity.append(accountAvatar(ACCOUNT));
+    const details = el("span", "account-identity-text"); details.append(el("span", "account-name", ACCOUNT.name), el("span", "account-login-value", ACCOUNT.login)); identity.append(details); menu.append(identity);
+    const workspaces = el("section", "account-section"); workspaces.append(el("div", "account-heading", "Workspaces"));
+    for (const workspace of ACCOUNT.workspaces) {
+      const row = el("a", "account-menu-row"); row.setAttribute("role", "menuitem"); row.setAttribute("href", workspace.switch_href);
+      if (workspace.current) row.setAttribute("aria-current", "page");
+      const name = el("span", "account-row-main"); name.append(el("span", "account-workspace-name", workspace.name), el("span", "account-role", workspace.role)); row.append(name);
+      if (workspace.current) row.append(el("span", "account-check", "✓"));
+      workspaces.append(row);
+    }
+    menu.append(workspaces);
+    if (ACCOUNT.links.length) {
+      const links = el("section", "account-section account-links");
+      for (const link of ACCOUNT.links) {
+        const row = el("a", "account-menu-row" + (link.danger ? " danger" : ""), link.label);
+        row.setAttribute("role", "menuitem"); row.setAttribute("href", link.href); links.append(row);
+      }
+      menu.append(links);
+    }
+    return menu;
+  }
+  function closeAccountMenu() {
+    document.querySelectorAll(".account-popover").forEach((menu) => menu.remove());
+    document.querySelectorAll(".account-trigger").forEach((button) => button.setAttribute("aria-expanded", "false"));
+    accountOpen = false;
+  }
+  function toggleAccountMenu(widget, trigger, compact) {
+    if (accountOpen) { closeAccountMenu(); return; }
+    closeAccountMenu(); closeFilter(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false");
+    const menu = accountPopover();
+    if (compact) widget.insertBefore(menu, trigger); else widget.append(menu);
+    accountOpen = true; trigger.setAttribute("aria-expanded", "true");
+  }
+  function accountWidget(compact) {
+    if (!ACCOUNT) return null;
+    const widget = el("div", "account-widget " + (compact ? "account-widget-phone" : "account-widget-desktop"));
+    const trigger = el("button", "account-trigger"); trigger.type = "button";
+    trigger.setAttribute("aria-haspopup", "menu"); trigger.setAttribute("aria-expanded", "false");
+    const current = ACCOUNT.workspaces.find((workspace) => workspace.current);
+    if (compact) {
+      trigger.setAttribute("aria-label", ACCOUNT.name + ", " + (current?.name ?? ACCOUNT.login));
+      const summary = el("span", "account-summary"); summary.append(el("span", "account-summary-name", ACCOUNT.name), el("span", "account-summary-workspace", current?.name ?? ACCOUNT.login));
+      trigger.append(accountAvatar(ACCOUNT), summary);
+    } else {
+      trigger.classList.add("account-avatar-button"); trigger.setAttribute("aria-label", ACCOUNT.name + " account menu"); trigger.append(accountAvatar(ACCOUNT));
+    }
+    trigger.addEventListener("click", (event) => { event.stopPropagation(); toggleAccountMenu(widget, trigger, compact); });
+    widget.append(trigger); return widget;
+  }
+  function renderDrawerAccount() {
+    $("#account-drawer")?.remove();
+    if (!ACCOUNT) return;
+    const widget = accountWidget(true); widget.id = "account-drawer"; $("#sidebar").append(widget);
+  }
   function renderNav() {
     const nav = $("#nav"); nav.replaceChildren();
     // A session or a trace sits under Sessions, a machine under Machines.
@@ -374,7 +456,7 @@
   function renderTopbar(title, crumb, opts = {}) {
     const bar = $("#topbar"), s = opts.session; bar.replaceChildren(); bar.classList.remove("scrolled");
     bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("searching", !!(s && findOpen));
-    if (s && findOpen) { searchBar(bar); return; }
+    if (s && findOpen) { searchBar(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
     const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); bar.append(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
     if (s) { const hit = el("button", "hit"); hit.type = "button"; hit.setAttribute("aria-label", s.name + ": details"); hit.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(s, $("#more-btn")); }); t.append(hit); }
@@ -382,18 +464,19 @@
     const tt = el("span", "t", title); tt.title = title; l1.append(tt); t.append(l1);
     if (opts.line2) { const l2 = el("div", "l2"); opts.line2(l2); t.append(l2); }
     bar.append(t);
-    if (!s) return;
+    if (!s) { const account = accountWidget(false); if (account) bar.append(account); return; }
     const fb = el("button", "ibtn"); fb.type = "button"; fb.setAttribute("aria-label", "Find in transcript"); fb.append(icon(I.search));
     fb.addEventListener("click", () => { findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
     const pop = el("div", "filters pop"); pop.hidden = !filterOpen;
     for (const [key, label] of [["messages", "Messages"], ["tools", "Tool steps"], ["thinking", "Thinking"]]) { const l = el("label"); const cb = el("input"); cb.type = "checkbox"; cb.checked = show[key]; cb.id = "f-" + key; cb.addEventListener("change", () => { show[key] = cb.checked; render(); }); l.append(cb, label); pop.append(l); }
     const tb = el("button", "ibtn" + (show.messages && show.tools && show.thinking ? "" : " on")); tb.id = "filter-btn"; tb.type = "button"; tb.setAttribute("aria-label", "Filter transcript"); tb.setAttribute("aria-expanded", String(filterOpen)); tb.append(icon(I.filter));
-    tb.addEventListener("click", () => { $(".menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); filterOpen = pop.hidden; pop.hidden = !filterOpen; tb.setAttribute("aria-expanded", String(filterOpen)); });
+    tb.addEventListener("click", () => { $(".session-menu")?.remove(); closeAccountMenu(); $("#more-btn")?.setAttribute("aria-expanded", "false"); filterOpen = pop.hidden; pop.hidden = !filterOpen; tb.setAttribute("aria-expanded", String(filterOpen)); });
     const more = el("button", "ibtn"); more.id = "more-btn"; more.type = "button"; more.setAttribute("aria-label", "Session details and actions"); more.setAttribute("aria-expanded", "false"); more.append(icon(I.more)); more.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(s, more); });
     // The dropdown hangs from the filter button's right edge, wherever the bar's padding and the buttons after it put it.
     const place = () => { pop.style.right = Math.max(0, bar.getBoundingClientRect().right - tb.getBoundingClientRect().right) + "px"; };
     tb.addEventListener("click", place);
     bar.append(fb, tb, more, pop); if (filterOpen) place();
+    const account = accountWidget(false); if (account) bar.append(account);
   }
   function closeFilter() { if (!filterOpen) return; filterOpen = false; const p = $(".filters.pop"); if (p) p.hidden = true; $("#filter-btn")?.setAttribute("aria-expanded", "false"); }
   // Search takes over the bar: back, the field, and how many entries match. Back (or Escape) restores the bar.
@@ -426,8 +509,9 @@
   window.addEventListener("scroll", syncBarLine, { passive: true });
   $("#main").addEventListener("scroll", syncBarLine, { passive: true });
   function toggleMenu(s, btn) {
-    const ex = $(".menu"); if (ex) { ex.remove(); btn.setAttribute("aria-expanded", "false"); return; }
-    const m = el("div", "menu"); m.setAttribute("role", "menu");
+    const ex = $(".session-menu"); if (ex) { ex.remove(); btn.setAttribute("aria-expanded", "false"); return; }
+    closeAccountMenu();
+    const m = el("div", "menu session-menu"); m.setAttribute("role", "menu");
     const copy = el("button"); copy.type = "button"; copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command"));
     const cmd = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + s.id;
     copy.addEventListener("click", () => { navigator.clipboard?.writeText(cmd).then(() => { copy.lastChild.textContent = "Copied"; }, () => { copy.lastChild.textContent = cmd; }); });
@@ -437,7 +521,9 @@
     for (const [k, v] of [["Model", s.model], ["Machine", MACHINE[s.machine] + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Tokens in / out", tok(s.tokens[0]) + " / " + tok(s.tokens[2])], ["Cached context", tok(s.tokens[1])], ["Session id", s.id]]) dl.append(el("dt", null, k), el("dd", "mono", v));
     m.append(dl); closeFilter(); $("#topbar").append(m); btn.setAttribute("aria-expanded", "true");
   }
-  document.addEventListener("click", (e) => { const m = $(".menu"); if (m && !m.contains(e.target)) { m.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); }
+  document.addEventListener("click", (e) => {
+    const account = $(".account-popover"); if (account && !account.parentElement.contains(e.target)) closeAccountMenu();
+    const m = $(".session-menu"); if (m && !m.contains(e.target)) { m.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); }
     // A checkbox in the filter re-renders the bar, so its (now detached) target still sits inside the old popover.
     if (filterOpen && !e.target.closest?.(".filters, #filter-btn")) closeFilter(); });
 
@@ -816,6 +902,7 @@
   // ---- Render --------------------------------------------------------------------------------------------------------
   function render() {
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
+    closeAccountMenu();
     tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; page.replaceChildren(); page.classList.toggle("wide", r.v === "timeline");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "timeline") { renderTimeline(page); renderTopbar("Timeline"); }
@@ -825,7 +912,7 @@
     else if (r.v === "trace") { const sum = renderTrace(page, r.turn) ?? ""; renderTopbar("Trace", { label: SESS[r.sid].name, go: () => goSession(r.sid, r.turn) }, { line2: (l2) => l2.append(el("span", "rest", sum)) }); }
     else if (r.v === "session") { const p = parentOf(r.id), s = SESS[r.id]; renderSession(page, r.id); renderTopbar(s.name, p ? { label: SESS[p].name, go: () => goSession(p) } : null, { session: s, line2: sessionLine(s) }); }
     document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px");
-    syncBarLine(); renderNav(); renderLanes();
+    syncBarLine(); renderNav(); renderLanes(); renderDrawerAccount();
   }
 
   // ---- Timeline: sessions as rows, time across ------------------------------------------------------------------------
@@ -1031,10 +1118,10 @@
   // ---- Drawer (phone) ---------------------------------------------------------------------------------------------------------
   const sidebar = $("#sidebar");
   function openDrawer() { if (!phone.matches) return; document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
-  function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); }
+  function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); closeAccountMenu(); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); }
   $("#drawer-close").addEventListener("click", () => closeDrawer());
   $("#scrim").addEventListener("click", () => closeDrawer());
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeDrawer(); $(".menu")?.remove(); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
   let sx = null;
   sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
   sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });
