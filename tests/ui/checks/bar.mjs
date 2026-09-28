@@ -145,7 +145,8 @@ export default async function barCheck(browser) {
       out.filter = Fl;
       // Line 2 opens the Session details sheet/dialog with the session's facts and no stage-B Cost row.
       await page.evaluate(() => { window.scrollTo(0, 400); document.querySelector("#main").scrollTop = 400; }); await page.waitForTimeout(100);
-      await page.click(".topbar .l2.session-meta .meta-hit"); await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
+      const detailsHit = page.locator(".topbar .l2.session-meta .meta-hit"), detailsHitBox = await detailsHit.boundingBox();
+      await detailsHit.click({ position: { x: 2, y: Math.floor(detailsHitBox.height / 2) } }); await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
       out.details = await page.evaluate((phone) => { const d = document.querySelector("dialog.session-details"), r = d.getBoundingClientRect(), labels = [...d.querySelectorAll(".detail-label")].map((x) => x.textContent); return { open: d.open, inView: r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth, phoneSheet: phone ? r.bottom >= innerHeight - 1 && r.width >= innerWidth - 1 : null, desktopDialog: phone ? null : r.width <= 680, labels, hasCost: labels.some((x) => /cost/i.test(x)), hasSessionId: labels.includes("Session id"), hasDirectory: labels.includes("Directory"), hasPid: labels.includes("Process id") }; }, phone);
       out.details.session = busy;
       await page.click(".session-details .vclose"); await page.waitForTimeout(100); out.details.closed = await page.evaluate(() => !document.querySelector("dialog.session-details"));

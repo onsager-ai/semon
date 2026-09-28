@@ -68,6 +68,7 @@ export default async function turnsCheck(browser) {
     const screen = async (where) => { R.screens++; const n = await over(); if (n) { R.overflowScreens++; R.overflowWhere.push(where + ":" + n); } };
     const small = (sel) => page.evaluate((sel) => { const hs = [...document.querySelectorAll(sel)].filter((x) => x.offsetParent).map((x) => x.getBoundingClientRect().height); return { n: hs.length, min: hs.length ? Math.round(Math.min(...hs) * 10) / 10 : null, under36: hs.filter((h) => h < 35.5).length }; }, sel);
     const taps = {}; const addTap = (k, rr) => { const t = taps[k] ??= { n: 0, min: null, under36: 0 }; t.n += rr.n; t.under36 += rr.under36; if (rr.min != null) t.min = t.min == null ? rr.min : Math.min(t.min, rr.min); };
+    const menuAction = async (label) => { await page.click("#more-btn"); await page.locator('.menu [role="menuitem"]').filter({ hasText: label }).click(); };
 
     // Home and Machines.
     await screen("home"); addTap("ib", await small(".ib")); addTap("ib .tracebtn", await small(".ib .tracebtn"));
@@ -164,12 +165,12 @@ export default async function turnsCheck(browser) {
       await goto(page, { v: "session", id: multiSid }, D0);
       const allTurns = await page.evaluate(() => document.querySelectorAll(".turns > .turn").length);
       const word = "morning sweep";
-      await page.click('.topbar [aria-label="Find in transcript"]'); await page.fill("#find", word); await page.waitForTimeout(150);
+      await menuAction("Find in transcript"); await page.fill("#find", word); await page.waitForTimeout(150);
       const f1 = await page.evaluate(() => ({ turns: document.querySelectorAll(".turns > .turn").length, empty: !!document.querySelector(".turns > .empty") }));
       await page.fill("#find", "zzqqxx"); await page.waitForTimeout(150);
       const f2 = await page.evaluate(() => ({ turns: document.querySelectorAll(".turns > .turn").length, empty: document.querySelector(".turns > .empty")?.textContent }));
       await page.fill("#find", ""); await page.waitForTimeout(100); await page.click('.topbar [aria-label="Close search"]'); await page.waitForTimeout(100);
-      await page.click("#filter-btn"); await page.uncheck("#f-tools"); await page.waitForTimeout(120);
+      await menuAction("Filter transcript"); await page.uncheck("#f-tools"); await page.waitForTimeout(120);
       const f3 = await page.evaluate(() => document.querySelectorAll(".turns > .turn").length);
       const stepsWhileFiltered = await page.evaluate(() => document.querySelectorAll(".turns .step").length);
       await page.check("#f-tools"); await page.waitForTimeout(100);

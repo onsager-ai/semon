@@ -7,10 +7,9 @@
 // Ported: the phone half now drives the served sample fixture instead of test-real.html (the same measurements, on
 // the fixture's data); the desktop half already used the sample, so it only changes how the page is reached. Session
 // ids are unchanged from the sample. Neither half named a sample handoff or turn id, so there is no id mapping here.
-// The original opened whichever lane is first in the sidebar's DOM order ('.srow >> nth=0') to find its longest cut
-// call; that lane has no cut preview at all in this fixture (per gaps.json, previews are short except harbor's first
-// Bash output), so the phone half instead opens whichever lane the per-lane census above actually found a cut
-// preview on (discovered at runtime from the census, never hardcoded to "harbor"). The desktop half still opens
+// The sidebar now shows eight top-level sessions and nested children, so the census visits each served session by
+// route instead of treating every tree row as a visible, flat sidebar item. The phone half opens whichever session
+// the census found a cut preview on (discovered at runtime, never hardcoded to "harbor"); the desktop half opens
 // 'harbor' by session id, which is stable and does have a cut preview on its first step.
 //
 // Tool entries carry `src` and may carry `more` in the served viewer: "View all" shows whenever the server cut a
@@ -29,9 +28,7 @@
 //  - the desktop dialog: at least one "View all" is visible on the sample's first expanded step, the dialog is not
 //    sideways-clipped off the 1280px viewport, and a backdrop click closes it (closedByBackdrop === true).
 import path from "node:path";
-import { ENV, served, data, reporter } from "../lib.mjs";
-
-const afterTitle = (page, text) => page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, text);
+import { ENV, served, data, goto, reporter } from "../lib.mjs";
 
 export default async function viewerCheck(browser) {
   const D = await data();
@@ -41,15 +38,10 @@ export default async function viewerCheck(browser) {
   // ---- Phone, dark: census, then the "View all" sheet on the first lane. ----
   {
     const page = await served(browser, { size: "phone", dark: true });
-    const top = async () => { await page.evaluate(() => window.scrollTo(0, 0)); await page.mouse.wheel(0, -50); await page.waitForTimeout(350); };
-
-    await page.click("#lead-btn"); await page.waitForTimeout(280);
-    const lanes = await page.evaluate(() => [...document.querySelectorAll(".srow")].map((row) => row.dataset.id));
-    await page.click("#drawer-close"); await page.waitForTimeout(250);
+    const lanes = Object.keys(D.SESS);
     const C = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0 }; const cutLanes = [];
     for (const id of lanes) {
-      await top(); await page.click("#lead-btn"); await page.waitForTimeout(280);
-      await page.click('.srow[data-id="' + id + '"]'); await afterTitle(page, D.SESS[id].name); await page.waitForTimeout(150);
+      await goto(page, { v: "session", id }, D); await page.waitForTimeout(150);
       const rr = await page.evaluate(() => { const r = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0 };
         for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"]').forEach((x) => x.click());
         document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => { x.click(); r.steps++; const o = x.parentElement.querySelector('.out');
@@ -67,8 +59,7 @@ export default async function viewerCheck(browser) {
     const targetId = cutLanes[0];
     r.expect(!!targetId, "no lane had a cut preview to open 'View all' on (census.cut=" + C.cut + ")");
     if (targetId) {
-    await top(); await page.click("#lead-btn"); await page.waitForTimeout(280); await page.click('.srow[data-id="' + targetId + '"]');
-    await afterTitle(page, D.SESS[targetId].name); await page.waitForTimeout(200);
+    await goto(page, { v: "session", id: targetId }, D); await page.waitForTimeout(200);
     await page.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => x.click()); });
     const hashBefore = await page.evaluate(() => JSON.stringify(history.state));
     const btn = page.locator(".viewall:visible").first();
@@ -102,7 +93,7 @@ export default async function viewerCheck(browser) {
   // ---- Desktop, light: the dialog on the sample's harbor lane. ----
   {
     const page = await served(browser, { size: "desktop", dark: false });
-    await page.click('.srow[data-id="harbor"]'); await afterTitle(page, D.SESS.harbor.name); await page.waitForTimeout(200);
+    await goto(page, { v: "session", id: "harbor" }, D); await page.waitForTimeout(200);
     await page.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); });
     await page.locator(".step > button").first().click(); await page.waitForTimeout(200);
     R.sample = { viewAll: await page.locator(".viewall:visible").count() };

@@ -140,6 +140,8 @@ const secsOf = (t) => { const m = /^(?:(\d+)m )?(\d+)s$/.exec(t ?? ""); return m
 
 async function scheme(browser, name, opts, r, protocol) {
   const R = { name };
+  const phone = opts.size === "phone";
+  const menuAction = async (page, label) => { await page.click("#more-btn"); await page.locator('.menu [role="menuitem"]').filter({ hasText: label }).click(); };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-live-"));
   const now = write(dir);
   // The server's clock stands 10 minutes after the sample's now, so the appended lines (12:41–12:46) are in its past.
@@ -297,7 +299,8 @@ async function scheme(browser, name, opts, r, protocol) {
     await S.setViewportSize(opts.size === "phone" ? { width: 390, height: 844 } : { width: 1280, height: 860 }); await sleep(200);
 
     // ---- 4. a relay, with harbor's filter dropdown open and Thinking off ----
-    await S.click("#filter-btn"); await S.waitForFunction(() => document.querySelector(".filters.pop")?.hidden === false);
+    if (phone) await menuAction(S, "Filter transcript"); else await S.click("#filter-btn");
+    await S.waitForFunction(() => document.querySelector(".filters.pop")?.hidden === false);
     await S.click("#f-thinking"); await S.waitForFunction(() => document.querySelector("#f-thinking")?.checked === false && document.querySelector(".filters.pop")?.hidden === false);
     await TL.evaluate(() => document.querySelector('[aria-label="Zoom in"]').focus());
     let u = S.updates; t0 = Date.now();
@@ -313,15 +316,16 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.tlFocus === "Zoom in", name + ": the Timeline's focus didn't stay on Zoom in: " + R.tlFocus);
     r.expect(await updated(S, u), name + ": harbor's page got no update for the relay");
     R.homeTrail.push(await homeState());
-    R.filters = await S.evaluate(() => ({ pop: document.querySelector(".filters.pop")?.hidden === false, expanded: document.querySelector("#filter-btn")?.getAttribute("aria-expanded"), thinking: document.querySelector("#f-thinking")?.checked, tools: document.querySelector("#f-tools")?.checked }));
-    r.expect(R.filters.pop && R.filters.expanded === "true" && R.filters.thinking === false && R.filters.tools === true, name + ": the filters changed: " + JSON.stringify(R.filters));
+    R.filters = await S.evaluate((phone) => ({ pop: document.querySelector(".filters.pop")?.hidden === false, expanded: document.querySelector(phone ? "#more-btn" : "#filter-btn")?.getAttribute("aria-expanded"), thinking: document.querySelector("#f-thinking")?.checked, tools: document.querySelector("#f-tools")?.checked }), phone);
+    r.expect(R.filters.pop && R.filters.expanded === (phone ? "false" : "true") && R.filters.thinking === false && R.filters.tools === true, name + ": the filters changed: " + JSON.stringify(R.filters));
     await S.keyboard.press("Escape");
     R.timeline = await tlState();
     r.expect(R.timeline.zoom === tl0.zoom && Math.abs(R.timeline.left - tl0.left) <= 1 && JSON.stringify(Object.entries(tl0.discs).filter(([k]) => R.timeline.discs[k] !== tl0.discs[k])) === "[]",
       name + ": the Timeline's zoom, scroll or rows changed: " + JSON.stringify({ before: tl0, after: R.timeline }));
 
     // ---- 5. a question for you, and one more message while find is open; the drawer open on the phone ----
-    await S.click('#topbar button[aria-label="Find in transcript"]'); await S.waitForSelector("#find");
+    if (phone) await menuAction(S, "Find in transcript"); else await S.click('#topbar button[aria-label="Find in transcript"]');
+    await S.waitForSelector("#find");
     await S.fill("#find", "Live check"); await S.waitForFunction(() => /^\d+ match/.test(document.querySelector("#topbar .fcount")?.textContent ?? ""));
     const find0 = await S.evaluate(() => { const f = document.querySelector("#find"); return { value: f.value, focus: document.activeElement === f, caret: f.selectionStart, count: document.querySelector("#topbar .fcount").textContent }; });
     if (opts.size === "phone") { await Hm.click("#lead-btn"); await Hm.waitForFunction(() => document.body.classList.contains("drawer-open")); }
