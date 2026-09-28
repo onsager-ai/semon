@@ -2796,6 +2796,91 @@ mod tests {
     }
 
     #[test]
+    fn account_and_nav_are_per_request_model_fields_outside_the_version() {
+        let fixture = lane_fixture();
+        let mut core = crate::ViewerCore::new(fixture.options.clone());
+        let plain = core.respond("GET", "/api/model", "", None);
+        assert_eq!(plain.status, 200);
+        let plain_model: Value = serde_json::from_slice(&plain.body).unwrap();
+        assert!(plain_model.get("account").is_none());
+        assert!(plain_model.get("nav").is_none());
+
+        let menu = |name: &str| {
+            crate::AccountMenu::new(
+                name,
+                "reader@example.invalid",
+                "R",
+                Some("/avatars/reader.png"),
+                vec![crate::AccountWorkspace {
+                    name: "Research".into(),
+                    role: "Owner".into(),
+                    current: true,
+                    switch_href: "/workspaces/research".into(),
+                }],
+                vec![
+                    crate::AccountLink {
+                        label: "Profile".into(),
+                        href: "/account/profile".into(),
+                        method: crate::LinkMethod::default(),
+                        danger: false,
+                    },
+                    crate::AccountLink {
+                        label: "Sign out".into(),
+                        href: "/account/sign-out".into(),
+                        method: crate::LinkMethod::Post,
+                        danger: true,
+                    },
+                ],
+            )
+            .unwrap()
+        };
+        core.set_account(Some(menu("Morgan Lee")));
+        assert!(core.set_nav_override("machines", "/account/workspaces"));
+        let first = core.respond("GET", "/api/model", "", None);
+        assert_eq!(first.status, 200);
+        let first_model: Value = serde_json::from_slice(&first.body).unwrap();
+        assert_eq!(first_model["account"]["name"], "Morgan Lee");
+        assert_eq!(first_model["account"]["login"], "reader@example.invalid");
+        assert_eq!(first_model["account"]["initials"], "R");
+        assert_eq!(first_model["account"]["avatar_href"], "/avatars/reader.png");
+        assert_eq!(first_model["account"]["workspaces"][0]["name"], "Research");
+        assert_eq!(first_model["account"]["workspaces"][0]["role"], "Owner");
+        assert_eq!(first_model["account"]["workspaces"][0]["current"], true);
+        assert_eq!(
+            first_model["account"]["workspaces"][0]["switch_href"],
+            "/workspaces/research"
+        );
+        assert_eq!(first_model["account"]["links"][0]["label"], "Profile");
+        assert_eq!(
+            first_model["account"]["links"][0]["href"],
+            "/account/profile"
+        );
+        assert_eq!(first_model["account"]["links"][0]["danger"], false);
+        assert_eq!(first_model["account"]["links"][0]["method"], "get");
+        assert_eq!(first_model["account"]["links"][1]["method"], "post");
+        assert_eq!(
+            first_model["nav"],
+            json!({"machines":"/account/workspaces"})
+        );
+        let version = first_model["version"].as_str().unwrap();
+        let etag = first.etag.clone().unwrap();
+        assert_eq!(etag, format!("\"{version}\""));
+
+        core.set_account(Some(menu("Another account")));
+        let second = core.respond("GET", "/api/model", "", None);
+        assert_eq!(second.status, 200);
+        let second_model: Value = serde_json::from_slice(&second.body).unwrap();
+        assert_eq!(second_model["account"]["name"], "Another account");
+        assert_eq!(second_model["version"], version);
+        assert_eq!(second.etag.as_deref(), Some(etag.as_str()));
+
+        let unchanged = core.respond("GET", "/api/model", "", Some(&etag));
+        assert_eq!(unchanged.status, 304);
+        assert!(unchanged.body.is_empty());
+        assert_eq!(unchanged.etag.as_deref(), Some(etag.as_str()));
+    }
+
+    #[test]
     fn several_machines_serve_one_model_and_each_answers_for_its_own() {
         let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
         let mut core = ViewerCore::with_machines(vec![
