@@ -1717,8 +1717,9 @@ impl<'a> Builder<'a> {
             tokens.cached_input += used.tokens.cached_input;
             tokens.output += used.tokens.output;
             if let Some(model) = &used.model {
+                let model = crate::pricing::normalize_model_id(model).to_owned();
                 tokens_by_model
-                    .entry(model.clone())
+                    .entry(model)
                     .or_insert_with(events::ModelTokens::default)
                     .add(&used.model_tokens);
             }

@@ -329,6 +329,45 @@ fn tokens_by_model_keep_claude_message_models_and_deduplicate_message_ids() {
 }
 
 #[test]
+fn claude_dated_model_ids_strip_only_the_trailing_date_for_price_matching() {
+    let home = Home::new();
+    home.top(
+        "dated-model",
+        &[assistant_usage(
+            "dated-model",
+            ts(1, 0),
+            "message-dated",
+            "claude-sonnet-4-5-20250929",
+            json!({"input_tokens":90,"cache_creation_input_tokens":20,
+                "cache_read_input_tokens":30,"output_tokens":40}),
+        )],
+    );
+
+    let built = home.build();
+    let usage = &built.sessions["dated-model"].tokens_by_model;
+    assert_eq!(usage.len(), 1);
+    assert_eq!(
+        usage["claude-sonnet-4-5"],
+        crate::events::ModelTokens {
+            input: 90,
+            output: 40,
+            cache_write: 20,
+            cache_read: 30,
+        }
+    );
+    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    assert!(
+        model["sessions"]["dated-model"]["tokens_by_model"]
+            .get("claude-sonnet-4-5-20250929")
+            .is_none()
+    );
+    assert_eq!(
+        model["pricing"]["models"]["claude-sonnet-4-5"]["input"],
+        3.0
+    );
+}
+
+#[test]
 fn codex_model_switch_attributes_cumulative_token_deltas_to_the_current_model() {
     let home = Home::new();
     home.codex(
