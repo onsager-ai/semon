@@ -17,8 +17,8 @@
 /* Links inside shell content use the viewer's accent colour instead of the browser default, in both link and visited
    states. Anchors that stand in for the viewer's .nav-item button (the gallery and docs use <a>, the viewer uses
    <button>) drop the browser's underline and match the button's ink colours instead. */
-.page a, .signin a, .notice a, .sh-step a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
-.page a:visited, .signin a:visited, .notice a:visited, .sh-step a:visited { color: var(--accent); }
+.page a:not(.btn), .signin a:not(.btn), .notice a:not(.btn), .sh-step a:not(.btn) { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.page a:not(.btn):visited, .signin a:not(.btn):visited, .notice a:not(.btn):visited, .sh-step a:not(.btn):visited { color: var(--accent); }
 a.nav-item { text-decoration: none; color: var(--ink-2); }
 a.nav-item[aria-current="page"] { color: var(--ink); }
 
