@@ -3,6 +3,7 @@
 //   SEMON_BASE / SEMON_TOKEN / SEMON_NOW   the primary fixture's served viewer (required)
 //   SEMON_EXTRA_BASE / SEMON_EXTRA_TOKEN   the --extras fixture's served viewer (required: md's synthetic pass, bar's
 //                                          table check and extras.mjs run on it)
+//   SEMON_ACCOUNT_BASE / SEMON_ACCOUNT_TOKEN   the embedding API fixture used by extras.mjs
 //   SEMON_UI_OUT                          where reports and screenshots go (default: ./out)
 import { launch } from "../lib.mjs";
 import full from "./full.mjs";

@@ -1,5 +1,5 @@
 # The session viewer's browser checks (#40 M4, decision D2). Builds `semon` with a test clock, writes the synthetic sample
-# fixture (tests/ui/fixture.mjs) and its extras variant, serves both with `semon sessions --serve`, and runs, in Chromium
+# fixture (tests/ui/fixture.mjs) and its extras variant, serves them and an embedding-API fixture, and runs, in Chromium
 # through Playwright:
 #   - the fixture's gaps against the sample mockup's data (tests/ui/gaps.mjs, listed in tests/ui/gaps.json),
 #   - the mockup's check scripts, ported to the served viewer (tests/ui/checks/),
@@ -49,6 +49,9 @@ jobs:
       - name: Build semon with the test clock
         run: cargo build --locked -p semon-store --bin semon --features semon-sessions/test-clock
 
+      - name: Build the embedding API fixture
+        run: cargo build --locked -p semon-sessions --example ui-account-server --features test-clock,test-ui-account-server
+
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -89,6 +92,20 @@ jobs:
           [ -n "$token" ] || { cat "$RUNNER_TEMP"/sample*.log; exit 1; }
           echo "SEMON_EXTRA_BASE=$base" >> "$GITHUB_ENV"
           echo "SEMON_EXTRA_TOKEN=$token" >> "$GITHUB_ENV"
+          curl -fsS -o /dev/null "$base/?t=$token"
+          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/examples/ui-account-server \
+            127.0.0.1:8768 "$RUNNER_TEMP/sample-extras/claude" "$RUNNER_TEMP/sample-extras/codex" \
+            "$RUNNER_TEMP/sample-extras/proc" "$RUNNER_TEMP/sample-extras/account-index.json" \
+            < /dev/null > "$RUNNER_TEMP/account-menu.log" 2>&1 &
+          for _ in $(seq 1 100); do
+            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/account-menu.log" || true)
+            [ -n "$url" ] && break
+            sleep 0.2
+          done
+          [ -n "$url" ] || { cat "$RUNNER_TEMP/account-menu.log"; exit 1; }
+          base="${url%%/?t=*}"; token="${url##*t=}"
+          echo "SEMON_ACCOUNT_BASE=$base" >> "$GITHUB_ENV"
+          echo "SEMON_ACCOUNT_TOKEN=$token" >> "$GITHUB_ENV"
           curl -fsS -o /dev/null "$base/?t=$token"
 
       - name: Fixture gaps against the sample's data
@@ -142,7 +159,7 @@ jobs:
 
       - name: Server logs
         if: ${{ always() }}
-        run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/two-machines.log || true
+        run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/account-menu.log "$RUNNER_TEMP"/two-machines.log || true
 
       - name: Upload reports, screenshots and diffs
         if: ${{ always() }}

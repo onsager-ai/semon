@@ -26,6 +26,102 @@ export default async function (browser) {
   const R = r.results;
   const D = await data({ extras: true });
 
+  // ---- Embedding server account menu and Machines destination -----------------------------------------------------
+  {
+    const name = '<img src=x onerror="window.__accountXss=1">';
+    r.expect(!!ENV.accountBase && !!ENV.accountToken, "the account fixture server is required");
+    const desktop = await served(browser, { account: true, size: "desktop" });
+    const topbarAvatar = await desktop.locator("#topbar .account-avatar-button").evaluate((button) => {
+      const rect = button.getBoundingClientRect();
+      return { width: rect.width, height: rect.height, right: Math.round(document.querySelector("#topbar").getBoundingClientRect().right - rect.right), visible: getComputedStyle(button).display !== "none" };
+    });
+    const servedAccount = await desktop.evaluate(async () => (await (await fetch("/api/model")).json()).account);
+    const servedNav = await desktop.evaluate(async () => (await (await fetch("/api/model")).json()).nav);
+    r.expect(servedAccount?.name === name && servedAccount.links?.map((link) => link.method).join(",") === "get,get,post" && servedNav?.machines === "/account/workspaces", "the embedding fixture serves account methods and nav model values");
+    r.expect(topbarAvatar.width === 32 && topbarAvatar.height === 32 && topbarAvatar.visible && topbarAvatar.right === 20, "desktop has a 32px avatar button at the top bar's right end: " + JSON.stringify(topbarAvatar));
+    await desktop.locator("#topbar .account-avatar-button").click();
+    const desktopMenu = await desktop.locator("#topbar .account-popover").evaluate((menu) => ({
+      name: menu.querySelector(".account-name")?.textContent,
+      login: menu.querySelector(".account-login-value")?.textContent,
+      workspaces: [...menu.querySelectorAll(".account-workspace-form")].map((form) => {
+        const row = form.querySelector(".account-menu-row");
+        return { name: row.querySelector(".account-workspace-name")?.textContent, method: form.getAttribute("method"), action: form.getAttribute("action"), tag: row.tagName, type: row.getAttribute("type"), role: row.getAttribute("role"), current: row.getAttribute("aria-current"), controls: form.elements.length, hidden: form.querySelectorAll("input").length };
+      }),
+      allWorkspaces: [...menu.querySelectorAll(".account-workspace-name")].map((row) => row.textContent),
+      links: [...menu.querySelectorAll(".account-links > a, .account-links > form")].map((container) => {
+        const form = container.matches("form") ? container : null;
+        const row = form ? form.querySelector(".account-menu-row") : container;
+        return { label: row.textContent, tag: row.tagName, href: row.getAttribute("href"), method: form?.getAttribute("method") ?? null, action: form?.getAttribute("action") ?? null, danger: row.classList.contains("danger"), role: row.getAttribute("role"), type: row.getAttribute("type"), controls: form?.elements.length ?? null };
+      }),
+      expanded: document.querySelector("#topbar .account-avatar-button")?.getAttribute("aria-expanded"),
+      payloadNodes: { img: menu.querySelectorAll("img").length, script: menu.querySelectorAll("script").length },
+    }));
+    R.accountDesktop = { topbarAvatar, desktopMenu };
+    r.expect(desktopMenu.name === name && desktopMenu.login === "reader@example.invalid", "the menu shows identity strings as text: " + JSON.stringify(desktopMenu));
+    r.expect(desktopMenu.allWorkspaces.join(",") === "Research,Writing" && desktopMenu.workspaces.length === 2 && desktopMenu.workspaces.every((row) => row.method === "post" && row.tag === "BUTTON" && row.type === "submit" && row.role === "menuitem" && row.controls === 1 && row.hidden === 0) && desktopMenu.workspaces[0].name === "Research" && desktopMenu.workspaces[0].action === "/workspaces/research" && desktopMenu.workspaces[0].current === "page" && desktopMenu.workspaces[1].action === "/workspaces/writing", "workspace rows are POST forms and mark the current one: " + JSON.stringify(desktopMenu.workspaces));
+    r.expect(desktopMenu.links.length === 3 && desktopMenu.links[0].label === "Profile" && desktopMenu.links[0].tag === "A" && desktopMenu.links[0].href === "/account/profile" && desktopMenu.links[1].label === "Machines" && desktopMenu.links[1].tag === "A" && desktopMenu.links[1].href === "/machines" && desktopMenu.links[2].label === "Sign out" && desktopMenu.links[2].tag === "BUTTON" && desktopMenu.links[2].method === "post" && desktopMenu.links[2].action === "/account/sign-out" && desktopMenu.links[2].controls === 1 && desktopMenu.links[2].role === "menuitem" && desktopMenu.links[2].type === "submit" && desktopMenu.links[2].danger, "GET account links remain anchors and Sign out is a POST form: " + JSON.stringify(desktopMenu.links));
+    r.expect(desktopMenu.payloadNodes.img === 0 && desktopMenu.payloadNodes.script === 0 && (await desktop.evaluate(() => window.__accountXss ?? null)) === null, "the injected name stays a text node");
+    await desktop.keyboard.press("Escape");
+    r.expect(await desktop.locator("#topbar .account-popover").count() === 0, "Escape closes the account menu");
+    await desktop.locator("#topbar .account-avatar-button").click();
+    await desktop.locator("#page").click({ position: { x: 8, y: 8 } });
+    r.expect(await desktop.locator("#topbar .account-popover").count() === 0, "a click outside closes the account menu");
+
+    const workspacePost = desktop.waitForResponse((response) => new URL(response.url()).pathname === "/workspaces/research" && response.request().method() === "POST");
+    await desktop.locator("#topbar .account-avatar-button").click();
+    await desktop.locator("#topbar .account-workspace-form button").first().click();
+    const workspaceResponse = await workspacePost;
+    const landedAtRoot = await desktop.waitForURL((url) => url.pathname === "/" && url.search === "").then(() => true, () => false);
+    const responseBody = await workspaceResponse.text().catch(() => "");
+    let viewerLoaded = await desktop.waitForFunction(() => !!document.querySelector('.nav-item[data-go="machines"]')).then(() => true, () => false);
+    const landing = { status: workspaceResponse.status(), location: workspaceResponse.headers()["location"] ?? null, body: responseBody, url: desktop.url(), landedAtRoot, viewerLoaded };
+    r.expect(landing.status === 303 && landedAtRoot && viewerLoaded, "submitting the workspace form follows its 303 back to /: " + JSON.stringify(landing));
+    if (!viewerLoaded) {
+      await desktop.goto(ENV.accountBase + "/?t=" + ENV.accountToken, { waitUntil: "load" });
+      viewerLoaded = await desktop.waitForFunction(() => !!document.querySelector('.nav-item[data-go="machines"]')).then(() => true, () => false);
+    }
+
+    await desktop.route("**/account/workspaces", (route) => route.fulfill({ status: 200, contentType: "text/plain", body: "workspaces destination" }));
+    await desktop.locator('.nav-item[data-go="machines"]').click();
+    await desktop.waitForURL((url) => url.pathname === "/account/workspaces");
+    r.expect(new URL(desktop.url()).pathname === "/account/workspaces", "the Machines nav entry follows the same-origin override");
+    await desktop.goto(ENV.accountBase + "/machines?t=" + ENV.accountToken, { waitUntil: "load" });
+    await desktop.waitForURL((url) => url.pathname === "/account/workspaces");
+    r.expect(new URL(desktop.url()).pathname === "/account/workspaces", "the /machines route follows the override when opened directly");
+    await desktop.goto(ENV.accountBase + "/machines/laptop?t=" + ENV.accountToken, { waitUntil: "load" });
+    await desktop.waitForFunction(() => document.querySelector("#topbar .crumb")?.textContent === "Machines");
+    await desktop.locator("#topbar .crumb").click();
+    await desktop.waitForURL((url) => url.pathname === "/account/workspaces");
+    r.expect(new URL(desktop.url()).pathname === "/account/workspaces", "the Machines detail crumb follows the override");
+    r.expect(desktop.errors.length === 0, "desktop account page errors: " + desktop.errors.join(" | "));
+    await desktop.context().close();
+
+    const phone = await served(browser, { account: true, size: "phone" });
+    await phone.locator("#lead-btn").click();
+    const footer = phone.locator("#account-drawer");
+    await footer.scrollIntoViewIfNeeded();
+    const drawerRow = await footer.evaluate((widget) => ({
+      isLast: widget === widget.parentElement.lastElementChild,
+      open: document.body.classList.contains("drawer-open"),
+      summary: widget.querySelector(".account-trigger")?.innerText,
+      visible: getComputedStyle(widget).display !== "none",
+    }));
+    r.expect(drawerRow.isLast && drawerRow.open && drawerRow.visible && drawerRow.summary.includes(name) && drawerRow.summary.includes("Research"), "phone account summary is the drawer footer row: " + JSON.stringify(drawerRow));
+    await footer.locator(".account-trigger").click();
+    const phoneMenu = await footer.locator(".account-popover").evaluate((menu) => ({
+      workspaces: [...menu.querySelectorAll(".account-workspace-name")].map((row) => row.textContent),
+      current: menu.querySelector('.account-menu-row[aria-current="page"] .account-workspace-name')?.textContent,
+      targets: [...menu.querySelectorAll(".account-menu-row")].map((row) => Math.round(row.getBoundingClientRect().height)),
+      postForms: [...menu.querySelectorAll("form")].map((form) => ({ method: form.getAttribute("method"), action: form.getAttribute("action"), controls: form.elements.length })),
+      visible: getComputedStyle(menu).display !== "none",
+    }));
+    R.accountPhone = { drawerRow, phoneMenu };
+    r.expect(phoneMenu.visible && phoneMenu.workspaces.join(",") === "Research,Writing" && phoneMenu.current === "Research" && phoneMenu.postForms.length === 3 && phoneMenu.postForms.every((form) => form.method === "post" && form.controls === 1) && phoneMenu.postForms[2].action === "/account/sign-out", "phone footer expands to the same account menu with POST forms: " + JSON.stringify(phoneMenu));
+    r.expect(phoneMenu.targets.length === 5 && phoneMenu.targets.every((height) => height >= 44), "phone account links have 44px targets: " + JSON.stringify(phoneMenu.targets));
+    r.expect(phone.errors.length === 0, "phone account page errors: " + phone.errors.join(" | "));
+    await phone.context().close();
+  }
+
   // ---- Paging -------------------------------------------------------------------------------------------------------
   {
     const page = await served(browser, { extras: true, path: "/s/claude/backlog" });

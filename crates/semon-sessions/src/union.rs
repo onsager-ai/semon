@@ -38,19 +38,145 @@ pub struct AdminLink {
 }
 
 impl AdminLink {
-    /// `href` must be a same-origin path (`/…`, not `//…`), and `label` 1 to
-    /// 80 characters; control characters are refused in both.
+    /// `href` must be a same-origin path (`/…`, not `//…`), at most 512
+    /// bytes, with no backslash or control characters. `label` must be 1 to
+    /// 80 characters with no control characters.
     pub fn new(label: &str, href: &str) -> Option<Self> {
-        let clean = |text: &str| !text.chars().any(char::is_control);
-        let label_ok = !label.trim().is_empty() && label.chars().count() <= 80 && clean(label);
-        let href_ok = href.starts_with('/')
-            && !href.starts_with("//")
-            && !href.contains('\\')
-            && href.len() <= 512
-            && clean(href);
-        (label_ok && href_ok).then(|| Self {
+        (valid_label(label) && valid_href(href)).then(|| Self {
             label: label.trim().to_owned(),
             href: href.to_owned(),
+        })
+    }
+}
+
+fn valid_text(text: &str, min: usize, max: usize) -> bool {
+    let count = text.chars().count();
+    count >= min && count <= max && !text.chars().any(char::is_control)
+}
+
+fn valid_label(label: &str) -> bool {
+    !label.trim().is_empty() && valid_text(label, 1, 80)
+}
+
+fn valid_href(href: &str) -> bool {
+    href.starts_with('/')
+        && !href.starts_with("//")
+        && !href.contains('\\')
+        && href.len() <= 512
+        && !href.chars().any(char::is_control)
+}
+
+/// One named workspace listed by an embedding server in an account menu.
+/// Selecting it submits a POST to `switch_href`; the embedding server should
+/// apply its same-origin check before changing the active workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountWorkspace {
+    /// The name shown in the list.
+    pub name: String,
+    /// The role shown below the name.
+    pub role: String,
+    /// Whether this is the account's current workspace.
+    pub current: bool,
+    /// Same-origin form action submitted with POST when this item is selected.
+    pub switch_href: String,
+}
+
+/// The HTTP method used by an account link.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkMethod {
+    /// Navigate with a link. This is the default.
+    #[default]
+    Get,
+    /// Submit a same-origin form to the link's action.
+    Post,
+}
+
+impl LinkMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Post => "post",
+        }
+    }
+}
+
+/// A link listed at the end of an account menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountLink {
+    /// The text shown for the link.
+    pub label: String,
+    /// Same-origin path used as the link destination or form action.
+    pub href: String,
+    /// Method used to select this link. Defaults to [`LinkMethod::Get`].
+    pub method: LinkMethod,
+    /// Whether the link is shown with the error color.
+    pub danger: bool,
+}
+
+/// Account details an embedding server can add to the viewer's navigation.
+/// Every path is same-origin and every list is validated as a whole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountMenu {
+    name: String,
+    login: String,
+    initials: String,
+    avatar_href: Option<String>,
+    workspaces: Vec<AccountWorkspace>,
+    links: Vec<AccountLink>,
+}
+
+impl AccountMenu {
+    /// Creates a menu, or returns `None` if any value, path, or list count is
+    /// invalid. The account name, workspace names, and link labels use the
+    /// [`AdminLink`] label checks (1–80 characters). Login and workspace roles
+    /// allow 0–80 characters; initials allow 1–3. Display text rejects
+    /// controls. `avatar_href`, `switch_href`, and link `href` values use the
+    /// [`AdminLink`] same-origin path checks. Workspaces always submit their
+    /// `switch_href` with POST; account links default to GET and can use POST
+    /// with [`LinkMethod::Post`]. The embedding server must enforce its
+    /// same-origin check on POST actions. The menu accepts up to 50 workspaces
+    /// and 12 links, and does not keep a partial list.
+    pub fn new(
+        name: &str,
+        login: &str,
+        initials: &str,
+        avatar_href: Option<&str>,
+        mut workspaces: Vec<AccountWorkspace>,
+        mut links: Vec<AccountLink>,
+    ) -> Option<Self> {
+        let valid_workspace = |workspace: &AccountWorkspace| {
+            valid_label(&workspace.name)
+                && valid_text(&workspace.role, 0, 80)
+                && valid_href(&workspace.switch_href)
+        };
+        let valid_link = |link: &AccountLink| valid_label(&link.label) && valid_href(&link.href);
+        if !valid_label(name)
+            || !valid_text(login, 0, 80)
+            || !valid_text(initials, 1, 3)
+            || initials.trim().is_empty()
+            || avatar_href.is_some_and(|href| !valid_href(href))
+            || workspaces.len() > 50
+            || links.len() > 12
+            || workspaces
+                .iter()
+                .any(|workspace| !valid_workspace(workspace))
+            || links.iter().any(|link| !valid_link(link))
+        {
+            return None;
+        }
+        for workspace in &mut workspaces {
+            workspace.name = workspace.name.trim().to_owned();
+        }
+        for link in &mut links {
+            link.label = link.label.trim().to_owned();
+        }
+        Some(Self {
+            name: name.trim().to_owned(),
+            login: login.to_owned(),
+            initials: initials.trim().to_owned(),
+            avatar_href: avatar_href.map(str::to_owned),
+            workspaces,
+            links,
         })
     }
 }
@@ -71,6 +197,8 @@ impl AdminLink {
 pub struct ViewerCore {
     views: Vec<(String, MachineView)>,
     admin: Option<AdminLink>,
+    account: Option<AccountMenu>,
+    nav_machines: Option<String>,
 }
 
 /// Which machine answers for each session id the union serves.
@@ -258,10 +386,57 @@ fn union_json(parts: &[(&str, &Built)], plan: &Plan, now: i64) -> Result<String,
     Ok(union.to_string())
 }
 
-/// `body` (a model's JSON object) with the admin link as its first field.
-fn with_admin(body: &[u8], admin: &AdminLink) -> Vec<u8> {
-    let link = json!({ "label": admin.label, "href": admin.href }).to_string();
-    let mut out = format!("{{\"admin\":{link},").into_bytes();
+/// Adds per-request embedding values at the front of a model's JSON object.
+fn with_model_extras(
+    body: &[u8],
+    admin: Option<&AdminLink>,
+    account: Option<&AccountMenu>,
+    nav_machines: Option<&str>,
+) -> Vec<u8> {
+    if admin.is_none() && account.is_none() && nav_machines.is_none() {
+        return body.to_vec();
+    }
+    let mut out = b"{".to_vec();
+    let mut first = true;
+    let mut add = |name: &str, value: Value| {
+        if !first {
+            out.push(b',');
+        }
+        first = false;
+        out.extend_from_slice(format!("\"{name}\":{}", value).as_bytes());
+    };
+    if let Some(admin) = admin {
+        add("admin", json!({ "label": admin.label, "href": admin.href }));
+    }
+    if let Some(account) = account {
+        add(
+            "account",
+            json!({
+                "name": account.name,
+                "login": account.login,
+                "initials": account.initials,
+                "avatar_href": account.avatar_href,
+                "workspaces": account.workspaces.iter().map(|workspace| json!({
+                    "name": workspace.name,
+                    "role": workspace.role,
+                    "current": workspace.current,
+                    "switch_href": workspace.switch_href,
+                })).collect::<Vec<_>>(),
+                "links": account.links.iter().map(|link| json!({
+                    "label": link.label,
+                    "href": link.href,
+                    "method": link.method.as_str(),
+                    "danger": link.danger,
+                })).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    if let Some(href) = nav_machines {
+        add("nav", json!({ "machines": href }));
+    }
+    if body.get(1).is_some_and(|byte| *byte != b'}') {
+        out.push(b',');
+    }
     out.extend_from_slice(body.get(1..).unwrap_or_default());
     out
 }
@@ -328,6 +503,8 @@ impl ViewerCore {
                 .map(|(key, options)| (key, MachineView::new(options)))
                 .collect(),
             admin: None,
+            account: None,
+            nav_machines: None,
         }
     }
 
@@ -341,6 +518,24 @@ impl ViewerCore {
     /// `admin`, so it can differ per request.
     pub fn set_admin_link(&mut self, link: Option<AdminLink>) {
         self.admin = link;
+    }
+
+    /// Sets, or clears, the account menu served in `/api/model` as `account`.
+    /// It can differ per request and is not included in the model version or
+    /// its `ETag`.
+    pub fn set_account(&mut self, account: Option<AccountMenu>) {
+        self.account = account;
+    }
+
+    /// Sets the destination for the Machines navigation entry. `item` must
+    /// be `"machines"`, and `href` must be a same-origin path. Returns false
+    /// and leaves the current value unchanged for an unknown item or path.
+    pub fn set_nav_override(&mut self, item: &str, href: &str) -> bool {
+        if item != "machines" || !valid_href(href) {
+            return false;
+        }
+        self.nav_machines = Some(href.to_owned());
+        true
     }
 
     /// Answers one request: `path` and `query` split at the `?`, still
@@ -362,11 +557,13 @@ impl ViewerCore {
         }
         if self.views.len() == 1 {
             let mut reply = self.views[0].1.respond(method, path, query, if_none_match);
-            if path == "/api/model"
-                && reply.status == 200
-                && let Some(admin) = &self.admin
-            {
-                reply.body = with_admin(&reply.body, admin);
+            if path == "/api/model" && reply.status == 200 {
+                reply.body = with_model_extras(
+                    &reply.body,
+                    self.admin.as_ref(),
+                    self.account.as_ref(),
+                    self.nav_machines.as_deref(),
+                );
             }
             return reply;
         }
@@ -429,10 +626,12 @@ impl ViewerCore {
                 Ok(ViewerReply {
                     status: 200,
                     content_type: json,
-                    body: match &self.admin {
-                        Some(admin) => with_admin(&body, admin),
-                        None => body,
-                    },
+                    body: with_model_extras(
+                        &body,
+                        self.admin.as_ref(),
+                        self.account.as_ref(),
+                        self.nav_machines.as_deref(),
+                    ),
                     etag: Some(etag),
                 })
             }
@@ -637,12 +836,146 @@ mod tests {
         }
         let link = AdminLink::new("Manage machines", "/admin/machines").unwrap();
         assert_eq!(
-            with_admin(b"{\"version\":\"v\"}", &link),
+            with_model_extras(b"{\"version\":\"v\"}", Some(&link), None, None),
             b"{\"admin\":{\"label\":\"Manage machines\",\"href\":\"/admin/machines\"},\"version\":\"v\"}"
         );
         assert_eq!(
             with_param("sid=a%40b&before=3", "sid", "a"),
             "sid=a&before=3"
         );
+    }
+
+    #[test]
+    fn account_menu_validates_all_values_and_list_counts() {
+        let workspace = || AccountWorkspace {
+            name: "Research".into(),
+            role: "Owner".into(),
+            current: true,
+            switch_href: "/workspaces/research".into(),
+        };
+        let link = || AccountLink {
+            label: "Profile".into(),
+            href: "/account/profile".into(),
+            method: LinkMethod::default(),
+            danger: false,
+        };
+        let menu = || {
+            AccountMenu::new(
+                "Morgan Lee",
+                "morgan@example.invalid",
+                "ML",
+                Some("/avatars/morgan.png"),
+                vec![workspace()],
+                vec![link()],
+            )
+        };
+        assert!(menu().is_some());
+
+        let overlong = format!("/{}", "x".repeat(512));
+        for href in ["//x", "http://x", "/x\\y", "/x\n", overlong.as_str()] {
+            assert!(
+                AccountMenu::new("Morgan", "", "M", Some(href), vec![], vec![]).is_none(),
+                "avatar href {href:?}"
+            );
+            let mut bad_workspace = workspace();
+            bad_workspace.switch_href = href.to_owned();
+            assert!(
+                AccountMenu::new("Morgan", "", "M", None, vec![bad_workspace], vec![]).is_none(),
+                "workspace href {href:?}"
+            );
+            let mut bad_link = link();
+            bad_link.method = LinkMethod::Post;
+            bad_link.href = href.to_owned();
+            assert!(
+                AccountMenu::new("Morgan", "", "M", None, vec![], vec![bad_link]).is_none(),
+                "link href {href:?}"
+            );
+        }
+
+        let mut bad_workspace = workspace();
+        bad_workspace.switch_href = "//x".into();
+        assert!(
+            AccountMenu::new(
+                "Morgan",
+                "",
+                "M",
+                None,
+                vec![workspace(), bad_workspace],
+                vec![]
+            )
+            .is_none()
+        );
+
+        let long_name = "x".repeat(81);
+        let long_login = "x".repeat(81);
+        for (name, login, initials) in [
+            ("", "", "M"),
+            (" ", "", "M"),
+            (long_name.as_str(), "", "M"),
+            ("Morgan", long_login.as_str(), "M"),
+            ("Morgan", "", ""),
+            ("Morgan", "", "MORE"),
+            ("Morgan", "\n", "M"),
+        ] {
+            assert!(
+                AccountMenu::new(name, login, initials, None, vec![], vec![]).is_none(),
+                "{name:?} {login:?} {initials:?}"
+            );
+        }
+        assert!(AccountMenu::new("Morgan", "", "M", None, vec![workspace(); 51], vec![]).is_none());
+        assert!(AccountMenu::new("Morgan", "", "M", None, vec![], vec![link(); 13]).is_none());
+        assert!(
+            AccountMenu::new(
+                "Morgan",
+                "",
+                "M",
+                None,
+                vec![],
+                vec![AccountLink {
+                    label: "\n".into(),
+                    ..link()
+                }]
+            )
+            .is_none()
+        );
+        let long_label = "x".repeat(81);
+        assert!(
+            AccountMenu::new(
+                "Morgan",
+                "",
+                "M",
+                None,
+                vec![],
+                vec![AccountLink {
+                    label: long_label,
+                    ..link()
+                }]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn nav_override_only_accepts_a_known_item_and_same_origin_path() {
+        let root = std::env::temp_dir().join("semon-account-test");
+        let options = crate::Options {
+            claude_home: root.join("claude"),
+            codex_home: root.join("codex"),
+            proc_root: root.join("proc"),
+            cache: root.join("cache"),
+            all: false,
+            since: std::time::Duration::from_secs(86400),
+            session: None,
+            facts: None,
+            scan_window: false,
+        };
+        let mut core = ViewerCore::new(options);
+        assert!(!core.set_nav_override("unknown", "/x"));
+        let overlong = format!("/{}", "x".repeat(512));
+        for href in ["//x", "http://x", "/x\\y", "/x\n", overlong.as_str()] {
+            assert!(!core.set_nav_override("machines", href), "{href:?}");
+        }
+        assert!(core.set_nav_override("machines", "/account/workspaces"));
+        assert_eq!(core.nav_machines.as_deref(), Some("/account/workspaces"));
     }
 }

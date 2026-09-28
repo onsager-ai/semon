@@ -15,3 +15,9 @@ tiny_http.workspace = true
 # Lets `SEMON_TEST_NOW` (epoch ms) pin the viewer's clock. Only CI's browser
 # suite builds with it, to serve a fixture whose times must stand still.
 test-clock = []
+# Builds the UI check's embedding-server example; not used by the viewer CLI.
+test-ui-account-server = []
+
+[[example]]
+name = "ui-account-server"
+required-features = ["test-ui-account-server"]

@@ -14,6 +14,8 @@ export const ENV = {
   // The extras fixture's server (fixture.mjs --extras).
   extraBase: (process.env.SEMON_EXTRA_BASE ?? "").replace(/\/$/, ""),
   extraToken: process.env.SEMON_EXTRA_TOKEN ?? "",
+  accountBase: (process.env.SEMON_ACCOUNT_BASE ?? "").replace(/\/$/, ""),
+  accountToken: process.env.SEMON_ACCOUNT_TOKEN ?? "",
   now: Number(process.env.SEMON_NOW ?? Date.now()),
   out: path.resolve(process.env.SEMON_UI_OUT ?? "out"),
 };
@@ -34,7 +36,8 @@ export async function context(browser, { size = "phone", dark = false } = {}) {
 // A page on the served viewer at `path` (such as "/" or "/s/claude/harbor"), signed in with the token. Only the served
 // origin is reachable. `page.errors` collects page errors. `extras: true` opens the extras fixture's server.
 export async function served(browser, opts = {}) {
-  const base = opts.extras ? ENV.extraBase : ENV.base, token = opts.extras ? ENV.extraToken : ENV.token;
+  const base = opts.account ? ENV.accountBase : opts.extras ? ENV.extraBase : ENV.base;
+  const token = opts.account ? ENV.accountToken : opts.extras ? ENV.extraToken : ENV.token;
   if (!base) throw new Error(opts.extras ? "SEMON_EXTRA_BASE is not set" : "SEMON_BASE is not set");
   const ctx = await context(browser, opts);
   const page = await ctx.newPage();
