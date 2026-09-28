@@ -496,6 +496,9 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2.session-meta .meta-runs .meta-value { font: inherit; }
 .topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; min-height: 28px; margin: 0 0 0 -5px; border: 0; background: none; padding: 0 2px; font: inherit; font-weight: 500; color: var(--err); pointer-events: auto; }
 .topbar .l2.session-meta .errs:empty { display: none; }
+/* fitSessionLine hides overflow items by setting the `hidden` attribute; these selectors must out-specify
+   the display rules above so hiding actually takes effect. */
+.topbar .l2.session-meta .meta-item[hidden], .topbar .l2.session-meta .meta-runs[hidden], .topbar .l2.session-meta .errs[hidden] { display: none; }
 .topbar .l1 .crumb { padding: 8px 0; margin: -8px 0; }
 .topbar.searching { gap: 8px; }
 .topbar .find { flex: 1 1 auto; min-width: 0; }
@@ -537,7 +540,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .analytics-range { display: inline-flex; align-items: center; gap: 2px; flex: none; padding: 2px; border-radius: 10px; background: var(--sunken); white-space: nowrap; }
 .analytics-range button { min-width: 38px; min-height: 32px; border: 0; border-radius: 8px; background: none; padding: 0 7px; color: var(--muted); font-size: 12.5px; }
 .analytics-range button[aria-pressed="true"] { background: var(--ground); color: var(--ink); box-shadow: 0 1px 3px color-mix(in srgb, var(--ink) 12%, transparent); font-weight: 600; }
-.facet-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 11px; }
+.facet-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .facet-field { display: grid; gap: 3px; min-width: 0; color: var(--muted); font-size: 11.5px; }
 .facet-field select { width: 100%; min-width: 0; height: 34px; border: 1px solid var(--line); border-radius: 8px; background: var(--ground); color: var(--ink); padding: 0 7px; font-size: 12.5px; }
 .analytics-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--line); }
@@ -1159,10 +1162,15 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     }
     bar.append(group);
   }
+  // The kind chip and the state stay put; everything else drops from the right (in append order: model,
+  // machine, branch, tools, runs, tokens, cost) until the line fits, with the inline error count as a last resort.
   function fitSessionLine(l2) {
-    const drop = [".meta-cost", ".meta-tools", ".meta-branch", ".meta-machine"].map((s) => l2.querySelector(s)).filter(Boolean);
-    drop.forEach((n) => { n.hidden = false; });
-    for (const n of drop) { if (l2.scrollWidth <= l2.clientWidth + 1) break; n.hidden = true; }
+    const keep = new Set(["meta-kind", "meta-state"]);
+    const droppable = [...l2.children].filter((n) => (n.classList.contains("meta-item") || n.classList.contains("meta-runs")) && ![...n.classList].some((c) => keep.has(c)));
+    droppable.forEach((n) => { n.hidden = false; });
+    const errs = l2.querySelector(".errs"); if (errs) errs.hidden = false;
+    for (let i = droppable.length - 1; i >= 0 && l2.scrollWidth > l2.clientWidth + 1; i--) droppable[i].hidden = true;
+    if (errs && l2.scrollWidth > l2.clientWidth + 1) errs.hidden = true;
   }
   function lineageOf(sid) { const path = [], seen = new Set(); let id = sid; while (id && SESS[id] && !seen.has(id)) { seen.add(id); path.push(SESS[id]); id = parentOf(id); } return path.reverse(); }
   function showLineageMenu(sid, bar) {
@@ -1766,14 +1774,14 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   function renderFacetFilters(onChange) {
     const box = el("div", "facet-filters"); box.setAttribute("aria-label", "Filter sessions");
     const specs = [
-      ["repo", "Repo", [...new Set(Object.values(SESS).map((s) => s.repo ?? "__none__"))].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
-      ["machine", "Machine", [...new Set(Object.values(SESS).map((s) => s.machine))].sort(), (v) => MACHINE[v] ?? v],
-      ["harness", "Harness", [...new Set(Object.values(SESS).map((s) => s.harness))].sort(), (v) => HARNESS[v] ?? v],
-      ["model", "Model", [...new Set(Object.values(SESS).map((s) => s.model))].sort(), shortModel],
+      ["repo", "Repo", "All repos", [...new Set(Object.values(SESS).map((s) => s.repo ?? "__none__"))].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
+      ["machine", "Machine", "All machines", [...new Set(Object.values(SESS).map((s) => s.machine))].sort(), (v) => MACHINE[v] ?? v],
+      ["harness", "Harness", "All harnesses", [...new Set(Object.values(SESS).map((s) => s.harness))].sort(), (v) => HARNESS[v] ?? v],
+      ["model", "Model", "All models", [...new Set(Object.values(SESS).map((s) => s.model))].sort(), shortModel],
     ];
-    for (const [key, label, values, showValue] of specs) {
+    for (const [key, label, allLabel, values, showValue] of specs) {
       const field = el("label", "facet-field"); field.append(el("span", null, label)); const select = el("select"); select.setAttribute("aria-label", label);
-      const all = el("option", null, "All " + label.toLowerCase() + "s"); all.value = ""; select.append(all);
+      const all = el("option", null, allLabel); all.value = ""; select.append(all);
       for (const value of values) { const o = el("option", null, showValue(value)); o.value = value; select.append(o); }
       select.value = sessionFilters[key]; select.addEventListener("change", () => { sessionFilters[key] = select.value; onChange(); }); field.append(select); box.append(field);
     }
@@ -1785,7 +1793,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const durations = waits.map((w) => Math.max(0, Math.min(w.endAt ?? to, to) - Math.max(w.startAt, from))).filter((x) => x > 0).sort((a, b) => a - b);
     const median = durations.length ? durations.length % 2 ? durations[(durations.length - 1) / 2] : (durations[durations.length / 2 - 1] + durations[durations.length / 2]) / 2 : 0;
     const waitBy = new Map(); for (const w of waits) { const ms = Math.max(0, Math.min(w.endAt ?? to, to) - Math.max(w.startAt, from)); waitBy.set(w.sid, (waitBy.get(w.sid) ?? 0) + ms); }
-    const current = analyticsWaits().filter((w) => !w.endAt && rows.some((r) => r.id === w.sid)).map((w) => ({ ...w, ms: Math.max(0, ANALYTICS_NOW - w.startAt) })).sort((a, b) => b.ms - a.ms);
+    const current = analyticsWaits().filter((w) => !w.endAt && rows.some((r) => r.id === w.sid)).map((w) => ({ ...w, ms: Math.max(0, ANALYTICS_NOW - w.startAt), s: SESS[w.sid] })).sort((a, b) => b.ms - a.ms);
     const activity = relevant.reduce((sum, r) => sum + busyMsIn(r, from, to), 0);
     const costRows = rows.filter((r) => inRange(r.costAt, from, to)).map((r) => ({ row: r, cost: costForSession(r.id) }));
     const costUnknown = [...new Set(costRows.flatMap((x) => x.cost.unknown))];
