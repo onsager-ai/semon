@@ -1204,6 +1204,75 @@ fn a_failed_codex_operation_ends_its_turn_as_a_failed_step() {
 }
 
 #[test]
+fn a_script_error_after_its_operations_ends_the_turn_as_failed() {
+    let home = Home::new();
+    home.codex(
+        "late-script-error",
+        json!({}),
+        &[
+            codex_user(ts(19, 0), "Run the script"),
+            codex_line(
+                ts(19, 1),
+                "response_item",
+                json!({"type":"custom_tool_call","call_id":"exec","name":"exec","input":"await tools.exec_command({cmd:'ls'}); throw new Error('boom')"}),
+            ),
+            codex_line(
+                ts(19, 2),
+                "event_msg",
+                json!({"type":"item_completed","item":{"type":"CommandExecution","id":"item","command":["/bin/zsh","-lc","ls"],"exit_code":0,"aggregated_output":"a.rs"}}),
+            ),
+            codex_line(
+                ts(19, 3),
+                "response_item",
+                json!({"type":"custom_tool_call_output","call_id":"exec","output":[{"type":"input_text","text":"Script error: boom"}]}),
+            ),
+        ],
+    );
+    let built = home.build();
+    let turns = turns_of(&built, "late-script-error");
+    let turn = turns.last().unwrap();
+    assert_eq!((turn.end.st, turn.end.why), ("err", "failed_step"));
+    let tx = &built.tx["late-script-error"];
+    assert_eq!((tx.calls, tx.errors), (2, 1));
+}
+
+#[test]
+fn a_result_follows_the_last_block_of_its_reply() {
+    let home = Home::new();
+    home.top(
+        "blocks",
+        &[
+            human("blocks", ts(20, 0), "Summarise it"),
+            assistant(
+                "blocks",
+                ts(20, 1),
+                vec![text("First part."), text("Final part.")],
+            ),
+        ],
+    );
+    home.live(38, "blocks", "idle", json!({}));
+    let built = home.build();
+    let result = built
+        .handoffs
+        .iter()
+        .find(|handoff| handoff.from == "blocks" && handoff.ask == Some("result"))
+        .expect("a result for a reply to your message");
+    let slots = &built.tx["blocks"].slots;
+    let reply = slots
+        .iter()
+        .position(|slot| matches!(slot.kind, SlotKind::A) && slot.block == 1)
+        .expect("the reply's last block");
+    let marker = slots
+        .iter()
+        .position(|slot| matches!(&slot.kind, SlotKind::H(id) if *id == result.id))
+        .expect("the result in the transcript");
+    assert!(marker > reply, "result at {marker}, reply at {reply}");
+    let turns = turns_of(&built, "blocks");
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].end.why, "toyou");
+}
+
+#[test]
 fn turns_split_at_each_incoming_entry_and_at_a_gap() {
     let home = Home::new();
     let path = home.top(

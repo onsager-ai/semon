@@ -1422,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn code_mode_exec_errors_and_ambiguous_items_keep_exact_attribution() {
+    fn code_mode_exec_errors_and_ambiguous_items_are_not_steps() {
         let home = Home::new();
         let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
         let mut records = vec![codex(
@@ -1489,12 +1489,13 @@ mod tests {
         let built = home.built(BASE + 86_400_000);
         let page = page_of(&built, "overlap", &Anchor::Last);
         let entries = page["entries"].as_array().unwrap();
+        // The item that completed while two calls were open has no exact
+        // owner: it is no step of its own, so it can't repeat its wrapper.
         assert_eq!(
             (page["calls"].as_u64(), page["errors"].as_u64()),
-            (Some(5), Some(1))
+            (Some(4), Some(1))
         );
-        let unowned = entries.iter().find(|entry| entry["arg"] == "pwd").unwrap();
-        assert!(unowned.get("script").is_none());
+        assert!(!entries.iter().any(|entry| entry["arg"] == "pwd"));
         let owned = entries.iter().find(|entry| entry["arg"] == "a.rs").unwrap();
         assert!(owned["script"].is_number());
         let owned_script: Value = serde_json::from_str(
@@ -1666,6 +1667,84 @@ mod tests {
         assert_eq!(
             (page["calls"].as_u64(), page["errors"].as_u64()),
             (Some(1), Some(1))
+        );
+    }
+
+    #[test]
+    fn an_item_with_no_open_code_mode_call_is_not_a_step() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-unowned.jsonl",
+            &[
+                codex(ts(9, 0, 0), "session_meta", json!({"id":"unowned","cwd":"/work/proj"})),
+                codex(ts(9, 1, 0), "response_item", json!({"type":"function_call","name":"apply_patch","call_id":"patch-call","arguments":"*** Begin Patch\\n*** Update File: a.rs\\n@@ -1 +1 @@\\n-old\\n+new\\n*** End Patch"})),
+                codex(ts(9, 1, 250), "event_msg", json!({"type":"item_completed","item":{"type":"FileChange","id":"other-id","changes":{"/work/proj/a.rs":{"type":"update","unified_diff":"@@ -1 +1 @@\\n-old\\n+new\\n"}}}})),
+                codex(ts(9, 1, 500), "response_item", json!({"type":"function_call_output","call_id":"patch-call","output":"{\"output\":\"Success\",\"metadata\":{\"exit_code\":0}}"})),
+                codex(ts(9, 2, 0), "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"stray","command":["/bin/zsh","-lc","pwd"],"exit_code":1,"aggregated_output":"/work/proj\n"}})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "unowned", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "apply_patch");
+        assert_eq!(entries[0]["ok"], true);
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(1), Some(0))
+        );
+    }
+
+    #[test]
+    fn a_script_error_after_its_operations_is_a_failed_step() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-late-error.jsonl",
+            &[
+                codex(ts(9, 0, 0), "session_meta", json!({"id":"late-error","cwd":"/work/proj"})),
+                codex(ts(9, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"call","name":"exec","input":"await tools.exec_command({cmd:'ls'}); throw new Error('boom')"})),
+                codex(ts(9, 2, 0), "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"item","command":["/bin/zsh","-lc","ls"],"exit_code":0,"aggregated_output":"a.rs\n"}})),
+                codex(ts(9, 3, 0), "response_item", json!({"type":"custom_tool_call_output","call_id":"call","output":[{"type":"input_text","text":"Script error: boom"}]})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "late-error", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["arg"], "ls");
+        assert_eq!(entries[0]["ok"], true);
+        assert_eq!(entries[1]["name"], "exec");
+        assert_eq!(entries[1]["ok"], false);
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(2), Some(1))
+        );
+    }
+
+    #[test]
+    fn a_script_error_is_read_from_the_harness_header_only() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-printed-error.jsonl",
+            &[
+                codex(ts(9, 0, 0), "session_meta", json!({"id":"printed-error","cwd":"/work/proj"})),
+                codex(ts(9, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"call","name":"exec","input":"text('Script error: printed')"})),
+                codex(ts(9, 2, 0), "response_item", json!({"type":"custom_tool_call_output","call_id":"call","output":[{"type":"input_text","text":"Script completed"},{"type":"input_text","text":"Script error: printed"}]})),
+                codex(ts(9, 3, 0), "response_item", json!({"type":"custom_tool_call","call_id":"plain","name":"exec","input":"text('x')"})),
+                codex(ts(9, 4, 0), "response_item", json!({"type":"custom_tool_call_output","call_id":"plain","output":"Script error: a plain string is no header"})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "printed-error", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry["ok"] != false));
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(2), Some(0))
         );
     }
 

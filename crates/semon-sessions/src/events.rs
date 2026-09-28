@@ -30,7 +30,9 @@ use crate::{Tokens, field};
 /// v5: completed Codex items carry their exact code-mode call parent, if known.
 /// v6: code-mode calls stop accepting item attribution at a turn boundary.
 /// v7: tool ids index all tool events for exact legacy item matching.
-const CACHE_VERSION: u32 = 7;
+/// v8: an item is an operation only when exactly one code-mode call owns it,
+/// and a script error is read from the harness header alone.
+const CACHE_VERSION: u32 = 8;
 
 /// One file's event index and the facts the model needs about it. Metadata
 /// only (risk:secret).
@@ -361,7 +363,8 @@ pub(crate) struct Event {
     /// Still open for operation attribution within the current turn.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) code_mode_open: bool,
-    /// Operation: the exact index of its parent code-mode call, if unique.
+    /// Operation: the exact index of its parent code-mode call, the only one
+    /// open when the item completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -825,16 +828,27 @@ fn non_code_mode_tool(summary: &FileIndex, id: &str) -> bool {
     })
 }
 
+/// The one code-mode call open for item attribution, if exactly one is.
+fn open_code_mode_call(summary: &FileIndex) -> Option<usize> {
+    let mut open = summary.pending.values().copied().filter(|index| {
+        summary
+            .events
+            .get(*index)
+            .is_some_and(|event| event.k == Kind::Tool && event.code_mode && event.code_mode_open)
+    });
+    let first = open.next()?;
+    open.next().is_none().then_some(first)
+}
+
+/// A code-mode script failed: the harness's header, the output's first
+/// element, says so. Text in later elements is the script's own output and is
+/// never read as a failure.
 fn script_error(output: Option<&Value>) -> bool {
-    fn has_prefix(value: &Value) -> bool {
-        match value {
-            Value::String(text) => text.trim_start().starts_with("Script error"),
-            Value::Array(values) => values.iter().any(has_prefix),
-            Value::Object(fields) => fields.get("text").is_some_and(has_prefix),
-            _ => false,
-        }
-    }
-    output.is_some_and(has_prefix)
+    output
+        .and_then(Value::as_array)
+        .and_then(|elements| elements.first())
+        .and_then(|header| field(header, "text"))
+        .is_some_and(|text| text.trim_start().starts_with("Script error"))
 }
 
 fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Option<i64>) {
@@ -1168,17 +1182,16 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             let item = &payload["item"];
             let operation = matches!(field(item, "type"), Some("CommandExecution" | "FileChange"));
             let legacy_tool = field(item, "id").is_some_and(|id| non_code_mode_tool(summary, id));
-            if operation && !legacy_tool {
-                let parent = summary
-                    .pending
-                    .values()
-                    .copied()
-                    .filter(|index| {
-                        summary.events.get(*index).is_some_and(|event| {
-                            event.k == Kind::Tool && event.code_mode && event.code_mode_open
-                        })
-                    })
-                    .collect::<Vec<_>>();
+            // An item is a step of its own only when exactly one code-mode
+            // call is open to own it. Otherwise it is a plain call's item, or
+            // its owner is ambiguous: its wrapper, or the plain call, is the
+            // step, and the item adds nothing but the exit code below.
+            let parent = if operation && !legacy_tool {
+                open_code_mode_call(summary)
+            } else {
+                None
+            };
+            if let Some(parent) = parent {
                 let code = item.get("exit_code").and_then(Value::as_i64);
                 let failed =
                     code.is_some_and(|code| code != 0) || field(item, "status") == Some("failed");
@@ -1193,7 +1206,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                         t: time,
                         id: field(item, "id").map(str::to_owned),
                         n: field(item, "type").map(str::to_owned),
-                        parent: (parent.len() == 1).then(|| parent[0]),
+                        parent: Some(parent),
                         r: Some(Reply {
                             o: offset,
                             t: time,

@@ -2845,10 +2845,7 @@ impl<'a> Builder<'a> {
             };
         for (position, entry) in entries.iter().enumerate() {
             if let Some(queue) = extras.get_mut(&entry.file) {
-                let at = entry.at.map_or((entry.offset, 0), |at| {
-                    let found = event(self.files, at);
-                    (found.o, found.b)
-                });
+                let at = entry.pos;
                 while queue.front().is_some_and(|extra| (extra.o, extra.b) < at) {
                     let extra = queue.pop_front().expect("front");
                     slots.push(extra_slot(extra, entry.file, owner, &mut started));
@@ -2867,7 +2864,9 @@ impl<'a> Builder<'a> {
                 }
                 continue;
             }
-            if matches!(entry.kind, EntryKind::Tool(_))
+            // A code-mode call is drawn as its operations, unless it failed:
+            // then it is also the failed step, after them.
+            if matches!(entry.kind, EntryKind::Tool(state) if state != ToolState::Err)
                 && entry.at.is_some_and(|at| operation_parents.contains(&at))
             {
                 continue;
@@ -2936,34 +2935,87 @@ impl<'a> Builder<'a> {
         Transcript::from_slots(slots)
     }
 
+    /// A session's entries in transcript order: its events, each handoff
+    /// placed after the event it follows, and its Codex operations. Each
+    /// entry's sort key is computed once, where it is made.
     fn entries(&self, index: usize) -> Vec<Entry> {
-        let mut entries = Vec::new();
         let refs = self.events_of(index);
         let session_files = &self.sessions[index].files;
-        let mut event_times = BTreeMap::new();
+        let several = session_files.len() > 1;
+        // Each file's event times; an event without one takes the time before
+        // it, and events before a file's first time take that time.
+        let mut event_times: HashMap<usize, Vec<i64>> = HashMap::new();
         for file in session_files {
             let events = &self.files[*file].summary.events;
             let mut time = events.iter().find_map(|event| event.t).unwrap_or(i64::MIN);
-            for (position, found) in events.iter().enumerate() {
-                time = found.t.unwrap_or(time);
-                event_times.insert((*file, position), time);
+            let times = events
+                .iter()
+                .map(|found| {
+                    time = found.t.unwrap_or(time);
+                    time
+                })
+                .collect();
+            event_times.insert(*file, times);
+        }
+        // The time of the last event at or before `offset` in `file`: events
+        // are in line order, so a binary search finds it.
+        let time_at = |file: usize, offset: u64| {
+            let events = &self.files[file].summary.events;
+            let before = events.partition_point(|found| found.o <= offset);
+            event_times
+                .get(&file)
+                .and_then(|times| times.get(before.saturating_sub(1)))
+                .copied()
+                .unwrap_or(i64::MIN)
+        };
+        let file_order: HashMap<usize, usize> = session_files
+            .iter()
+            .enumerate()
+            .map(|(order, file)| (*file, order))
+            .collect();
+        // Several files merge by time; within a file, line and block order.
+        // Phase 2 puts a handoff after the event it follows.
+        let key = |time: i64, file: usize, pos: (u64, u32), phase: u8| {
+            (
+                if several { time } else { 0 },
+                *file_order.get(&file).unwrap_or(&usize::MAX),
+                pos.0,
+                pos.1,
+                phase,
+            )
+        };
+        // Code-mode calls drawn as their operations.
+        let mut operation_parents = BTreeSet::new();
+        for file in session_files {
+            for extra in &self.files[*file].summary.extras {
+                if extra.k == Kind::Operation
+                    && let Some(parent) = extra.parent
+                {
+                    operation_parents.insert((*file, parent));
+                }
             }
         }
+        let mut keyed = Vec::new();
         if let Some(handoff) = self.head.get(&index) {
             let (file, offset) = refs
                 .first()
                 .map(|at| (at.0, event(self.files, *at).o))
                 .unwrap_or((self.sessions[index].files[0], 0));
-            entries.push(Entry {
-                kind: EntryKind::H(*handoff),
-                file,
-                offset,
-                t: None,
-                at: None,
-            });
+            keyed.push((
+                (i64::MIN, 0, 0, 0, 0),
+                Entry {
+                    kind: EntryKind::H(*handoff),
+                    file,
+                    offset,
+                    pos: (offset, 0),
+                    t: None,
+                    at: None,
+                },
+            ));
         }
         for at in refs {
             let found = event(self.files, at);
+            let time = event_times[&at.0][at.1];
             let kind = if let Some((handoff, _)) = self.placed.get(&at) {
                 Some(EntryKind::H(*handoff))
             } else {
@@ -2983,22 +3035,45 @@ impl<'a> Builder<'a> {
                 }
             };
             if let Some(kind) = kind {
-                entries.push(Entry {
-                    kind,
-                    file: at.0,
-                    offset: found.o,
-                    t: found.t,
-                    at: Some(at),
-                });
+                // A failed code-mode call drawn as its operations is still a
+                // failed step: it sits where its failure arrived, after them.
+                let (time, pos) = match (&kind, &found.r) {
+                    (EntryKind::Tool(ToolState::Err), Some(reply))
+                        if operation_parents.contains(&at) =>
+                    {
+                        (
+                            reply.t.unwrap_or_else(|| time_at(at.0, reply.o)),
+                            (reply.o, reply.b),
+                        )
+                    }
+                    _ => (time, (found.o, found.b)),
+                };
+                keyed.push((
+                    key(time, at.0, pos, 1),
+                    Entry {
+                        kind,
+                        file: at.0,
+                        offset: found.o,
+                        pos,
+                        t: found.t,
+                        at: Some(at),
+                    },
+                ));
             }
             if let Some(handoff) = self.after.get(&at) {
-                entries.push(Entry {
-                    kind: EntryKind::H(*handoff),
-                    file: at.0,
-                    offset: found.o,
-                    t: found.t,
-                    at: None,
-                });
+                // The event's own place, so the handoff follows it even when
+                // it is a later block of its line.
+                keyed.push((
+                    key(time, at.0, (found.o, found.b), 2),
+                    Entry {
+                        kind: EntryKind::H(*handoff),
+                        file: at.0,
+                        offset: found.o,
+                        pos: (found.o, found.b),
+                        t: found.t,
+                        at: None,
+                    },
+                ));
             }
         }
         for file in session_files {
@@ -3012,59 +3087,25 @@ impl<'a> Builder<'a> {
                     Some(_) => ToolState::Ok,
                     None => ToolState::Pending,
                 };
-                entries.push(Entry {
-                    kind: EntryKind::Operation(state),
-                    file: *file,
-                    offset: extra.o,
-                    t: extra.t,
-                    at: None,
-                });
+                let time = extra.t.unwrap_or_else(|| time_at(*file, extra.o));
+                keyed.push((
+                    key(time, *file, (extra.o, extra.b), 1),
+                    Entry {
+                        kind: EntryKind::Operation(state),
+                        file: *file,
+                        offset: extra.o,
+                        pos: (extra.o, extra.b),
+                        t: extra.t,
+                        at: None,
+                    },
+                ));
             }
         }
-        let time_at = |file: usize, offset: u64| {
-            self.files[file]
-                .summary
-                .events
-                .iter()
-                .enumerate()
-                .take_while(|(_, event)| event.o <= offset)
-                .last()
-                .and_then(|(position, _)| event_times.get(&(file, position)).copied())
-                .or_else(|| {
-                    self.files[file]
-                        .summary
-                        .events
-                        .first()
-                        .and_then(|_| event_times.get(&(file, 0)).copied())
-                })
-                .unwrap_or(i64::MIN)
-        };
-        let file_order: BTreeMap<usize, usize> = session_files
-            .iter()
-            .enumerate()
-            .map(|(order, file)| (*file, order))
-            .collect();
-        entries.sort_by_key(|entry| {
-            let is_head = matches!(entry.kind, EntryKind::H(handoff) if self.head.get(&index) == Some(&handoff));
-            let (time, phase) = if is_head {
-                (i64::MIN, 0)
-            } else if let Some(at) = entry.at {
-                (*event_times.get(&at).unwrap_or(&i64::MIN), 1)
-            } else if matches!(entry.kind, EntryKind::H(_)) {
-                (entry.t.unwrap_or_else(|| time_at(entry.file, entry.offset)), 2)
-            } else {
-                (entry.t.unwrap_or_else(|| time_at(entry.file, entry.offset)), 1)
-            };
-            let block = entry.at.map_or(0, |at| event(self.files, at).b);
-            (
-                if session_files.len() > 1 { time } else { 0 },
-                *file_order.get(&entry.file).unwrap_or(&usize::MAX),
-                entry.offset,
-                block,
-                phase,
-            )
-        });
-        entries
+        // Stable, and linear when the entries are already in order (a
+        // session without operations). It isn't skipped for one file: a
+        // Codex file's operations come from its extras and must interleave.
+        keyed.sort_by_key(|(key, _)| *key);
+        keyed.into_iter().map(|(_, entry)| entry).collect()
     }
 
     /// The mockup's turn rule: a turn starts at each incoming entry (your
@@ -3442,6 +3483,10 @@ struct Entry {
     kind: EntryKind,
     file: usize,
     offset: u64,
+    /// Where it sits in its file (line offset, block): its event's place, the
+    /// event a handoff follows, or where a failed code-mode call's failure
+    /// arrived.
+    pos: (u64, u32),
     t: Option<i64>,
     at: Option<Ref>,
 }
