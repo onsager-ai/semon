@@ -122,6 +122,9 @@ export function write(out, { extras = false } = {}) {
     c.peer(ms(T(7, 12)), 102, "Sentinel", "m-h9", brief("h9"));
     c.text(ms(T(7, 14)), tx("principal")[1].text);
     c.ask(ms(T(7, 30)), brief("h8"));
+    // The sample includes two masked Claude thinking blocks before this turn's first tool call.
+    c.think(ms(T(7, 30), 12), "");
+    c.think(ms(T(7, 30), 20), "");
     c.tool(ms(T(7, 31)), "toolu-p1", "Bash", { command: tx("principal")[6].arg, description: "List open PRs" });
     c.result(ms(T(7, 31), 2, 300), "toolu-p1", tx("principal")[6].out);
     c.busy(ms(T(7, 30)), ms(T(7, 48)));
@@ -193,7 +196,7 @@ export function write(out, { extras = false } = {}) {
     c.tool(ms(T(12, 33)), "toolu-h20", "Agent", { description: SESS["h-failed"].name, subagent_type: "general-purpose", prompt: brief("h20"), run_in_background: true });
     c.result(ms(T(12, 36)), "toolu-h20", "Failed before producing a reproducer: the review sandbox could not read the test fixture.", { error: true });
     if (extras) c.text(ms(T(12, 31), 30), MARKDOWN);
-    c.text(ms(T(12, 32)), t[10].text);
+    c.text(ms(T(12, 36), 1), t[10].text);
     c.tool(ms(T(12, 39), 18), "toolu-b3", "Bash", { command: SESS.harbor.activity[1] });
     c.tokens(ms(T(12, 32)));
     c.save(); live("harbor", "busy");

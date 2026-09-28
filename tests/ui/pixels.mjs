@@ -61,8 +61,8 @@ const CALL_LINES = [
     '    const es = TX[s.id] ?? [], calls = TXM[s.id]?.calls ?? es.filter((e) => e.k === "tool").length, errors = TXM[s.id]?.errors ?? es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;'],
   ['    const block = el("div", "child-return"), calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, finished =',
     '    const block = el("div", "child-return"), calls = TXM[s.id]?.calls ?? (TX[s.id] ?? []).filter((e) => e.k === "tool").length, finished ='],
-  ['    const calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, origin = originHandoff(s.id), meta = el("span", "run-meta");',
-    '    const calls = TXM[s.id]?.calls ?? (TX[s.id] ?? []).filter((e) => e.k === "tool").length, origin = originHandoff(s.id), meta = el("span", "run-meta");'],
+  ['    const calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, origin = originHandoff(s.id);',
+    '    const calls = TXM[s.id]?.calls ?? (TX[s.id] ?? []).filter((e) => e.k === "tool").length, origin = originHandoff(s.id);'],
   ['    if (child) { const calls = (TX[child.id] ?? []).filter((e) => e.k === "tool").length, meta = el("div", "child-meta");',
     '    if (child) { const calls = TXM[child.id]?.calls ?? (TX[child.id] ?? []).filter((e) => e.k === "tool").length, meta = el("div", "child-meta");'],
 ];
