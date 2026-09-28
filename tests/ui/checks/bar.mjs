@@ -185,7 +185,7 @@ export default async function barCheck(browser) {
         await page.fill("#q", term); await page.waitForTimeout(80); SP.sidebar.typedRows = await page.evaluate(() => document.querySelectorAll("#lanes .srow").length);
         await page.press("#q", "Enter"); await page.waitForTimeout(300); SP.sidebar.enter = await page.evaluate(() => ({ v: history.state?.v, pageQuery: document.querySelector("#sq")?.value, rows: document.querySelectorAll(".page .nrow").length, drawerClosed: !document.body.classList.contains("drawer-open") }));
         await page.fill("#sq", ""); await page.waitForTimeout(80);
-      } else SP.sidebar = await page.evaluate(() => ({ rows: document.querySelectorAll("#lanes .srow").length, roots: document.querySelectorAll("#lanes > .treeitem").length, children: document.querySelectorAll("#lanes .tree-group .treeitem").length, all: document.querySelector("#all-sessions")?.textContent }));
+      } else SP.sidebar = await page.evaluate(({ parent, child }) => { const roots = [...document.querySelectorAll("#lanes > .treeitem")], item = roots.find((x) => x.dataset.id === parent); return { rows: document.querySelectorAll("#lanes .srow").length, roots: roots.length, children: document.querySelectorAll("#lanes .tree-group .treeitem").length, childUnderParent: [...(item?.querySelectorAll(":scope > .tree-group .treeitem") ?? [])].some((x) => x.dataset.id === child), all: document.querySelector("#all-sessions")?.textContent }; }, treePair ? { parent: treePair.from, child: treePair.to } : {});
       out.sessionsPage = SP;
     }
     out.fixes = { ...F, tsumFallback: F.tsumFallback.slice(0, 8), expected: X };
