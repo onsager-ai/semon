@@ -908,6 +908,30 @@ impl TraceStore {
         Ok(records)
     }
 
+    /// The inclusive `[earliest, latest]` occurrence timestamp (nanoseconds
+    /// since the Unix epoch), optionally restricted to one `repo`, or `None`
+    /// when no occurrence matches. Used to turn an empty `--day`-filtered
+    /// `semon log` into a hint naming the days the store actually covers,
+    /// rather than a bare "no occurrences" that can't be told apart from a
+    /// genuinely quiet day.
+    ///
+    /// Like [`TraceStore::log`], this is an ordinary read over `occurrences`
+    /// alone — it never touches `raw_carrier_records`.
+    pub fn timestamp_span(&self, repo: Option<&str>) -> Result<Option<(i64, i64)>, StoreError> {
+        let mut sql = String::from("SELECT MIN(timestamp), MAX(timestamp) FROM occurrences");
+        let mut bindings: Vec<Box<dyn ToSql>> = Vec::new();
+        if let Some(repo) = repo {
+            sql.push_str(" WHERE repo = ?");
+            bindings.push(Box::new(repo.to_owned()));
+        }
+        let params: Vec<&dyn ToSql> = bindings.iter().map(AsRef::as_ref).collect();
+        let (min, max): (Option<i64>, Option<i64>) =
+            self.connection.query_row(&sql, params.as_slice(), |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+        Ok(min.zip(max))
+    }
+
     /// Counts how many `raw_carrier_records` rows match `selector`, without
     /// deleting anything.
     ///
@@ -2490,6 +2514,49 @@ mod tests {
             second,
             first + 1,
             "alpha's two records must not be contiguous: beta's record belongs between them"
+        );
+    }
+
+    #[test]
+    fn timestamp_span_covers_all_occurrences_or_only_one_repos() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        assert_eq!(store.timestamp_span(None).unwrap(), None);
+
+        store
+            .capture(
+                &semantic(r#"{"kind":"intent","content":"repo-a early"}"#),
+                NewRawCarrierRecord::new("codex", b"repo-a-early"),
+                NewOccurrence {
+                    timestamp: 100,
+                    repo: "repo-a",
+                    repo_source: RepoSource::GitRemote,
+                    authored_by: AuthoredBy::Human,
+                    ..occurrence("session-a", 0)
+                },
+            )
+            .unwrap();
+        store
+            .capture(
+                &semantic(r#"{"kind":"intent","content":"repo-b late"}"#),
+                NewRawCarrierRecord::new("codex", b"repo-b-late"),
+                NewOccurrence {
+                    timestamp: 900,
+                    repo: "repo-b",
+                    repo_source: RepoSource::GitRemote,
+                    authored_by: AuthoredBy::Human,
+                    ..occurrence("session-b", 0)
+                },
+            )
+            .unwrap();
+
+        assert_eq!(store.timestamp_span(None).unwrap(), Some((100, 900)));
+        assert_eq!(
+            store.timestamp_span(Some("repo-a")).unwrap(),
+            Some((100, 100))
+        );
+        assert_eq!(
+            store.timestamp_span(Some("repo-nonexistent")).unwrap(),
+            None
         );
     }
 
