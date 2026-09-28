@@ -60,6 +60,11 @@ pub(crate) struct Session {
     pub(crate) state: &'static str,
     pub(crate) model: String,
     pub(crate) tokens: [f64; 3],
+    pub(crate) tokens_by_model: BTreeMap<String, events::ModelTokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rate_limits: Option<events::RateLimits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) parent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -199,6 +204,7 @@ pub(crate) struct SessionFacts {
 
 #[derive(Serialize)]
 struct Rest<'a> {
+    pricing: &'a crate::pricing::Pricing,
     handoffs: &'a [Handoff],
     turns: &'a [Turn],
     busy: &'a BTreeMap<String, Vec<(i64, i64)>>,
@@ -1309,6 +1315,9 @@ impl<'a> Builder<'a> {
             state: "done",
             model: "—".into(),
             tokens: [0.0; 3],
+            tokens_by_model: BTreeMap::new(),
+            rate_limits: None,
+            parent: None,
             repo: None,
             branch: None,
             start: 0,
@@ -1653,6 +1662,8 @@ impl<'a> Builder<'a> {
         let mut last = 0;
         let mut names = BTreeSet::new();
         let mut title = None;
+        let mut tokens_by_model = BTreeMap::new();
+        let mut rate_limits: Option<events::RateLimits> = None;
         // Claude usage is merged by message id across the lineage's files, so
         // a copy-resume's copied messages count once.
         let mut usage = BTreeMap::new();
@@ -1669,6 +1680,19 @@ impl<'a> Builder<'a> {
                 tokens.input += used.input;
                 tokens.cached_input += used.cached_input;
                 tokens.output += used.output;
+                for (model, usage) in file.summary.codex_usage() {
+                    tokens_by_model
+                        .entry(model.clone())
+                        .or_insert_with(events::ModelTokens::default)
+                        .add(usage);
+                }
+                if let Some(latest) = &file.summary.rate_limits
+                    && rate_limits
+                        .as_ref()
+                        .is_none_or(|current| latest.recorded_at >= current.recorded_at)
+                {
+                    rate_limits = Some(latest.clone());
+                }
             }
             busy.extend(file.summary.busy.iter().copied());
             if let Some(found) = &file.summary.last_model {
@@ -1689,9 +1713,15 @@ impl<'a> Builder<'a> {
             }
         }
         for used in usage.values() {
-            tokens.input += used.input;
-            tokens.cached_input += used.cached_input;
-            tokens.output += used.output;
+            tokens.input += used.tokens.input;
+            tokens.cached_input += used.tokens.cached_input;
+            tokens.output += used.tokens.output;
+            if let Some(model) = &used.model {
+                tokens_by_model
+                    .entry(model.clone())
+                    .or_insert_with(events::ModelTokens::default)
+                    .add(&used.model_tokens);
+            }
         }
         let million = |value: u64| (value as f64 / 1e6 * 1000.0).round() / 1000.0;
         let (cwd, branch, fallback_model, fallback_name) = match &last_file.role {
@@ -1729,6 +1759,8 @@ impl<'a> Builder<'a> {
         session.first = (start != i64::MAX).then_some(start);
         session.last = (last != 0).then_some(last);
         let out = &mut session.out;
+        out.tokens_by_model = tokens_by_model;
+        out.rate_limits = rate_limits;
         out.tokens = [
             million(tokens.input.saturating_sub(tokens.cached_input)),
             million(tokens.cached_input),
@@ -4009,6 +4041,19 @@ pub(crate) fn build(
         }
     }
     handoffs.sort_by(|a, b| a.at.cmp(&b.at).then(a.id.cmp(&b.id)));
+    // Match the approved mockup's parentOf rule against the same handoffs
+    // and session flags the client receives.
+    for (sid, session) in &mut sessions {
+        session.parent = handoffs
+            .iter()
+            .find(|handoff| {
+                (handoff.kind == "spawn" || handoff.kind == "relay")
+                    && handoff.to.as_deref() == Some(sid.as_str())
+                    && handoff.from.as_str() != sid.as_str()
+                    && (handoff.kind == "spawn" || session.kind == Some("Relayed") || !session.lane)
+            })
+            .map(|handoff| handoff.from.clone());
+    }
     let order: HashMap<&str, usize> = {
         let mut keys: Vec<(&str, i64)> = sessions
             .iter()
@@ -4096,7 +4141,9 @@ pub(crate) fn build(
         last: offline_since,
     };
     let machine = serde_json::to_string(&machine)?;
+    let pricing = crate::pricing::table();
     let rest = serde_json::to_string(&Rest {
+        pricing: &pricing,
         handoffs: &handoffs,
         turns: &turns,
         busy: &busy,

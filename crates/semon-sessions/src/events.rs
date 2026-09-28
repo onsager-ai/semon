@@ -32,7 +32,49 @@ use crate::{Tokens, field};
 /// v7: tool ids index all tool events for exact legacy item matching.
 /// v8: an item is an operation only when exactly one code-mode call owns it,
 /// and a script error is read from the harness header alone.
-const CACHE_VERSION: u32 = 8;
+/// v9: token usage is retained by model and Codex rate limits are indexed.
+const CACHE_VERSION: u32 = 9;
+
+/// The four token categories the model serves for an exact model id.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ModelTokens {
+    pub(crate) input: u64,
+    pub(crate) output: u64,
+    pub(crate) cache_write: u64,
+    pub(crate) cache_read: u64,
+}
+
+impl ModelTokens {
+    pub(crate) fn add(&mut self, other: &Self) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_write += other.cache_write;
+        self.cache_read += other.cache_read;
+    }
+}
+
+/// A Claude assistant message's token report. `tokens` preserves the legacy
+/// triple's input/cache-read accounting; `model_tokens` keeps cache writes
+/// separate for the model JSON.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct MessageUsage {
+    pub(crate) model: Option<String>,
+    pub(crate) tokens: Tokens,
+    pub(crate) model_tokens: ModelTokens,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct RateLimitWindow {
+    pub(crate) minutes: u64,
+    pub(crate) used_percent: f64,
+    pub(crate) resets_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct RateLimits {
+    pub(crate) recorded_at: i64,
+    pub(crate) windows: Vec<RateLimitWindow>,
+}
 
 /// One file's event index and the facts the model needs about it. Metadata
 /// only (risk:secret).
@@ -78,15 +120,23 @@ pub(crate) struct FileIndex {
     #[serde(default)]
     pub(crate) branch: Option<String>,
     #[serde(default)]
-    usage_by_id: BTreeMap<String, Tokens>,
+    usage_by_id: BTreeMap<String, MessageUsage>,
     #[serde(default)]
     codex_tokens: Tokens,
+    #[serde(default)]
+    codex_tokens_by_model: BTreeMap<String, ModelTokens>,
+    #[serde(default)]
+    pub(crate) rate_limits: Option<RateLimits>,
 }
 
 impl FileIndex {
     /// Claude usage by message id, for merging across a lineage's files.
-    pub(crate) fn usage(&self) -> &BTreeMap<String, Tokens> {
+    pub(crate) fn usage(&self) -> &BTreeMap<String, MessageUsage> {
         &self.usage_by_id
+    }
+
+    pub(crate) fn codex_usage(&self) -> &BTreeMap<String, ModelTokens> {
+        &self.codex_tokens_by_model
     }
 
     pub(crate) fn tokens(&self, harness: &str) -> Tokens {
@@ -95,10 +145,10 @@ impl FileIndex {
         }
         let mut total = Tokens::default();
         for usage in self.usage_by_id.values() {
-            total.input += usage.input;
-            total.cached_input += usage.cached_input;
-            total.output += usage.output;
-            total.total += usage.total;
+            total.input += usage.tokens.input;
+            total.cached_input += usage.tokens.cached_input;
+            total.output += usage.tokens.output;
+            total.total += usage.tokens.total;
         }
         total
     }
@@ -504,6 +554,71 @@ pub(crate) fn record_time(record: &Value) -> Option<i64> {
                 .and_then(|payload| field(payload, "timestamp"))
         })
         .and_then(parse_ms)
+}
+
+fn absolute_reset_ms(value: &Value) -> Option<i64> {
+    if let Some(seconds) = value.as_i64() {
+        return if seconds.unsigned_abs() >= 100_000_000_000 {
+            Some(seconds)
+        } else {
+            seconds.checked_mul(1000)
+        };
+    }
+    if let Some(seconds) = value.as_u64() {
+        return if seconds >= 100_000_000_000 {
+            i64::try_from(seconds).ok()
+        } else {
+            i64::try_from(seconds).ok()?.checked_mul(1000)
+        };
+    }
+    if let Some(seconds) = value.as_f64() {
+        if !seconds.is_finite() {
+            return None;
+        }
+        let millis = if seconds.abs() >= 100_000_000_000.0 {
+            seconds
+        } else {
+            seconds * 1000.0
+        };
+        return (millis >= i64::MIN as f64 && millis <= i64::MAX as f64)
+            .then(|| millis.round() as i64);
+    }
+    value.as_str().and_then(parse_ms)
+}
+
+fn rate_limits(info: &Value, recorded_at: i64) -> Option<RateLimits> {
+    let data = info.get("rate_limits")?;
+    let mut by_minutes = BTreeMap::new();
+    for name in ["primary", "secondary"] {
+        let window = data.get(name)?;
+        let minutes = window.get("window_minutes")?.as_u64()?;
+        let used_percent = window.get("used_percent")?.as_f64()?;
+        let resets_at = if let Some(seconds) = window.get("resets_in_seconds") {
+            let seconds = seconds.as_f64()?;
+            if !seconds.is_finite() {
+                continue;
+            }
+            let millis = seconds * 1000.0;
+            if millis < i64::MIN as f64 || millis > i64::MAX as f64 {
+                continue;
+            }
+            recorded_at.checked_add(millis.round() as i64)?
+        } else {
+            absolute_reset_ms(window.get("resets_at")?)?
+        };
+        by_minutes.insert(
+            minutes,
+            RateLimitWindow {
+                minutes,
+                used_percent,
+                resets_at,
+            },
+        );
+    }
+    (!by_minutes.is_empty()).then_some(RateLimits {
+        recorded_at,
+        windows: by_minutes.into_values().collect(),
+    })
 }
 
 fn strip_reminders(text: &str) -> String {
@@ -926,18 +1041,27 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
     if let Some(message) = record.get("message")
         && let (Some(id), Some(usage)) = (field(message, "id"), message.get("usage"))
     {
-        let input = number(usage, "input_tokens")
-            + number(usage, "cache_creation_input_tokens")
-            + number(usage, "cache_read_input_tokens");
+        let input = number(usage, "input_tokens");
+        let cache_write = number(usage, "cache_creation_input_tokens");
+        let cache_read = number(usage, "cache_read_input_tokens");
         let output = number(usage, "output_tokens");
         summary.usage_by_id.insert(
             id.to_owned(),
-            Tokens {
-                input,
-                cached_input: number(usage, "cache_read_input_tokens"),
-                output,
-                reasoning_output: 0,
-                total: input + output,
+            MessageUsage {
+                model: field(message, "model").map(str::to_owned),
+                tokens: Tokens {
+                    input: input + cache_write + cache_read,
+                    cached_input: cache_read,
+                    output,
+                    reasoning_output: 0,
+                    total: input + cache_write + cache_read + output,
+                },
+                model_tokens: ModelTokens {
+                    input,
+                    output,
+                    cache_write,
+                    cache_read,
+                },
             },
         );
     }
@@ -1163,17 +1287,43 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                 .map(str::to_owned);
         }
         Some("event_msg") if field(payload, "type") == Some("token_count") => {
-            if let Some(usage) = payload
-                .get("info")
-                .and_then(|info| info.get("total_token_usage"))
-            {
-                summary.codex_tokens = Tokens {
-                    input: number(usage, "input_tokens"),
-                    cached_input: number(usage, "cached_input_tokens"),
-                    output: number(usage, "output_tokens"),
-                    reasoning_output: number(usage, "reasoning_output_tokens"),
-                    total: number(usage, "total_tokens"),
-                };
+            if let Some(info) = payload.get("info") {
+                if let Some(usage) = info.get("total_token_usage") {
+                    let current = Tokens {
+                        input: number(usage, "input_tokens"),
+                        cached_input: number(usage, "cached_input_tokens"),
+                        output: number(usage, "output_tokens"),
+                        reasoning_output: number(usage, "reasoning_output_tokens"),
+                        total: number(usage, "total_tokens"),
+                    };
+                    if let Some(model) = &summary.last_model {
+                        let input_delta = current.input.saturating_sub(summary.codex_tokens.input);
+                        let cache_read = current
+                            .cached_input
+                            .saturating_sub(summary.codex_tokens.cached_input);
+                        let counts = ModelTokens {
+                            input: input_delta.saturating_sub(cache_read),
+                            output: current.output.saturating_sub(summary.codex_tokens.output),
+                            cache_write: 0,
+                            cache_read,
+                        };
+                        summary
+                            .codex_tokens_by_model
+                            .entry(model.clone())
+                            .or_default()
+                            .add(&counts);
+                    }
+                    summary.codex_tokens = current;
+                }
+                if let Some(time) = time
+                    && let Some(latest) = rate_limits(info, time)
+                    && summary
+                        .rate_limits
+                        .as_ref()
+                        .is_none_or(|previous| latest.recorded_at >= previous.recorded_at)
+                {
+                    summary.rate_limits = Some(latest);
+                }
             }
         }
         // A finished command's structured exit code, and the completed
