@@ -177,6 +177,10 @@ fn main() {
     );
     let options = Options {
         claude_home: PathBuf::from(&args[2]),
+        claude_json: PathBuf::from(&args[2])
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(".claude.json"),
         codex_home: PathBuf::from(&args[3]),
         proc_root: PathBuf::from(&args[4]),
         cache: PathBuf::from(&args[5]),
