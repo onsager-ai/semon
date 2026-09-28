@@ -1720,9 +1720,9 @@ fn golden(name: &str, built: &Built) {
     if let Some(sessions) = expected_shape["sessions"].as_object_mut() {
         for session in sessions.values_mut() {
             if let Some(session) = session.as_object_mut() {
-                session.remove("cost");
-                session.remove("reported_runs");
-                session.remove("cost_check");
+                session.shift_remove("cost");
+                session.shift_remove("reported_runs");
+                session.shift_remove("cost_check");
             }
         }
     }
@@ -2332,7 +2332,14 @@ fn reported_cost_checks_keep_overwritten_runs_and_drop_account_values() {
 
     let served = second.json(NOW);
     let served_json: Value = serde_json::from_str(&served).unwrap();
-    assert_eq!(served_json["sessions"]["run-one"]["cost"]["usd"], 1.835095);
+    assert!(
+        (served_json["sessions"]["run-one"]["cost"]["usd"]
+            .as_f64()
+            .unwrap()
+            - 1.835095)
+            .abs()
+            < 1e-12
+    );
     assert_eq!(
         served_json["sessions"]["run-one"]["cost"]["by_model"]["claude-opus-5"]["tokens"]["cache_write_1h"],
         151872

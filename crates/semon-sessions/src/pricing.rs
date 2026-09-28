@@ -711,12 +711,12 @@ mod tests {
         };
         let below_cost = calculate_cost_with(&[below], &[], |_| Some(tier_price));
         let above_cost = calculate_cost_with(&[p.clone()], &[], |_| Some(tier_price));
-        assert_eq!(below_cost.usd, Some(0.000006));
-        assert_eq!(above_cost.usd, Some(0.00003));
+        assert!((below_cost.usd.unwrap() - 0.000006).abs() < 1e-12);
+        assert!((above_cost.usd.unwrap() - 0.00003).abs() < 1e-12);
         let mut fast = p.clone();
         fast.billing.speed = Some("fast".into());
         let fast_cost = calculate_cost(&[fast], &[]);
-        assert_eq!(fast_cost.usd, Some(0.00006));
+        assert!((fast_cost.usd.unwrap() - 0.00006).abs() < 1e-12);
         // The official pages do not publish a usable OpenAI long-context
         // threshold, so no such tier is installed in its rows.
         assert!(
