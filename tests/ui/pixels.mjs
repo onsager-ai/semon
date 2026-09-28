@@ -263,12 +263,17 @@ const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.wr
     }
     // The phone's navigation drawer, open on Home.
     if (size === "phone" && !ONLY.length) {
-      await nav(page, { v: "home" }, D, false); await page.click("#lead-btn"); await page.waitForTimeout(350);
+      // Each session screenshot can mark result handoffs read. Start the drawer comparison in a fresh served context,
+      // matching the reference page reload below, so both drawers show the fixture's initial unread count.
+      const drawerPage = await served(browser, { size, dark });
+      await drawerPage.click("#lead-btn"); await drawerPage.waitForTimeout(350);
       await port.goto("http://reference.test/", { waitUntil: "load" }); await port.waitForSelector("#lead-btn"); await port.click("#lead-btn"); await port.waitForTimeout(350);
-      const p = compare(await shot(page, "desktop"), await shot(port, "desktop"));
+      const p = compare(await shot(drawerPage, "desktop"), await shot(port, "desktop"));
       const row = { scheme, screen: "drawer", port: { pixels: p.pixels, ratio: p.ratio, size: p.size, pass: p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size } };
       if (!row.port.pass) { const dir = path.join(OUT, "port", scheme); save(dir, "drawer-served", p.A); save(dir, "drawer-reference", p.B); save(dir, "drawer-diff", p.diff); }
       results.push(row);
+      errors.push(...drawerPage.errors.map((e) => scheme + " served drawer: " + e));
+      await drawerPage.context().close();
     }
     errors.push(...page.errors.map((e) => scheme + " served: " + e), ...port.errors.map((e) => scheme + " port reference: " + e), ...orig.errors.map((e) => scheme + " sample: " + e));
     await page.context().close(); await port.context().close(); await orig.context().close();
