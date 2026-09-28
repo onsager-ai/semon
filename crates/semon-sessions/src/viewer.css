@@ -526,19 +526,26 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .hmark.h-codex { font-size: 15px; }
 .page.wide-mode { max-width: 1400px; }
 
-.topbar .l2.session-meta { position: relative; gap: 12px; width: 100%; min-height: 36px; overflow: hidden; border: 0; border-radius: 8px; background: none; padding: 0; text-align: left; pointer-events: none; }
+.topbar .l2.session-meta { position: relative; gap: 12px; width: 100%; min-height: 30px; overflow: hidden; border: 0; border-radius: 8px; background: none; padding: 0; text-align: left; pointer-events: none; }
 .topbar .l2.session-meta .meta-hit { position: absolute; inset: 0; z-index: 0; border: 0; border-radius: 8px; background: none; padding: 0; pointer-events: auto; }
 @media (hover: hover) { .topbar .l2.session-meta:hover .meta-hit { background: var(--sunken); } }
 .topbar .l2.session-meta .meta-item { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; flex: none; min-width: 0; pointer-events: none; }
-.topbar .l2.session-meta .meta-runs { min-height: 36px; border: 0; background: none; padding: 0; color: inherit; font: inherit; pointer-events: auto; }
+.topbar .l2.session-meta .meta-runs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 30px; border: 0; background: none; padding: 0; color: var(--muted); font: inherit; pointer-events: auto; }
+.topbar .l2.session-meta .meta-runs svg { width: 15px; height: 15px; color: var(--faint); }
+.topbar .l2.session-meta .meta-runs .dot { width: 6px; height: 6px; }
+.topbar .l2.session-meta .meta-runs .meta-value { font: inherit; }
 .topbar .l2.session-meta .meta-item .meta-value { display: block; min-width: 0; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .l2.session-meta .meta-state { gap: 5px; }
 .topbar .l2.session-meta .meta-state .meta-value { max-width: none; }
 .topbar .l2.session-meta .meta-state .state-sep { color: var(--faint); }
 .topbar .l2.session-meta .meta-item svg, .topbar .l2.session-meta .meta-item .hmark { width: 15px; height: 15px; flex: none; color: var(--faint); }
 .topbar .l2.session-meta .meta-item .hmark { color: var(--h); }
-.topbar .l2.session-meta .meta-tokens .meta-value { max-width: 7ch; }
-.topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; min-height: 36px; margin: 0; border: 0; background: none; padding: 0 2px; font: inherit; font-weight: 500; color: var(--err); pointer-events: auto; }
+.topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, var(--h) 12%, transparent); color: var(--h); }
+.topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--h); }
+.topbar .l2.session-meta .meta-item.meta-cost { gap: 4px; }
+.topbar .l2.session-meta .meta-cost .meta-value, .topbar .l2.session-meta .meta-tokens .meta-value { min-width: 0; max-width: 7ch; }
+.topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; margin: 0; border: 0; background: none; padding: 0 2px; font: inherit; font-weight: 500; color: var(--err); pointer-events: auto; }
+.topbar .l2.session-meta .errs:empty { display: none; }
 .topbar .l2.session-meta .errs::before { content: "·"; color: var(--faint); font-weight: 400; }
 .topbar .l2.session-meta .meta-item[hidden], .topbar .l2.session-meta .meta-runs[hidden], .topbar .l2.session-meta .errs[hidden], .topbar .l2.session-meta .meta-value[hidden] { display: none; }
 .wide-toggle { margin-left: auto; }
