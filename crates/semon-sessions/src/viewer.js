@@ -526,7 +526,8 @@
     for (const xs of children.values()) xs.sort((a, b) => b.last - a.last);
     return children;
   };
-  const childSessions = (sid) => sessionChildren().get(sid) ?? [];
+  // Sibling navigation follows the handoffs in their original order; the sidebar and Runs list stay newest-first.
+  const childSessions = (sid) => [...(sessionChildren().get(sid) ?? [])].sort((a, b) => (originHandoff(a.id)?.at ?? a.last) - (originHandoff(b.id)?.at ?? b.last));
   const descendantsOf = (sid, children, out = [], seen = new Set([sid])) => {
     for (const child of children.get(sid) ?? []) if (!seen.has(child.id)) { seen.add(child.id); out.push(child); descendantsOf(child.id, children, out, seen); }
     return out;

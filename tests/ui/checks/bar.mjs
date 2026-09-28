@@ -205,7 +205,7 @@ export default async function barCheck(browser) {
 
   // Child-session path, sibling navigation, return rows and nested Runs views.
   const childAssertions = [];
-  const parentKids = Object.values(D.SESS).filter((s) => parentOf(s.id) === "harbor").sort((a, b) => b.last - a.last);
+  const parentKids = Object.values(D.SESS).filter((s) => parentOf(s.id) === "harbor").sort((a, b) => D.H.find((h) => h.kind === "spawn" && h.to === a.id).at - D.H.find((h) => h.kind === "spawn" && h.to === b.id).at);
   const grandchild = Object.values(D.SESS).find((s) => parentOf(s.id) && parentOf(parentOf(s.id)) === "harbor");
   const failedChild = parentKids.find((s) => s.state === "err" || D.H.some((h) => h.kind === "spawn" && h.to === s.id && h.status === "err"));
   r.expect(!!grandchild, "fixture has no grandchild session for the lineage and nested Runs checks");

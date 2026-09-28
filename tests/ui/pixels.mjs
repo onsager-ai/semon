@@ -76,11 +76,10 @@ const COST_LINES = [
   ['    const cost = costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", cost.unknown.length ? "—" : shortMoney(cost.usd))); costItem.title = COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));',
     '    const directRunsForCost = childSessions(s.id), descendantRunsForCost = descendantsOf(s.id, sessionChildren()), cost = directRunsForCost.length ? costForSessions([s, ...descendantRunsForCost]) : costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", (directRunsForCost.length ? "incl. runs " : "") + (cost.unknown.length ? "—" : shortMoney(cost.usd)))); costItem.title = "API-equivalent cost. " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + (directRunsForCost.length ? ", including runs" : "") + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));'],
 ];
-// The served model marks results read when their session opens and draws them as compact transcript markers. The mockup
-// keeps them as waiting cards; port mode mirrors the served result state and row so the image comparison covers the chrome.
+// Port mode keeps the served result status and read behavior so the image comparison covers the chrome faithfully.
 const RESULT_LINES = [
   ['  const inbox = () => H.filter((h) => h.kind === "toyou" && h.status === "wait").sort((a, b) => b.at - a.at);',
-    '  const inbox = () => H.filter((h) => h.kind === "toyou" && h.status === "wait" && !(h.ask === "result" && SEEN_RESULTS.has(h.id))).sort((a, b) => b.at - a.at);'],
+    '  const inbox = () => H.filter((h) => h.kind === "toyou" && (h.status === "wait" || (h.ask === "result" && !SEEN_RESULTS.has(h.id)))).sort((a, b) => b.at - a.at);'],
   ['  const statWord = (h) => ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];',
     '  const statWord = (h) => h.kind === "toyou" && h.ask === "result" ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];'],
   ['  function renderSession(page, sid) {\n    const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr");',
@@ -130,8 +129,7 @@ function portReference(D) {
   const hhmm = (t) => new Date(t).toISOString().slice(11, 16);
   const asIso = (t) => new Date(t).toISOString();
   const TX = {};
-  // The service calls unseen results `new`; the mockup groups them with its `wait` inbox items.
-  const H = D.H.map((h) => h.kind === "toyou" && h.status === "new" ? { ...h, status: "wait" } : h);
+  const H = D.H;
   for (const [sid, es] of Object.entries(D.TX)) TX[sid] = es.map((e) => (e.ret ? { k: "end", text: "Returned to " + D.SESS[e.ret.to].name + (e.ret.failed ? " · failed" : "") + " · " + hhmm(e.ret.at) } : e));
   const PRICING = Object.fromEntries(Object.entries(D.model.pricing?.models ?? {}).map(([id, p]) => [id, { input: p.input, output: p.output, cacheWrite: p.cache_write, cacheRead: p.cache_read }]));
   const SESS = Object.fromEntries(Object.entries(D.SESS).map(([id, source]) => {
