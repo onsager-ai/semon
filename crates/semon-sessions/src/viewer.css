@@ -510,7 +510,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .tree-group { min-width: 0; margin-left: 14px; padding-left: 0; border-left: 1px solid var(--line); }
 .tree-group[data-depth="4"], .tree-group[data-depth="5"], .tree-group[data-depth="6"], .tree-group[data-depth="7"] { margin-left: 0; border-left-color: transparent; }
 .treeitem[aria-expanded="false"] > .tree-group { display: none; }
-.srow { width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; align-items: center; border: 0; background: none; padding: 5px 8px; border-radius: 9px; text-align: left; }
+.srow { width: 100%; min-width: 0; margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; align-items: center; border: 0; background: none; padding: 5px 8px; border-radius: 9px; text-align: left; }
 .srow-main, .srow-meta { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .srow .nm { flex: 1 1 auto; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srow .ag { flex: none; font-size: 11.5px; color: var(--faint); font-family: var(--mono); }

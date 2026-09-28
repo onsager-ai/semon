@@ -88,6 +88,12 @@ const RESULT_LINES = [
   ['        if (h.kind === "ask") { if (!show.messages) continue; const m = el("div", "msg user"); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }\n        // A relay or brief that starts a turn is that turn\'s message.',
     '        if (h.kind === "ask") { if (!show.messages) continue; const m = el("div", "msg user"); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }\n        if (h.kind === "toyou" && h.ask === "result") { const marker = el("div", "result-marker " + (SEEN_RESULTS.has(h.id) ? "read" : "new")); marker.append(icon(I.result), el("span", "word", statWord(h)), el("span", "tm", clock(h.at))); tx.append(marker); continue; }\n        // A relay or brief that starts a turn is that turn\'s message.'],
 ];
+const RESULT_CSS = [
+  '.result-marker { display: flex; align-items: center; gap: 7px; min-height: 24px; color: var(--muted); font-size: 12.5px; }',
+  '.result-marker > svg { width: 15px; height: 15px; flex: none; color: var(--faint); }',
+  '.result-marker .tm { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--faint); }',
+  '.result-marker.new { color: var(--accent); }',
+].join('\n');
 // The sample uses illustrative hostnames; in port mode the served model owns the machine names and the viewer
 // shortens those names in sidebar and line-2 labels.
 const HOST_LINES = [
@@ -129,6 +135,9 @@ function portReference(D) {
     '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(SESS) + ";",
     "  const API_PRICE = " + J(PRICING) + ";", "  const H = " + J(H) + ";", "  const SEEN_RESULTS = new Set();", "  const markSeenResults = (handoffs) => { for (const h of handoffs) if (h.kind === \"toyou\" && h.ask === \"result\") SEEN_RESULTS.add(h.id); };", "  const THREADS = {};", "  const TX = " + J(TX) + ";", "  const TXM = " + J(D.TXM ?? {}) + ";", ""].join("\n");
   let html = MOCKUP.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + MOCKUP.slice(end);
+  const styleEnd = html.lastIndexOf("</style>");
+  if (styleEnd < 0) throw new Error("mockup style block moved");
+  html = html.slice(0, styleEnd) + RESULT_CSS + "\n" + html.slice(styleEnd);
   for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES, ...CALL_LINES, ...THOUGHT_LINES, ...COST_LINES, ...RESULT_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
   for (const [a, replacement] of HOST_LINES) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, replacement(D)); }
   const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
