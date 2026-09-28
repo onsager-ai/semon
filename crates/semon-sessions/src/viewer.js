@@ -42,6 +42,8 @@
     run: "M4 17l5-5-5-5M12 19h8", stack: "M12 3l9 5-9 5-9-5zM3 13l9 5 9-5", read: "M6 3h8l4 4v14H6zM14 3v4h4", edit: "M4 20h4L19 9l-4-4L4 16zM13 7l4 4", find: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4",
     machine: "M3 5h18v11H3zM8 20h8M12 16v4", repo: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6", role: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6",
     out: "M7 17L17 7M9 7h8v8", in: "M17 7L7 17M15 17H7V9", move: "M4 8h13l-3-3M20 16H7l3 3", ask: "M5 18l-1 3 3-1 11-11-2-2zM14 6l4 4", you: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6", q: "M9 9a3 3 0 1 1 4 2.8c-.7.3-1 .9-1 1.7V14M12 18h.01", check: "M5 12l4 4 10-10", qc: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4M12 17h.01", decide: "M12 21v-6M12 15L6 9M12 15l6-6M6 9V4M18 9V4M4 6l2-2 2 2M16 6l2-2 2 2", result: "M14 3H6v18h12V7zM14 3v4h4M9 12h6M9 16h6", done: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12.5l2.7 2.7L16 9.8", x: "M6 6l12 12M18 6L6 18", expand: "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7", copy: "M9 9h11v11H9zM5 15H4V4h11v1", ext: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
+    down: "M12 4v15M5 12l7 7 7-7", branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
+    wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z", wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", tokens: "M5 5h14M12 5v14M9 19h6",
   };
   const clock = (t) => { const d = new Date(t), n = new Date(NOW); const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(undefined, { weekday: "short" }) + " " + hm; };
   const ago = (t) => { const d = Math.floor((NOW - t) / 60000); return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d"; };
@@ -52,6 +54,11 @@
   const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
   const where = (s) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " · " + s.branch : "") : "No repo";
+  const hostOf = (s) => s.host ?? MACHINE[s.machine] ?? s.machine ?? "Unknown machine";
+  const shortHost = (s) => { const h = hostOf(s).split(".")[0]; return h.length > 14 ? h.slice(0, 14) + "…" : h; };
+  const branchOf = (s) => s.worktree ?? s.branch ?? "No branch";
+  const shortModel = (model) => String(model ?? "Unknown model").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
+  const harnessMark = (harness) => { const mark = el("span", "hmark h-" + harness, harness === "claude" ? "✳" : "⌘"); mark.setAttribute("aria-hidden", "true"); mark.title = HARNESS[harness] ?? harness; return mark; };
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
   const parentOf = (sid) => H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
   const RANK = { wait: 0, work: 1, err: 2, done: 3 };
@@ -317,25 +324,63 @@
     api("/api/model").then((m) => {
       adopt(m); route = routeOf(location); LIVE.version = m.version; remember(m);
       if (route.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
-      try { history.replaceState(route, "", urlOf(route)); } catch {}
-      const done = () => { render(); if (route.v === "session" && route.turn) revealTurn(route.turn, true); schedule(2000); setInterval(ticker, 1000); };
+      try { history.replaceState({ ...route, scrollTop: 0 }, "", urlOf(route)); } catch {}
+      const done = () => {
+        render();
+        if (route.v === "session" && route.turn) revealTurn(route.turn, true);
+        else if (route.v === "session") { openSessionAtEnd(); syncJump(); }
+        else quietTop();
+        schedule(2000); setInterval(ticker, 1000);
+      };
       const p = load(route); if (p) p.then(done, done); else done();
     }, (err) => { $("#page").replaceChildren(el("p", "empty", "Couldn't load the sessions: " + err.message)); });
   }
 
   // ---- State & navigation ---------------------------------------------------------------
   const phone = window.matchMedia("(max-width: 760px)");
+  let wideMode = false, railMode = false, treePrefs = {};
+  try { wideMode = localStorage.getItem("semon.wide") === "1"; } catch {}
+  try { railMode = localStorage.getItem("semon.rail") === "1"; } catch {}
+  try { const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = saved; } catch {}
+  const app = $(".app");
+  const syncLayoutPrefs = () => { app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
+  function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); }
+  function setRailMode(on) { railMode = on; try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("title", on ? "Expand sidebar" : "Collapse sidebar"); }
+  function saveTreePref(id, open) {
+    treePrefs[id] = { open, at: Date.now() };
+    treePrefs = Object.fromEntries(Object.entries(treePrefs).sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0)).slice(0, 500));
+    try { localStorage.setItem("semon.tree", JSON.stringify(treePrefs)); } catch {}
+  }
+  const railToggle = $("#rail-toggle"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("title", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
   let route = { v: "home" }; let groupBy = "recent"; let query = "";
   let accountOpen = false;
+  try { history.scrollRestoration = "manual"; } catch {}
   let show = { messages: true, tools: true, thinking: true }; let find = ""; let findOpen = false; let filterOpen = false;
+  const currentScroll = () => phone.matches ? window.scrollY : $("#main").scrollTop;
+  const restoreScroll = (top) => { if (phone.matches) window.scrollTo(0, top); else $("#main").scrollTop = top; };
+  const saveHistoryScroll = () => { try { if (history.state?.v) history.replaceState({ ...history.state, scrollTop: currentScroll() }, ""); } catch {} };
+  let scrollSaveFrame = false;
+  const queueScrollSave = () => { if (scrollSaveFrame) return; scrollSaveFrame = true; requestAnimationFrame(() => { scrollSaveFrame = false; saveHistoryScroll(); }); };
+  window.addEventListener("scroll", queueScrollSave, { passive: true });
+  $("#main").addEventListener("scroll", queueScrollSave, { passive: true });
   const quietTop = () => { if (phone.matches) window.scrollTo(0, 0); else $("#main").scrollTop = 0; };
+  const openSessionAtEnd = () => { if (phone.matches) window.scrollTo(0, document.documentElement.scrollHeight); else { const m = $("#main"); m.scrollTop = m.scrollHeight; } saveHistoryScroll(); };
   function go(r, fromHistory) {
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
+    if (!fromHistory) saveHistoryScroll();
     closeAccountMenu();
-    route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearPill();
-    if (!fromHistory) { try { history.pushState(r, "", urlOf(r)); } catch {} }
+    route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
+    if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     if (r.v === "timeline" && !fromHistory) tlView.left = null;
-    const done = () => { if (route !== r) return; render(); if (r.v === "session" && r.turn) revealTurn(r.turn, !fromHistory); else quietTop(); };
+    const done = () => {
+      if (route !== r) return;
+      render();
+      if (fromHistory && Number.isFinite(r.scrollTop)) restoreScroll(r.scrollTop);
+      else if (r.v === "session" && r.turn) revealTurn(r.turn, !fromHistory);
+      else if (r.v === "session") openSessionAtEnd();
+      else quietTop();
+      syncJump();
+    };
     const p = load(r); if (p) p.then(done, done); else done();
   }
   window.addEventListener("popstate", (e) => {
@@ -350,7 +395,8 @@
   function revealTurn(id, flash) {
     const b = [...document.querySelectorAll(".turn")].find((x) => x.dataset.turn === id); if (!b) { quietTop(); return; }
     const place = () => { if (!b.isConnected) return; const gap = $("#topbar").offsetHeight + 8;
-      if (phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + b.getBoundingClientRect().top - gap)); else { const m = $("#main"); m.scrollTop += b.getBoundingClientRect().top - m.getBoundingClientRect().top - gap; } };
+      if (phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + b.getBoundingClientRect().top - gap)); else { const m = $("#main"); m.scrollTop += b.getBoundingClientRect().top - m.getBoundingClientRect().top - gap; }
+      syncJump(); saveHistoryScroll(); };
     place(); requestAnimationFrame(() => requestAnimationFrame(place));
     if (flash) { b.classList.add("flash"); setTimeout(() => b.classList.remove("flash"), 1500); }
   }
@@ -441,19 +487,60 @@
   }
   // Sessions match by name, repo, branch, machine, harness and the messages that started their turns.
   const sessMatch = (s, q) => !q || [s.name, s.repo, s.branch, MACHINE[s.machine], s.movedFrom ? MACHINE[s.movedFrom] : "", HARNESS[s.harness], s.role ? "role no repo" : "", ...(TURNS[s.id] ?? []).map((t) => t.start?.brief ?? t.u?.text ?? "")].join(" ").toLowerCase().includes(q.toLowerCase());
-  // The sidebar keeps a short list for quick switching: the 8 most recently active sessions (those matching the search
-  // box while something is typed there), then a link to the Sessions page. Enter in the search box opens that page.
+  const sessionChildren = () => {
+    const children = new Map();
+    for (const s of Object.values(SESS)) { const parent = parentOf(s.id); if (parent && SESS[parent]) { if (!children.has(parent)) children.set(parent, []); children.get(parent).push(s); } }
+    for (const xs of children.values()) xs.sort((a, b) => b.last - a.last);
+    return children;
+  };
+  const descendantsOf = (sid, children, out = [], seen = new Set([sid])) => {
+    for (const child of children.get(sid) ?? []) if (!seen.has(child.id)) { seen.add(child.id); out.push(child); descendantsOf(child.id, children, out, seen); }
+    return out;
+  };
+  const TREE_RANK = { wait: 0, work: 1, err: 2, idle: 3, done: 4 };
+  const urgentDescendant = (sid, children) => descendantsOf(sid, children).filter((s) => s.state in TREE_RANK).sort((a, b) => TREE_RANK[a.state] - TREE_RANK[b.state] || b.last - a.last)[0]?.state;
+  const defaultTreeOpen = (sid, children) => descendantsOf(sid, children).some((s) => s.state === "wait" || s.state === "work");
+  const matchesTree = (sid, children, seen = new Set()) => {
+    if (seen.has(sid)) return false;
+    seen.add(sid);
+    return sessMatch(SESS[sid], query) || (children.get(sid) ?? []).some((s) => matchesTree(s.id, children, seen));
+  };
+  // The sidebar keeps the 8 most recently active top-level sessions, with children nested beneath their parent.
+  function buildLaneItem(s, depth, children, rail) {
+    const kids = children.get(s.id) ?? [], allKids = descendantsOf(s.id, children), item = el("div", "treeitem");
+    item.dataset.id = s.id; item.setAttribute("role", "treeitem"); item.setAttribute("aria-label", s.name); item.tabIndex = 0;
+    const saved = treePrefs[s.id], open = typeof saved?.open === "boolean" ? saved.open : defaultTreeOpen(s.id, children);
+    if (kids.length && !rail) item.setAttribute("aria-expanded", String(open));
+    const line = el("div", "tree-row");
+    if (kids.length && !rail) {
+      const toggle = el("button", "tree-toggle"); toggle.type = "button"; toggle.dataset.treeToggle = s.id; toggle.setAttribute("aria-label", (open ? "Collapse " : "Expand ") + s.name); toggle.setAttribute("aria-expanded", String(open)); toggle.append(icon(I.chev));
+      toggle.addEventListener("click", (e) => { e.stopPropagation(); const value = item.getAttribute("aria-expanded") !== "true"; item.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-label", (value ? "Collapse " : "Expand ") + s.name); saveTreePref(s.id, value); });
+      line.append(toggle);
+    } else line.append(el("span", "tree-spacer"));
+    const row = el("button", "srow"); row.type = "button"; row.dataset.id = s.id; row.title = s.name;
+    row.setAttribute("aria-label", s.name + ", " + (STATE[s.state] ?? s.state) + ", " + (HARNESS[s.harness] ?? s.harness) + ", " + shortHost(s));
+    const target = route.v === "session" ? route.id : route.v === "trace" ? route.sid : null;
+    let ancestor = target, selected = false; const seen = new Set();
+    while (ancestor && SESS[ancestor] && !seen.has(ancestor)) { if (ancestor === s.id) { selected = true; break; } seen.add(ancestor); ancestor = parentOf(ancestor); }
+    if (selected) row.setAttribute("aria-current", "page");
+    const main = el("span", "srow-main"); main.append(dot(s.state), harnessMark(s.harness), el("span", "nm", s.name), el("span", "ag", ago(s.last)));
+    if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work"); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
+    if (kids.length && !rail && !open && allKids.length) { const summary = el("span", "tree-summary"); const state = urgentDescendant(s.id, children); if (state) summary.append(dot(state)); summary.append(String(allKids.length)); main.append(summary); }
+    const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").title = hostOf(s); meta.querySelector(".repo-short").title = branchOf(s);
+    row.append(main, meta); row.addEventListener("click", () => goSession(s.id)); line.append(row); item.append(line);
+    item.addEventListener("keydown", (e) => {
+      if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); item.querySelector(":scope > .tree-row .tree-toggle")?.click(); } }
+      else if ((e.key === "Enter" || e.key === " ") && e.target === item) { e.preventDefault(); goSession(s.id); }
+    });
+    if (kids.length && !rail) { const group = el("div", "tree-group"); group.dataset.depth = String(Math.min(depth + 1, 4)); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Sessions spawned by " + s.name); for (const child of kids) group.append(buildLaneItem(child, depth + 1, children, rail)); item.append(group); }
+    return item;
+  }
   function renderLanes() {
-    const lanes = Object.values(SESS).filter((s) => s.lane && sessMatch(s, query)).sort((a, b) => b.last - a.last);
-    const box = $("#lanes"); box.replaceChildren();
-    for (const s of lanes.slice(0, 8)) {
-      const r = el("button", "srow"); r.type = "button"; r.dataset.id = s.id;
-      if ((route.v === "session" && (route.id === s.id || parentOf(route.id) === s.id)) || (route.v === "trace" && route.sid === s.id)) r.setAttribute("aria-current", "page");
-      r.append(dot(s.state), el("span", "nm", s.name), el("span", "ag", ago(s.last)), el("span", "fx", [HARNESS[s.harness], MACHINE[s.machine], s.repo ?? "no repo"].join(" · ")));
-      r.addEventListener("click", () => goSession(s.id)); box.append(r);
-    }
-    if (!lanes.length) box.append(el("p", "ghead", "No sessions match"));
-    const all = el("button", "side-all", query ? "All matching sessions ›" : "All sessions ›"); all.type = "button"; all.id = "all-sessions"; all.addEventListener("click", () => go({ v: "sessions" })); box.append(all);
+    const children = sessionChildren(), lanes = Object.values(SESS).filter((s) => s.lane && !parentOf(s.id) && matchesTree(s.id, children)).sort((a, b) => b.last - a.last);
+    const box = $("#lanes"), more = $("#lanes-all"); box.replaceChildren(); more.replaceChildren();
+    for (const s of lanes.slice(0, 8)) box.append(buildLaneItem(s, 0, children, railMode && !phone.matches));
+    if (!lanes.length) { const empty = el("p", "ghead", "No sessions match"); empty.setAttribute("role", "none"); box.append(empty); }
+    const all = el("button", "side-all", query ? "All matching sessions ›" : "All sessions ›"); all.type = "button"; all.id = "all-sessions"; all.addEventListener("click", () => go({ v: "sessions" })); more.append(all);
     const q = $("#q"); if (document.activeElement !== q) q.value = query;
   }
 
@@ -465,27 +552,49 @@
   function renderTopbar(title, crumb, opts = {}) {
     const bar = $("#topbar"), s = opts.session; bar.replaceChildren(); bar.classList.remove("scrolled");
     bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("searching", !!(s && findOpen));
-    if (s && findOpen) { searchBar(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
+    if (s && findOpen) { searchBar(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
     const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); bar.append(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
-    if (s) { const hit = el("button", "hit"); hit.type = "button"; hit.setAttribute("aria-label", s.name + ": details"); hit.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(s, $("#more-btn")); }); t.append(hit); }
     if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
     const tt = el("span", "t", title); tt.title = title; l1.append(tt); t.append(l1);
-    if (opts.line2) { const l2 = el("div", "l2"); opts.line2(l2); t.append(l2); }
+    if (opts.line2) {
+      const l2 = el("div", "l2" + (s ? " session-meta" : ""));
+      if (s) { const hit = el("button", "meta-hit"); hit.type = "button"; hit.setAttribute("aria-label", s.name + ": open Session details"); hit.addEventListener("click", () => openSessionDetails(s)); l2.append(hit); }
+      opts.line2(l2); t.append(l2);
+      if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); });
+    }
     bar.append(t);
-    if (!s) { const account = accountWidget(false); if (account) bar.append(account); return; }
+    if (!s) { appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
     const fb = el("button", "ibtn"); fb.type = "button"; fb.setAttribute("aria-label", "Find in transcript"); fb.append(icon(I.search));
     fb.addEventListener("click", () => { findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
     const pop = el("div", "filters pop"); pop.hidden = !filterOpen;
     for (const [key, label] of [["messages", "Messages"], ["tools", "Tool steps"], ["thinking", "Thinking"]]) { const l = el("label"); const cb = el("input"); cb.type = "checkbox"; cb.checked = show[key]; cb.id = "f-" + key; cb.addEventListener("change", () => { show[key] = cb.checked; render(); }); l.append(cb, label); pop.append(l); }
-    const tb = el("button", "ibtn" + (show.messages && show.tools && show.thinking ? "" : " on")); tb.id = "filter-btn"; tb.type = "button"; tb.setAttribute("aria-label", "Filter transcript"); tb.setAttribute("aria-expanded", String(filterOpen)); tb.append(icon(I.filter));
+    const filtered = !(show.messages && show.tools && show.thinking);
+    const tb = el("button", "ibtn" + (filtered ? " on" : "")); tb.id = "filter-btn"; tb.type = "button"; tb.setAttribute("aria-label", "Filter transcript"); tb.setAttribute("aria-expanded", String(filterOpen)); tb.append(icon(I.filter));
     tb.addEventListener("click", () => { $(".session-menu")?.remove(); closeAccountMenu(); $("#more-btn")?.setAttribute("aria-expanded", "false"); filterOpen = pop.hidden; pop.hidden = !filterOpen; tb.setAttribute("aria-expanded", String(filterOpen)); });
-    const more = el("button", "ibtn"); more.id = "more-btn"; more.type = "button"; more.setAttribute("aria-label", "Session details and actions"); more.setAttribute("aria-expanded", "false"); more.append(icon(I.more)); more.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(s, more); });
-    // The dropdown hangs from the filter button's right edge, wherever the bar's padding and the buttons after it put it.
-    const place = () => { pop.style.right = Math.max(0, bar.getBoundingClientRect().right - tb.getBoundingClientRect().right) + "px"; };
+    const more = el("button", "ibtn" + (phone.matches && filtered ? " on" : "")); more.id = "more-btn"; more.type = "button"; more.setAttribute("aria-label", "Session details and actions"); more.setAttribute("aria-expanded", "false"); more.append(icon(I.more)); more.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(s, more); });
+    // On phones search and filter live in the ⋯ menu, and the filter hangs from that button.
+    const place = () => { const anchor = phone.matches ? more : tb; pop.style.right = Math.max(0, bar.getBoundingClientRect().right - anchor.getBoundingClientRect().right) + "px"; };
     tb.addEventListener("click", place);
-    bar.append(fb, tb, more, pop); if (filterOpen) place();
+    if (phone.matches) bar.append(more, pop); else bar.append(fb, tb, more, pop);
+    appendWideToggle(bar); if (filterOpen) place();
     const account = accountWidget(false); if (account) bar.append(account);
+  }
+  function appendWideToggle(bar) {
+    const b = el("button", "ibtn wide-toggle"); b.type = "button"; b.setAttribute("aria-label", "Wide reading mode"); b.setAttribute("aria-pressed", String(wideMode)); b.title = "Wide reading mode"; b.append(icon(I.wide));
+    b.addEventListener("click", () => setWideMode(!wideMode)); bar.append(b);
+  }
+  // State remains first; model, machine, branch, tools and tokens drop from the right until the line fits.
+  // The state word and turn count are the last readable values to go, leaving its dot on the narrowest screens.
+  function fitSessionLine(l2) {
+    const keep = new Set(["meta-state"]), droppable = [...l2.children].filter((n) => n.classList.contains("meta-item") && ![...n.classList].some((c) => keep.has(c)));
+    droppable.forEach((n) => { n.hidden = false; });
+    const stateValues = [...l2.querySelectorAll(".meta-state .meta-value")], sep = l2.querySelector(".meta-state .state-sep"); stateValues.forEach((n) => { n.hidden = false; }); if (sep) sep.hidden = false;
+    const fits = () => l2.scrollWidth <= l2.clientWidth + 1;
+    for (let i = droppable.length - 1; i >= 0 && !fits(); i--) droppable[i].hidden = true;
+    const errs = l2.querySelector(".errs"); if (!fits() && errs) errs.hidden = true;
+    if (!fits() && stateValues[1]) { stateValues[1].hidden = true; if (sep) sep.hidden = true; }
+    if (!fits() && stateValues[0]) stateValues[0].hidden = true;
   }
   function closeFilter() { if (!filterOpen) return; filterOpen = false; const p = $(".filters.pop"); if (p) p.hidden = true; $("#filter-btn")?.setAttribute("aria-expanded", "false"); }
   // Search takes over the bar: back, the field, and how many entries match. Back (or Escape) restores the bar.
@@ -498,14 +607,20 @@
     const c = el("span", "fcount", find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""); c.setAttribute("aria-live", "polite");
     bar.append(back, fr, c);
   }
-  // A session's summary line: state, errors (a jump to the first failed step), turns and calls, harness and model, machine, repo.
+  // A session's compact metadata line: state, model, machine, branch, tool calls, token usage.
   const sessionLine = (s) => (l2) => {
     const es = TX[s.id] ?? [], m = TXM[s.id], calls = m ? m.calls : es.filter((e) => e.k === "tool").length, errors = m ? m.errors : es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
-    const st = el("span", "stat " + s.state); st.append(dot(s.state), STATE[s.state]); l2.append(st);
+    const st = el("span", "meta-item meta-state"); st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", nT + (nT === 1 ? " turn" : " turns")));
     if (errors) { const j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")); j.type = "button"; j.setAttribute("aria-label", j.textContent + ": jump to the first failed step");
       j.addEventListener("click", (ev) => { ev.stopPropagation(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
-      l2.append(el("span", "sep", " · "), j); }
-    l2.append(el("span", "sep", " · "), el("span", "rest", [nT + (nT === 1 ? " turn" : " turns"), calls + (calls === 1 ? " call" : " calls"), (s.kind ? s.kind + " · " : "") + HARNESS[s.harness] + " · " + s.model, MACHINE[s.machine] + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : ""), s.repo ? where(s) : "No repo"].join(" · ")));
+      st.append(j); }
+    const model = el("span", "meta-item meta-model"); model.append(harnessMark(s.harness), el("span", "meta-value", shortModel(s.model))); model.title = s.model ?? "Unknown model";
+    const machine = el("span", "meta-item meta-machine"); machine.append(icon(I.machine), el("span", "meta-value", shortHost(s))); machine.title = hostOf(s);
+    const branch = el("span", "meta-item meta-branch"); branch.append(icon(I.branch), el("span", "meta-value", branchOf(s))); branch.title = branchOf(s);
+    const tools = el("span", "meta-item meta-tools"); tools.append(icon(I.wrench), el("span", "meta-value", String(calls))); tools.setAttribute("aria-label", calls + (calls === 1 ? " tool call" : " tool calls"));
+    const totalTokens = (s.tokens ?? []).reduce((sum, n) => sum + (Number(n) || 0), 0);
+    const tokens = el("span", "meta-item meta-tokens"); tokens.append(icon(I.tokens), el("span", "meta-value", tok(totalTokens))); tokens.title = totalTokens.toLocaleString() + " tokens";
+    l2.append(st, model, machine, branch, tools, tokens);
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
     const st = el("span", "stat " + (!up ? "err" : w ? "work" : "idle")); st.append(dot(!up ? "err" : w ? "work" : "idle"), !up ? "Not responding" : w ? "Up" : "Idle"); l2.append(st, el("span", "sep", " · "));
@@ -517,10 +632,20 @@
   function syncBarLine() { const y = phone.matches ? window.scrollY : $("#main").scrollTop; $("#topbar").classList.toggle("scrolled", y > 4); }
   window.addEventListener("scroll", syncBarLine, { passive: true });
   $("#main").addEventListener("scroll", syncBarLine, { passive: true });
+  window.addEventListener("resize", () => { const l2 = $("#topbar .l2.session-meta"); if (l2) fitSessionLine(l2); syncLayoutPrefs(); syncJump(); }, { passive: true });
   function toggleMenu(s, btn) {
     const ex = $(".session-menu"); if (ex) { ex.remove(); btn.setAttribute("aria-expanded", "false"); return; }
+    const filterWasOpen = phone.matches && filterOpen;
     closeAccountMenu();
     const m = el("div", "menu session-menu"); m.setAttribute("role", "menu");
+    if (phone.matches) {
+      const findItem = el("button"); findItem.type = "button"; findItem.setAttribute("role", "menuitem"); findItem.append(icon(I.search, "icon"), el("span", null, "Find in transcript"));
+      findItem.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
+      const filtered = !(show.messages && show.tools && show.thinking), filterItem = el("button"); filterItem.type = "button"; filterItem.setAttribute("role", "menuitem"); filterItem.append(icon(I.filter, "icon"), el("span", null, "Filter transcript"));
+      if (filtered) filterItem.append(el("span", "menu-note", "On"));
+      filterItem.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); const pop = $(".filters.pop"); if (!pop) return; filterOpen = filterWasOpen ? false : pop.hidden; pop.hidden = !filterOpen; if (filterOpen) { pop.style.right = Math.max(0, $("#topbar").getBoundingClientRect().right - btn.getBoundingClientRect().right) + "px"; pop.querySelector("input")?.focus(); } });
+      m.append(findItem, filterItem);
+    }
     const copy = el("button"); copy.type = "button"; copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command"));
     const cmd = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + s.id;
     copy.addEventListener("click", () => { navigator.clipboard?.writeText(cmd).then(() => { copy.lastChild.textContent = "Copied"; }, () => { copy.lastChild.textContent = cmd; }); });
@@ -529,6 +654,29 @@
     const dl = el("dl");
     for (const [k, v] of [["Model", s.model], ["Machine", MACHINE[s.machine] + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Tokens in / out", tok(s.tokens[0]) + " / " + tok(s.tokens[2])], ["Cached context", tok(s.tokens[1])], ["Session id", s.id]]) dl.append(el("dt", null, k), el("dd", "mono", v));
     m.append(dl); closeFilter(); $("#topbar").append(m); btn.setAttribute("aria-expanded", "true");
+  }
+  function openSessionDetails(s) {
+    $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeAccountMenu(); closeFilter();
+    const d = el("dialog", "session-details"); d.setAttribute("aria-labelledby", "session-details-title");
+    const head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose");
+    title.id = "session-details-title"; title.append(el("span", null, "Session details"));
+    close.type = "button"; close.setAttribute("aria-label", "Close session details"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
+    const body = el("div", "vb"), list = el("div", "detail-list"), moved = s.movedFrom ? " (moved from " + (MACHINE[s.movedFrom] ?? s.movedFrom) + ")" : "";
+    const rows = [
+      ["Harness", HARNESS[s.harness] ?? s.harness], ["Model", s.model ?? s.modelId ?? "Unknown model"],
+      ["Machine", (MACHINE[s.machine] ?? s.machine ?? "Unknown machine") + (hostOf(s) !== (MACHINE[s.machine] ?? s.machine) ? " · " + hostOf(s) : "") + moved],
+    ];
+    const directory = s.cwd ?? s.dir ?? s.directory;
+    if (directory != null && directory !== "") rows.push(["Directory", directory]);
+    rows.push([s.worktree ? "Worktree" : "Branch", branchOf(s)]);
+    if (s.pid != null && s.pid !== "") rows.push(["Process id", String(s.pid)]);
+    rows.push(["Session id", s.sessionId ?? s.id], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Last activity", clock(s.last)], ["Tokens in / out", tok(s.tokens?.[0] ?? 0) + " / " + tok(s.tokens?.[2] ?? 0)], ["Cached context", tok(s.tokens?.[1] ?? 0)]);
+    for (const [label, value] of rows) { const row = el("div", "detail-row"); row.append(el("span", "detail-label", label), el("span", "detail-value", String(value))); list.append(row); }
+    body.append(list); d.append(head, body); document.body.append(d);
+    d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
+    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); });
+    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
+    try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
   }
   document.addEventListener("click", (e) => {
     const account = $(".account-popover"); if (account && !account.parentElement.contains(e.target)) closeAccountMenu();
@@ -704,6 +852,27 @@
     page.append(transcript(sid));
   }
 
+  const thoughtText = (e) => String(e.text ?? "").trim();
+  const isPendingThought = (e) => !!(e.pending || e.status === "thinking");
+  const isMaskedThought = (e) => e.k === "think" && !isPendingThought(e) && !thoughtText(e);
+  function thoughtSeconds(e) {
+    if (Number.isFinite(e?.secs) && e.secs >= 0) return e.secs;
+    if (typeof e?.secs === "string") { const m = /^(\d+(?:\.\d+)?)s?$/.exec(e.secs.trim()); if (m) return Number(m[1]); }
+    return null;
+  }
+  function transcriptEntries(entries) {
+    const out = [];
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i]; if (e.k !== "think") { out.push(e); continue; }
+      const row = { ...e, displaySecs: thoughtSeconds(e) };
+      if (!isMaskedThought(e)) { out.push(row); continue; }
+      let j = i, sum = 0, measured = true;
+      while (j < entries.length && isMaskedThought(entries[j])) { const secs = thoughtSeconds(entries[j]); if (secs == null) measured = false; else sum += secs; j++; }
+      out.push({ ...row, displaySecs: measured ? Math.round(sum) : null, grouped: j - i }); i = j - 1;
+    }
+    return out;
+  }
+
   // What a tool call did: an icon and verb for its step row, and a phrase and nouns for a group summary
   // ("ran 2 commands, asked you 1 question"). An unknown tool keeps its own name ("TodoWrite 1 step").
   const RUN = ["run", "Ran", "ran", "command", "commands"], FIND = ["find", "Searched for", "searched", "time", "times"];
@@ -719,7 +888,7 @@
   const verb = (name) => toolInfo(name).slice(0, 2);
   function transcript(sid, opts = {}) {
     const sec = el("section", opts.nested ? "nested" : null); sec.setAttribute("aria-label", opts.nested ? SESS[sid].name + " transcript" : "Transcript"); Object.assign(sec.style, { display: "grid", gap: "10px", gridTemplateColumns: "minmax(0, 1fr)" });
-    const entries = opts.entries ?? TX[sid] ?? [];
+    const entries = transcriptEntries(opts.entries ?? TX[sid] ?? []);
     const turnMode = !opts.nested;
     // On a session page the transcript is a list of turns, each with its own entries; a nested one is a plain list.
     const box = el("div", turnMode ? "turns" : "tx"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);
@@ -752,11 +921,11 @@
       g.append(steps); tx.append(g); run = [];
     };
     // A turn block: who started it, the work, and how it ended. While finding or filtering, a turn left with nothing drops out.
-    const firsts = turnMode ? new Map((TURNS[sid] ?? []).map((t) => [t.entries[0], t])) : new Map(); let cur = null;
+    const firsts = turnMode ? new Map((TURNS[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t])) : new Map(); let cur = null;
     // A live update draws only the turns that changed (opts.only, by turn id).
-    const owner = opts.only ? new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id]))) : null;
+    const owner = opts.only ? new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : null;
     const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
-      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard")) { blk.remove(); return; }
+      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .think, .think-masked, .think-pending")) { blk.remove(); return; }
       const end = turnEnd(t); if (!end) return;
       const d = el("div", "turn-end"); const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st), end.text); d.append(st);
       if (t.out.length) d.append(traceBtn(t)); blk.append(d); };
@@ -767,11 +936,11 @@
       else if (h) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in), l, el("span", "tm", clock(h.at))); blk.append(hd); }
       tx = el("div", "tx"); blk.append(tx); box.append(blk); cur = { t, blk }; };
     for (const e of entries) {
-      if (owner && !opts.only.has(owner.get(e))) continue;
+      if (owner && !opts.only.has(owner.get(e.key))) continue;
       if (turnMode && isGap(e)) { closeTurn(); if (!find) box.append(el("div", "divider", e.text)); continue; }
-      if (firsts.has(e)) openTurn(firsts.get(e));
+      if (turnMode && firsts.has(e.key)) openTurn(firsts.get(e.key));
       // Entries that render nothing (empty thinking, hidden kinds) must not split a run of tool calls.
-      if (e.k === "think" && (!show.thinking || find || (!e.secs && !e.text))) continue;
+      if (e.k === "think" && (!show.thinking || find)) continue;
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
@@ -804,7 +973,15 @@
       flush();
       if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg user"), e); m.append(markdown(e.text)); tx.append(m); }
       else if (e.k === "a") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg assistant"), e); m.append(markdown(e.text)); tx.append(m); }
-      else if (e.k === "think") { if (!show.thinking || find || (!e.secs && !e.text)) continue; /* Claude Code stores most thinking empty: no marker without content or a duration */ const t = el("button", "think"); t.type = "button"; t.append(el("span", null, e.secs != null ? "Thought for " + e.secs + "s" : "Thought"), icon(I.chev, "chev")); tx.append(keyed(t, e)); }
+      else if (e.k === "think") {
+        if (isPendingThought(e)) { const pending = keyed(el("div", "think-pending"), e); pending.append(el("span", "spin"), el("span", null, "Thinking…")); tx.append(pending); }
+        else if (isMaskedThought(e)) { const label = e.displaySecs == null ? "Thought" : "Thought for " + e.displaySecs + "s"; tx.append(keyed(el("div", "think-masked", label), e)); }
+        else {
+          const group = el("div", "thought"), b = keyed(el("button", "think"), e), text = markdown(thoughtText(e), "think-text");
+          b.type = "button"; b.setAttribute("aria-expanded", "false"); b.append(el("span", null, e.displaySecs == null ? "Thought" : "Thought for " + Math.round(e.displaySecs) + "s"), icon(I.chev, "chev"));
+          text.hidden = true; b.addEventListener("click", () => { text.hidden = !text.hidden; b.setAttribute("aria-expanded", String(!text.hidden)); }); group.append(b, text); tx.append(group);
+        }
+      }
       else if (e.k === "harness") { if (!show.messages || find) continue; tx.append(keyed(el("div", "harness-note", "Harness text added before the prompt (" + e.label + ")"), e)); }
       else if (e.k === "end") { if (find) continue; tx.append(keyed(el("div", "divider", e.text), e)); }
       else if (e.k === "h") {
@@ -1137,7 +1314,12 @@
   // The sidebar search narrows the Recent list as you type; Enter opens the Sessions page with the same query.
   $("#q").addEventListener("input", (e) => { query = e.target.value.trim(); renderLanes(); });
   $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); query = e.target.value.trim(); go({ v: "sessions" }); } });
-  phone.addEventListener("change", () => { closeDrawer(true); if (route.v === "timeline") render(); });
+  phone.addEventListener("change", () => {
+    closeDrawer(true); syncLayoutPrefs();
+    if (route.v === "session" || route.v === "timeline") { const top = currentScroll(); render(); restoreScroll(top); }
+    else renderLanes();
+    const l2 = $("#topbar .l2"); if (l2?.classList.contains("session-meta")) fitSessionLine(l2); syncJump();
+  });
 
   // ---- Live updates (deliberate difference 3) --------------------------------------------------------------------------------
   // Every screen polls /api/model?since= every 2 s while the tab is visible, one request at a time: it backs off up to 30 s
@@ -1247,7 +1429,8 @@
     const st = capture(); $("#page").style.paddingBottom = "";
     if (r.v !== "session") { render(); restore(st); return; }
     const n = patchSession(dirty); restore(st, st.bottom);
-    if (!st.bottom && n) pill(n);
+    if (!st.bottom && n) LIVE.fresh += n;
+    syncJump();
   }
 
   // View state. A block's identity: its class and keys, or its own text when it has no key (a section heading).
@@ -1351,7 +1534,7 @@
   // are new.
   function patchSession(dirty) {
     tick(); const s = SESS[route.id], box = $("#page .turns");
-    const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .step, .hcard)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
+    const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .step, .hcard, .think, .think-masked, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
     const before = keys();
     // Only the changed turns are drawn again, unless the turns shown no longer match the index or nothing was shown.
     const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some((b) => !TURN.has(b.dataset.turn));
@@ -1359,7 +1542,7 @@
     else if (dirty.size) morphTurns(box, transcript(route.id, { only: dirty }).querySelector(".turns"), dirty);
     const h1 = $("#page .ph h1"); if (h1) h1.textContent = s.name;
     const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.title = s.name; }
-    const l2 = $("#topbar .l2"); if (l2) { l2.replaceChildren(); sessionLine(s)(l2); }
+    const l2 = $("#topbar .l2"); if (l2) { l2.replaceChildren(); const hit = el("button", "meta-hit"); hit.type = "button"; hit.setAttribute("aria-label", s.name + ": open Session details"); hit.addEventListener("click", () => openSessionDetails(s)); l2.append(hit); sessionLine(s)(l2); requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); }); }
     const fc = $("#topbar .fcount"); if (fc) { const n = find ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : 0; fc.textContent = find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""; }
     renderNav(); renderLanes(); ticker();
     let n = 0; for (const k of keys()) if (!before.has(k)) n++;
@@ -1403,16 +1586,24 @@
     });
   }
 
-  // "N new ↓": entries that arrived below a reader who had scrolled up. Tapping it goes to the end; reaching the end clears it.
-  function pill(n) {
-    LIVE.fresh += n; let p = $(".newpill");
-    if (!p) { p = el("button", "newpill"); p.type = "button"; p.addEventListener("click", () => { const sc = scroller(); sc.scrollTop = sc.scrollHeight; clearPill(); }); document.body.append(p); }
-    p.textContent = LIVE.fresh + " new ↓"; p.setAttribute("aria-label", LIVE.fresh + (LIVE.fresh === 1 ? " new entry" : " new entries") + ": go to the latest");
+  const jumpButton = el("button", "jump-bottom"); jumpButton.type = "button"; jumpButton.id = "jump-bottom"; jumpButton.setAttribute("aria-label", "Jump to bottom of transcript"); jumpButton.hidden = true; document.body.append(jumpButton);
+  function scrollMetrics() {
+    if (phone.matches) return { top: window.scrollY, height: document.documentElement.scrollHeight, viewport: window.innerHeight, gap: Math.max(0, document.documentElement.scrollHeight - window.innerHeight - window.scrollY) };
+    const m = $("#main"); return { top: m.scrollTop, height: m.scrollHeight, viewport: m.clientHeight, gap: Math.max(0, m.scrollHeight - m.clientHeight - m.scrollTop) };
   }
-  function clearPill() { LIVE.fresh = 0; $(".newpill")?.remove(); }
-  const atEnd = () => { if (!LIVE.fresh) return; const sc = scroller(); if (sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80) clearPill(); };
-  window.addEventListener("scroll", atEnd, { passive: true });
-  $("#main").addEventListener("scroll", atEnd, { passive: true });
+  function scrollToEnd(behavior = "smooth") { if (phone.matches) window.scrollTo({ top: document.documentElement.scrollHeight, behavior }); else { const m = $("#main"); m.scrollTo({ top: m.scrollHeight, behavior }); } }
+  function syncJump() {
+    if (route.v !== "session") { LIVE.fresh = 0; jumpButton.hidden = true; return; }
+    const { gap } = scrollMetrics(); if (gap <= 80) LIVE.fresh = 0;
+    jumpButton.hidden = gap <= 80; jumpButton.replaceChildren();
+    if (LIVE.fresh) jumpButton.append(el("span", "new-count", LIVE.fresh + " new"));
+    jumpButton.append(icon(I.down));
+    jumpButton.setAttribute("aria-label", LIVE.fresh ? "Jump to bottom; " + LIVE.fresh + " new entries" : "Jump to bottom of transcript");
+  }
+  function clearNewEntries() { LIVE.fresh = 0; jumpButton.hidden = true; }
+  jumpButton.addEventListener("click", () => scrollToEnd("smooth"));
+  window.addEventListener("scroll", syncJump, { passive: true });
+  $("#main").addEventListener("scroll", syncJump, { passive: true });
 
   // Every second: a running step's elapsed time, from its session's activity[3] (the call's start), and a running row's age.
   // A clock that stands still (the checks pin it) changes nothing.
