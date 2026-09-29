@@ -59,8 +59,12 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
+      # --no-deps: lint the workspace's own crates only. Clippy would
+      # otherwise lint vendor/tiny_http too, since a path dependency's lints
+      # aren't capped the way a registry crate's are, and that code is kept
+      # as published (vendor/tiny_http/SEMON-PATCH.md).
       - name: cargo clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --locked -- --no-deps -D warnings
 
       - name: cargo test
         run: cargo test --locked
