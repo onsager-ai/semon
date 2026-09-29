@@ -372,6 +372,9 @@ const REF_BASE = (process.env.SEMON_REF_BASE ?? "").replace(/\/$/, ""), REF_TOKE
 const REGIONS = MAP.regions ?? [];
 const regionsOf = (name) => REGIONS.filter((r) => r.screens.some((x) => (x.endsWith("-") ? name.startsWith(x) : name === x)));
 async function regionShot(page, region) {
+  // A region that does not depend on how far the page is scrolled (the bar, whose border shows once it is) is taken at the top, so a
+  // pending page that happens to be a few pixels taller on one side cannot change it.
+  if (region.top) { await page.evaluate(() => { window.scrollTo(0, 0); const main = document.querySelector("#main"); if (main) main.scrollTop = 0; }); await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))); await page.waitForTimeout(120); }
   if (region.open) { await page.click(region.open); await page.waitForTimeout(200); }
   const target = page.locator(region.selector).first();
   await target.waitFor({ state: "visible", timeout: 3000 });

@@ -21,6 +21,7 @@
     {
       "name": "topbar",
       "selector": "#topbar",
+      "top": true,
       "screens": [
         "home",
         "sessions",

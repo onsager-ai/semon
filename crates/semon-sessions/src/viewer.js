@@ -497,6 +497,7 @@
 
   // ---- State & navigation ---------------------------------------------------------------
   const phone = window.matchMedia("(max-width: 760px)");
+  let route = { v: "home" }; // (before the layout preferences, which read it)
   let wideMode = false, railMode = false, treePrefs = {};
   try { wideMode = localStorage.getItem("semon.wide") === "1"; } catch {}
   try { railMode = !SIDEBAR_ONLY && localStorage.getItem("semon.rail") === "1"; } catch {} // the rail is the viewer's own layout: an embedding page keeps its sidebar whole
@@ -519,7 +520,7 @@
   }
   // An embedding page's sidebar has no rail and no toggle for it (shell::session_sidebar): the toggle is then a detached button.
   const railToggle = $("#rail-toggle") ?? el("button"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
-  let route = { v: "home" }; let groupBy = "recent"; let query = ""; let focusSessionsSearchOnRender = null; let analyticsRange = 7, analyticsMeasure = "hours";
+  let groupBy = "recent"; let query = ""; let analyticsRange = 7, analyticsMeasure = "hours";
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
   let pendingSessionOpen = null, pendingFlashHandoff = null;
   let accountOpen = false;

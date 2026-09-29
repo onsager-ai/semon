@@ -355,7 +355,7 @@ export default async function tooltipCheck(browser) {
         await route.fulfill({ response, json: body });
       });
       results[tag] = {};
-      for (const [name, selector] of [["a badge in the top bar", "#topbar .meta-tokens"], ["a row's host in the sidebar", "#lanes .srow-meta .host"]]) {
+      for (const [name, selector] of [["a badge in the top bar", "#topbar .meta-line > span.lab[data-tip]"], ["a row's host in the sidebar", "#lanes .srow-meta .host"]]) {
         await away(page); await page.waitForTimeout(450);
         const t = await hover(page, selector, 1500);
         r.expect(t != null, tag + ": " + name + " never showed a tooltip");
