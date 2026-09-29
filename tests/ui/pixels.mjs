@@ -81,8 +81,88 @@ const THOUGHT_LINES = [
 ];
 // Parents show the API-equivalent cost of their own session and descendant runs, as the served viewer does.
 const COST_LINES = [
+  [`  const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cacheWrite", "Cache write"], ["cacheRead", "Cache read"]];
+  const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
+  const usageTotal = (s) => Object.values(s.tokensByModel ?? {}).reduce((sum, m) => sum + TOKEN_KINDS.reduce((n, [k]) => n + (Number(m[k]) || 0), 0), 0);
+  function costForSessions(sessions) {
+    const unknown = new Set(), models = new Map(), by_day = {}; let knownUsd = 0, allPriced = true;
+    for (const s of sessions) {
+      const cost = s.cost ?? {};
+      if (cost.usd == null) allPriced = false; else knownUsd += Number(cost.usd) || 0;
+      for (const modelId of cost.unpriced_models ?? []) unknown.add(modelId);
+      for (const [day, amount] of Object.entries(cost.by_day ?? {})) by_day[day] = (by_day[day] ?? 0) + (Number(amount) || 0);
+      for (const [modelId, model] of Object.entries(cost.by_model ?? {})) {
+        const current = models.get(modelId) ?? { modelId, kinds: Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), usd: 0, priced: true };
+        if (model.usd == null) current.priced = false; else current.usd += Number(model.usd) || 0;
+        for (const [key] of TOKEN_KINDS) { current.kinds[key].tokens += Number(model.tokens?.[key]) || 0; current.kinds[key].usd += Number(model.usd_by_kind?.[key]) || 0; }
+        models.set(modelId, current);
+      }
+    }
+    return { usd: allPriced && !unknown.size ? knownUsd : null, knownUsd, models: [...models.values()], unknown: [...unknown].sort(), by_day };
+  }
+  const costForSession = (sid, includeRuns = false) => costForSessions(SESS[sid] ? [SESS[sid], ...(includeRuns ? descendantsOf(sid, sessionChildren()) : [])] : []);
+  const costText = (cost) => cost.unknown.length || cost.usd == null ? "—" : asMoney(cost.usd);
+  function sessionCostInRange(s, from, to) {
+    const cost = s.cost ?? {}, days = Object.entries(cost.by_day ?? {}).filter(([day]) => { const start = Date.parse(day + "T00:00:00.000Z"); return Number.isFinite(start) && start < to && start + DAY_MS > from; });
+    const unknown = days.length ? cost.unpriced_models ?? [] : [];
+    return { usd: unknown.length ? null : days.reduce((sum, [, amount]) => sum + (Number(amount) || 0), 0), unknown, hasData: days.length > 0 };
+  }
+  function analyticsCost(rows, from, to) {
+    const unknown = new Set(); let usd = 0;
+    for (const row of rows) { const cost = sessionCostInRange(row.s, from, to); if (!cost.hasData) continue; usd += Number(cost.usd) || 0; cost.unknown.forEach((model) => unknown.add(model)); }
+    return { usd: unknown.size ? null : usd, unknown: [...unknown] };
+  }
+  `, `  const TOTAL_TOKEN_KINDS = ["input", "output", "cacheWrite", "cacheRead"];
+  const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cache_read", "Cache read"], ["cache_write_5m", "Cache write · 5m"], ["cache_write_1h", "Cache write · 1h"], ["web_search", "Web search"]];
+  const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
+  const usageTotal = (s) => Object.values(s.tokensByModel ?? {}).reduce((sum, m) => sum + TOTAL_TOKEN_KINDS.reduce((n, k) => n + (Number(m[k]) || 0), 0), 0);
+  function costForSessions(sessions) {
+    const unknown = new Set(), models = new Map(), by_day = {}; let knownUsd = 0, allPriced = true;
+    for (const s of sessions) {
+      const cost = s.cost ?? {};
+      if (cost.usd == null) allPriced = false; else knownUsd += Number(cost.usd) || 0;
+      for (const modelId of cost.unpriced_models ?? []) unknown.add(modelId);
+      for (const [day, amount] of Object.entries(cost.by_day ?? {})) by_day[day] = (by_day[day] ?? 0) + (Number(amount) || 0);
+      for (const [modelId, model] of Object.entries(cost.by_model ?? {})) {
+        const current = models.get(modelId) ?? { modelId, kinds: Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), usd: 0, priced: true };
+        if (model.usd == null) current.priced = false; else current.usd += Number(model.usd) || 0;
+        for (const [key] of TOKEN_KINDS) { current.kinds[key].tokens += Number(model.tokens?.[key]) || 0; current.kinds[key].usd += Number(model.usd_by_kind?.[key]) || 0; }
+        models.set(modelId, current);
+      }
+    }
+    return { usd: allPriced && !unknown.size ? knownUsd : null, knownUsd, models: [...models.values()], unknown: [...unknown].sort(), by_day };
+  }
+  const costForSession = (sid, includeRuns = false) => costForSessions(SESS[sid] ? [SESS[sid], ...(includeRuns ? descendantsOf(sid, sessionChildren()) : [])] : []);
+  const costText = (cost) => cost.unknown.length || cost.usd == null ? "—" : asMoney(cost.usd);
+  function sessionCostInRange(s, from, to) {
+    const cost = s.cost ?? {}, days = Object.entries(cost.by_day ?? {}).filter(([day]) => { const start = Date.parse(day + "T00:00:00.000Z"); return Number.isFinite(start) && start < to && start + DAY_MS > from; });
+    const unknown = days.length ? cost.unpriced_models ?? [] : [];
+    return { usd: unknown.length ? null : days.reduce((sum, [, amount]) => sum + (Number(amount) || 0), 0), unknown, hasData: days.length > 0 };
+  }
+  function analyticsCost(rows, from, to) {
+    const unknown = new Set(); let usd = 0;
+    for (const row of rows) { const cost = sessionCostInRange(row.s, from, to); if (!cost.hasData) continue; usd += Number(cost.usd) || 0; cost.unknown.forEach((model) => unknown.add(model)); }
+    return { usd: unknown.size ? null : usd, unknown: [...unknown] };
+  }
+  `],
   ['    const cost = costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", cost.unknown.length ? "—" : shortMoney(cost.usd))); costItem.title = COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));',
     '    const directRunsForCost = childSessions(s.id), descendantRunsForCost = descendantsOf(s.id, sessionChildren()), cost = directRunsForCost.length ? costForSessions([s, ...descendantRunsForCost]) : costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", (directRunsForCost.length ? "incl. runs " : "") + (cost.unknown.length ? "—" : shortMoney(cost.usd)))); costItem.title = "API-equivalent cost. " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + (directRunsForCost.length ? ", including runs" : "") + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));'],
+  ['    const costRows = rows.filter((r) => inRange(r.costAt, from, to)).map((r) => ({ row: r, cost: costForSession(r.id) }));',
+    '    const costRange = analyticsCost(rows, from, to);'],
+  ['    const costUnknown = [...new Set(costRows.flatMap((x) => x.cost.unknown))];',
+    '    const costUnknown = costRange.unknown;'],
+  ['      longestCurrent: current[0] ?? null, waitBy, costRows, costUnknown,\n      apiCost: costUnknown.length ? null : costRows.reduce((sum, x) => sum + x.cost.knownUsd, 0),',
+    '      longestCurrent: current[0] ?? null, waitBy, costUnknown,\n      apiCost: costRange.usd,'],
+  ['    const bins = Array.from({ length: count }, () => ({ claude: 0, codex: 0 })), unpriced = new Set();\n    for (const row of rows) {\n      if (!inRange(row.costAt, from, to)) continue; const cost = costForSession(row.id); if (cost.usd == null) { cost.unknown.forEach((m) => unpriced.add(m)); continue; }\n      const at = Math.min(count - 1, Math.floor((row.costAt - from) / (to - from) * count)); bins[at][row.s.harness] += cost.usd;\n    }',
+    '    const bins = Array.from({ length: count }, () => ({ claude: 0, codex: 0 })), unpriced = new Set();\n    for (const row of rows) for (const [day, amount] of Object.entries(row.s.cost?.by_day ?? {})) {\n      const start = Date.parse(day + "T00:00:00.000Z"), end = start + DAY_MS, overlapStart = Math.max(start, from), overlapEnd = Math.min(end, to);\n      if (!Number.isFinite(start) || overlapStart >= overlapEnd) continue;\n      for (const model of row.s.cost?.unpriced_models ?? []) unpriced.add(model);\n      const at = overlapStart + (overlapEnd - overlapStart) / 2, index = Math.min(count - 1, Math.floor((at - from) / (to - from) * count)); bins[index][row.s.harness] += Number(amount) || 0;\n    }'],
+  ['      const ms = busyMsIn(row, from, to); if (!ms && !inRange(row.startedAt, from, to)) continue;\n      const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);',
+    '      const ms = busyMsIn(row, from, to), c = sessionCostInRange(row.s, from, to); if (!ms && !inRange(row.startedAt, from, to) && !c.hasData) continue;\n      const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);'],
+  ['      if (inRange(row.costAt, from, to)) { const c = costForSession(row.id); g.cost += c.knownUsd; c.unknown.forEach((x) => g.unknown.add(x)); }',
+    '      if (c.hasData) { g.cost += Number(c.usd) || 0; c.unknown.forEach((x) => g.unknown.add(x)); }'],
+  ['    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", value(item))); if (item.cost?.unknown.length) b.append(el("span", "no-price", "no price for " + item.cost.unknown.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); }',
+    '    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", value(item))); if (item.cost?.unknown.length) b.append(el("span", "no-price", "no price for " + item.cost.unknown.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); }'],
+  ['    const costTop = all.filter((r) => inRange(r.costAt, from, to)).map((r) => { const cost = costForSession(r.id); return { ...r, cost, value: cost.usd }; }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5);',
+    '    const costTop = all.map((r) => { const rangeCost = sessionCostInRange(r.s, from, to), cost = { ...rangeCost, unknown: rangeCost.unknown }; return { ...r, cost, value: cost.usd }; }).filter((r) => r.cost.hasData).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5);'],
 ];
 // Port mode keeps the served result status and read behavior so the image comparison covers the chrome faithfully.
 const RESULT_LINES = [
@@ -137,9 +217,8 @@ function portReference(D) {
   const hhmm = (t) => new Date(t).toISOString().slice(11, 16);
   const asIso = (t) => new Date(t).toISOString();
   const TX = {};
-  const H = D.H.map((h) => ({ ...h, portStatus: h.status, ...(h.kind === "toyou" && h.status === "new" ? { status: "wait" } : {}) }));
+  const H = D.H.map((h) => ({ ...h, portStatus: h.status }));
   for (const [sid, es] of Object.entries(D.TX)) TX[sid] = es.map((e) => (e.ret ? { k: "end", text: "Returned to " + D.SESS[e.ret.to].name + (e.ret.failed ? " · failed" : "") + " · " + hhmm(e.ret.at) } : e));
-  const PRICING = Object.fromEntries(Object.entries(D.model.pricing?.models ?? {}).map(([id, p]) => [id, { input: p.input, output: p.output, cacheWrite: p.cache_write, cacheRead: p.cache_read }]));
   const SESS = Object.fromEntries(Object.entries(D.SESS).map(([id, source]) => {
     const s = { ...source, id, modelId: Object.keys(source.tokens_by_model ?? {})[0] ?? source.model };
     s.tokensByModel = Object.fromEntries(Object.entries(source.tokens_by_model ?? {}).map(([model, usage]) => [model, { input: usage.input, output: usage.output, cacheWrite: usage.cache_write, cacheRead: usage.cache_read }]));
@@ -153,7 +232,7 @@ function portReference(D) {
   const block = ["  const NOW = " + D.NOW + ";", "  const MACHINE = " + J(D.MACHINE) + ";", "  const MACHINE_UP = " + J(D.MACHINE_UP) + ";",
     "  const MACHINE_LAST = " + J(D.MACHINE_LAST ?? {}) + ";", "  const ADMIN = " + J(D.ADMIN ?? null) + ";",
     '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(SESS) + ";",
-    "  const API_PRICE = " + J(PRICING) + ";", "  const H = " + J(H) + ";", "  const SEEN_RESULTS = new Set();", "  const markSeenResults = (handoffs) => { for (const h of handoffs) if (h.kind === \"toyou\" && h.ask === \"result\") SEEN_RESULTS.add(h.id); };", "  const THREADS = {};", "  const TX = " + J(TX) + ";", "  const TXM = " + J(D.TXM ?? {}) + ";", ""].join("\n");
+    "  const API_PRICE = {};", "  const H = " + J(H) + ";", "  const SEEN_RESULTS = new Set();", "  const markSeenResults = (handoffs) => { for (const h of handoffs) if (h.kind === \"toyou\" && h.ask === \"result\") SEEN_RESULTS.add(h.id); };", "  const THREADS = {};", "  const TX = " + J(TX) + ";", "  const TXM = " + J(D.TXM ?? {}) + ";", ""].join("\n");
   let html = MOCKUP.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + MOCKUP.slice(end);
   const styleEnd = html.lastIndexOf("</style>");
   if (styleEnd < 0) throw new Error("mockup style block moved");

@@ -44,12 +44,8 @@ function align(a, b) {
 export function gaps({ model, tx }) {
   const S = sample(), out = [];
   const say = (x) => out.push(x);
-  const priceFields = (price) => ({ input: price.input, output: price.output, cacheWrite: price.cache_write ?? price.cacheWrite, cacheRead: price.cache_read ?? price.cacheRead });
-  for (const [id, price] of Object.entries(S.API_PRICE)) {
-    const served = model.pricing?.models?.[id];
-    if (!served) say("price " + id + ": not served");
-    else if (J(price) !== J(priceFields(served))) say("price " + id + ": sample " + J(price) + ", served " + J(priceFields(served)));
-  }
+  // The sample's API_PRICE is only for its static illustration. The served viewer now reads exact per-session `cost`;
+  // pricing and token rates are no longer compared as frontend inputs.
   // Machines.
   const sampleMachines = Object.values(S.MACHINE), servedMachines = [model.machine.name];
   for (const m of sampleMachines) if (!servedMachines.includes(m)) say("machine " + m + ": not served");
@@ -63,7 +59,7 @@ export function gaps({ model, tx }) {
     cmp("movedFrom", s.movedFrom, v.movedFrom); cmp("model", s.model, v.model); cmp("state", s.state, v.state); cmp("tokens", s.tokens, v.tokens);
     const parent = S.H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === id && h.from !== id && (h.kind === "spawn" || s.kind === "Relayed" || !s.lane))?.from;
     cmp("parent", parent, v.parent);
-    const expectedTokens = s.tokensByModel ?? {};
+    const expectedTokens = Object.fromEntries(Object.entries(s.tokensByModel ?? {}).map(([modelId, usage]) => [modelId, { input: usage.input, output: usage.output, cacheWrite: usage.cacheWrite, cacheRead: usage.cacheRead }]));
     const actualTokens = Object.fromEntries(Object.entries(v.tokens_by_model ?? {}).map(([modelId, usage]) => [modelId, { input: usage.input, output: usage.output, cacheWrite: usage.cache_write, cacheRead: usage.cache_read }]));
     cmp("tokens_by_model", expectedTokens, actualTokens);
     if (s.rate_limits) {

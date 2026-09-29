@@ -435,7 +435,10 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .hcard .result { grid-column: 2 / 4; font-size: 13px; color: var(--muted); }
 .hcard .result b { font-weight: 500; color: var(--ink-2); }
 @media (hover: hover) { .hcard:hover .ln .who { color: var(--accent); } }
-.hcard.toyou { --h: var(--wait); }
+.hcard.toyou { --h: var(--line); }
+.hcard.toyou.waiting { --h: var(--wait); }
+.hcard.toyou.answered { --h: var(--line); background: none; }
+.hcard.toyou.answered > svg, .hcard.toyou.answered .ln, .hcard.toyou.answered .ln .who, .hcard.toyou.answered .brief, .hcard.toyou.answered .answer, .hcard.toyou.answered .stat { color: var(--muted); }
 .hcard.move { --h: var(--accent); }
 /* The relay or brief that starts a turn: just its text. The turn header already says who sent it. */
 .hcard.start { grid-template-columns: minmax(0, 1fr); }
@@ -734,11 +737,13 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     "gpt-6-luna": { input: .1, output: .5, cacheWrite: .125, cacheRead: .01 },
   };
   const CACHE_WRITE_M = { principal: .12, harbor: .2, "h-codex": .06, quill: .08, "q-codex": .04, deps: .03 };
+  const CACHE_WRITE_1H_M = { principal: .05 };
   for (const s of Object.values(SESS)) {
     s.modelId = s.modelId ?? (s.harness === "codex" ? s.model : "claude-" + String(s.model).replace(/^opus-/, "opus-").replace(/^sonnet-/, "sonnet-").replace(/^haiku-/, "haiku-").replace(/\./g, "-"));
     const [input = 0, cached = 0, output = 0] = s.tokens ?? [];
     const write = Math.min(cached, CACHE_WRITE_M[s.id] ?? 0);
-    s.tokensByModel = s.tokensByModel ?? { [s.modelId]: { input: Math.round(input * 1e6), output: Math.round(output * 1e6), cacheWrite: Math.round(write * 1e6), cacheRead: Math.round((cached - write) * 1e6) } };
+    const write1h = Math.min(write, CACHE_WRITE_1H_M[s.id] ?? 0);
+    s.tokensByModel = s.tokensByModel ?? { [s.modelId]: { input: Math.round(input * 1e6), output: Math.round(output * 1e6), cacheWrite: Math.round(write * 1e6), cacheWrite1h: Math.round(write1h * 1e6), cacheRead: Math.round((cached - write) * 1e6) } };
   }
 
   // Handoffs. kind: ask (you → session), spawn (session → subagent / Codex run), relay (lane → lane),
@@ -954,7 +959,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     if (h.kind === "relay") return viewer === h.to ? [I.in, [el("span", "verb", "Relay from "), W(h.from)]] : [I.out, [W(h.from), el("span", "verb", " relayed to "), W(h.to)]];
     if (h.kind === "move") return [I.move, [el("span", "verb", "Semon moved "), W(h.to), el("span", "verb", " from " + MACHINE[h.fromMachine] + " to " + MACHINE[h.toMachine])]];
     const what = { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h.ask];
-    return [h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from), el("span", "verb", what)]];
+    const answered = h.status === "done" && (h.ask === "question" || h.ask === "decision");
+    return [answered ? I.done : h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from), el("span", "verb", what)]];
   }
   const statWord = (h) => ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
 
@@ -1718,7 +1724,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   function handoffCard(h, viewer, start) {
     const other = h.kind === "move" ? null : viewer === h.from ? h.to : h.from;
     const child = h.kind === "spawn" && viewer === h.from ? SESS[h.to] : null;
-    const c = el("div", "hcard " + (child ? "child-card " + hcls(h.to) : h.kind === "toyou" ? "toyou" : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
+    const answered = h.kind === "toyou" && h.status === "done" && (h.ask === "question" || h.ask === "decision");
+    const c = el("div", "hcard " + (child ? "child-card " + hcls(h.to) : h.kind === "toyou" ? "toyou" + (h.status === "wait" ? " waiting" : "") + (answered ? " answered" : "") : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
     const [ic, parts] = sentence(h, viewer);
     if (child) { c.append(childKindChip(child)); const ln = el("span", "ln", child.name); ln.append(el("span", "verb", " · " + (child.kind ?? HARNESS[child.harness]))); c.append(ln); }
     else { c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln); }

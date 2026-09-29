@@ -17,7 +17,7 @@
   },
   {
     "gap": "session advisor.state: sample \"idle\", served \"done\"",
-    "why": "The model has no idle-after-a-reply state: a live session whose last message is a reply is waiting on you (a result), and one that exited is done. Advisor exited."
+    "why": "An exited Advisor session is done in the served model; the sample keeps its separate idle state. Results are new and read or unread per device (#26), rather than making the session wait."
   },
   {
     "gap": "session quill.machine: sample \"mac-studio\", served \"laptop\"",
@@ -57,7 +57,7 @@
   },
   {
     "gap": "handoff h14.ask: sample \"decision\", served \"result\"",
-    "why": "The model's messages to you are questions (AskUserQuestion) and results (a live session's last message); \"decision\" isn't in the logs."
+    "why": "This log contains an assistant reply that the model attributes as a result, not an AskUserQuestion decision prompt."
   },
   {
     "gap": "handoff h15 (ask you→deps at 740): not served",
@@ -65,7 +65,7 @@
   },
   {
     "gap": "handoff h18 (toyou result ledger→you at 482): not served",
-    "why": "A result for you exists only while its session is live and waiting; ledger exited, so its last message is a reply."
+    "why": "The ledger reply follows a turn with a subagent handback, so the model cannot attribute it to a direct result for you. Results that are identified are served as new and read or unread per device (#26)."
   },
   {
     "gap": "tx harbor: sample entry not served: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"cargo test -p harbor-sync\",\"ok\":false,\"secs\":\"38.2s\",\"in\":\"cd ~/work/harbor && RUST_BACKTRACE=1 cargo test -p harbor-sync -- --test-threads=4\",\"out\":\"running 128 tests\\ntest queue::enqueue_basic ... ok\\ntest queue::enqueue_many ... ok\\ntest queue::dequeue_empty ... ok\\ntest queue::dequeue_order ... ok\\ntest queue::retry_backoff ... FAILED\\ntest queue::retry_limit ... ok\\ntest queue::retry_jitter ... ok\\ntest queue::dead_letter ... ok\\ntest queue::visibility_timeout ... ok\\ntest queue::ack_twice ... ok\\ntest store::open_fresh ... ok\\ntest store::open_existing ... ok\\ntest store::migrate_v3 ... ok\\ntest store::migrate_v4 ... ok\\ntest store::compact ... ok\\ntest store::crash_recovery ... ok\\ntest sync::push_one ... ok\\ntest sync::push_batch ... ok\\ntest sync::pull_since ... ok\\ntest sync::pull_gap ... ok\\ntest sync::conflict_lww ... ok\\ntest sync::conflict_merge ... ok\\ntest sync::tombstone ... ok\\ntest sync::clock_skew ... ok\\ntest net::connect_timeout ... ok\\ntest net::tls_reject ... ok\\ntest net::reconnect ... ok\\ntest net::backpressure ... ok\\n...\\n\\nfailures:\\n\\n---- queue::retry_backoff stdout ----\\nseed 0x5f3a: expected 3 attempts, got 4\\nthread 'queue::retry_backoff' panicked at crates/sync/src/queue.rs:212:9:\\nassertion `left == right` failed\\n  left: 4\\n right: 3\\n\\ntest result: FAILED. 127 passed; 1 failed\"}",
@@ -77,7 +77,7 @@
   },
   {
     "gap": "tx principal: served entry not in the sample: {\"k\":\"a\",\"text\":\"Sweep done: 2 CI failures (quill is real, ledger was flaky), 5 open PRs, and the SQLite queue move is deferred on Advisor's advice.\"}",
-    "why": "A result waiting for you is the session's last message, so that message is served too, just before its card; the sample draws only the card."
+    "why": "The model serves the assistant reply in the transcript as well as its result card; the sample draws only the card. Results are new and read or unread per device (#26)."
   },
   {
     "gap": "tx advisor: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to Principal · 09:45\"}",
@@ -105,7 +105,7 @@
   },
   {
     "gap": "tx atlas: served entry not in the sample: {\"k\":\"a\",\"text\":\"One tool call didn't finish before the move: `terraform apply -auto-approve`. Check the real infrastructure state before I resume.\"}",
-    "why": "A result waiting for you is the session's last message, so that message is served too, just before its card; the sample draws only the card."
+    "why": "The model serves the assistant reply in the transcript as well as its result card; the sample draws only the card. Results are new and read or unread per device (#26)."
   },
   {
     "gap": "tx deps: sample entry not served: {\"k\":\"h\",\"id\":\"h15\"}",
@@ -117,31 +117,31 @@
   },
   {
     "gap": "tx ledger: sample entry not served: {\"k\":\"h\",\"id\":\"h18\"}",
-    "why": "A result for you exists only while its session is live and waiting; ledger exited, so its last message is a reply."
+    "why": "The ledger reply follows a turn with a subagent handback, so the model cannot attribute it to a direct result for you. Results that are identified are served as new and read or unread per device (#26)."
   },
   {
     "gap": "tx ledger: served entry not in the sample: {\"k\":\"a\",\"text\":\"Rounding now happens once, after summing. 42 tests pass. Committed on `fix/rounding`.\"}",
-    "why": "A result for you exists only while its session is live and waiting; ledger exited, so its last message is a reply."
+    "why": "The ledger reply follows a turn with a subagent handback, so the model cannot attribute it to a direct result for you. Results that are identified are served as new and read or unread per device (#26)."
   },
   {
     "gap": "session principal.state: sample \"wait\", served \"idle\"",
-    "why": "Results no longer make a session wait (#21)."
+    "why": "Results have status new, with read or unread tracked per device, and no longer put the session into wait (#26)."
   },
   {
     "gap": "session atlas.state: sample \"wait\", served \"idle\"",
-    "why": "Results no longer make a session wait (#21)."
+    "why": "Results have status new, with read or unread tracked per device, and no longer put the session into wait (#26)."
   },
   {
     "gap": "handoff h11.status: sample \"wait\", served \"new\"",
-    "why": "Results no longer make a session wait (#21)."
+    "why": "Results have status new, with read or unread tracked per device, and no longer put the session into wait (#26)."
   },
   {
     "gap": "handoff h14.status: sample \"wait\", served \"new\"",
-    "why": "Results no longer make a session wait (#21)."
+    "why": "Results have status new, with read or unread tracked per device, and no longer put the session into wait (#26)."
   },
   {
     "gap": "session principal.tokens: sample [0.52,44.1,0.23], served [0.64,43.98,0.23]",
-    "why": "The model allocates more of Principal’s aggregate usage to input and less to output; its per-model counts are the source used for API-equivalent cost."
+    "why": "The fixture's Claude usage event records the model-derived input and output split, while the sample stores separate aggregate token totals. API-equivalent cost comes from the served cost record."
   },
   {
     "gap": "session principal.start: sample 450, served -8208",
@@ -169,7 +169,7 @@
   },
   {
     "gap": "session harbor.tokens: sample [0.41,38.2,0.19], served [0.61,38,0.19]",
-    "why": "The model allocates more of Harbor’s aggregate usage to input and less to output; its per-model counts are the source used for API-equivalent cost."
+    "why": "The fixture's Claude usage event records the model-derived input and output split, while the sample stores separate aggregate token totals. API-equivalent cost comes from the served cost record."
   },
   {
     "gap": "session harbor.start: sample 485, served -955",
@@ -177,7 +177,7 @@
   },
   {
     "gap": "session h-codex.tokens: sample [0.9,11.4,0.06], served [0.9,11.34,0.06]",
-    "why": "The model’s aggregate token totals and the mockup’s manually entered totals differ slightly; the per-model counts remain the cost source."
+    "why": "The model's aggregate token total and the sample's manually entered total differ slightly. API-equivalent cost comes from the served cost record."
   },
   {
     "gap": "session h-codex.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":900000,\"output\":60000,\"cacheWrite\":60000,\"cacheRead\":11340000}}, served {\"gpt-6-luna\":{\"input\":900000,\"output\":60000,\"cacheWrite\":0,\"cacheRead\":11340000}}",
@@ -193,7 +193,7 @@
   },
   {
     "gap": "session quill.tokens: sample [0.22,19.7,0.11], served [0.3,19.62,0.11]",
-    "why": "The model allocates more of Quill’s aggregate usage to input and less to output; its per-model counts are the source used for API-equivalent cost."
+    "why": "The fixture's Claude usage event records the model-derived input and output split, while the sample stores separate aggregate token totals. API-equivalent cost comes from the served cost record."
   },
   {
     "gap": "session quill.start: sample 610, served -3800",
@@ -205,7 +205,7 @@
   },
   {
     "gap": "session q-codex.tokens: sample [0.7,9.8,0.05], served [0.7,9.76,0.05]",
-    "why": "The model’s aggregate token totals and the mockup’s manually entered totals differ slightly; the per-model counts remain the cost source."
+    "why": "The model's aggregate token total and the sample's manually entered total differ slightly. API-equivalent cost comes from the served cost record."
   },
   {
     "gap": "session q-codex.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":700000,\"output\":50000,\"cacheWrite\":40000,\"cacheRead\":9760000}}, served {\"gpt-6-luna\":{\"input\":700000,\"output\":50000,\"cacheWrite\":0,\"cacheRead\":9760000}}",
@@ -221,7 +221,7 @@
   },
   {
     "gap": "session deps.tokens: sample [0.3,2.2,0.02], served [0.3,2.17,0.02]",
-    "why": "The model’s aggregate token totals and the mockup’s manually entered totals differ slightly; the per-model counts remain the cost source."
+    "why": "The model's aggregate token total and the sample's manually entered total differ slightly. API-equivalent cost comes from the served cost record."
   },
   {
     "gap": "session deps.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":300000,\"output\":20000,\"cacheWrite\":30000,\"cacheRead\":2170000}}, served {\"gpt-6-luna\":{\"input\":300000,\"output\":20000,\"cacheWrite\":0,\"cacheRead\":2170000}}",

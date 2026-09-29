@@ -14,7 +14,6 @@
   // An offline machine's last-seen time (epoch ms), and the embedding server's machine-management link, when served.
   const MACHINE_LAST = {};
   let ADMIN = null;
-  let PRICING = {};
   let ACCOUNT = null;
   let NAV_MACHINES = null;
   const HARNESS = { claude: "Claude Code", codex: "Codex" };
@@ -156,7 +155,8 @@
     if (h.kind === "relay") return viewer === h.to ? [I.in, [el("span", "verb", "Relay from "), W(h.from)]] : [I.out, [W(h.from), el("span", "verb", " relayed to "), W(h.to)]];
     if (h.kind === "move") return [I.move, [el("span", "verb", "Semon moved "), W(h.to), el("span", "verb", " from " + MACHINE[h.fromMachine] + " to " + MACHINE[h.toMachine])]];
     const what = { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h.ask];
-    return [h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from), el("span", "verb", what)]];
+    const answered = h.status === "done" && (h.ask === "question" || h.ask === "decision");
+    return [answered ? I.done : h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from), el("span", "verb", what)]];
   }
   const statWord = (h) => isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
 
@@ -239,7 +239,7 @@
     for (const s of Object.values(SESS)) if (s.activity && s.activity[3] != null) s.activity[2] = Math.floor((NOW - s.activity[3]) / 1000);
   }
   function adopt(m) {
-    serverNow = m.now; fetchedAt = Date.now(); TOK = m.tx ?? {}; PRICING = m.pricing?.models ?? {};
+    serverNow = m.now; fetchedAt = Date.now(); TOK = m.tx ?? {};
     for (const k of Object.keys(MACHINE)) { delete MACHINE[k]; delete MACHINE_UP[k]; delete MACHINE_LAST[k]; }
     // Several machines come as `machines`; one comes as `machine` alone.
     for (const x of m.machines ?? [m.machine]) { MACHINE[x.id] = x.name; MACHINE_UP[x.id] = x.up; if (x.last != null) MACHINE_LAST[x.id] = x.last; }
@@ -532,24 +532,33 @@
     for (const child of children.get(sid) ?? []) if (!seen.has(child.id)) { seen.add(child.id); out.push(child); descendantsOf(child.id, children, out, seen); }
     return out;
   };
-  const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cache_write", "Cache write"], ["cache_read", "Cache read"]];
+  const TOTAL_TOKEN_KINDS = ["input", "output", "cache_write", "cache_read"];
+  const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cache_read", "Cache read"], ["cache_write_5m", "Cache write · 5m"], ["cache_write_1h", "Cache write · 1h"], ["web_search", "Web search"]];
   const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
-  const usageTotal = (s) => Object.values(s.tokens_by_model ?? {}).reduce((sum, usage) => sum + TOKEN_KINDS.reduce((n, [key]) => n + (Number(usage[key]) || 0), 0), 0);
+  const usageTotal = (s) => Object.values(s.tokens_by_model ?? {}).reduce((sum, usage) => sum + TOTAL_TOKEN_KINDS.reduce((n, key) => n + (Number(usage[key]) || 0), 0), 0);
   function costForSessions(sessions) {
-    const kinds = Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), models = new Map(), unknown = new Set(); let knownUsd = 0;
-    for (const s of sessions) for (const [modelId, usage] of Object.entries(s.tokens_by_model ?? {})) {
-      const price = PRICING[modelId], current = models.get(modelId) ?? { modelId, kinds: Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), usd: 0, priced: !!price };
-      if (!price) { unknown.add(modelId); current.priced = false; }
-      for (const [key] of TOKEN_KINDS) {
-        const tokens = Number(usage[key]) || 0; current.kinds[key].tokens += tokens; kinds[key].tokens += tokens;
-        if (price) { const amount = tokens * price[key] / 1e6; current.kinds[key].usd += amount; kinds[key].usd += amount; current.usd += amount; knownUsd += amount; }
+    const total = { usd: 0, unpriced_models: [], split_unknown_messages: 0, by_model: {}, by_day: {} }, unpriced = new Set(); let allPriced = true;
+    for (const s of sessions) {
+      const cost = s.cost ?? {};
+      if (cost.usd == null) allPriced = false; else total.usd += Number(cost.usd) || 0;
+      for (const model of cost.unpriced_models ?? []) unpriced.add(model);
+      total.split_unknown_messages += Number(cost.split_unknown_messages) || 0;
+      for (const [day, amount] of Object.entries(cost.by_day ?? {})) total.by_day[day] = (total.by_day[day] ?? 0) + (Number(amount) || 0);
+      for (const [modelId, model] of Object.entries(cost.by_model ?? {})) {
+        const current = total.by_model[modelId] ?? { usd: 0, tokens: {}, usd_by_kind: {} };
+        if (model.usd == null) current.usd = null; else if (current.usd != null) current.usd += Number(model.usd) || 0;
+        for (const [key, amount] of Object.entries(model.tokens ?? {})) current.tokens[key] = (current.tokens[key] ?? 0) + (Number(amount) || 0);
+        for (const [key, amount] of Object.entries(model.usd_by_kind ?? {})) current.usd_by_kind[key] = (current.usd_by_kind[key] ?? 0) + (Number(amount) || 0);
+        total.by_model[modelId] = current;
       }
-      models.set(modelId, current);
     }
-    return { usd: unknown.size ? null : knownUsd, knownUsd, kinds, models: [...models.values()], unknown: [...unknown] };
+    total.unpriced_models = [...unpriced].sort();
+    if (!allPriced || unpriced.size) total.usd = null;
+    return total;
   }
   const costForSession = (sid, includeRuns = false) => costForSessions(SESS[sid] ? [SESS[sid], ...(includeRuns ? descendantsOf(sid, sessionChildren()) : [])] : []);
-  const costText = (cost) => cost.unknown.length ? "—" : asMoney(cost.usd);
+  const costText = (cost) => cost.usd == null || cost.unpriced_models?.length ? "—" : asMoney(cost.usd);
+  const costMissing = (cost) => cost.unpriced_models ?? [];
   const COST_TIP = "What these tokens would cost at API rates. Subscriptions (Claude Max, ChatGPT plans) aren't billed this way.";
   function costInfoTip() { const b = el("span", "cost-info"); b.title = COST_TIP; b.setAttribute("role", "img"); b.setAttribute("aria-label", COST_TIP); b.append(icon(I.q)); return b; }
   const TREE_RANK = { wait: 0, work: 1, err: 2, idle: 3, done: 4 };
@@ -718,7 +727,7 @@
     if (kids.length) { runs = el("button", "meta-item meta-runs"); runs.type = "button"; runs.setAttribute("aria-label", kids.length + (kids.length === 1 ? " child session" : " child sessions") + (allKids.some((x) => x.state === "work") ? ", work in progress" : "") + ": open runs"); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); if (allKids.some((x) => x.state === "work")) runs.append(dot("work")); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
     const totalTokens = usageTotal(s);
     const tokens = el("span", "meta-item meta-tokens"); tokens.append(icon(I.tokens), el("span", "meta-value", tok(totalTokens / 1e6))); tokens.title = totalTokens.toLocaleString() + " tokens";
-    const parentCost = kids.length ? costForSessions([s, ...allKids]) : costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", (kids.length ? "incl. runs " : "") + (parentCost.unknown.length ? "—" : shortMoney(parentCost.usd)))); costItem.title = "API-equivalent cost. " + COST_TIP + (parentCost.unknown.length ? " no price for " + parentCost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(parentCost) + (kids.length ? ", including runs" : "") + ". " + COST_TIP + (parentCost.unknown.length ? " no price for " + parentCost.unknown.join(", ") : ""));
+    const parentCost = kids.length ? costForSessions([s, ...allKids]) : costForSession(s.id), missing = costMissing(parentCost), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", (kids.length ? "incl. runs " : "") + (costText(parentCost) === "—" ? "—" : shortMoney(parentCost.usd)))); costItem.title = "API-equivalent cost. " + COST_TIP + (missing.length ? " no price for " + missing.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(parentCost) + (kids.length ? ", including runs" : "") + ". " + COST_TIP + (missing.length ? " no price for " + missing.join(", ") : ""));
     l2.append(...(kind ? [kind] : []), st, model, machine, branch, tools, ...(runs ? [runs] : []), tokens, costItem);
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
@@ -779,7 +788,15 @@
     costRow.append(costLabel, el("span", "detail-value", hasRuns ? costText(ownCost) + " own · " + costText(allCost) + " incl. runs" : costText(ownCost)));
     const breakdown = costBreakdown(s.id, true); breakdown.hidden = true;
     costRow.addEventListener("click", () => { breakdown.hidden = !breakdown.hidden; costRow.setAttribute("aria-expanded", String(!breakdown.hidden)); });
-    list.append(costRow); if (allCost.unknown.length) list.append(el("div", "no-price", "no price for " + allCost.unknown.join(", "))); list.append(breakdown);
+    list.append(costRow); const missing = costMissing(allCost); if (missing.length) list.append(el("div", "no-price", "no price for " + missing.join(", ")));
+    const reports = s.reported_runs ?? [], reported = reports.filter((run) => Number.isFinite(run.cost_usd));
+    if (reports.length) {
+      const reportedUsd = reported.reduce((sum, run) => sum + run.cost_usd, 0), phrase = reported.length === 1 ? "its last run" : "its last " + reported.length + " runs";
+      list.append(el("div", "reported-cost", reported.length ? "Claude Code reported " + asMoney(reportedUsd) + " for " + phrase : "Claude Code reported a run without a cost figure."));
+    }
+    const mismatch = [...(s.cost_check ?? [])].reverse().find((check) => check.ok === false && Number.isFinite(check.computed_usd) && Number.isFinite(check.reported_usd));
+    if (mismatch) { const diff = Math.abs(mismatch.computed_usd - mismatch.reported_usd), pct = mismatch.reported_usd === 0 ? (diff === 0 ? 0 : 100) : Math.round(diff / Math.abs(mismatch.reported_usd) * 100); list.append(el("div", "cost-warning", "Differs from Claude Code's figure by " + pct + "%")); }
+    list.append(breakdown);
     body.append(list); d.append(head, body); document.body.append(d);
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); });
@@ -789,15 +806,15 @@
   function costBreakdown(sid, includeRuns) {
     const cost = costForSession(sid, includeRuns), box = el("div", "cost-breakdown");
     box.append(el("div", "cost-breakdown-head", includeRuns && childSessions(sid).length ? "Tokens and API-equivalent cost · incl. runs" : "Tokens and API-equivalent cost"));
-    for (const model of cost.models) {
-      const group = el("section", "cost-model"); group.append(el("div", "cost-model-name", model.modelId));
+    for (const [modelId, model] of Object.entries(cost.by_model)) {
+      const group = el("section", "cost-model"), priced = model.usd != null && !costMissing(cost).includes(modelId); group.append(el("div", "cost-model-name", modelId));
       for (const [key, label] of TOKEN_KINDS) {
-        const item = model.kinds[key], row = el("div", "cost-line"); row.append(el("span", null, label), el("span", "cost-amount", item.tokens.toLocaleString() + " tokens"), el("span", "cost-value", model.priced ? asMoney(item.usd) : "—")); group.append(row);
+        const tokens = model.tokens?.[key], amount = Number(model.usd_by_kind?.[key]) || 0, row = el("div", "cost-line"); row.append(el("span", null, label), el("span", "cost-amount", tokens == null ? "" : tokens.toLocaleString() + " tokens"), el("span", "cost-value", priced ? asMoney(amount) : "—")); group.append(row);
       }
-      if (!model.priced) group.append(el("div", "no-price", "no price for " + model.modelId));
+      if (!priced) group.append(el("div", "no-price", "no price for " + modelId));
       box.append(group);
     }
-    if (!cost.models.length) box.append(el("p", "empty", "No token usage recorded.")); return box;
+    if (!Object.keys(cost.by_model).length) box.append(el("p", "empty", "No token usage recorded.")); return box;
   }
   function runRow(s, depth, sheet) {
     const row = el("button", "runs-row"); row.type = "button"; row.style.paddingLeft = Math.min(depth, 3) * 14 + "px";
@@ -806,7 +823,7 @@
     const calls = TXM[s.id]?.calls ?? ANALYTICS_COUNTS[s.id]?.calls ?? (TX[s.id] ?? []).filter((e) => e.k === "tool").length, origin = originHandoff(s.id), meta = el("span", "run-meta");
     meta.append(el("span", null, STATE[s.state]), el("span", null, dur(s.start, s.state === "work" ? null : s.last)), el("span", null, calls + (calls === 1 ? " tool call" : " tool calls"))); row.append(meta);
     if (origin?.brief) row.append(el("span", "run-brief", oneLine(origin.brief)));
-    if (cost.unknown.length) row.append(el("span", "no-price", "no price for " + cost.unknown.join(", ")));
+    const missing = costMissing(cost); if (missing.length) row.append(el("span", "no-price", "no price for " + missing.join(", ")));
     row.setAttribute("aria-label", [s.name, s.kind, STATE[s.state], dur(s.start, s.state === "work" ? null : s.last), origin?.brief ? oneLine(origin.brief) : "", "API-equivalent cost " + costText(cost)].filter(Boolean).join(" · "));
     row.addEventListener("click", () => { if (sheet) { pendingSessionOpen = s.id; sheet.close(); } else { $(".runs-popover")?.remove(); goSession(s.id); } }); return row;
   }
@@ -1221,7 +1238,8 @@
   function handoffCard(h, viewer, start) {
     const other = h.kind === "move" ? null : viewer === h.from ? h.to : h.from;
     const child = h.kind === "spawn" && viewer === h.from ? SESS[h.to] : null;
-    const c = el("div", "hcard " + (child ? "child-card " + hcls(h.to) : h.kind === "toyou" ? "toyou" : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
+    const answered = h.kind === "toyou" && h.status === "done" && (h.ask === "question" || h.ask === "decision");
+    const c = el("div", "hcard " + (child ? "child-card " + hcls(h.to) : h.kind === "toyou" ? "toyou" + (h.status === "wait" ? " waiting" : "") + (answered ? " answered" : "") : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
     const [ic, parts] = sentence(h, viewer);
     if (child) { c.append(childKindChip(child)); const ln = el("span", "ln", child.name); ln.append(el("span", "verb", " · " + (child.kind ?? HARNESS[child.harness]))); c.append(ln); }
     else { c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln); }
@@ -1285,7 +1303,7 @@
       const startedAt = Number(s.start) || 0, calls = ANALYTICS_COUNTS[s.id]?.calls ?? TXM[s.id]?.calls ?? 0;
       const errors = ANALYTICS_COUNTS[s.id]?.errors ?? TXM[s.id]?.errors ?? 0;
       const turns = (TURNS[s.id] ?? []).filter(hasTurn);
-      return { s, id: s.id, startedAt, costAt: startedAt, busy: busyOf(s),
+      return { s, id: s.id, startedAt, busy: busyOf(s),
         turnEvents: turns.map((t) => Number.isFinite(t.at) ? t.at : Number.isFinite(t.start?.at) ? t.start.at : startedAt),
         toolEvents: Array.from({ length: Math.max(0, calls) }, (_, i) => ({ at: startedAt, error: i < errors })) };
     });
@@ -1295,6 +1313,21 @@
       .map((h) => ({ sid: h.from, startAt: h.at, endAt: h.status === "wait" ? null : Number.isFinite(h.done) ? h.done : null }));
   }
   function busyMsIn(row, from, to) { return row.busy.reduce((sum, [a, b]) => sum + Math.max(0, Math.min(b, to) - Math.max(a, from)), 0); }
+  function sessionCostInRange(s, from, to) {
+    const cost = s.cost ?? {}, unknown = new Set(), byDay = Object.entries(cost.by_day ?? {}).filter(([day]) => {
+      const start = Date.parse(day + "T00:00:00.000Z"); return Number.isFinite(start) && start < to && start + DAY_MS > from;
+    });
+    if (byDay.length) for (const model of costMissing(cost)) unknown.add(model);
+    return { usd: unknown.size ? null : byDay.reduce((sum, [, amount]) => sum + (Number(amount) || 0), 0), unpriced_models: [...unknown], hasData: byDay.length > 0 };
+  }
+  function analyticsCost(rows, from, to) {
+    const unpriced = new Set(); let usd = 0, hasData = false;
+    for (const row of rows) {
+      const cost = sessionCostInRange(row.s, from, to); if (!cost.hasData) continue;
+      hasData = true; usd += Number(cost.usd) || 0; for (const model of cost.unpriced_models) unpriced.add(model);
+    }
+    return { usd: unpriced.size ? null : usd, unpriced_models: [...unpriced].sort(), hasData };
+  }
   const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
   function matchesSessionFacets(s) { return Object.keys(sessionFilters).every((key) => !sessionFilters[key] || sessionFacetValue(s, key) === sessionFilters[key]); }
   function renderFacetFilters(onChange) {
@@ -1321,15 +1354,13 @@
     const waitBy = new Map(); for (const w of waits) { const ms = Math.max(0, Math.min(w.endAt ?? to, to) - Math.max(w.startAt, from)); waitBy.set(w.sid, (waitBy.get(w.sid) ?? 0) + ms); }
     const current = analyticsWaits().filter((w) => !w.endAt && rows.some((r) => r.id === w.sid)).map((w) => ({ ...w, ms: Math.max(0, NOW - w.startAt), s: SESS[w.sid] })).sort((a, b) => b.ms - a.ms);
     const agentMs = relevant.reduce((sum, r) => sum + busyMsIn(r, from, to), 0);
-    const costRows = rows.filter((r) => inRange(r.costAt, from, to)).map((r) => ({ row: r, cost: costForSession(r.id) }));
-    const costUnknown = [...new Set(costRows.flatMap((x) => x.cost.unknown))];
+    const rangeCost = analyticsCost(rows, from, to), costUnknown = rangeCost.unpriced_models;
     return { rows: relevant, agentMs, started: rows.filter((r) => inRange(r.startedAt, from, to)).length,
       turns: rows.reduce((sum, r) => sum + r.turnEvents.filter((at) => inRange(at, from, to)).length, 0),
       tools: rows.reduce((sum, r) => sum + r.toolEvents.filter((e) => inRange(e.at, from, to)).length, 0),
       errors: rows.reduce((sum, r) => sum + r.toolEvents.filter((e) => inRange(e.at, from, to) && e.error).length, 0),
       waitsMs: durations.reduce((sum, x) => sum + x, 0), medianWaitMs: median, longestWaitMs: durations.at(-1) ?? 0,
-      longestCurrent: current[0] ?? null, waitBy, costUnknown,
-      apiCost: costUnknown.length ? null : costRows.reduce((sum, x) => sum + x.cost.knownUsd, 0) };
+      longestCurrent: current[0] ?? null, waitBy, costUnknown, apiCost: rangeCost.usd };
   }
   const hoursText = (ms) => (ms / HOUR).toFixed(1) + " h", rangeName = () => analyticsRange === 1 ? "24 h" : analyticsRange + " d";
   function deltaNote(value, previous, format) {
@@ -1370,14 +1401,20 @@
     const panel = el("section", "analytics-panel"), title = el("h2", null, "Cost over time"); title.append(costInfoTip());
     const count = analyticsRange === 1 ? 24 : analyticsRange, unit = analyticsRange === 1 ? "per hour" : "per day"; panel.append(title, el("div", "panel-sub", "API-equivalent cost " + unit + " · stacked by harness"));
     const bins = Array.from({ length: count }, (_, i) => ({ a: from + (to - from) * i / count, b: from + (to - from) * (i + 1) / count, claude: 0, codex: 0, rows: [] })), unknown = new Set();
-    for (const row of rows) { if (!inRange(row.costAt, from, to)) continue; const cost = costForSession(row.id); if (cost.usd == null) { cost.unknown.forEach((model) => unknown.add(model)); continue; } const index = Math.min(count - 1, Math.floor((row.costAt - from) / (to - from) * count)); bins[index][row.s.harness] += cost.usd; bins[index].rows.push(row); }
+    for (const row of rows) for (const [day, amount] of Object.entries(row.s.cost?.by_day ?? {})) {
+      const start = Date.parse(day + "T00:00:00.000Z"), end = start + DAY_MS, overlapStart = Math.max(start, from), overlapEnd = Math.min(end, to);
+      if (!Number.isFinite(start) || overlapStart >= overlapEnd) continue;
+      for (const model of costMissing(row.s.cost)) unknown.add(model);
+      const at = overlapStart + (overlapEnd - overlapStart) / 2, index = Math.min(count - 1, Math.floor((at - from) / (to - from) * count)), usd = Number(amount) || 0;
+      bins[index][row.s.harness] += usd; bins[index].rows.push({ row, usd, unpriced_models: costMissing(row.s.cost) });
+    }
     const W = chartWidth(), svg = svgEl("svg", { viewBox: "0 0 " + W + " 190", role: "img", "aria-label": "API-equivalent cost " + unit + ", stacked by harness" });
     const left = 46, right = W - 4, top = 12, bottom = 151, max = Math.max(.01, ...bins.map((b) => b.claude + b.codex)), step = (right - left) / count;
     for (let n = 0; n <= 2; n++) { const y = bottom - (bottom - top) * n / 2; svg.append(svgEl("line", { x1: left, x2: right, y1: y, y2: y, class: "gridline" }), svgEl("text", { x: 0, y: y + 4, class: "axis-label" }, "$" + (max * n / 2).toFixed(2))); }
     bins.forEach((bin, i) => { const w = Math.max(2, step * .64), x = left + i * step + (step - w) / 2, ch = bin.claude / max * (bottom - top), xh = bin.codex / max * (bottom - top);
       if (ch) svg.append(svgEl("rect", { x, y: bottom - ch, width: w, height: ch, class: "cost-claude" })); if (xh) svg.append(svgEl("rect", { x, y: bottom - ch - xh, width: w, height: xh, class: "cost-codex" }));
       const hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); if (bin.rows.length) { hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", clock(bin.a) + " to " + clock(bin.b) + ": " + asMoney(bin.claude + bin.codex)); }
-      const open = () => { if (bin.rows.length) openAnalyticsSlice(bin.a, bin.b, bin.rows); }; hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
+      const open = () => { if (bin.rows.length) openAnalyticsSlice(bin.a, bin.b, bin.rows, true); }; hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
     });
     svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, analyticsRange === 1 ? "24 h ago" : analyticsRange + " d ago"), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart); const legend = el("div", "analytics-legend");
@@ -1391,11 +1428,13 @@
       box.append(el("div", "window-name", label), el("div", "window-used", limit.used_percent + "% used"), el("div", "window-reset", "Resets " + new Date(limit.resets_at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))); grid.append(box); }
     if (!grid.childElementCount) return null; panel.append(grid); return panel;
   }
-  function openAnalyticsSlice(a, b, active) {
-    const d = el("dialog", "viewer analytics-slice"), head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose"), when = new Date(a).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) + "–" + new Date(b).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    d.setAttribute("aria-label", "Sessions busy " + when); title.append(el("span", null, "Sessions busy · " + when)); close.type = "button"; close.setAttribute("aria-label", "Close sessions list"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
-    const body = el("div", "vb"), list = el("div", "analytics-list"); if (!active.length) body.append(el("p", "empty", "No sessions were busy then."));
-    for (const row of active.map((r) => ({ r, ms: busyMsIn(r, a, b) })).sort((x, y) => y.ms - x.ms || x.r.s.name.localeCompare(y.r.s.name))) { const s = row.r.s, item = el("button", "analytics-session analytics-slice"); item.type = "button"; item.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", timeText(row.ms) + " busy")); item.addEventListener("click", () => { pendingSessionOpen = s.id; d.close(); }); list.append(item); }
+  function openAnalyticsSlice(a, b, active, costMode = false) {
+    const d = el("dialog", "viewer analytics-slice"), head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose"), when = new Date(a).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) + "–" + new Date(b).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), heading = costMode ? "Sessions with cost" : "Sessions busy";
+    d.setAttribute("aria-label", heading + " " + when); title.append(el("span", null, heading + " · " + when)); close.type = "button"; close.setAttribute("aria-label", "Close sessions list"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
+    const body = el("div", "vb"), list = el("div", "analytics-list"); if (!active.length) body.append(el("p", "empty", costMode ? "No sessions had a recorded cost then." : "No sessions were busy then."));
+    const rows = costMode ? active.map((entry) => ({ r: entry.row, usd: entry.usd, unpriced_models: entry.unpriced_models })) : active.map((r) => ({ r, ms: busyMsIn(r, a, b) }));
+    rows.sort((x, y) => costMode ? y.usd - x.usd || x.r.s.name.localeCompare(y.r.s.name) : y.ms - x.ms || x.r.s.name.localeCompare(y.r.s.name));
+    for (const row of rows) { const s = row.r.s, item = el("button", "analytics-session analytics-slice"); item.type = "button"; item.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", costMode ? asMoney(row.usd) : timeText(row.ms) + " busy")); if (costMode && row.unpriced_models.length) item.append(el("span", "no-price", "no price for " + row.unpriced_models.join(", "))); item.addEventListener("click", () => { pendingSessionOpen = s.id; d.close(); }); list.append(item); }
     if (active.length) body.append(list); d.append(head, body); document.body.append(d); d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
@@ -1403,8 +1442,8 @@
   function analyticsBreakdown(title, rows, from, to, groupKey) {
     const groups = new Map(), keyFor = (s) => groupKey === "repo" ? s.repo ?? "__none__" : groupKey === "machine" ? s.machine : s.harness + "\u0000" + (s.model ?? s.modelId ?? "Unknown model");
     const labelFor = (key) => groupKey === "repo" ? key === "__none__" ? "No repo (roles)" : key : groupKey === "machine" ? MACHINE[key] ?? key : (HARNESS[key.split("\u0000")[0]] ?? key.split("\u0000")[0]) + " · " + shortModel(key.split("\u0000")[1]);
-    for (const row of rows) { const ms = busyMsIn(row, from, to); if (!ms && !inRange(row.startedAt, from, to)) continue; const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);
-      if (inRange(row.costAt, from, to)) { const c = costForSession(row.id); g.cost += c.knownUsd; c.unknown.forEach((x) => g.unknown.add(x)); } groups.set(key, g); }
+    for (const row of rows) { const ms = busyMsIn(row, from, to), c = sessionCostInRange(row.s, from, to); if (!ms && !inRange(row.startedAt, from, to) && !c.hasData) continue; const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);
+      if (c.hasData) { g.cost += Number(c.usd) || 0; c.unpriced_models.forEach((x) => g.unknown.add(x)); } groups.set(key, g); }
     const selected = (x) => analyticsMeasure === "cost" ? x.cost : x.ms, items = [...groups.values()].sort((a, b) => selected(b) - selected(a) || labelFor(a.key).localeCompare(labelFor(b.key))), max = Math.max(1, ...items.map(selected));
     const panel = el("section", "analytics-panel"); panel.append(el("h3", null, title)); const list = el("div", "analytics-list");
     for (const item of items) { const b = el("button", "analytics-row"); b.type = "button"; b.append(el("span", "row-title", labelFor(item.key)), el("span", "row-count", item.sessions.size + (item.sessions.size === 1 ? " session" : " sessions")));
@@ -1416,7 +1455,7 @@
   }
   function analyticsList(title, items, value) {
     const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title)); const list = el("div", "analytics-list"); if (!items.length) list.append(el("p", "empty", "No sessions in this range."));
-    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", value(item))); if (item.cost?.unknown.length) b.append(el("span", "no-price", "no price for " + item.cost.unknown.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); } panel.append(list); return panel;
+    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", value(item))); const missing = item.cost?.unpriced_models ?? []; if (missing.length) b.append(el("span", "no-price", "no price for " + missing.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); } panel.append(list); return panel;
   }
   function renderAnalytics(page) {
     const all = analyticsSessions().filter((row) => matchesSessionFacets(row.s)), to = NOW, from = to - rangeMs(analyticsRange), now = analyticsStats(all, from, to), previous = analyticsStats(all, from - rangeMs(analyticsRange), from);
@@ -1435,7 +1474,7 @@
     const breakdowns = el("div", "analytics-breakdowns"); breakdowns.append(analyticsBreakdown("By repo", all, from, to, "repo"), analyticsBreakdown("By machine", all, from, to, "machine"), analyticsBreakdown("By harness and model", all, from, to, "harness"));
     const bdHead = el("div", "analytics-bd-head"), bdTitle = el("div"); bdTitle.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Agent-hours and API-equivalent cost; bars follow the toggle")); bdHead.append(bdTitle, measure);
     const busyTop = [...all].map((r) => ({ ...r, value: busyMsIn(r, from, to) })).filter((r) => r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5), waitTop = [...now.waitBy].map(([id, ms]) => ({ s: SESS[id], id, value: ms })).filter((r) => r.s && r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5);
-    const costTop = all.filter((r) => inRange(r.costAt, from, to)).map((r) => { const cost = costForSession(r.id); return { ...r, cost, value: cost.usd }; }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5), bottom = el("div", "analytics-split");
+    const costTop = all.map((r) => { const cost = sessionCostInRange(r.s, from, to); return { ...r, cost, value: cost.usd }; }).filter((r) => r.cost.hasData).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5), bottom = el("div", "analytics-split");
     bottom.append(analyticsList("Top sessions · busy time", busyTop, (x) => timeText(x.value)), analyticsList("Top sessions · waited on", waitTop, (x) => timeText(x.value)), analyticsList("Most expensive sessions · API-equivalent cost", costTop, (x) => x.value == null ? "—" : asMoney(x.value)));
     page.append(renderAgentsChart(all, from, to), renderCostChart(all, from, to), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(); if (allowance) page.append(allowance);
   }

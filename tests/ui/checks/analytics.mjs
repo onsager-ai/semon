@@ -18,6 +18,14 @@ export default async function analyticsCheck(browser) {
     await page.click('#topbar .analytics-range button:has-text("7 d")');
     record.labels = await page.evaluate(() => [...document.querySelectorAll(".analytics-metric .label")].map((x) => x.textContent.trim()));
     record.figures = await page.locator(".analytics-metric").count();
+    const costFrom = D.NOW - 7 * 86400000, missingModels = new Set(); let expectedUsd = 0;
+    for (const session of Object.values(D.SESS)) {
+      const days = Object.entries(session.cost?.by_day ?? {}).filter(([day]) => { const start = Date.parse(day + "T00:00:00.000Z"); return start < D.NOW && start + 86400000 > costFrom; });
+      for (const [, amount] of days) expectedUsd += Number(amount) || 0;
+      if (days.length) for (const model of session.cost?.unpriced_models ?? []) missingModels.add(model);
+    }
+    record.costExpected = missingModels.size ? "—" : "$" + expectedUsd.toFixed(2);
+    record.costHeadline = await page.locator('.analytics-metric').filter({ hasText: "API-equivalent cost" }).locator(".value").textContent();
     record.charts = await page.evaluate(() => [...document.querySelectorAll(".analytics-chart svg")].map((svg) => ({ label: svg.getAttribute("aria-label"), columns: [...svg.querySelectorAll("rect.cost-claude, rect.cost-codex")].map((x) => ({ width: Number(x.getAttribute("width")), height: Number(x.getAttribute("height")) })).filter((x) => x.width > 0 && x.height > 0).length })));
     record.allowance = await page.evaluate(() => ({ heading: [...document.querySelectorAll(".analytics-panel h2")].find((x) => x.textContent === "Codex allowance")?.textContent, windows: [...document.querySelectorAll(".allowance-window .window-name")].map((x) => x.textContent.trim()), used: [...document.querySelectorAll(".allowance-window .window-used")].map((x) => x.textContent.trim()) }));
     record.sideways = size === "phone" ? await overflow(page) : 0;
@@ -51,6 +59,7 @@ export default async function analyticsCheck(browser) {
     r.expect(m.errors.length === 0, m.mode + ": page errors: " + m.errors.join(" | "));
     r.expect(m.range.labels.join(",") === "24 h,7 d,30 d" && m.range30.selected === "30 d" && m.range30.heading?.includes("Last 30 days"), m.mode + ": Analytics range control did not change the selected range: " + JSON.stringify({ before: m.range, after: m.range30 }));
     r.expect(m.figures === 8 && expectedLabels.every((label) => m.labels.some((value) => value.startsWith(label))), m.mode + ": expected eight headline figures: " + JSON.stringify(m.labels));
+    r.expect(m.costHeadline === m.costExpected, m.mode + ": Analytics headline did not sum the served by_day cost: " + JSON.stringify({ actual: m.costHeadline, expected: m.costExpected }));
     r.expect(m.charts.length === 2 && m.charts.every((chart) => chart.columns > 0), m.mode + ": expected both charts to render vertical columns: " + JSON.stringify(m.charts));
     r.expect(m.slice?.open && m.slice.sessions > 0, m.mode + ": an Analytics slice did not open with busy sessions: " + JSON.stringify(m.slice));
     if (m.mode === "phone") r.expect(m.slice?.bottomSheet && m.sideways === 0, "phone: the slice must be a bottom sheet with no sideways page scroll: " + JSON.stringify({ slice: m.slice, sideways: m.sideways }));

@@ -414,7 +414,10 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .hcard .result { grid-column: 2 / 4; font-size: 13px; color: var(--muted); }
 .hcard .result b { font-weight: 500; color: var(--ink-2); }
 @media (hover: hover) { .hcard:hover .ln .who { color: var(--accent); } }
-.hcard.toyou { --h: var(--wait); }
+.hcard.toyou { --h: var(--line); }
+.hcard.toyou.waiting { --h: var(--wait); }
+.hcard.toyou.answered { --h: var(--line); background: none; }
+.hcard.toyou.answered > svg, .hcard.toyou.answered .ln, .hcard.toyou.answered .ln .who, .hcard.toyou.answered .brief, .hcard.toyou.answered .answer, .hcard.toyou.answered .stat { color: var(--muted); }
 .hcard.move { --h: var(--accent); }
 /* The relay or brief that starts a turn: just its text. The turn header already says who sent it. */
 .hcard.start { grid-template-columns: minmax(0, 1fr); }
@@ -680,6 +683,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .session-details .detail-row { display: grid; grid-template-columns: minmax(94px, .3fr) minmax(0, 1fr); gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); user-select: text; -webkit-user-select: text; }
 .session-details .detail-label { color: var(--faint); font-size: 13px; }
 .session-details .detail-value { min-width: 0; overflow-wrap: anywhere; color: var(--ink-2); font-size: 13.5px; user-select: text; -webkit-user-select: text; }
+.session-details .reported-cost, .session-details .cost-warning { padding: 6px 0; color: var(--faint); font-size: 12px; }
+.session-details .cost-warning { color: var(--wait); }
 @media (min-width: 761px) {
   .app.rail { grid-template-columns: 64px minmax(0, 1fr); }
   .app.rail .sidebar { overflow-x: hidden; }

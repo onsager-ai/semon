@@ -1,8 +1,8 @@
-// Writes a synthetic ~/.claude, ~/.codex and /proc whose session model reproduces the sample mockup's data: its sessions,
+// Writes a synthetic ~/.claude, ~/.claude.json, ~/.codex and /proc whose session model reproduces the sample mockup's data: its sessions,
 // handoffs, turns, answers, busy intervals and transcripts, as Claude Code and Codex log lines. The sample's data is made up,
 // and every line here is made from it: the texts are read from the committed mockup, never from real logs.
 //
-//   node fixture.mjs OUT_DIR [--extras]   writes OUT_DIR/{claude,codex,proc,work,roles} and prints the `now` to pin
+//   node fixture.mjs OUT_DIR [--extras]   writes OUT_DIR/{.claude.json,claude,codex,proc,work,roles} and prints the `now` to pin
 //   node fixture.mjs OUT_DIR --second     writes a second machine's home (`desktop`) for views across machines
 //
 // --extras writes the sample plus what only the served viewer has to handle, for the check scripts (never for the pixel
@@ -90,7 +90,8 @@ export function write(out, { extras = false } = {}) {
     // Token use: one usage record, as the model counts tokens by message id.
     s.tokens = (t) => {
       const target = Object.values(SESS[sid]?.tokensByModel ?? {})[0] ?? { input: tokens[0] * 1e6, cacheWrite: 0, cacheRead: tokens[1] * 1e6, output: tokens[2] * 1e6 };
-      lines.push([t, { type: "assistant", timestamp: iso(t), sessionId: agent ? agent.parent : sid, cwd, uuid: "u-" + sid + "-usage", message: { id: "msg-" + sid + "-usage", model: models[model], role: "assistant", content: [], usage: { input_tokens: target.input, cache_creation_input_tokens: target.cacheWrite ?? target.cache_write ?? 0, cache_read_input_tokens: target.cacheRead ?? target.cache_read ?? 0, output_tokens: target.output } } }]);
+      const cacheWrite = target.cacheWrite ?? target.cache_write ?? 0, cacheWrite1h = target.cacheWrite1h ?? target.cache_write_1h ?? 0;
+      lines.push([t, { type: "assistant", timestamp: iso(t), sessionId: agent ? agent.parent : sid, cwd, uuid: "u-" + sid + "-usage", message: { id: "msg-" + sid + "-usage", model: models[model], role: "assistant", content: [], usage: { input_tokens: target.input, cache_creation_input_tokens: cacheWrite, cache_creation: { ephemeral_5m_input_tokens: cacheWrite - cacheWrite1h, ephemeral_1h_input_tokens: cacheWrite1h }, cache_read_input_tokens: target.cacheRead ?? target.cache_read ?? 0, output_tokens: target.output } } }]);
     };
     s.save = () => {
       if (agent) {
@@ -459,6 +460,7 @@ export function write(out, { extras = false } = {}) {
     xs.text(ms(T(12, 35), 30), XSS);
     xs.save();
   }
+  put(".claude.json", JSON.stringify({ projects: { "/fixture/principal": { lastSessionId: "principal", lastStartTime: ms(T(9, 45)), lastCost: 40, lastDuration: 300000, lastAPIDuration: 260000, lastToolDuration: 40000, lastLinesAdded: 12, lastLinesRemoved: 3, lastModelUsage: {} } } }));
   put("proc/locks", locks);
   return ms(NOW);
 }

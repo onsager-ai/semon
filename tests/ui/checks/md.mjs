@@ -127,6 +127,15 @@ async function runPass(page, D, tag, scheme) {
       await page.evaluate(() => { document.querySelector(".md .mh").scrollIntoView({ block: "start" }); window.scrollBy(0, -70); }); await page.waitForTimeout(150); await page.screenshot({ path: path.join(ENV.out, "bar-md-synthetic-top.png") });
       T.synthetic = await page.evaluate(() => { const m = document.querySelector(".md .mh").closest(".md"); const cb = [...m.querySelectorAll(".codeblock")]; return { codeblocks: cb.length, firstScrolls: cb[0].scrollWidth > cb[0].clientWidth, unclosedFenceText: cb[1]?.textContent, truncatedTableRows: m.querySelector(".tbl")?.querySelectorAll("tr").length, badLinkIsText: !m.querySelector('a[href^="javascript"]') && m.textContent.includes("a bad link, and"), scriptText: m.textContent.includes("<script>alert(1)</script>"), olStart: m.querySelector("ol")?.children.length, nestedUnderOl: !!m.querySelector("ol li > ul"), star: [...m.querySelectorAll("ul > li")].some((l) => l.textContent === "star bullet"), quote: m.querySelector("blockquote")?.children.length, hr: !!m.querySelector("hr") }; });
       await goto(page, { v: "session", id: "ledger" }, D); T.synthetic.answerCard = await page.evaluate(() => { const a = document.querySelector(".hcard .answer"); return a ? { head: a.querySelector("b")?.textContent, items: [...a.querySelectorAll("li")].map((li) => li.textContent) } : null; });
+      T.synthetic.answeredCard = await page.evaluate(() => {
+        const card = document.querySelector(".hcard.toyou.answered"), iconPath = card?.querySelector(":scope > svg path")?.getAttribute("d"), probe = document.createElement("span");
+        probe.style.cssText = "position:fixed;visibility:hidden;border-left:2px solid var(--line);color:var(--muted)"; document.body.append(probe);
+        const rule = getComputedStyle(probe).borderLeftColor, muted = getComputedStyle(probe).color; probe.style.borderLeftColor = "var(--wait)";
+        const waitingRule = getComputedStyle(probe).borderLeftColor; probe.remove();
+        return card ? { rule: getComputedStyle(card).borderLeftColor, expectedRule: rule, waitingRule, background: getComputedStyle(card).backgroundColor, text: getComputedStyle(card.querySelector(".ln")).color, expectedText: muted, icon: iconPath } : null;
+      });
+      const waiting = D.H.find((h) => h.kind === "toyou" && ["question", "decision"].includes(h.ask) && h.status === "wait");
+      if (waiting) { await goto(page, { v: "session", id: waiting.from }, D); T.synthetic.waitingCard = await page.evaluate((id) => { const card = [...document.querySelectorAll(".hcard.toyou")].find((x) => x.dataset.h === id), svg = card?.querySelector(":scope > svg"), iconPath = svg?.querySelector("path")?.getAttribute("d"); return card ? { rule: getComputedStyle(card).borderLeftColor, iconColor: getComputedStyle(svg).color, icon: iconPath, waiting: card.classList.contains("waiting"), answered: card.classList.contains("answered") } : null; }, waiting.id); }
       await goto(page, { v: "home" }, D); await page.evaluate(() => document.querySelector(".ib.quiet")?.scrollIntoView({ block: "center" })); await page.waitForTimeout(150); await page.screenshot({ path: path.join(ENV.out, "bar-answered.png") });
     } else {
       T.shots = { table: await shot(".msg .md .tbl", "bar-md-table.png"), list: await shot(".msg .md ol", "bar-md-list.png") };
@@ -178,6 +187,9 @@ export default async function mdCheck(browser) {
       r.expect(T.synthetic.hr === true, tag + ": rule (<hr>) missing");
       // A card lists two or more answers, one per question, under "You answered:" (the mockup's answerEl).
       r.expect(JSON.stringify(T.synthetic.answerCard) === JSON.stringify({ head: "You answered:", items: ["Ship it (Recommended)", "Squash the commits"] }), tag + ": ledger's answer card: " + JSON.stringify(T.synthetic.answerCard));
+      const doneIcon = "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12.5l2.7 2.7L16 9.8", questionIcon = "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4M12 17h.01";
+      r.expect(T.synthetic.answeredCard?.rule === T.synthetic.answeredCard?.expectedRule && T.synthetic.answeredCard?.rule !== T.synthetic.answeredCard?.waitingRule && T.synthetic.answeredCard?.background === "rgba(0, 0, 0, 0)" && T.synthetic.answeredCard?.text === T.synthetic.answeredCard?.expectedText && T.synthetic.answeredCard?.icon === doneIcon && T.synthetic.answeredCard?.icon !== questionIcon, tag + ": answered question card kept waiting styling or icon: " + JSON.stringify(T.synthetic.answeredCard));
+      r.expect(T.synthetic.waitingCard?.rule === T.synthetic.waitingCard?.iconColor && T.synthetic.waitingCard?.waiting === true && T.synthetic.waitingCard?.icon === questionIcon && T.synthetic.waitingCard?.answered === false, tag + ": waiting question card lost its waiting colour or question icon: " + JSON.stringify(T.synthetic.waitingCard));
       r.expect(T.homeAnswers.some((answer) => normSpace(answer) === normSpace(wantAnswer)), tag + ": Home does not show the exact answered-question text: " + JSON.stringify(T.homeAnswers));
     }
   }
