@@ -140,6 +140,421 @@ pub(crate) fn clip(text: &str, limit: usize) -> (String, bool) {
     (format!("{}…", text[..end].trim_end()), true)
 }
 
+/// Cuts `text` to its last `limit` bytes on a character boundary; `true`
+/// when cut.
+fn clip_end(text: &str, limit: usize) -> (String, bool) {
+    if text.len() <= limit {
+        return (text.to_owned(), false);
+    }
+    let mut start = text.len() - limit;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    (format!("…{}", text[start..].trim_start()), true)
+}
+
+/// A gap Codex left in a command's output, and how much it took out.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Gap {
+    n: u64,
+    /// `tokens`, `chars`, `bytes` or `lines`.
+    unit: &'static str,
+    /// `lines` only: how many lines the output had.
+    of: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Part {
+    Text(String),
+    Gap(Gap),
+}
+
+/// Output Codex cut before the model saw it: what its warning header says of
+/// the whole, and the text on both sides of the gap when the gap is found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Cut {
+    original_tokens: Option<u64>,
+    lines: Option<u64>,
+    /// Text, gap, text; empty when the header is there but no gap was found.
+    parts: Vec<Part>,
+}
+
+/// The leading digits of `text` as a number, and what follows them.
+fn digits(text: &str) -> Option<(u64, &str)> {
+    let end = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    Some((text.get(..end)?.parse().ok()?, &text[end..]))
+}
+
+/// Codex's warning header, written at the start of an output it cut:
+/// `Warning: truncated output (original token count: N)\n`, then
+/// `Total output lines: M\n\n` (which older versions wrote alone). Returns
+/// the text after the header, the two numbers, and whether there was one.
+fn strip_header(text: &str) -> (&str, Option<u64>, Option<u64>, bool) {
+    let (mut rest, mut tokens, mut lines, mut found) = (text, None, None, false);
+    if let Some(after) = rest.strip_prefix("Warning: truncated output (original token count: ")
+        && let Some((n, after)) = digits(after)
+        && let Some(after) = after.strip_prefix(")\n")
+    {
+        (rest, tokens, found) = (after, Some(n), true);
+    }
+    if let Some(after) = rest.strip_prefix("Total output lines: ")
+        && let Some((n, after)) = digits(after)
+        && let Some(after) = after.strip_prefix('\n')
+    {
+        (rest, lines, found) = (after.strip_prefix('\n').unwrap_or(after), Some(n), true);
+    }
+    (rest, tokens, lines, found)
+}
+
+/// Where a gap sits in a text: the bytes the marker takes, and what it says.
+struct Marker {
+    start: usize,
+    end: usize,
+    gap: Gap,
+}
+
+/// Where a Codex text came from, which decides what in it is Codex's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// Not Codex's: nothing is a cut.
+    Plain,
+    /// What the model saw: a `function_call_output`, a
+    /// `custom_tool_call_output` or a poll's chunk. The token cut and the
+    /// warning header are Codex's.
+    Model,
+    /// A `CommandExecution` item's `aggregated_output`, which only the 1 MiB
+    /// collection cap touched. Anything else in it that looks like a cut is
+    /// text the command printed.
+    Collected,
+}
+
+/// Unified exec's frame around an output: `Chunk ID: …`, `Wall time: N
+/// seconds`, then `Process exited with code N` or `Process running with
+/// session ID N`, `Original token count: N`, and `Output:` on a line of its
+/// own (codex-rs `core/src/tools/context.rs`, `ExecCommandToolOutput`). Codex's
+/// warning header and cut come after it. Returns the text after the frame,
+/// whether there was one, and the frame's `Original token count` if it has
+/// one. A frame needs its `Wall time:` line.
+fn strip_frame(text: &str) -> (&str, bool, Option<u64>) {
+    let mut rest = text;
+    let mut timed = false;
+    let mut count = None;
+    while let Some((line, after)) = rest.split_once('\n') {
+        if line == "Output:" {
+            return if timed {
+                (after, true, count)
+            } else {
+                (text, false, None)
+            };
+        }
+        if let Some(number) = line.strip_prefix("Original token count: ") {
+            count = digits(number)
+                .filter(|(_, rest)| rest.is_empty())
+                .map(|(n, _)| n);
+        } else if line.starts_with("Wall time: ") && line.ends_with(" seconds") {
+            timed = true;
+        } else if ![
+            "Chunk ID: ",
+            "Process exited with code ",
+            "Process running with session ID ",
+        ]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+        {
+            break;
+        }
+        rest = after;
+    }
+    (text, false, None)
+}
+
+/// The gaps Codex left in `body`, in order, by the forms it writes them in:
+///
+/// - `…N tokens truncated…` or `…N chars truncated…`, in the middle of a line
+///   as the model-facing cut writes it, so only after Codex's warning header
+///   (`marked`), which says the text was cut;
+/// - `\n... N bytes omitted ...\n`, the 1 MiB collection cap, in the middle;
+/// - the same marker as the first line, which Codex writes when the cap fell
+///   before a token cut (`ExecCommandToolOutput::truncated_output_with_policy`),
+///   only where the text's start is Codex's (`anchored`: after its frame or
+///   header);
+/// - `[... omitted N of M lines ...]` on a line of its own, from Codex before
+///   v0.56.
+///
+/// Only the collection cap's marker in the middle applies to text that was
+/// only collected (`model` is false): the other forms are the token cut's.
+///
+/// Text that only looks like a marker (inside a line, or with no header for
+/// the first form) is not one. Codex leaves at most one gap in the middle, so
+/// of several matches the one nearest the middle is taken: it keeps the head
+/// and the tail about equal.
+fn find_gaps(body: &str, marked: bool, anchored: bool, model: bool) -> Vec<Marker> {
+    let mut gaps = Vec::new();
+    let mut from = 0;
+    if anchored
+        && let Some(rest) = body.strip_prefix("... ")
+        && let Some((n, rest)) = digits(rest)
+        && let Some(after) = rest.strip_prefix(" bytes omitted ...\n")
+    {
+        // After a warning line, Codex writes a blank line, which goes with
+        // it. With no warning line the marker's own newline is all there is.
+        let end = if marked {
+            body.len() - after.strip_prefix('\n').unwrap_or(after).len()
+        } else {
+            body.len() - after.len()
+        };
+        gaps.push(Marker {
+            start: 0,
+            end,
+            gap: Gap {
+                n,
+                unit: "bytes",
+                of: None,
+            },
+        });
+        from = end;
+    }
+    let mut found = Vec::new();
+    if marked {
+        for (at, _) in body.match_indices('…') {
+            if at < from {
+                continue;
+            }
+            let Some((n, rest)) = digits(&body[at + '…'.len_utf8()..]) else {
+                continue;
+            };
+            for (word, unit) in [
+                (" tokens truncated…", "tokens"),
+                (" chars truncated…", "chars"),
+            ] {
+                if let Some(after) = rest.strip_prefix(word) {
+                    let gap = Gap { n, unit, of: None };
+                    found.push(Marker {
+                        start: at,
+                        end: body.len() - after.len(),
+                        gap,
+                    });
+                }
+            }
+        }
+    }
+    for (at, _) in body.match_indices("\n... ") {
+        if at < from {
+            continue;
+        }
+        if let Some((n, rest)) = digits(&body[at + "\n... ".len()..])
+            && let Some(after) = rest.strip_prefix(" bytes omitted ...\n")
+        {
+            let gap = Gap {
+                n,
+                unit: "bytes",
+                of: None,
+            };
+            found.push(Marker {
+                start: at,
+                end: body.len() - after.len(),
+                gap,
+            });
+        }
+    }
+    let mut line_start = 0;
+    for line in body.split_inclusive('\n') {
+        let start = line_start;
+        line_start += line.len();
+        if !model || start < from {
+            continue;
+        }
+        if let Some(rest) = line.trim_end_matches('\n').strip_prefix("[... omitted ")
+            && let Some((n, rest)) = digits(rest)
+            && let Some(rest) = rest.strip_prefix(" of ")
+            && let Some((of, rest)) = digits(rest)
+            && rest == " lines ...]"
+        {
+            // The blank line Codex writes after the marker goes with it.
+            let end = line_start + usize::from(body[line_start..].starts_with('\n'));
+            let gap = Gap {
+                n,
+                unit: "lines",
+                of: Some(of),
+            };
+            found.push(Marker { start, end, gap });
+        }
+    }
+    gaps.extend(
+        found
+            .into_iter()
+            .min_by_key(|marker| (marker.start + marker.end).abs_diff(body.len())),
+    );
+    gaps
+}
+
+/// A Codex output split at the gaps Codex cut, if it did: the text without
+/// the warning header (the markers stay in it), and the cut. What is Codex's
+/// depends on the [`Source`]: for `Collected` only the collection cap's
+/// marker in the middle counts and nothing is stripped. A model-facing text
+/// may sit in unified exec's frame, and a code-mode script's result may come
+/// as JSON, read as its `output` first. `None` for text with no cut.
+pub(crate) fn split_cut(text: &str, source: Source) -> (String, Option<Cut>) {
+    let model = source == Source::Model;
+    if source == Source::Plain {
+        return (text.to_owned(), None);
+    }
+    let (after_frame, framed, frame_tokens) = if model {
+        strip_frame(text)
+    } else {
+        (text, false, None)
+    };
+    let (mut rest, mut original_tokens, mut lines, mut marked) = if model {
+        strip_header(after_frame)
+    } else {
+        (after_frame, None, None, false)
+    };
+    // Behind a frame, Codex's warning carries the count the frame does (both
+    // are `ceil(bytes / 4)` of the same output, codex-rs `unified_exec/
+    // process_manager.rs` and `tools/context.rs`). A warning line with any
+    // other count, or a frame with none, is the command's own first line.
+    if framed && marked && (original_tokens.is_none() || original_tokens != frame_tokens) {
+        (rest, original_tokens, lines, marked) = (after_frame, None, None, false);
+    }
+    let mut unwrapped = None;
+    if model
+        && let Ok(value) = serde_json::from_str::<Value>(rest.trim())
+        // A script's result carries these; any other JSON with an `output`
+        // field is the command's own text.
+        && (value.get("chunk_id").is_some() || value.get("wall_time_seconds").is_some())
+        && let Some(output) = field(&value, "output")
+    {
+        // Codex's own cut of a result's output field has its header inside.
+        let (inner, tokens, total, header) = strip_header(output);
+        original_tokens = tokens.or(original_tokens);
+        lines = total.or(lines);
+        marked |= header;
+        unwrapped = Some(inner.to_owned());
+    }
+    let body = unwrapped.as_deref().unwrap_or(rest);
+    let markers = find_gaps(body, marked, model && (framed || marked), model);
+    if !marked && markers.is_empty() {
+        return (text.to_owned(), None);
+    }
+    let mut cut = Cut {
+        original_tokens,
+        lines,
+        parts: Vec::new(),
+    };
+    let mut at = 0;
+    for Marker { start, end, gap } in markers {
+        cut.lines = cut.lines.or(gap.of);
+        if start > at {
+            cut.parts.push(Part::Text(body[at..start].to_owned()));
+        }
+        cut.parts.push(Part::Gap(gap));
+        at = end;
+    }
+    if !cut.parts.is_empty() && at < body.len() {
+        cut.parts.push(Part::Text(body[at..].to_owned()));
+    }
+    // What is shown as the output: the frame stays, the header does not.
+    let plain = if unwrapped.is_some() {
+        body.to_owned()
+    } else {
+        format!("{}{body}", &text[..text.len() - after_frame.len()])
+    };
+    (plain, Some(cut))
+}
+
+impl Cut {
+    /// The `cut` field of an entry. The text on each side of the gap gets an
+    /// equal share of `budget` bytes, the head cut at its end and the tail at
+    /// its start; `true` when any was cut.
+    fn json(&self, budget: usize) -> (Value, bool) {
+        let texts = self
+            .parts
+            .iter()
+            .filter(|part| matches!(part, Part::Text(_)))
+            .count();
+        let share = budget / texts.max(1);
+        let last = self
+            .parts
+            .iter()
+            .rposition(|part| matches!(part, Part::Text(_)));
+        let mut clipped = false;
+        let mut parts = Vec::new();
+        for (index, part) in self.parts.iter().enumerate() {
+            match part {
+                Part::Text(text) => {
+                    // The end of the last text is what matters; the others
+                    // are read from their start.
+                    let (text, cut) = if Some(index) == last && index > 0 {
+                        clip_end(text, share)
+                    } else {
+                        clip(text, share)
+                    };
+                    clipped |= cut;
+                    parts.push(json!({"text": text}));
+                }
+                Part::Gap(gap) => {
+                    let mut fields = json!({"n": gap.n, "unit": gap.unit});
+                    if let Some(of) = gap.of {
+                        fields["of"] = json!(of);
+                    }
+                    parts.push(json!({"gap": fields}));
+                }
+            }
+        }
+        let mut cut = json!({"by": "codex"});
+        if let Some(tokens) = self.original_tokens {
+            cut["original_tokens"] = json!(tokens);
+        }
+        if let Some(lines) = self.lines {
+            cut["lines"] = json!(lines);
+        }
+        if !parts.is_empty() {
+            cut["parts"] = Value::Array(parts);
+        }
+        (cut, clipped)
+    }
+}
+
+/// Puts a step's output preview in `entry`: `out`, cut at [`PREVIEW_MAX`]
+/// (`more` names it when cut), and for a Codex output that Codex cut, `cut`.
+fn put_out(
+    entry: &mut Map<String, Value>,
+    more: &mut Vec<&'static str>,
+    text: &str,
+    source: Source,
+) {
+    let (plain, cut) = split_cut(text, source);
+    let (shown, mut clipped) = clip(&plain, PREVIEW_MAX);
+    entry.insert("out".into(), json!(shown));
+    if let Some(cut) = cut {
+        let (cut, cut_clipped) = cut.json(PREVIEW_MAX);
+        entry.insert("cut".into(), cut);
+        clipped |= cut_clipped;
+    }
+    if clipped {
+        more.push("out");
+    }
+}
+
+/// One part's whole text for "View all": `text`, whether semon cut it here
+/// (`truncated`, or `cut_before`), and for a Codex output that Codex cut,
+/// `cut`. A gap Codex made is never `truncated`.
+fn text_json(text: &str, source: Source, cut_before: bool) -> String {
+    let (plain, cut) = split_cut(text, source);
+    let (shown, truncated) = clip(&plain, FULL_MAX);
+    let mut fields = json!({"text": shown});
+    if let Some(cut) = cut {
+        // Each side may take up to the cap itself: whether semon cut the text
+        // is `truncated`'s to say, from the text as a whole.
+        let (cut, _) = cut.json(FULL_MAX * 2);
+        fields["cut"] = cut;
+    }
+    fields["truncated"] = json!(truncated || cut_before);
+    fields.to_string()
+}
+
 /// A step's duration: tenths of a second under a minute, then minutes.
 fn secs(ms: i64) -> String {
     let ms = ms.max(0);
@@ -527,16 +942,20 @@ fn yielded_entry(
             entry.insert("cwd".into(), json!(codex_path(cwd, file.cwd.as_deref())));
         }
     }
-    let (output, cut) = match item
+    // The item's whole collected output, else what the polls printed.
+    let (output, polls_cut, source) = match item
         .as_ref()
         .and_then(|item| field(item, "aggregated_output"))
     {
-        Some(output) => clip(output, PREVIEW_MAX),
-        None => chunks(lines, &file.path, first, polls, dropped, PREVIEW_MAX),
+        Some(output) => (output.to_owned(), false, Source::Collected),
+        None => {
+            let (output, cut) = chunks(lines, &file.path, first, polls, dropped, PREVIEW_MAX);
+            (output, cut, Source::Model)
+        }
     };
     if !output.is_empty() {
-        entry.insert("out".into(), json!(output));
-        if cut {
+        put_out(&mut entry, &mut more, &output, source);
+        if polls_cut && !more.contains(&"out") {
             more.push("out");
         }
     }
@@ -585,11 +1004,7 @@ fn sent_entry(
         .and_then(|record| chunk_of(&record).or_else(|| result_text(&record, 0)))
         .filter(|output| !output.trim().is_empty())
     {
-        let (output, cut) = clip(&output, PREVIEW_MAX);
-        entry.insert("out".into(), json!(output));
-        if cut {
-            more.push("out");
-        }
+        put_out(&mut entry, &mut more, &output, Source::Model);
     }
     if !more.is_empty() {
         entry.insert("more".into(), json!(more));
@@ -597,6 +1012,36 @@ fn sent_entry(
     entry.insert("script".into(), json!(slot.offset));
     entry.insert("slot".into(), json!(index));
     Value::Object(entry)
+}
+
+/// A plain call's output, and where it is from: the whole output its
+/// `CommandExecution` item collected when the logs have that item, else the
+/// call's result, which is what the model saw.
+fn tool_output(
+    lines: &mut Lines,
+    path: &Path,
+    reply: Option<&Reply>,
+    item: Option<u64>,
+) -> Option<(String, Source)> {
+    if let Some(output) = item
+        .and_then(|item| lines.get(path, item))
+        .and_then(|record| {
+            command_item(&record)
+                .and_then(|item| field(item, "aggregated_output"))
+                .filter(|output| !output.is_empty())
+                .map(str::to_owned)
+        })
+    {
+        return Some((output, Source::Collected));
+    }
+    let reply = reply?;
+    let record = lines.get(path, reply.o)?;
+    let source = if record.get("payload").is_some() {
+        Source::Model
+    } else {
+        Source::Plain
+    };
+    Some((result_text(&record, reply.b as usize)?, source))
 }
 
 fn think_text(record: &Value, block: usize) -> Option<String> {
@@ -631,6 +1076,7 @@ fn tool_entry(
     shown: Shown,
     name: &str,
     reply: Option<&crate::events::Reply>,
+    item: Option<u64>,
     now: i64,
     home: Option<&str>,
 ) -> Value {
@@ -652,13 +1098,7 @@ fn tool_entry(
             more.push("in");
         }
     }
-    let mut result = || {
-        reply.and_then(|reply| {
-            lines
-                .get(&file.path, reply.o)
-                .and_then(|record| result_text(&record, reply.b as usize))
-        })
-    };
+    let mut result = || tool_output(lines, &file.path, reply, item);
     match shown {
         Shown::Live => {
             entry.insert("live".into(), json!(true));
@@ -696,12 +1136,10 @@ fn tool_entry(
                 if cut {
                     more.push("diff");
                 }
-            } else if let Some(text) = result().filter(|text| !text.trim().is_empty()) {
-                let (text, cut) = clip(&text, PREVIEW_MAX);
-                entry.insert("out".into(), json!(text));
-                if cut {
-                    more.push("out");
-                }
+            } else if let Some((text, source)) =
+                result().filter(|(text, _)| !text.trim().is_empty())
+            {
+                put_out(&mut entry, &mut more, &text, source);
             }
         }
     }
@@ -839,11 +1277,7 @@ fn operation_entry(
             if let Some(output) = field(item, "aggregated_output")
                 && !output.is_empty()
             {
-                let (output, cut) = clip(output, PREVIEW_MAX);
-                entry.insert("out".into(), json!(output));
-                if cut {
-                    more.push("out");
-                }
+                put_out(&mut entry, &mut more, output, Source::Collected);
             }
         }
         "FileChange" => {
@@ -932,7 +1366,12 @@ fn render(
         SlotKind::Returned { to, at, failed } => {
             json!({"k": "end", "ret": {"to": to, "at": at, "failed": failed}})
         }
-        SlotKind::Tool { shown, name, reply } => tool_entry(
+        SlotKind::Tool {
+            shown,
+            name,
+            reply,
+            item,
+        } => tool_entry(
             lines,
             file?,
             slot,
@@ -940,6 +1379,7 @@ fn render(
             *shown,
             name,
             reply.as_ref(),
+            *item,
             now,
             built.home.as_deref(),
         ),
@@ -1033,7 +1473,7 @@ pub(crate) fn slot_texts(
         SlotKind::Think => lines
             .get(&file.path, slot.offset)
             .and_then(|record| think_text(&record, block)),
-        SlotKind::Tool { reply, .. } => {
+        SlotKind::Tool { reply, item, .. } => {
             if let Some(input) = lines
                 .get(&file.path, slot.offset)
                 .and_then(|record| tool_input(&record, block))
@@ -1042,11 +1482,7 @@ pub(crate) fn slot_texts(
                 strings(&input, &mut text);
                 texts.push(("in", text));
             }
-            if let Some(reply) = reply
-                && let Some(text) = lines
-                    .get(&file.path, reply.o)
-                    .and_then(|record| result_text(&record, reply.b as usize))
-            {
+            if let Some((text, _)) = tool_output(lines, &file.path, reply.as_ref(), *item) {
                 texts.push(("out", text));
             }
             None
@@ -1247,7 +1683,7 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
         return full_yielded(file, slot, part);
     }
     let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "not a tool call");
-    let SlotKind::Tool { reply, .. } = &slot.kind else {
+    let SlotKind::Tool { reply, item, .. } = &slot.kind else {
         if part == "out"
             && let SlotKind::Operation { kind, .. } = &slot.kind
             && kind == "CommandExecution"
@@ -1258,8 +1694,7 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
                 .and_then(|payload| payload.get("item"))
                 .and_then(|item| field(item, "aggregated_output"))
                 .ok_or_else(invalid)?;
-            let (text, truncated) = clip(output, FULL_MAX);
-            return Ok(json!({"text": text, "truncated": truncated}).to_string());
+            return Ok(text_json(output, Source::Collected, false));
         }
         if part == "diff"
             && let SlotKind::Operation { kind, .. } = &slot.kind
@@ -1293,8 +1728,10 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
     };
     match part {
         "out" => {
-            let reply = reply.as_ref().ok_or_else(invalid)?;
-            full(&file.path, reply.o, reply.b as usize, part)
+            let (text, source) =
+                tool_output(&mut Lines::default(), &file.path, reply.as_ref(), *item)
+                    .ok_or_else(invalid)?;
+            Ok(text_json(&text, source, false))
         }
         "in" | "diff" => full(&file.path, slot.offset, slot.block as usize, part),
         _ => Err(invalid()),
@@ -1307,6 +1744,8 @@ fn full_yielded(file: &SlotFile, slot: &Slot, part: &str) -> io::Result<String> 
     let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "entry is not expandable");
     let mut lines = Lines::default();
     let path = &file.path;
+    // What the item collected, or what the model was shown of a poll.
+    let mut source = Source::Model;
     let text = match (&slot.kind, part) {
         (_, "script") => script_at(&mut lines, path, slot.offset),
         (SlotKind::Yielded { done, .. }, "in") => yielded_command(
@@ -1335,8 +1774,9 @@ fn full_yielded(file: &SlotFile, slot: &Slot, part: &str) -> io::Result<String> 
                 });
             if whole.is_none() {
                 let (text, truncated) = chunks(&mut lines, path, *first, polls, *cut, FULL_MAX);
-                return Ok(json!({"text": text, "truncated": truncated}).to_string());
+                return Ok(text_json(&text, Source::Model, truncated));
             }
+            source = Source::Collected;
             whole
         }
         (SlotKind::Sent { .. }, "in") => sent_chars(&mut lines, path, slot.offset),
@@ -1347,6 +1787,9 @@ fn full_yielded(file: &SlotFile, slot: &Slot, part: &str) -> io::Result<String> 
         _ => None,
     }
     .ok_or_else(invalid)?;
+    if part == "out" {
+        return Ok(text_json(&text, source, false));
+    }
     let (text, truncated) = clip(&text, FULL_MAX);
     Ok(json!({"text": text, "truncated": truncated}).to_string())
 }
@@ -1374,8 +1817,15 @@ fn full(path: &Path, offset: u64, block: usize, part: &str) -> io::Result<String
         }
         "out" => {
             let text = result_text(&record, block).ok_or_else(invalid)?;
-            let (text, truncated) = clip(&text, FULL_MAX);
-            Ok(json!({"text": text, "truncated": truncated}).to_string())
+            Ok(text_json(
+                &text,
+                if record.get("payload").is_some() {
+                    Source::Model
+                } else {
+                    Source::Plain
+                },
+                false,
+            ))
         }
         "diff" => {
             let name = tool_name(&record, block).ok_or_else(invalid)?;
@@ -1899,6 +2349,542 @@ mod tests {
         assert_eq!(full["truncated"], false);
     }
 
+    fn model(text: &str) -> (String, Option<Cut>) {
+        split_cut(text, Source::Model)
+    }
+
+    fn text(part: &str) -> Part {
+        Part::Text(part.to_owned())
+    }
+
+    fn gap(n: u64, unit: &'static str, of: Option<u64>) -> Part {
+        Part::Gap(Gap { n, unit, of })
+    }
+
+    #[test]
+    fn a_token_cut_is_split_at_its_marker_and_its_header_stripped() {
+        let (plain, cut) = model(
+            "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\nline 1\nline 2…19500 tokens truncated…line 899\nline 900\n",
+        );
+        assert_eq!(
+            plain,
+            "line 1\nline 2…19500 tokens truncated…line 899\nline 900\n"
+        );
+        assert_eq!(
+            cut,
+            Some(Cut {
+                original_tokens: Some(24000),
+                lines: Some(900),
+                parts: vec![
+                    text("line 1\nline 2"),
+                    gap(19500, "tokens", None),
+                    text("line 899\nline 900\n")
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn a_char_cut_is_split_at_its_marker() {
+        let (_, cut) = model(
+            "Warning: truncated output (original token count: 9000)\nTotal output lines: 40\n\nhead…12345 chars truncated…tail",
+        );
+        let cut = cut.unwrap();
+        assert_eq!(
+            cut.parts,
+            vec![text("head"), gap(12345, "chars", None), text("tail")]
+        );
+        assert_eq!((cut.original_tokens, cut.lines), (Some(9000), Some(40)));
+    }
+
+    #[test]
+    fn the_collection_cap_marker_is_split_with_no_header() {
+        let (plain, cut) = model("head\n... 1048576 bytes omitted ...\ntail\n");
+        assert_eq!(plain, "head\n... 1048576 bytes omitted ...\ntail\n");
+        assert_eq!(
+            cut,
+            Some(Cut {
+                original_tokens: None,
+                lines: None,
+                parts: vec![text("head"), gap(1_048_576, "bytes", None), text("tail\n")],
+            })
+        );
+    }
+
+    #[test]
+    fn the_old_line_marker_is_split_and_gives_the_line_count() {
+        let (_, cut) = model("a\nb\n[... omitted 3 of 9 lines ...]\n\nc\nd\n");
+        assert_eq!(
+            cut,
+            Some(Cut {
+                original_tokens: None,
+                lines: Some(9),
+                parts: vec![text("a\nb\n"), gap(3, "lines", Some(9)), text("c\nd\n")],
+            })
+        );
+    }
+
+    #[test]
+    fn text_that_only_looks_like_a_marker_is_not_split() {
+        for output in [
+            // The token marker is written mid-line, so only a header vouches for it.
+            "echo says …5 tokens truncated… and goes on\n",
+            "…5 chars truncated…",
+            "see ... 5 bytes omitted ... here\n",
+            "no newline after\n... 5 bytes omitted ...",
+            "  [... omitted 3 of 9 lines ...]\n",
+            "a [... omitted 3 of 9 lines ...] b\n",
+            "[... omitted 3 of 9 lines ...] trailing\n",
+            "Total output lines are 900\nplain\n",
+            "Warning: truncated output is what Codex prints\n",
+        ] {
+            let (plain, cut) = model(output);
+            assert_eq!((plain.as_str(), cut), (output, None), "{output:?}");
+        }
+    }
+
+    #[test]
+    fn a_header_with_no_marker_keeps_the_cut_but_no_gap() {
+        let (plain, cut) = model(
+            "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\nonly what is left\n",
+        );
+        assert_eq!(plain, "only what is left\n");
+        assert_eq!(
+            cut,
+            Some(Cut {
+                original_tokens: Some(24000),
+                lines: Some(900),
+                parts: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_previewed_cut_keeps_the_head_and_the_end_of_the_tail() {
+        let long = "x".repeat(PREVIEW_MAX);
+        let (_, cut) = model(&format!(
+            "Warning: truncated output (original token count: 1)\n{long}HEAD…9 tokens truncated…{long}TAIL"
+        ));
+        let (json, clipped) = cut.unwrap().json(PREVIEW_MAX);
+        assert!(clipped);
+        let parts = json["parts"].as_array().unwrap();
+        assert!(parts[0]["text"].as_str().unwrap().ends_with('…'));
+        assert_eq!(parts[1], json!({"gap": {"n": 9, "unit": "tokens"}}));
+        let tail = parts[2]["text"].as_str().unwrap();
+        assert!(tail.starts_with('…') && tail.ends_with("TAIL"));
+        assert!(
+            parts
+                .iter()
+                .all(|part| part.to_string().len() < PREVIEW_MAX)
+        );
+    }
+
+    fn codex_line(time: String, kind: &str, payload: Value) -> Value {
+        json!({"timestamp": time, "type": kind, "payload": payload})
+    }
+
+    #[test]
+    fn a_plain_call_with_a_cut_output_says_where_and_keeps_the_text() {
+        let home = Home::new();
+        let output = "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\nline 1\n…19500 tokens truncated…\nline 900\n";
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-plain-cut.jsonl",
+            &[
+                codex_line(ts(6, 0, 0), "session_meta", json!({"id":"plain-cut","cwd":"/work/proj"})),
+                codex_line(ts(6, 1, 0), "response_item", json!({"type":"function_call","name":"exec_command","call_id":"call","arguments":"{\"cmd\":\"cargo test\"}"})),
+                codex_line(ts(6, 1, 500), "response_item", json!({"type":"function_call_output","call_id":"call","output":output})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "plain-cut", &Anchor::Last);
+        let entry = &page["entries"][0];
+        assert_eq!(entry["out"], "line 1\n…19500 tokens truncated…\nline 900\n");
+        assert_eq!(
+            entry["cut"],
+            json!({"by":"codex","original_tokens":24000,"lines":900,"parts":[
+                {"text":"line 1\n"},
+                {"gap":{"n":19500,"unit":"tokens"}},
+                {"text":"\nline 900\n"}
+            ]})
+        );
+        assert!(entry.get("more").is_none());
+        let slot = entry["slot"].as_u64().unwrap() as usize;
+        let full: Value =
+            serde_json::from_str(&full_slot(&built, "plain-cut", slot, "out").unwrap()).unwrap();
+        assert_eq!(full["text"], entry["out"]);
+        assert_eq!(full["cut"], entry["cut"]);
+        assert_eq!(full["truncated"], false);
+    }
+
+    #[test]
+    fn a_plain_call_shows_its_items_whole_output_instead_of_the_cut_one() {
+        let home = Home::new();
+        let cut = "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\nline 1\n…19500 tokens truncated…\nline 900\n";
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-plain-item.jsonl",
+            &[
+                codex_line(ts(6, 0, 0), "session_meta", json!({"id":"plain-item","cwd":"/work/proj"})),
+                codex_line(ts(6, 1, 0), "response_item", json!({"type":"function_call","name":"exec_command","call_id":"call","arguments":"{\"cmd\":\"cargo test\"}"})),
+                codex_line(ts(6, 1, 500), "response_item", json!({"type":"function_call_output","call_id":"call","output":cut})),
+                codex_line(ts(6, 1, 750), "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"call","command":["/bin/zsh","-lc","cargo test"],"exit_code":0,"aggregated_output":"line 1\nline 2\nline 900\n"}})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "plain-item", &Anchor::Last);
+        let entry = &page["entries"][0];
+        assert_eq!(entry["out"], "line 1\nline 2\nline 900\n");
+        assert!(entry.get("cut").is_none());
+        let slot = entry["slot"].as_u64().unwrap() as usize;
+        let full: Value =
+            serde_json::from_str(&full_slot(&built, "plain-item", slot, "out").unwrap()).unwrap();
+        assert_eq!(full["text"], "line 1\nline 2\nline 900\n");
+        assert!(full.get("cut").is_none());
+    }
+
+    #[test]
+    fn an_operations_collection_cap_is_shown_as_a_gap_in_the_preview_and_in_full() {
+        let home = Home::new();
+        let head = "h".repeat(PREVIEW_MAX);
+        let output = format!("{head}\n... 1048576 bytes omitted ...\nthe end\n");
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-capped.jsonl",
+            &[
+                codex_line(ts(6, 0, 0), "session_meta", json!({"id":"capped","cwd":"/work/proj"})),
+                codex_line(ts(6, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"call","name":"exec","input":"tools.exec_command({cmd:'big'})"})),
+                codex_line(ts(6, 2, 0), "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"item","command":["/bin/zsh","-lc","big"],"exit_code":0,"aggregated_output":output}})),
+                codex_line(ts(6, 3, 0), "response_item", json!({"type":"custom_tool_call_output","call_id":"call","output":"done"})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "capped", &Anchor::Last);
+        let entry = &page["entries"][0];
+        let parts = entry["cut"]["parts"].as_array().unwrap();
+        assert_eq!(parts[1], json!({"gap": {"n": 1_048_576, "unit": "bytes"}}));
+        assert_eq!(parts[2], json!({"text": "the end\n"}));
+        assert!(entry["cut"].get("original_tokens").is_none());
+        assert!(entry["more"].as_array().unwrap().contains(&json!("out")));
+        let slot = entry["slot"].as_u64().unwrap() as usize;
+        let full: Value =
+            serde_json::from_str(&full_slot(&built, "capped", slot, "out").unwrap()).unwrap();
+        assert_eq!(full["text"], output);
+        assert_eq!(full["cut"]["parts"][0], json!({"text": head}));
+        assert_eq!(full["truncated"], false);
+    }
+
+    #[test]
+    fn a_code_mode_result_cut_in_its_json_falls_back_to_its_text_without_the_header() {
+        let home = Home::new();
+        let header =
+            "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\n";
+        // Whole JSON around the cut: the script's output field is read.
+        let whole = format!(
+            "{header}{{\"chunk_id\":\"c\",\"wall_time_seconds\":1.0,\"output\":\"line 1\\nline 2…19500 tokens truncated…line 899\\n\"}}"
+        );
+        // Cut mid-string and never closed: the text is shown as it is.
+        let broken = format!(
+            "{header}{{\"chunk_id\":\"c\",\"wall_time_seconds\":1.0,\"output\":\"line 1\\nline 2…19500 tokens truncated…lin"
+        );
+        let result = |call: &str, body: &str| json!({"type":"custom_tool_call_output","call_id":call,"output":[{"type":"input_text","text":"Script completed\nWall time 1.0s\nOutput:\n"},{"type":"input_text","text":body}]});
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-code-cut.jsonl",
+            &[
+                codex_line(ts(6, 0, 0), "session_meta", json!({"id":"code-cut","cwd":"/work/proj"})),
+                codex_line(ts(6, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"one","name":"exec","input":"text('one')"})),
+                codex_line(ts(6, 1, 500), "response_item", result("one", &whole)),
+                codex_line(ts(6, 2, 0), "response_item", json!({"type":"custom_tool_call","call_id":"two","name":"exec","input":"text('two')"})),
+                codex_line(ts(6, 2, 500), "response_item", result("two", &broken)),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "code-cut", &Anchor::Last);
+        let entries: Vec<&Value> = page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["k"] == "tool")
+            .collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0]["out"],
+            "line 1\nline 2…19500 tokens truncated…line 899\n"
+        );
+        assert_eq!(
+            entries[0]["cut"]["parts"][1],
+            json!({"gap": {"n": 19500, "unit": "tokens"}})
+        );
+        assert_eq!(entries[0]["cut"]["original_tokens"], 24000);
+        let out = entries[1]["out"].as_str().unwrap();
+        assert!(out.starts_with("{\"chunk_id\""), "{out}");
+        assert!(!out.contains("Warning: truncated output"));
+        assert_eq!(
+            entries[1]["cut"]["parts"][1],
+            json!({"gap": {"n": 19500, "unit": "tokens"}})
+        );
+        assert_eq!(entries[1]["cut"]["lines"], 900);
+    }
+
+    #[test]
+    fn collected_output_is_never_read_as_the_model_facing_cut() {
+        // A command that printed a rollout's cut output.
+        let printed = "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\nline 1\n…19500 tokens truncated…line 900\n[... omitted 3 of 9 lines ...]\n";
+        assert_eq!(
+            split_cut(printed, Source::Collected),
+            (printed.to_owned(), None)
+        );
+        // The collection cap's own marker still splits it, and the printed
+        // header stays in the text.
+        let capped = format!("{printed}head\n... 2048 bytes omitted ...\ntail\n");
+        let (plain, cut) = split_cut(&capped, Source::Collected);
+        assert_eq!(plain, capped);
+        let cut = cut.unwrap();
+        assert_eq!((cut.original_tokens, cut.lines), (None, None));
+        assert_eq!(cut.parts.len(), 3);
+        assert_eq!(cut.parts[1], gap(2048, "bytes", None));
+        assert!(
+            matches!(&cut.parts[0], Part::Text(head) if head.starts_with("Warning: truncated") && head.ends_with("head"))
+        );
+        // No marker at the first line either: that form is the model's.
+        let first = "... 5 bytes omitted ...\nwhat a command printed\n";
+        assert_eq!(
+            split_cut(first, Source::Collected),
+            (first.to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn unified_execs_frame_comes_before_the_warning_header() {
+        // codex-rs core/src/tools/context.rs: `{frame}\n{formatted_truncate_text(..)}`.
+        let frame = "Chunk ID: 3f9a1c\nWall time: 4.2100 seconds\nProcess exited with code 0\nOriginal token count: 24000\nOutput:\n";
+        let raw = format!(
+            "{frame}Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\nline 1\n…19500 tokens truncated…line 900\n"
+        );
+        let (plain, cut) = model(&raw);
+        assert_eq!(
+            plain,
+            format!("{frame}line 1\n…19500 tokens truncated…line 900\n")
+        );
+        assert_eq!(
+            cut,
+            Some(Cut {
+                original_tokens: Some(24000),
+                lines: Some(900),
+                parts: vec![
+                    text("line 1\n"),
+                    gap(19500, "tokens", None),
+                    text("line 900\n")
+                ],
+            })
+        );
+        // No cut: the frame alone is ordinary output, unchanged.
+        let plain_run = format!("{frame}hello\n");
+        assert_eq!(model(&plain_run), (plain_run.clone(), None));
+        // A frame doesn't vouch for a token marker a command printed.
+        let echoed = format!("{frame}echo …5 tokens truncated…\n");
+        assert_eq!(model(&echoed), (echoed.clone(), None));
+        // A frame needs its wall time.
+        let bare = "Chunk ID: x\nOutput:\nWarning: truncated output (original token count: 1)\n\nx";
+        assert_eq!(model(bare), (bare.to_owned(), None));
+    }
+
+    #[test]
+    fn a_cap_marker_first_then_a_token_cut_are_two_gaps() {
+        // `truncated_output_with_policy`: the warning line, the omission
+        // notice, a blank line, then the token-cut text.
+        let raw = "Chunk ID: a\nWall time: 1.0000 seconds\nOriginal token count: 5000000\nOutput:\nWarning: truncated output (original token count: 5000000)\n... 1048576 bytes omitted ...\n\nhead…9000 tokens truncated…tail";
+        let cut = model(raw).1.unwrap();
+        assert_eq!(cut.original_tokens, Some(5_000_000));
+        assert_eq!(
+            cut.parts,
+            vec![
+                gap(1_048_576, "bytes", None),
+                text("head"),
+                gap(9000, "tokens", None),
+                text("tail")
+            ]
+        );
+        // The same notice with no token cut, as `format!("{marker}\n{text}")`.
+        let notice =
+            "Chunk ID: a\nWall time: 1.0000 seconds\nOutput:\n... 77 bytes omitted ...\nrest\n";
+        assert_eq!(
+            model(notice).1.unwrap().parts,
+            vec![gap(77, "bytes", None), text("rest\n")]
+        );
+    }
+
+    #[test]
+    fn a_header_inside_a_script_results_output_field_is_found() {
+        let result = "{\"chunk_id\":\"c\",\"wall_time_seconds\":1.0,\"output\":\"Warning: truncated output (original token count: 7)\\nTotal output lines: 9\\n\\nab…3 tokens truncated…cd\"}";
+        let (plain, cut) = model(result);
+        assert_eq!(plain, "ab…3 tokens truncated…cd");
+        let cut = cut.unwrap();
+        assert_eq!((cut.original_tokens, cut.lines), (Some(7), Some(9)));
+        assert_eq!(
+            cut.parts,
+            vec![text("ab"), gap(3, "tokens", None), text("cd")]
+        );
+        // A result with nothing cut is left as it is.
+        let whole = "{\"chunk_id\":\"c\",\"wall_time_seconds\":1.0,\"output\":\"fine\"}";
+        assert_eq!(model(whole), (whole.to_owned(), None));
+    }
+
+    #[test]
+    fn a_multibyte_character_at_the_previews_split_is_kept_whole_or_dropped() {
+        // Each side gets 768 bytes: 1 + 3 * 255 = 766 is the last boundary
+        // of the head at or before 768, and the tail starts at a boundary
+        // at or after len - 768.
+        let head = format!("a{}", "€".repeat(400));
+        let tail = format!("{}z", "€".repeat(400));
+        let (_, cut) = model(&format!(
+            "Warning: truncated output (original token count: 1)\n{head}…9 tokens truncated…{tail}"
+        ));
+        let (json, clipped) = cut.unwrap().json(PREVIEW_MAX);
+        assert!(clipped);
+        let parts = json["parts"].as_array().unwrap();
+        let shown_head = parts[0]["text"]
+            .as_str()
+            .unwrap()
+            .strip_suffix('…')
+            .unwrap();
+        assert!(
+            head.starts_with(shown_head) && shown_head.len() == 766,
+            "{}",
+            shown_head.len()
+        );
+        let shown_tail = parts[2]["text"]
+            .as_str()
+            .unwrap()
+            .strip_prefix('…')
+            .unwrap();
+        assert!(tail.ends_with(shown_tail) && shown_tail.ends_with('z'));
+        assert!(
+            shown_tail.len() <= 768 && shown_tail.len() >= 766,
+            "{}",
+            shown_tail.len()
+        );
+    }
+
+    #[test]
+    fn view_all_never_says_semon_cut_a_gap_codex_made() {
+        // Each side over half the cap, the whole under it.
+        let side = FULL_MAX / 2 + 1024;
+        let text = format!(
+            "{}\n... 9 bytes omitted ...\n{}",
+            "a".repeat(side),
+            "b".repeat(1024)
+        );
+        let value: Value =
+            serde_json::from_str(&text_json(&text, Source::Collected, false)).unwrap();
+        assert_eq!(value["truncated"], false);
+        assert_eq!(
+            value["cut"]["parts"][0]["text"].as_str().unwrap().len(),
+            side
+        );
+    }
+
+    #[test]
+    fn an_item_that_printed_a_cut_output_shows_it_unchanged() {
+        let home = Home::new();
+        let printed = "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\nline 1\n…19500 tokens truncated…\nline 900\n";
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-printed.jsonl",
+            &[
+                codex_line(ts(6, 0, 0), "session_meta", json!({"id":"printed","cwd":"/work/proj"})),
+                codex_line(ts(6, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"call","name":"exec","input":"tools.exec_command({cmd:'jq'})"})),
+                codex_line(ts(6, 2, 0), "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"item","command":["/bin/zsh","-lc","jq"],"exit_code":0,"aggregated_output":printed}})),
+                codex_line(ts(6, 3, 0), "response_item", json!({"type":"custom_tool_call_output","call_id":"call","output":"done"})),
+                codex_line(ts(6, 4, 0), "response_item", json!({"type":"function_call","name":"exec_command","call_id":"plain","arguments":"{\"cmd\":\"jq\"}"})),
+                codex_line(ts(6, 4, 500), "response_item", json!({"type":"function_call_output","call_id":"plain","output":"model saw this"})),
+                codex_line(ts(6, 4, 750), "event_msg", json!({"type":"item_completed","item":{"type":"CommandExecution","id":"plain","command":["/bin/zsh","-lc","jq"],"exit_code":0,"aggregated_output":printed}})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "printed", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        for entry in entries {
+            assert_eq!(entry["out"], printed);
+            assert!(entry.get("cut").is_none(), "{entry}");
+            let slot = entry["slot"].as_u64().unwrap() as usize;
+            let full: Value =
+                serde_json::from_str(&full_slot(&built, "printed", slot, "out").unwrap()).unwrap();
+            assert_eq!(full["text"], printed);
+            assert!(full.get("cut").is_none());
+        }
+    }
+
+    #[test]
+    fn a_unified_exec_call_cut_by_codex_is_found_after_its_frame() {
+        let home = Home::new();
+        let output = "Chunk ID: 3f9a1c\nWall time: 4.2100 seconds\nProcess exited with code 0\nOriginal token count: 24000\nOutput:\nWarning: truncated output (original token count: 24000)\nTotal output lines: 900\n\nline 1\n…19500 tokens truncated…\nline 900\n";
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-framed.jsonl",
+            &[
+                codex_line(ts(6, 0, 0), "session_meta", json!({"id":"framed","cwd":"/work/proj"})),
+                codex_line(ts(6, 1, 0), "response_item", json!({"type":"function_call","name":"exec_command","call_id":"call","arguments":"{\"cmd\":\"cargo test\"}"})),
+                codex_line(ts(6, 1, 500), "response_item", json!({"type":"function_call_output","call_id":"call","output":output})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "framed", &Anchor::Last);
+        let entry = &page["entries"][0];
+        assert_eq!(
+            entry["cut"],
+            json!({"by":"codex","original_tokens":24000,"lines":900,"parts":[
+                {"text":"line 1\n"},
+                {"gap":{"n":19500,"unit":"tokens"}},
+                {"text":"\nline 900\n"}
+            ]})
+        );
+        assert!(
+            !entry["out"]
+                .as_str()
+                .unwrap()
+                .contains("Warning: truncated")
+        );
+    }
+
+    #[test]
+    fn a_printed_warning_line_behind_a_frame_is_kept_unless_its_count_is_the_frames() {
+        // A command printed a rollout's cut output; Codex cut nothing.
+        let printed = "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\nline 1\n…19500 tokens truncated…line 900\n";
+        let with = |count: &str| {
+            format!(
+                "Chunk ID: a\nWall time: 1.0000 seconds\nProcess exited with code 0\n{count}Output:\n{printed}"
+            )
+        };
+        // The frame's count is the whole output's, not the printed one's.
+        let other = with("Original token count: 12\n");
+        assert_eq!(model(&other), (other.clone(), None));
+        // A frame with no count (an intercepted patch's) can't vouch for it.
+        let none = with("");
+        assert_eq!(model(&none), (none.clone(), None));
+        // Equal counts are Codex's own header.
+        let real = with("Original token count: 24000\n");
+        let (plain, cut) = model(&real);
+        assert!(!plain.contains("Warning: truncated output"));
+        assert_eq!(cut.unwrap().original_tokens, Some(24000));
+        // With no frame at all (legacy and code-mode forms) the header is
+        // Codex's wherever it starts the text.
+        assert_eq!(model(printed).1.unwrap().original_tokens, Some(24000));
+    }
+
+    #[test]
+    fn a_leading_cap_marker_takes_only_its_own_newline_without_a_warning_line() {
+        // `format!("{marker}\n{text}")`: a kept output that starts blank.
+        let raw =
+            "Chunk ID: a\nWall time: 1.0000 seconds\nOutput:\n... 5 bytes omitted ...\n\nkept\n";
+        assert_eq!(
+            model(raw).1.unwrap().parts,
+            vec![gap(5, "bytes", None), text("\nkept\n")]
+        );
+        // After a warning line the blank line is Codex's separator.
+        let warned = "Chunk ID: a\nWall time: 1.0000 seconds\nOriginal token count: 9\nOutput:\nWarning: truncated output (original token count: 9)\n... 5 bytes omitted ...\n\nkept\n";
+        assert_eq!(
+            model(warned).1.unwrap().parts,
+            vec![gap(5, "bytes", None), text("kept\n")]
+        );
+    }
+
     #[test]
     fn codex_diff_keeps_deleted_lines_that_look_like_headers() {
         let (rows, cut, _) = codex_diff_rows("@@ -1 +0,0 @@\n--- note\n", FULL_MAX);
@@ -2061,7 +3047,8 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "exec_command");
         assert_eq!(entries[0]["arg"], "git status");
-        assert_eq!(entries[0]["out"], "## main\n");
+        // The item that completed the call holds its whole output (#52).
+        assert_eq!(entries[0]["out"], "failed");
         assert_eq!(entries[0]["ok"], false);
         assert_eq!(entries[0]["secs"], "0.5s");
         assert_eq!(
@@ -2231,10 +3218,6 @@ mod tests {
             (page["calls"].as_u64(), page["errors"].as_u64()),
             (Some(2), Some(0))
         );
-    }
-
-    fn codex_line(time: String, kind: &str, payload: Value) -> Value {
-        json!({"timestamp": time, "type": kind, "payload": payload})
     }
 
     fn script_call(id: &str, script: &str) -> Value {
