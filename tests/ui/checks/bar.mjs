@@ -339,9 +339,10 @@ export default async function barCheck(browser) {
 
   // Thinking shows inline. Readable thinking is drawn in full, with no control to open (no button, nothing hidden), under a
   // "Thinking" label that carries a duration only from one second up. Masked thinking (Claude redacts it, Codex encrypts it) is
-  // one quiet line, "Thinking hidden by the harness", and a run of masked thoughts is one line. Checked at 390 and 1280.
-  // Injected through the served /api/tx path: a readable thought timed 0 s, two masked thoughts, a readable thought timed 12 s,
-  // then two more masked thoughts: two readable thoughts and two masked lines are added, however many the session had.
+  // one quiet line, "Thinking hidden by the harness", at most one per turn. Checked at 390 and 1280.
+  // Injected through the served /api/tx path: a readable thought timed 0 s holding one very long unbroken token, two masked
+  // thoughts, a readable thought timed 12 s holding a fenced code block with a long line, then two more masked thoughts: two
+  // readable thoughts are added, at most one masked line however many the session had, and the page never scrolls sideways.
   const thoughtSid = Object.keys(D.SESS).find((sid) => (D.TX[sid] ?? []).length);
   const countThoughts = () => ({ readable: document.querySelectorAll(".turns .thought:not(.masked)").length, masked: document.querySelectorAll(".turns .thought.masked").length });
   const thoughtsBySize = {};
@@ -354,7 +355,7 @@ export default async function barCheck(browser) {
     await page.route("**/api/tx*", async (route) => {
       const u = new URL(route.request().url()); if (u.searchParams.get("sid") !== thoughtSid) return route.continue();
       const response = await route.fetch(), body = await response.json();
-      body.entries.push({ k: "think", text: "Timing separator", secs: 0 }, { k: "think", text: "", secs: 2 }, { k: "think", text: "", secs: 3 }, { k: "think", text: "A readable thought", secs: 12 }, { k: "think", text: "" }, { k: "think", text: "" });
+      body.entries.push({ k: "think", text: "Timing separator " + "A".repeat(300), secs: 0 }, { k: "think", text: "", secs: 2 }, { k: "think", text: "", secs: 3 }, { k: "think", text: "A readable thought\n\n```\nconst longLine = \"" + "y".repeat(240) + "\";\n```", secs: 12 }, { k: "think", text: "" }, { k: "think", text: "" });
       await route.fulfill({ response, json: body });
     });
     await goto(page, { v: "session", id: thoughtSid }, D);
@@ -363,7 +364,7 @@ export default async function barCheck(browser) {
       const readable = [...document.querySelectorAll(".turns .thought:not(.masked)")], masked = [...document.querySelectorAll(".turns .thought.masked")];
       const shown = (x) => { const b = x.getBoundingClientRect(); return b.width > 0 && b.height > 0; };
       const labels = readable.map((x) => (x.querySelector(".think-label")?.textContent ?? "").replace(/\s+/g, " ").trim()); // the viewer spaces a "·" out
-      return { addedReadable: readable.length - base.readable, addedMasked: masked.length - base.masked,
+      return { addedReadable: readable.length - base.readable, addedMasked: masked.length - base.masked, maxPerTurn: Math.max(0, ...[...document.querySelectorAll(".turns .turn")].map((b) => b.querySelectorAll(".thought.masked").length)),
         inline: readable.length > 0 && readable.every((x) => shown(x.querySelector(".think-text")) && !x.querySelector("button, [aria-expanded], [hidden]") && x.querySelector(".think-text").textContent.trim().length > 0),
         maskedLines: masked.every((x) => x.children.length === 1 && x.textContent.trim() === "Thinking hidden by the harness" && !x.querySelector("button, [aria-expanded]")),
         pairs: masked.filter((x) => x.nextElementSibling?.classList.contains("masked")).length,
@@ -406,14 +407,19 @@ export default async function barCheck(browser) {
       const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response }); // a 304 has no body
       const body = await response.json();
       const base = body.turns.filter((t) => t.sid === "principal").at(-1);
-      for (const id of ["bt-bare-turn", "bt-masked-then-reply"]) body.turns.push({ id, sid: "principal", at: base?.at ?? 0, start: null, u: false, text: "", sent: [], end: null });
+      for (const id of ["bt-bare-turn", "bt-masked-then-reply", "bt-alternating", "bt-in-run"]) body.turns.push({ id, sid: "principal", at: base?.at ?? 0, start: null, u: false, text: "", sent: [], end: null });
       await route.fulfill({ response, json: body });
     });
     await page.route("**/api/tx*", async (route) => {
       const u = new URL(route.request().url()); if (u.searchParams.get("sid") !== "principal") return route.continue();
       const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response });
       const body = await response.json();
-      body.entries.push({ k: "think", text: "", secs: 4, turn: "bt-bare-turn" }, { k: "think", text: "", secs: 5, turn: "bt-masked-then-reply" }, { k: "a", text: "Reply after a masked thought" });
+      const call = (extra = {}) => ({ k: "tool", name: "Bash", arg: "true", in: "true", out: "", ok: true, exit: 0, secs: "0.1s", ...extra }), masked = (extra = {}) => ({ k: "think", text: "", ...extra });
+      body.entries.push({ k: "think", text: "", secs: 4, turn: "bt-bare-turn" }, { k: "think", text: "", secs: 5, turn: "bt-masked-then-reply" }, { k: "a", text: "Reply after a masked thought" },
+        // masked, call, masked, call, masked, call: one line, then one group of three calls
+        masked({ turn: "bt-alternating" }), call(), masked(), call(), masked(), call(),
+        // a call, then masked inside the run that is still gathering, then two more calls: the line goes before the run
+        call({ turn: "bt-in-run" }), masked(), call(), call());
       await route.fulfill({ response, json: body });
     });
     await page.reload({ waitUntil: "load" }); // served() loaded the model before these routes existed
@@ -421,7 +427,9 @@ export default async function barCheck(browser) {
     await page.waitForSelector('section.turn[data-turn="bt-masked-then-reply"]', { timeout: 8000 }).catch(() => {});
     bareTurns = await page.evaluate(() => {
       const withReply = document.querySelector('section.turn[data-turn="bt-masked-then-reply"]'), bare = document.querySelector('section.turn[data-turn="bt-bare-turn"]');
-      return { bareBlock: !!bare, bareLines: bare?.querySelectorAll(".thought.masked").length ?? null, bareMessages: bare?.querySelectorAll(".msg").length ?? null, replyBlock: !!withReply, replyText: withReply?.querySelector(".msg")?.textContent ?? null, linesInReply: withReply?.querySelectorAll(".thought.masked").length ?? null, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] };
+      const shape = (id) => { const b = document.querySelector('section.turn[data-turn="' + id + '"]'), tx = b?.querySelector(".tx"), g = b ? [...b.querySelectorAll(".tgroup")] : [];
+        return { block: !!b, masked: b?.querySelectorAll(".thought.masked").length ?? null, groups: g.length, summary: g[0]?.querySelector(".tt")?.textContent.trim() ?? null, steps: g[0]?.querySelectorAll(".step").length ?? null, singles: b?.querySelectorAll(".tx > .steps").length ?? null, order: tx ? [...tx.children].map((c) => c.classList.contains("thought") ? "masked" : c.classList.contains("tgroup") ? "group" : c.className) : null }; };
+      return { alternating: shape("bt-alternating"), inRun: shape("bt-in-run"), bareBlock: !!bare, bareLines: bare?.querySelectorAll(".thought.masked").length ?? null, bareMessages: bare?.querySelectorAll(".msg").length ?? null, replyBlock: !!withReply, replyText: withReply?.querySelector(".msg")?.textContent ?? null, linesInReply: withReply?.querySelectorAll(".thought.masked").length ?? null, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] };
     });
     bareTurns.errors = page.errors;
     await page.context().close();
@@ -445,7 +453,7 @@ export default async function barCheck(browser) {
   r.expect(!!thoughtSid, "no session transcript was available for the thinking check");
   for (const [size, t] of Object.entries(thoughtsBySize)) {
     r.expect(t.errors.length === 0, size + " thinking route: page errors: " + t.errors.join(" | "));
-    r.expect(t.addedReadable === 2 && t.addedMasked === 2, size + ": the injected thoughts should add two readable thoughts and two masked lines (a run of masked thoughts is one line): " + JSON.stringify(t));
+    r.expect(t.addedReadable === 2 && t.addedMasked <= 1 && t.maxPerTurn <= 1, size + ": the injected thoughts should add two readable thoughts and at most one masked line, and no turn should hold two: " + JSON.stringify(t));
     r.expect(t.inline === true, size + ": readable thinking is not shown in full without a click: " + JSON.stringify(t));
     r.expect(t.maskedLines === true && t.pairs === 0, size + ": masked thinking is not a single quiet line: " + JSON.stringify(t));
     r.expect(t.zero.length === 0 && t.oldRows === 0, size + ": a thinking label names a zero duration, or the collapsed row is back: " + JSON.stringify(t));
@@ -460,6 +468,10 @@ export default async function barCheck(browser) {
     r.expect(t.overflow === 0, size + ": harbor scrolls sideways: " + t.overflow);
   }
   if (bareTurns) {
+    for (const id of ["alternating", "inRun"]) {
+      const x = bareTurns[id];
+      r.expect(x.block && x.masked === 1 && x.groups === 1 && x.summary === "Ran 3 commands" && x.steps === 3 && x.singles === 0 && x.order.join() === "masked,group", id + ": a turn with masked thoughts among its calls should draw one masked line, then one \"Ran 3 commands\" group: " + JSON.stringify(x));
+    }
     r.expect(bareTurns.errors.length === 0, "bare masked turn: page errors: " + bareTurns.errors.join(" | "));
     r.expect(bareTurns.replyBlock && bareTurns.replyText?.includes("Reply after a masked thought") && bareTurns.linesInReply === 1, "the injected masked-then-reply turn did not draw as one quiet line and its reply: " + JSON.stringify(bareTurns));
     r.expect(bareTurns.bareBlock && bareTurns.bareLines === 1 && bareTurns.bareMessages === 0 && bareTurns.emptyBlocks === 0, "a turn holding only masked thoughts did not draw as one quiet line: " + JSON.stringify(bareTurns));

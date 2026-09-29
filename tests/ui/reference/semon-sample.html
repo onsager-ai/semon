@@ -6,7 +6,7 @@
 <style>
 :root {
   --ground: #ffffff; --side: #f7f7f5; --sunken: #f0f1ee; --bubble: #eeefeb;
-  --ink: #191d1b; --ink-2: #3f4642; --muted: #6f7773; --faint: #9aa19d; --line: #e5e7e3;
+  --ink: #191d1b; --ink-2: #3f4642; --muted: #6f7773; --faint: #9aa19d; --line: #e5e7e3; --line-2: #d3d7d2;
   --accent: #4152c4; --claude: #c0643f; --codex: #2b8070; --you: #4152c4;
   --work: #1f78c1; --wait: #b9740b; --wait-soft: #faf0da; --err: #c23b3b; --done: #8b928e;
   --diff-add: #e3f3e8; --diff-del: #fbe8e6;
@@ -18,7 +18,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --ground: #141817; --side: #181c1b; --sunken: #202523; --bubble: #242927;
-    --ink: #e5e9e6; --ink-2: #c3c9c5; --muted: #8b938f; --faint: #646c68; --line: #272d2a;
+    --ink: #e5e9e6; --ink-2: #c3c9c5; --muted: #8b938f; --faint: #646c68; --line: #272d2a; --line-2: #3d4541;
     --accent: #8f9cf0; --claude: #de8a63; --codex: #4fb5a0; --you: #8f9cf0;
     --work: #58a9ec; --wait: #e2a23a; --wait-soft: #33280f; --err: #ef6b66; --done: #737b77;
     --diff-add: #173022; --diff-del: #381d1b; color-scheme: dark;
@@ -26,7 +26,7 @@
 }
 :root[data-theme="dark"] {
   --ground: #141817; --side: #181c1b; --sunken: #202523; --bubble: #242927;
-  --ink: #e5e9e6; --ink-2: #c3c9c5; --muted: #8b938f; --faint: #646c68; --line: #272d2a;
+  --ink: #e5e9e6; --ink-2: #c3c9c5; --muted: #8b938f; --faint: #646c68; --line: #272d2a; --line-2: #3d4541;
   --accent: #8f9cf0; --claude: #de8a63; --codex: #4fb5a0; --you: #8f9cf0;
   --work: #58a9ec; --wait: #e2a23a; --wait-soft: #33280f; --err: #ef6b66; --done: #737b77;
   --diff-add: #173022; --diff-del: #381d1b; color-scheme: dark;
@@ -341,7 +341,7 @@ code { overflow-wrap: anywhere; }
 .msg.user .body code { background: color-mix(in srgb, var(--ink) 7%, transparent); }
 .msg.assistant { max-width: 68ch; }
 .msg.assistant .body { font-family: var(--serif); font-size: 16px; color: var(--ink); }
-.thought { display: grid; gap: 3px; max-width: 68ch; padding-left: 12px; border-left: 1px solid var(--line); color: var(--muted); font-family: var(--sans); }
+.thought { display: grid; gap: 3px; max-width: 68ch; padding-left: 12px; border-left: 1px solid var(--line-2); color: var(--muted); font-family: var(--sans); }
 .thought.masked { padding-block: 0; }
 .think-label { font-size: 12px; font-weight: 600; letter-spacing: .04em; line-height: 1.4; color: var(--muted); }
 .thought.masked .think-label { font-weight: 400; letter-spacing: 0; font-size: 13px; }
@@ -1619,7 +1619,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     if (!find && turnMode) box.append(el("div", "divider", "Started " + clock(SESS[sid].start) + " on " + MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine]));
     // Adjacent tool calls collapse into one summary line ("Ran 2 commands, read 1 file · 1 failed"),
     // expandable to the individual steps. A lone call stays a single line; while finding, matches show directly.
-    let run = [];
+    let run = []; const maskedIn = new WeakSet();
     const flush = () => {
       if (!run.length) return;
       const steps = el("div", "steps"); run.forEach((r) => steps.append(r.node));
@@ -1658,8 +1658,13 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       if (opts.excludeH && e.k === "end" && /^Returned to /.test(e.text ?? "")) continue;
       // Entries that render nothing (hidden kinds) must not split a run of tool calls.
       if (isThought(e) && (!show.thinking || find)) continue;
-      // A masked thought is one quiet line; a masked thought right after another adds nothing, so it draws nothing and splits nothing.
-      if (isMaskedThought(e) && !run.length && tx.lastElementChild?.classList.contains("masked")) continue;
+      // Masked thinking is one quiet line per turn (per list, when nested), at the first masked thought's place. Later ones draw
+      // nothing, and the line never splits a run of steps: drawn before flush(), it lands ahead of a run still being gathered.
+      if (isMaskedThought(e)) {
+        const scope = cur ?? box;
+        if (!maskedIn.has(scope)) { maskedIn.add(scope); const m = el("div", "thought masked"); m.append(el("div", "think-label", "Thinking hidden by the harness")); tx.append(m); }
+        continue;
+      }
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
@@ -1688,9 +1693,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
         if (!show.thinking || find) continue;
         if (isPendingThought(e)) { const pending = el("div", "think-pending"); pending.append(el("span", "spin"), el("span", null, "Thinking…")); tx.append(pending); }
         else {
-          const masked = isMaskedThought(e), group = el("div", "thought" + (masked ? " masked" : ""));
-          if (masked) group.append(el("div", "think-label", "Thinking hidden by the harness"));
-          else group.append(el("div", "think-label", thoughtLabel(e.displaySecs)), markdown(thoughtText(e), "think-text"));
+          const group = el("div", "thought");
+          group.append(el("div", "think-label", thoughtLabel(e.displaySecs)), markdown(thoughtText(e), "think-text"));
           tx.append(group);
         }
       }

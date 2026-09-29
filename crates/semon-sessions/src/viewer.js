@@ -1522,7 +1522,7 @@
     else if (!find && turnMode) box.append(el("div", "divider", "Started " + clock(SESS[sid].start) + " on " + MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine]));
     // Adjacent tool calls collapse into one summary line ("Ran 2 commands, read 1 file · 1 failed"),
     // expandable to the individual steps. A lone call stays a single line; while finding, matches show directly.
-    let run = [];
+    let run = []; const maskedIn = new WeakSet();
     const flush = () => {
       if (!run.length) return;
       const steps = el("div", "steps"); run.forEach((r) => steps.append(r.node));
@@ -1566,8 +1566,13 @@
       if (opts.excludeH && e.k === "end" && /^Returned to /.test(e.text ?? "")) continue;
       // Entries that render nothing (hidden kinds) must not split a run of tool calls.
       if (e.k === "think" && (!show.thinking || find)) continue;
-      // A masked thought is one quiet line; a masked thought right after another adds nothing, so it draws nothing and splits nothing.
-      if (e.k === "think" && isMaskedThought(e) && !run.length && tx.lastElementChild?.classList.contains("masked")) continue;
+      // Masked thinking is one quiet line per turn (per list, when nested), at the first masked thought's place. Later ones draw
+      // nothing, and the line never splits a run of steps: drawn before flush(), it lands ahead of a run still being gathered.
+      if (e.k === "think" && isMaskedThought(e)) {
+        const scope = cur ?? box;
+        if (!maskedIn.has(scope)) { maskedIn.add(scope); const m = keyed(el("div", "thought masked"), e); m.append(el("div", "think-label", "Thinking hidden by the harness")); tx.append(m); }
+        continue;
+      }
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
@@ -1605,10 +1610,9 @@
       else if (e.k === "think") {
         if (isPendingThought(e)) { const pending = keyed(el("div", "think-pending"), e); pending.append(el("span", "spin"), el("span", null, "Thinking…")); tx.append(pending); }
         else {
-          // Readable thinking sits in the flow, in full and quietly styled; masked thinking is a single line with nothing to open.
-          const masked = isMaskedThought(e), group = keyed(el("div", "thought" + (masked ? " masked" : "")), e);
-          if (masked) group.append(el("div", "think-label", "Thinking hidden by the harness"));
-          else group.append(el("div", "think-label", thoughtLabel(e.displaySecs)), markdown(thoughtText(e), "think-text"));
+          // Readable thinking sits in the flow, in full and quietly styled, with nothing to open.
+          const group = keyed(el("div", "thought"), e);
+          group.append(el("div", "think-label", thoughtLabel(e.displaySecs)), markdown(thoughtText(e), "think-text"));
           tx.append(group);
         }
       }
@@ -2334,7 +2338,7 @@
   // are new.
   function patchSession(dirty) {
     tick(); const s = SESS[route.id], box = $("#page .turns");
-    const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .step, .hcard, .think, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
+    const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .step, .hcard, .thought, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
     const before = keys();
     // Only the changed turns are drawn again, unless the turns shown no longer match the index or nothing was shown.
     const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some((b) => !TURN.has(b.dataset.turn));

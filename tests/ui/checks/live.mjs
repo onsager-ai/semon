@@ -59,6 +59,7 @@ const sleep = (n) => new Promise((r) => setTimeout(r, n));
 
 const SCHEMES = [["phone-light", { size: "phone", dark: false }], ["phone-dark", { size: "phone", dark: true }], ["desktop", { size: "desktop", dark: false }]];
 const MESSAGE = "Live check: the suite passed on the second run.";
+const THOUGHT = "Live check thinking: the second run needs no new seed.";
 const LATER = "Live check: one more thing to find.";
 const BRIEF = "Live check: review the flush change before it lands.";
 const RELAY = "Live check: a new CI failure on main, relayed for triage.";
@@ -93,6 +94,7 @@ function logs(dir) {
       path: f,
       append: (...lines) => fs.appendFileSync(f, lines.map((l) => JSON.stringify(l) + "\n").join("")),
       text: (t, text) => said(t, [{ type: "text", text }]),
+      think: (t, text) => said(t, [{ type: "thinking", thinking: text, signature: "sig" }]),
       tool: (t, id, name, input) => said(t, [{ type: "tool_use", id, name, input }]),
       result: (t, id, content, extra = {}) => base(t, "user", { message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content }] }, ...extra }),
       prompt: (t, text) => base(t, "user", { message: { role: "user", content: text } }),
@@ -207,7 +209,7 @@ async function scheme(browser, name, opts, r, protocol) {
     // ---- 1. harbor's running call returns, and it says something; the reader is scrolled up ----
     const beforeEntries = await S.evaluate(() => [...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .thought, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
     let t0 = Date.now();
-    harbor.append(harbor.result(at(12, 41), "toolu-b3", "test result: ok. 214 passed; 0 failed"), harbor.text(at(12, 41, 5), MESSAGE));
+    harbor.append(harbor.result(at(12, 41), "toolu-b3", "test result: ok. 214 passed; 0 failed"), harbor.think(at(12, 41, 2), THOUGHT), harbor.text(at(12, 41, 5), MESSAGE));
     R.message = await appear(S, t0, (m) => [...document.querySelectorAll("#page .msg.assistant")].some((x) => x.textContent.includes(m)), MESSAGE);
     r.expect(R.message != null, name + ": harbor's new message didn't appear within 4 s");
     await sleep(300);
@@ -220,6 +222,10 @@ async function scheme(browser, name, opts, r, protocol) {
     R.stillOpen1 = open0.filter((k) => !open1.has(k));
     r.expect(R.stillOpen1.length === 0, name + ": closed by the update: " + R.stillOpen1.join(", "));
     R.jump = await S.evaluate((before) => { const p = document.querySelector(".jump-bottom"); if (!p || p.hidden) return null; const b = p.getBoundingClientRect(), keys = new Set([...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .thought, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e)); return { text: p.textContent.trim(), added: [...keys].filter((key) => !before.includes(key)).length, w: b.width, h: b.height, top: b.top, left: b.left, right: b.right, bottom: b.bottom, vw: document.documentElement.clientWidth, vh: innerHeight }; }, beforeEntries);
+    // The new thought is an entry like any other: it counts toward "N new" (the message and the thought make at least two).
+    R.thought = await S.evaluate((t) => { const n = [...document.querySelectorAll("#page .turns .thought[data-e]")].find((x) => x.querySelector(".think-text")?.textContent.includes(t)); return n ? { key: n.dataset.e, open: !n.querySelector("button, [hidden]") } : null; }, THOUGHT);
+    r.expect(!!R.thought && R.thought.open && !beforeEntries.includes(R.thought.key), name + ": harbor's new thought did not appear in full, or was already counted: " + JSON.stringify(R.thought));
+    r.expect(R.jump && R.jump.added >= 2, name + ": the new thought and message should both count as new: " + JSON.stringify(R.jump));
     const jumpCount = R.jump && /^([1-9]\d*) new$/.exec(R.jump.text);
     r.expect(!!jumpCount && Number(jumpCount[1]) === R.jump.added, name + ": jump button count didn't match newly rendered entries: " + JSON.stringify(R.jump));
     if (R.jump) r.expect(R.jump.w >= 40 && R.jump.h >= 40 && R.jump.top >= 0 && R.jump.left >= 0 && R.jump.right <= R.jump.vw + 0.5 && R.jump.bottom <= R.jump.vh, name + ": the jump button is off screen or under 40 px: " + JSON.stringify(R.jump));
