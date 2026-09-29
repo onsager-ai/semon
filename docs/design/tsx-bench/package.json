@@ -1,0 +1,11 @@
+{
+  "name": "semon-tsx-bench",
+  "private": true,
+  "description": "CI-only benchmark for docs/design/tsx.md: the runtimes the samples import. The bundlers, Babel and TypeScript are in pkg/; bench.sh downloads the standalone binaries. Not part of the Rust build.",
+  "type": "module",
+  "dependencies": {
+    "lit-html": "3.3.3",
+    "preact": "10.29.8",
+    "solid-js": "1.9.15"
+  }
+}
