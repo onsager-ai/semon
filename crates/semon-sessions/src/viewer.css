@@ -419,6 +419,19 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .viewer pre.in { color: var(--ink); }
 .viewer .diff { border-radius: 10px; background: var(--sunken); }
 .viewer .vnote { margin: 8px 0 0; font-size: var(--fs-sm); color: var(--muted); }
+/* A parent's "All N" sheet: a search field above one scrolling list of waiting, running and finished sessions. */
+.kids-search { flex: none; display: flex; align-items: center; gap: 8px; height: 44px; margin: 8px 16px 4px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--ground); color: var(--muted); }
+.kids-search:focus-within { outline: 2px solid var(--accent); outline-offset: -1px; }
+.kids-search svg { width: 18px; height: 18px; flex: none; }
+.kids-search input { flex: 1 1 auto; min-width: 0; border: 0; outline: 0; background: transparent; padding: 0; font: var(--fs-read) var(--sans); color: var(--ink); }
+.kids-search input::placeholder { color: var(--muted); }
+.kids-h { margin: 14px 0 2px; font-size: var(--fs-sm); font-weight: 600; color: var(--muted); }
+.kids-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 6px 4px; border: 0; border-radius: 8px; background: none; text-align: left; color: var(--ink); }
+.kids-row .nm { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.kids-row .under { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-cap); color: var(--muted); }
+.kids-row .ag { flex: none; font: var(--fs-cap) var(--mono); color: var(--muted); }
+@media (hover: hover) { .kids-row:hover { background: var(--sunken); } }
+.kids-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 @media (max-width: 760px) {
   dialog.viewer { position: fixed; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; }
   .viewer .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
@@ -545,9 +558,17 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .tree-toggle svg { width: 16px; height: 16px; transition: transform .18s ease; }
 @media (hover: hover) { .tree-toggle:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); color: var(--ink); } }
 .tree-toggle:focus-visible { background: var(--sunken); color: var(--ink); outline: 2px solid var(--accent); outline-offset: -2px; }
-.tree-more { display: block; width: calc(100% - 12px); min-height: 30px; margin: 1px 4px 3px 8px; padding: 4px 8px; border: 0; border-radius: 8px; background: none; color: var(--muted); font: var(--fs-cap)/1.4 var(--sans); text-align: left; }
-@media (hover: hover) { .tree-more:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); color: var(--ink); } }
-.tree-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* "All N" ends a short list: on a phone it opens a sheet, on a wide screen the whole list opens in the tree (the chevron points down there). */
+.tree-all { display: flex; align-items: center; justify-content: space-between; gap: 6px; width: calc(100% - 12px); min-height: 30px; margin: 1px 4px 3px 8px; padding: 4px 8px; border: 0; border-radius: 8px; background: none; color: var(--ink-2); font: var(--fs-cap)/1.4 var(--sans); text-align: left; }
+.tree-all svg, .tree-fewer svg { width: 14px; height: 14px; flex: none; }
+.tree-fewer svg { transform: rotate(-90deg); }
+@media (min-width: 761px) { .tree-all svg { transform: rotate(90deg); } }
+@media (hover: hover) { .tree-all:hover, .tree-fewer:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); color: var(--ink); } }
+.tree-all:focus-visible, .tree-fewer:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* A parent whose whole list is open sticks to the top of the sidebar's scroll area; the shadows cover the row's side margins. */
+.tree-row.stuck { position: sticky; top: 0; z-index: 3; padding-bottom: 34px; background: var(--side); box-shadow: -8px 0 0 var(--side), 4px 0 0 var(--side), 0 1px 0 var(--line); }
+.tree-row.stuck .tree-toggle { bottom: 34px; }
+.tree-fewer { position: absolute; left: 0; right: 0; bottom: 0; height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 10px; border: 0; border-radius: 8px; background: none; color: var(--ink-2); font: var(--fs-cap)/1.4 var(--sans); text-align: left; }
 .treeitem[aria-expanded="true"] > .tree-row .tree-toggle svg { transform: rotate(90deg); }
 .tree-group { min-width: 0; margin-left: 14px; padding-left: 0; border-left: 1px solid var(--line); }
 .tree-group[data-depth="4"], .tree-group[data-depth="5"], .tree-group[data-depth="6"], .tree-group[data-depth="7"] { margin-left: 0; border-left-color: transparent; }
@@ -705,9 +726,9 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .analytics-measure button, .topbar .l2.session-meta .meta-runs { min-height: 44px; }
   .sibling-nav .ibtn { width: 44px; height: 44px; }
   .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-intro .more, .child-return button, .child-work .cw-toggle, .lineage-menu button { min-height: 44px; }
-  dialog.viewer.analytics-slice, dialog.viewer.runs-sheet { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
-  .analytics-slice .vh, .runs-sheet .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); } .analytics-slice .vb, .runs-sheet .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
-  .analytics-slice .vclose, .runs-sheet .vclose { width: 44px; height: 44px; }
+  dialog.viewer.analytics-slice, dialog.viewer.runs-sheet, dialog.viewer.kids-sheet { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
+  .analytics-slice .vh, .runs-sheet .vh, .kids-sheet .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); } .analytics-slice .vb, .runs-sheet .vb, .kids-sheet .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
+  .analytics-slice .vclose, .runs-sheet .vclose, .kids-sheet .vclose { width: 44px; height: 44px; }
 }
 .jump-bottom { position: fixed; left: var(--jump-x, 50%); transform: translateX(-50%); bottom: 16px; z-index: 15; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 20px; background: var(--ground); padding: 0 10px; color: var(--ink-2); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 12%, transparent); }
 .jump-bottom[hidden] { display: none; }
@@ -766,7 +787,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .srow-meta .host { max-width: 10ch; flex-shrink: 3; }
   .tree-toggle svg { width: 20px; height: 20px; }
   .tree-row { margin-inline: 4px; }
-  .tree-more { min-height: 44px; margin-inline: 4px; }
+  .tree-all { min-height: 44px; margin-inline: 4px; }
   .srow { min-height: 44px; padding-block: 8px; }
   .think { min-height: 44px; }
   .jump-bottom { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
