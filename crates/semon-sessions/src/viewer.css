@@ -770,7 +770,24 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .analytics-range button::before, .analytics-measure button::before { content: ""; position: absolute; left: 0; right: 0; top: calc(-1 * var(--seg-reach)); bottom: calc(-1 * var(--seg-reach)); }
 .analytics-range button[aria-pressed="true"], .analytics-measure button[aria-pressed="true"] { background: var(--ground); color: var(--ink); font-weight: 500; box-shadow: inset 0 0 0 1px var(--line-2); }
 @media (hover: hover) { .analytics-range button[aria-pressed="false"]:hover, .analytics-measure button[aria-pressed="false"]:hover { color: var(--ink); } }
-.facet-filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1.2fr) minmax(0, 1fr); gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+/* Analytics' and Sessions' filters: one Filter button, one chip per active filter, and the sheet the button opens. With nothing
+   active the control is one line. Chips wrap; nothing scrolls sideways. */
+.facet-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; padding: 2px 0; }
+.facet-btn { display: inline-flex; align-items: center; gap: 6px; min-height: var(--tap); padding: 0 12px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--ground); color: var(--ink); font-size: var(--fs-sm); font-weight: 500; }
+.facet-btn svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
+.facet-n { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: var(--ground); font-size: var(--fs-cap); line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
+.facet-n[hidden], .facet-chip[hidden] { display: none; }
+.facet-chip { position: relative; display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; min-height: 32px; padding: 0 10px 0 12px; border: 1px solid var(--accent); border-radius: 16px; background: var(--accent-soft); color: var(--accent); font-size: var(--fs-sm); }
+.facet-chip .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.facet-chip svg { width: 14px; height: 14px; flex: none; }
+.facet-btn:focus-visible, .facet-chip:focus-visible, .filters-sheet .vf button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (hover: hover) { .facet-btn:hover { background: var(--hover); } .facet-chip:hover { background: color-mix(in srgb, var(--accent-soft) 70%, var(--accent)); } }
+.filters-sheet .vclose { grid-row: auto; }
+.filters-sheet .vb { display: grid; align-content: start; gap: 12px; padding-top: 16px; padding-bottom: 16px; }
+.filters-sheet .vf { flex: none; display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); }
+.filters-sheet .vf button { min-height: var(--tap); padding: 0 16px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--ground); color: var(--ink); font-size: var(--fs-sm); font-weight: 500; }
+.filters-sheet .vf .fdone { border-color: var(--ink); background: var(--ink); color: var(--ground); }
+@media (min-width: 761px) { dialog.viewer.filters-sheet { width: min(420px, calc(100vw - 48px)); } }
 .analytics-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; margin-top: -6px; }
 .analytics-metric:nth-last-child(-n+2) { border-bottom: 0; }
 .analytics-metric { min-width: 0; padding: 12px 0 13px; border-bottom: 1px solid var(--line); }
@@ -820,14 +837,16 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .analytics-session .no-price { grid-column: 1 / -1; margin-top: -3px; } .analytics-slice .session-name { white-space: normal; overflow-wrap: anywhere; }
 @media (min-width: 761px) { .analytics-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 20px; } .analytics-metric:nth-last-child(-n+4) { border-bottom: 0; } .analytics-breakdowns, .analytics-split { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 760px) {
-  .facet-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .facet-chip { min-height: 36px; }
+  .facet-chip::before { content: ""; position: absolute; inset: -4px 0; }
+  .filters-sheet .vf { padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
   .analytics-range, .analytics-measure { --seg-reach: 10px; }
   .analytics-range button, .analytics-measure button { min-width: 44px; }
   .topbar .l2.session-meta .meta-runs { min-height: 44px; }
   .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-intro .more, .child-return button, .child-work .cw-toggle, .lineage-menu button { min-height: 44px; }
-  dialog.viewer.analytics-slice, dialog.viewer.runs-sheet, dialog.viewer.kids-sheet { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
-  .analytics-slice .vh, .runs-sheet .vh, .kids-sheet .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); } .analytics-slice .vb, .runs-sheet .vb, .kids-sheet .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
-  .analytics-slice .vclose, .runs-sheet .vclose, .kids-sheet .vclose { width: 44px; height: 44px; }
+  dialog.viewer.analytics-slice, dialog.viewer.runs-sheet, dialog.viewer.kids-sheet, dialog.viewer.filters-sheet { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
+  .analytics-slice .vh, .runs-sheet .vh, .kids-sheet .vh, .filters-sheet .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); } .analytics-slice .vb, .runs-sheet .vb, .kids-sheet .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
+  .analytics-slice .vclose, .runs-sheet .vclose, .kids-sheet .vclose, .filters-sheet .vclose { width: 44px; height: 44px; }
 }
 .jump-bottom, .order-pill { position: fixed; left: var(--jump-x, 50%); transform: translateX(-50%); bottom: 16px; z-index: 15; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 20px; background: var(--ground); padding: 0 10px; color: var(--ink-2); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 12%, transparent); }
 .jump-bottom[hidden], .order-pill[hidden] { display: none; }
