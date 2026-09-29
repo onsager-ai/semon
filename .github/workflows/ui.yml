@@ -74,7 +74,7 @@ jobs:
       - name: Serve the fixtures
         run: |
           serve() { # name port dir
-            SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen "127.0.0.1:$2" \
+            HOME="$3" SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen "127.0.0.1:$2" \
               --claude-home "$3/claude" --codex-home "$3/codex" --proc-root "$3/proc" --cache "$3/index.json" \
               < /dev/null > "$RUNNER_TEMP/$1.log" 2>&1 &
             for _ in $(seq 1 100); do
@@ -147,7 +147,7 @@ jobs:
           SEMON_PIXEL_SCHEMES: all
         run: |
           [ "$(node tests/ui/fixture.mjs "$RUNNER_TEMP/second" --second)" = "$SEMON_NOW" ]
-          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen 127.0.0.1:8767 \
+          HOME="$RUNNER_TEMP/sample" SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen 127.0.0.1:8767 \
             --machine "$RUNNER_TEMP/sample" --machine "$RUNNER_TEMP/second" < /dev/null > "$RUNNER_TEMP/two-machines.log" 2>&1 &
           for _ in $(seq 1 100); do
             url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/two-machines.log" || true)

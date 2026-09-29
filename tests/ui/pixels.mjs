@@ -85,33 +85,20 @@ const COST_LINES = [
   const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
   const usageTotal = (s) => Object.values(s.tokensByModel ?? {}).reduce((sum, m) => sum + TOKEN_KINDS.reduce((n, [k]) => n + (Number(m[k]) || 0), 0), 0);
   function costForSessions(sessions) {
-    const unknown = new Set(), models = new Map(), by_day = {}; let knownUsd = 0, allPriced = true;
-    for (const s of sessions) {
-      const cost = s.cost ?? {};
-      if (cost.usd == null) allPriced = false; else knownUsd += Number(cost.usd) || 0;
-      for (const modelId of cost.unpriced_models ?? []) unknown.add(modelId);
-      for (const [day, amount] of Object.entries(cost.by_day ?? {})) by_day[day] = (by_day[day] ?? 0) + (Number(amount) || 0);
-      for (const [modelId, model] of Object.entries(cost.by_model ?? {})) {
-        const current = models.get(modelId) ?? { modelId, kinds: Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), usd: 0, priced: true };
-        if (model.usd == null) current.priced = false; else current.usd += Number(model.usd) || 0;
-        for (const [key] of TOKEN_KINDS) { current.kinds[key].tokens += Number(model.tokens?.[key]) || 0; current.kinds[key].usd += Number(model.usd_by_kind?.[key]) || 0; }
-        models.set(modelId, current);
+    const kinds = Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), models = new Map(), unknown = new Set(); let usd = 0;
+    for (const s of sessions) for (const [modelId, usage] of Object.entries(s.tokensByModel ?? {})) {
+      const price = API_PRICE[modelId], current = models.get(modelId) ?? { modelId, kinds: Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), usd: 0, priced: !!price };
+      if (!price) { unknown.add(modelId); current.priced = false; }
+      for (const [key] of TOKEN_KINDS) {
+        const tokens = Number(usage[key]) || 0; current.kinds[key].tokens += tokens; kinds[key].tokens += tokens;
+        if (price) { const amount = tokens * price[key] / 1e6; current.kinds[key].usd += amount; kinds[key].usd += amount; current.usd += amount; usd += amount; }
       }
+      models.set(modelId, current);
     }
-    return { usd: allPriced && !unknown.size ? knownUsd : null, knownUsd, models: [...models.values()], unknown: [...unknown].sort(), by_day };
+    return { usd: unknown.size ? null : usd, knownUsd: usd, kinds, models: [...models.values()], unknown: [...unknown] };
   }
   const costForSession = (sid, includeRuns = false) => costForSessions(SESS[sid] ? [SESS[sid], ...(includeRuns ? descendantsOf(sid, sessionChildren()) : [])] : []);
-  const costText = (cost) => cost.unknown.length || cost.usd == null ? "—" : asMoney(cost.usd);
-  function sessionCostInRange(s, from, to) {
-    const cost = s.cost ?? {}, days = Object.entries(cost.by_day ?? {}).filter(([day]) => { const start = Date.parse(day + "T00:00:00.000Z"); return Number.isFinite(start) && start < to && start + DAY_MS > from; });
-    const unknown = days.length ? cost.unpriced_models ?? [] : [];
-    return { usd: unknown.length ? null : days.reduce((sum, [, amount]) => sum + (Number(amount) || 0), 0), unknown, hasData: days.length > 0 };
-  }
-  function analyticsCost(rows, from, to) {
-    const unknown = new Set(); let usd = 0;
-    for (const row of rows) { const cost = sessionCostInRange(row.s, from, to); if (!cost.hasData) continue; usd += Number(cost.usd) || 0; cost.unknown.forEach((model) => unknown.add(model)); }
-    return { usd: unknown.size ? null : usd, unknown: [...unknown] };
-  }
+  const costText = (cost) => cost.unknown.length ? "—" : asMoney(cost.usd);
   `, `  const TOTAL_TOKEN_KINDS = ["input", "output", "cacheWrite", "cacheRead"];
   const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cache_read", "Cache read"], ["cache_write_5m", "Cache write · 5m"], ["cache_write_1h", "Cache write · 1h"], ["web_search", "Web search"]];
   const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
