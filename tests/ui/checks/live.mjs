@@ -36,6 +36,7 @@
 //     that adds a repo: the same elements stay in the document, the focused one keeps focus (and the search field its text and
 //     caret), an open list stays open with its highlight, the new repo is an option, and the selection is unchanged; a selected
 //     repo that leaves the data stays, marked "(no sessions)";
+//   - a running subagent's page shows its brief once, in the intro block, on opening and after a live update redraws its turn;
 //   - a 403 stops polling and shows "Session ended: reload with the printed URL";
 //   - 0 page errors and 0 sideways overflow on every page.
 // Once (desktop): polling pauses while the tab is hidden and resumes when it shows; failed polls back off from 2 s,
@@ -625,6 +626,50 @@ async function middleCounts(browser, r) {
   return R;
 }
 
+// A subagent's page shows its brief once, in the intro block at the top. The transcript leaves out the handoff that started it,
+// and a live update (the subagent is still running) redraws its turns the same way: it must not bring the brief back as a turn
+// header and a quoted copy under the "Started" divider.
+async function childBriefOnce(browser, r) {
+  const R = { name: "child-brief-once" }, dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-live-brief-")), now = write(dir);
+  const srv = await serve(dir, now + 10 * 60000), L = logs(dir), harbor = L.lane("harbor"), pages = [];
+  const NOTE = "Live check: the brief-once note, written while the page is open.";
+  // The elements whose own text holds the brief (the deepest ones), and whether each sits in the intro block.
+  const copies = (page) => page.evaluate((brief) => [...document.querySelectorAll("#page *")]
+    .filter((n) => n.textContent.includes(brief) && ![...n.children].some((c) => c.textContent.includes(brief)))
+    .map((n) => ({ tag: n.tagName.toLowerCase(), cls: n.className, intro: !!n.closest(".child-intro") })), BRIEF);
+  try {
+    harbor.append(harbor.tool(at(12, 43), "toolu-brief1", "Agent", { description: "Live reviewer", subagent_type: "general-purpose", prompt: BRIEF, run_in_background: true }),
+      harbor.result(at(12, 43, 0, 500), "toolu-brief1", "Async agent launched successfully.", { toolUseResult: { status: "async_launched", agentId: "brief-sub" } }));
+    const sub = L.lane("brief-sub", { parent: "harbor" });
+    fs.mkdirSync(path.dirname(sub.path), { recursive: true });
+    fs.writeFileSync(sub.path.replace(/\.jsonl$/, ".meta.json"), JSON.stringify({ agentType: "general-purpose", description: "Live reviewer", toolUseId: "toolu-brief1" }));
+    sub.append(sub.prompt(at(12, 43, 1), BRIEF), sub.text(at(12, 43, 20), "Live check: reading the flush change."));
+    const t0 = Date.now();
+    while (Date.now() - t0 < 8000 && !(await model(srv)).handoffs.some((h) => h.kind === "spawn" && h.to === "brief-sub")) await sleep(50);
+    const page = await open(browser, srv, "/s/claude/brief-sub", { size: "phone", dark: false }); pages.push(page);
+    await page.waitForFunction(() => !!document.querySelector("#page .child-intro"));
+    R.opened = await copies(page);
+    r.expect(R.opened.length === 1 && R.opened[0].intro, "child-brief-once: on opening, the brief is in " + R.opened.length + " elements, not only in the intro block: " + JSON.stringify(R.opened));
+    // The subagent goes on working: a live update draws its turn again.
+    const updates = page.updates, t1 = Date.now();
+    sub.append(sub.text(at(12, 44), NOTE));
+    R.followed = await appear(page, t1, (note) => [...document.querySelectorAll("#page .turns .msg")].some((x) => x.textContent.includes(note)), NOTE, 8000);
+    r.expect(R.followed != null && page.updates > updates, "child-brief-once: the live update never drew the subagent's new message");
+    await sleep(300);
+    R.live = await copies(page);
+    r.expect(R.live.length === 1 && R.live[0].intro, "child-brief-once: after a live update the brief is in " + R.live.length + " elements, not only in the intro block: " + JSON.stringify(R.live));
+    R.turnHeads = await page.evaluate(() => [...document.querySelectorAll("#page .turn-h")].map((h) => h.textContent));
+    r.expect(R.turnHeads.every((t) => !t.includes("Brief from")), "child-brief-once: a turn header repeats the brief's sender: " + JSON.stringify(R.turnHeads));
+    R.errors = pages.flatMap((p) => p.errors);
+    r.expect(R.errors.length === 0, "child-brief-once: page errors: " + R.errors.join(" | "));
+  } finally {
+    for (const p of pages) await p.context().close();
+    srv.proc.kill("SIGTERM");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return R;
+}
+
 export default async function liveCheck(browser) {
   const r = reporter("live");
   const out = {};
@@ -636,6 +681,8 @@ export default async function liveCheck(browser) {
   catch (e) { r.expect(false, "analytics-counts: threw " + (e?.stack ?? e)); }
   try { out.middleCounts = await middleCounts(browser, r); }
   catch (e) { r.expect(false, "middle-counts: threw " + (e?.stack ?? e)); }
+  try { out.childBriefOnce = await childBriefOnce(browser, r); }
+  catch (e) { r.expect(false, "child-brief-once: threw " + (e?.stack ?? e)); }
   r.results = out;
   return r.done();
 }
