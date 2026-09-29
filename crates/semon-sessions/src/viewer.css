@@ -606,10 +606,6 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .lineage-menu button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lineage-menu button span:first-child { flex: 1 1 auto; }
 .lineage-menu button .hname { flex: none; overflow: visible; }
-.sibling-nav { display: inline-flex; align-items: center; gap: 2px; flex: none; }
-.sibling-nav .sibling-count { min-width: 4ch; color: var(--muted); font: var(--fs-cap) var(--mono); text-align: center; white-space: nowrap; }
-.sibling-nav .ibtn { width: 36px; height: 36px; }
-.sibling-nav .ibtn:disabled { opacity: .4; cursor: default; }
 .runs-popover { position: absolute; top: calc(100% + 4px); right: 12px; z-index: 22; width: min(400px, calc(100vw - 24px)); max-height: min(72vh, 620px); overflow: auto; overscroll-behavior: contain; background: var(--ground); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px color-mix(in srgb, var(--ink) 16%, transparent); padding: 12px 14px; }
 .runs-popover h2 { margin: 0; font-size: var(--fs-ui); }
 .runs-tree { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 6px; }
@@ -634,8 +630,6 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .child-intro .intro-title { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--ink-2); font-weight: 600; }
 .child-intro .intro-title button, .child-return button { min-height: 36px; min-width: 0; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .child-intro .intro-title .tm { margin-left: auto; flex: none; color: var(--muted); font: var(--fs-cap) var(--mono); }
-.child-intro .intro-title .sibling-nav { margin: -4px -12px -4px auto; }
-.child-intro .intro-title:has(.sibling-nav) .tm { margin-left: 6px; }
 .child-intro .brief { max-height: 5.8em; margin-top: 3px; overflow: hidden; color: var(--ink-2); font: var(--fs-read)/1.5 var(--serif); }
 .child-intro .brief.open { max-height: none; }
 .child-intro .more { min-height: 36px; border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: var(--fs-sm); }
@@ -703,7 +697,6 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .facet-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .facet-field select { height: 44px; }
   .topbar .analytics-range button { min-width: 38px; min-height: 44px; padding: 0 5px; }
   .analytics-measure button, .topbar .l2.session-meta .meta-runs { min-height: 44px; }
-  .sibling-nav .ibtn { width: 44px; height: 44px; }
   .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-intro .more, .child-return button, .child-work .cw-toggle, .lineage-menu button { min-height: 44px; }
   dialog.viewer.analytics-slice, dialog.viewer.runs-sheet { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
   .analytics-slice .vh, .runs-sheet .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); } .analytics-slice .vb, .runs-sheet .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
