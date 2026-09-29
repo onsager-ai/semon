@@ -109,7 +109,8 @@ impl Facts {
 /// Reads this machine's facts for the homes `options` names. The working
 /// directories come from the same metadata scan the model builder runs (its
 /// event cache is used and saved, as `model_json` does); repositories are
-/// found by walking up from each one to a `.git`.
+/// found by walking up from each one to a `.git` (a linked worktree resolves
+/// to the repository it was made from).
 pub fn local_facts(options: &Options) -> io::Result<Facts> {
     let mut source = FactsSource::new(options);
     let facts = source.facts()?;
