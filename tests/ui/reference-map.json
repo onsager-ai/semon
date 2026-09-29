@@ -1,0 +1,20 @@
+{
+  "references": {
+    "sample": "reference/semon-sample.html",
+    "overhaul": "reference/overhaul.html"
+  },
+  "screens": {
+    "home": "sample",
+    "analytics": "sample",
+    "sessions": "sample",
+    "machines": "sample",
+    "machine": "sample",
+    "session": "sample",
+    "trace": "sample",
+    "drawer": "sample",
+    "loading": null,
+    "empty": null,
+    "error": null,
+    "not-found": null
+  }
+}
