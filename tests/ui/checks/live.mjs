@@ -201,7 +201,7 @@ async function scheme(browser, name, opts, r, protocol) {
     for (const p of pages) await p.evaluate(() => window.__live.reset());
 
     // ---- 1. harbor's running call returns, and it says something; the reader is scrolled up ----
-    const beforeEntries = await S.evaluate(() => [...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .think, .think-masked, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
+    const beforeEntries = await S.evaluate(() => [...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .think, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
     let t0 = Date.now();
     harbor.append(harbor.result(at(12, 41), "toolu-b3", "test result: ok. 214 passed; 0 failed"), harbor.text(at(12, 41, 5), MESSAGE));
     R.message = await appear(S, t0, (m) => [...document.querySelectorAll("#page .msg.assistant")].some((x) => x.textContent.includes(m)), MESSAGE);
@@ -215,7 +215,7 @@ async function scheme(browser, name, opts, r, protocol) {
     const open1 = new Set(await openKeys(S));
     R.stillOpen1 = open0.filter((k) => !open1.has(k));
     r.expect(R.stillOpen1.length === 0, name + ": closed by the update: " + R.stillOpen1.join(", "));
-    R.jump = await S.evaluate((before) => { const p = document.querySelector(".jump-bottom"); if (!p || p.hidden) return null; const b = p.getBoundingClientRect(), keys = new Set([...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .think, .think-masked, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e)); return { text: p.textContent.trim(), added: [...keys].filter((key) => !before.includes(key)).length, w: b.width, h: b.height, top: b.top, left: b.left, right: b.right, bottom: b.bottom, vw: document.documentElement.clientWidth, vh: innerHeight }; }, beforeEntries);
+    R.jump = await S.evaluate((before) => { const p = document.querySelector(".jump-bottom"); if (!p || p.hidden) return null; const b = p.getBoundingClientRect(), keys = new Set([...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .think, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e)); return { text: p.textContent.trim(), added: [...keys].filter((key) => !before.includes(key)).length, w: b.width, h: b.height, top: b.top, left: b.left, right: b.right, bottom: b.bottom, vw: document.documentElement.clientWidth, vh: innerHeight }; }, beforeEntries);
     const jumpCount = R.jump && /^([1-9]\d*) new$/.exec(R.jump.text);
     r.expect(!!jumpCount && Number(jumpCount[1]) === R.jump.added, name + ": jump button count didn't match newly rendered entries: " + JSON.stringify(R.jump));
     if (R.jump) r.expect(R.jump.w >= 40 && R.jump.h >= 40 && R.jump.top >= 0 && R.jump.left >= 0 && R.jump.right <= R.jump.vw + 0.5 && R.jump.bottom <= R.jump.vh, name + ": the jump button is off screen or under 40 px: " + JSON.stringify(R.jump));
