@@ -155,6 +155,7 @@ code, .mono { font-family: var(--mono); font-size: .88em; font-variant-numeric: 
 .tree-group { display: grid; margin-left: 12px; padding-left: 6px; border-left: 1px solid var(--line); min-width: 0; }
 .tree-group[data-depth="4"] { margin-left: 0; border-left-color: transparent; }
 .treeitem[aria-expanded="false"] > .tree-group { display: none; }
+#lanes .empty { padding: 8px 10px; }
 .tree-more { justify-self: start; min-height: var(--row); border: 0; background: none; padding: 0 8px; color: var(--accent); font-size: var(--fs-sm); }
 
 .topbar { position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; align-items: center; column-gap: 4px; min-height: 56px; padding: 6px 12px 6px 24px; background: var(--ground); border-bottom: 1px solid transparent; }
@@ -162,11 +163,11 @@ code, .mono { font-family: var(--mono); font-size: .88em; font-variant-numeric: 
 .topbar .ttl { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
 .topbar .l1 { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-weight: 600; font-size: var(--fs-title); line-height: 22px; }
 .topbar .t { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.crumb { flex: 0 1 auto; min-width: 3em; max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-weight: 500; }
+.crumb { flex: 0 1 auto; min-width: 3em; max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-weight: 500; text-align: left; }
 .crumb-sep { flex: none; color: var(--faint); font-weight: 400; }
 @media (hover: hover) { .crumb:hover { text-decoration: underline; text-underline-offset: 3px; } }
 .meta-line { display: flex; align-items: center; min-width: 0; overflow: hidden; white-space: nowrap; font-size: var(--fs-cap); line-height: var(--lh-cap); color: var(--muted); padding-left: 1px; }
-.meta-line .lab + .lab::before { content: "·"; margin: 0 7px; color: var(--faint); }
+.meta-line .lab + .lab::before { content: "·"; margin: 0 5px; color: var(--faint); }
 .meta-line .lab.state .dot { width: 7px; height: 7px; }
 .meta-line .lab.state { color: var(--ink-2); }
 .meta-line .lab.state.wait { color: var(--wait); } .meta-line .lab.state.err { color: var(--err); }
@@ -185,6 +186,8 @@ code, .mono { font-family: var(--mono); font-size: .88em; font-variant-numeric: 
 .sec-h .n { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
 .list { display: grid; grid-template-columns: minmax(0, 1fr); }
 .list > * { min-width: 0; }
+/* Rows that are links bleed their hover into the gutter, so their text lines up with the section heading. */
+.list:has(> .nrow, > .ib, > .kids-wrap) { margin: 0 -8px; }
 .empty { margin: 0; padding: 12px 0; color: var(--muted); font-size: var(--fs-sm); }
 .empty-state { display: grid; justify-items: start; gap: 8px; padding: 32px 0 8px; }
 .empty-state h2 { margin: 0; font-size: var(--fs-ui); font-weight: 600; }
@@ -210,7 +213,7 @@ code, .mono { font-family: var(--mono); font-size: .88em; font-variant-numeric: 
 .nrow .act .el { margin-left: auto; flex: none; font-size: var(--fs-cap); color: var(--muted); font-variant-numeric: tabular-nums; }
 .nrow.child { grid-template-columns: 8px minmax(0, 1fr) auto; padding-block: 0; min-height: var(--row); }
 .nrow.child .nm { font-weight: 400; color: var(--ink-2); }
-.nrow.child .kind { color: var(--muted); font-weight: 400; }
+.nrow.child .kind, .run-row .kind { margin-left: 6px; color: var(--muted); font-weight: 400; }
 .kids { display: grid; margin-left: 11px; padding-left: 13px; border-left: 1px solid var(--line); }
 .kids .nrow { border-bottom: 0; }
 .kids-wrap { display: grid; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
@@ -355,14 +358,14 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .menu-item { display: flex; align-items: center; gap: 12px; min-height: var(--tap); border: 0; border-radius: 8px; background: none; padding: 0 8px; text-align: left; color: var(--ink); }
 @media (hover: hover) { .menu-item:hover { background: var(--hover); } }
 .menu-item .icon { color: var(--muted); }
-.menu-item > span { flex: 1 1 auto; min-width: 0; }
+.menu-item > span:not(.switch) { flex: 1 1 auto; min-width: 0; }
 .menu-item .aside { flex: none; color: var(--muted); font-size: var(--fs-sm); }
 .switch { flex: none; position: relative; width: 34px; height: 20px; border-radius: 10px; background: var(--line-2); }
 .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--ground); box-shadow: 0 1px 2px color-mix(in srgb, #000 25%, transparent); }
 [aria-checked="true"] > .switch { background: var(--accent); }
 [aria-checked="true"] > .switch::after { left: 16px; }
-.kv { display: grid; grid-template-columns: minmax(96px, auto) minmax(0, 1fr); column-gap: 16px; margin: 0; font-size: var(--fs-sm); }
-.kv dt { padding: 7px 0; color: var(--muted); border-bottom: 1px solid var(--line); }
+.kv { display: grid; grid-template-columns: minmax(96px, auto) minmax(0, 1fr); column-gap: 0; margin: 0; font-size: var(--fs-sm); }
+.kv dt { padding: 7px 16px 7px 0; color: var(--muted); border-bottom: 1px solid var(--line); }
 .kv dd { margin: 0; padding: 7px 0; color: var(--ink); text-align: right; overflow-wrap: anywhere; border-bottom: 1px solid var(--line); user-select: text; -webkit-user-select: text; }
 .kv dd.mono { font-size: 12px; }
 .kv > :nth-last-child(-n+2) { border-bottom: 0; }
@@ -561,6 +564,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   .who-link { padding: 12px 0; margin: -12px 0; }
   .out .io .link, .viewer-b .vs .link { min-height: 44px; margin: -12px 0; }
   .msg.user { max-width: 88%; }
+  .notice .btn { grid-row: auto; grid-column: 2; justify-self: start; margin-top: 6px; }
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; }
   .metric:nth-last-child(-n+4) { border-bottom: 1px solid var(--line); }
   .metric:nth-last-child(-n+2) { border-bottom: 0; }
@@ -1110,8 +1114,11 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     row.append(back, fr, c); bar.append(row);
     const chips = el("div", "find-chips"); chips.setAttribute("role", "group"); chips.setAttribute("aria-label", "Show");
     const failed = (TX[s.id] ?? []).filter((e) => e.k === "tool" && e.ok === false).length;
-    const chip = (key, label, count) => { const b = btn("chip"); b.dataset.filter = key; b.setAttribute("aria-pressed", String(!!show[key])); b.append(el("span", null, label)); if (count != null) b.append(el("span", "n", String(count))); b.addEventListener("click", () => { show[key] = !show[key]; render(); }); chips.append(b); };
-    chip("messages", "Messages"); chip("tools", "Steps"); chip("thinking", "Thinking"); if (failed) chip("failures", "Failed steps", failed);
+    // One choice at a time: everything, only messages, only steps, or only the steps that failed.
+    const MODES = { all: { ...SHOW_ALL }, messages: { messages: true, tools: false, thinking: false, failures: false }, steps: { messages: false, tools: true, thinking: false, failures: false }, failures: { messages: false, tools: false, thinking: false, failures: true } };
+    const mode = show.failures ? "failures" : show.messages && show.tools ? "all" : show.messages ? "messages" : "steps";
+    const chip = (key, label, count) => { const b = btn("chip"); b.dataset.filter = key; b.setAttribute("aria-pressed", String(mode === key)); b.append(el("span", null, label)); if (count != null) b.append(el("span", "n", String(count))); b.addEventListener("click", () => { show = { ...MODES[key] }; render(); }); chips.append(b); };
+    chip("all", "All"); chip("messages", "Messages"); chip("steps", "Steps"); if (failed) chip("failures", "Failed steps", failed);
     bar.append(chips);
   }
 
@@ -1222,7 +1229,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
       const children = sessionChildren(), rows = [];
       const walk = (id, depth) => { for (const c of children.get(id) ?? []) { rows.push([c, depth]); walk(c.id, depth + 1); } };
       walk(s.id, 0);
-      rows.forEach(([c, depth], i) => { const r = btn("run-row depth" + Math.min(depth, 1)); r.hidden = i >= CHILD_CAP; r.setAttribute("aria-label", "Open " + c.name + ", " + kindText(c) + ", " + STATE[c.state] + ", " + costText(costForSession(c.id))); const nm = el("span", "nm", c.name + " "); nm.append(el("span", "kind", "· " + kindText(c))); r.append(dot(c.state), nm, el("span", "v", costText(costForSession(c.id))), icon(I.chev, "chev")); r.addEventListener("click", () => { pendingSessionOpen = c.id; dialog.close(); }); list.append(r); });
+      rows.forEach(([c, depth], i) => { const r = btn("run-row depth" + Math.min(depth, 1)); r.hidden = i >= CHILD_CAP; r.setAttribute("aria-label", "Open " + c.name + ", " + kindText(c) + ", " + STATE[c.state] + ", " + costText(costForSession(c.id))); const nm = el("span", "nm", c.name); nm.append(el("span", "kind", "·\u2009" + kindText(c))); r.append(dot(c.state), nm, el("span", "v", costText(costForSession(c.id))), icon(I.chev, "chev")); r.addEventListener("click", () => { pendingSessionOpen = c.id; dialog.close(); }); list.append(r); });
       if (rows.length > CHILD_CAP) { const m = btn("link", "Show " + (rows.length - CHILD_CAP) + " more"); m.addEventListener("click", () => { list.querySelectorAll(".run-row").forEach((r) => { r.hidden = false; }); m.remove(); }); list.append(m); }
       sec.append(list);
     }
@@ -1447,7 +1454,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
         const c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null, [ic, parts] = sentence(h, null);
         const [x, b] = hop("child k-" + h.kind + " s-" + h.status + (c || h.kind === "toyou" || h.kind === "move" ? "" : " stub"), ic, parts, h.at); x.dataset.h = h.id; if (c) x.dataset.turn = c.id;
         clampText(b, h.brief); const an = answerEl(h, "ev-result"); if (an) b.append(an);
-        if (h.result) { const r = el("div", "ev-result"); r.append(el("span", "rl", (h.status === "err" ? "Failed: " : "Returned: "))); inline(r, h.result); b.append(r); }
+        if (h.result) { const r = el("div", "ev-result"); r.append(el("span", "rl", (h.status === "err" ? "Result: " : "Returned: "))); inline(r, h.result); b.append(r); }
         const m = el("div", "meta");
         if (h.kind === "move") { m.append(stateLabel("done", "Moved")); b.append(m); continue; }
         n++;
@@ -1539,9 +1546,9 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const CONTENT = ".msg, .bubble, .step, .event, .child-card, .thought, .think-pending, .harness-note, .tgroup";
     const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
       if (!blk.querySelector(CONTENT)) { if (filtering || !blk.querySelector(".turn-h")) { blk.remove(); return; } }
-      const end = turnEnd(t);
+      const end = turnEnd(t), returned = t.entries.some((e) => e.k === "end" && /^Returned to /.test(e.text ?? ""));
       // A turn's foot only says what the rows above don't: that it stopped on a failure, and where its trace is.
-      if (!filtering && ((end && end.st === "err") || t.out.length)) { const d = el("div", "turn-end"); if (end?.st === "err") d.append(stateLabel("err", end.text)); if (t.out.length) { const tb = btn("link", null, "Trace what this turn set off"); tb.append(icon(I.trace), el("span", null, "Trace")); tb.addEventListener("click", () => goTrace(t.id)); d.append(tb); } blk.append(d); } };
+      if (!filtering && ((end && end.st === "err" && !returned) || t.out.length)) { const d = el("div", "turn-end"); if (end?.st === "err" && !returned) d.append(stateLabel("err", end.text)); if (t.out.length) { const tb = btn("link", null, "Trace what this turn set off"); tb.append(icon(I.trace), el("span", null, "Trace")); tb.addEventListener("click", () => goTrace(t.id)); d.append(tb); } blk.append(d); } };
     const openTurn = (t) => { closeTurn(); const blk = el("section", "turn"); blk.dataset.turn = t.id;
       const h = t.start;
       if (t.u || h?.kind === "ask") blk.setAttribute("aria-label", "Your message" + (h ? " at " + clock(h.at) : ""));
@@ -1594,7 +1601,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const head = el("span", "cc-head"); head.append(el("span", "cc-name", c.name), stateLabel(c.state), icon(I.chev, "chev"));
     b.append(head, el("span", "cc-meta", [kindText(c), shortModel(c.model), dur(c.start, c.state === "work" ? null : c.last), calls + (calls === 1 ? " step" : " steps")].join(" · ")));
     b.append(rich("span", "cc-brief", preview(h.brief)));
-    if (h.result) { const r = el("span", "cc-result" + (h.status === "err" ? " err" : "")); r.append(el("span", "rl", h.status === "err" ? "Failed: " : "Returned: ")); inline(r, h.result); b.append(r); }
+    if (h.result) { const r = el("span", "cc-result" + (h.status === "err" ? " err" : "")); r.append(el("span", "rl", h.status === "err" ? "Result: " : "Returned: ")); inline(r, h.result); b.append(r); }
     else if (c.state === "work") { const last = (TX[c.id] ?? []).filter((e) => e.k === "tool").at(-1); if (last) { const n = el("span", "cc-now"); n.append(el("span", "spin"), el("span", null, (last.live ? verbNow(last.name) : verb(last.name)[1]))); n.append(el("code", null, last.arg)); b.append(n); } }
     b.setAttribute("aria-label", "Open " + c.name + ": " + kindText(c) + ", " + STATE[c.state]);
     b.addEventListener("click", () => goSession(c.id));
@@ -1730,7 +1737,9 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   const hoursText = (ms) => (ms / 3600000).toFixed(1) + " h";
   const rangeName = () => analyticsRange === 1 ? "24 hours" : analyticsRange + " days";
   // A figure's second line: its change against the previous period, or "new" when there was nothing to compare with.
+  let noPrevious = false;
   function deltaNote(value, previous, format) {
+    if (noPrevious) return el("div", "note", "\u00a0");
     if (!previous) return el("div", "note", value ? "New this period" : "—");
     const d = value - previous; if (Math.abs(d) < 1e-9) return el("div", "note", "No change");
     return el("div", "note", (d > 0 ? "+" : "−") + format(Math.abs(d)));
@@ -1767,7 +1776,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     // Each bar is a tap target, so a phone gets fewer, wider buckets (at least 44 px each).
     const [count, unit] = (phone.matches ? { 1: [6, "per 4 hours"], 7: [7, "per day"], 30: [6, "per 5 days"] } : { 1: [24, "per hour"], 7: [28, "per 6 hours"], 30: [30, "per day"] })[analyticsRange], span = (to - from) / count;
     const fmtT = (t) => new Date(t).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }), clockOf = (t) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const bins = Array.from({ length: count }, (_, i) => { const a = from + i * span, b = a + span, hrs = (h) => rows.filter((r) => r.s.harness === h).reduce((n, r) => n + busyMsIn(r, a, b), 0) / 3600000; return { a, b, claude: hrs("claude"), codex: hrs("codex"), label: fmtT(a) + "–" + clockOf(b) }; });
+    const bins = Array.from({ length: count }, (_, i) => { const a = from + i * span, b = a + span, hrs = (h) => rows.filter((r) => r.s.harness === h).reduce((n, r) => n + busyMsIn(r, a, b), 0) / 3600000; return { a, b, claude: hrs("claude"), codex: hrs("codex"), label: span >= DAY_MS ? fmtT(a) + " – " + fmtT(b) : fmtT(a) + "–" + clockOf(b) }; });
     return stackedChart("Agents at work", "Agent-hours " + unit + ", by harness", bins, hLabel, (bin) => openAnalyticsSlice(bin, rows.filter((r) => busyMsIn(r, bin.a, bin.b) > 0)));
   }
   function renderCostChart(rows, from, to) {
@@ -1835,7 +1844,8 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const all = analyticsSessions().filter((r) => matchesSessionFacets(r.s)), [from, to] = [ANALYTICS_NOW - rangeMs(analyticsRange), ANALYTICS_NOW];
     if (!all.length) { page.append(emptyState("No activity yet", "Analytics adds up busy time, turns, steps and cost from the sessions Semon has read. Nothing matches this range and filter.")); return; }
     const now = analyticsStats(all, from, to), previous = analyticsStats(all, from - rangeMs(analyticsRange), from);
-    page.append(el("p", "an-cap", "Last " + rangeName() + " · change vs the " + rangeName() + " before"));
+    noPrevious = !previous.agentMs && !previous.started && !previous.turns;
+    page.append(el("p", "an-cap", "Last " + rangeName() + (noPrevious ? " · nothing recorded in the " + rangeName() + " before" : " · change vs the " + rangeName() + " before")));
     const metrics = el("div", "metrics");
     const add = (label, value, note, tip) => { const m = el("div", "metric"); if (tip) m.title = tip; m.append(el("div", "label", label), el("div", "value", value), note); metrics.append(m); };
     add("Agent-hours", hoursText(now.agentMs), deltaNote(now.agentMs, previous.agentMs, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
@@ -1883,7 +1893,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
           if (!kids.length) { list.append(r); continue; }
           const wrap = el("div", "kids-wrap"), k = el("div", "kids"); wrap.append(r, k);
           const cap = treePrefs["list:" + s.id]?.more || query ? kids.length : CHILD_CAP;
-          kids.slice(0, cap).forEach((c) => { const cr = btn("nrow child"); cr.dataset.id = c.id; const nm = el("span", "nm", c.name + " "); nm.append(el("span", "kind", "· " + kindText(c))); cr.append(dot(c.state), nm, el("span", "ag", ago(c.last))); cr.setAttribute("aria-label", c.name + ", " + STATE[c.state] + ", " + kindText(c)); cr.addEventListener("click", () => goSession(c.id)); k.append(cr); });
+          kids.slice(0, cap).forEach((c) => { const cr = btn("nrow child"); cr.dataset.id = c.id; const nm = el("span", "nm", c.name); nm.append(el("span", "kind", "·\u2009" + kindText(c))); cr.append(dot(c.state), nm, el("span", "ag", ago(c.last))); cr.setAttribute("aria-label", c.name + ", " + STATE[c.state] + ", " + kindText(c)); cr.addEventListener("click", () => goSession(c.id)); k.append(cr); });
           if (kids.length > cap) { const m = btn("tree-more", "Show " + (kids.length - cap) + " more"); m.addEventListener("click", () => { saveTreePref("list:" + s.id, { more: true }); draw(); }); k.append(m); }
           list.append(wrap);
         }
@@ -1898,7 +1908,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   // ---- Loading: skeletons that hold the final layout's geometry --------------------------------------------------------
   const skLine = (w) => { const i = el("i", "sk"); i.style.width = w; return i; };
   // In a flex row a bare placeholder has no line box; wrapped in a span it takes the same line height as the text.
-  const skText = (w) => { const s = el("span"); s.style.flex = "1 1 auto"; s.style.minWidth = "0"; s.append(skLine(w)); return s; };
+  const skText = (w) => { const s = el("div"); s.style.flex = "1 1 auto"; s.style.minWidth = "0"; s.append(skLine(w)); return s; };
   const W = ["62%", "48%", "71%", "55%", "66%", "40%", "58%", "69%"];
   function skeletonLanes() {
     const box = el("div", "loading"); box.setAttribute("aria-busy", "true"); box.setAttribute("aria-label", "Loading sessions");
