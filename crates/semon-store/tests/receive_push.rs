@@ -341,6 +341,113 @@ fn push_mirrors_a_home_into_semon_receive() {
     assert_ne!(fixture.copy(LOG), fixture.redacted(LOG));
 }
 
+/// `semon push --watch` ends on Ctrl-C through its stop, not by the
+/// signal's default action alone: it says so, then ends by SIGINT as it
+/// always did. While it runs, a second push with its state fails at once;
+/// after, the state lock is free.
+#[cfg(unix)]
+#[test]
+fn push_watch_stops_on_ctrl_c_and_holds_its_state_alone_until_then() {
+    use std::{os::unix::process::ExitStatusExt, time::Instant};
+
+    let mut fixture = Fixture::new();
+    let dir = fixture.dir();
+    let added = fixture.receive(&["token", "add", "laptop", "--dir", dir.to_str().unwrap()]);
+    assert_ok(&added, "token add");
+    let token = String::from_utf8(added.stdout).unwrap().trim().to_owned();
+    fixture.write("token", token.as_bytes());
+    private(&fixture.path("token"));
+    let url = fixture.start_receiver();
+    let log = format!("home/{LOG}");
+    fixture.write(&log, claude("watched").as_bytes());
+
+    let home = fixture.path("home");
+    let mut watch = semon()
+        .args(["push", "--watch", "--to", &url, "--token-file"])
+        .arg(fixture.path("token"))
+        .arg("--state")
+        .arg(fixture.path("state/push.json"))
+        .arg("--claude-home")
+        .arg(home.join("claude"))
+        .arg("--codex-home")
+        .arg(home.join("codex"))
+        .arg("--proc-root")
+        .arg(home.join("proc"))
+        .arg("--cache")
+        .arg(fixture.path("state/index.json"))
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", fixture.path("state"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let said_on = watch.stderr.take().unwrap();
+    // Ended if the test fails before the watch does.
+    struct Ended(Option<Child>);
+    impl Drop for Ended {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let mut watch = Ended(Some(watch));
+    let watch = watch.0.as_mut().unwrap();
+    let (lines, said) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(said_on).lines() {
+            let Ok(line) = line else { break };
+            eprintln!("[push --watch] {line}");
+            let _ = lines.send(line);
+        }
+    });
+
+    // The first pass and facts are in: the watch sleeps between passes.
+    let facts = dir.join("machines/laptop/facts.json");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !facts.exists() {
+        assert!(Instant::now() < deadline, "no facts from the watch");
+        assert!(watch.try_wait().unwrap().is_none(), "the watch ended");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(fixture.copy(LOG), fixture.redacted(LOG));
+
+    let second = fixture.push(&url);
+    assert!(!second.status.success());
+    assert!(
+        stderr(&second).contains("already running"),
+        "{}",
+        stderr(&second)
+    );
+
+    let interrupted = Command::new("kill")
+        .args(["-INT", &watch.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(interrupted.success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = watch.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the watch ignored Ctrl-C");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.signal(), Some(2), "{status:?}");
+    let mut stopped = false;
+    while let Ok(line) = said.recv_timeout(Duration::from_secs(5)) {
+        stopped |= line == "semon push: stopped";
+    }
+    assert!(stopped, "the watch didn't stop through its stop");
+
+    fixture.append(&log, claude("after the stop").as_bytes());
+    let pushed = fixture.push(&url);
+    assert_ok(&pushed, "a push after the watch stopped");
+    assert_eq!(fixture.copy(LOG), fixture.redacted(LOG));
+}
+
 #[test]
 fn receive_refuses_plain_http_off_loopback() {
     let fixture = Fixture::new();

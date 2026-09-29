@@ -393,7 +393,7 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
     Ok(PushArgs {
         options: semon_push::PushOptions {
             url,
-            token_file,
+            credential: semon_push::Credential::File(token_file),
             sessions,
             state,
         },
@@ -719,7 +719,7 @@ fn parse_forget_args(mut arguments: impl Iterator<Item = String>) -> Result<Forg
 fn run(command: Command) -> Result<(), String> {
     match command {
         Command::Sessions(args) => run_sessions(args),
-        Command::Push(args) => semon_push::push(&args.options, args.watch),
+        Command::Push(args) => run_push(&args),
         Command::Receive(args) => run_receive(args),
         Command::Query(args) => run_query(args),
         Command::Mcp(home) => run_mcp(&home),
@@ -728,6 +728,97 @@ fn run(command: Command) -> Result<(), String> {
         Command::Forensic(args) => run_forensic(args),
         Command::Forget(args) => run_forget(args),
     }
+}
+
+/// `semon push`, stopped by Ctrl-C or SIGTERM through the same
+/// [`semon_push::Stop`] an embedding app uses. Once it has returned, the
+/// signal is raised again with its default action, so the process ends
+/// the way it did before: by that signal.
+fn run_push(args: &PushArgs) -> Result<(), String> {
+    let stop = semon_push::Stop::new();
+    interrupt::stop_on_signal(&stop);
+    let result = semon_push::push_until(&args.options, args.watch, &stop);
+    if stop.is_stopped() {
+        eprintln!("semon push: stopped");
+    }
+    interrupt::raise_received();
+    result
+}
+
+/// Ctrl-C and SIGTERM, turned into a [`semon_push::Stop`]. The handler only
+/// stores the signal's number, which is async-signal-safe, and puts the
+/// default action back, so a second Ctrl-C ends the process at once; a
+/// thread turns the number into the stop. `signal` and `raise` are the C
+/// library's, which `std` already links; SIGINT (2) and SIGTERM (15) have
+/// these numbers on every Unix Rust supports.
+#[cfg(unix)]
+mod interrupt {
+    use std::{
+        os::raw::c_int,
+        sync::atomic::{AtomicI32, Ordering},
+        thread,
+        time::Duration,
+    };
+
+    const SIGINT: c_int = 2;
+    const SIGTERM: c_int = 15;
+    const SIG_DFL: usize = 0;
+    const SIG_IGN: usize = 1;
+
+    static RECEIVED: AtomicI32 = AtomicI32::new(0);
+
+    unsafe extern "C" {
+        fn signal(signum: c_int, handler: usize) -> usize;
+        fn raise(signum: c_int) -> c_int;
+    }
+
+    extern "C" fn on_signal(signum: c_int) {
+        RECEIVED.store(signum, Ordering::SeqCst);
+        // SAFETY: `signal` is async-signal-safe, and SIG_DFL is a valid
+        // disposition.
+        unsafe { signal(signum, SIG_DFL) };
+    }
+
+    pub fn stop_on_signal(stop: &semon_push::Stop) {
+        let handler: extern "C" fn(c_int) = on_signal;
+        for signum in [SIGINT, SIGTERM] {
+            // SAFETY: `on_signal` has the handler's C signature and does
+            // only async-signal-safe work.
+            let previous = unsafe { signal(signum, handler as *const () as usize) };
+            if previous == SIG_IGN {
+                // Started with it ignored (`cmd &` in a script): it stays so.
+                // SAFETY: SIG_IGN is a valid disposition.
+                unsafe { signal(signum, SIG_IGN) };
+            }
+        }
+        let stop = stop.clone();
+        let _ = thread::Builder::new()
+            .name("semon-signals".to_owned())
+            .spawn(move || {
+                while RECEIVED.load(Ordering::SeqCst) == 0 {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                stop.stop();
+            });
+    }
+
+    /// Ends the process by the signal that stopped the push, if one did.
+    pub fn raise_received() {
+        let signum = RECEIVED.load(Ordering::SeqCst);
+        if signum != 0 {
+            // SAFETY: the handler already put the default action back, so
+            // this ends the process as the signal would have.
+            unsafe { raise(signum) };
+        }
+    }
+}
+
+/// Elsewhere Ctrl-C ends the process as it always did; the OS releases the
+/// push's state lock with it.
+#[cfg(not(unix))]
+mod interrupt {
+    pub fn stop_on_signal(_: &semon_push::Stop) {}
+    pub fn raise_received() {}
 }
 
 /// The model of several machines' homes, as one viewer serves it: each
