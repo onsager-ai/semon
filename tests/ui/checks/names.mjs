@@ -8,7 +8,7 @@ import path from "node:path";
 import { ENV, served, data, reporter, goto, overflow } from "../lib.mjs";
 
 // A Codex session started directly is a "Codex run" in the model, so its top bar says so; every other place says "Codex".
-const ALLOWED = new Set(["Claude Code", "Claude", "Codex", "Codex run"]);
+const ALLOWED = new Set(["Claude Code", "Claude", "Codex", "Codex run", "Subagent"]);
 const OUT = path.join(ENV.out, "names");
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -65,11 +65,11 @@ export default async function namesCheck(browser) {
       else if (s !== kinded || s === claude || s === codex) r.expect(top.length > 0, tag + ": the top bar of " + s.name + " (" + s.harness + ") shows no harness label, so none was audited");
       if (top.length) audit("topbar-" + s.harness, top);
       if (s === kinded) {
-        // A child's kind chip in the top bar is neutral: no tinted fill, and the neutral ink.
-        const chip = await page.evaluate(() => { const c = document.querySelector("#topbar .meta-kind"); if (!c) return null; const probe = document.createElement("span"); probe.style.color = "var(--muted)"; document.body.append(probe); const muted = getComputedStyle(probe).color; probe.remove(); const cs = getComputedStyle(c), v = getComputedStyle(c.querySelector(".meta-value")); return { bg: cs.backgroundColor, color: cs.color, valueColor: v.color, muted }; });
-        rec["kind-chip"] = chip ?? "dropped by the line fitter";
-        if (size === "desktop") r.expect(!!chip, tag + ": the kind chip is missing from a child's top bar at 1280 px");
-        if (chip) r.expect(chip.bg === "rgba(0, 0, 0, 0)" && chip.color === chip.muted && chip.valueColor === chip.muted, tag + ": the kind chip is tinted: " + JSON.stringify(chip));
+        // A child's kind ("Subagent", "Codex run") is a plain label of the meta line: no fill, the neutral ink.
+        const chip = await page.evaluate(() => { const c = document.querySelector('#topbar .meta-line .lab[data-drop="2"]'); if (!c) return null; const probe = document.createElement("span"); probe.style.color = "var(--muted)"; document.body.append(probe); const muted = getComputedStyle(probe).color; probe.remove(); const cs = getComputedStyle(c); return { text: c.textContent, bg: cs.backgroundColor, color: cs.color, muted }; });
+        rec["kind-label"] = chip ?? "dropped by the line fitter";
+        if (size === "desktop") r.expect(!!chip, tag + ": the kind label is missing from a child's top bar at 1280 px");
+        if (chip) r.expect(chip.bg === "rgba(0, 0, 0, 0)" && chip.color === chip.muted, tag + ": the kind label is tinted: " + JSON.stringify(chip));
       }
       if (s === claude) await shot("session");
     }
