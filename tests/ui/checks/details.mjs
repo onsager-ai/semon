@@ -13,7 +13,7 @@ fs.mkdirSync(OUT, { recursive: true });
 // Reads the open menu with its tokens table shown. A cell's text is on its own text node (the tooltip's screen-reader text sits beside it).
 const read = (page) => page.evaluate(() => {
   const d = document.querySelector("dialog.session-menu"), t = d.querySelector(".tokens");
-  const lines = (n) => { const cs = getComputedStyle(n), lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.25; return Math.round(n.getBoundingClientRect().height / lh); };
+  const lines = (n) => { const range = document.createRange(); range.selectNodeContents(n); return new Set([...range.getClientRects()].map((q) => Math.round(q.top / 4))).size; }; // the label's own text, in line boxes (a row's height may come from its value)
   const cell = (c) => { const node = c.firstChild, text = node?.nodeType === 3 && node.length ? node : null; if (!text) return { text: "", tip: c.dataset.tip ?? null }; const range = document.createRange(); range.selectNodeContents(text); return { text: text.data, tip: c.dataset.tip ?? null, right: Math.round(range.getBoundingClientRect().right * 10) / 10 }; };
   const rows = [...t.querySelectorAll(".tok-line")].map((l) => { const cells = [...l.children].map(cell); return { kind: cells[0].text, tokens: cells[1].text, cost: cells[2].text, cells }; });
   const body = d.querySelector(".panel-b");

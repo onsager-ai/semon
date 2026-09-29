@@ -63,9 +63,9 @@ export default async function namesCheck(browser) {
       const top = await measure(page, "#topbar", '.meta-line .lab[data-drop="2"]');
       // A session's top bar always shows its harness. If the line fitter dropped the label, nothing was audited, so fail.
       // A child's own top bar keeps its kind chip first, so its model label may be dropped there.
-      // On a phone the session bar is one row with no line 2, so it holds no harness label (Session details has it).
-      if (size === "phone") r.expect(top.length === 0, tag + ": the phone session bar of " + s.name + " still shows a harness label");
-      else if (s !== kinded || s === claude || s === codex) r.expect(top.length > 0, tag + ": the top bar of " + s.name + " (" + s.harness + ") shows no harness label, so none was audited");
+      // (A phone's bar is one row and does not draw the line: there the harness is in the menu's Details, audited below.)
+      const lineShown = await page.evaluate(() => { const l = document.querySelector("#topbar .meta-line"); return !!l && getComputedStyle(l).display !== "none"; });
+      if (lineShown && (s !== kinded || s === claude || s === codex)) r.expect(top.length > 0, tag + ": the top bar of " + s.name + " (" + s.harness + ") shows no harness label, so none was audited");
       if (top.length) audit("topbar-" + s.harness, top);
       if (s === kinded) {
         // A child's kind ("Subagent", "Codex run") is a plain label of the meta line: no fill, the neutral ink.
