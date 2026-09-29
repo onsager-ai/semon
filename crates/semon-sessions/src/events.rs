@@ -2735,10 +2735,10 @@ mod tests {
         assert!(!stale.files.contains_key("session.jsonl"));
 
         let current_path = root.join("current.events.json");
-        cache.version = 14;
+        cache.version = CACHE_VERSION;
         cache.save(&current_path).unwrap();
         let current = EventCache::read(&current_path);
-        assert_eq!(current.version, 14);
+        assert_eq!(current.version, CACHE_VERSION);
         let retained_index = &current.files.get("session.jsonl").unwrap().index;
         assert_eq!(
             serde_json::to_value(retained_index.as_ref()).unwrap(),
