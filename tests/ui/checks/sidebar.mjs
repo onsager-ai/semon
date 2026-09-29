@@ -1,37 +1,49 @@
-// The sidebar tree, on the extras fixture (it holds `Fan-out`: a live parent with seven subagents, the oldest still
-// running), phone and desktop:
-//   - a parent lists its five newest children plus any that is working or waiting, then one "Show N more" button that
-//     names the parent; the running oldest child shows, so the fixture's N is 1.
-//   - the button reveals the rest and becomes "Show fewer"; the choice is saved per parent, beside `open`, and survives a
-//     reload; "Show fewer" folds them again.
-//   - while a search is typed every child shows and there is no button.
-//   - the toggle sits over the right end of its row's meta line, and only rows with children have one: no row has a left
-//     gutter, so within a group every name starts at the same x and every time ends at the same x whether or not the row has
-//     children, and no `.tree-spacer` is left.
-//   - arrow keys act on their own row: ArrowLeft on "Show N more" or on a leaf does not collapse its parent.
-//   - the toggle's box is at least 44x44 at 390 px and at least 28x36 at 1280 px, and a collapsed parent's summary does
-//     not overlap it.
+// The sidebar tree, on the extras fixture, phone and desktop. It holds two live parents: `Fan-out` (seven subagents, only the
+// oldest, Reader 1, still running) and `Swarm` (twelve: Workers 1 to 10 running, 11 and 12 finished and newer).
+//   - an open parent lists its waiting children, then its running ones (at most 8), then the newest finished ones until three rows
+//     are listed, and ends with one "All N" row when anything is hidden, N being the count pill's number. Fan-out lists Reader 1
+//     (old, but running) ahead of the newer finished Readers 7 and 6; Swarm lists Workers 10 to 3 and no finished worker.
+//   - there is no "Show N more" or "Show fewer" list control, and an old saved `more` is ignored and pruned on the next save.
+//   - a parent with no waiting or running session below it, and not holding the open session, is collapsed by default.
+//   - while a search is typed the children that match it are listed, capped by the same rule, and "All N" stays when others are hidden.
+//   - the keyboard reaches "All N" in tree order; on a phone the row is at least 44 px tall and its text has AA contrast.
+//   - on a phone "All N" opens a bottom sheet with a search field and Waiting / Running / Finished sections holding exactly the
+//     descendants, newest first; a tap on a row opens that session and closes the sheet; Esc and a tap on the backdrop close it
+//     and return focus to "All N"; rows are at least 44 px, there is one scroll surface, no sideways overflow, and AA contrast.
+//   - on a wide screen "All N" opens no dialog: it lists the whole parent inline, in the same order; the parent's row sticks to the
+//     top of the sidebar while the list scrolls, with "Show fewer", which folds the list, scrolls the parent back into view and
+//     focuses it; the open list is not saved (a reload starts short); navigating to a row under the sticky row scrolls it clear.
+//   - opening a nested parent's "All N" inside an open parent leaves the ancestors listed and open and sticks only the innermost
+//     row; on a wide screen "All N" reveals exactly its number (every descendant, under its own parent, open); a live update keeps
+//     the whole list open and focus on "Show fewer"; crossing 760 px, the rail, collapsing the parent or an ancestor, and a list with
+//     nothing left to fold all drop the open list; Esc in a phone's sheet leaves the drawer open; the sheet says which parent a
+//     grandchild is under.
+//   - a collapsed parent's count pill is the bare total with no state dot, fully round and AA in both themes; it is amber (`wait`) exactly when a run inside needs you, and its title and the row's aria-label break the total down (runs, needs you, working, failed). A patched model puts a waiting and a failed run, and a grandchild, under Fan-out.
+//   - the toggle sits over the right end of its row's meta line, and only rows with children have one: no row has a left gutter.
+//   - the toggle's box is at least 44x44 at 390 px and at least 28x36 at 1280 px, and a collapsed parent's summary does not
+//     overlap it.
 //   - only the open session's row is current: its parent is not highlighted; a collapsed parent opens for the child's page
 //     without saving that, and its saved choice is unchanged after navigating away; a collapse made while the child is open
-//     stays collapsed through redraws; the open child is never folded into 'Show N more'; in the rail the ancestor keeps a
-//     ring, no highlight, and aria-current="true".
-//   - a collapsed parent's count pill is the bare total with no state dot, fully round and AA in both themes; it is amber (`wait`) exactly when a run inside needs you, and its title and the row's aria-label break the total down (runs, needs you, working, failed). A patched model puts a waiting and a failed run, and a grandchild, under Fan-out.
-//   - screenshots of the sidebar at 390 and 1280, light and dark, go to out/sidebar-*.png.
+//     stays collapsed through redraws; the open child is always listed; in the rail the ancestor keeps a ring, no highlight, and
+//     aria-current="true".
+//   - screenshots of the sidebar (and of the sheet, and of the sticky list) at 390 and 1280, light and dark, go to out/sidebar-*.png.
 import path from "node:path";
 import { ENV, served, goto, data, reporter, overflow, settled } from "../lib.mjs";
 
 const openDrawer = async (page) => { await page.click("#lead-btn"); await page.waitForTimeout(300); };
 
-// The direct children of a parent's group, and its button.
+// A root's direct children, its "All N" row, its pill, and what is saved for it.
 const groupOf = (page, id) => page.evaluate((id) => {
-  const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id);
+  const item = [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id);
   if (!item) return null;
-  const button = item.querySelector(":scope > .tree-group > .tree-more");
+  const all = item.querySelector(":scope > .tree-group > .tree-all"), summary = item.querySelector(":scope > .tree-row .tree-summary");
   const stored = JSON.parse(localStorage.getItem("semon.tree") ?? "{}")[id] ?? null;
   return {
     ids: [...item.querySelectorAll(":scope > .tree-group > .treeitem")].map((x) => x.dataset.id),
-    more: button ? { text: button.textContent, role: button.getAttribute("role"), label: button.getAttribute("aria-label"), expanded: button.getAttribute("aria-expanded"), tag: button.tagName, tabIndex: button.tabIndex } : null,
-    expanded: item.getAttribute("aria-expanded"), stored,
+    all: all ? { text: all.textContent, role: all.getAttribute("role"), label: all.getAttribute("aria-label"), tag: all.tagName, tabIndex: all.tabIndex, height: Math.round(all.getBoundingClientRect().height * 10) / 10 } : null,
+    oldButtons: document.querySelectorAll("#lanes .tree-more").length, dialogs: document.querySelectorAll("dialog").length,
+    pill: summary ? summary.textContent.trim() : null, expanded: item.getAttribute("aria-expanded"), stored,
+    stuck: !!item.querySelector(":scope > .tree-row.stuck"), fewer: item.querySelector(":scope > .tree-row .tree-fewer")?.textContent ?? null,
   };
 }, id);
 
@@ -124,34 +136,119 @@ const servedPatched = async (browser, opts, kidIds) => {
   return page;
 };
 
+// The contrast ratio of each visible element's text against what is behind it (its ancestors' backgrounds, composited).
+const contrast = (page, selector, pseudo) => page.evaluate(({ selector, pseudo }) => {
+  const canvas = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  const rgba = (css) => { canvas.clearRect(0, 0, 1, 1); canvas.fillStyle = "#000"; canvas.fillStyle = css; canvas.fillRect(0, 0, 1, 1); const [r, g, b, a] = canvas.getImageData(0, 0, 1, 1).data; return [r, g, b, a / 255]; };
+  const over = (top, under) => { const a = top[3] + under[3] * (1 - top[3]); return a ? [0, 1, 2].map((i) => (top[i] * top[3] + under[i] * under[3] * (1 - top[3])) / a).concat(a) : [0, 0, 0, 0]; };
+  const backdrop = (node) => { const layers = []; for (let e = node; e; e = e.parentElement) layers.push(rgba(getComputedStyle(e).backgroundColor)); let c = [255, 255, 255, 1]; for (const layer of layers.reverse()) c = over(layer, c); return c; };
+  const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  return [...document.querySelectorAll(selector)].filter((n) => n.getClientRects().length).map((n) => {
+    const fg = rgba(getComputedStyle(n, pseudo || null).color), bg = backdrop(n);
+    return { text: (n.textContent || n.placeholder || "").trim().slice(0, 30), ratio: Math.round(ratio(fg, bg) * 100) / 100 };
+  });
+}, { selector, pseudo });
+
+// The sheet: its box, its headings and rows, what scrolls, and what pokes past the screen's edge.
+const sheetOf = (page) => page.evaluate(() => {
+  const d = document.querySelector("dialog.kids-sheet");
+  if (!d || !d.open) return null;
+  const box = d.getBoundingClientRect(), vw = document.documentElement.clientWidth;
+  const rows = [...d.querySelectorAll(".kids-row")], scrollers = [d, ...d.querySelectorAll("*")].filter((e) => /auto|scroll/.test(getComputedStyle(e).overflowY));
+  const close = d.querySelector(".vclose").getBoundingClientRect();
+  return {
+    box: { left: Math.round(box.left), right: Math.round(box.right), bottom: Math.round(box.bottom), width: Math.round(box.width), vh: innerHeight },
+    title: d.querySelector(".vt")?.textContent, count: d.querySelector(".vm")?.textContent,
+    headings: [...d.querySelectorAll(".kids-h")].map((h) => h.textContent),
+    sections: [...d.querySelectorAll(".kids-sec")].map((sec) => [...sec.querySelectorAll(".kids-row")].map((r) => r.dataset.id)),
+    ids: rows.map((r) => r.dataset.id), names: rows.map((r) => r.querySelector(".nm").textContent), unders: rows.map((r) => r.querySelector(".under")?.textContent ?? null),
+    minRow: rows.length ? Math.round(Math.min(...rows.map((r) => r.getBoundingClientRect().height)) * 10) / 10 : 0,
+    search: { height: Math.round((d.querySelector(".kids-search")?.getBoundingClientRect().height ?? 0) * 10) / 10, type: d.querySelector(".kids-search input")?.type ?? null },
+    close: Math.round(Math.min(close.width, close.height)),
+    scrollers: scrollers.map((e) => e.className || e.tagName), sideways: [...d.querySelectorAll("*")].filter((e) => { const r = e.getBoundingClientRect(); return r.width && (r.right > vw + 0.5 || r.left < -0.5); }).length,
+    scrollW: d.scrollWidth <= d.clientWidth, empty: d.querySelector(".empty")?.textContent ?? null,
+  };
+});
+
+const stickyBox = (page, id) => page.evaluate((id) => {
+  const sb = document.querySelector("#sidebar"), item = [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id), row = item?.querySelector(":scope > .tree-row");
+  if (!row) return null;
+  const s = sb.getBoundingClientRect(), r = row.getBoundingClientRect(), f = row.querySelector(".tree-fewer")?.getBoundingClientRect();
+  return { top: Math.round((r.top - s.top) * 10) / 10, bottom: Math.round((r.bottom - s.top) * 10) / 10, scrollTop: Math.round(sb.scrollTop), max: Math.round(sb.scrollHeight - sb.clientHeight), stuck: row.classList.contains("stuck"), fewerVisible: !!f && f.top >= s.top - 0.5 && f.bottom <= s.bottom + 0.5, viewport: Math.round(s.height) };
+}, id);
+// A page whose model is patched on the way in: `patch(model)` runs on every full model the page fetches, and setting `state.edit` to a
+// function makes the next poll return the model changed by it (a live update), once.
+const servedModel = async (browser, opts, patch) => {
+  const page = await served(browser, opts), state = { edit: null, version: null, n: 0 };
+  await page.route((u) => u.pathname === "/api/model", async (route) => {
+    const url = new URL(route.request().url()), since = url.searchParams.get("since");
+    if (since !== null && !state.edit) return state.version && since === state.version ? route.fulfill({ status: 304 }) : route.continue();
+    url.searchParams.delete("since");
+    const res = await route.fetch({ url: url.toString() }), m = patch(await res.json());
+    if (since !== null) { state.edit(m); m.version = state.version = "live-" + (++state.n); state.edit = null; }
+    await route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(m) });
+  });
+  await page.reload({ waitUntil: "load" }); await settled(page);
+  return { page, state };
+};
+const scrollSidebar = async (page, y) => { await page.evaluate((y) => { document.querySelector("#sidebar").scrollTop = y; }, y); await page.waitForTimeout(80); };
+
 export default async function sidebarCheck(browser) {
   const D = await data({ extras: true });
   const r = reporter("sidebar");
   const R = r.results;
-  const fan = Object.values(D.SESS).find((s) => s.name === "Fan-out");
-  r.expect(!!fan, "the extras fixture has no Fan-out session");
-  if (!fan) return r.done();
-  const kids = D.H.filter((h) => h.kind === "spawn" && h.from === fan.id).map((h) => D.SESS[h.to]).filter(Boolean).sort((a, b) => b.last - a.last);
-  const urgent = (c) => c.state === "work" || c.state === "wait";
-  const shownIds = kids.filter((c, i) => i < 5 || urgent(c)).map((c) => c.id), hidden = kids.length - shownIds.length;
-  r.expect(kids.length >= 7, "Fan-out needs at least 7 children, has " + kids.length);
-  r.expect(kids.findIndex(urgent) >= 5, "the fixture's running child must be older than the 5 newest: states " + kids.map((c) => c.state).join(","));
-  r.expect(hidden >= 1, "nothing is hidden by the cap: " + hidden);
-  R.expected = { kids: kids.length, shown: shownIds.length, hidden, states: kids.map((c) => c.state) };
+  const fan = Object.values(D.SESS).find((s) => s.name === "Fan-out"), swarm = Object.values(D.SESS).find((s) => s.name === "Swarm");
+  r.expect(!!fan && !!swarm, "the extras fixture has no Fan-out or no Swarm session");
+  if (!fan || !swarm) return r.done();
+  const kidsOf = (parent) => D.H.filter((h) => h.kind === "spawn" && h.from === parent.id).map((h) => D.SESS[h.to]).filter(Boolean).sort((a, b) => b.last - a.last);
+  const name = (id) => D.SESS[id]?.name ?? id;
+  const rankOf = (c) => (c.state === "wait" ? 0 : c.state === "work" ? 1 : 2);
+  // Waiting, then running, then finished, newest first in each; the short list is the running ones (at most 8), then the newest finished until three rows.
+  const ordered = (ks) => [...ks].sort((a, b) => rankOf(a) - rankOf(b) || b.last - a.last);
+  const shortList = (ks) => { const sorted = ordered(ks), keep = new Set(); for (const c of sorted) if (rankOf(c) < 2 && keep.size < 8) keep.add(c.id); for (const c of sorted) if (keep.size < 3) keep.add(c.id); return sorted.filter((c) => keep.has(c.id)); };
+  const fanKids = kidsOf(fan), swarmKids = kidsOf(swarm);
+  const fanShort = shortList(fanKids).map((c) => c.id), swarmShort = shortList(swarmKids).map((c) => c.id);
+  const fanFull = ordered(fanKids).map((c) => c.id), swarmFull = ordered(swarmKids).map((c) => c.id);
+  const fanNames = ["Reader 1", "Reader 7", "Reader 6"], swarmNames = ["Worker 10", "Worker 9", "Worker 8", "Worker 7", "Worker 6", "Worker 5", "Worker 4", "Worker 3"];
+  r.expect(fanKids.length === 7 && fanKids.filter((c) => rankOf(c) < 2).length === 1 && rankOf(fanKids.at(-1)) === 1, "Fan-out needs 7 children, the oldest the only running one: states " + fanKids.map((c) => c.state).join(","));
+  r.expect(swarmKids.length === 12 && swarmKids.filter((c) => c.state === "work").length === 10, "Swarm needs 12 children, 10 of them running: states " + swarmKids.map((c) => c.state).join(","));
+  r.expect(JSON.stringify(fanShort.map(name)) === JSON.stringify(fanNames), "Fan-out's expected short list is Reader 1 then the two newest finished: " + JSON.stringify(fanShort.map(name)));
+  r.expect(JSON.stringify(swarmShort.map(name)) === JSON.stringify(swarmNames), "Swarm's expected short list is its eight newest running workers: " + JSON.stringify(swarmShort.map(name)));
+  R.expected = { fan: fanShort.map(name), swarm: swarmShort.map(name), fanKids: fanKids.length, swarmKids: swarmKids.length };
 
-  // ---- Phone, light: the cap, the button, the saved choice, search, the toggle's box --------------------------------
+  // The same walk the viewer does: a session's children are those it spawned.
+  const kidMap = new Map();
+  for (const s of Object.values(D.SESS)) { const p = s.parent ?? D.H.find((h) => h.kind === "spawn" && h.to === s.id)?.from; if (p && D.SESS[p]) { if (!kidMap.has(p)) kidMap.set(p, []); kidMap.get(p).push(s); } }
+  const below = (id, seen = new Set([id])) => (kidMap.get(id) ?? []).flatMap((k) => (seen.has(k.id) ? [] : (seen.add(k.id), [k, ...below(k.id, seen)])));
+
+  // ---- Phone, light: the short lists, the "All N" row, prefs, search, keys, the sheet ------------------------------------
   {
     const page = await served(browser, { extras: true, size: "phone", dark: false });
     await openDrawer(page);
-    const first = await groupOf(page, fan.id);
-    R.phoneFirst = first;
-    r.expect(first && JSON.stringify(first.ids) === JSON.stringify(shownIds), "phone: the group shows the 5 newest and the running child in newest-first order: " + JSON.stringify(first?.ids) + " expected " + JSON.stringify(shownIds));
+    const first = await groupOf(page, fan.id), second = await groupOf(page, swarm.id);
+    R.phoneFirst = first; R.phoneSwarm = second;
+    r.expect(first && JSON.stringify(first.ids) === JSON.stringify(fanShort), "phone: Fan-out lists its running child, then the newest finished: " + JSON.stringify(first?.ids.map(name)) + " expected " + JSON.stringify(fanNames));
     r.expect(first?.expanded === "true", "phone: Fan-out is open by default (a child is running)");
-    r.expect(first?.more?.text === "Show " + hidden + " more" && first.more.tag === "BUTTON" && first.more.tabIndex === 0, "phone: one focusable 'Show N more' button: " + JSON.stringify(first?.more));
-    r.expect(first?.more?.label?.includes("Fan-out") && first.more.label.startsWith("Show " + hidden + " more " + (hidden === 1 ? "session spawned by" : "sessions spawned by")), "phone: the button's aria-label agrees in number and names the parent: " + first?.more?.label);
-    r.expect(first?.more?.role === "treeitem", "phone: the button is reachable in tree navigation (role treeitem): " + first?.more?.role);
-    r.expect(first?.stored?.more === undefined, "phone: nothing is saved until the button is used");
+    r.expect(first?.all?.text === "All 7" && first.all.tag === "BUTTON" && first.all.tabIndex === 0 && first.all.role === "treeitem", "phone: one focusable 'All 7' row: " + JSON.stringify(first?.all));
+    r.expect(first?.all?.label === "All 7 sessions under Fan-out", "phone: the row's aria-label names the parent: " + first?.all?.label);
+    r.expect(first?.pill === "7", "phone: N is the count pill's number: pill " + first?.pill);
+    r.expect(first?.all && first.all.height >= 44, "phone: the 'All N' row is at least 44 px tall: " + first?.all?.height);
+    r.expect(first?.oldButtons === 0, "phone: no 'Show more' button is left");
+    r.expect(first?.stored === null, "phone: nothing is saved until a parent is toggled: " + JSON.stringify(first?.stored));
+    r.expect(second && JSON.stringify(second.ids) === JSON.stringify(swarmShort), "phone: Swarm lists its eight newest running workers and no finished one: " + JSON.stringify(second?.ids.map(name)));
+    r.expect(second?.all?.text === "All 12" && second.pill === "12", "phone: Swarm ends with 'All 12', its pill's number: " + JSON.stringify([second?.all?.text, second?.pill]));
     await page.screenshot({ path: path.join(ENV.out, "sidebar-390-light.png") });
+
+    // Defaults: a parent is open only when something below it is waiting or running (nothing is saved yet, and no session is open).
+    const defaults = await page.evaluate(() => [...document.querySelectorAll("#lanes > .treeitem[aria-expanded]")].map((x) => ({ id: x.dataset.id, expanded: x.getAttribute("aria-expanded"), pill: x.querySelector(":scope > .tree-row .tree-summary")?.textContent.trim() ?? null })));
+    R.defaults = defaults.map((d) => ({ name: name(d.id), expanded: d.expanded, pill: d.pill }));
+    for (const d of defaults) {
+      const active = below(d.id).some((k) => k.state === "work" || k.state === "wait");
+      r.expect(d.expanded === String(active), "phone: " + name(d.id) + " is " + (d.expanded === "true" ? "open" : "collapsed") + " by default but " + (active ? "has" : "has no") + " running or waiting session below it");
+      if (!active) r.expect(d.pill === String(below(d.id).length), "phone: the collapsed " + name(d.id) + " shows its count pill, " + below(d.id).length + ": " + d.pill);
+    }
+    r.expect(defaults.some((d) => d.expanded === "false"), "phone: the fixture shows a collapsed parent, so the default-collapsed check proves nothing: " + JSON.stringify(R.defaults));
 
     const box = await toggleBox(page, fan.id);
     R.phoneToggle = box;
@@ -165,74 +262,137 @@ export default async function sidebarCheck(browser) {
     r.expect(g.mixed >= 1, "phone: no group mixes rows with and without children, so the gutter check proves nothing");
     r.expect(g.groups.every((x) => x.lefts.length === 1), "phone: names in a group start at different x: " + JSON.stringify(g.groups));
     r.expect(g.groups.every((x) => x.ends.length === 1), "phone: times in a group end at different x: " + JSON.stringify(g.groups));
-
-    // The meta line carries the harness name and, on parents, the toggle's reserved width: the host gives way first, so the
-    // fixture's short repo names are never cut.
     const cut = await page.evaluate(() => [...document.querySelectorAll("#lanes .srow-meta .repo-short")].filter((e) => e.getClientRects().length && e.scrollWidth > e.clientWidth + 1).map((e) => e.textContent + " " + e.clientWidth + "/" + e.scrollWidth));
     R.phoneRepoCut = cut;
     r.expect(cut.length === 0, "phone: repo names are cut on the meta line: " + cut.join(", "));
+    const allContrast = await contrast(page, "#lanes .tree-all");
+    R.phoneAllContrast = allContrast;
+    r.expect(allContrast.length >= 2 && allContrast.every((c) => c.ratio >= 4.5), "phone: the 'All N' rows meet AA contrast (4.5): " + JSON.stringify(allContrast));
 
-    await page.click('#lanes .tree-more[aria-label*="Fan-out"]');
-    const revealed = await groupOf(page, fan.id);
-    R.phoneRevealed = revealed;
-    r.expect(revealed && JSON.stringify(revealed.ids) === JSON.stringify(kids.map((c) => c.id)), "phone: the button reveals every child, newest first: " + JSON.stringify(revealed?.ids));
-    r.expect(revealed?.more?.text === "Show fewer" && revealed.more.expanded === "true", "phone: the button becomes 'Show fewer': " + JSON.stringify(revealed?.more));
-    r.expect(revealed?.stored?.more === true && typeof revealed.stored.at === "number", "phone: the choice is saved per parent: " + JSON.stringify(revealed?.stored));
-    r.expect(await page.evaluate(() => document.activeElement?.classList.contains("tree-more")), "phone: focus stays on the button after it is used");
-    await page.screenshot({ path: path.join(ENV.out, "sidebar-390-light-more.png") });
-
+    // Saved values from before: {open, more} keeps its open and ignores `more`; an entry with only `more` is dropped.
+    await page.evaluate(({ fan, swarm }) => { localStorage.setItem("semon.tree", JSON.stringify({ [fan]: { open: true, more: true, at: 5 }, [swarm]: { more: true, at: 6 } })); }, { fan: fan.id, swarm: swarm.id });
     await page.reload({ waitUntil: "load" });
     await page.waitForFunction(() => document.querySelector("#lanes .treeitem"));
-    const reloaded = await groupOf(page, fan.id);
-    R.phoneReloaded = reloaded;
-    r.expect(reloaded && reloaded.ids.length === kids.length && reloaded.more?.text === "Show fewer", "phone: the revealed children survive a reload: " + JSON.stringify(reloaded));
-
-    // A saved value from before this change holds only `open`: it still works and keeps its choice.
-    await page.evaluate((id) => { const t = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); t[id] = { open: true, at: Date.now() }; localStorage.setItem("semon.tree", JSON.stringify(t)); }, fan.id);
-    await page.reload({ waitUntil: "load" });
-    await page.waitForFunction(() => document.querySelector("#lanes .treeitem"));
-    const legacy = await groupOf(page, fan.id);
-    r.expect(legacy && legacy.expanded === "true" && legacy.ids.length === shownIds.length && legacy.more?.text === "Show " + hidden + " more", "phone: an older saved {open} value still loads: " + JSON.stringify(legacy));
-
-    // Search: every child shows, and there is no button.
+    const legacy = await groupOf(page, fan.id), legacy2 = await groupOf(page, swarm.id);
+    R.phoneLegacy = { fan: legacy, swarm: legacy2 };
+    r.expect(legacy && legacy.expanded === "true" && JSON.stringify(legacy.ids) === JSON.stringify(fanShort) && legacy.all?.text === "All 7", "phone: an older saved {open, more} still loads and its `more` reveals nothing: " + JSON.stringify(legacy));
+    r.expect(legacy2 && JSON.stringify(legacy2.ids) === JSON.stringify(swarmShort), "phone: an older entry with only `more` changes nothing: " + JSON.stringify(legacy2?.ids.map(name)));
+    // The next save writes the pruned prefs: Swarm's toggle saves its own choice, and Fan-out's entry loses its `more`.
+    await page.evaluate((id) => [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-toggle").click(), swarm.id);
+    const pruned = await page.evaluate(() => JSON.parse(localStorage.getItem("semon.tree") ?? "{}"));
+    R.phonePruned = pruned;
+    r.expect(pruned[swarm.id]?.open === false && pruned[fan.id]?.open === true && Object.values(pruned).every((v) => !("more" in v)), "phone: the next save drops every `more`: " + JSON.stringify(pruned));
+    await page.evaluate((id) => [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-toggle").click(), swarm.id);
     await openDrawer(page);
+
+    // Search: the children that match are the pool, capped by the same rule, and "All N" stays when others are hidden.
+    await page.fill("#q", "Reader 3"); await page.waitForTimeout(120);
+    const one = await groupOf(page, fan.id);
+    R.phoneSearchOne = one;
+    r.expect(one && one.ids.length === 1 && name(one.ids[0]) === "Reader 3" && one.all?.text === "All 7", "phone: a search lists only the child that matches, and keeps 'All 7': " + JSON.stringify(one?.ids.map(name)) + " " + one?.all?.text);
     await page.fill("#q", "Reader"); await page.waitForTimeout(120);
-    const searching = await groupOf(page, fan.id);
-    R.phoneSearch = searching;
-    r.expect(searching && searching.ids.length === kids.length && !searching.more, "phone: a search shows every child with no button: " + JSON.stringify(searching));
+    const every = await groupOf(page, fan.id);
+    r.expect(every && JSON.stringify(every.ids) === JSON.stringify(fanShort) && every.all?.text === "All 7", "phone: a search that matches every child is capped like any list, with 'All 7': " + JSON.stringify(every?.ids.map(name)) + " " + every?.all?.text);
     await page.fill("#q", ""); await page.waitForTimeout(120);
     const cleared = await groupOf(page, fan.id);
-    r.expect(cleared && cleared.ids.length === shownIds.length && cleared.more, "phone: clearing the search caps the group again");
+    r.expect(cleared && JSON.stringify(cleared.ids) === JSON.stringify(fanShort) && cleared.all, "phone: clearing the search lists the short list again");
 
-    // Arrow keys act on their own row: on "Show N more" and on a leaf they leave the parent open and save nothing.
-    await page.focus('#lanes .tree-more[aria-label*="Fan-out"]'); await page.keyboard.press("ArrowLeft");
-    const arrowMore = await groupOf(page, fan.id);
-    r.expect(arrowMore?.expanded === "true" && arrowMore.stored?.open !== false, "phone: ArrowLeft on 'Show N more' leaves the parent open: " + JSON.stringify(arrowMore));
-    await page.evaluate((id) => [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id).focus(), shownIds[0]);
+    // Keys: Tab from the last listed child reaches "All N"; the arrows act on their own row.
+    await page.evaluate((id) => { const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id); item.querySelector(":scope > .tree-group > .treeitem:last-of-type .srow").focus(); }, fan.id);
+    await page.keyboard.press("Tab");
+    const tabbed = await page.evaluate(() => ({ cls: document.activeElement?.className, id: document.activeElement?.dataset?.id }));
+    R.phoneTab = tabbed;
+    r.expect(tabbed.cls === "tree-all" && tabbed.id === fan.id, "phone: Tab from the last child reaches 'All N': " + JSON.stringify(tabbed));
+    await page.keyboard.press("ArrowLeft");
+    const arrowAll = await groupOf(page, fan.id);
+    r.expect(arrowAll?.expanded === "true" && arrowAll.stored?.open !== false, "phone: ArrowLeft on 'All N' leaves the parent open: " + JSON.stringify(arrowAll));
+    await page.evaluate((id) => [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id).focus(), fanShort[0]);
     await page.keyboard.press("ArrowLeft");
     const arrowLeaf = await groupOf(page, fan.id);
     r.expect(arrowLeaf?.expanded === "true" && arrowLeaf.stored?.open !== false, "phone: ArrowLeft on a leaf leaves its parent open: " + JSON.stringify(arrowLeaf));
 
-    // Show fewer folds them, and saves that.
-    await page.click('#lanes .tree-more[aria-label*="Fan-out"]'); await page.waitForTimeout(60);
-    await page.click('#lanes .tree-more[aria-label*="Fan-out"]'); await page.waitForTimeout(60);
-    const folded = await groupOf(page, fan.id);
-    r.expect(folded && folded.ids.length === shownIds.length && folded.more?.text === "Show " + hidden + " more" && folded.stored?.more === false, "phone: 'Show fewer' folds the group and saves it: " + JSON.stringify(folded));
+    // The sheet, from Fan-out's "All 7".
+    await page.click('#lanes .tree-all[data-id="' + fan.id + '"]');
+    await page.waitForSelector("dialog.kids-sheet[open]");
+    await page.waitForTimeout(150);
+    let sheet = await sheetOf(page);
+    R.phoneSheet = sheet;
+    r.expect(sheet && sheet.box.left === 0 && sheet.box.width === 390 && Math.abs(sheet.box.bottom - sheet.box.vh) <= 1, "phone: the sheet is a bottom sheet at the screen's foot: " + JSON.stringify(sheet?.box));
+    r.expect(sheet?.title === "Fan-out" && sheet.count === "7 sessions", "phone: the sheet names the parent and counts its sessions: " + JSON.stringify([sheet?.title, sheet?.count]));
+    r.expect(JSON.stringify(sheet?.headings) === JSON.stringify(["Running (1)", "Finished (6)"]), "phone: the sections are 'Running (1)' and 'Finished (6)', with the empty one omitted: " + JSON.stringify(sheet?.headings));
+    r.expect(JSON.stringify(sheet?.ids) === JSON.stringify(fanFull), "phone: the sheet lists exactly the descendants, running first, newest first: " + JSON.stringify(sheet?.names));
+    r.expect(sheet && sheet.minRow >= 44 && sheet.search.height >= 44 && sheet.close >= 44, "phone: rows, search and close are at least 44 px: " + JSON.stringify([sheet?.minRow, sheet?.search, sheet?.close]));
+    r.expect(sheet?.search.type === "search", "phone: the sheet has a search field");
+    r.expect(sheet && sheet.scrollers.length === 1 && sheet.scrollers[0] === "vb", "phone: one scroll surface: " + JSON.stringify(sheet?.scrollers));
+    r.expect(sheet && sheet.sideways === 0 && sheet.scrollW, "phone: no sideways overflow in the sheet: " + JSON.stringify([sheet?.sideways, sheet?.scrollW]));
+    const sheetContrast = [...await contrast(page, "dialog.kids-sheet .kids-h, dialog.kids-sheet .kids-row .nm, dialog.kids-sheet .kids-row .ag, dialog.kids-sheet .vt span, dialog.kids-sheet .vm"), ...await contrast(page, "dialog.kids-sheet .kids-search input", "::placeholder")];
+    R.phoneSheetContrast = sheetContrast;
+    r.expect(sheetContrast.length >= 10 && sheetContrast.every((c) => c.ratio >= 4.5), "phone: the sheet's text meets AA contrast (4.5): " + JSON.stringify(sheetContrast.filter((c) => c.ratio < 4.5)));
+    await page.screenshot({ path: path.join(ENV.out, "sidebar-390-light-sheet.png") });
+
+    // Search filters it.
+    await page.fill("dialog.kids-sheet .kids-search input", "Reader 3"); await page.waitForTimeout(80);
+    sheet = await sheetOf(page);
+    r.expect(sheet && sheet.names.length === 1 && sheet.names[0] === "Reader 3" && JSON.stringify(sheet.headings) === JSON.stringify(["Finished (1)"]), "phone: the search narrows the sheet to Reader 3: " + JSON.stringify([sheet?.names, sheet?.headings]));
+    await page.fill("dialog.kids-sheet .kids-search input", "no such session"); await page.waitForTimeout(80);
+    sheet = await sheetOf(page);
+    r.expect(sheet && sheet.ids.length === 0 && sheet.headings.length === 0 && sheet.empty?.startsWith("No sessions match"), "phone: a search with no match says so and shows no heading: " + JSON.stringify([sheet?.ids, sheet?.empty]));
+    await page.fill("dialog.kids-sheet .kids-search input", ""); await page.waitForTimeout(80);
+    sheet = await sheetOf(page);
+    r.expect(sheet && sheet.ids.length === 7, "phone: clearing the search lists every session again: " + sheet?.ids.length);
+
+    // A tap on a row opens that session and closes the sheet.
+    const target = fanFull[3];
+    await page.click('dialog.kids-sheet .kids-row[data-id="' + target + '"]');
+    await page.waitForFunction(() => !document.querySelector("dialog.kids-sheet"));
+    await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, name(target));
+    r.expect(await page.evaluate(() => !document.querySelector("dialog.kids-sheet") && location.pathname.includes("/s/")), "phone: the sheet closes and the tapped session opens: " + await page.evaluate(() => location.pathname));
+    r.expect(await overflow(page) === 0, "phone: no sideways overflow after the sheet");
+
+    // Esc closes it and returns focus to "All N"; so does a tap on the backdrop.
+    for (const how of ["Escape", "backdrop"]) {
+      await goto(page, { v: "sessions" }, D);
+      await openDrawer(page);
+      await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
+      await page.waitForSelector("dialog.kids-sheet[open]");
+      const swarmSheet = await sheetOf(page);
+      if (how === "Escape") {
+        R.phoneSwarmSheet = swarmSheet;
+        r.expect(swarmSheet && JSON.stringify(swarmSheet.ids) === JSON.stringify(swarmFull) && JSON.stringify(swarmSheet.headings) === JSON.stringify(["Running (10)", "Finished (2)"]), "phone: Swarm's sheet lists all twelve under 'Running (10)' and 'Finished (2)': " + JSON.stringify([swarmSheet?.headings, swarmSheet?.names]));
+        await page.keyboard.press("Escape");
+      } else await page.mouse.click(195, 30);
+      await page.waitForFunction(() => !document.querySelector("dialog.kids-sheet"));
+      const back = await page.evaluate(() => ({ cls: document.activeElement?.className, id: document.activeElement?.dataset?.id, drawer: document.body.classList.contains("drawer-open") }));
+      r.expect(back.cls === "tree-all" && back.id === swarm.id, "phone: " + how + " closes the sheet and returns focus to 'All N': " + JSON.stringify(back));
+      r.expect(back.drawer === true, "phone: " + how + " closes only the sheet, the drawer stays open: " + JSON.stringify(back));
+      await page.waitForTimeout(400);
+      r.expect(await page.evaluate(() => document.body.classList.contains("drawer-open") && getComputedStyle(document.querySelector("#sidebar")).visibility === "visible"), "phone: " + how + ": the drawer is still open and visible after its transition");
+    }
     r.expect(await overflow(page) === 0, "phone: the sidebar has no sideways overflow");
     r.expect(page.errors.length === 0, "phone: page errors " + page.errors.join("; "));
     await page.context().close();
   }
 
-  // ---- Phone, dark: a screenshot ------------------------------------------------------------------------------------
+  // ---- Phone, dark: screenshots and contrast --------------------------------------------------------------------------------
   {
     const page = await served(browser, { extras: true, size: "phone", dark: true });
     await openDrawer(page);
     await page.screenshot({ path: path.join(ENV.out, "sidebar-390-dark.png") });
+    await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
+    await page.waitForSelector("dialog.kids-sheet[open]"); await page.waitForTimeout(150);
+    await page.screenshot({ path: path.join(ENV.out, "sidebar-390-dark-sheet.png") });
+    const dark = [...await contrast(page, "dialog.kids-sheet .kids-h, dialog.kids-sheet .kids-row .nm, dialog.kids-sheet .kids-row .ag, dialog.kids-sheet .vt span, dialog.kids-sheet .vm"), ...await contrast(page, "dialog.kids-sheet .kids-search input", "::placeholder")];
+    R.phoneDarkContrast = dark;
+    r.expect(dark.length >= 10 && dark.every((c) => c.ratio >= 4.5), "phone dark: the sheet's text meets AA contrast (4.5): " + JSON.stringify(dark.filter((c) => c.ratio < 4.5)));
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector("dialog.kids-sheet"));
+    const allDark = await contrast(page, "#lanes .tree-all");
+    r.expect(allDark.length >= 2 && allDark.every((c) => c.ratio >= 4.5), "phone dark: the 'All N' rows meet AA contrast (4.5): " + JSON.stringify(allDark));
     r.expect(page.errors.length === 0, "phone dark: page errors " + page.errors.join("; "));
     await page.context().close();
   }
 
-  // ---- Desktop: the toggle's hit area, the summary, the gutter ------------------------------------------------------
+  // ---- Desktop: the toggle, the short lists, the whole list inline with its sticky row ----------------------------------------
   for (const dark of [false, true]) {
     const page = await served(browser, { extras: true, size: "desktop", dark });
     const tag = dark ? "dark" : "light";
@@ -245,9 +405,7 @@ export default async function sidebarCheck(browser) {
       const g = await gutters(page);
       R.desktopGutters = g;
       r.expect(g.spacers === 0 && g.mixed >= 1 && g.groups.every((x) => x.lefts.length === 1 && x.ends.length === 1), "desktop: names in a group start at one x and times end at one x: " + JSON.stringify(g));
-      const first = await groupOf(page, fan.id);
-      r.expect(first && JSON.stringify(first.ids) === JSON.stringify(shownIds) && first.more?.text === "Show " + hidden + " more", "desktop: the cap and the button: " + JSON.stringify(first));
-      // Open, the child count is hidden; collapsed, the count pill sits inside the row, clear of the toggle.
+      // Open, the child count is hidden; collapsed, the count and state dot sit inside the row, clear of the toggle.
       const summaryShown = () => page.evaluate((id) => { const s = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-summary"); return !!s && getComputedStyle(s).display !== "none"; }, fan.id);
       r.expect(!(await summaryShown()), "desktop: an open parent shows no child count");
       await page.evaluate((id) => [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-toggle").click(), fan.id);
@@ -259,15 +417,102 @@ export default async function sidebarCheck(browser) {
         return { expanded: item.getAttribute("aria-expanded"), summary: s.textContent, gap: Math.round((b.left - a.right) * 10) / 10 };
       }, fan.id);
       R.desktopCollapsed = collapsed;
-      r.expect(collapsed?.expanded === "false" && collapsed.summary === String(kids.length) && collapsed.gap >= 0, "desktop: the collapsed summary clears the toggle: " + JSON.stringify(collapsed));
+      r.expect(collapsed?.expanded === "false" && collapsed.summary === String(fanKids.length) && collapsed.gap >= 0, "desktop: the collapsed summary clears the toggle: " + JSON.stringify(collapsed));
       await page.screenshot({ path: path.join(ENV.out, "sidebar-1280-light-collapsed.png") });
       await page.evaluate((id) => [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-toggle").click(), fan.id);
       await page.waitForTimeout(300);
       r.expect(!(await summaryShown()), "desktop: expanding hides the child count again");
     }
+    const first = await groupOf(page, fan.id), second = await groupOf(page, swarm.id);
+    R.desktopFirst = { fan: first, swarm: second };
+    r.expect(first && JSON.stringify(first.ids) === JSON.stringify(fanShort) && first.all?.text === "All 7" && first.pill === "7", "desktop " + tag + ": Fan-out's short list and 'All 7': " + JSON.stringify(first));
+    r.expect(second && JSON.stringify(second.ids) === JSON.stringify(swarmShort) && second.all?.text === "All 12", "desktop " + tag + ": Swarm's short list and 'All 12': " + JSON.stringify(second));
     await page.screenshot({ path: path.join(ENV.out, "sidebar-1280-" + tag + ".png") });
+
+    // "All 7" opens the whole list inline: no dialog, the parent's row sticks, and "Show fewer" is focused.
+    await page.click('#lanes .tree-all[data-id="' + fan.id + '"]');
+    await page.waitForTimeout(150);
+    const open = await groupOf(page, fan.id);
+    R.desktopInline = open;
+    r.expect(open && JSON.stringify(open.ids) === JSON.stringify(fanFull) && !open.all, "desktop " + tag + ": 'All 7' lists all seven inline, running first, newest first, and the row is gone: " + JSON.stringify(open?.ids.map(name)));
+    r.expect(open?.dialogs === 0, "desktop " + tag + ": 'All N' opens no dialog");
+    r.expect(open?.stuck === true && open.fewer === "Show fewer", "desktop " + tag + ": the parent's row is sticky and carries 'Show fewer': " + JSON.stringify([open?.stuck, open?.fewer]));
+    r.expect(await page.evaluate(() => document.activeElement?.classList.contains("tree-fewer")), "desktop " + tag + ": focus moves to 'Show fewer'");
+    r.expect(await page.evaluate(() => document.querySelectorAll("#lanes .tree-row.stuck").length) === 1, "desktop " + tag + ": one sticky row");
+    await page.screenshot({ path: path.join(ENV.out, "sidebar-1280-" + tag + "-all.png") });
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(150);
+    const folded = await groupOf(page, fan.id);
+    r.expect(folded && JSON.stringify(folded.ids) === JSON.stringify(fanShort) && folded.all?.text === "All 7" && !folded.stuck, "desktop " + tag + ": 'Show fewer' folds the list back to the short one: " + JSON.stringify(folded?.ids.map(name)));
+    r.expect(await page.evaluate((id) => document.activeElement?.classList.contains("srow") && document.activeElement.dataset.id === id, fan.id), "desktop " + tag + ": 'Show fewer' leaves focus on the parent");
+
+    // Swarm, in a short window so its whole list scrolls: the parent stays within the top pixel, and folding needs no scroll.
+    await page.setViewportSize({ width: 1280, height: 520 });
+    await page.waitForTimeout(150);
+    const before = await stickyBox(page, swarm.id), natural = before.top + before.scrollTop;
+    await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
+    await page.waitForTimeout(150);
+    const start = await stickyBox(page, swarm.id);
+    R.desktopSticky = { natural, start };
+    r.expect(start?.max >= natural + 160, "desktop " + tag + ": the expanded list scrolls far enough to test the sticky row: " + JSON.stringify({ natural, start }));
+    const opened = await groupOf(page, swarm.id);
+    r.expect(opened && JSON.stringify(opened.ids) === JSON.stringify(swarmFull), "desktop " + tag + ": Swarm's whole list is inline, running first, newest first: " + JSON.stringify(opened?.ids.map(name)));
+    const seen = [];
+    for (const d of [60, 160, 300, 480]) {
+      if (natural + d > start.max) continue;
+      await scrollSidebar(page, natural + d);
+      const at = await stickyBox(page, swarm.id);
+      seen.push(at);
+      r.expect(at && at.stuck && Math.abs(at.top) <= 1 && at.fewerVisible, "desktop " + tag + ": scrolled to " + at?.scrollTop + " the parent's row is within the sidebar's top pixel with 'Show fewer' visible: " + JSON.stringify(at));
+    }
+    R.desktopStickySeen = seen;
+    r.expect(seen.length >= 2, "desktop " + tag + ": the sticky row was checked at two scroll positions at least: " + seen.length);
+    await scrollSidebar(page, natural + 160);
+    await page.screenshot({ path: path.join(ENV.out, "sidebar-1280-" + tag + "-sticky.png") });
+
+    // Navigating to a row that sits under the sticky row scrolls it clear of that row.
+    const target = swarmFull[2];
+    await page.evaluate((id) => { const sb = document.querySelector("#sidebar"), row = sb.querySelector('.srow[data-id="' + CSS.escape(id) + '"]'); sb.scrollTop += row.getBoundingClientRect().top - sb.getBoundingClientRect().top - 4; }, target);
+    await page.waitForTimeout(80);
+    await page.evaluate((id) => document.querySelector('#lanes .srow[data-id="' + CSS.escape(id) + '"]').click(), target);
+    await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, name(target));
+    await page.waitForTimeout(150);
+    const cleared2 = await page.evaluate(() => {
+      const sb = document.querySelector("#sidebar").getBoundingClientRect(), cur = document.querySelector('#lanes .srow[aria-current="page"]')?.getBoundingClientRect(), st = document.querySelector("#lanes .tree-row.stuck")?.getBoundingClientRect();
+      return cur && st ? { curTop: Math.round(cur.top - sb.top), curBottom: Math.round(cur.bottom - sb.top), stickyBottom: Math.round(st.bottom - sb.top), viewport: Math.round(sb.height) } : null;
+    });
+    R.desktopReveal = cleared2;
+    r.expect(cleared2 && cleared2.curTop >= cleared2.stickyBottom - 1 && cleared2.curBottom <= cleared2.viewport + 1, "desktop " + tag + ": the open session's row is scrolled clear of the sticky row: " + JSON.stringify(cleared2));
+
+    // "Show fewer" on the sticky row folds it, brings the parent into view and focuses it.
+    await page.click("#lanes .tree-row.stuck .tree-fewer");
+    await page.waitForTimeout(150);
+    const back = await groupOf(page, swarm.id), where = await stickyBox(page, swarm.id);
+    R.desktopFolded = { back, where };
+    r.expect(back && JSON.stringify(back.ids) === JSON.stringify(swarmShort) && back.all?.text === "All 12" && !back.stuck, "desktop " + tag + ": 'Show fewer' restores the short list: " + JSON.stringify(back?.ids.map(name)));
+    r.expect(where && where.top >= -1 && where.bottom <= where.viewport + 1, "desktop " + tag + ": the parent's row is back in the sidebar's view: " + JSON.stringify(where));
+    r.expect(await page.evaluate((id) => document.activeElement?.classList.contains("srow") && document.activeElement.dataset.id === id, swarm.id), "desktop " + tag + ": focus is on the parent's row");
+
+    // The open list is not saved: a reload starts short. Collapsing the parent also folds it.
+    await goto(page, { v: "sessions" }, D);
+    await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
+    await page.waitForTimeout(100);
+    r.expect((await groupOf(page, swarm.id))?.stuck === true, "desktop " + tag + ": the list opens again");
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("semon.tree") ?? "{}"));
+    r.expect(Object.values(stored).every((v) => Object.keys(v).every((k) => k === "open" || k === "at")), "desktop " + tag + ": nothing about the open list is saved: " + JSON.stringify(stored));
+    await page.reload({ waitUntil: "load" });
+    await page.waitForFunction(() => document.querySelector("#lanes .treeitem"));
+    const reloaded = await groupOf(page, swarm.id);
+    r.expect(reloaded && JSON.stringify(reloaded.ids) === JSON.stringify(swarmShort) && !reloaded.stuck && reloaded.all?.text === "All 12", "desktop " + tag + ": a reload starts with the short list: " + JSON.stringify(reloaded?.ids.map(name)));
+    await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
+    await page.waitForTimeout(100);
+    await page.evaluate((id) => [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-toggle").click(), swarm.id);
+    await page.waitForTimeout(100);
+    const collapsedAfter = await groupOf(page, swarm.id);
+    r.expect(collapsedAfter && collapsedAfter.expanded === "false" && !collapsedAfter.stuck, "desktop " + tag + ": collapsing the parent drops its sticky row: " + JSON.stringify([collapsedAfter?.expanded, collapsedAfter?.stuck]));
     // The count pill: a neutral total with no state dot (a dot next to "53" read as 53 running); it turns amber only when a
-    // descendant needs you; its title and the row's accessible label break the total down, failures included.
+    // descendant needs you; its title and the row's accessible label break the total down, failures included. It collapses every
+    // parent in turn and saves that, so it runs after the reload assertions.
     {
       const pills = await collapsedPills(page);
       (R.desktopPill ??= {})[tag] = pills;
@@ -279,16 +524,32 @@ export default async function sidebarCheck(browser) {
 
   // ---- The count pill with a waiting and a failed run inside (a patched model), desktop and phone -------------------------
   {
-    const kidIds = kids.map((c) => c.id), M = patchModel(structuredClone(D.model), kidIds), SESS = M.sessions;
+    const kidIds = fanKids.map((c) => c.id), M = patchModel(structuredClone(D.model), kidIds), SESS = M.sessions;
     for (const [size, dark] of [["desktop", false], ["desktop", true], ["phone", false], ["phone", true]]) {
       const tag = size + (dark ? "-dark" : "-light"), page = await servedPatched(browser, { extras: true, size, dark }, kidIds);
       if (size === "phone") await openDrawer(page);
       await page.waitForSelector("#lanes .treeitem");
+      // The short list with a waiting run and a failed one in it: the waiting run first, then the running one, then the newest finished.
+      const patchedKids = Object.values(SESS).filter((x) => x.parent === fan.id), patchedShort = shortList(patchedKids).map((c) => c.id), pt = tally(SESS, M.handoffs, fan.id);
+      const patchedFan = await groupOf(page, fan.id);
+      R.patchedShort = { ids: patchedShort.map((id) => SESS[id].name), got: patchedFan?.ids.map((id) => SESS[id]?.name) };
+      r.expect(patchedFan && JSON.stringify(patchedFan.ids) === JSON.stringify(patchedShort) && SESS[patchedShort[0]].state === "wait" && SESS[patchedShort[1]].state === "work" && patchedFan.all?.text === "All " + pt.total, "patched " + tag + ": the short list puts the waiting run first, then the running one, and 'All " + pt.total + "': " + JSON.stringify([patchedFan?.ids.map((id) => SESS[id]?.name), patchedFan?.all?.text]));
+      if (size === "phone") {
+        await page.click('#lanes .tree-all[data-id="' + fan.id + '"]');
+        await page.waitForSelector("dialog.kids-sheet[open]");
+        await page.waitForTimeout(150);
+        const sheet = await sheetOf(page), heads = ["Waiting for you (" + pt.wait + ")", "Running (" + pt.work + ")", "Finished (" + (pt.total - pt.wait - pt.work) + ")"];
+        r.expect(sheet && JSON.stringify(sheet.headings) === JSON.stringify(heads) && sheet.ids.length === pt.total && sheet.unders.filter(Boolean).length === 1 && sheet.unders.filter(Boolean)[0] === "under " + SESS[fanKids[3].id].name, "patched " + tag + ": the sheet has a waiting section first and names the grandchild's parent: " + JSON.stringify([sheet?.headings, sheet?.unders?.filter(Boolean)]));
+        r.expect(sheet && sheet.sections?.[0]?.[0] === patchedShort[0], "patched " + tag + ": the waiting run is the sheet's first row");
+        await page.screenshot({ path: path.join(ENV.out, "sidebar-wait-sheet-" + tag + ".png") });
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => !document.querySelector("dialog.kids-sheet"));
+      }
       const pills = await collapsedPills(page);
       (R.patchedPill ??= {})[tag] = pills.filter((p) => SESS[p.id]?.name === "Fan-out");
       assertPills(r, "patched " + tag, pills, SESS, M.handoffs, ["Fan-out"]);
       const fanPill = pills.find((p) => p.id === fan.id), t = tally(SESS, M.handoffs, fan.id);
-      r.expect(t.wait === 1 && t.err === 1 && t.total === kids.length + 1, "patched " + tag + ": the patch did not land: " + JSON.stringify(t));
+      r.expect(t.wait === 1 && t.err === 1 && t.total === fanKids.length + 1, "patched " + tag + ": the patch did not land: " + JSON.stringify(t));
       r.expect(fanPill?.wait === true && /1 needs you/.test(fanPill.title) && /1 failed/.test(fanPill.title), "patched " + tag + ": Fan-out's pill is amber and names the waiting and the failed run: " + JSON.stringify(fanPill));
       // Collapsed for the screenshot.
       await page.evaluate((id) => { const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id); if (item.getAttribute("aria-expanded") === "true") item.querySelector(":scope > .tree-row .tree-toggle").click(); }, fan.id);
@@ -297,17 +558,176 @@ export default async function sidebarCheck(browser) {
     }
   }
 
+  // ---- Nested parents, a live update, and a change of screen ------------------------------------------------------------------
+  {
+    const c1 = fanShort[0], source = fanFull.at(-1);
+    // Reader 1 (running, so listed) gets five sessions of its own: one running, four finished. Fan-out then has 12 descendants.
+    const nest = (m) => {
+      if (m.sessions["nest-1"]) return m;
+      for (let i = 1; i <= 5; i++) m.sessions["nest-" + i] = { ...structuredClone(m.sessions[source]), id: "nest-" + i, name: "Helper " + i, parent: c1, state: i === 1 ? "work" : "done", last: m.sessions[source].last - i * 60000 };
+      return m;
+    };
+    const NM = nest(structuredClone(D.model)), nname = (id) => NM.sessions[id]?.name ?? name(id);
+    const nestKids = ["nest-1", "nest-2", "nest-3", "nest-4", "nest-5"], nestShort = ["nest-1", "nest-2", "nest-3"];
+    const finishSwarm = (m) => {
+      const w10 = swarmKids.find((c) => c.name === "Worker 10"), w13 = "swarm-worker-13";
+      m.sessions[w10.id].state = "done";
+      m.sessions[w13] = { ...structuredClone(m.sessions[w10.id]), id: w13, name: "Worker 13", state: "work", last: m.sessions[w10.id].last + 3 * 60000 };
+      return m;
+    };
+    const live = (() => { const m = finishSwarm(nest(structuredClone(D.model))), ks = Object.values(m.sessions).filter((x) => x.parent === swarm.id); return ordered(ks).map((x) => x.id); })();
+
+    for (const dark of [false, true]) {
+      const tag = dark ? "dark" : "light", { page, state } = await servedModel(browser, { extras: true, size: "desktop", dark }, nest);
+      await page.waitForSelector("#lanes .treeitem");
+      const start = await groupOf(page, fan.id), inner = await groupOf(page, c1);
+      R["nested" + tag] = { start, inner };
+      r.expect(start && JSON.stringify(start.ids) === JSON.stringify(fanShort) && start.all?.text === "All 12" && start.pill === "12", "nested " + tag + ": Fan-out counts its 12 descendants: " + JSON.stringify([start?.ids.map(nname), start?.all?.text, start?.pill]));
+      r.expect(inner && JSON.stringify(inner.ids) === JSON.stringify(nestShort) && inner.all?.text === "All 5" && inner.expanded === "true", "nested " + tag + ": Reader 1 lists its running helper and the two newest finished, and 'All 5': " + JSON.stringify([inner?.ids.map(nname), inner?.all?.text, inner?.expanded]));
+
+      // A parent's "All N" reveals exactly N: every descendant, under its own parent, all open.
+      await page.click('#lanes .tree-all[data-id="' + fan.id + '"]');
+      await page.waitForTimeout(150);
+      const full = await page.evaluate((id) => {
+        const item = [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id), rows = [...item.querySelectorAll(":scope > .tree-group .srow")];
+        return { rows: rows.length, visible: rows.filter((x) => x.getClientRects().length).length, alls: item.querySelectorAll(".tree-all").length, stuck: [...document.querySelectorAll("#lanes .tree-row.stuck")].map((x) => x.closest(".treeitem").dataset.id) };
+      }, fan.id);
+      R["nestedFull" + tag] = full;
+      r.expect(full.rows === 12 && full.visible === 12 && full.alls === 0, "nested " + tag + ": Fan-out's 'All 12' shows 12 rows, all visible, and no nested 'All N': " + JSON.stringify(full));
+      r.expect(full.stuck.length === 1 && full.stuck[0] === fan.id, "nested " + tag + ": only Fan-out's row is sticky: " + JSON.stringify(full.stuck));
+      const under = await groupOf(page, c1);
+      r.expect(under && JSON.stringify(under.ids) === JSON.stringify(nestKids), "nested " + tag + ": Reader 1's five helpers show under Reader 1: " + JSON.stringify(under?.ids.map(nname)));
+      await page.click("#lanes .tree-row.stuck .tree-fewer");
+      await page.waitForTimeout(120);
+
+      // Opening the nested "All 5" leaves Fan-out and Reader 1 listed and sticks only Reader 1's row.
+      await page.setViewportSize({ width: 1280, height: 520 });
+      await page.waitForTimeout(150);
+      const before = await stickyBox(page, c1), natural = before.top + before.scrollTop;
+      await page.click('#lanes .tree-all[data-id="' + c1 + '"]');
+      await page.waitForTimeout(150);
+      const outer = await groupOf(page, fan.id), innerOpen = await groupOf(page, c1);
+      const stuckIds = await page.evaluate(() => [...document.querySelectorAll("#lanes .tree-row.stuck")].map((x) => x.closest(".treeitem").dataset.id));
+      R["nestedInner" + tag] = { outer, innerOpen, stuckIds };
+      r.expect(outer && JSON.stringify(outer.ids) === JSON.stringify(fanShort) && outer.all?.text === "All 12" && !outer.stuck, "nested " + tag + ": Fan-out stays a short list, listing Reader 1, and is not sticky: " + JSON.stringify(outer?.ids.map(nname)));
+      r.expect(innerOpen && JSON.stringify(innerOpen.ids) === JSON.stringify(nestKids) && innerOpen.stuck && innerOpen.fewer === "Show fewer" && !innerOpen.all, "nested " + tag + ": Reader 1 lists all five helpers with a 'Show fewer': " + JSON.stringify([innerOpen?.ids.map(nname), innerOpen?.stuck, innerOpen?.fewer]));
+      r.expect(stuckIds.length === 1 && stuckIds[0] === c1, "nested " + tag + ": only the innermost row is sticky: " + JSON.stringify(stuckIds));
+      r.expect(await page.evaluate((id) => { const a = document.activeElement; return a?.classList.contains("tree-fewer") && a.closest(".treeitem").dataset.id === id; }, c1), "nested " + tag + ": focus is on Reader 1's 'Show fewer', not the page");
+      const seen = [];
+      const reach = (await stickyBox(page, c1)).max;
+      for (const d of [30, 90]) {
+        if (natural + d > reach) continue;
+        await scrollSidebar(page, natural + d);
+        const at = await stickyBox(page, c1);
+        seen.push(at);
+        r.expect(at && at.stuck && Math.abs(at.top) <= 1 && at.fewerVisible, "nested " + tag + ": scrolled to " + at?.scrollTop + " Reader 1's row holds the sidebar's top pixel: " + JSON.stringify(at));
+      }
+      R["nestedSticky" + tag] = { natural, seen };
+      r.expect(seen.length >= 1, "nested " + tag + ": the nested sticky row was checked at a scroll position at least: " + JSON.stringify({ natural, reach }));
+      await page.screenshot({ path: path.join(ENV.out, "sidebar-1280-" + tag + "-nested.png") });
+
+      // Collapsing an ancestor drops the open list; "Show fewer" folds it and focuses Reader 1's row.
+      if (!dark) {
+        await page.evaluate((id) => [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-toggle").click(), fan.id);
+        await page.waitForTimeout(120);
+        const shut = await groupOf(page, fan.id);
+        r.expect(shut && shut.expanded === "false" && await page.evaluate(() => document.querySelectorAll("#lanes .tree-row.stuck").length) === 0, "nested " + tag + ": collapsing an ancestor drops the open list: " + JSON.stringify([shut?.expanded]));
+        await page.evaluate((id) => [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-toggle").click(), fan.id);
+        await page.waitForTimeout(120);
+        await page.click('#lanes .tree-all[data-id="' + c1 + '"]');
+        await page.waitForTimeout(120);
+      }
+      await page.click("#lanes .tree-row.stuck .tree-fewer");
+      await page.waitForTimeout(150);
+      const folded = await groupOf(page, c1);
+      r.expect(folded && JSON.stringify(folded.ids) === JSON.stringify(nestShort) && folded.all?.text === "All 5" && !folded.stuck, "nested " + tag + ": 'Show fewer' folds Reader 1 back to three rows: " + JSON.stringify(folded?.ids.map(nname)));
+      r.expect(await page.evaluate((id) => document.activeElement?.classList.contains("srow") && document.activeElement.dataset.id === id, c1), "nested " + tag + ": focus is on Reader 1's row after folding");
+
+      if (!dark) {
+        // A live update while Swarm's whole list is open: it stays open, reorders, takes the new child, and keeps focus on "Show fewer".
+        await page.evaluate(() => { document.querySelector("#sidebar").scrollTop = 0; });
+        await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
+        await page.waitForTimeout(150);
+        state.edit = finishSwarm;
+        await page.waitForFunction((id) => document.querySelectorAll('#lanes .treeitem[data-id="' + id + '"] > .tree-group > .treeitem').length === 13, swarm.id, { timeout: 15000 });
+        await page.waitForTimeout(100);
+        const after = await groupOf(page, swarm.id);
+        R.liveAfter = after;
+        r.expect(after && JSON.stringify(after.ids) === JSON.stringify(live), "live: the open list reorders (Worker 10 finished) and takes Worker 13: " + JSON.stringify(after?.ids.map((id) => finishSwarm(nest(structuredClone(D.model))).sessions[id].name)));
+        r.expect(after?.stuck === true && after.fewer === "Show fewer" && after.dialogs === 0, "live: the list is still open and sticky after the update: " + JSON.stringify([after?.stuck, after?.fewer]));
+        r.expect(await page.evaluate((id) => { const a = document.activeElement; return a?.classList.contains("tree-fewer") && a.closest(".treeitem").dataset.id === id; }, swarm.id), "live: focus stays on 'Show fewer' through the redraw");
+        await page.click("#lanes .tree-row.stuck .tree-fewer");
+      }
+      r.expect(page.errors.length === 0, "nested " + tag + ": page errors " + page.errors.join("; "));
+      await page.context().close();
+    }
+
+    // Crossing 760 px drops the open list (and a phone's sheet closes when the screen turns wide).
+    {
+      const page = await served(browser, { extras: true, size: "desktop", dark: false });
+      await page.waitForSelector("#lanes .treeitem");
+      await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
+      await page.waitForTimeout(150);
+      r.expect((await groupOf(page, swarm.id))?.stuck === true, "resize: the list is open and sticky at 1280");
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(300);
+      const narrow = await groupOf(page, swarm.id);
+      R.resizeNarrow = narrow;
+      r.expect(narrow && !narrow.stuck && JSON.stringify(narrow.ids) === JSON.stringify(swarmShort) && narrow.all?.text === "All 12", "resize: at 390 the sticky list is gone and the short list is back: " + JSON.stringify([narrow?.stuck, narrow?.ids.map(name), narrow?.all?.text]));
+      await openDrawer(page);
+      await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
+      await page.waitForSelector("dialog.kids-sheet[open]");
+      await page.setViewportSize({ width: 1280, height: 860 });
+      await page.waitForFunction(() => !document.querySelector("dialog.kids-sheet"));
+      await page.waitForTimeout(300);
+      const wide = await groupOf(page, swarm.id);
+      R.resizeWide = wide;
+      r.expect(wide && !wide.stuck && JSON.stringify(wide.ids) === JSON.stringify(swarmShort) && wide.all?.text === "All 12" && wide.dialogs === 0, "resize: at 1280 the sheet is closed and the short list stands: " + JSON.stringify([wide?.stuck, wide?.dialogs]));
+      await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
+      await page.waitForTimeout(150);
+      r.expect((await groupOf(page, swarm.id))?.stuck === true, "resize: back at 1280 'All 12' opens the list inline again");
+      // The rail drops it as well.
+      await page.click("#rail-toggle"); await page.waitForTimeout(250);
+      await page.click("#rail-toggle"); await page.waitForTimeout(250);
+      const railed = await groupOf(page, swarm.id);
+      r.expect(railed && !railed.stuck && JSON.stringify(railed.ids) === JSON.stringify(swarmShort), "resize: going to the rail and back drops the open list: " + JSON.stringify([railed?.stuck, railed?.ids.map(name)]));
+      r.expect(page.errors.length === 0, "resize: page errors " + page.errors.join("; "));
+      await page.context().close();
+    }
+
+    // The phone's sheet with a grandchild: Fan-out's sheet names the parent of Reader 1's helpers.
+    {
+      const { page } = await servedModel(browser, { extras: true, size: "phone", dark: false }, nest);
+      await openDrawer(page);
+      await page.click('#lanes .tree-all[data-id="' + fan.id + '"]');
+      await page.waitForSelector("dialog.kids-sheet[open]");
+      await page.waitForTimeout(150);
+      const sheet = await sheetOf(page);
+      R.phoneNestedSheet = sheet;
+      r.expect(sheet && sheet.ids.length === 12 && sheet.count === "12 sessions" && JSON.stringify(sheet.headings) === JSON.stringify(["Running (2)", "Finished (10)"]), "nested phone: Fan-out's sheet lists all 12 descendants: " + JSON.stringify([sheet?.count, sheet?.headings]));
+      r.expect(sheet && sheet.unders.filter(Boolean).length === 5 && sheet.unders.filter(Boolean).every((u) => u === "under Reader 1") && sheet.ids.every((id, i) => (sheet.unders[i] !== null) === nestKids.includes(id)), "nested phone: only the five helpers say 'under Reader 1': " + JSON.stringify(sheet?.unders));
+      r.expect(sheet && sheet.sideways === 0 && sheet.minRow >= 44, "nested phone: the suffix adds no overflow and no short row: " + JSON.stringify([sheet?.sideways, sheet?.minRow]));
+      const c = await contrast(page, "dialog.kids-sheet .kids-row .under");
+      r.expect(c.length === 5 && c.every((x) => x.ratio >= 4.5), "nested phone: the suffix meets AA contrast: " + JSON.stringify(c));
+      await page.screenshot({ path: path.join(ENV.out, "sidebar-390-light-sheet-nested.png") });
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => !document.querySelector("dialog.kids-sheet"));
+      r.expect(await page.evaluate(() => document.body.classList.contains("drawer-open")), "nested phone: Esc leaves the drawer open");
+      await page.context().close();
+    }
+  }
+
   // ---- The open session's row is the only one marked ----------------------------------------------------------------
   {
-    // Reader 2 is the child the cap folds away when nothing is open.
-    const child = kids.find((c) => !shownIds.includes(c.id)) ?? kids[kids.length - 1];
+    // The newest child the short list leaves out when nothing is open.
+    const child = fanKids.find((c) => !fanShort.includes(c.id));
     const page = await served(browser, { extras: true, size: "desktop", dark: false });
     await page.waitForSelector("#lanes .treeitem");
     const marks = () => page.evaluate(({ parent, child }) => {
       const cur = [...document.querySelectorAll("#lanes [aria-current='page']")].map((x) => x.dataset.id);
       const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === parent);
       const pick = (id) => item?.querySelector('.srow[data-id="' + CSS.escape(id) + '"]') ?? (id === parent ? item?.querySelector(":scope > .tree-row .srow") : null);
-      return { current: cur, expanded: item?.getAttribute("aria-expanded"), childShown: !!pick(child), onPath: !!item?.querySelector(":scope > .tree-row .srow.on-path"), ring: item?.querySelector(":scope > .tree-row .srow.on-path")?.getAttribute("aria-current") ?? null, ringColor: item?.querySelector(":scope > .tree-row .srow.on-path") ? getComputedStyle(item.querySelector(":scope > .tree-row .srow.on-path")).boxShadow : null, more: item?.querySelector(":scope > .tree-group > .tree-more")?.textContent ?? null,
+      return { current: cur, expanded: item?.getAttribute("aria-expanded"), childShown: !!pick(child), rows: item?.querySelectorAll(":scope > .tree-group > .treeitem").length ?? 0, onPath: !!item?.querySelector(":scope > .tree-row .srow.on-path"), ring: item?.querySelector(":scope > .tree-row .srow.on-path")?.getAttribute("aria-current") ?? null, ringColor: item?.querySelector(":scope > .tree-row .srow.on-path") ? getComputedStyle(item.querySelector(":scope > .tree-row .srow.on-path")).boxShadow : null, all: item?.querySelector(":scope > .tree-group > .tree-all")?.textContent ?? null,
         parentBg: getComputedStyle(item.querySelector(":scope > .tree-row .srow")).backgroundColor, childBg: pick(child) ? getComputedStyle(pick(child)).backgroundColor : null };
     }, { parent: fan.id, child: child.id });
     const pref = () => page.evaluate((id) => JSON.parse(localStorage.getItem("semon.tree") ?? "{}")[id] ?? null, fan.id);
@@ -324,11 +744,10 @@ export default async function sidebarCheck(browser) {
     R.currentChild = { child: child.id, open, pref: await pref() };
     r.expect(open.current.length === 1 && open.current[0] === child.id, "open: only the open child's row is current, not its parent: " + JSON.stringify(open.current));
     r.expect(open.expanded === "true" && open.childShown, "open: the collapsed parent opens to show the open child: " + JSON.stringify(open));
-    r.expect(open.more === null || !open.more.includes("Show fewer"), "open: the open child does not force the group to 'Show fewer': " + open.more);
+    r.expect(open.rows === 3 && open.all === "All 7", "open: the open child takes one of the three rows, and 'All 7' stays: " + JSON.stringify([open.rows, open.all]));
     const saved = await pref();
-    r.expect(saved?.open === false && saved.at === 1 && saved.more === undefined, "open: the parent's saved choice is unchanged while its child is open: " + JSON.stringify(saved));
+    r.expect(saved?.open === false && saved.at === 1 && !("more" in saved), "open: the parent's saved choice is unchanged while its child is open: " + JSON.stringify(saved));
     r.expect(open.childBg !== "rgba(0, 0, 0, 0)" && open.parentBg === "rgba(0, 0, 0, 0)", "open: only the open child is highlighted: parent " + open.parentBg + ", child " + open.childBg);
-    r.expect(open.more === null && open.childShown, "open: the open child counts as shown under the cap, so nothing folds away: " + open.more);
     await page.screenshot({ path: path.join(ENV.out, "sidebar-1280-light-child-open.png") });
 
     // The parent opens for the child's page alone: leaving it restores the saved choice.
