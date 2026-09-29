@@ -2866,6 +2866,36 @@ mod tests {
         format!("{head}\"now\":0{rest}")
     }
 
+    /// TEMPORARY stress for #80, dropped before the PR is ready: 200 rounds
+    /// of the two `/api/tree` builds, each started 1 ms before a wall-clock
+    /// second boundary so the pair straddles it as often as possible.
+    #[test]
+    fn stress_tree_flake() {
+        let fixture = machine("laptop", "lane");
+        let mut mismatches = Vec::new();
+        for round in 0..200 {
+            let mut today = fixture.viewer();
+            let mut core =
+                ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos();
+            let wait = 999_000_000u32.saturating_sub(nanos);
+            std::thread::sleep(Duration::from_nanos(u64::from(wait)));
+            let a = today.respond("GET", "/api/tree", "", None);
+            let b = core.respond("GET", "/api/tree", "", None);
+            if a.body != b.body {
+                mismatches.push(round);
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} of 200 rounds differ: {mismatches:?}",
+            mismatches.len()
+        );
+    }
+
     #[test]
     fn one_machine_through_with_machines_is_todays_viewer_byte_for_byte() {
         let fixture = machine("laptop", "lane");
