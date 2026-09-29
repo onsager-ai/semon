@@ -3257,8 +3257,11 @@ mod tests {
                 ".title =",
                 ".title=",
                 "setAttribute(\"title\"",
+                "setAttribute('title'",
                 "svgEl(\"title\"",
                 "createElementNS(SVGNS, \"title\"",
+                // a `title` key in an attrs object (svgEl(..., { title: ... })), which svgEl sets as an attribute
+                "title:",
             ] {
                 assert!(
                     !script.contains(banned),
