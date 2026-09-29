@@ -330,7 +330,7 @@ export default async function (browser) {
       const plainStep = page.locator(".step", { has: page.locator('.sa:text-matches("^cargo test")') });
       await plainStep.scrollIntoViewIfNeeded(); await page.waitForTimeout(150);
       await page.screenshot({ path: path.join(ENV.out, "codex-cut-step-" + tag + ".png") });
-      await page.locator(".step", { has: page.locator('.sa:text-matches("^cat build.log")') }).locator(".viewall").click();
+      await page.locator(".step", { has: page.locator('.sa:text-matches("^cat build.log")') }).locator(".viewall:not(.viewscript)").click();
       await page.waitForSelector("dialog.panel.full[open] .cutgap"); await page.waitForTimeout(200);
       const sheet = await page.evaluate(() => { const v = document.querySelector("dialog.panel.full[open]"); return { gaps: [...v.querySelectorAll(".cutgap")].map((g) => g.textContent), notes: [...v.querySelectorAll(".vnote")].map((n) => n.textContent), first: v.querySelector(".cutout pre")?.textContent.split("\n").length ?? 0, last: v.querySelector(".cutout pre:last-of-type")?.textContent.trim().split("\n").pop() ?? null }; });
       r.expect(sheet.gaps.length === 1 && sheet.gaps[0] === "1,048,576 bytes cut here by Codex", tag + ": View all shows the collection gap with its count: " + JSON.stringify(sheet.gaps));

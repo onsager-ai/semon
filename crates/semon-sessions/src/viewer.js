@@ -336,26 +336,15 @@
       Object.assign(TXM[sid], { total: p.total, calls: p.calls, errors: p.errors }); if (where !== "before" && p.to >= p.total) TXM[sid].tok = tok; spread(sid);
     });
   }
-  // A spawn's child work opens inline under its card: load the turn each brief started, when its session isn't loaded.
-  function kids(sid, signal) {
-    const jobs = [];
-    for (const e of TX[sid] ?? []) {
-      const h = e.k === "h" ? HID.get(e.id) : null, c = h && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id) : null;
-      if (c && !TX[c.sid]) jobs.push(fetchTx(c.sid, "turn=" + enc(c.id), undefined, signal));
-    }
-    return jobs.length ? Promise.all(jobs) : null;
-  }
-  // What a route needs before it can draw: a session's page (the one holding a deep-linked turn), and its child work.
+  // What a route needs before it can draw: a session's page (the one holding a deep-linked turn).
   // `signal` cancels what a navigation asked for when the reader goes elsewhere first.
   function load(r, signal) {
     if (r.v === "analytics") return fetchAnalytics().then(() => { scheduleAnalytics(); }); // the range's answer, from the server
     if (r.v !== "session" || !SESS[r.id]) return null;
     const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
-    if (TX[r.id] && !deep) return lenient(kids(r.id, signal));
-    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal).then(() => lenient(kids(r.id, signal)));
+    if (TX[r.id] && !deep) return null;
+    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal);
   }
-  // Child work that fails to load leaves its cards as they were: only the session's own transcript failing fails the route.
-  const lenient = (p) => (p ? p.catch(() => {}) : p);
   // The last few transcripts opened, kept when the reader leaves them, so opening one again draws it at once. (A transcript
   // still in TX, which only a model update prunes, draws from there just the same.) A transcript is kept only when it was
   // loaded to its end, and the cache is bounded by entries and by estimated memory: two bytes for each character of an entry's
@@ -388,7 +377,7 @@
   // for when the mark is the same. The page is drawn again, keeping the reader's place, once something arrived.
   function revalidate(r) {
     const sid = r.id, m = TXM[sid], moved = m && m.to >= m.total && m.tok != null && TOK[sid] != null && m.tok !== TOK[sid];
-    const job = moved ? (shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid)) : null, work = job ? job.then(() => kids(sid)) : kids(sid);
+    const job = moved ? (shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid)) : null, work = job;
     if (work) work.then(() => { if (route === r && rendered === r) refresh(null); }, () => {});
   }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
@@ -397,7 +386,7 @@
     b.addEventListener("click", () => {
       stopOpeningEndPin();
       const m = TXM[sid], box = phone.matches ? document.documentElement : $("#main"), h0 = box.scrollHeight; b.disabled = true;
-      fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where).then(() => kids(sid)).then(() => {
+      fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where).then(() => {
         render(); if (where === "before") { const d = box.scrollHeight - h0; if (phone.matches) window.scrollBy(0, d); else box.scrollTop += d; } }, () => { b.disabled = false; });
     });
     return w;
@@ -1065,7 +1054,7 @@
     let tries = 0;
     const extend = () => hasSlot(sid, slot) || tries++ >= 3 ? null : fetchTx(sid, up ? "before=" + TXM[sid].from : "after=" + TXM[sid].to, up ? "before" : "after").then(extend);
     const around = () => hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + Math.max(0, slot - ERR_AROUND)).then(() => (hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + slot)));
-    return Promise.resolve(near ? extend() : null).then(around).then(() => kids(sid)).then(() => true);
+    return Promise.resolve(near ? extend() : null).then(around).then(() => true);
   }
   // The session's own step for a slot: not one in a child run's work drawn inside it.
   function errNode(sid, slot) {
@@ -2163,13 +2152,16 @@
   }
   // A 403 or a dropped connection fails the update (and backs off); anything else skips that one transcript.
   const soft = (p) => p.catch((e) => { if (e?.status === 403 || e?.status === 0) throw e; });
-  // The transcripts on screen: a session page's own, and its child runs'. Any other loaded transcript is dropped from TX (the
-  // last few opened are kept in TXCACHE, and brought up to date when opened again).
-  const viewed = () => { const v = new Set(); if (route.v !== "session") return v; v.add(route.id); for (const h of H) if (h.kind === "spawn" && h.from === route.id && h.to) v.add(h.to); return v; };
+  // The transcript on screen: a session page's own. Any other loaded transcript is dropped from TX (the last few opened are kept in
+  // TXCACHE, and brought up to date when opened again). A child run's card is drawn from the model, so its transcript is not loaded.
+  const viewed = () => { const v = new Set(); if (route.v === "session") v.add(route.id); return v; };
+  // What a child card shows, so an update knows which cards changed: the run's name, state, kind, model, steps and current call.
+  const cardKeys = () => new Map(H.filter((h) => h.kind === "spawn" && SESS[h.to]).map((h) => { const c = SESS[h.to]; return [h.id, [c.name, c.state, c.kind, c.model, countOf(c, "calls"), c.activity?.join("|"), h.status, h.result].join("\u0001")]; }));
   function update(m) {
-    const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
+    const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, oldCards = cardKeys(), names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
     adopt(m); remember(m);
     const changedH = new Set(H.filter((h) => oldH.get(h.id) !== handKey(h)).map((h) => h.id));
+    const newCards = cardKeys(), changedCards = new Set([...newCards].filter(([id, k]) => oldCards.has(id) && oldCards.get(id) !== k).map(([id]) => id));
     const view = viewed(), grown = new Set(), cuts = new Map();
     let full = Object.values(SESS).some((x) => names.has(x.id) && names.get(x.id) !== x.name); // a new name shows in every turn
     for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
@@ -2177,19 +2169,18 @@
     let chain = Promise.resolve();
     for (const sid of view) if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
     else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.reload) full = true; })));
-    if (route.v === "session" && TX[route.id]) chain = chain.then(() => newKids(route.id, grown));
-    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
+    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT, changedCards)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
   }
   // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), those
-  // whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw them all.
-  function dirtyTurns(cuts, grown, changedH, oldT) {
+  // whose record or handoffs changed, and those holding the card of a child run that changed. Null: draw them all.
+  function dirtyTurns(cuts, grown, changedH, oldT, changedCards) {
     if (route.v !== "session" || !TX[route.id]) return null;
     const sid = route.id, dirty = new Set(), owner = new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id])));
     if (cuts.has(sid)) for (const e of TX[sid].slice(cuts.get(sid))) { if (isGap(e)) return null; if (owner.has(e)) dirty.add(owner.get(e)); }
     for (const t of TURNS[sid] ?? []) {
       if (oldT.get(t.id) !== LIVE.turns.get(t.id) || [t.start, ...t.sent].some((h) => h && changedH.has(h.id)) || t.entries.some((e) => e.k === "h" && changedH.has(e.id))) dirty.add(t.id);
     }
-    for (const h of H) if (h.kind === "spawn" && h.from === sid && grown.has(h.to) && HOLDS.get(h.id)) dirty.add(HOLDS.get(h.id).id);
+    for (const h of H) if (h.kind === "spawn" && h.from === sid && changedCards.has(h.id) && HOLDS.get(h.id)) dirty.add(HOLDS.get(h.id).id);
     return dirty;
   }
   // The tail of a transcript loaded to its end: from its first call still running (anywhere), or the last turn's first call
@@ -2215,15 +2206,6 @@
   function reload(sid) {
     if (sid !== route.id) { delete TX[sid]; delete TXM[sid]; return Promise.resolve({ cut: null, reload: true }); }
     return fetchTx(sid, "").then(() => ({ cut: null, reload: true }));
-  }
-  // A new spawn's child work: its turn, loaded one request at a time. A turn the server doesn't have (404) isn't asked for again.
-  function newKids(sid, grown) {
-    let chain = Promise.resolve();
-    for (const e of TX[sid] ?? []) {
-      const h = e.k === "h" ? HID.get(e.id) : null, c = h && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id) : null;
-      if (c && !TX[c.sid] && !LIVE.missing.has(c.id)) chain = chain.then(() => (TX[c.sid] ? null : soft(fetchTx(c.sid, "turn=" + enc(c.id)).then(() => { grown.add(c.sid); }, (err) => { if (err?.status === 404) LIVE.missing.add(c.id); throw err; }))));
-    }
-    return chain;
   }
   // Draws the new model on the screen shown, unless a navigation is still loading (it draws when done), the sheet is open
   // (it draws when the sheet closes), or what the screen shows left the model (it stays as it was).

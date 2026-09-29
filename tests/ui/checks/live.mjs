@@ -206,7 +206,7 @@ async function scheme(browser, name, opts, r, protocol) {
     for (const p of pages) await p.evaluate(() => window.__live.reset());
 
     // ---- 1. harbor's running call returns, and it says something; the reader is scrolled up ----
-    const beforeEntries = await S.evaluate(() => [...document.querySelectorAll("#page .turns :is(.msg, .step, .event, .child-card, .bubble, .think, .think-pending)[data-e]")].map((n) => n.dataset.e));
+    const beforeEntries = await S.evaluate(() => [...document.querySelectorAll("#page .turns :is(.msg, .step, .event, .child-card, .bubble, .thought, .think-pending)[data-e]")].map((n) => n.dataset.e));
     let t0 = Date.now();
     harbor.append(harbor.result(at(12, 41), "toolu-b3", "test result: ok. 214 passed; 0 failed"), harbor.think(at(12, 41, 2), THOUGHT), harbor.text(at(12, 41, 5), MESSAGE));
     R.message = await appear(S, t0, (m) => [...document.querySelectorAll("#page .msg.assistant")].some((x) => x.textContent.includes(m)), MESSAGE);
@@ -220,10 +220,10 @@ async function scheme(browser, name, opts, r, protocol) {
     const open1 = new Set(await openKeys(S));
     R.stillOpen1 = open0.filter((k) => !open1.has(k));
     r.expect(R.stillOpen1.length === 0, name + ": closed by the update: " + R.stillOpen1.join(", "));
-    R.jump = await S.evaluate((before) => { const p = document.querySelector("#jump-bottom"); if (!p || p.closest(".jump-wrap")?.hidden) return null; const b = p.getBoundingClientRect(), keys = new Set([...document.querySelectorAll("#page .turns :is(.msg, .step, .event, .child-card, .bubble, .think, .think-pending)[data-e]")].map((n) => n.dataset.e)); return { text: p.textContent.trim(), added: [...keys].filter((key) => !before.includes(key)).length, w: b.width, h: b.height, top: b.top, left: b.left, right: b.right, bottom: b.bottom, vw: document.documentElement.clientWidth, vh: innerHeight }; }, beforeEntries);
-    // The new thought is an entry like any other: it counts toward "N new" (the message and the thought make at least two). The overhaul draws it as a "Thought for Ns" row that opens the text.
-    R.thought = await S.evaluate((t) => { const g = [...document.querySelectorAll("#page .turns .thought")].find((x) => x.querySelector(".think-text")?.textContent.includes(t)); const b = g?.querySelector("button.think[data-e]"); return b ? { key: b.dataset.e, collapsed: b.getAttribute("aria-expanded") === "false" } : null; }, THOUGHT);
-    r.expect(!!R.thought && !beforeEntries.includes(R.thought.key), name + ": harbor's new thought did not appear as a row, or was already counted: " + JSON.stringify(R.thought));
+    R.jump = await S.evaluate((before) => { const p = document.querySelector("#jump-bottom"); if (!p || p.closest(".jump-wrap")?.hidden) return null; const b = p.getBoundingClientRect(), keys = new Set([...document.querySelectorAll("#page .turns :is(.msg, .step, .event, .child-card, .bubble, .thought, .think-pending)[data-e]")].map((n) => n.dataset.e)); return { text: p.textContent.trim(), added: [...keys].filter((key) => !before.includes(key)).length, w: b.width, h: b.height, top: b.top, left: b.left, right: b.right, bottom: b.bottom, vw: document.documentElement.clientWidth, vh: innerHeight }; }, beforeEntries);
+    // The new thought is an entry like any other: it counts toward "N new" (the message and the thought make at least two).
+    R.thought = await S.evaluate((t) => { const n = [...document.querySelectorAll("#page .turns .thought[data-e]")].find((x) => x.querySelector(".think-text")?.textContent.includes(t)); return n ? { key: n.dataset.e, open: !n.querySelector("button, [hidden]") } : null; }, THOUGHT);
+    r.expect(!!R.thought && R.thought.open && !beforeEntries.includes(R.thought.key), name + ": harbor's new thought did not appear in full, or was already counted: " + JSON.stringify(R.thought));
     r.expect(R.jump && R.jump.added >= 2, name + ": the new thought and message should both count as new: " + JSON.stringify(R.jump));
     const jumpCount = R.jump && /^([1-9]\d*) new$/.exec(R.jump.text);
     r.expect(!!jumpCount && Number(jumpCount[1]) === R.jump.added, name + ": jump button count didn't match newly rendered entries: " + JSON.stringify(R.jump));
@@ -479,7 +479,7 @@ async function scheme(browser, name, opts, r, protocol) {
     const live5 = await S.evaluate(() => [...document.querySelectorAll(".step.live")].find((x) => x.querySelector(".sa")?.textContent.includes("sleep 99"))?.dataset.e ?? null);
     const pidFile = fs.readdirSync(path.join(dir, "claude/sessions")).find((f) => JSON.parse(fs.readFileSync(path.join(dir, "claude/sessions", f), "utf8")).sessionId === "harbor");
     t0 = Date.now(); fs.rmSync(path.join(dir, "proc", path.basename(pidFile, ".json"), "stat"));
-    R.died = await appear(S, t0, (k) => { const n = document.querySelector('.step[data-e="' + k + '"]'); return !!n && !n.classList.contains("live") && n.querySelector(".sd")?.textContent === "no result"; }, live5);
+    R.died = await appear(S, t0, (k) => { const n = document.querySelector('.step[data-e="' + k + '"]'); return !!n && !n.classList.contains("live") && n.querySelector(".sd")?.textContent === "No result"; }, live5);
     r.expect(R.died != null, name + ": the step kept running after its process died");
 
     // ---- Overflow at the screen's own size ----
