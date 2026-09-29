@@ -1,7 +1,8 @@
 //! Public assets for pages that share the viewer's presentation shell.
 //!
-//! Serve these assets from the page's own origin at `/viewer.css`, `/shell.css`, and `/shell.js`, and serve each font at
-//! `/fonts/<name>`; the viewer's content security policy permits same-origin assets only.
+//! Serve these assets from the page's own origin at `/viewer.css`, `/shell.css`, `/shell.js`, `/mark.svg` and
+//! `/favicon.svg`, and serve each font at `/fonts/<name>`; the viewer's content security policy permits same-origin
+//! assets only.
 
 /// The viewer's base styles, including its tokens, fonts, and chrome.
 pub const VIEWER_CSS: &str = include_str!("viewer.css");
@@ -11,6 +12,14 @@ pub const CSS: &str = include_str!("shell.css");
 
 /// The drawer, copy, dialog, and readiness-poll behavior for shell pages.
 pub const JS: &str = include_str!("shell.js");
+
+/// The Semon mark, a monochrome glyph. `.mark` paints it as a mask from `/mark.svg`, so a page that uses `.mark` must
+/// serve this at that path (as `image/svg+xml`).
+pub const MARK_SVG: &str = include_str!("mark.svg");
+
+/// The mark as a favicon: its fill follows the browser's light or dark scheme. Serve it at `/favicon.svg` and link it
+/// with `<link rel="icon" href="/favicon.svg" type="image/svg+xml">`.
+pub const FAVICON_SVG: &str = include_str!("favicon.svg");
 
 /// Font file names used by [`VIEWER_CSS`], as served under `/fonts/`.
 pub const FONT_FILES: [&str; 6] = [

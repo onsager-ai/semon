@@ -12,7 +12,7 @@
 
 import { readFile, mkdir, writeFile, appendFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -98,11 +98,32 @@ function slugForFile(file) {
   return file.replace(/\\/g, "/").replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
 }
 
+// The mockup is opened on a routed origin rather than as a file: URL, because its `.mark` is a CSS mask of `/mark.svg`,
+// and a file: page can neither resolve that path nor load a mask across file origins. `/mark.svg` here is the crate's
+// own file, the same one the served viewer sends; every other path on the origin is a file of the repository.
+const MOCKUP_ORIGIN = "http://mockup.test";
+const MARK_SVG = path.join(ROOT, "crates/semon-sessions/src/mark.svg");
+
 function pageUrl(filePath, shot) {
-  const url = pathToFileURL(filePath);
+  const url = new URL(path.relative(ROOT, filePath).split(path.sep).map(encodeURIComponent).join("/"), MOCKUP_ORIGIN + "/");
   if (shot.query) url.search = shot.query.slice(1);
   if (shot.hash) url.hash = shot.hash.slice(1);
   return url.href;
+}
+
+async function serveMockupOrigin(context) {
+  await context.route((url) => url.origin === MOCKUP_ORIGIN, async (route) => {
+    const { pathname } = new URL(route.request().url());
+    const file = pathname === "/mark.svg" ? MARK_SVG : path.resolve(ROOT, decodeURIComponent(pathname.slice(1)));
+    if (!file.startsWith(ROOT + path.sep)) return route.fulfill({ status: 403, body: "" });
+    try {
+      const body = await readFile(file);
+      const type = { ".html": "text/html; charset=utf-8", ".svg": "image/svg+xml", ".css": "text/css", ".js": "text/javascript" }[path.extname(file)];
+      await route.fulfill({ body, contentType: type ?? "application/octet-stream" });
+    } catch {
+      await route.fulfill({ status: 404, body: "" });
+    }
+  });
 }
 
 function display(value) {
@@ -152,6 +173,7 @@ async function renderCase(browser, entry, shot, size, scheme, fileSlug) {
   let context;
   try {
     context = await browser.newContext(contextOptions);
+    await serveMockupOrigin(context);
     const page = await context.newPage();
     addPageErrors(page, record);
     const filePath = path.resolve(ROOT, entry.file);

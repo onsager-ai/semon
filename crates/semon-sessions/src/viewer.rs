@@ -834,6 +834,8 @@ impl MachineView {
                 "text/css; charset=utf-8",
                 include_str!("viewer.css").into(),
             )),
+            "/mark.svg" => Ok((200, "image/svg+xml", include_str!("mark.svg").into())),
+            "/favicon.svg" => Ok((200, "image/svg+xml", include_str!("favicon.svg").into())),
             "/shell.js" => Ok((
                 200,
                 "text/javascript; charset=utf-8",
@@ -2348,6 +2350,8 @@ mod tests {
             ("/viewer.css", "text/css; charset=utf-8"),
             ("/shell.js", "text/javascript; charset=utf-8"),
             ("/shell.css", "text/css; charset=utf-8"),
+            ("/mark.svg", "image/svg+xml"),
+            ("/favicon.svg", "image/svg+xml"),
             ("/fonts/instrument-sans-latin.woff2", "font/woff2"),
             ("/fonts/instrument-sans-latin-ext.woff2", "font/woff2"),
             ("/fonts/jetbrains-mono-latin.woff2", "font/woff2"),
