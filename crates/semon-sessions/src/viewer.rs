@@ -2866,7 +2866,6 @@ mod tests {
         format!("{head}\"now\":0{rest}")
     }
 
-<<<<<<< Updated upstream
     /// TEMPORARY stress for #80, dropped before the PR is ready: 200 rounds
     /// of the two `/api/tree` builds, each started 1 ms before a wall-clock
     /// second boundary so the pair straddles it as often as possible.
@@ -2895,12 +2894,13 @@ mod tests {
             "{} of 200 rounds differ: {mismatches:?}",
             mismatches.len()
         );
-=======
+    }
+
     /// `/api/tree` stamps each node with `last_activity_age_seconds`, whole
     /// seconds between the node's last record and the moment of the build.
     /// Two builds that straddle a wall-clock second boundary legitimately
     /// differ there and nowhere else; zero the number, as [`without_now`]
-    /// does for the model. A body with no such number is an error: it would
+    /// does for the model. A body with no number at all is an error: it would
     /// turn this into a silent no-op.
     fn without_age(body: &[u8]) -> String {
         const KEY: &str = "\"last_activity_age_seconds\":";
@@ -2911,21 +2911,25 @@ mod tests {
         while let Some((head, tail)) = rest.split_once(KEY) {
             let tail = tail.trim_start();
             let digits = tail.len() - tail.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-            assert!(
-                digits > 0,
-                "age is not a number: {}",
-                tail.chars().take(20).collect::<String>()
-            );
             out.push_str(head);
             out.push_str(KEY);
-            out.push_str(" 0");
+            out.push(' ');
+            if digits > 0 {
+                out.push('0');
+                seen += 1;
+            } else {
+                // A node with no timestamp is `null`, and stays so.
+                assert!(
+                    tail.starts_with("null"),
+                    "age is neither a number nor null: {}",
+                    tail.chars().take(20).collect::<String>()
+                );
+            }
             rest = &tail[digits..];
-            seen += 1;
         }
         assert!(seen > 0, "no last_activity_age_seconds in {text}");
         out.push_str(rest);
         out
->>>>>>> Stashed changes
     }
 
     #[test]
