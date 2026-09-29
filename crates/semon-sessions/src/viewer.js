@@ -718,7 +718,7 @@
     const under = { home: ["home"], analytics: ["analytics"], sessions: ["sessions", "session", "trace"], machines: ["machines", "machine"] };
     const item = (v, label, ic, count, hot) => { const b = el("button", "nav-item"); b.type = "button"; b.dataset.go = v; if (under[v].includes(route.v)) b.setAttribute("aria-current", "page"); b.append(icon(ic, "icon"), el("span", null, label)); if (count) b.append(el("span", "cnt" + (hot ? " hot" : ""), String(count))); b.addEventListener("click", () => go({ v })); nav.append(b); };
     item("home", "Home", I.home, inbox().length, true);
-    item("sessions", "Sessions", I.sessions, Object.keys(SESS).length);
+    item("sessions", "Sessions", I.sessions);
     item("analytics", "Analytics", I.chart);
     item("machines", "Machines", I.machine, Object.keys(MACHINE).filter((m) => !MACHINE_UP[m]).length, true);
   }

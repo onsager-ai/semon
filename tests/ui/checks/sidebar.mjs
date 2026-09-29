@@ -903,9 +903,11 @@ export default async function sidebarCheck(browser) {
   }
   // ---- The nav order: Home, Sessions, Analytics, Machines, in the sidebar, the rail and the drawer ------------------------
   {
-    const order = (page) => page.evaluate(() => [...document.querySelectorAll("#nav .nav-item")].map((b) => ({ go: b.dataset.go, label: b.querySelector("span:not(.cnt)")?.textContent, shown: b.getClientRects().length > 0, top: Math.round(b.getBoundingClientRect().top) })));
+    const order = (page) => page.evaluate(() => [...document.querySelectorAll("#nav .nav-item")].map((b) => ({ go: b.dataset.go, label: b.querySelector("span:not(.cnt)")?.textContent, cnt: !!b.querySelector(".cnt"), shown: b.getClientRects().length > 0, top: Math.round(b.getBoundingClientRect().top) })));
     const want = ["home", "sessions", "analytics", "machines"], labels = ["Home", "Sessions", "Analytics", "Machines"];
-    const ok = (o) => JSON.stringify(o.map((b) => b.go)) === JSON.stringify(want) && JSON.stringify(o.map((b) => b.label)) === JSON.stringify(labels) && o.every((b) => b.shown) && o.every((b, i) => i === 0 || b.top > o[i - 1].top);
+    // The Sessions item carries no count pill (a total there says nothing you act on); it is the only one that never has one.
+    const noCount = (o) => o.find((b) => b.go === "sessions")?.cnt === false;
+    const ok = (o) => JSON.stringify(o.map((b) => b.go)) === JSON.stringify(want) && JSON.stringify(o.map((b) => b.label)) === JSON.stringify(labels) && o.every((b) => b.shown) && o.every((b, i) => i === 0 || b.top > o[i - 1].top) && noCount(o);
     const desktop = await served(browser, { extras: true, size: "desktop", dark: false });
     await desktop.waitForSelector("#nav .nav-item");
     const expanded = await order(desktop);
@@ -914,7 +916,7 @@ export default async function sidebarCheck(browser) {
     await desktop.click("#rail-toggle"); await desktop.waitForTimeout(300);
     const rail = await order(desktop);
     R.navRail = rail;
-    r.expect(rail.map((b) => b.go).join() === want.join() && rail.every((b) => b.shown) && rail.every((b, i) => i === 0 || b.top > rail[i - 1].top), "nav: the rail's icons run Home, Sessions, Analytics, Machines top to bottom: " + JSON.stringify(rail));
+    r.expect(rail.map((b) => b.go).join() === want.join() && rail.every((b) => b.shown) && rail.every((b, i) => i === 0 || b.top > rail[i - 1].top) && noCount(rail), "nav: the rail's icons run Home, Sessions, Analytics, Machines top to bottom, and Sessions has no count: " + JSON.stringify(rail));
     await desktop.screenshot({ path: path.join(ENV.out, "sidebar-nav-1280-light-rail.png") });
     r.expect(desktop.errors.length === 0, "nav desktop: page errors " + desktop.errors.join("; "));
     await desktop.context().close();
