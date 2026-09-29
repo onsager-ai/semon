@@ -490,10 +490,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2 .stat { gap: 5px; font-size: 12.5px; }
 .topbar .l2 .sep { white-space: pre; }
 .topbar .l2 .rest { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.topbar .l2.session-meta { position: relative; gap: 12px; width: 100%; min-height: 30px; overflow: hidden; border: 0; border-radius: 8px; background: none; padding: 0; text-align: left; }
-.topbar .l2.session-meta .meta-hit { position: absolute; inset: 0; z-index: 0; border: 0; border-radius: 8px; background: none; padding: 0; }
-@media (hover: hover) { .topbar .l2.session-meta:hover .meta-hit { background: var(--sunken); } }
-.topbar .l2.session-meta .meta-item { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; flex: none; min-width: 0; pointer-events: none; }
+.topbar .l2.session-meta { position: relative; gap: 12px; width: calc(100% + 6px); min-height: 30px; overflow: hidden; border: 0; border-radius: 8px; background: none; margin-left: -6px; padding: 0 0 0 6px; text-align: left; }
+.topbar .l2.session-meta .meta-item { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; flex: none; min-width: 0; }
 .topbar .l2.session-meta .meta-item .meta-value { display: block; min-width: 0; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .l2.session-meta .meta-state { gap: 5px; }
 .topbar .l2.session-meta .meta-state .meta-value { max-width: none; }
@@ -505,16 +503,18 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2.session-meta .meta-item.meta-cost { gap: 4px; }
 .topbar .l2.session-meta .meta-cost .meta-value { min-width: 0; max-width: 7ch; }
 .topbar .l2.session-meta .meta-item.meta-tokens .meta-value { min-width: 0; max-width: 7ch; }
-.topbar .l2.session-meta .meta-runs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 30px; border: 0; background: none; padding: 0; color: var(--muted); font: inherit; pointer-events: auto; }
+.topbar .l2.session-meta .meta-runs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 30px; margin: 0 -4px; border: 0; border-radius: 6px; background: none; padding: 0 4px; color: var(--muted); font: inherit; pointer-events: auto; cursor: pointer; }
 .topbar .l2.session-meta .meta-runs svg { width: 15px; height: 15px; color: var(--faint); }
-.topbar .l2.session-meta .meta-runs .dot { width: 6px; height: 6px; }
+@media (hover: hover) { .topbar .l2.session-meta .meta-runs:hover, .topbar .l2.session-meta .errs:hover { background: var(--sunken); color: var(--ink); } }
+.topbar .l2.session-meta .meta-runs:focus-visible, .topbar .l2.session-meta .errs:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--sunken); color: var(--ink); }
 .topbar .l2.session-meta .meta-runs .meta-value { font: inherit; }
-.topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; margin: 0; border: 0; background: none; padding: 0 2px; font: inherit; font-weight: 500; color: var(--err); pointer-events: auto; }
+.topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; margin: 0 -4px; border: 0; border-radius: 6px; background: none; padding: 0 4px; font: inherit; font-weight: 400; color: var(--muted); text-decoration: none; pointer-events: auto; cursor: pointer; }
 .topbar .l2.session-meta .errs:empty { display: none; }
-.topbar .l2.session-meta .errs::before { content: "·"; color: var(--faint); font-weight: 400; }
+.topbar .l2.session-meta .errs-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--err); }
+.topbar .l2.session-meta .errs-sep { color: var(--faint); }
 /* fitSessionLine hides overflow items by setting the `hidden` attribute; these selectors must out-specify
    the display rules above so hiding actually takes effect. */
-.topbar .l2.session-meta .meta-item[hidden], .topbar .l2.session-meta .meta-runs[hidden], .topbar .l2.session-meta .errs[hidden], .topbar .l2.session-meta .meta-value[hidden] { display: none; }
+.topbar .l2.session-meta .meta-item[hidden], .topbar .l2.session-meta .meta-runs[hidden], .topbar .l2.session-meta .errs[hidden], .topbar .l2.session-meta .errs-sep[hidden], .topbar .l2.session-meta .meta-value[hidden] { display: none; }
 .topbar .l1 .crumb { padding: 8px 0; margin: -8px 0; }
 .topbar.searching { gap: 8px; }
 .topbar .find { flex: 1 1 auto; min-width: 0; }
@@ -1245,13 +1245,13 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const keep = new Set(["meta-kind", "meta-state"]);
     const droppable = [...l2.children].filter((n) => (n.classList.contains("meta-item") || n.classList.contains("meta-runs")) && ![...n.classList].some((c) => keep.has(c)));
     droppable.forEach((n) => { n.hidden = false; });
-    const errs = l2.querySelector(".errs"); if (errs) errs.hidden = false;
+    const errs = l2.querySelector(".errs"), errsSep = l2.querySelector(".errs-sep"); if (errs) errs.hidden = false; if (errsSep) errsSep.hidden = false;
     const kindValue = l2.querySelector(".meta-kind .meta-value"); if (kindValue) kindValue.hidden = false;
     const stateValues = [...l2.querySelectorAll(".meta-state .meta-value")]; const stateSep = l2.querySelector(".meta-state .state-sep");
     stateValues.forEach((n) => { n.hidden = false; }); if (stateSep) stateSep.hidden = false;
     const fits = () => l2.scrollWidth <= l2.clientWidth + 1;
     for (let i = droppable.length - 1; i >= 0 && !fits(); i--) droppable[i].hidden = true;
-    if (!fits() && errs) errs.hidden = true;
+    if (!fits() && errs) { errs.hidden = true; if (errsSep) errsSep.hidden = true; }
     if (!fits() && kindValue) kindValue.hidden = true;
     if (!fits() && stateValues[1]) { stateValues[1].hidden = true; if (stateSep) stateSep.hidden = true; }
     if (!fits() && stateValues[0]) stateValues[0].hidden = true;
@@ -1283,7 +1283,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       else { const path = opts.lineage; path.forEach((item, i) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); }); }
     } else if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
     const tt = el("span", "t", title); tt.title = title; l1.append(tt); t.append(l1);
-    if (opts.line2) { const l2 = el("div", "l2" + (s ? " session-meta" : "")); if (s) { const hit = el("button", "meta-hit"); hit.type = "button"; hit.setAttribute("aria-label", s.name + ": open Session details"); hit.addEventListener("click", () => openSessionDetails(s)); l2.append(hit); }
+    if (opts.line2) { const l2 = el("div", "l2" + (s ? " session-meta" : ""));
       opts.line2(l2); t.append(l2); if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); }); }
     bar.append(t); if (s && !phone.matches) { const nav = siblingNav(s); if (nav) bar.append(nav); }
     if (opts.analytics) { appendAnalyticsRange(bar); appendWideToggle(bar); return; }
@@ -1318,16 +1318,16 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   const sessionLine = (s) => (l2) => {
     const es = TX[s.id] ?? [], calls = es.filter((e) => e.k === "tool").length, errors = es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
     const st = el("span", "meta-item meta-state"); st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", nT + (nT === 1 ? " turn" : " turns")));
-    if (errors) { const j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")); j.type = "button"; j.setAttribute("aria-label", j.textContent + ": jump to the first failed step");
+    if (errors) { const sep = el("span", "state-sep errs-sep", "·"), j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); j.prepend(mark); j.type = "button"; j.title = "Jump to the first failed step"; j.setAttribute("aria-label", j.textContent + ": jump to the first failed step");
       j.addEventListener("click", (ev) => { ev.stopPropagation(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
-      st.append(j); }
+      st.append(sep, j); }
     const kind = s.kind ? childKindChip(s, true) : null;
     const model = el("span", "meta-item meta-model"); model.append(harnessName(s.harness), el("span", "meta-value", shortModel(s.model)));
     const machine = el("span", "meta-item meta-machine"); machine.append(icon(I.machine), el("span", "meta-value", shortHost(s))); machine.title = hostOf(s);
     const branch = el("span", "meta-item meta-branch"); branch.append(icon(I.branch), el("span", "meta-value", branchOf(s))); branch.title = branchOf(s);
     const tools = el("span", "meta-item meta-tools"); tools.append(icon(I.wrench), el("span", "meta-value", String(calls))); tools.setAttribute("aria-label", calls + (calls === 1 ? " tool call" : " tool calls"));
     const kids = childSessions(s.id), allKids = descendantsOf(s.id, sessionChildren());
-    let runs = null; if (kids.length) { runs = el("button", "meta-item meta-runs"); runs.type = "button"; runs.setAttribute("aria-label", kids.length + (kids.length === 1 ? " child session" : " child sessions") + (allKids.some((x) => x.state === "work") ? ", work in progress" : "") + ": open runs"); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); if (allKids.some((x) => x.state === "work")) runs.append(dot("work")); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
+    let runs = null; if (kids.length) { runs = el("button", "meta-item meta-runs"); runs.type = "button"; runs.setAttribute("aria-label", kids.length + (kids.length === 1 ? " child session" : " child sessions") + (allKids.some((x) => x.state === "work") ? ", work in progress" : "") + ": open runs"); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
     const tokens = el("span", "meta-item meta-tokens"); tokens.append(icon(I.tokens), el("span", "meta-value", tok(usageTotal(s) / 1e6))); tokens.title = usageTotal(s).toLocaleString() + " sample tokens";
     const cost = costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", cost.unknown.length ? "—" : shortMoney(cost.usd))); costItem.title = COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));
     l2.append(...(kind ? [kind] : []), st, model, machine, branch, tools, ...(runs ? [runs] : []), tokens, costItem);
@@ -1386,6 +1386,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       filterItem.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); const pop = $(".filters.pop"); if (!pop) return; filterOpen = true; pop.hidden = false; pop.style.right = Math.max(0, $("#topbar").getBoundingClientRect().right - btn.getBoundingClientRect().right) + "px"; pop.querySelector("input")?.focus(); });
       m.append(findItem, filterItem);
     }
+    const details = el("button"); details.type = "button"; details.setAttribute("role", "menuitem"); details.append(icon(I.read, "icon"), el("span", null, "Session details")); details.addEventListener("click", (e) => { e.stopPropagation(); openSessionDetails(s); }); m.append(details);
     const copy = el("button"); copy.type = "button"; copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command"));
     const cmd = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + s.id;
     copy.addEventListener("click", () => { navigator.clipboard?.writeText(cmd).then(() => { copy.lastChild.textContent = "Copied"; }, () => { copy.lastChild.textContent = cmd; }); });

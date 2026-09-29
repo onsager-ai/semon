@@ -26,7 +26,7 @@
       },
       {
         "name": "session-details-cost",
-        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.meta-hit').click(); document.querySelector('.session-details .cost-row').click();"
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('#more-btn').click(); [...document.querySelectorAll('.menu button')].find((b) => b.textContent.includes('Session details')).click(); document.querySelector('.session-details .cost-row').click();"
       },
       {
         "name": "parent-runs",
