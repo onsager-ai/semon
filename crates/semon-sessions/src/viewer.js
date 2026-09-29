@@ -955,7 +955,7 @@
       const g = el("div", "analytics-range"); g.setAttribute("role", "group"); g.setAttribute("aria-label", "Analytics range");
       for (const [days, label] of [[1, "24 h"], [7, "7 d"], [30, "30 d"]]) {
         const b = el("button", null, label); b.type = "button"; b.dataset.e = "analytics-range:" + days;
-        b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); refreshAnalytics(); }); g.append(b);
+        b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); refreshAnalytics(true); }); g.append(b);
       }
       return g;
     }).el;
@@ -1794,7 +1794,7 @@
   // while nothing changed), and every 10 s while the page shows, as time moves the range. Answers are kept per range and
   // filters, so switching back draws at once while the page asks again.
   const MIN = 60000, HOUR = 60 * MIN, AN_EVERY = 10000, AN_KEEP = 8;
-  const AN = { answers: new Map(), inflight: null, again: false, timer: null, error: null };
+  const AN = { answers: new Map(), inflight: null, again: false, timer: null, error: null, failedAt: 0 };
   function analyticsQuery() {
     const q = ["range=" + (analyticsRange === 1 ? "24h" : analyticsRange + "d")];
     // "No repo" is an empty repo; an unset filter isn't sent.
@@ -1819,7 +1819,7 @@
           const changed = AN.error != null || kept?.etag !== etag; AN.error = null; return changed;
         });
       })
-      .catch((e) => { const changed = AN.error !== e.message; AN.error = e.message; return changed; });
+      .catch((e) => { const changed = AN.error !== e.message; AN.error = e.message; AN.failedAt = Date.now(); return changed; });
     AN.inflight = asked.then((changed) => {
       AN.inflight = null;
       if (!AN.again) return changed;
@@ -1828,16 +1828,20 @@
     return AN.inflight;
   }
   // Asks again in 10 s, or in a little over a second when the answer came from an older model than the page has. While
-  // asking fails (a 409 or a 500), it waits the 10 s: the kept answer stays drawn, with the error above it.
+  // asking fails (a 409 or a 500), it asks 10 s after the last failure: the kept answer stays drawn, with the error above it.
+  const backingOff = () => AN.error != null && Date.now() - AN.failedAt < AN_EVERY;
   function scheduleAnalytics() {
     clearTimeout(AN.timer); AN.timer = null;
     if (route.v !== "analytics" || LIVE.ended || !visible()) return;
     const data = analyticsData(), behind = !AN.error && data && LIVE.version && data.version !== LIVE.version;
-    AN.timer = setTimeout(refreshAnalytics, behind ? 1200 : AN_EVERY);
+    AN.timer = setTimeout(() => { AN.timer = null; refreshAnalytics(); }, AN.error ? Math.max(0, AN.failedAt + AN_EVERY - Date.now()) : behind ? 1200 : AN_EVERY);
   }
-  function refreshAnalytics() {
-    clearTimeout(AN.timer); AN.timer = null;
+  // `asked`: the reader changed the range or a filter, which asks at once. Anything else (a model update, the tab showing
+  // again) waits out the backoff while asking fails, so failed asks keep 10 s apart however fast the model moves.
+  function refreshAnalytics(asked = false) {
     if (route.v !== "analytics") return Promise.resolve();
+    if (asked !== true && backingOff()) { if (!AN.timer) scheduleAnalytics(); return Promise.resolve(); }
+    clearTimeout(AN.timer); AN.timer = null;
     return fetchAnalytics().then((changed) => {
       if (changed && route.v === "analytics" && rendered === route) {
         if (viewerEl) LIVE.pending = true; // drawn when the sheet closes
@@ -1985,7 +1989,7 @@
   function renderAnalytics(page) {
     const A = analyticsData();
     const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days")));
-    const put = placer(page); put(head); observeTitle(h1); put(renderFacetFilters(page, () => { render(); refreshAnalytics(); }));
+    const put = placer(page); put(head); observeTitle(h1); put(renderFacetFilters(page, () => { render(); refreshAnalytics(true); }));
     // Until the range's answer is here (the first time a range or filter is asked for), the page says so.
     if (!A) { const wait = el("p", "empty", AN.error ? "Couldn't load Analytics: " + AN.error : "Loading…"); wait.setAttribute("role", "status"); put(wait); put.done(); return; }
     // An answer kept from before a request that failed is still drawn, under the error.

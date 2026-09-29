@@ -2,7 +2,8 @@
 // phone width and the served Codex allowance. This replaces the retired Timeline check. The figures come from the server
 // (/api/analytics), which reaches past the model's day: on the extras fixture, a session from five days ago (`archive`,
 // absent from /api/model) counts in 7 d and 30 d and not in 24 h. Every range is shot at 390 and 1280, light and dark, into
-// out/analytics/.
+// out/analytics/. A request that fails (500, 409) keeps the last answer drawn under a message, asks again only every 10 s
+// while it fails, and a 304 or 200 clears it.
 import fs from "node:fs";
 import path from "node:path";
 import { served, data, reporter, overflow, goto, settled, ENV } from "../lib.mjs";
@@ -105,6 +106,66 @@ export default async function analyticsCheck(browser) {
   r.expect(older.ranges["7d"]?.row === 1 && older.ranges["30d"]?.row === 1 && older.ranges["24h"]?.row === 0, "archive's repo row must show in 7 d and 30 d only: " + JSON.stringify(older.ranges));
   r.expect(older.errors.length === 0, "older session: page errors: " + older.errors.join(" | "));
 
+  // A request for the range that fails (a 500, then a 409) leaves the last answer drawn under "Couldn't update Analytics…",
+  // and while it fails the page asks again only every 10 s, however fast the model moves. An answer that works again (a
+  // 304, then a 200) clears the message.
+  const failing = { steps: {} };
+  const fp = await served(browser, { size: "desktop", path: "/analytics" });
+  await drawn(fp, "range=7d");
+  await fp.click('#topbar .analytics-range button:has-text("30 d")'); await drawn(fp, "range=30d");
+  let mode = "real", asks = 0, updates = 0, fakeVersion = 0;
+  fp.on("request", (q) => { if (new URL(q.url()).pathname === "/api/analytics") asks++; });
+  await fp.route((u) => u.pathname === "/api/analytics", async (route) => {
+    if (mode === "real") return route.continue(); // with the page's If-None-Match: the server's 304 for a kept answer
+    if (mode === "fresh") { // a 200 with a new tag, whatever the page holds
+      const headers = { ...route.request().headers() }; delete headers["if-none-match"];
+      const res = await route.fetch({ headers });
+      return route.fulfill({ status: 200, headers: { "content-type": "application/json", etag: '"fresh-' + Date.now() + '"' }, body: await res.text() });
+    }
+    return route.fulfill({ status: mode === "conflict" ? 409 : 500, contentType: "text/plain", body: "no" });
+  });
+  const shown = () => fp.evaluate(() => ({ query: document.querySelector(".analytics-metrics[data-analytics-ready]")?.dataset.query ?? null, figures: document.querySelectorAll(".analytics-metric").length, message: [...document.querySelectorAll("#page p.empty")].map((p) => p.textContent).find((t) => t.startsWith("Couldn't update Analytics")) ?? null }));
+  const settle = () => fp.waitForTimeout(400);
+  // 500: 7 d is kept, so it is drawn at once, and the failure puts the message over it.
+  mode = "error"; await fp.click('#topbar .analytics-range button:has-text("7 d")');
+  await fp.waitForFunction(() => [...document.querySelectorAll("#page p.empty")].some((p) => p.textContent.startsWith("Couldn't update Analytics: 500")), null, { timeout: 5000 }).catch(() => {});
+  failing.steps.error500 = await shown();
+  // Model updates every poll (each a new version) while it fails: no new ask for 7 s.
+  const modelUrl = (u) => u.pathname === "/api/model";
+  await fp.route(modelUrl, async (route) => {
+    const res = await route.fetch(); if (res.status() !== 200) return route.fulfill({ response: res });
+    const m = await res.json(); m.version = "fake-" + ++fakeVersion; updates++;
+    return route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(m) });
+  });
+  const asked0 = asks; await fp.waitForTimeout(6000);
+  failing.spacing = { asks: asks - asked0, modelUpdates: updates };
+  await fp.unroute(modelUrl);
+  failing.steps.during = await shown();
+  // 409, on 30 d (kept): the reader's click asks at once.
+  mode = "conflict"; await fp.click('#topbar .analytics-range button:has-text("30 d")');
+  await fp.waitForFunction(() => [...document.querySelectorAll("#page p.empty")].some((p) => p.textContent.startsWith("Couldn't update Analytics: 409")), null, { timeout: 5000 }).catch(() => {});
+  failing.steps.error409 = await shown();
+  // 304: back on 7 d, the server answers the kept tag, and the message goes.
+  mode = "real"; await fp.click('#topbar .analytics-range button:has-text("7 d")'); await settle();
+  await fp.waitForFunction(() => ![...document.querySelectorAll("#page p.empty")].some((p) => p.textContent.startsWith("Couldn't update Analytics")), null, { timeout: 5000 }).catch(() => {});
+  failing.steps.after304 = await shown();
+  // Fails again on 30 d, then a 200 on 7 d clears it.
+  mode = "error"; await fp.click('#topbar .analytics-range button:has-text("30 d")');
+  await fp.waitForFunction(() => [...document.querySelectorAll("#page p.empty")].some((p) => p.textContent.startsWith("Couldn't update Analytics: 500")), null, { timeout: 5000 }).catch(() => {});
+  failing.steps.error500again = await shown();
+  mode = "fresh"; await fp.click('#topbar .analytics-range button:has-text("7 d")'); await settle();
+  await fp.waitForFunction(() => ![...document.querySelectorAll("#page p.empty")].some((p) => p.textContent.startsWith("Couldn't update Analytics")), null, { timeout: 5000 }).catch(() => {});
+  failing.steps.after200 = await shown();
+  failing.errors = fp.errors;
+  await fp.context().close();
+  const kept = (step, query) => step?.query === query && step.figures === 8;
+  r.expect(kept(failing.steps.error500, "range=7d") && failing.steps.error500.message?.includes("500") && failing.steps.error500.message.includes("Showing the last answer"), "a 500 must leave the last 7 d answer drawn under the message: " + JSON.stringify(failing.steps.error500));
+  r.expect(failing.spacing.modelUpdates >= 2 && failing.spacing.asks === 0 && kept(failing.steps.during, "range=7d") && failing.steps.during.message, "while it fails, model updates must not ask again within 10 s: " + JSON.stringify({ spacing: failing.spacing, during: failing.steps.during }));
+  r.expect(kept(failing.steps.error409, "range=30d") && failing.steps.error409.message?.includes("409"), "a 409 must leave the last 30 d answer drawn under the message: " + JSON.stringify(failing.steps.error409));
+  r.expect(kept(failing.steps.after304, "range=7d") && failing.steps.after304.message === null, "a 304 must clear the message: " + JSON.stringify(failing.steps.after304));
+  r.expect(kept(failing.steps.error500again, "range=30d") && failing.steps.error500again.message && kept(failing.steps.after200, "range=7d") && failing.steps.after200.message === null, "a 200 must clear the message: " + JSON.stringify({ before: failing.steps.error500again, after: failing.steps.after200 }));
+  r.expect(failing.errors.length === 0, "failing answers: page errors: " + failing.errors.join(" | "));
+
   // Every range, at 390 and 1280, light and dark: out/analytics/<scheme>-<range>.png.
   const shots = path.join(ENV.out, "analytics"); fs.mkdirSync(shots, { recursive: true });
   const shotErrors = [];
@@ -127,7 +188,7 @@ export default async function analyticsCheck(browser) {
   const legacyErrors = legacy.errors;
   await legacy.context().close();
 
-  r.results = { modes, oldRoute, costTwoDays, older };
+  r.results = { modes, oldRoute, costTwoDays, older, failing };
   for (const m of modes) {
     r.expect(m.errors.length === 0, m.mode + ": page errors: " + m.errors.join(" | "));
     r.expect(m.range.labels.join(",") === "24 h,7 d,30 d" && m.range30.selected === "30 d" && m.range30.heading?.includes("Last 30 days"), m.mode + ": Analytics range control did not change the selected range: " + JSON.stringify({ before: m.range, after: m.range30 }));

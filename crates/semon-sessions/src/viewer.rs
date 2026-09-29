@@ -4557,6 +4557,18 @@ mod tests {
         );
         assert!(inside.count() >= 590, "{line}");
         assert!(bytes < 1024 * rows.len(), "{line}");
+        // Each row's vectors hold no spare capacity (`shrink_to_fit`), so
+        // what is measured is what they need.
+        for (id, row) in rows {
+            assert_eq!(row.busy.capacity(), row.busy.len(), "{id} busy");
+            assert_eq!(row.turns.capacity(), row.turns.len(), "{id} turns");
+            assert_eq!(
+                row.cost_by_day.capacity(),
+                row.cost_by_day.len(),
+                "{id} cost days"
+            );
+            assert_eq!(row.waits.capacity(), row.waits.len(), "{id} waits");
+        }
     }
 
     /// Across machines: every machine's sessions, each under its machine's
