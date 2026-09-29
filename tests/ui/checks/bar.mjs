@@ -466,7 +466,7 @@ export default async function barCheck(browser) {
         call({ turn: "bt-in-run" }), masked(), call(), call());
       await route.fulfill({ response, json: body });
     });
-    await page.reload({ waitUntil: "load" }); // served() loaded the model before these routes existed
+    await page.reload({ waitUntil: "load" }); await settled(page); // served() loaded the model before these routes existed; the app is ready when its bar is drawn
     await goto(page, { v: "session", id: "principal" }, D);
     await page.waitForSelector('section.turn[data-turn="bt-masked-then-reply"]', { timeout: 8000 }).catch(() => {});
     bareTurns = await page.evaluate(() => {

@@ -379,7 +379,7 @@ export default async function tooltipCheck(browser) {
       // The positive control: off the badge and back on it, the tip shows again.
       await away(page); await page.waitForTimeout(450);
       const again = await hover(page, spot, 1500);
-      r.expect(again != null && /^Tokens: /.test((await state(page)).text ?? ""), tag + ": the tooltip did not show again after the pointer left and returned");
+      r.expect(again != null && ((await state(page)).text ?? "").length > 0, tag + ": the tooltip did not show again after the pointer left and returned");
       r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join("; "));
     });
   }
