@@ -6087,6 +6087,10 @@ mod tests {
                 view
             })
             .collect();
+        // A build counts when it starts: the model it shows is what ends it.
+        let shown =
+            |view: &Arc<MachineView>| view.shown_model().map(|model| model.built.version.clone());
+        let before: Vec<_> = views.iter().map(shown).collect();
         let builds: Vec<_> = views.iter().map(|view| view.hooks.builds()).collect();
         say(&fixture, "lane", 1, "seen by fifty views");
         eventually("a rebuild of every view, with no read", || {
@@ -6097,8 +6101,10 @@ mod tests {
             }
             views
                 .iter()
-                .zip(&builds)
-                .all(|(view, builds)| view.hooks.builds() > *builds)
+                .zip(builds.iter().zip(&before))
+                .all(|(view, (builds, before))| {
+                    view.hooks.builds() > *builds && shown(view) != *before
+                })
                 .then_some(())
         });
         for view in &views {
