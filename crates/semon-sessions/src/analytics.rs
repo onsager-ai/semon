@@ -559,7 +559,7 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
     };
     let mut repos: BTreeSet<Option<&str>> = BTreeSet::new();
     let mut facets: [BTreeSet<&str>; 3] = Default::default();
-    for row in all.iter().filter(|row| active(*row)) {
+    for row in all.iter().filter(|row| active(row)) {
         let activity = row.row.activity;
         repos.insert(activity.repo.as_deref());
         facets[0].insert(row.row.machine);
