@@ -58,7 +58,7 @@ JSON output has `schema_version: 1` and a `roots` array of nested nodes. Every n
 
 `semon receive` is a receiver for `semon push`, for one person with several machines, and the [mirror protocol](docs/mirror-protocol.md)'s reference implementation (`semon_push::mirror::Receiver`). Each machine pushes with its own token, and its copy lands in `DIR/machines/NAME/`: `claude/` and `codex/` hold the input files at their paths under each home, and `facts.json` holds the machine's facts. A token decides the machine, so one machine's token can't write another's files.
 
-On the machine that receives, make a token per machine. It is printed once, and `DIR/tokens` (0600, in a 0700 directory) keeps only its SHA-256 and the name. A name is 1 to 63 of `a-z`, `0-9` and `-`.
+On the machine that receives, make a token per machine. It is printed once, and `DIR/tokens` (0600, in a 0700 directory) keeps only its SHA-256 and the name. A name is 1 to 63 of `a-z`, `0-9` and `-`. A missing `DIR` is created 0700; an existing `DIR`, or `DIR/tokens`, that its group or others can use is refused with the `chmod` that fixes it, and never changed.
 
 ```sh
 (umask 077; semon receive token add laptop --dir ~/semon-mirror > laptop.token)
@@ -73,17 +73,19 @@ ssh -N -L 8735:127.0.0.1:8735 receiving-host &
 semon push --to http://127.0.0.1:8735 --token-file ~/.config/semon/laptop.token --watch
 ```
 
-`semon receive token revoke laptop --dir ~/semon-mirror` removes a token. A running receiver re-reads `DIR/tokens` when the file changes, so the next request with that token gets 401 without a restart.
+`semon receive token revoke laptop --dir ~/semon-mirror` removes a token. A running receiver re-reads `DIR/tokens` when the file changes, so the next request with that token gets 401 without a restart. If the file stops parsing, or its mode is loosened, no token is accepted until it is fixed.
 
 The receiver listens on `127.0.0.1:8735` unless `--listen ADDR` says otherwise. A non-loopback address is refused unless `--tls-cert PEM --tls-key PEM` are given and `DIR/tokens` holds at least one token; plain HTTP off loopback is always refused. These are `semon-relay receive`'s rules. Semon never opens a port or obtains a certificate: the address, the firewall, DNS and the certificate stay your choices. `semon push` checks a certificate against the standard web roots only, so a TLS receiver needs a certificate that chains to them; otherwise use the SSH route above.
 
 Its limits:
 
-- A request body is at most 6 MiB (one append's 4 MiB of file bytes, as base64, plus the JSON around it). A larger declared body gets 413 before any of it is read, and a chunked body gets 411.
+- A request body is at most 6 MiB (one append's 4 MiB of file bytes, as base64, plus the JSON around it). A larger declared body gets 413 before any of it is read. A body needs a `Content-Length`: without one, or chunked, it gets 411.
 - The token is checked (401) before the body is read.
-- At most 32 connections at once. A request head must arrive within 10 s, a body within 120 s with no gap over 30 s, and a kept-alive connection closes after 30 s idle.
+- At most 32 connections at once, and 4 from one IP address; one more is closed as soon as it is accepted.
+- Every read and write, the TLS handshake's included, runs against a deadline, so trickling bytes doesn't stretch it. The first request's head must be in within 10 s of the connection being accepted, a later one's within 10 s of its first byte, and a body within 120 s. A kept-alive connection closes after 30 s idle, and no single read or write waits more than 30 s.
+- Each machine's copy holds at most 20 GiB (`--max-bytes SIZE`, as in `500G`), counted by a walk of `DIR/machines/` at start and then by each write; a push that would pass it gets 507.
 - Paths are checked with `semon_sessions::is_input_path`. The receiver creates its directories itself and refuses a request whose path meets a symbolic link.
-- Each file has one writer at a time, and a 200 is answered only once the bytes are synced to disk.
+- Each file has one writer at a time. A 200 is answered only once the bytes are synced to disk, and an append that fails partway is cut back off before the 500, so the copy is as it was.
 
 To see the received machines, serve `DIR` with `semon sessions --serve --machines DIR` ([See all your machines](#see-all-your-machines)).
 

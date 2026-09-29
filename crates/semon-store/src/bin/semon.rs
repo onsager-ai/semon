@@ -413,6 +413,7 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
     let mut listen = semon_push::serve::DEFAULT_LISTEN.to_owned();
     let mut certificate = None;
     let mut private_key = None;
+    let mut max_bytes = semon_push::mirror::DEFAULT_MAX_BYTES;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -424,6 +425,7 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
             "--listen" => listen = value()?,
             "--tls-cert" => certificate = Some(PathBuf::from(value()?)),
             "--tls-key" => private_key = Some(PathBuf::from(value()?)),
+            "--max-bytes" => max_bytes = parse_size(&value()?)?,
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown receive argument: {argument}")),
         }
@@ -444,7 +446,34 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
         dir,
         listen,
         tls,
+        max_bytes,
     }))
+}
+
+/// A byte count: digits, optionally followed by K, M, G or T (powers of
+/// 1024), as in `20G`.
+fn parse_size(raw: &str) -> Result<u64, String> {
+    let invalid = || format!("invalid size {raw}: use bytes, or a number with K, M, G or T");
+    let (digits, shift) = match raw.char_indices().last() {
+        Some((at, unit @ ('K' | 'M' | 'G' | 'T' | 'k' | 'm' | 'g' | 't'))) => {
+            let shift = match unit.to_ascii_uppercase() {
+                'K' => 10,
+                'M' => 20,
+                'G' => 30,
+                _ => 40,
+            };
+            (&raw[..at], shift)
+        }
+        _ => (raw, 0),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|number| number.checked_mul(1u64 << shift))
+        .ok_or_else(invalid)
 }
 
 fn parse_receive_token_args(
@@ -1220,11 +1249,12 @@ fn usage() -> String {
          (docs/mirror-protocol.md), appending as they grow. The token file must be mode 0600. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s.\n\
          \n\
-         Usage: semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM]\n\
+         Usage: semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--max-bytes SIZE]\n\
          Usage: semon receive token (add NAME | revoke NAME | list) --dir DIR\n\
          A mirror-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
          DIR/machines/NAME/. It listens on 127.0.0.1:8735 by default; another address needs TLS (an operator-supplied\n\
          certificate and key) and at least one token. A token, printed once by token add, decides its machine.\n\
+         --max-bytes caps each machine's copy (20G by default); a push past it gets 507.\n\
          \n\
          Usage: semon ship [--store PATH] [--endpoint URL]\n\
          Endpoint defaults to ${REPLICATION_ENDPOINT_ENV}; when unset, ship succeeds without reading the store.\n\
@@ -2036,5 +2066,16 @@ mod tests {
         assert_eq!(store.log(&LogFilter::default()).unwrap().len(), 2);
 
         let _ = std::fs::remove_file(&store_path);
+    }
+
+    #[test]
+    fn receive_sizes_parse_with_binary_units() {
+        assert_eq!(parse_size("1024").unwrap(), 1024);
+        assert_eq!(parse_size("20G").unwrap(), 20u64 << 30);
+        assert_eq!(parse_size("5m").unwrap(), 5u64 << 20);
+        assert_eq!(parse_size("1T").unwrap(), 1u64 << 40);
+        for bad in ["", "G", "-1", "1.5G", "10GB", "99999999999T"] {
+            assert!(parse_size(bad).is_err(), "{bad}");
+        }
     }
 }
