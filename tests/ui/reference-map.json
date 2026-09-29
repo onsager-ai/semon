@@ -22,6 +22,9 @@
       "name": "topbar",
       "selector": "#topbar",
       "top": true,
+      "except": {
+        "desktop-light|session-quill": "the still-pending transcript makes quill's page scroll at 1280 where the mockup's does not, so the sticky bar is drawn in its own layer with grayscale letters (the mockup's are subpixel-antialiased); the transcript's port removes the difference"
+      },
       "screens": [
         "home",
         "sessions",

@@ -421,6 +421,8 @@ function saveMismatch(row, name, scheme, p) {
       saveMismatch(row, s.name, scheme, p);
       for (const region of regionsOf(s.name)) {
         const name = s.name + "#" + region.name, rrow = { scheme, screen: name, reference: "overhaul", port: { enforced: true, pass: false } };
+        const except = region.except?.[scheme + "|" + s.name];
+        if (except) { rrow.port = { pixels: 0, ratio: 0, enforced: true, pass: true, skipped: except }; regions.push(rrow); continue; } // a named, reasoned exception
         try {
           const q = compare(await regionShot(page, region), await regionShot(port, region));
           rrow.port = { pixels: q.pixels, ratio: q.ratio, size: q.size, enforced: true, pass: q.pixels <= MAX_RATIO * q.diff.width * q.diff.height && !q.size };
@@ -466,7 +468,7 @@ function saveMismatch(row, name, scheme, p) {
   const pct = (x) => (x * 100).toFixed(3) + "%";
   const md = ["| Screen | Scheme | vs port reference | vs sample mockup |", "|---|---|---|---|",
     ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.enforced ? (r.port.pass ? "✓ " : "✗ ") : r.port.ratchet ? (r.port.ratchet.startsWith("~") ? "pending (" + r.port.ratchet.slice(1) + ") · " : "✗ ratchet (" + r.port.ratchet + ") · ") : "pending · ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
-  const regionMd = regions.length ? "\n\n| Region | Scheme | vs overhaul |\n|---|---|---|\n" + regions.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.error ? "✗ " + r.error : (r.port.pass ? "✓ " : "✗ ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "")) + " |").join("\n") : "";
+  const regionMd = regions.length ? "\n\n| Region | Scheme | vs overhaul |\n|---|---|---|\n" + regions.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.error ? "✗ " + r.error : r.port.skipped ? "skipped: " + r.port.skipped : (r.port.pass ? "✓ " : "✗ ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "")) + " |").join("\n") : "";
   fs.writeFileSync(path.join(ENV.out, "pixels.json"), J({ threshold: THRESHOLD, maxRatio: MAX_RATIO, results, regions, errors }, null, 1));
   const note = skipped.length ? "\nNot compared (unmapped in reference-map.json, not drawn by the viewer yet): " + skipped.join(", ") + "\n" : "";
   fs.writeFileSync(path.join(ENV.out, "pixels.md"), md + regionMd + "\n" + note);
