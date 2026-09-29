@@ -286,9 +286,13 @@ async function runScreen(browser, screen, server, fixture) {
     coldOpen: { samplesMs: [], medianMs: null },
     openAtEnd: null,
     pinYields: [],
+    // A switch to a session not opened before (its transcript is not in memory): the time until the top bar shows the new session
+    // (feedback) and until its last message has painted. `cached` is a switch back to a session just left, with no model update
+    // in between, so its transcript is still loaded (the common case; the transcript cache proper is exercised by checks/switch.mjs).
     switch: {
-      marathonToRelay: { samplesMs: [], medianMs: null },
-      relayToMarathon: { samplesMs: [], medianMs: null },
+      marathonToRelay: { samplesMs: [], medianMs: null, feedbackSamplesMs: [], medianFeedbackMs: null, clickTaskSamplesMs: [], medianClickTaskMs: null },
+      relayToMarathon: { samplesMs: [], medianMs: null, feedbackSamplesMs: [], medianFeedbackMs: null, clickTaskSamplesMs: [], medianClickTaskMs: null },
+      cached: { samplesMs: [], medianMs: null, feedbackSamplesMs: [], medianFeedbackMs: null, clickTaskSamplesMs: [], medianClickTaskMs: null },
     },
     switchWhileWriting: {
       marathonToRelay: { samplesMs: [], medianMs: null },
@@ -387,12 +391,13 @@ async function runScreen(browser, screen, server, fixture) {
       try { await managed.cdp.detach(); } catch {}
       try { await managed.page.close(); } catch {}
     };
-    const openMarathon = async (managed) => {
+    const openSession = async (page, id) => {
       const started = Date.now();
-      await managed.page.goto(sessionUrl(server.base, server.token, "marathon"), { waitUntil: "load" });
-      await waitPaint(managed.page, PAINT_MARKERS.marathon);
+      await page.goto(sessionUrl(server.base, server.token, id), { waitUntil: "load" });
+      await waitPaint(page, PAINT_MARKERS[id]);
       return Date.now() - started;
     };
+    const openMarathon = (managed) => openSession(managed.page, "marathon");
     const prepareSidebarRow = async (page, id) => {
       await page.waitForSelector(`.srow[data-id="${id}"]`, { state: "attached", timeout: 60_000 });
       const mobile = await page.evaluate(() => matchMedia("(max-width: 760px)").matches);
@@ -404,14 +409,42 @@ async function runScreen(browser, screen, server, fixture) {
         return !!row && row.getBoundingClientRect().width > 0 && row.getBoundingClientRect().height > 0;
       }, `.srow[data-id="${id}"]`, { timeout: 60_000 });
     };
+    // Click a session in the sidebar; `feedbackMs` is when the top bar names it, `paintMs` when its last message has painted.
     const clickAndPaint = async (page, id, marker = PAINT_MARKERS[id]) => {
       await prepareSidebarRow(page, id);
-      await page.evaluate(() => { window.__perfPaintWait = null; });
-      const started = await page.evaluate(() => performance.now());
-      await page.locator(`.srow[data-id="${id}"]`).click();
-      await waitPaint(page, marker);
-      return await page.evaluate((start) => performance.now() - start, started);
+      const name = (await page.locator(`.srow[data-id="${id}"] .nm`).textContent()).trim();
+      // The click is made in the page and everything is timed there, so none of this harness's own round trips (or the polling
+      // of a wait started from here) is counted. `clickMs` is the click's own task. Feedback is the second animation frame after
+      // the top bar names the session (the browser has drawn it by then). Paint is the second frame after the transcript's last
+      // message is in the page, as `waitPaint` reads it.
+      return page.evaluate(([id, expected, marker]) => new Promise((resolve, reject) => {
+        const row = [...document.querySelectorAll(".srow[data-id]")].find((x) => x.dataset.id === id), t0 = performance.now();
+        row.click();
+        const clickMs = performance.now() - t0;
+        let feedbackMs = null, titled = false, node = null;
+        const tick = () => {
+          const now = performance.now();
+          if (now - t0 > 60_000) return reject(new Error("the switch to " + id + " did not paint"));
+          if (!titled && document.querySelector("#topbar .t")?.textContent.trim() === expected) {
+            titled = true;
+            requestAnimationFrame(() => requestAnimationFrame(() => { feedbackMs = performance.now() - t0; }));
+          }
+          const messages = document.querySelectorAll('#page section[aria-label="Transcript"] .msg.assistant'), last = messages[messages.length - 1];
+          if (!node && last && last.textContent.includes(marker)) {
+            node = last;
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              if (node.isConnected && node.textContent.includes(marker) && feedbackMs != null) resolve({ clickMs, feedbackMs, paintMs: performance.now() - t0 });
+              else if (node.isConnected && node.textContent.includes(marker)) { feedbackMs = performance.now() - t0; resolve({ clickMs, feedbackMs, paintMs: feedbackMs }); }
+              else { node = null; requestAnimationFrame(tick); }
+            }));
+            return;
+          }
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }), [id, name, marker]);
     };
+    const record = (entry, sample) => { entry.samplesMs.push(sample.paintMs); entry.feedbackSamplesMs.push(sample.feedbackMs); entry.clickTaskSamplesMs.push(sample.clickMs); };
 
     for (const how of ["wheel", "press", "after"]) {
       const managed = await makePage();
@@ -435,9 +468,14 @@ async function runScreen(browser, screen, server, fixture) {
       else await finishPage(managed);
     }
 
+    // Each cold sample starts from a fresh page, so no transcript is cached: marathon then relay, back to marathon (cached), and
+    // relay then marathon. The page ends on marathon, where the live samples below need it.
     for (let i = 0; i < 3; i++) {
-      metrics.switch.marathonToRelay.samplesMs.push(await clickAndPaint(switchPage.page, "relay"));
-      metrics.switch.relayToMarathon.samplesMs.push(await clickAndPaint(switchPage.page, "marathon"));
+      await openSession(switchPage.page, "marathon");
+      record(metrics.switch.marathonToRelay, await clickAndPaint(switchPage.page, "relay"));
+      record(metrics.switch.cached, await clickAndPaint(switchPage.page, "marathon"));
+      await openSession(switchPage.page, "relay");
+      record(metrics.switch.relayToMarathon, await clickAndPaint(switchPage.page, "marathon"));
     }
 
     for (let i = 1; i <= 3; i++) {
@@ -515,8 +553,8 @@ async function runScreen(browser, screen, server, fixture) {
     try {
       await switchPage.page.waitForTimeout(1500);
       for (let i = 0; i < 3; i++) {
-        metrics.switchWhileWriting.marathonToRelay.samplesMs.push(await clickAndPaint(switchPage.page, "relay"));
-        metrics.switchWhileWriting.relayToMarathon.samplesMs.push(await clickAndPaint(switchPage.page, "marathon", "PERF_LIVE_3_LAST"));
+        metrics.switchWhileWriting.marathonToRelay.samplesMs.push((await clickAndPaint(switchPage.page, "relay")).paintMs);
+        metrics.switchWhileWriting.relayToMarathon.samplesMs.push((await clickAndPaint(switchPage.page, "marathon", "PERF_LIVE_3_LAST")).paintMs);
       }
     } finally {
       clearInterval(writer);
@@ -535,8 +573,11 @@ async function runScreen(browser, screen, server, fixture) {
 
   metrics.coldOpen.medianMs = round(median(metrics.coldOpen.samplesMs));
   metrics.domSize.medianElements = median(metrics.domSize.samples);
-  metrics.switch.marathonToRelay.medianMs = round(median(metrics.switch.marathonToRelay.samplesMs));
-  metrics.switch.relayToMarathon.medianMs = round(median(metrics.switch.relayToMarathon.samplesMs));
+  for (const entry of Object.values(metrics.switch)) {
+    entry.medianMs = round(median(entry.samplesMs));
+    entry.medianFeedbackMs = round(median(entry.feedbackSamplesMs));
+    entry.medianClickTaskMs = round(median(entry.clickTaskSamplesMs));
+  }
   metrics.switchWhileWriting.marathonToRelay.medianMs = round(median(metrics.switchWhileWriting.marathonToRelay.samplesMs));
   metrics.switchWhileWriting.relayToMarathon.medianMs = round(median(metrics.switchWhileWriting.relayToMarathon.samplesMs));
   metrics.liveUpdate.medianPaintMs = round(median(metrics.liveUpdate.samples.map((sample) => sample.paintMs)));
@@ -560,14 +601,14 @@ function markdownTable(screens) {
   const number = (value) => value == null ? "—" : String(round(value));
   const request = (entry) => `${entry.count} / ${entry.encodedBytes} B / ${number(entry.ttfbMs.median)} / ${number(entry.ttfbMs.max)} ms`;
   const rows = [
-    "| Screen | Cold open ms | Switch marathon→relay ms | Switch relay→marathon ms | Switching while writing: →relay / →marathon ms | Live paint ms | Live task ms | Scroll frames >20 ms | Longest frame ms | DOM elements | `/api/model`: req / bytes / TTFB median / max | `/api/tx`: req / bytes / TTFB median / max | Other: req / bytes / TTFB median / max |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    "| Screen | Cold open ms | Switch marathon→relay ms | Switch relay→marathon ms | Feedback marathon→relay ms | Feedback relay→marathon ms | Cached switch ms | Click task marathon→relay ms | Switching while writing: →relay / →marathon ms | Live paint ms | Live task ms | Scroll frames >20 ms | Longest frame ms | DOM elements | `/api/model`: req / bytes / TTFB median / max | `/api/tx`: req / bytes / TTFB median / max | Other: req / bytes / TTFB median / max |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
   ];
   for (const name of ["phone", "desktop"]) {
     const screen = screens[name];
     const m = screen?.metrics;
     const r = screen?.requests ?? Object.fromEntries(BUCKETS.map((key) => [key, { count: 0, encodedBytes: 0, ttfbMs: { median: null, max: null } }]));
-    rows.push(`| ${name} | ${number(m?.coldOpen.medianMs)} | ${number(m?.switch.marathonToRelay.medianMs)} | ${number(m?.switch.relayToMarathon.medianMs)} | ${number(m?.switchWhileWriting.marathonToRelay.medianMs)} / ${number(m?.switchWhileWriting.relayToMarathon.medianMs)} | ${number(m?.liveUpdate.medianPaintMs)} | ${number(m?.liveUpdate.medianLongestTaskMs)} | ${number(m?.scroll.medianFramesOver20Ms)} | ${number(m?.scroll.medianLongestFrameMs)} | ${number(m?.domSize.medianElements)} | ${request(r["/api/model"])} | ${request(r["/api/tx"])} | ${request(r.other)} |`);
+    rows.push(`| ${name} | ${number(m?.coldOpen.medianMs)} | ${number(m?.switch.marathonToRelay.medianMs)} | ${number(m?.switch.relayToMarathon.medianMs)} | ${number(m?.switch.marathonToRelay.medianFeedbackMs)} | ${number(m?.switch.relayToMarathon.medianFeedbackMs)} | ${number(m?.switch.cached.medianMs)} | ${number(m?.switch.marathonToRelay.medianClickTaskMs)} | ${number(m?.switchWhileWriting.marathonToRelay.medianMs)} / ${number(m?.switchWhileWriting.relayToMarathon.medianMs)} | ${number(m?.liveUpdate.medianPaintMs)} | ${number(m?.liveUpdate.medianLongestTaskMs)} | ${number(m?.scroll.medianFramesOver20Ms)} | ${number(m?.scroll.medianLongestFrameMs)} | ${number(m?.domSize.medianElements)} | ${request(r["/api/model"])} | ${request(r["/api/tx"])} | ${request(r.other)} |`);
   }
   return rows.join("\n");
 }

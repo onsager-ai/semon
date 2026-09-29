@@ -65,7 +65,8 @@ export async function settled(page) {
 export async function goto(page, route, D) {
   await page.evaluate((r) => { history.pushState(r, ""); dispatchEvent(new PopStateEvent("popstate", { state: r })); }, route);
   const title = titleOf(route, D);
-  if (title) await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, title);
+  // A session's title is in the bar as soon as it is opened; its page is ready once it is no longer aria-busy.
+  if (title) await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t && !document.querySelector("#page").hasAttribute("aria-busy"), title);
   if (route.v === "session") await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']"));
   // Analytics draws whole at once: its counts are in the model.
   if (route.v === "analytics") await page.waitForFunction(() => document.querySelector(".analytics-metrics"));

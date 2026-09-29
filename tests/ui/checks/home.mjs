@@ -22,7 +22,8 @@
 import path from "node:path";
 import { ENV, served, data, reporter, overflow, settled } from "../lib.mjs";
 
-const afterTitle = (page, text) => page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, text);
+// The title is in the bar as soon as a session is clicked; the page is ready once it is no longer aria-busy.
+const afterTitle = (page, text) => page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t && !document.querySelector("#page").hasAttribute("aria-busy"), text);
 
 export default async function homeCheck(browser) {
   const D = await data();
