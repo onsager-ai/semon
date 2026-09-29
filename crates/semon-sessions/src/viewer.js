@@ -861,7 +861,7 @@
     const main = el("span", "srow-main"), ag = el("span", "ag", ago(s.last)), nm = el("span", "nm", s.name); nm.dataset.tip = s.name; nm.dataset.tipClipped = ""; main.append(dot(s.state), nm, ag);
     if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work"); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
     if (kids.length && !rail && allKids.length) { const summary = el("span", "tree-summary", String(allKids.length)); summary.dataset.tip = parts.join(" · "); summary.classList.toggle("wait", allKids.some((x) => x.state === "wait")); ag.before(summary); }
-    const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").dataset.tip = "Machine: " + hostOf(s); meta.querySelector(".repo-short").dataset.tip = "Repo: " + (s.repo ?? "none") + " · " + (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s);
+    const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").dataset.tip = "Machine: " + hostOf(s); meta.querySelector(".repo-short").dataset.tip = spaced("Repo: " + (s.repo ?? "none") + " · " + (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s));
     row.append(main, meta); row.addEventListener("click", () => goSession(s.id)); line.append(row); if (lineToggle) line.append(lineToggle); item.append(line);
     item.addEventListener("keydown", (e) => {
       if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { if (e.target !== item && e.target !== row && e.target !== lineToggle) return; const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); item.querySelector(":scope > .tree-row .tree-toggle")?.click(); } }
@@ -1168,7 +1168,7 @@
   const sessionLine = (s) => (l2) => {
     const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
     const turnsText = nT + (nT === 1 ? " turn" : " turns");
-    const st = el("span", "meta-item meta-state"); st.dataset.tip = "Status: " + STATE[s.state] + " · " + turnsText; st.append(dot(s.state, false), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", turnsText));
+    const st = el("span", "meta-item meta-state"); st.dataset.tip = spaced("Status: " + STATE[s.state] + " · " + turnsText); st.append(dot(s.state, false), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", turnsText));
     if (errors) {
       const sep = el("span", "state-sep errs-sep", "·"), j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); j.prepend(mark);
       const stepTip = j.textContent + ": step through the failed steps"; j.type = "button"; j.dataset.tip = stepTip; j.setAttribute("aria-label", stepTip);

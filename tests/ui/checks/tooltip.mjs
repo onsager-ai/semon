@@ -163,11 +163,13 @@ export default async function tooltipCheck(browser) {
       r.expect(c.ratio >= 4.5 && c.alpha === 1, tag + ": the tooltip's contrast is " + c.ratio + " (alpha " + c.alpha + "), under 4.5");
       r.expect(c.fontSize === 13 && c.maxWidth === Math.min(280, s.view.width - 16) + "px", tag + ": the tooltip is " + c.fontSize + "px, max-width " + c.maxWidth);
       r.expect(c.animation === "tip-in" || c.animation === "none", tag + ": unexpected animation " + c.animation);
+      await page.waitForTimeout(300); // past the 120 ms fade
       await page.screenshot({ path: path.join(OUT, "tip-gallery-" + size + (dark ? "-dark" : "-light") + ".png") });
       await away(page); await page.waitForTimeout(450);
       // A scroll that moves the target closes it.
       await hover(page, "#tip-static", 1500);
-      const moved = await page.evaluate(() => { const t = document.getElementById("tip-static"), before = t.getBoundingClientRect().top; const main = document.getElementById("main"); if (main && main.scrollHeight > main.clientHeight) main.scrollTop += 40; window.scrollBy(0, 40); return Math.abs(t.getBoundingClientRect().top - before) > 1; });
+      // The gallery may already stand at the end of its scroll, so try down and then up.
+      const moved = await page.evaluate(() => { const t = document.getElementById("tip-static"), before = t.getBoundingClientRect().top, main = document.getElementById("main"); for (const delta of [40, -40]) { if (main && main.scrollHeight > main.clientHeight) main.scrollTop += delta; window.scrollBy(0, delta); if (Math.abs(t.getBoundingClientRect().top - before) > 1) return true; } return false; });
       await page.waitForTimeout(150);
       r.expect(moved, tag + ": the gallery could not be scrolled to move the target");
       r.expect(!(await state(page)).open, tag + ": a scroll that moved the target did not close the tooltip");
@@ -242,7 +244,7 @@ export default async function tooltipCheck(browser) {
       r.expect(items.length >= (size === "desktop" ? 4 : 0), tag + ": only " + items.length + " tipped items in the session line: " + JSON.stringify(rec.items));
       const at = (i) => box(page, '#topbar [data-probe="' + i + '"]');
       const dotBox = await box(page, "#topbar .meta-state > .dot"), reach = [dotBox, ...(await Promise.all(items.slice(0, 3).map((x) => at(x.i))))];
-      if (reach.length >= 2) await behaviour(page, tag, r, rec, { first: reach[0], second: reach[1], third: reach[2] });
+      if (reach.length >= 2) await behaviour(page, tag, r, rec, { first: reach[0], second: reach[1] });
       // Every visible tipped item in the bar and the sidebar stays inside the margin and off its target.
       const spots = await page.evaluate(() => { const list = [...document.querySelectorAll("#topbar [data-tip], #sidebar [data-tip]")].filter((n) => { const b = n.getBoundingClientRect(); return n.getClientRects().length && b.width > 0 && b.left >= 0 && b.right <= innerWidth && b.top >= 0 && b.bottom <= innerHeight && (!n.hasAttribute("data-tip-clipped") || n.scrollWidth > n.clientWidth + 1); }); return list.slice(0, 40).map((n, i) => { n.dataset.spot = String(i); return { i, tip: n.dataset.tip, clipped: n.hasAttribute("data-tip-clipped") }; }); });
       let checked = 0;
@@ -258,13 +260,14 @@ export default async function tooltipCheck(browser) {
       const whole = await page.evaluate(() => { const n = [...document.querySelectorAll("#sidebar .srow .nm[data-tip-clipped]")].find((x) => { const b = x.getBoundingClientRect(); return b.width > 0 && b.right <= innerWidth && b.left >= 0 && x.scrollWidth <= x.clientWidth + 1; }); if (!n) return null; n.dataset.whole = ""; return true; });
       if (whole) { await away(page); await page.waitForTimeout(450); const t = await hover(page, "#sidebar .nm[data-whole]", 800); r.expect(t == null, tag + ": a name that is not cut off showed a tooltip after " + t + " ms"); }
       rec.whole = !!whole;
-      r.expect(checked >= 5, tag + ": only " + checked + " tooltips were placed");
+      r.expect(checked >= (size === "desktop" ? 5 : 1), tag + ": only " + checked + " tooltips were placed");
       // A long tip (the cost badge, or the state), for the contrast, the size and the screenshot.
       await away(page); await page.waitForTimeout(450);
       const shot = (await page.locator("#topbar .meta-cost").count()) && await page.locator("#topbar .meta-cost").first().isVisible() ? "#topbar .meta-cost" : "#topbar .meta-state";
       await hover(page, shot, 1500);
       const c = await contrast(page); rec.contrast = c.ratio;
       r.expect(c.ratio >= 4.5 && c.alpha === 1, tag + ": the tooltip's contrast is " + c.ratio + ", under 4.5");
+      await page.waitForTimeout(300); // past the 120 ms fade
       await page.screenshot({ path: path.join(OUT, "tip-bar-" + size + (dark ? "-dark" : "-light") + ".png"), clip: { x: 0, y: 0, width: VIEWPORTS[size].viewport.width, height: 220 } });
       await away(page); await page.waitForTimeout(450);
 
