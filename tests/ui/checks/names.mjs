@@ -21,7 +21,7 @@ const measure = (page, root) => page.evaluate((rootSelector) => {
   return [...document.querySelectorAll(rootSelector + " .hname")].filter((n) => n.getClientRects().length).map((n) => {
     const cs = getComputedStyle(n), box = n.getBoundingClientRect(), lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.2;
     const fg = rgba(cs.color), bg = backdrop(n.parentElement);
-    return { text: n.textContent, harness: [...n.classList].find((c) => c.startsWith("h-")), graphics: n.querySelectorAll("svg,img").length + n.children.length, tag: n.tagName, lines: Math.round(box.height / lh), fontSize: parseFloat(cs.fontSize), weight: cs.fontWeight, ratio: Math.round(ratio(fg, over(fg.slice(0, 3).concat(1), bg)) * 100) / 100, fromHidden: n.getAttribute("aria-hidden") === "true" };
+    return { text: n.textContent, harness: [...n.classList].find((c) => c.startsWith("h-")), graphics: n.querySelectorAll("svg,img").length + n.children.length, tag: n.tagName, lines: Math.round(box.height / lh), fontSize: parseFloat(cs.fontSize), weight: cs.fontWeight, ratio: Math.round(ratio(fg, bg) * 100) / 100, fromHidden: n.getAttribute("aria-hidden") === "true" };
   });
 }, root);
 
