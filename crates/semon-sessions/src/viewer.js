@@ -988,6 +988,27 @@
     return path.reverse();
   }
   // The label and buttons in place, so focus stays where it is.
+  // ---- Errors mode: "N errors" steps through the session's failed steps ---------------------------------------------------------
+  // The bar reads "Error k of N" with previous and next, and a close button (Escape). /api/tx?errors=1 says where every failed
+  // step is (its slot), so a step on a page not loaded yet is reachable: a page next to the loaded range is added to it, one
+  // further away replaces it with the page around the step. Each step is scrolled to the middle and marked, never opened;
+  // its tool group opens so it shows. Closing puts back the pages, what was open and the scroll position from before. The
+  // mode is its own controller, apart from find, so the two can become one mode later.
+  const ERR = { on: false, sid: null, slots: [], listed: false, count: 0, version: null, k: -1, slot: null, saved: null, range: null, tools: true, chain: Promise.resolve(), gen: 0 };
+  const ERR_NEAR = 400, ERR_AROUND = 40; // slots: a page (at most 200 entries) or two away is added; 40 entries of context above
+  const errLive = el("div", "sr-only"); errLive.setAttribute("role", "status"); errLive.setAttribute("aria-live", "polite"); document.body.append(errLive);
+  const errText = () => ERR.k < 0 ? (ERR.count ? "Finding errors…" : "No errors") : "Error " + (ERR.k + 1) + " of " + ERR.count;
+  const errOn = (sid) => ERR.on && ERR.sid === sid;
+  function errorsBar(bar) {
+    const close = el("button", "ibtn"); close.type = "button"; close.id = "err-close"; close.setAttribute("aria-label", "Close errors"); close.append(icon(I.x)); close.addEventListener("click", () => closeErrors());
+    const pill = el("div", "find errnav"), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); pill.append(mark, el("span", "errnav-count", errText()));
+    const prev = el("button", "ibtn errnav-btn"); prev.type = "button"; prev.id = "err-prev"; prev.setAttribute("aria-label", "Previous error"); prev.append(icon(I.up)); prev.addEventListener("click", () => stepErrors(-1));
+    const next = el("button", "ibtn errnav-btn"); next.type = "button"; next.id = "err-next"; next.setAttribute("aria-label", "Next error"); next.append(icon(I.dn)); next.addEventListener("click", () => stepErrors(1));
+    prev.disabled = next.disabled = ERR.listed && !ERR.slots.length;
+    const group = el("div", "errnav-bar"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Failed steps"); group.append(close, pill, prev, next);
+    bar.append(group);
+  }
+  // The label and buttons in place, so focus stays where it is.
   function errLabel(announce) {
     const t = $("#topbar .errnav-count"); if (t) t.textContent = errText();
     for (const id of ["err-prev", "err-next"]) { const b = document.getElementById(id); if (b) b.disabled = ERR.listed && !ERR.slots.length; }
