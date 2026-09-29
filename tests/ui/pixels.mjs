@@ -295,7 +295,7 @@ async function ready(page) {
 }
 async function shot(page, size) {
   await ready(page);
-  return PNG.sync.read(await page.screenshot({ fullPage: size === "phone", animations: "disabled", caret: "hide" }));
+  return PNG.sync.read(await page.screenshot({ fullPage: size === "phone", animations: "disabled", caret: "hide", style: MASK_CSS }));
 }
 
 // Differing pixels over the larger of the two images; the area one image lacks counts as differing.
@@ -338,6 +338,9 @@ async function nav(page, route, D, mockup) {
   await page.waitForTimeout(80);
 }
 
+// Masked in every comparison: the jump-to-latest button, a transient control that floats at a scroll position (its place shifts a pixel or two
+// with how far each page was scrolled), not part of a screen's design.
+const MASK_CSS = ".jump-wrap { visibility: hidden !important; }";
 const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name + ".png"), PNG.sync.write(img)); };
 // The ratchet: a pending screen may not drift away from the overhaul. tests/ui/pixel-baseline.json holds, per screen and scheme, its
 // ratio of differing pixels and the size of both pictures (served, reference). A screen fails when its ratio rises by more than half
@@ -378,7 +381,7 @@ async function regionShot(page, region) {
   if (region.open) { await page.click(region.open); await page.waitForTimeout(200); }
   const target = page.locator(region.selector).first();
   await target.waitFor({ state: "visible", timeout: 3000 });
-  const png = PNG.sync.read(await target.screenshot({ animations: "disabled", caret: "hide" }));
+  const png = PNG.sync.read(await target.screenshot({ animations: "disabled", caret: "hide", style: MASK_CSS }));
   if (region.open) { await page.keyboard.press("Escape"); await page.waitForTimeout(150); }
   return png;
 }
