@@ -1989,6 +1989,16 @@ mod tests {
         assert!(refused.starts_with("HTTP/1.1 403"));
     }
 
+    #[test]
+    fn model_api_version_is_served() {
+        let fixture = Fixture::new();
+        let mut core = ViewerCore::new(fixture.options.clone());
+        let reply = core.respond("GET", "/api/model", "", None);
+        assert_eq!(reply.status, 200);
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["api"], crate::MODEL_API);
+    }
+
     /// Live polling (#40 M3): `?since=` answers 304 while nothing changed,
     /// without parsing a line; any appended line changes the version, even
     /// one that changes nothing else in the model, and the rebuild parses
@@ -3254,7 +3264,7 @@ mod tests {
         core.set_admin_link(crate::AdminLink::new("Manage machines", "/admin/machines"));
         let linked = core.respond("GET", "/api/model", "", None);
         assert!(linked.body.starts_with(
-            b"{\"admin\":{\"label\":\"Manage machines\",\"href\":\"/admin/machines\"},\"version\":"
+            b"{\"admin\":{\"label\":\"Manage machines\",\"href\":\"/admin/machines\"},\"api\":1,\"version\":"
         ));
     }
 

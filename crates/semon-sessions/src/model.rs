@@ -34,6 +34,10 @@ use crate::{
     field, file_list, matches_handoff, read_first_marker,
 };
 
+/// Version of the `/api/model` JSON shape. Embedders and clients compare it;
+/// bump it only for a breaking change to that shape.
+pub const MODEL_API: u32 = 1;
+
 /// Briefs and results are capped as in the mockup data.
 pub(crate) const MSG_MAX: usize = 4096;
 const TRUNCATED: &str = "\n…(truncated)";
@@ -294,8 +298,8 @@ impl Built {
         }
         let sessions = serde_json::to_string(&sessions).expect("serializable sessions");
         format!(
-            "{{\"version\":\"{}\",\"now\":{now},\"machine\":{},\"sessions\":{sessions},{}",
-            self.version, self.machine, self.rest
+            "{{\"api\":{},\"version\":\"{}\",\"now\":{now},\"machine\":{},\"sessions\":{sessions},{}",
+            MODEL_API, self.version, self.machine, self.rest
         )
     }
 }

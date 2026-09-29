@@ -22,7 +22,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     Options,
-    model::{self, Built, fnv},
+    model::{self, Built, MODEL_API, fnv},
     received::{Listing, ReceivedMachines},
     viewer::{
         MachineView, ViewerReply, decoded, has_session_page, has_trace_page, percent_encode,
@@ -442,6 +442,7 @@ fn union_json(parts: &[(&str, &Built)], plan: &Plan, now: i64) -> Result<String,
     }
     let first = machines.first().cloned().unwrap_or(Value::Null);
     let union = json!({
+        "api": MODEL_API,
         "version": plan.version,
         "now": served_now,
         "machine": first,
@@ -1071,13 +1072,56 @@ mod tests {
         }
         let link = AdminLink::new("Manage machines", "/admin/machines").unwrap();
         assert_eq!(
-            with_model_extras(b"{\"version\":\"v\"}", Some(&link), None, None),
-            b"{\"admin\":{\"label\":\"Manage machines\",\"href\":\"/admin/machines\"},\"version\":\"v\"}"
+            with_model_extras(b"{\"api\":1,\"version\":\"v\"}", Some(&link), None, None),
+            b"{\"admin\":{\"label\":\"Manage machines\",\"href\":\"/admin/machines\"},\"api\":1,\"version\":\"v\"}"
         );
         assert_eq!(
             with_param("sid=a%40b&before=3", "sid", "a"),
             "sid=a&before=3"
         );
+    }
+
+    #[test]
+    fn two_machine_model_advertises_the_api_version() {
+        let root = std::env::temp_dir().join(format!(
+            "semon-union-api-{}-{}",
+            std::process::id(),
+            model::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let options = |name: &str| {
+            let home = root.join(name);
+            let claude_home = home.join("claude");
+            let codex_home = home.join("codex");
+            let proc_root = home.join("proc");
+            std::fs::create_dir_all(&claude_home).unwrap();
+            std::fs::create_dir_all(&codex_home).unwrap();
+            std::fs::create_dir_all(&proc_root).unwrap();
+            std::fs::write(proc_root.join("locks"), "").unwrap();
+            Options {
+                claude_home,
+                claude_json: home.join(".claude.json"),
+                codex_home,
+                proc_root,
+                cache: home.join("cache"),
+                all: false,
+                since: std::time::Duration::from_secs(86400),
+                session: None,
+                facts: None,
+                scan_window: false,
+            }
+        };
+        let mut core = ViewerCore::with_machines(vec![
+            ("first".into(), options("first")),
+            ("second".into(), options("second")),
+        ]);
+        let reply = core.respond("GET", "/api/model", "", None);
+        assert_eq!(reply.status, 200);
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["api"], MODEL_API);
+        assert_eq!(body["machines"].as_array().unwrap().len(), 2);
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
