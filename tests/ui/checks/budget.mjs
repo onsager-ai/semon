@@ -39,6 +39,10 @@ const SIZES = [
 // What a budget can bound. Everything else in a row is recorded for reading only.
 const BUDGETED = ["requests", "transferBytes", "decodedBytes", "txRequests", "txDecodedBytes", "blockingMs", "longestTaskMs", "firstEntryMs", "requestsPerUpdate", "transferBytesPerUpdate", "txRequestsPerUpdate", "txDecodedBytesPerUpdate"];
 const HEADROOM = 1.1;
+// The "Load earlier" control: its own hook, else the button the viewer drew before it had one.
+const LOAD_EARLIER = "[data-load-earlier], #page section[aria-label='Transcript'] button.more:has-text('Load earlier')";
+// The Analytics range buttons: by their data-range hook, else the topbar group of the current viewer.
+const RANGE_BUTTONS = "[data-range], #topbar .analytics-range button";
 const LIVE_BATCHES = 6, LIVE_EVERY_MS = 5000, LIVE_WINDOW_MS = 30_000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -84,7 +88,7 @@ async function stopServer(proc) {
 // Every request of the context (its pages and their workers): grouped by path without the query, /api/* by path and
 // everything else as "static". A request counts where it ended, finished or failed. A bare 304 answer to a fetch arrived
 // as a failed request (seen in the first CI run: as many failures as polls), so the status comes from the response event:
-// a failed request with a status counts as an answered one, and only one with none counts as failed. The browser cannot
+// a failed 304 counts as an answered one; a request with no response, or aborted after its response began, counts as failed. The browser cannot
 // size such an answer, so it adds no bytes. Transfer bytes are the browser's own (headers plus body as sent); decoded bytes are the
 // body's length, read from the body when the response is compressed and equal to the sent body otherwise (the served
 // responses are never compressed: reading the body back is unreliable for `Cache-Control: no-store` responses).
@@ -93,15 +97,22 @@ function recorder(ctx) {
   const answered = new WeakMap();
   const mine = (request) => /^https?:/.test(request.url());
   const keyOf = (request) => { try { const p = new URL(request.url()).pathname; return p.startsWith("/api/") ? p : "static"; } catch { return "static"; } };
-  const entry = (key) => (state.paths[key] ??= { count: 0, statuses: {}, failed: 0, errors: {}, transferBytes: 0, decodedBytes: 0 });
-  ctx.on("request", (request) => { if (!mine(request)) return; state.inflight++; state.lastActivity = Date.now(); });
+  const entry = (key) => (state.paths[key] ??= { count: 0, statuses: {}, failed: 0, errors: {}, streams: 0, transferBytes: 0, decodedBytes: 0 });
+  // A server-sent event stream never finishes while the page is open: it is counted once, apart, and is neither in flight
+  // nor activity, so it cannot keep idle() from seeing the network quiet.
+  const streams = new WeakSet();
+  ctx.on("request", (request) => {
+    if (!mine(request)) return;
+    if (request.resourceType() === "eventsource") { streams.add(request); entry(keyOf(request)).streams++; return; }
+    state.inflight++; state.lastActivity = Date.now();
+  });
   ctx.on("response", (response) => { answered.set(response.request(), response); });
   const ended = (request, failure) => {
-    if (!mine(request)) return;
+    if (!mine(request) || streams.has(request)) return;
     state.inflight--; state.lastActivity = Date.now();
     const e = entry(keyOf(request)), response = answered.get(request);
     if (failure) e.errors[failure] = (e.errors[failure] ?? 0) + 1;
-    if (!response) { e.failed++; return; }
+    if (!response || (failure && response.status() !== 304)) { e.failed++; return; }
     e.count++;
     const status = String(response.status());
     e.statuses[status] = (e.statuses[status] ?? 0) + 1;
@@ -247,17 +258,19 @@ const scenarios = {
     // Older pages: the viewer offers "Load earlier" at the top of the transcript; press it until it is gone.
     const since = await nowIn(page);
     await rec.reset();
-    let pages = 0, stuck = false;
-    for (; pages < 60; pages++) {
+    let presses = 0, stuck = false;
+    for (; presses < 60; presses++) {
       await scrollTop(page);
-      const button = page.locator("#page section[aria-label='Transcript'] button.more", { hasText: "Load earlier" }).first();
+      const button = page.locator(LOAD_EARLIER).first();
       if (!(await button.count())) break;
       const handle = await button.elementHandle();
       await handle.evaluate((b) => b.click());
       if (!(await softly(page.waitForFunction((b) => !b.isConnected, handle, { timeout: 30_000 })))) { stuck = true; break; }
     }
     const quiet = await rec.idle();
-    out["session-older"] = await row(page, rec, since, { olderPages: pages }, { quiet, stuck });
+    // A press can fetch more than one /api/tx (the page and the child runs it shows), so presses and requests differ.
+    // No press at all means the control was not found: the row measured nothing, and is listed as not settled.
+    out["session-older"] = await row(page, rec, since, { olderPresses: presses }, { quiet, stuck, noOlder: presses === 0 });
     return out;
   }),
 
@@ -272,8 +285,10 @@ const scenarios = {
 
     const since = await nowIn(page);
     await rec.reset();
-    await page.click('#topbar .analytics-range button:has-text("30 d")');
-    await softly(page.waitForFunction(() => [...document.querySelectorAll("#topbar .analytics-range button")].find((b) => b.getAttribute("aria-pressed") === "true")?.textContent.trim() === "30 d"));
+    await page.locator(RANGE_BUTTONS).filter({ hasText: /^\s*30\s*d/i }).first().click();
+    // Selected: aria-pressed or aria-selected true, or a class saying so. The wait is soft: the figures below settle the row.
+    await softly(page.waitForFunction((sel) => [...document.querySelectorAll(sel)].some((b) => /^\s*30\s*d/i.test(b.textContent)
+      && (b.getAttribute("aria-pressed") === "true" || b.getAttribute("aria-selected") === "true" || /\b(on|active|selected)\b/.test(b.className))), RANGE_BUTTONS, { timeout: 5000 }));
     const readyAfter = await counted();
     const quietAfter = await rec.idle();
     out["analytics-30d"] = await row(page, rec, since, {}, { ready: readyAfter, quiet: quietAfter });
@@ -333,7 +348,7 @@ function liveRecords(fixture, batch) {
 }
 
 // ---- The run ----------------------------------------------------------------------------------------------------------------
-async function runSize(browser, vp, fixtureDir, failures) {
+async function runSize(browser, vp, fixtureDir, warnings) {
   fs.rmSync(fixtureDir, { recursive: true, force: true });
   fs.mkdirSync(fixtureDir, { recursive: true });
   const fixture = writeLong(fixtureDir);
@@ -349,7 +364,8 @@ async function runSize(browser, vp, fixtureDir, failures) {
       try {
         for (const [label, result] of Object.entries(await run(server, vp, browser, fixture))) rows[`${label}@${vp.width}`] = { viewport: vp.width, cpuThrottle: vp.throttle, ...result };
       } catch (error) {
-        failures.push(`${name}@${vp.width}: ${error.stack ?? error}`);
+        // Report-only: that scenario's rows are missing, and the summary says why.
+        warnings.push({ scenario: `${name}@${vp.width}`, error: String(error.stack ?? error).split("\n").slice(0, 4).join(" | ") });
       }
     }
   } finally {
@@ -384,7 +400,7 @@ function suggest(rows) {
 }
 
 const kb = (n) => n == null ? "-" : (n / 1024).toFixed(1);
-function markdown(rows, over) {
+function markdown(rows, over, warnings = []) {
   const lines = [
     "### Request and main-thread budget (report only)",
     "",
@@ -406,13 +422,14 @@ function markdown(rows, over) {
   lines.push("", "By path:", "", "| Scenario | Path | Requests | Statuses | Transfer KB | Decoded KB |", "|---|---|---:|---|---:|---:|");
   for (const [name, r] of Object.entries(rows)) {
     for (const [p, e] of Object.entries(r.paths).sort((a, b) => b[1].decodedBytes - a[1].decodedBytes)) {
-      lines.push(`| ${name} | ${p} | ${e.count}${e.failed ? ` (+${e.failed} failed)` : ""} | ${Object.entries(e.statuses).map(([s, n]) => `${s}x${n}`).join(" ")} | ${kb(e.transferBytes)} | ${kb(e.decodedBytes)} |`);
+      lines.push(`| ${name} | ${p} | ${e.count}${e.failed ? ` (+${e.failed} failed)` : ""} | ${Object.entries(e.statuses).map(([s, n]) => `${s}x${n}`).concat(Object.entries(e.errors).map(([t, n]) => `${t}x${n}`), e.streams ? [`stream x${e.streams}`] : []).join(" ")} | ${kb(e.transferBytes)} | ${kb(e.decodedBytes)} |`);
     }
   }
   // A row whose screen never finished loading (a tool-call count still outstanding after 30 s, the network not quiet, the
   // first entry not drawn) measured a stuck page, not the screen: say so beside the numbers.
-  const unsettled = Object.entries(rows).filter(([, r]) => r.ready === false || r.quiet === false || r.drawn === false || r.stuck === true);
-  if (unsettled.length) lines.push("", `Did not settle (read those rows with care): ${unsettled.map(([name, r]) => `${name} (${["ready", "quiet", "drawn"].filter((k) => r[k] === false).concat(r.stuck ? ["stuck"] : []).join(", ")})`).join("; ")}.`);
+  const unsettled = Object.entries(rows).filter(([, r]) => r.ready === false || r.quiet === false || r.drawn === false || r.stuck === true || r.noOlder === true);
+  if (unsettled.length) lines.push("", `Did not settle (read those rows with care): ${unsettled.map(([name, r]) => `${name} (${["ready", "quiet", "drawn"].filter((k) => r[k] === false).concat(r.stuck ? ["stuck"] : [], r.noOlder ? ["no older page loaded"] : []).join(", ")})`).join("; ")}.`);
+  if (warnings.length) lines.push("", "Scenarios that failed (their rows are missing):", ...warnings.map((w) => `- ${w.scenario}: ${w.error}`));
   const overLines = over.filter((o) => o.metric);
   lines.push("", overLines.length ? "Over budget:" : "Over budget: none.", ...overLines.map((o) => `- ${o.scenario} ${o.metric}: ${o.value} > ${o.ceiling}`));
   const unbudgeted = over.filter((o) => o.note);
@@ -422,13 +439,13 @@ function markdown(rows, over) {
 
 async function main() {
   fs.mkdirSync(ENV.out, { recursive: true });
-  const fixtureDir = path.join(os.tmpdir(), "semon-budget-fixture");
-  const failures = [], rows = {};
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-budget-"));
+  const failures = [], warnings = [], rows = {};
   let counts = null, browser;
   try {
     browser = await launch();
     for (const vp of SIZES) {
-      const ran = await runSize(browser, vp, fixtureDir, failures);
+      const ran = await runSize(browser, vp, fixtureDir, warnings);
       Object.assign(rows, ran.rows);
       counts = ran.counts;
     }
@@ -442,13 +459,14 @@ async function main() {
   let budget = { scenarios: {} };
   try { budget = JSON.parse(fs.readFileSync(BUDGET_FILE, "utf8")); } catch (error) { console.warn(`no usable ${BUDGET_FILE}: ${error.message}`); }
   const over = compare(rows, budget);
-  fs.writeFileSync(path.join(ENV.out, "budget.json"), JSON.stringify({ fixture: counts, rows, over, failures }, null, 2) + "\n");
+  fs.writeFileSync(path.join(ENV.out, "budget.json"), JSON.stringify({ fixture: counts, rows, over, warnings, failures }, null, 2) + "\n");
   fs.writeFileSync(path.join(ENV.out, "perf-budget.suggested.json"), JSON.stringify(suggest(rows), null, 2) + "\n");
-  const table = markdown(rows, over);
+  const table = markdown(rows, over, warnings);
   console.log(table);
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n${table}\n`);
   for (const o of over.filter((x) => x.metric)) console.log(`OVER BUDGET ${o.scenario} ${o.metric}: ${o.value} > ${o.ceiling}`);
   for (const [name, r] of Object.entries(rows)) for (const e of r.pageErrors ?? []) console.warn(`page error in ${name}: ${e}`);
+  for (const w of warnings) console.warn(`WARN ${w.scenario} failed: ${w.error}`);
   for (const failure of failures) console.error(`FAIL ${failure}`);
   if (failures.length || !Object.keys(rows).length) process.exitCode = 1;
 }

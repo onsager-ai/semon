@@ -313,7 +313,7 @@
   }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
   function pager(sid, where, label) {
-    const w = el("div", "list"), b = el("button", "more", label); b.type = "button"; w.append(b);
+    const w = el("div", "list"), b = el("button", "more", label); b.type = "button"; if (where === "before") b.dataset.loadEarlier = ""; w.append(b); // data-load-earlier: a stable hook for the budget check
     b.addEventListener("click", () => {
       stopOpeningEndPin();
       const m = TXM[sid], box = phone.matches ? document.documentElement : $("#main"), h0 = box.scrollHeight; b.disabled = true;
