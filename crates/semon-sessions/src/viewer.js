@@ -740,21 +740,26 @@
     if (!ACCOUNT) return;
     const widget = accountWidget(true); widget.id = "account-drawer"; $("#sidebar").append(widget);
   }
-  // ---- Stable order: a list of sessions keeps its rows where they are while the model updates ------------------------------------
+  // ---- Stable order: a list of sessions keeps its rows where they are while the reader can see it ------------------------------------
   // Each list sorted by recency keeps its order as a snapshot of session ids. A live update refreshes every row in place and never
-  // reorders one, wherever the list is scrolled: a reorder is held and counted. A session new since the snapshot is inserted at the top
-  // (a pure insertion, like a message arriving) only while the list's top is in view and it is untouched (no pointer down, no mouse
-  // over one of its rows, no keyboard focus on one); otherwise it is held and counted too, and so is a list new since the snapshot.
-  // What is held shows as "N updated": a small chip in the list's own header row while its top is in view (it takes no room and covers
-  // no control), a floating pill once the top is scrolled out of view. Tapping either re-sorts the list (the pill also scrolls to its
-  // top). The list re-sorts, unasked, only when the reader changes what it is (the route, the search, the filters, the grouping) or
-  // opens the phone's drawer. A session that leaves the list or the filter goes in place. Nothing re-sorts on a timer.
-  const ORD = new Map(), ordPills = new Map(), ordChips = new Map(), ordTotal = { page: 0, side: 0 }, ordTouch = { down: false }, byLast = (a, b) => b.last - a.last;
+  // reorders one: a reorder is held. A session new since the snapshot is put at the top (a pure insertion, like a message arriving)
+  // only while the list's top is in view and it is untouched (no pointer down, no mouse over one of its rows, no keyboard focus on
+  // one); otherwise it is held too, and so is a list new since the snapshot. Nothing tells the reader what is held. Held order is
+  // applied when the list is out of sight, so that no row ever moves while it is looked at:
+  //   - the phone's drawer: when it opens (before it shows) and once it has closed;
+  //   - the page: when the route changes (the new page is drawn sorted) and when the tab comes back from the background;
+  //   - the sidebar on a wide screen, which is always in view: ORD_IDLE_MS after something was first held or the reader last touched it
+  //     (a pointer over it, focus in it), once the pointer and focus are off it. The Sessions page has no timer: it is what is read.
+  // The list also re-sorts when the reader changes what it is (the search, the filters, the grouping).
+  const ORD = new Map(), ordTouch = { down: false }, byLast = (a, b) => b.last - a.last;
   const pageSig = () => JSON.stringify([query, groupBy, sessionFilters]);
   document.addEventListener("pointerdown", () => { ordTouch.down = true; }, true);
   for (const t of ["pointerup", "pointercancel"]) document.addEventListener(t, () => { ordTouch.down = false; }, true);
   window.addEventListener("blur", () => { ordTouch.down = false; });
-  document.addEventListener("visibilitychange", () => { ordTouch.down = false; });
+  // A tab that comes back from the background applies what was held (before it paints), and draws the updates of its first moments
+  // sorted too: nobody has looked at these lists since.
+  let ordReturnUntil = 0;
+  document.addEventListener("visibilitychange", () => { ordTouch.down = false; if (visible()) { ordReturnUntil = performance.now() + ORD_RETURN_MS; orderApply("page"); orderApply("side"); } });
   // How many rows must move to put `rows` in `cmp` order: all of them but the longest run already in it.
   function ordMoves(rows, cmp) {
     const tails = [];
@@ -770,8 +775,7 @@
   // list, a mouse only over one of its rows.
   function ordState(name) {
     const side = name === "side", rows = side ? "#lanes .treeitem" : "#page .nrow", a = document.activeElement;
-    const host = side ? null : chipHost("page"); // the header row the chip sits in: the list's top is in view while that row's bottom is below the bar
-    const inView = side ? sideRegion().scrollTop <= 1 : !host || host.getBoundingClientRect().bottom >= $("#topbar").getBoundingClientRect().bottom - 1;
+    const inView = side ? sideRegion().scrollTop <= 1 : !$(rows) || $(rows).getBoundingClientRect().top >= $("#topbar").getBoundingClientRect().bottom - 1;
     const touched = ordTouch.down || (!!a?.matches?.(":focus-visible") && !!a.closest(side ? "#lanes" : rows)) || (matchMedia("(hover: hover)").matches && !!$(rows + ":hover"));
     return { inView, touched };
   }
@@ -780,7 +784,7 @@
   // One draw of a screen's lists. `sig` is what the reader chose to show, `tie` the route it belongs to (null: the sidebar, which
   // outlives routes); a draw with another sig or tie starts from the sorted order. `st` is ordState from before the draw.
   function orderScope(name, sig, tie, st) {
-    const prev = ORD.get(name), keep = !!prev && prev.sig === sig && prev.tie === tie;
+    const prev = ORD.get(name), keep = !!prev && prev.sig === sig && prev.tie === tie && performance.now() >= ordReturnUntil;
     const scope = { sig, tie, keep, calm: st.inView && !st.touched, // calm: a new session may be put at the top
       prev: keep ? prev.lists : new Map(), prevKids: keep ? prev.kids : new Set(), kids: new Set(), prevExp: keep ? prev.exp : null, exp: null, reseed: false, lists: new Map(), n: 0 };
     ORD.set(name, scope); return scope;
@@ -804,69 +808,26 @@
     scope.lists.set(key, ids);
     return ids.map((id) => by.get(id));
   }
-  // The pill: in the sidebar a sticky zero-height slot above the rows, on a page a fixed button under the top bar, so that showing it
-  // moves no row. It shows the count the last draw of that screen found.
-  function makeOrderButton(name, cls) {
-    const b = el("button", cls); b.type = "button"; b.hidden = true; b.dataset.order = name;
-    b.addEventListener("click", (e) => orderResort(name, e.detail === 0, cls === "order-chip"));
-    (cls === "order-chip" ? ordChips : ordPills).set(name, b); return b;
-  }
   const sideRegion = () => $("#side-list") ?? $("#sidebar");
-  const ordLive = el("div", "sr-only"); ordLive.id = "order-status"; ordLive.setAttribute("role", "status"); ordLive.setAttribute("aria-live", "polite");
-  { const slot = el("div", "order-slot"); slot.append(makeOrderButton("side", "order-pill")); sideRegion()?.prepend(slot);
-    const pagePill = makeOrderButton("page", "order-pill"); if (SIDEBAR_ONLY) sideRegion().append(ordLive); else { $("#page").before(pagePill); document.body.append(ordLive); }
-    makeOrderButton("side", "order-chip"); makeOrderButton("page", "order-chip"); } // the page's pill sits just before the page, so the tab order reaches it first
-  function placeOrderPill() {
-    const b = ordPills.get("page"); if (!b || b.hidden) return;
-    const r = $("#page").getBoundingClientRect(); if (r.width) b.style.setProperty("--jump-x", r.left + r.width / 2 + "px");
-    b.style.setProperty("--order-top", Math.max(0, $("#topbar").getBoundingClientRect().bottom) + 8 + "px");
-  }
-  // The header row a screen's chip sits in: the sidebar's "Recent" label; Sessions' group-by row; the heading above a page's first list.
-  function chipHost(name) {
-    if (name === "side") return $(".side-h");
-    if (route.v === "sessions") return $("#page .groupby");
-    return $("#page .nrow")?.closest(".list")?.previousElementSibling ?? null;
-  }
-  function labelOrder(b, n, compact) {
-    b.replaceChildren(); if (!n) return;
-    const count = el("span", "new-count"), word = el("span", "word"); word.textContent = " updated"; count.append(String(n), word);
-    b.append(count, icon(I.up)); b.setAttribute("aria-label", n + " updated, show in recency order"); b.classList.toggle("compact", !!compact);
-  }
-  // What the last draw of that screen held or found stale shows as the chip while the list's top is in view, as the floating pill once
-  // it is scrolled out of view.
-  function syncOrderPill(name) {
-    const pill = ordPills.get(name), chip = ordChips.get(name), sc = ORD.get(name); if (!pill) return;
-    const view = ordState(name), n = !sc || (name === "page" && sc.tie !== route) || (name === "side" && railMode && !phone.matches) ? 0 : sc.n, was = ordTotal[name];
-    const pn = view.inView ? 0 : n, cn = view.inView ? n : 0;
-    if (pill.dataset.n !== String(pn)) { pill.dataset.n = String(pn); pill.hidden = !pn; labelOrder(pill, pn); }
-    const host = cn ? chipHost(name) : null;
-    if (!host || chip.parentElement !== host) chip.remove();
-    if (host) {
-      if (chip.parentElement !== host) host.append(chip);
-      if (chip.dataset.n !== String(cn)) { chip.dataset.n = String(cn); labelOrder(chip, cn); }
-      chip.hidden = false; chip.classList.remove("compact", "tiny");
-      // On a narrow row the chip would cover the last control: it shrinks to its count and arrow, then to its count.
-      const last = [...host.children].filter((x) => x !== chip && !x.hidden).at(-1), over = () => last && chip.getBoundingClientRect().left < last.getBoundingClientRect().right + 6;
-      if (over()) { chip.classList.add("compact"); if (over()) chip.classList.add("tiny"); }
-    } else { chip.hidden = true; chip.dataset.n = "0"; }
-    ordTotal[name] = n; // one status region serves both screens: it is cleared only when neither holds anything
-    if (n && !was) ordLive.textContent = n + (n === 1 ? " session updated" : " sessions updated"); else if (!ordTotal.page && !ordTotal.side) ordLive.textContent = "";
-    if (pn) placeOrderPill();
-  }
-  // Scrolling moves what is held between the chip and the pill.
-  function orderScroll() {
-    for (const name of ["page", "side"]) if (ORD.get(name)?.n || !ordPills.get(name).hidden || !ordChips.get(name).hidden) syncOrderPill(name); // nothing held or shown: nothing to move
-  }
-  if (!SIDEBAR_ONLY) { window.addEventListener("resize", placeOrderPill, { passive: true }); window.addEventListener("scroll", orderScroll, { passive: true }); $("#main").addEventListener("scroll", orderScroll, { passive: true }); }
-  sideRegion().addEventListener("scroll", orderScroll, { passive: true });
-  // Tapping the pill re-sorts the list it belongs to and scrolls it to its top; a keyboard user lands on its first row. The chip
-  // re-sorts where the list stands (its top is already in view).
-  function orderResort(name, keyboard, quiet) {
+  const ORD_IDLE_MS = Number(window.__semonOrderIdleMs) > 0 ? Number(window.__semonOrderIdleMs) : 10000; // (a browser check sets the hook to shorten it)
+  const ORD_DRAWER_MS = 320, ORD_RETURN_MS = 3000; // the drawer's slide (0.24 s) and a little; the first moments after a tab returns
+  // Applies what a screen holds: the list is drawn sorted, from scratch.
+  function orderApply(name) {
+    const sc = ORD.get(name); if (!sc?.n || (name === "page" && (sc.tie !== route || rendered !== route || viewerEl || $("#page").hasAttribute("aria-busy")))) return;
     ORD.delete(name);
-    if (name === "side") { renderLanes(); if (!quiet) sideRegion().scrollTop = 0; if (keyboard) $("#lanes .srow")?.focus({ preventScroll: true }); }
-    else if (quiet) { const st = capture(); render(); restore(st); syncOrderPill("page"); syncOrderPill("side"); if (keyboard) $("#page .nrow")?.focus({ preventScroll: true }); }
-    else { render(); quietTop(); if (keyboard) $("#page .nrow")?.focus({ preventScroll: true }); }
+    if (name === "side") renderLanes(); else { const st = capture(); render(); restore(st); }
   }
+  // The wide screen's sidebar is always in view: what it holds is applied once it has been left alone for ORD_IDLE_MS.
+  let ordIdle = null;
+  function ordIdleArm() {
+    clearTimeout(ordIdle); ordIdle = null;
+    if (phone.matches || !ORD.get("side")?.n) return;
+    ordIdle = setTimeout(() => {
+      ordIdle = null; const bar = $("#sidebar");
+      if (ordTouch.down || bar.matches(":hover") || bar.contains(document.activeElement)) ordIdleArm(); else orderApply("side");
+    }, ORD_IDLE_MS);
+  }
+  for (const t of ["pointermove", "pointerdown", "pointerleave", "focusin", "focusout", "wheel", "keydown"]) $("#sidebar").addEventListener(t, () => { if (ordIdle) ordIdleArm(); }, { passive: true });
   function renderNav() {
     const nav = $("#nav"); nav.replaceChildren();
     // A session or a trace sits under Sessions, a machine under Machines.
@@ -1112,7 +1073,7 @@
     expandedPath = expandedAll ? ancestorsOf(expandedAll) : new Set(); expandedUnder = expandedAll ? new Set(descendantsOf(expandedAll, children).map((x) => x.id)) : new Set();
     box.replaceChildren();
     for (const s of orderList(sideOrder, "lanes", lanes, byLast, { limit: 8, must: new Set([current, ...ancestors]) }).slice(0, 8)) box.append(buildLaneItem(s, 0, children, railMode && !phone.matches));
-    syncOrderPill("side");
+    if (!sideOrder.n) { clearTimeout(ordIdle); ordIdle = null; } else if (!ordIdle) ordIdleArm(); // (counted from when something was first held)
     if (!lanes.length) { const empty = el("p", "ghead", "No sessions match"); empty.setAttribute("role", "none"); box.append(empty); }
     const q = $("#q"); if (document.activeElement !== q) q.value = query;
     restoreLaneFocus(focus);
@@ -2091,7 +2052,7 @@
     if (r.v === "session" && errOn(r.id)) markError(false);
     document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px");
     const lanesKept = lanesFor && lanesFor.r === r && lanesFor.version === LIVE.version; lanesFor = null;
-    syncLayoutPrefs(); syncBarLine(); renderNav(); if (!lanesKept) renderLanes(); renderDrawerAccount(); syncJump(); syncOrderPill("page"); ordPageState = null;
+    syncLayoutPrefs(); syncBarLine(); renderNav(); if (!lanesKept) renderLanes(); renderDrawerAccount(); syncJump(); ordPageState = null;
   }
 
   // ---- Analytics: the server computes each range (/api/analytics) -----------------------------------------------------------
@@ -2406,7 +2367,7 @@
       }
       if (!lanes.length) out.append(el("p", "empty", "No sessions match “" + query + "”."));
       for (const b of gb.querySelectorAll("button[data-g]")) b.setAttribute("aria-pressed", String(b.dataset.g === groupBy));
-      syncOrderPill("page"); renderLanes();
+      renderLanes();
     };
     found.ctx.draw = grouped.ctx.draw = draw;
     put(renderFacetFilters(page, () => render()), fr, gb, out); put.done(); draw();
@@ -2414,11 +2375,11 @@
 
   // ---- Drawer (phone) ---------------------------------------------------------------------------------------------------------
   const sidebar = $("#sidebar");
-  function openDrawer() { if (!phone.matches) return; if (ORD.get("side")?.n) { ORD.delete("side"); renderLanes(); } document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
-  function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); closeAccountMenu(); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); }
+  function openDrawer() { if (!phone.matches) return; orderApply("side"); document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
+  function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); closeAccountMenu(); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); setTimeout(() => { if (!document.body.classList.contains("drawer-open")) orderApply("side"); }, ORD_DRAWER_MS); }
   // On an embedding page shell.js opens and closes the drawer, and names its opening (semon:drawer-open); the viewer binds none of it, "/" included.
   if (!SIDEBAR_ONLY) { $("#drawer-close").addEventListener("click", () => closeDrawer()); $("#scrim").addEventListener("click", () => closeDrawer()); }
-  else window.addEventListener("semon:drawer-open", () => { if (ORD.get("side")?.n) { ORD.delete("side"); renderLanes(); } }); // opening the drawer re-sorts what the list held, as openDrawer does
+  else window.addEventListener("semon:drawer-open", () => orderApply("side")); // opening the drawer re-sorts what the list held, as openDrawer does
     if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
   let sx = null;
   if (!SIDEBAR_ONLY) sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
@@ -2564,7 +2525,7 @@
     LIVE.pending = false; const r = route;
     if (rendered !== r || (r.v === "session" && !SESS[r.id]) || (r.v === "trace" && !SESS[r.sid]) || (r.v === "machine" && !MACHINE[r.id])) return;
     const st = capture(); $("#page").style.paddingBottom = "";
-    if (r.v !== "session") { render(); restore(st); syncOrderPill("page"); syncOrderPill("side"); return; }
+    if (r.v !== "session") { render(); restore(st); return; }
     const n = patchSession(dirty); restore(st, st.bottom);
     if (!st.bottom && n) LIVE.fresh += n;
     syncJump();
