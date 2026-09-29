@@ -246,7 +246,8 @@ export default async function tooltipCheck(browser) {
       rec.items = items.map((x) => x.cls.replace(/meta-item ?/, "") || x.tag + ":" + x.tip.slice(0, 20));
       r.expect(items.length >= (size === "desktop" ? 4 : 0), tag + ": only " + items.length + " tipped items in the session line: " + JSON.stringify(rec.items));
       const at = (i) => box(page, '#topbar [data-probe="' + i + '"]');
-      const dotBox = await box(page, "#topbar .meta-state > .dot"), reach = [dotBox, ...(await Promise.all(items.slice(0, 3).map((x) => at(x.i))))];
+      // On a phone the state is the small dot before the title (line 2 is not drawn there).
+      const stateDot = size === "phone" ? "#topbar .l1-state > .dot" : "#topbar .meta-state > .dot", dotBox = await box(page, stateDot), reach = [dotBox, ...(await Promise.all(items.slice(0, 3).map((x) => at(x.i))))];
       if (reach.length >= 2) await behaviour(page, tag, r, rec, { first: reach[0], second: reach[1] });
       // Every visible tipped item in the bar and the sidebar stays inside the margin and off its target.
       const spots = await page.evaluate(() => { const list = [...document.querySelectorAll("#topbar [data-tip], #sidebar [data-tip]")].filter((n) => { const b = n.getBoundingClientRect(); return n.getClientRects().length && b.width > 0 && b.left >= 0 && b.right <= innerWidth && b.top >= 0 && b.bottom <= innerHeight && (() => { const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return !!hit && (n === hit || n.contains(hit)); })() && (!n.hasAttribute("data-tip-clipped") || n.scrollWidth > n.clientWidth + 1); }); return list.slice(0, 40).map((n, i) => { n.dataset.spot = String(i); return { i, tip: n.dataset.tip, clipped: n.hasAttribute("data-tip-clipped") }; }); });
@@ -266,7 +267,7 @@ export default async function tooltipCheck(browser) {
       r.expect(checked >= (size === "desktop" ? 5 : 1), tag + ": only " + checked + " tooltips were placed");
       // A long tip (the cost badge, or the state), for the contrast, the size and the screenshot.
       await away(page); await page.waitForTimeout(450);
-      const shot = (await page.locator("#topbar .meta-cost").count()) && await page.locator("#topbar .meta-cost").first().isVisible() ? "#topbar .meta-cost" : "#topbar .meta-state";
+      const shot = (await page.locator("#topbar .meta-cost").count()) && await page.locator("#topbar .meta-cost").first().isVisible() ? "#topbar .meta-cost" : size === "phone" ? "#topbar .l1-state" : "#topbar .meta-state";
       await hover(page, shot, 1500);
       const c = await contrast(page); rec.contrast = c.ratio;
       r.expect(c.ratio >= 4.5 && c.alpha === 1, tag + ": the tooltip's contrast is " + c.ratio + ", under 4.5");
@@ -276,7 +277,7 @@ export default async function tooltipCheck(browser) {
 
       if (size === "phone") {
         // Touch: a static badge toggles its tip; elsewhere closes it; a control runs and shows none.
-        const state0 = await box(page, "#topbar .meta-state > .dot"), blank = [4, 400];
+        const state0 = await box(page, stateDot), blank = [4, 400];
         await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
         const opened = await state(page);
         r.expect(opened.open && /^Status: /.test(opened.text), tag + ": tapping the state badge did not show its tooltip " + JSON.stringify(opened));
@@ -388,6 +389,8 @@ export default async function tooltipCheck(browser) {
       await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
       await page.waitForSelector("dialog.session-details[open]");
       // The dialog's own tipped element: the "?" icon by its API-equivalent cost row (costInfoTip).
+      // On a phone the sheet has more rows (Kind, Status, Tool calls), so the cost row can lie below the fold.
+      await page.locator("dialog.session-details .cost-info").scrollIntoViewIfNeeded(); await page.waitForTimeout(100);
       const shownAt = await hover(page, "dialog.session-details .cost-info", 1500), open = await state(page);
       r.expect(shownAt != null && /^What these tokens would cost/.test(open.text ?? ""), tag + ": the tooltip did not open on the cost icon inside the modal dialog " + JSON.stringify(open.text));
       await page.keyboard.press("Escape"); await page.waitForTimeout(150);
@@ -397,6 +400,35 @@ export default async function tooltipCheck(browser) {
       const second = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-details[open]") }));
       r.expect(!second.dialog, tag + ": the second Esc did not close the dialog " + JSON.stringify(second));
       results[tag] = { first, second };
+    });
+  }
+
+  // ---- The Started line's machine name: its tip is the whole name, and shows only while the name is cut off ----
+  {
+    const tag = "started line phone", page = await served(browser, { size: "phone" });
+    await guard(r, tag, page, async () => {
+      const name = ".turns > .divider.started .dv-machine";
+      let found = false;
+      for (const s of Object.values(D.SESS)) { await goto(page, { v: "session", id: s.id }, D); await page.waitForTimeout(120); if (await page.locator(name).count()) { found = true; break; } }
+      r.expect(found, tag + ": no session showed a Started line");
+      if (!found) return;
+      await page.locator(name).scrollIntoViewIfNeeded(); await page.waitForTimeout(150);
+      const facts = () => page.evaluate((sel) => { const n = document.querySelector(sel); return { text: n.textContent, tip: n.dataset.tip, cut: n.scrollWidth > n.clientWidth }; }, name);
+      const fit = await facts();
+      r.expect(!fit.cut && !!fit.tip && fit.tip === fit.text, tag + ": the name as drawn is cut off, or its tip is not the whole name " + JSON.stringify(fit));
+      await page.touchscreen.tap(...centre(await box(page, name))); await page.waitForTimeout(150);
+      r.expect(!(await state(page)).open, tag + ": a name that fits showed a tip");
+      // The same line with a long name (the fixture's are short): cut off, and now the tip is the whole name.
+      const LONG = "marvin-HP-EliteBook-X-G2i-14-inch-Notebook-Next-Gen-AI-PC";
+      await page.evaluate(({ sel, long }) => { const n = document.querySelector(sel); n.textContent = long; n.dataset.tip = long; }, { sel: name, long: LONG });
+      await page.waitForTimeout(100);
+      const cut = await facts();
+      r.expect(cut.cut && cut.tip === LONG, tag + ": the long name is not cut off " + JSON.stringify(cut));
+      await page.touchscreen.tap(...centre(await box(page, name))); await page.waitForTimeout(150);
+      const shown = await state(page);
+      r.expect(shown.open && shown.text === LONG, tag + ": tapping the cut-off name did not show the whole name " + JSON.stringify(shown.text));
+      results[tag] = { fit: fit.text, cutShows: shown.open };
+      r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join("; "));
     });
   }
 
