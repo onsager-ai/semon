@@ -200,6 +200,7 @@ pub(crate) struct Signal {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum SignalKind {
     Compact,
     Interrupt,
@@ -741,6 +742,9 @@ fn push(summary: &mut FileIndex, event: Event) {
     summary.events.push(event);
 }
 
+/// Compaction dedupe has two limits: an interrupt between lines of one
+/// compaction counts it twice, while two compactions with no event between
+/// them (such as `/compact` twice in a row) fold into one.
 fn signal(
     summary: &mut FileIndex,
     k: SignalKind,
@@ -2597,6 +2601,34 @@ mod tests {
         assert!(index.events.is_empty());
     }
 
+    fn assert_one_codex_compact(record: Value) {
+        let mut index = FileIndex::default();
+        codex(&mut index, &record, 0);
+
+        assert_eq!(index.signals.len(), 1);
+        assert_eq!(index.signals[0].k, SignalKind::Compact);
+    }
+
+    #[test]
+    fn lone_codex_compacted_record_indexes_one_compact_signal() {
+        assert_one_codex_compact(serde_json::json!({"type":"compacted"}));
+    }
+
+    #[test]
+    fn lone_codex_context_compacted_event_indexes_one_compact_signal() {
+        assert_one_codex_compact(
+            serde_json::json!({"type":"event_msg","payload":{"type":"context_compacted"}}),
+        );
+    }
+
+    #[test]
+    fn lone_codex_context_compaction_item_indexes_one_compact_signal() {
+        assert_one_codex_compact(serde_json::json!({
+            "type":"event_msg",
+            "payload":{"type":"item_completed","item":{"type":"ContextCompaction"}}
+        }));
+    }
+
     #[test]
     fn codex_turn_aborts_keep_only_safe_reason_tags() {
         let long_reason = "x".repeat(33);
@@ -2658,7 +2690,7 @@ mod tests {
             }],
             ..FileIndex::default()
         };
-        let cache = EventCache {
+        let mut cache = EventCache {
             version: CACHE_VERSION,
             files: BTreeMap::from([(
                 "session.jsonl".to_owned(),
@@ -2677,16 +2709,31 @@ mod tests {
         cache.save(&path).unwrap();
         let reopened = EventCache::read(&path);
         let cached_index = &reopened.files.get("session.jsonl").unwrap().index;
+        let serialized_index = serde_json::to_value(&index).unwrap();
+        assert_eq!(serialized_index["signals"][0]["k"], "compact");
         assert_eq!(
-            serde_json::to_value(&index).unwrap(),
+            serialized_index,
             serde_json::to_value(cached_index.as_ref()).unwrap()
         );
 
         let stale_path = root.join("stale.events.json");
-        fs::write(&stale_path, br#"{"version":13,"files":{}}"#).unwrap();
+        cache.version = 13;
+        cache.save(&stale_path).unwrap();
         let stale = EventCache::read(&stale_path);
         assert_eq!(stale.version, CACHE_VERSION);
         assert!(stale.files.is_empty());
+        assert!(!stale.files.contains_key("session.jsonl"));
+
+        let current_path = root.join("current.events.json");
+        cache.version = 14;
+        cache.save(&current_path).unwrap();
+        let current = EventCache::read(&current_path);
+        assert_eq!(current.version, 14);
+        let retained_index = &current.files.get("session.jsonl").unwrap().index;
+        assert_eq!(
+            serde_json::to_value(retained_index.as_ref()).unwrap(),
+            serialized_index
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
