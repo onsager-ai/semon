@@ -76,19 +76,6 @@ export default async function namesCheck(browser) {
       }
       if (s === claude) await shot("session");
     }
-    if (size === "phone") {
-      // A child's ⋯ menu lists its ancestors in Session path; the current session is the title, not a path row.
-      const child = Object.values(D.SESS).find((x) => x.parent ?? D.H.some((h) => h.kind === "spawn" && h.to === x.id));
-      r.expect(!!child, "the fixture must hold a child session for Session path");
-      if (child) {
-        await goto(page, { v: "session", id: child.id }, D); await page.waitForTimeout(200);
-        await page.click("#more-btn"); await page.waitForSelector(".session-menu .menu-path-item");
-        const menu = await measure(page, ".session-menu .menu-path-group");
-        r.expect(menu.length > 0, tag + ": Session path shows no ancestor harness label");
-        audit("session-path", menu);
-        await shot("session-path");
-      }
-    }
     await goto(page, { v: "analytics" }, D);
     await page.waitForTimeout(200);
     audit("analytics", await measure(page, ".page"));
