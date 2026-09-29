@@ -3479,6 +3479,7 @@ mod tests {
         assert!(crate::shell::is_page_path("/s/claude/not-in-model"));
         for path in [
             "/api/model",
+            "/api/analytics",
             "/viewer.js",
             "/viewer.css",
             "/nonexistent.txt",
@@ -4086,6 +4087,235 @@ mod tests {
         );
         assert_eq!(core.respond("GET", "/api/tx", "sid=same", None).status, 409);
         assert_eq!(core.respond("GET", "/s/claude/same", "", None).status, 404);
+        assert_eq!(
+            core.respond("GET", "/api/analytics", "range=7d", None)
+                .status,
+            409
+        );
+    }
+
+    /// `ms` (epoch ms, UTC) as RFC 3339, as the logs write it.
+    fn iso(ms: i64) -> String {
+        let days = ms.div_euclid(86_400_000);
+        let of_day = ms.rem_euclid(86_400_000);
+        // Civil from days (Howard Hinnant's algorithm).
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + i64::from(month <= 2);
+        format!(
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+            of_day / 3_600_000,
+            of_day / 60_000 % 60,
+            of_day / 1000 % 60,
+            of_day % 1000
+        )
+    }
+
+    const MINUTE: i64 = 60_000;
+    const DAY: i64 = 86_400_000;
+
+    /// A machine whose model keeps its default day (`all` off), with a
+    /// session per `(id, how long ago it started, minutes it ran)`: your
+    /// message, then a reply that many minutes later.
+    fn dated(host: &str, now: i64, sessions: &[(&str, i64, i64)]) -> Fixture {
+        let mut fixture = Fixture::new();
+        fixture.options.all = false;
+        fixture.write("proc/sys/kernel/hostname", &format!("{host}\n"));
+        for (sid, ago, minutes) in sessions {
+            let start = now - ago;
+            fixture.claude(
+                sid,
+                &[
+                    json!({"type":"user","timestamp":iso(start),"sessionId":sid,"origin":{"kind":"human"},
+                        "message":{"role":"user","content":format!("work on {sid}")}}),
+                    json!({"type":"assistant","timestamp":iso(start + minutes * MINUTE),"sessionId":sid,
+                        "message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}),
+                ],
+            );
+        }
+        fixture
+    }
+
+    fn analytics_of(core: &ViewerCore, query: &str) -> Value {
+        let reply = core.respond("GET", "/api/analytics", query, None);
+        assert_eq!(
+            reply.status,
+            200,
+            "{query}: {}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        assert_eq!(reply.content_type, "application/json; charset=utf-8");
+        body_of(&reply)
+    }
+
+    /// #102: Analytics' 7 d and 30 d reach past the model's day. The model
+    /// leaves out a session from five days ago; the week counts it, and the
+    /// month counts one from twenty days ago too. The week before counts one
+    /// from ten days ago.
+    #[test]
+    fn analytics_ranges_count_what_the_models_day_leaves_out() {
+        let now = model::now_ms();
+        let fixture = dated(
+            "testbox",
+            now,
+            &[
+                ("today", 60 * MINUTE, 2),
+                ("older", 5 * DAY, 10),
+                ("before", 10 * DAY, 3),
+                ("month", 20 * DAY, 4),
+            ],
+        );
+        let core = ViewerCore::new(fixture.options.clone());
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        assert!(model["sessions"].get("today").is_some());
+        assert!(model["sessions"].get("older").is_none(), "{model}");
+        let day = analytics_of(&core, "range=24h");
+        let week = analytics_of(&core, "range=7d");
+        let month = analytics_of(&core, "range=30d");
+        for (answer, range, started, minutes) in [
+            (&day, "24h", 1, 2),
+            (&week, "7d", 2, 12),
+            (&month, "30d", 4, 19),
+        ] {
+            assert_eq!(answer["range"], range);
+            assert_eq!(answer["version"], model["version"], "{range}");
+            assert_eq!(answer["current"]["started"], started, "{range}");
+            assert_eq!(answer["current"]["turns"], started, "{range}");
+            assert_eq!(answer["current"]["agent_ms"], minutes * MINUTE, "{range}");
+        }
+        assert!(week["sessions"].get("older").is_some());
+        assert!(day["sessions"].get("older").is_none());
+        let busy: Vec<&str> = week["top"]["busy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["sid"].as_str().unwrap())
+            .collect();
+        assert_eq!(busy, ["older", "today"]);
+        // The previous period: the 7 days before the week hold `before`.
+        assert_eq!(week["previous"]["started"], 1);
+        assert_eq!(week["previous"]["agent_ms"], 3 * MINUTE);
+        assert_eq!(day["previous"]["started"], 0);
+        assert_eq!(month["previous"]["started"], 0);
+        assert_eq!(week["facets"]["machine"], json!(["testbox"]));
+    }
+
+    #[test]
+    fn analytics_refuses_anything_but_a_range_and_the_filters() {
+        let fixture = dated("testbox", model::now_ms(), &[("today", 60 * MINUTE, 2)]);
+        let core = ViewerCore::new(fixture.options.clone());
+        for query in [
+            "",
+            "range=1d",
+            "range=7d&range=7d",
+            "range=7d&range=30d",
+            "range=7d&extra=1",
+            "range=7d&machine=",
+            "range=7d&repo=%zz",
+            "repo=harbor",
+            "range=7d&",
+        ] {
+            let reply = core.respond("GET", "/api/analytics", query, None);
+            assert_eq!(reply.status, 400, "{query:?}");
+            assert_eq!(reply.etag, None);
+        }
+        assert_eq!(
+            core.respond("POST", "/api/analytics", "range=7d", None)
+                .status,
+            405
+        );
+        assert!(!crate::shell::is_page_path("/api/analytics"));
+    }
+
+    /// A poll with the answer's `ETag` is a 304 until the logs change; then
+    /// the answer is computed again, once, and has a new `ETag`.
+    #[test]
+    fn analytics_polls_are_304_until_the_logs_change() {
+        let now = model::now_ms();
+        let fixture = dated("testbox", now, &[("today", 30 * MINUTE, 2)]);
+        let core = ViewerCore::new(fixture.options.clone());
+        let first = core.respond("GET", "/api/analytics", "range=7d", None);
+        assert_eq!(first.status, 200);
+        let etag = first.etag.clone().expect("an ETag");
+        let again = core.respond("GET", "/api/analytics", "range=7d", Some(&etag));
+        assert_eq!((again.status, again.body.len()), (304, 0));
+        assert_eq!(again.etag.as_deref(), Some(etag.as_str()));
+        // Another range, or other filters, is another answer.
+        let month = core.respond("GET", "/api/analytics", "range=30d", Some(&etag));
+        assert_eq!(month.status, 200);
+        assert_ne!(month.etag.as_deref(), Some(etag.as_str()));
+        let path = fixture.root.join("claude/projects/project/today.jsonl");
+        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"assistant","timestamp":iso(now - 26 * MINUTE),"sessionId":"today",
+                "message":{"role":"assistant","content":[{"type":"text","text":"later"}]}})
+        )
+        .unwrap();
+        drop(file);
+        let moved = eventually("a new answer after the logs changed", || {
+            let reply = core.respond("GET", "/api/analytics", "range=7d", Some(&etag));
+            (reply.status == 200).then_some(reply)
+        });
+        let answer = body_of(&moved);
+        // The busy interval now runs to the new line, 26 minutes ago.
+        assert_eq!(answer["current"]["agent_ms"], 4 * MINUTE);
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        assert_eq!(answer["version"], model["version"]);
+        let latest = moved.etag.clone().unwrap();
+        assert_eq!(
+            core.respond("GET", "/api/analytics", "range=7d", Some(&latest))
+                .status,
+            304
+        );
+    }
+
+    /// Across machines: every machine's sessions, each under its machine's
+    /// id, and the union's version.
+    #[test]
+    fn analytics_counts_every_machine_and_filters_by_one() {
+        let now = model::now_ms();
+        let alpha = dated("alpha", now, &[("a-old", 5 * DAY, 6)]);
+        let bravo = dated("bravo", now, &[("b-new", 60 * MINUTE, 2)]);
+        let core = ViewerCore::with_machines(vec![
+            ("a".into(), alpha.options.clone()),
+            ("b".into(), bravo.options.clone()),
+        ]);
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        let week = analytics_of(&core, "range=7d");
+        assert_eq!(week["version"], model["version"]);
+        assert_eq!(week["current"]["started"], 2);
+        assert_eq!(week["facets"]["machine"], json!(["alpha", "bravo"]));
+        let machines: Vec<&Value> = week["breakdown"]["machine"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|group| &group["machine"])
+            .collect();
+        assert_eq!(machines, [&json!("alpha"), &json!("bravo")]);
+        let bravo_only = analytics_of(&core, "range=7d&machine=bravo");
+        assert_eq!(bravo_only["current"]["started"], 1);
+        assert_eq!(bravo_only["current"]["agent_ms"], 2 * MINUTE);
+        let day = analytics_of(&core, "range=24h");
+        assert_eq!(day["current"]["started"], 1);
+        assert!(day["sessions"].get("a-old").is_none());
+        // One machine through `with_machines` answers as it does alone.
+        let alone = ViewerCore::with_machines(vec![("k".into(), alpha.options.clone())]);
+        let single = ViewerCore::new(alpha.options.clone());
+        let (a, b) = (
+            analytics_of(&alone, "range=30d"),
+            analytics_of(&single, "range=30d"),
+        );
+        assert_eq!(a["current"], b["current"]);
+        assert_eq!(a["version"], b["version"]);
+        assert_eq!(a["facets"]["machine"], json!(["alpha"]));
     }
 
     #[test]

@@ -336,6 +336,7 @@
   // What a route needs before it can draw: a session's page (the one holding a deep-linked turn), and its child work.
   // `signal` cancels what a navigation asked for when the reader goes elsewhere first.
   function load(r, signal) {
+    if (r.v === "analytics") return fetchAnalytics().then(() => { scheduleAnalytics(); }); // the range's answer, from the server
     if (r.v !== "session" || !SESS[r.id]) return null;
     const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
     if (TX[r.id] && !deep) return lenient(kids(r.id, signal));
@@ -954,7 +955,7 @@
       const g = el("div", "analytics-range"); g.setAttribute("role", "group"); g.setAttribute("aria-label", "Analytics range");
       for (const [days, label] of [[1, "24 h"], [7, "7 d"], [30, "30 d"]]) {
         const b = el("button", null, label); b.type = "button"; b.dataset.e = "analytics-range:" + days;
-        b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); }); g.append(b);
+        b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); refreshAnalytics(); }); g.append(b);
       }
       return g;
     }).el;
@@ -1786,62 +1787,86 @@
     syncLayoutPrefs(); syncBarLine(); renderNav(); if (!lanesKept) renderLanes(); renderDrawerAccount(); syncJump();
   }
 
-  // Analytics uses epoch milliseconds from the served model. While a session is still working, extend its last
-  // recorded busy interval to the model clock so the figures and charts include live work.
-  const MIN = 60000, HOUR = 60 * MIN;
-  const busyOf = (s) => { const iv = (s.busy ?? []).map(([a, b]) => [a, b]); if (s.state === "work" && iv.length) iv.at(-1)[1] = Math.max(iv.at(-1)[1], NOW); return iv; };
-
-  // Analytics is computed from the served model's sessions, busy intervals, turn index and handoffs.
-  // The model gives per-session aggregate tool counts, so (as in the approved mockup) those calls are attributed to session start.
-  const DAY_MS = 86400000;
-  const rangeMs = (days) => days * DAY_MS;
-  const inRange = (t, from, to) => Number.isFinite(t) && t >= from && t < to;
-  function analyticsSessions() {
-    return Object.values(SESS).map((s) => {
-      const startedAt = Number(s.start) || 0, calls = countOf(s, "calls") ?? 0;
-      const errors = countOf(s, "errors") ?? 0;
-      const turns = (TURNS[s.id] ?? []).filter(hasTurn);
-      return { s, id: s.id, startedAt, busy: busyOf(s),
-        turnEvents: turns.map((t) => Number.isFinite(t.at) ? t.at : Number.isFinite(t.start?.at) ? t.start.at : startedAt),
-        toolEvents: Array.from({ length: Math.max(0, calls) }, (_, i) => ({ at: startedAt, error: i < errors })) };
+  // ---- Analytics: the server computes each range (/api/analytics) -----------------------------------------------------------
+  // The model holds only its own window (a day), so the page asks the server for the range it shows: 24 h, 7 d or 30 d, with
+  // the filters. The answer has every figure, chart column and list the page draws, and the page does no range math. It is
+  // asked for when the page opens, when the range or a filter changes, after every model update (the server answers 304
+  // while nothing changed), and every 10 s while the page shows, as time moves the range. Answers are kept per range and
+  // filters, so switching back draws at once while the page asks again.
+  const MIN = 60000, HOUR = 60 * MIN, AN_EVERY = 10000, AN_KEEP = 8;
+  const AN = { answers: new Map(), inflight: null, again: false, timer: null, error: null };
+  function analyticsQuery() {
+    const q = ["range=" + (analyticsRange === 1 ? "24h" : analyticsRange + "d")];
+    // "No repo" is an empty repo; an unset filter isn't sent.
+    if (sessionFilters.repo) q.push("repo=" + (sessionFilters.repo === "__none__" ? "" : enc(sessionFilters.repo)));
+    for (const key of ["machine", "harness", "model"]) if (sessionFilters[key]) q.push(key + "=" + enc(sessionFilters[key]));
+    return q.join("&");
+  }
+  const analyticsData = () => AN.answers.get(analyticsQuery())?.data ?? null;
+  // One request at a time: a change while one is out asks again when it is back. Resolves true when the answer changed.
+  function fetchAnalytics() {
+    if (AN.inflight) { AN.again = true; return AN.inflight; }
+    const key = analyticsQuery(), kept = AN.answers.get(key);
+    const asked = fetch("/api/analytics?" + key, { credentials: "same-origin", headers: kept?.etag ? { "If-None-Match": kept.etag } : {} })
+      .then((r) => {
+        if (r.status === 304) return false;
+        if (r.status === 403) { ended(); return false; }
+        if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status });
+        const etag = r.headers.get("ETag");
+        return r.json().then((data) => {
+          AN.answers.delete(key); AN.answers.set(key, { etag, data });
+          while (AN.answers.size > AN_KEEP) AN.answers.delete(AN.answers.keys().next().value);
+          const changed = AN.error != null || kept?.etag !== etag; AN.error = null; return changed;
+        });
+      })
+      .catch((e) => { const changed = AN.error !== e.message; AN.error = e.message; return changed; });
+    AN.inflight = asked.then((changed) => {
+      AN.inflight = null;
+      if (!AN.again) return changed;
+      AN.again = false; return fetchAnalytics().then((more) => changed || more);
+    });
+    return AN.inflight;
+  }
+  // Asks again in 10 s, or in a little over a second when the answer came from an older model than the page has.
+  function scheduleAnalytics() {
+    clearTimeout(AN.timer); AN.timer = null;
+    if (route.v !== "analytics" || LIVE.ended || !visible()) return;
+    const data = analyticsData(), behind = data && LIVE.version && data.version !== LIVE.version;
+    AN.timer = setTimeout(refreshAnalytics, behind ? 1200 : AN_EVERY);
+  }
+  function refreshAnalytics() {
+    clearTimeout(AN.timer); AN.timer = null;
+    if (route.v !== "analytics") return Promise.resolve();
+    return fetchAnalytics().then((changed) => {
+      if (changed && route.v === "analytics" && rendered === route) {
+        if (viewerEl) LIVE.pending = true; // drawn when the sheet closes
+        else { const st = capture(); render(); restore(st); }
+      }
+      scheduleAnalytics();
     });
   }
-  function analyticsWaits() {
-    return H.filter((h) => h.kind === "toyou" && h.status === "wait" && SESS[h.from])
-      .map((h) => ({ sid: h.from, startAt: h.at, endAt: null }));
-  }
-  function busyMsIn(row, from, to) { return row.busy.reduce((sum, [a, b]) => sum + Math.max(0, Math.min(b, to) - Math.max(a, from)), 0); }
-  // Cost is served per UTC day (cost.by_day), so a window of hours can't be priced. Only whole UTC days count: the range's
-  // length in UTC days, ending with the UTC day `to` falls in (today, so far): today for 24 h, the last 7 or 30 UTC days
-  // otherwise. The previous period is the same rule on the range before it, so it is the whole days just before these.
-  function costSpan(from, to) {
-    const day = Math.floor(to / DAY_MS) * DAY_MS;
-    return [day - (analyticsRange - 1) * DAY_MS, day + DAY_MS];
-  }
-  const wholeDay = (day, a, b) => { const start = Date.parse(day + "T00:00:00.000Z"); return Number.isFinite(start) && start >= a && start + DAY_MS <= b; };
-  function sessionCostInRange(s, from, to) {
-    const [a, b] = costSpan(from, to), cost = s.cost ?? {}, unknown = new Set(), byDay = Object.entries(cost.by_day ?? {}).filter(([day]) => wholeDay(day, a, b));
-    if (byDay.length) for (const model of costMissing(cost)) unknown.add(model);
-    return { usd: unknown.size ? null : byDay.reduce((sum, [, amount]) => sum + (Number(amount) || 0), 0), unpriced_models: [...unknown], hasData: byDay.length > 0 };
-  }
-  function analyticsCost(rows, from, to) {
-    const unpriced = new Set(); let usd = 0, hasData = false;
-    for (const row of rows) {
-      const cost = sessionCostInRange(row.s, from, to); if (!cost.hasData) continue;
-      hasData = true; usd += Number(cost.usd) || 0; for (const model of cost.unpriced_models) unpriced.add(model);
-    }
-    return { usd: unpriced.size ? null : usd, unpriced_models: [...unpriced].sort(), hasData };
+  document.addEventListener("visibilitychange", () => { if (visible() && route.v === "analytics") refreshAnalytics(); else if (!visible()) { clearTimeout(AN.timer); AN.timer = null; } });
+  const nameOfSid = (A, sid) => SESS[sid]?.name ?? A.sessions[sid]?.name ?? sid;
+  const harnessOfSid = (A, sid) => SESS[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
+  // A session older than the model's window has no page to open: its row is text.
+  function sessionRow(A, sid, cls, value, onOpen) {
+    const open = !!SESS[sid], b = el(open ? "button" : "div", cls);
+    if (open) { b.type = "button"; b.addEventListener("click", onOpen); }
+    b.append(el("span", "session-name", nameOfSid(A, sid)), harnessName(harnessOfSid(A, sid), true), el("span", "session-value", value));
+    return b;
   }
   const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
   function matchesSessionFacets(s) { return Object.keys(sessionFilters).every((key) => !sessionFilters[key] || sessionFacetValue(s, key) === sessionFilters[key]); }
   // The four filters (Repo, Machine, Harness, Model) of Analytics and Sessions: one persistent control per page. A redraw
   // (`sync`) brings its option lists and selections up to date in place. A selected value that no session has now stays
   // selected, marked "(no sessions)", until the reader changes it.
+  // On Analytics the range's own values join the model's: a repo that worked last week is a choice there.
+  const rangeFacet = (key) => route.v !== "analytics" ? [] : (analyticsData()?.facets?.[key] ?? []).map((v) => v ?? "__none__");
   const FACETS = [
-    ["repo", "Repo", "All repos", () => [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "repo")))].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
-    ["machine", "Machine", "All machines", () => [...new Set(Object.values(SESS).map((s) => s.machine ?? ""))].sort(), (v) => MACHINE[v] ?? v],
-    ["harness", "Harness", "All harnesses", () => [...new Set(Object.values(SESS).map((s) => s.harness ?? ""))].sort(), (v) => HARNESS[v] ?? v],
-    ["model", "Model", "All models", () => [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "model")))].sort(), shortModel],
+    ["repo", "Repo", "All repos", () => [...new Set([...Object.values(SESS).map((s) => sessionFacetValue(s, "repo")), ...rangeFacet("repo")])].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
+    ["machine", "Machine", "All machines", () => [...new Set([...Object.values(SESS).map((s) => s.machine ?? ""), ...rangeFacet("machine")])].sort(), (v) => MACHINE[v] ?? v],
+    ["harness", "Harness", "All harnesses", () => [...new Set([...Object.values(SESS).map((s) => s.harness ?? ""), ...rangeFacet("harness")])].sort(), (v) => HARNESS[v] ?? v],
+    ["model", "Model", "All models", () => [...new Set([...Object.values(SESS).map((s) => sessionFacetValue(s, "model")), ...rangeFacet("model")])].sort(), shortModel],
   ];
   function renderFacetFilters(box, onChange) {
     const s = slot("facets", box, (ctx) => {
@@ -1868,146 +1893,115 @@
     });
     s.ctx.onChange = onChange; s.ctx.sync(); return s.el;
   }
-  function analyticsStats(rows, from, to) {
-    const relevant = rows.filter((r) => inRange(r.startedAt, from, to) || r.busy.some(([a, b]) => a < to && b > from));
-    const waits = analyticsWaits().filter((w) => rows.some((r) => r.id === w.sid) && w.startAt < to && (w.endAt ?? to) > from);
-    const durations = waits.map((w) => Math.max(0, Math.min(w.endAt ?? to, to) - Math.max(w.startAt, from))).filter((x) => x > 0).sort((a, b) => a - b);
-    const median = durations.length ? durations.length % 2 ? durations[(durations.length - 1) / 2] : (durations[durations.length / 2 - 1] + durations[durations.length / 2]) / 2 : 0;
-    const waitBy = new Map(); for (const w of waits) { const ms = Math.max(0, Math.min(w.endAt ?? to, to) - Math.max(w.startAt, from)); waitBy.set(w.sid, (waitBy.get(w.sid) ?? 0) + ms); }
-    const current = analyticsWaits().filter((w) => !w.endAt && rows.some((r) => r.id === w.sid)).map((w) => ({ ...w, ms: Math.max(0, NOW - w.startAt), s: SESS[w.sid] })).sort((a, b) => b.ms - a.ms);
-    const agentMs = relevant.reduce((sum, r) => sum + busyMsIn(r, from, to), 0);
-    const rangeCost = analyticsCost(rows, from, to), costUnknown = rangeCost.unpriced_models;
-    return { rows: relevant, agentMs, started: rows.filter((r) => inRange(r.startedAt, from, to)).length,
-      turns: rows.reduce((sum, r) => sum + r.turnEvents.filter((at) => inRange(at, from, to)).length, 0),
-      tools: rows.reduce((sum, r) => sum + r.toolEvents.filter((e) => inRange(e.at, from, to)).length, 0),
-      errors: rows.reduce((sum, r) => sum + r.toolEvents.filter((e) => inRange(e.at, from, to) && e.error).length, 0),
-      waitsMs: durations.reduce((sum, x) => sum + x, 0), medianWaitMs: median, longestWaitMs: durations.at(-1) ?? 0,
-      longestCurrent: current[0] ?? null, waitBy, costUnknown, apiCost: rangeCost.usd };
-  }
   const hoursText = (ms) => (ms / HOUR).toFixed(1) + " h", rangeName = () => analyticsRange === 1 ? "24 h" : analyticsRange + " d";
   function deltaNote(value, previous, format) {
     const delta = value - previous, note = el("div", "note");
     if (Math.abs(delta) < 1e-9) { note.textContent = "No change vs previous " + rangeName(); return note; }
     note.append(el("span", delta > 0 ? "up" : "down", (delta > 0 ? "+" : "−") + format(Math.abs(delta))), " vs previous " + rangeName()); return note;
   }
-  // The most sessions busy at one moment in [from, to): each session's intervals clipped and merged so it counts once, then
-  // a sweep over the sorted starts (+1) and ends (−1), ends first at a shared instant.
-  function peakBusy(rows, from, to) {
-    const events = [];
-    for (const r of rows) {
-      const iv = r.busy.map(([a, b]) => [Math.max(a, from), Math.min(b, to)]).filter(([a, b]) => a < b).sort((x, y) => x[0] - y[0]);
-      let cur = null;
-      for (const [a, b] of iv) { if (cur && a <= cur[1]) cur[1] = Math.max(cur[1], b); else { if (cur) events.push([cur[0], 1], [cur[1], -1]); cur = [a, b]; } }
-      if (cur) events.push([cur[0], 1], [cur[1], -1]);
-    }
-    events.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
-    let now = 0, best = 0; for (const [, d] of events) { now += d; if (now > best) best = now; } return best;
-  }
   function chartWidth() { const page = $("#page"), style = getComputedStyle(page); return Math.max(280, Math.round(page.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight))); }
   const niceStep = (max) => [.25, .5, 1, 2, 5, 10, 20, 50, 100, 200, 500].find((x) => x * 3 >= max) ?? 1000;
   const svgEl = (tag, attrs, text) => { const node = document.createElementNS(SVGNS, tag); for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value)); if (text != null) node.textContent = text; return node; };
   function timeText(ms) { const mins = Math.max(0, Math.round(ms / MIN)), days = Math.floor(mins / 1440), hours = Math.floor(mins % 1440 / 60), rem = mins % 60; return days ? days + "d " + hours + "h" : hours ? hours + "h " + rem + "m" : mins + "m"; }
   const countText = (n) => Math.round(n).toLocaleString(), hLabel = (n) => n ? +n.toFixed(2) + " h" : "0";
-  const agentBuckets = () => analyticsRange === 1 ? [24, "per hour"] : analyticsRange === 7 ? [28, "per 6 hours"] : [30, "per day"];
-  function renderAgentsChart(rows, from, to) {
-    const [count, unit] = agentBuckets(), span = (to - from) / count, panel = el("section", "analytics-panel");
+  const rangeAgo = (A) => A.days === 1 ? "24 h ago" : A.days + " d ago";
+  function renderAgentsChart(A) {
+    const columns = A.agents.columns, count = columns.length, unit = A.agents.unit, panel = el("section", "analytics-panel");
     panel.append(el("h2", null, "Agents at work"), el("div", "panel-sub", "Agent-hours " + unit + " · stacked by harness"));
-    const bins = Array.from({ length: count }, (_, i) => { const a = from + i * span, b = a + span, hrs = (h) => rows.filter((r) => r.s.harness === h).reduce((n, r) => n + busyMsIn(r, a, b), 0) / HOUR; return { a, b, claude: hrs("claude"), codex: hrs("codex") }; });
+    const bins = columns.map((c) => ({ a: c.from, b: c.to, claude: c.claude_ms / HOUR, codex: c.codex_ms / HOUR, sessions: c.sessions, more: c.more }));
     const W = chartWidth(), height = 190, left = 40, right = W - 4, top = 12, bottom = 151, most = Math.max(0, ...bins.map((x) => x.claude + x.codex)), stepY = niceStep(most || 1), max = Math.max(stepY, Math.ceil(most / stepY) * stepY);
     const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + height, role: "group", "aria-label": "Agent-hours " + unit + " over the selected range, stacked by harness" }), yOf = (n) => bottom - (bottom - top) * n / max;
     for (let n = 0; n <= max + 1e-9; n += stepY) svg.append(svgEl("line", { x1: left, x2: right, y1: yOf(n), y2: yOf(n), class: "gridline" }), svgEl("text", { x: 0, y: yOf(n) + 4, class: "axis-label" }, hLabel(n)));
-    const step = (right - left) / count, w = Math.max(2, step * .64);
+    const step = (right - left) / Math.max(1, count), w = Math.max(2, step * .64);
     bins.forEach((bin, i) => { const x = left + i * step + (step - w) / 2, ch = (bottom - top) * bin.claude / max, xh = (bottom - top) * bin.codex / max, total = bin.claude + bin.codex;
       if (ch) svg.append(svgEl("rect", { x, y: bottom - ch, width: w, height: ch, class: "cost-claude" })); if (xh) svg.append(svgEl("rect", { x, y: bottom - ch - xh, width: w, height: xh, class: "cost-codex" }));
       const label = clock(bin.a) + "–" + clock(bin.b) + ": " + hLabel(total), hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); hit.dataset.tip = label;
       if (total > 0) { hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", label + ". Open the sessions busy then"); }
-      const open = () => { if (total > 0) openAnalyticsSlice(bin.a, bin.b, rows.filter((r) => busyMsIn(r, bin.a, bin.b) > 0)); };
+      const open = () => { if (total > 0) openAnalyticsSlice(A, bin.a, bin.b, bin.sessions, bin.more); };
       hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
     });
-    svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, analyticsRange === 1 ? "24 h ago" : analyticsRange + " d ago"), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
+    svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart);
     const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend); return panel;
   }
-  function renderCostChart(rows, from, to) {
+  function renderCostChart(A) {
     const panel = el("section", "analytics-panel"), title = el("h2", null, "Cost over time"); title.append(costInfoTip());
     // Cost is recorded per UTC day: an hourly series would put a whole day into one hour.
-    if (analyticsRange === 1) { panel.append(title, el("p", "empty", "Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.")); return panel; }
-    const count = analyticsRange, unit = "per day"; panel.append(title, el("div", "panel-sub", "API-equivalent cost per UTC day · today so far · stacked by harness"));
-    const [spanFrom, spanTo] = costSpan(from, to), bins = Array.from({ length: count }, (_, i) => ({ a: spanFrom + i * DAY_MS, b: spanFrom + (i + 1) * DAY_MS, claude: 0, codex: 0, rows: [] })), unknown = new Set();
-    for (const row of rows) for (const [day, amount] of Object.entries(row.s.cost?.by_day ?? {})) {
-      if (!wholeDay(day, spanFrom, spanTo)) continue;
-      for (const model of costMissing(row.s.cost)) unknown.add(model);
-      const index = Math.round((Date.parse(day + "T00:00:00.000Z") - spanFrom) / DAY_MS), usd = Number(amount) || 0;
-      bins[index][row.s.harness] += usd; bins[index].rows.push({ row, usd, unpriced_models: costMissing(row.s.cost) });
-    }
+    if (!A.cost) { panel.append(title, el("p", "empty", "Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.")); return panel; }
+    const days = A.cost.days, count = days.length, unit = "per day"; panel.append(title, el("div", "panel-sub", "API-equivalent cost per UTC day · today so far · stacked by harness"));
+    const bins = days.map((d) => ({ a: d.from, b: d.to, claude: d.claude_usd, codex: d.codex_usd, sessions: d.sessions, more: d.more }));
     const W = chartWidth(), svg = svgEl("svg", { viewBox: "0 0 " + W + " 190", role: "img", "aria-label": "API-equivalent cost " + unit + ", stacked by harness" });
-    const left = 46, right = W - 4, top = 12, bottom = 151, max = Math.max(.01, ...bins.map((b) => b.claude + b.codex)), step = (right - left) / count;
+    const left = 46, right = W - 4, top = 12, bottom = 151, max = Math.max(.01, ...bins.map((b) => b.claude + b.codex)), step = (right - left) / Math.max(1, count);
     for (let n = 0; n <= 2; n++) { const y = bottom - (bottom - top) * n / 2; svg.append(svgEl("line", { x1: left, x2: right, y1: y, y2: y, class: "gridline" }), svgEl("text", { x: 0, y: y + 4, class: "axis-label" }, "$" + (max * n / 2).toFixed(2))); }
     bins.forEach((bin, i) => { const w = Math.max(2, step * .64), x = left + i * step + (step - w) / 2, ch = bin.claude / max * (bottom - top), xh = bin.codex / max * (bottom - top);
       if (ch) svg.append(svgEl("rect", { x, y: bottom - ch, width: w, height: ch, class: "cost-claude" })); if (xh) svg.append(svgEl("rect", { x, y: bottom - ch - xh, width: w, height: xh, class: "cost-codex" }));
-      const hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); if (bin.rows.length) { hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", clock(bin.a) + " to " + clock(bin.b) + ": " + asMoney(bin.claude + bin.codex)); }
-      const open = () => { if (bin.rows.length) openAnalyticsSlice(bin.a, bin.b, bin.rows, true); }; hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
+      const hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); if (bin.sessions.length) { hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", clock(bin.a) + " to " + clock(bin.b) + ": " + asMoney(bin.claude + bin.codex)); }
+      const open = () => { if (bin.sessions.length) openAnalyticsSlice(A, bin.a, bin.b, bin.sessions, bin.more, true); }; hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
     });
-    svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, analyticsRange === 1 ? "24 h ago" : analyticsRange + " d ago"), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
+    svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart); const legend = el("div", "analytics-legend");
     for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend);
-    if (unknown.size) panel.append(el("div", "no-price", "no price for " + [...unknown].join(", ") + "; unpriced usage is omitted from bars.")); return panel;
+    if (A.cost.unpriced_models.length) panel.append(el("div", "no-price", "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars.")); return panel;
   }
-  function renderCodexAllowance() {
-    const latest = Object.values(SESS).filter((s) => s.harness === "codex" && s.rate_limits?.recorded_at != null).sort((a, b) => b.rate_limits.recorded_at - a.rate_limits.recorded_at)[0]; if (!latest) return null;
-    const limits = latest.rate_limits, panel = el("section", "analytics-panel"), grid = el("div", "allowance-grid"); panel.append(el("h2", null, "Codex allowance"), el("div", "panel-sub", "Latest recorded rate limits · " + new Date(limits.recorded_at).toLocaleString([], { hour: "numeric", minute: "2-digit" })));
+  function renderCodexAllowance(limits) {
+    if (!limits || limits.recorded_at == null) return null;
+    const panel = el("section", "analytics-panel"), grid = el("div", "allowance-grid"); panel.append(el("h2", null, "Codex allowance"), el("div", "panel-sub", "Latest recorded rate limits · " + new Date(limits.recorded_at).toLocaleString([], { hour: "numeric", minute: "2-digit" })));
     for (const limit of limits.windows ?? []) { const label = limit.minutes === 300 ? "5-hour window" : limit.minutes === 10080 ? "Weekly window" : limit.minutes + "-minute window", box = el("div", "allowance-window");
       box.append(el("div", "window-name", label), el("div", "window-used", limit.used_percent + "% used"), el("div", "window-reset", "Resets " + new Date(limit.resets_at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))); grid.append(box); }
     if (!grid.childElementCount) return null; panel.append(grid); return panel;
   }
-  function openAnalyticsSlice(a, b, active, costMode = false) {
+  // A chart column's sessions, as the server listed them (most first); `more` counts those it left out.
+  function openAnalyticsSlice(A, a, b, items, more, costMode = false) {
     const d = el("dialog", "viewer analytics-slice"), head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose"), when = new Date(a).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) + "–" + new Date(b).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), heading = costMode ? "Sessions with cost" : "Sessions busy";
     d.setAttribute("aria-label", heading + " " + when); title.append(el("span", null, heading + " · " + when)); close.type = "button"; close.setAttribute("aria-label", "Close sessions list"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
-    const body = el("div", "vb"), list = el("div", "analytics-list"); if (!active.length) body.append(el("p", "empty", costMode ? "No sessions had a recorded cost then." : "No sessions were busy then."));
-    const rows = costMode ? active.map((entry) => ({ r: entry.row, usd: entry.usd, unpriced_models: entry.unpriced_models })) : active.map((r) => ({ r, ms: busyMsIn(r, a, b) }));
-    rows.sort((x, y) => costMode ? y.usd - x.usd || x.r.s.name.localeCompare(y.r.s.name) : y.ms - x.ms || x.r.s.name.localeCompare(y.r.s.name));
-    for (const row of rows) { const s = row.r.s, item = el("button", "analytics-session analytics-slice"); item.type = "button"; item.append(el("span", "session-name", s.name), harnessName(s.harness, true), el("span", "session-value", costMode ? asMoney(row.usd) : timeText(row.ms) + " busy")); if (costMode && row.unpriced_models.length) item.append(el("span", "no-price", "no price for " + row.unpriced_models.join(", "))); item.addEventListener("click", () => { pendingSessionOpen = s.id; d.close(); }); list.append(item); }
-    if (active.length) body.append(list); d.append(head, body); document.body.append(d); d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
+    const body = el("div", "vb"), list = el("div", "analytics-list"); if (!items.length) body.append(el("p", "empty", costMode ? "No sessions had a recorded cost then." : "No sessions were busy then."));
+    for (const item of items) {
+      const row = sessionRow(A, item.sid, "analytics-session analytics-slice", costMode ? asMoney(item.usd) : timeText(item.ms) + " busy", () => { pendingSessionOpen = item.sid; d.close(); });
+      if (costMode && item.unpriced_models.length) row.append(el("span", "no-price", "no price for " + item.unpriced_models.join(", "))); list.append(row);
+    }
+    if (more) list.append(el("p", "empty", "and " + more + " more"));
+    if (items.length) body.append(list); d.append(head, body); document.body.append(d); d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
   }
-  function analyticsBreakdown(title, rows, from, to, groupKey) {
-    const groups = new Map(), keyFor = (s) => groupKey === "repo" ? s.repo ?? "__none__" : groupKey === "machine" ? s.machine : s.harness + "\u0000" + (s.model ?? s.modelId ?? "Unknown model");
+  // The server's groups: repo (null for none), machine, or harness and model, each with its busy time, cost and sessions.
+  function analyticsBreakdown(title, groups, groupKey) {
+    const keyFor = (g) => groupKey === "repo" ? g.repo ?? "__none__" : groupKey === "machine" ? g.machine : g.harness + "\u0000" + g.model;
     const labelFor = (key) => groupKey === "repo" ? key === "__none__" ? "No repo (roles)" : key : groupKey === "machine" ? MACHINE[key] ?? key : (HARNESS[key.split("\u0000")[0]] ?? key.split("\u0000")[0]) + " · " + shortModel(key.split("\u0000")[1]);
-    for (const row of rows) { const ms = busyMsIn(row, from, to), c = sessionCostInRange(row.s, from, to); if (!ms && !inRange(row.startedAt, from, to) && !c.hasData) continue; const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);
-      if (c.hasData) { g.cost += Number(c.usd) || 0; c.unpriced_models.forEach((x) => g.unknown.add(x)); } groups.set(key, g); }
-    const selected = (x) => analyticsMeasure === "cost" ? x.cost : x.ms, items = [...groups.values()].sort((a, b) => selected(b) - selected(a) || labelFor(a.key).localeCompare(labelFor(b.key))), max = Math.max(1, ...items.map(selected));
+    const selected = (x) => analyticsMeasure === "cost" ? x.cost : x.ms, items = groups.map((g) => ({ key: keyFor(g), ms: g.ms, cost: g.usd, unknown: g.unpriced_models, sessions: g.sessions })).sort((a, b) => selected(b) - selected(a) || labelFor(a.key).localeCompare(labelFor(b.key))), max = Math.max(1, ...items.map(selected));
     const panel = el("section", "analytics-panel"); panel.append(el("h3", null, title)); const list = el("div", "analytics-list");
-    for (const item of items) { const b = el("button", "analytics-row"); b.type = "button"; b.append(el("span", "row-title", labelFor(item.key)), el("span", "row-count", item.sessions.size + (item.sessions.size === 1 ? " session" : " sessions")));
+    for (const item of items) { const b = el("button", "analytics-row"); b.type = "button"; b.append(el("span", "row-title", labelFor(item.key)), el("span", "row-count", item.sessions + (item.sessions === 1 ? " session" : " sessions")));
       const measure = selected(item), track = el("span", "row-track"), bar = el("i", "row-bar"); bar.style.width = Math.max(measure ? 2 : 0, measure / max * 100) + "%"; if (groupKey === "harness") bar.style.background = item.key.startsWith("claude") ? "var(--claude)" : "var(--codex)"; track.append(bar);
-      b.append(track, el("span", "row-hours" + (analyticsMeasure === "hours" ? " on" : ""), hoursText(item.ms)), el("span", "row-cost" + (analyticsMeasure === "cost" ? " on" : ""), item.unknown.size ? "—" : asMoney(item.cost))); if (item.unknown.size) b.append(el("span", "no-price", "no price for " + [...item.unknown].join(", ")));
+      b.append(track, el("span", "row-hours" + (analyticsMeasure === "hours" ? " on" : ""), hoursText(item.ms)), el("span", "row-cost" + (analyticsMeasure === "cost" ? " on" : ""), item.unknown.length ? "—" : asMoney(item.cost))); if (item.unknown.length) b.append(el("span", "no-price", "no price for " + item.unknown.join(", ")));
       b.dataset.breakdown = groupKey; b.dataset.key = item.key;
       b.addEventListener("click", () => { if (groupKey === "repo") sessionFilters.repo = item.key; else if (groupKey === "machine") sessionFilters.machine = item.key; else { const [harness, model] = item.key.split("\u0000"); sessionFilters.harness = harness; sessionFilters.model = model; } query = ""; groupBy = "recent"; go({ v: "sessions" }); }); list.append(b); }
     if (!items.length) list.append(el("p", "empty", "No activity in this range.")); panel.append(list); return panel;
   }
-  function analyticsList(title, items, value) {
+  function analyticsList(A, title, items, value) {
     const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title)); const list = el("div", "analytics-list"); if (!items.length) list.append(el("p", "empty", "No sessions in this range."));
-    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(el("span", "session-name", s.name), harnessName(s.harness, true), el("span", "session-value", value(item))); const missing = item.cost?.unpriced_models ?? []; if (missing.length) b.append(el("span", "no-price", "no price for " + missing.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); } panel.append(list); return panel;
+    for (const item of items) { const b = sessionRow(A, item.sid, "analytics-session", value(item), () => goSession(item.sid)); const missing = item.unpriced_models ?? []; if (missing.length) b.append(el("span", "no-price", "no price for " + missing.join(", "))); list.append(b); } panel.append(list); return panel;
   }
   function renderAnalytics(page) {
-    const all = analyticsSessions().filter((row) => matchesSessionFacets(row.s)), to = NOW, from = to - rangeMs(analyticsRange), now = analyticsStats(all, from, to), previous = analyticsStats(all, from - rangeMs(analyticsRange), from);
+    const A = analyticsData();
     const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days")));
-    const put = placer(page); put(head); observeTitle(h1); put(renderFacetFilters(page, () => render()));
+    const put = placer(page); put(head); observeTitle(h1); put(renderFacetFilters(page, () => { render(); refreshAnalytics(); }));
+    // Until the range's answer is here (the first time a range or filter is asked for), the page says so.
+    if (!A) { const wait = el("p", "empty", AN.error ? "Couldn't load Analytics: " + AN.error : "Loading…"); wait.setAttribute("role", "status"); put(wait); put.done(); return; }
+    const now = A.current, previous = A.previous;
     // A card with an explanation carries it for a screen reader all the time (hidden text, its description); the tooltip shows it to a pointer,
     // and the card takes keyboard focus so the tooltip is reachable.
     const metrics = el("div", "analytics-metrics"), addMetric = (label, value, note, more, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label"); l.append(el("span", null, label)); if (tip) l.append(costInfoTip()); if (more) { const note = el("span", "sr-only"); note.textContent = more; note.id = "metric-more-" + (++metricSeq); m.dataset.more = ""; m.dataset.tip = more; m.tabIndex = 0; m.setAttribute("aria-describedby", note.id); m.append(note); } m.append(l, el("div", "value", value), note); metrics.append(m); }, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
-    addMetric("Agent-hours", hoursText(now.agentMs), deltaNote(now.agentMs, previous.agentMs, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
-    const costNote = now.apiCost == null || previous.apiCost == null ? el("div", "note", "no price for " + [...new Set([...now.costUnknown, ...previous.costUnknown])].join(", ")) : deltaNote(now.apiCost, previous.apiCost, asMoney);
-    addMetric(analyticsRange === 1 ? "Cost today (UTC)" : "Cost, last " + analyticsRange + " UTC days", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, analyticsRange === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + analyticsRange + " UTC days count, today so far, compared with the " + analyticsRange + " whole UTC days before.", true);
+    addMetric("Agent-hours", hoursText(now.agent_ms), deltaNote(now.agent_ms, previous.agent_ms, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
+    const costNote = now.cost.usd == null || previous.cost.usd == null ? el("div", "note", "no price for " + [...new Set([...now.cost.unpriced_models, ...previous.cost.unpriced_models])].join(", ")) : deltaNote(now.cost.usd, previous.cost.usd, asMoney);
+    addMetric(A.days === 1 ? "Cost today (UTC)" : "Cost, last " + A.days + " UTC days", now.cost.usd == null ? "—" : asMoney(now.cost.usd), costNote, A.days === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + A.days + " UTC days count, today so far, compared with the " + A.days + " whole UTC days before.", true);
     addMetric("Sessions started", countText(now.started), deltaNote(now.started, previous.started, countText)); addMetric("Turns", countText(now.turns), deltaNote(now.turns, previous.turns, countText));
-    const toolNote = deltaNote(now.tools, previous.tools, countText), unavailable = all.filter((r) => !r.s.stub && countOf(r.s, "calls") == null).length;
+    const toolNote = deltaNote(now.tools, previous.tools, countText), unavailable = A.calls_unknown;
     if (unavailable) toolNote.append(" · — for " + unavailable + (unavailable === 1 ? " session" : " sessions"));
     addMetric("Tool calls", countText(now.tools), toolNote, countText(now.errors) + " failed (" + pct(now.errors, now.tools) + ") · previous " + rangeName() + ": " + countText(previous.errors) + " failed (" + pct(previous.errors, previous.tools) + ")");
-    const peak = peakBusy(all, from, to), peakBefore = peakBusy(all, from - rangeMs(analyticsRange), from);
-    addMetric("Peak concurrency", countText(peak), deltaNote(peak, peakBefore, countText), "The most sessions busy at the same moment.");
-    addMetric("Waited on you", timeText(now.waitsMs), deltaNote(now.waitsMs, previous.waitsMs, timeText), "Median wait " + timeText(now.medianWaitMs) + " · previous " + rangeName() + ": " + timeText(previous.medianWaitMs));
-    const currentWait = now.longestCurrent; addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longestWaitMs, timeText), currentWait ? currentWait.s.name + " has waited on you for " + timeText(currentWait.ms) : "No session is waiting on you"); put(metrics);
-    const breakdowns = el("div", "analytics-breakdowns"); breakdowns.append(analyticsBreakdown("By repo", all, from, to, "repo"), analyticsBreakdown("By machine", all, from, to, "machine"), analyticsBreakdown("By harness and model", all, from, to, "harness"));
+    addMetric("Peak concurrency", countText(now.peak), deltaNote(now.peak, previous.peak, countText), "The most sessions busy at the same moment.");
+    addMetric("Waited on you", timeText(now.wait_ms), deltaNote(now.wait_ms, previous.wait_ms, timeText), "Median wait " + timeText(now.median_wait_ms) + " · previous " + rangeName() + ": " + timeText(previous.median_wait_ms));
+    const currentWait = A.longest_current_wait; addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longest_wait_ms, timeText), currentWait ? nameOfSid(A, currentWait.sid) + " has waited on you for " + timeText(currentWait.ms) : "No session is waiting on you"); put(metrics);
+    const breakdowns = el("div", "analytics-breakdowns"); breakdowns.append(analyticsBreakdown("By repo", A.breakdown.repo, "repo"), analyticsBreakdown("By machine", A.breakdown.machine, "machine"), analyticsBreakdown("By harness and model", A.breakdown.model, "harness"));
     // The breakdown's heading and its measure toggle: a persistent control (the toggle's state is the page's).
     const bdHead = slot("measure", page, () => {
       const bar = el("div", "analytics-bd-head"), title = el("div"), toggle = el("div", "analytics-measure"); title.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Agent-hours and API-equivalent cost; bars follow the toggle"));
@@ -2016,10 +2010,11 @@
       bar.append(title, toggle); return bar;
     }).el;
     for (const b of bdHead.querySelectorAll(".analytics-measure button")) b.setAttribute("aria-pressed", String(analyticsMeasure === b.dataset.measure));
-    const busyTop = [...all].map((r) => ({ ...r, value: busyMsIn(r, from, to) })).filter((r) => r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5), waitTop = [...now.waitBy].map(([id, ms]) => ({ s: SESS[id], id, value: ms })).filter((r) => r.s && r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5);
-    const costTop = all.map((r) => { const cost = sessionCostInRange(r.s, from, to); return { ...r, cost, value: cost.usd }; }).filter((r) => r.cost.hasData).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5), bottom = el("div", "analytics-split");
-    bottom.append(analyticsList("Top sessions · busy time", busyTop, (x) => timeText(x.value)), analyticsList("Top sessions · waited on", waitTop, (x) => timeText(x.value)), analyticsList("Most expensive sessions · API-equivalent cost", costTop, (x) => x.value == null ? "—" : asMoney(x.value)));
-    put(renderAgentsChart(all, from, to), renderCostChart(all, from, to), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(); if (allowance) put(allowance); metrics.dataset.analyticsReady = ""; // data-analytics-ready: the figures and charts are drawn (a stable hook for the budget check);
+    const bottom = el("div", "analytics-split");
+    bottom.append(analyticsList(A, "Top sessions · busy time", A.top.busy, (x) => timeText(x.ms)), analyticsList(A, "Top sessions · waited on", A.top.waited, (x) => timeText(x.ms)), analyticsList(A, "Most expensive sessions · API-equivalent cost", A.top.cost, (x) => x.usd == null ? "—" : asMoney(x.usd)));
+    put(renderAgentsChart(A), renderCostChart(A), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(A.allowance); if (allowance) put(allowance);
+    // data-analytics-ready: the figures and charts are drawn (a stable hook for the budget check); data-query: for which range and filters.
+    metrics.dataset.analyticsReady = ""; metrics.dataset.query = analyticsQuery();
     put.done();
   }
 
@@ -2159,7 +2154,7 @@
     for (const sid of view) if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
     else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.reload) full = true; })));
     if (route.v === "session" && TX[route.id]) chain = chain.then(() => newKids(route.id, grown));
-    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); const e = errorsLive(); return e && soft(e); });
+    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
   }
   // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), those
   // whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw them all.
