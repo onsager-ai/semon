@@ -108,7 +108,8 @@ export default async function barCheck(browser) {
       // On a phone a session's line of labels is not drawn (its state is the dot before the title); it stays in the page, undisplayed.
       const l2 = bar.querySelector(".meta-line"), l2Shown = !!l2 && getComputedStyle(l2).display !== "none", lead = bar.querySelector(".l1-state");
       const sessionMeta = l2Shown && !!l2.querySelector(".lab.state") && !!bar.querySelector("#more-btn");
-      const phoneRow = bar.classList.contains("session-bar") ? { phone, l2Shown, leadShown: !!lead && getComputedStyle(lead).display !== "none", dot: !!lead?.querySelector(".dot[role=img]"), tip: lead?.dataset.tip ?? null, h: Math.round(br.height * 10) / 10 } : null;
+      const crumb = bar.querySelector(".l1 .crumb"), lb = lead?.getBoundingClientRect(), cb = crumb?.getBoundingClientRect();
+      const phoneRow = bar.classList.contains("session-bar") ? { phone, chevW: cb ? Math.round(cb.width) : null, leadW: lb ? Math.round(lb.width) : null, leadH: lb ? Math.round(lb.height) : null, l2Shown, leadShown: !!lead && getComputedStyle(lead).display !== "none", dot: !!lead?.querySelector(".dot[role=img]"), tip: lead?.dataset.tip ?? null, h: Math.round(br.height * 10) / 10 } : null;
       // A segmented control's buttons are drawn 24px tall on purpose; their tap target is the ::before box, so that is what counts here.
       const segmentHit = (x) => { if (!x.closest(".analytics-range")) return null; const p = getComputedStyle(x, "::before"), h = x.getBoundingClientRect().height, top = parseFloat(p.top), bottom = parseFloat(p.bottom); return Number.isFinite(top) && Number.isFinite(bottom) ? h - top - bottom : h; };
       // Every control in the bar is at least the tap size (36 px, 44 on a phone). A crumb is link text with a padded hit area.
@@ -134,7 +135,7 @@ export default async function barCheck(browser) {
       if (c.l2) { R.l2Pages++; if (!c.l2.oneLine) R.l2NotOneLine.push(name + ":" + c.l2.h); if (c.l2.overflows) R.l2Overflowing++; if (c.l2.sessionMeta) R.sessionMetaPages++; }
       const pr = c.phoneRow;
       if (pr) {
-        if (pr.phone) { if (pr.l2Shown || !pr.leadShown || !pr.dot || !/^Status: /.test(pr.tip ?? "") || pr.h > 57.5) R.metaFailures.push(name + ": a phone's session bar is not one row (line hidden, state dot before the title with its tip, at most 57.5 px): " + JSON.stringify(pr)); }
+        if (pr.phone) { if (pr.l2Shown || !pr.leadShown || !pr.dot || !/^Status: /.test(pr.tip ?? "") || pr.h > 57.5 || pr.leadW < 32 || pr.leadH < 32 || (pr.chevW != null && (pr.chevW < 44 || pr.chevW > 48))) R.metaFailures.push(name + ": a phone's session bar is not one row (line hidden, state dot at least 32 px before the title with its tip, a 44-48 px back chevron, at most 57.5 px): " + JSON.stringify(pr)); }
         else if (pr.leadShown || !pr.l2Shown) R.metaFailures.push(name + ": a desktop's session bar shows the phone's state dot or hides its line: " + JSON.stringify(pr));
       }
       const mf = c.metaFacts;
@@ -271,10 +272,13 @@ export default async function barCheck(browser) {
       const errSid = sids.find((s) => (D.TX[s] ?? []).some((e) => e.k === "tool" && e.ok === false));
       r.expect(!!errSid, "no session with a failed tool call to test the Failed steps chip on");
       if (errSid) {
-        await goto(page, { v: "session", id: errSid }, D); await page.click("#find-btn");
+        await goto(page, { v: "session", id: errSid }, D);
+        // On a phone the line is not drawn: the ⋯ menu's errors item carries the count.
+        let menuLabel = null; if (phone) { await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu[open]"); menuLabel = await page.evaluate(() => document.querySelector("dialog.session-menu .menu-errors > span:not(.dot):not(.menu-note)")?.textContent ?? null); await page.keyboard.press("Escape"); await page.waitForTimeout(150); }
+        await page.click("#find-btn");
         const badge = await page.evaluate(() => (document.querySelector('.find-chips .chip[data-filter="failures"] .n')?.textContent ?? "") + " errors");
         await page.click('.find-chips .chip[data-filter="failures"]'); await page.waitForTimeout(700);
-        out.errsJump = { session: D.SESS[errSid].name, badge, ...(await page.evaluate(() => { const e = document.querySelector("#page .step.err-current"), r = e?.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect(); return { label: document.querySelector("#topbar .errnav-count")?.textContent ?? null, marked: !!e?.classList.contains("err"), expanded: e?.querySelector("button")?.getAttribute("aria-expanded") ?? null, inView: !!r && r.top >= bar.bottom - 1 && r.top < innerHeight, menu: !!document.querySelector("dialog[open]") }; })) };
+        out.errsJump = { session: D.SESS[errSid].name, badge, menuLabel, ...(await page.evaluate(() => { const e = document.querySelector("#page .step.err-current"), r = e?.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect(); return { label: document.querySelector("#topbar .errnav-count")?.textContent ?? null, marked: !!e?.classList.contains("err"), expanded: e?.querySelector("button")?.getAttribute("aria-expanded") ?? null, inView: !!r && r.top >= bar.bottom - 1 && r.top < innerHeight, menu: !!document.querySelector("dialog[open]") }; })) };
         await page.keyboard.press("Escape"); await page.waitForTimeout(300); out.errsJump.closed = await page.evaluate(() => !!document.querySelector("#topbar .find-row") && !document.querySelector("#topbar .errnav-count"));
       }
       // The "N failed" label enters errors mode too, and Escape puts focus back on it; a search typed before the mode opens is cleared;
@@ -405,9 +409,13 @@ export default async function barCheck(browser) {
     await goto(page, { v: "session", id: "harbor" }, D);
     await page.click("#more-btn"); await page.waitForFunction(() => document.querySelector("dialog.session-menu")?.open === true);
     const runs = await page.evaluate(() => { const box = document.querySelector("dialog.session-menu .runs"); return { open: !!box, rows: box?.querySelectorAll(".run-row").length ?? 0, shown: [...(box?.querySelectorAll(".run-row") ?? [])].filter((x) => !x.hidden).length, nested: box?.querySelectorAll(".run-row.depth1").length ?? 0, costs: box?.querySelectorAll(".run-row .v").length ?? 0, apiLabel: document.querySelector("dialog.session-menu .cost")?.textContent.includes("API rates") ?? false }; });
-    await page.keyboard.press("Escape");
+    // On a phone the line is not drawn, so the ⋯ menu's Runs item takes you to the list (and Escape returns focus to ⋯).
+    const runsViaMenu = size === "phone" ? await page.locator("dialog.session-menu .menu-runs").isVisible() : null; let runsFocus = null;
+    if (runsViaMenu) { await page.locator("dialog.session-menu .menu-runs").click(); runsFocus = await page.evaluate(() => { const runs = document.querySelector("dialog.session-menu .runs"), body = document.querySelector("dialog.session-menu .panel-b"), a = runs.getBoundingClientRect(), b = body.getBoundingClientRect(); return a.top >= b.top - 1 && a.top < b.bottom ? "in view" : "not in view"; }); }
+    await page.keyboard.press("Escape"); await page.waitForTimeout(150);
+    const focusAfter = await page.evaluate(() => document.activeElement?.id ?? document.activeElement?.tagName ?? null);
     const expectedRuns = Object.values(D.SESS).filter((s) => { let p = parentOf(s.id); while (p && p !== "harbor") p = parentOf(p); return p === "harbor"; }).length;
-    childAssertions.push({ size, introActions, pathNames, expectedPath, pathOk, crumbOpens, briefCard, openedParent, returnRow, returnParent, siblingNav, runs, expectedRuns });
+    childAssertions.push({ size, introActions, pathNames, expectedPath, pathOk, crumbOpens, briefCard, openedParent, returnRow, returnParent, siblingNav, runs, runsViaMenu, runsFocus, focusAfter, expectedRuns });
     await page.context().close();
   }
 
@@ -421,7 +429,7 @@ export default async function barCheck(browser) {
     r.expect(child.siblingNav.nav === 0 && child.siblingNav.buttons === 0 && !child.siblingNav.count, child.size + ": a child session still shows previous/next sibling controls or an \"N of M\" count: " + JSON.stringify(child.siblingNav));
     r.expect(child.runs.open && child.runs.rows === child.expectedRuns && child.runs.shown === Math.min(5, child.expectedRuns) && child.runs.nested > 0 && child.runs.costs === child.expectedRuns && child.runs.apiLabel, child.size + ": the menu's runs list did not hold every descendant with its cost, five shown: " + JSON.stringify(child.runs));
   }
-  for (const child of childAssertions) if (child.size === "phone") r.expect(child.runsViaMenu === true && child.runsFocus === "more-btn", "phone: closing the Runs sheet opened from ⋯ left focus on " + child.runsFocus + " (via menu " + child.runsViaMenu + "), not ⋯");
+  for (const child of childAssertions) if (child.size === "phone") r.expect(child.runsViaMenu === true && child.runsFocus === "in view" && child.focusAfter === "more-btn", "phone: the ⋯ menu's Runs item did not scroll to the list (" + child.runsFocus + "), or closing the menu left focus on " + child.focusAfter + ", not ⋯ (via menu " + child.runsViaMenu + ")");
   r.expect(childAssertions.length === 2, "lineage, no-sibling-nav, brief/return and Runs checks did not run on phone and desktop: " + childAssertions.length);
 
   // Thinking shows inline. Readable thinking is drawn in full, with no control to open (no button, nothing hidden), under a
@@ -584,6 +592,15 @@ export default async function barCheck(browser) {
     r.expect(m.l2NotOneLine.length === 0, m.mode + ": the label line is not one line: " + JSON.stringify(m.l2NotOneLine));
     r.expect(m.l2Overflowing === 0, m.mode + ": the label line overflows: count=" + m.l2Overflowing);
     r.expect((m.mode !== "desktop" || m.sessionMetaPages > 0) && m.metaFailures.length === 0, m.mode + ": session label line (state first with its dot, labels in order, none a control, Find and the menu only): " + JSON.stringify(m.metaFailures.slice(0, 6)));
+    if (m.mode !== "desktop") {
+      const sl = m.startedLine;
+      r.expect(!!sl, m.mode + ": no session showed a Started line to check");
+      if (sl) {
+        r.expect(sl.h <= sl.leadH + 1, m.mode + ": the Started line wraps with a long machine name: " + JSON.stringify(sl));
+        r.expect(sl.cut && sl.ellipsis && sl.inside && !sl.sideways && sl.sidewaysOverflow === 0, m.mode + ": the long machine name is not ellipsised inside the screen: " + JSON.stringify(sl));
+        r.expect(!!sl.real && sl.real !== "" && sl.text.startsWith("Started "), m.mode + ": the machine name's full tip is missing: " + JSON.stringify(sl));
+      }
+    }
     r.expect(m.overflowScreens === 0, m.mode + ": overflowScreens=" + m.overflowScreens);
     // Gap markers: this fixture's own data has none (X.gapMarkers is always 0 here — every fixture available to this
     // suite is gap-free, per the extras fixture's own description), so there is no source of a positive count to
@@ -614,9 +631,9 @@ export default async function barCheck(browser) {
         r.expect(!!n && m.errsJump.label === "Error 1 of " + n, m.mode + ": errors mode does not read Error 1 of the segment's count: " + JSON.stringify(m.errsJump));
         r.expect(m.errsJump.marked && m.errsJump.expanded === "false", m.mode + ": errors mode did not mark the failed step, or expanded it: " + JSON.stringify(m.errsJump));
         r.expect(m.errsJump.closed === true, m.mode + ": Escape did not leave errors mode");
-        if (m.mode !== "desktop") r.expect(m.errsJump.menuLabel === m.errsJump.badge, m.mode + ": the ⋯ menu's errors item does not read the error count: " + JSON.stringify({ menu: m.errsJump.menuLabel, badge: m.errsJump.badge }));
         r.expect(m.errsJump.inView === true, m.mode + ": errors-jump step not in view");
         r.expect(m.errsJump.menu === false, m.mode + ": errors-jump left a menu open");
+        if (m.mode !== "desktop") r.expect(m.errsJump.menuLabel === m.errsJump.badge.replace(" errors", " failed"), m.mode + ": the ⋯ menu's errors item does not read the failed count: " + JSON.stringify({ menu: m.errsJump.menuLabel, badge: m.errsJump.badge }));
       }
       const labs = m.labs ?? {};
       if (labs.errs?.count) {
