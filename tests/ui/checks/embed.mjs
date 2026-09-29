@@ -374,9 +374,9 @@ export default async function embedCheck(browser) {
   // properly: the next click on the avatar opens it at once.
   {
     const page = await open(browser, { embed: { account: account() }, at: "/s/claude/harbor" });
-    await page.waitForSelector("#topbar .errs");
+    await page.waitForSelector("#topbar .lab-errs");
     await page.locator("#topbar .account-avatar-button").click(); await page.waitForSelector("#topbar .account-popover");
-    await page.locator("#topbar .errs").click();
+    await page.locator("#topbar .lab-errs").click();
     await page.waitForSelector("#topbar .errnav-count");
     const gone = await page.evaluate(() => !document.querySelector(".account-popover"));
     await page.locator("#topbar .account-avatar-button").click(); await page.waitForTimeout(200);

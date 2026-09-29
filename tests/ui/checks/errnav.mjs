@@ -166,18 +166,6 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     // A group the late calls made at the end is new, and closed.
     r.expect(after.groups.length >= before.groups.length && after.groups.every((x, i) => x === (before.groups[i] ?? false)), tag + "what was open before is not what is open after: " + JSON.stringify({ before: before.groups, after: after.groups }));
     r.expect(after.current === 0 && after.expanded === 0, tag + "a step stayed marked or expanded after Escape");
-    // Entered from the bar's line (its "N failed" label, or ⋯'s item on a phone) instead of Find: it says the model's count, Escape leaves it,
-    // and focus is on what entered it (the label, or ⋯ where the phone's bar draws no line).
-    await page.click('button[aria-label="Close find"]'); await sleep(300);
-    await enterFromLine(page, opts);
-    const viaLine = await appear(page, Date.now(), (want) => document.querySelector("#topbar .errnav-count")?.textContent === want, "Error 1 of " + N, 6000);
-    r.expect(viaLine != null, tag + "the line's failed control did not open errors mode at Error 1 of " + N);
-    await page.keyboard.press("Escape");
-    await page.waitForFunction(() => !!document.querySelector("#topbar .meta-line"), null, { timeout: 6000 }).catch(() => {});
-    await sleep(400);
-    const lineAfter = await state(page);
-    r.expect(opts.size === "phone" ? lineAfter.focusId === "more-btn" : lineAfter.focusLab === true, tag + "after Escape, focus is on " + lineAfter.focusId + " (line label: " + lineAfter.focusLab + "), not on what entered the mode");
-    await page.click("#find-btn"); await sleep(300);
     // Leaving the mode by navigation while it holds a page far from the end: coming back opens at the end, tailed, not on
     // that middle page.
     await enter(page);
@@ -190,6 +178,16 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     R.back = await page.evaluate(() => ({ pagers: [...document.querySelectorAll("#page button.more")].map((b) => b.textContent), mode: !!document.querySelector("#topbar .errnav-bar"), end: [...document.querySelectorAll("#page .msg.assistant")].some((m) => m.textContent.includes("All batches ran.")) }));
     r.expect(R.farRange.includes("Load later"), tag + "stepping to the first failure did not replace the range with a middle page: " + JSON.stringify(R.farRange));
     r.expect(!R.back.mode && !R.back.pagers.includes("Load later") && R.back.end, tag + "after leaving errors mode by navigation, the session did not open at its end: " + JSON.stringify(R.back));
+    // Entered from the bar's line (its "N failed" label, or ⋯'s item on a phone) instead of Find: it says the model's count, Escape leaves it,
+    // and focus is on what entered it (the label, or ⋯ where the phone's bar draws no line).
+    await enterFromLine(page, opts);
+    const viaLine = await appear(page, Date.now(), (want) => document.querySelector("#topbar .errnav-count")?.textContent === want, "Error 1 of " + N, 6000);
+    r.expect(viaLine != null, tag + "the line's failed control did not open errors mode at Error 1 of " + N + ": " + JSON.stringify(await page.evaluate(() => ({ bar: document.querySelector("#topbar")?.textContent.slice(0, 120), errs: !!document.querySelector("#topbar .lab-errs"), menu: !!document.querySelector("dialog.session-menu[open]") }))));
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !!document.querySelector("#topbar .meta-line"), null, { timeout: 6000 }).catch(() => {});
+    await sleep(400);
+    const lineAfter = await state(page);
+    r.expect(opts.size === "phone" ? lineAfter.focusId === "more-btn" : lineAfter.focusLab === true, tag + "after Escape, focus is on " + lineAfter.focusId + " (line label: " + lineAfter.focusLab + "), not on what entered the mode");
     R.errors = page.errors;
     r.expect(page.errors.length === 0, tag + "page errors: " + page.errors.join(" | "));
   } finally {
