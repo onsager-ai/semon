@@ -101,6 +101,10 @@ code { overflow-wrap: anywhere; }
 .dot.wait { background: var(--wait-dot); }
 .dot.idle { background: transparent; box-shadow: inset 0 0 0 1.5px var(--done); }
 .dot.err { background: var(--err); }
+/* A parent's row: a small decorative dot beside its time when a session under it needs you (amber) or failed (red). */
+.kid-flag { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.kid-flag.wait { background: var(--wait-dot); }
+.kid-flag.err { background: var(--err); }
 .dot.new { background: var(--accent); }
 .dot.read { background: transparent; box-shadow: inset 0 0 0 1.5px var(--faint); }
 .spin { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--line-2); border-top-color: var(--work); animation: spin .9s linear infinite; flex: none; }
@@ -699,10 +703,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .srow-meta .host { flex: 0 1 auto; max-width: 15ch; }
 .srow-meta .repo-short { flex: 0 1 auto; }
 .srow-meta svg { width: 14px; height: 14px; flex: none; color: var(--faint); }
-.tree-summary { display: inline-flex; align-items: center; flex: none; min-width: 20px; justify-content: center; padding: 1px 7px; border-radius: 999px; background: var(--sunken); color: var(--ink-2); font: var(--fs-cap)/1.4 var(--mono); }
-.tree-summary.wait { background: var(--wait-soft); color: var(--ink); }
 .hname { flex: none; font-size: var(--fs-cap); font-weight: 500; line-height: var(--lh-cap); letter-spacing: .01em; white-space: nowrap; color: var(--muted); }
-.treeitem[aria-expanded="true"] > .tree-row .tree-summary { display: none; }
 .page.wide-mode { max-width: 1400px; }
 /* Wide mode widens the reading column, so the prose measure that keeps the normal column readable no longer applies. */
 .page.wide-mode .msg.assistant { max-width: none; }
@@ -893,7 +894,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .app.rail .nav-item .cnt { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; overflow: hidden; border-radius: 50%; background: var(--faint); color: transparent; font-size: 0; }
   .app.rail .nav-item .cnt.hot { background: var(--wait); }
   .app.rail .tree-row { grid-template-columns: minmax(0, 1fr); margin: 0 7px; }
-  .app.rail .tree-toggle, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta, .app.rail .tree-group, .app.rail .tree-summary { display: none !important; }
+  .app.rail .tree-toggle, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta, .app.rail .tree-group { display: none !important; }
   .app.rail .srow { position: relative; display: flex; justify-content: center; min-height: 44px; padding: 0; }
   .app.rail .srow-main { justify-content: center; }
   .app.rail .srow.on-path { box-shadow: inset 0 0 0 1.5px var(--muted); }
