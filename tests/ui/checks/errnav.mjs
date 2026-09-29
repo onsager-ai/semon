@@ -181,8 +181,8 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     // Entered from the bar's line (its "N failed" label, or ⋯'s item on a phone) instead of Find: it says the model's count, Escape leaves it,
     // and focus is on what entered it (the label, or ⋯ where the phone's bar draws no line).
     await enterFromLine(page, opts);
-    const viaLine = await appear(page, Date.now(), (want) => document.querySelector("#topbar .errnav-count")?.textContent === want, "Error 1 of " + N, 6000);
-    r.expect(viaLine != null, tag + "the line's failed control did not open errors mode at Error 1 of " + N + ": " + JSON.stringify(await page.evaluate(() => ({ bar: document.querySelector("#topbar")?.textContent.slice(0, 120), errs: !!document.querySelector("#topbar .lab-errs"), menu: !!document.querySelector("dialog.session-menu[open]") }))));
+    const viaLine = await appear(page, Date.now(), (want) => new RegExp("^" + want + " \\d+$").test(document.querySelector("#topbar .errnav-count")?.textContent ?? ""), "Error 1 of", 6000); // (late calls made the count grow since Find's)
+    r.expect(viaLine != null, tag + "the line's failed control did not open errors mode at Error 1 of N (N was " + N + "): " + JSON.stringify(await page.evaluate(() => ({ bar: document.querySelector("#topbar")?.textContent.slice(0, 120), errs: !!document.querySelector("#topbar .lab-errs"), menu: !!document.querySelector("dialog.session-menu[open]") }))));
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => !!document.querySelector("#topbar .meta-line"), null, { timeout: 6000 }).catch(() => {});
     await sleep(400);
