@@ -2809,6 +2809,18 @@ impl<'a> Builder<'a> {
             let Some(time) = found.t else {
                 continue;
             };
+            // A command that outlived its yield runs on after its script.
+            if found.y.is_some() {
+                let arg = self
+                    .text(at, "yield:cmd", |record, block| {
+                        tool_input(record, block)
+                            .and_then(|input| events::script_command(input.as_str()?))
+                            .map(|command| one_line(&command, 160))
+                    })
+                    .unwrap_or_default();
+                self.sessions[index].out.activity = Some(("exec_command".into(), arg, 0, time));
+                continue;
+            }
             let name = found.n.clone().unwrap_or_else(|| "tool".into());
             let cwd = self.files[at.0].summary.cwd.clone();
             let summary_name = name.clone();
@@ -2985,10 +2997,12 @@ impl<'a> Builder<'a> {
                 }
                 continue;
             }
-            // A code-mode call is drawn as its operations, unless it failed:
-            // then it is also the failed step, after them.
-            if matches!(entry.kind, EntryKind::Tool(state) if state != ToolState::Err)
-                && entry.at.is_some_and(|at| operation_parents.contains(&at))
+            // A code-mode call is drawn as its operations, unless it failed
+            // or never finished: then it is also that step, after them.
+            if matches!(
+                entry.kind,
+                EntryKind::Tool(ToolState::Ok | ToolState::Unknown)
+            ) && entry.at.is_some_and(|at| operation_parents.contains(&at))
             {
                 continue;
             }
@@ -3002,18 +3016,56 @@ impl<'a> Builder<'a> {
                     let found = entry.at.map(|at| event(self.files, at));
                     let running = session.out.state == "work"
                         && owner.is_some_and(|turn| turn + 1 == turns.len() && turns[turn].last);
-                    SlotKind::Tool {
-                        shown: match state {
-                            ToolState::Ok => Shown::Ok,
-                            ToolState::Err => Shown::Err,
-                            ToolState::Unknown => Shown::Unknown,
-                            ToolState::Pending if running => Shown::Live,
-                            ToolState::Pending => Shown::Unfinished,
+                    let shown = match state {
+                        ToolState::Ok => Shown::Ok,
+                        ToolState::Err => Shown::Err,
+                        ToolState::Unknown => Shown::Unknown,
+                        ToolState::Pending if running => Shown::Live,
+                        ToolState::Pending => Shown::Unfinished,
+                    };
+                    let started = found
+                        .and_then(|found| found.poll)
+                        .and_then(|start| self.files[entry.file].summary.events.get(start))
+                        .filter(|start| start.y.is_some());
+                    let yielded = found.and_then(|found| found.y.as_deref());
+                    match (found, yielded, started, entry.at) {
+                        (Some(found), Some(yielded), _, _) => SlotKind::Yielded {
+                            // Running while its session works and its
+                            // session id is open, whichever turn started
+                            // it: its polls may come in a later turn.
+                            shown: match (state, entry.at) {
+                                (ToolState::Pending, Some(at)) if self.live_yield(index, at) => {
+                                    Shown::Live
+                                }
+                                (ToolState::Pending, _) => Shown::Unfinished,
+                                _ => shown,
+                            },
+                            first: found.r.as_ref().map(|reply| reply.o),
+                            polls: yielded.polls.clone(),
+                            cut: yielded.cut,
+                            done: yielded.done.clone(),
                         },
-                        name: found
-                            .and_then(|found| found.n.clone())
-                            .unwrap_or_else(|| "tool".into()),
-                        reply: found.and_then(|found| found.r.clone()),
+                        (Some(found), None, Some(started), Some(at))
+                            if !operation_parents.contains(&at) =>
+                        {
+                            SlotKind::Sent {
+                                shown,
+                                reply: found.r.clone(),
+                                start: started.o,
+                                done: started
+                                    .y
+                                    .as_ref()
+                                    .and_then(|yielded| yielded.done.as_ref())
+                                    .map(|done| done.o),
+                            }
+                        }
+                        _ => SlotKind::Tool {
+                            shown,
+                            name: found
+                                .and_then(|found| found.n.clone())
+                                .unwrap_or_else(|| "tool".into()),
+                            reply: found.and_then(|found| found.r.clone()),
+                        },
                     }
                 }
                 EntryKind::Operation(_) => unreachable!("operation slots are read from extras"),
@@ -3105,14 +3157,16 @@ impl<'a> Builder<'a> {
                 phase,
             )
         };
-        // Code-mode calls drawn as their operations.
-        let mut operation_parents = BTreeSet::new();
+        // Code-mode calls drawn as their operations, and where the last of
+        // each call's operations sits.
+        let mut last_operation: HashMap<Ref, (i64, (u64, u32))> = HashMap::new();
         for file in session_files {
             for extra in &self.files[*file].summary.extras {
                 if extra.k == Kind::Operation
                     && let Some(parent) = extra.parent
                 {
-                    operation_parents.insert((*file, parent));
+                    let time = extra.t.unwrap_or_else(|| time_at(*file, extra.o));
+                    last_operation.insert((*file, parent), (time, (extra.o, extra.b)));
                 }
             }
         }
@@ -3144,33 +3198,38 @@ impl<'a> Builder<'a> {
                     Kind::U => Some(EntryKind::U),
                     Kind::A => Some(EntryKind::A),
                     Kind::Gap => Some(EntryKind::Gap),
+                    // A poll of a yielded command folds into the step the
+                    // script that started it is, unless it sent input.
+                    Kind::Tool
+                        if found.poll.is_some()
+                            && found.script & events::SENDS == 0
+                            && !last_operation.contains_key(&at) =>
+                    {
+                        None
+                    }
                     Kind::Tool if found.n.as_deref() != Some("SubagentHandback") => {
-                        Some(EntryKind::Tool(match &found.r {
-                            Some(reply) if reply.e => ToolState::Err,
-                            Some(reply) if reply.f & UNKNOWN != 0 => ToolState::Unknown,
-                            Some(_) => ToolState::Ok,
-                            None => ToolState::Pending,
-                        }))
+                        Some(EntryKind::Tool(tool_state(found)))
                     }
                     _ => None,
                 }
             };
             if let Some(kind) = kind {
-                // A failed code-mode call drawn as its operations is still a
-                // failed step: it sits where its failure arrived, after them.
-                let (time, pos) = match (&kind, &found.r) {
-                    (EntryKind::Tool(ToolState::Err), Some(reply))
-                        if operation_parents.contains(&at) =>
-                    {
-                        (
-                            reply.t.unwrap_or_else(|| time_at(at.0, reply.o)),
-                            (reply.o, reply.b),
-                        )
+                // A code-mode call drawn as its operations that failed, or
+                // that never finished, is still a step: after them, where its
+                // failure arrived or after the last of them.
+                let (time, pos, phase) = match (&kind, &found.r, last_operation.get(&at)) {
+                    (EntryKind::Tool(ToolState::Err), Some(reply), Some(_)) => (
+                        reply.t.unwrap_or_else(|| time_at(at.0, reply.o)),
+                        (reply.o, reply.b),
+                        1,
+                    ),
+                    (EntryKind::Tool(ToolState::Pending), None, Some((time, pos))) => {
+                        (*time, *pos, 2)
                     }
-                    _ => (time, (found.o, found.b)),
+                    _ => (time, (found.o, found.b), 1),
                 };
                 keyed.push((
-                    key(time, at.0, pos, 1),
+                    key(time, at.0, pos, phase),
                     Entry {
                         kind,
                         file: at.0,
@@ -3411,7 +3470,8 @@ impl<'a> Builder<'a> {
                 h: None,
             });
         }
-        match content.last().map(|entry| entry.kind) {
+        let last_content = content.last();
+        match last_content.map(|entry| entry.kind) {
             Some(EntryKind::Operation(ToolState::Err)) => {
                 return Some(End {
                     st: "err",
@@ -3426,8 +3486,13 @@ impl<'a> Builder<'a> {
                     h: None,
                 });
             }
-            // Reached only outside the running last turn of a working session.
-            Some(EntryKind::Tool(ToolState::Pending)) => {
+            // Reached only outside the running last turn of a working
+            // session, or for a yielded command still running there.
+            Some(EntryKind::Tool(ToolState::Pending))
+                if !last_content
+                    .and_then(|entry| entry.at)
+                    .is_some_and(|at| self.live_yield(index, at)) =>
+            {
                 return Some(End {
                     st: "err",
                     why: "unfinished_step",
@@ -3465,6 +3530,41 @@ impl<'a> Builder<'a> {
             why: "no_reply",
             h: None,
         })
+    }
+}
+
+impl Builder<'_> {
+    /// A yielded command still running: no completion yet, its session id
+    /// still open in its file, and its session working.
+    fn live_yield(&self, index: usize, at: Ref) -> bool {
+        let found = event(self.files, at);
+        self.sessions[index].out.state == "work"
+            && found
+                .y
+                .as_ref()
+                .is_some_and(|yielded| yielded.done.is_none())
+            && self.files[at.0]
+                .summary
+                .yields
+                .values()
+                .any(|start| *start == at.1)
+    }
+}
+
+/// A tool call's state from its event: a yielded command's from the item
+/// that completed it, and a poll that sent input's from its script alone
+/// (its command's exit is the command's step).
+fn tool_state(found: &Event) -> ToolState {
+    let reply = match &found.y {
+        Some(yielded) => yielded.done.as_ref(),
+        None => found.r.as_ref(),
+    };
+    match reply {
+        Some(reply) if reply.e => ToolState::Err,
+        Some(_) if found.poll.is_some() => ToolState::Ok,
+        Some(reply) if reply.f & UNKNOWN != 0 => ToolState::Unknown,
+        Some(_) => ToolState::Ok,
+        None => ToolState::Pending,
     }
 }
 
@@ -3525,6 +3625,29 @@ pub(crate) enum SlotKind {
         ok: Option<bool>,
         script_offset: Option<u64>,
     },
+    /// A Codex command that outlived its yield, drawn as one step: the
+    /// script that started it (the slot's line), the polls that folded into
+    /// it and the item that completed it.
+    Yielded {
+        shown: Shown,
+        /// The starting script's output line: the first output chunk.
+        first: Option<u64>,
+        /// The polls' output lines, in order.
+        polls: Vec<u64>,
+        /// More polls folded in than were kept.
+        cut: bool,
+        /// The `CommandExecution` item that completed it.
+        done: Option<events::Reply>,
+    },
+    /// A poll that sent input to a yielded command: a step of its own.
+    Sent {
+        shown: Shown,
+        reply: Option<events::Reply>,
+        /// The line of the script that started the command, and of the item
+        /// that completed it.
+        start: u64,
+        done: Option<u64>,
+    },
     Gap,
     Think,
     Harness(String),
@@ -3580,7 +3703,10 @@ impl Transcript {
         let mut calls = 0;
         let mut errors = 0;
         for slot in &slots {
-            if let SlotKind::Tool { shown, .. } = &slot.kind {
+            if let SlotKind::Tool { shown, .. }
+            | SlotKind::Yielded { shown, .. }
+            | SlotKind::Sent { shown, .. } = &slot.kind
+            {
                 calls += 1;
                 if matches!(shown, Shown::Err | Shown::Unfinished) {
                     errors += 1;
@@ -4214,6 +4340,12 @@ pub(crate) fn build(
                     matches!(
                         slot.kind,
                         SlotKind::Tool {
+                            shown: Shown::Live,
+                            ..
+                        } | SlotKind::Yielded {
+                            shown: Shown::Live,
+                            ..
+                        } | SlotKind::Sent {
                             shown: Shown::Live,
                             ..
                         }

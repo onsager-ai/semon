@@ -2107,6 +2107,53 @@ mod tests {
         );
     }
 
+    /// The same for a Codex command that outlived its yield: its process
+    /// dies before the next poll writes anything, and the step it is stops
+    /// running all the same.
+    #[cfg(unix)]
+    #[test]
+    fn a_codex_process_that_dies_mid_yield_moves_its_transcripts_mark() {
+        let fixture = Fixture::new();
+        fixture.write("proc/sys/kernel/hostname", "testbox\n");
+        let result = json!({"wall_time_seconds":1.0,"session_id":4242,"output":"watching\n"});
+        fixture.codex(
+            "run",
+            &[
+                json!({"type":"response_item","timestamp":"2026-09-24T00:00:10Z","payload":{"type":"message","role":"user",
+                    "content":[{"type":"input_text","text":"watch the checks"}]}}),
+                json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"custom_tool_call","call_id":"start","name":"exec",
+                    "input":"const r = await tools.exec_command({cmd:\"make watch\",yield_time_ms:1000});\ntext(JSON.stringify(r));"}}),
+                json!({"type":"response_item","timestamp":"2026-09-24T00:01:01Z","payload":{"type":"custom_tool_call_output","call_id":"start",
+                    "output":[{"type":"input_text","text":"Script completed\nWall time 1.0 seconds\nOutput:\n"},{"type":"input_text","text":result.to_string()}]}}),
+            ],
+        );
+        let lock = fixture.write("codex/thread-writer-locks/run.lock", "");
+        let (major, minor, ino) = crate::lock_identity(&lock).unwrap();
+        fixture.write(
+            "proc/locks",
+            &format!("2: FLOCK  ADVISORY  WRITE 1234 {major:02x}:{minor:02x}:{ino} 0 EOF\n"),
+        );
+        let mut viewer = fixture.viewer();
+        let model = |routed: &Routed| serde_json::from_slice::<Value>(&routed.2).unwrap();
+        let alive = model(&viewer.model("", None).unwrap());
+        assert_eq!(alive["sessions"]["run"]["state"], "work");
+        let mark = alive["tx"]["run"].as_str().unwrap().to_owned();
+        assert!(mark.ends_with(".1"), "one running step: {mark}");
+        fixture.write("proc/locks", "");
+        let version = alive["version"].as_str().unwrap();
+        let dead = viewer.model(&format!("since={version}"), None).unwrap();
+        assert_eq!(dead.0, 200, "the process ending is a change");
+        let dead = model(&dead);
+        assert_ne!(dead["sessions"]["run"]["state"], "work");
+        let after = dead["tx"]["run"].as_str().unwrap();
+        assert!(after.ends_with(".0"), "no running step: {after}");
+        assert_eq!(
+            after.rsplit_once('.').unwrap().0,
+            mark.rsplit_once('.').unwrap().0,
+            "no line was written"
+        );
+    }
+
     /// Two ways a poll could miss or waste a build: a line that lands while a
     /// build runs is seen by the next poll (the files are stamped before the
     /// build reads them), and a lock anywhere else on the machine doesn't
