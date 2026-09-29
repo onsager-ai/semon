@@ -1052,6 +1052,7 @@ fn scan(
     texts: &mut Texts,
     cutoff: Option<i64>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>)> {
+    cache.begin_scan();
     let projects = options.claude_home.join("projects");
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();

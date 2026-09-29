@@ -30,8 +30,8 @@ use std::{
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 use rusqlite::{
-    Connection, ErrorCode, OptionalExtension, Row, Statement, Transaction, TransactionBehavior,
-    params, types::Type,
+    Connection, ErrorCode, OpenFlags, OptionalExtension, Row, Statement, Transaction,
+    TransactionBehavior, params, types::Type,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -47,8 +47,17 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 /// [`CACHE_VERSION`], kept in `meta`.
 const SCHEMA_VERSION: i64 = 1;
 
-/// How long a write waits for another process's transaction.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a write waits for another process's transaction. Tests wait
+/// less, so the busy paths they drive stay quick.
+const BUSY_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    Duration::from_secs(5)
+};
+
+/// What the WAL is cut back to after a checkpoint: a rebuild grows it to
+/// about the store's size, and it would otherwise stay that large.
+const JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (
@@ -319,8 +328,8 @@ impl IndexStore for SqliteStore {
             .map_err(failure)
     }
 
-    fn remove_files(&mut self, paths: &[String]) -> Result<Outcome, StoreError> {
-        self.remove(paths).map_err(failure)
+    fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
+        self.remove(files).map_err(failure)
     }
 
     fn save_runs(
@@ -363,7 +372,16 @@ impl SqliteStore {
             }
         };
         create_private(path).map_err(|error| Unopened::Other(error.to_string()))?;
-        let mut connection = Connection::open(path).map_err(classify)?;
+        // Never through a symlink: the path is checked above, and SQLite
+        // refuses one too.
+        let mut connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(classify)?;
         match init(&mut connection).map_err(classify)? {
             Init::Ready => {}
             Init::NoWal => {
@@ -477,16 +495,26 @@ impl SqliteStore {
         Ok(Outcome::Written)
     }
 
-    /// Drops the rows of files that are gone, or whose rows don't decode.
-    fn remove(&mut self, paths: &[String]) -> rusqlite::Result<Outcome> {
+    /// Drops files' rows: with a ledger, only if the row is still at it (or
+    /// doesn't decode); without one, whatever is there.
+    fn remove(&mut self, files: &[(String, Option<Ledger>)]) -> rusqlite::Result<Outcome> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !current(&transaction)? {
             return Ok(Outcome::Stale);
         }
-        // By path, never decoding the row: an undecodable one goes too.
-        for path in paths {
+        for (path, expected) in files {
+            if let Some(expected) = expected {
+                match ledger_row(&transaction, path) {
+                    Ok(Some((_, found))) if found == *expected => {}
+                    // Moved on by another process, or already gone.
+                    Ok(_) => continue,
+                    Err(error) if is_data_error(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            // By path, never decoding the row: an undecodable one goes too.
             for table in ["events", "signals", "usage", "codex_usage"] {
                 transaction.execute(
                     &format!(
@@ -565,10 +593,13 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Creates the store file owner-only (`0600`) in an owner-only directory
-/// when missing, so it is never readable by others, not even briefly.
-/// SQLite creates `-wal` and `-shm` with the main file's mode. A store left
-/// with looser permissions by anything else is tightened.
+/// Creates the store file owner-only (`0600`) when missing, so it is never
+/// readable by others, not even briefly; SQLite creates `-wal` and `-shm`
+/// with the main file's mode. A store left looser by anything else is
+/// tightened. Missing directories are created `0700`, and Semon's own state
+/// directory (the nearest one named `semon` or `.semon`) is tightened to
+/// `0700` when this user owns it; no other directory is touched. A symlink
+/// at the store's path is refused.
 fn create_private(path: &Path) -> io::Result<()> {
     if let Some(parent) = path
         .parent()
@@ -580,69 +611,125 @@ fn create_private(path: &Path) -> io::Result<()> {
         builder.mode(0o700);
         builder.create(parent)?;
     }
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(io::Error::other("its path is a symlink"));
+    }
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
     options.mode(0o600);
-    options.open(path)?;
+    let file = options.open(path)?;
     #[cfg(unix)]
-    for file in [
-        path.to_owned(),
-        sibling(path, "-wal"),
-        sibling(path, "-shm"),
-    ] {
-        if let Ok(metadata) = fs::symlink_metadata(&file)
-            && metadata.is_file()
+    {
+        use std::os::unix::fs::MetadataExt;
+        for file in [
+            path.to_owned(),
+            sibling(path, "-wal"),
+            sibling(path, "-shm"),
+        ] {
+            if let Ok(metadata) = fs::symlink_metadata(&file)
+                && metadata.is_file()
+                && metadata.permissions().mode() & 0o077 != 0
+            {
+                fs::set_permissions(&file, fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        let owner = file.metadata()?.uid();
+        let state = path.ancestors().skip(1).find(|dir| {
+            dir.file_name()
+                .is_some_and(|name| name == "semon" || name == ".semon")
+        });
+        if let Some(state) = state
+            && let Ok(metadata) = fs::symlink_metadata(state)
+            && metadata.is_dir()
+            && metadata.uid() == owner
             && metadata.permissions().mode() & 0o077 != 0
         {
-            fs::set_permissions(&file, fs::Permissions::from_mode(0o600))?;
+            fs::set_permissions(state, fs::Permissions::from_mode(0o700))?;
         }
     }
+    #[cfg(not(unix))]
+    drop(file);
     Ok(())
 }
 
 /// Renames a damaged store to `<path>.corrupt` and drops its `-wal` and
 /// `-shm`, which belong to it and must not meet the new file.
 fn set_aside(path: &Path) -> io::Result<()> {
-    fs::rename(path, sibling(path, ".corrupt"))?;
+    // The WAL first: were it left, even for a moment, beside a new file at
+    // the path, SQLite could replay it into that file.
     for suffix in ["-wal", "-shm"] {
         match fs::remove_file(sibling(path, suffix)) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
         }
     }
-    Ok(())
+    fs::rename(path, sibling(path, ".corrupt"))
 }
 
+/// Readies a connection. The versions are read without a lock, so a store
+/// that is current opens even while another process writes; the write lock
+/// is taken only to create or migrate it.
 fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     let mode: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
     if !mode.eq_ignore_ascii_case("wal") {
         return Ok(Init::NoWal);
     }
+    let _: i64 = connection.query_row(
+        &format!("PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT}"),
+        [],
+        |row| row.get(0),
+    )?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
+    match versions(connection)? {
+        (schema, _) if schema > SCHEMA_VERSION => return Ok(Init::Newer),
+        (_, Some(parser)) if parser > CACHE_VERSION => return Ok(Init::Newer),
+        (SCHEMA_VERSION, Some(CACHE_VERSION)) => return Ok(Init::Ready),
+        _ => {}
+    }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let schema: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if schema > SCHEMA_VERSION {
+    // Read again under the lock: another process may have migrated it.
+    let (schema, parser) = versions(&transaction)?;
+    if schema > SCHEMA_VERSION || parser.is_some_and(|parser| parser > CACHE_VERSION) {
         return Ok(Init::Newer);
     }
     if schema < SCHEMA_VERSION {
         transaction.execute_batch(SCHEMA)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
-    match parser_version(&transaction)? {
-        Some(version) if version == CACHE_VERSION => {}
-        Some(version) if version > CACHE_VERSION => return Ok(Init::Newer),
-        _ => {
-            transaction.execute_batch(DERIVED)?;
-            transaction.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_version', ?1)",
-                [CACHE_VERSION.to_string()],
-            )?;
-        }
+    let wiped = parser_version(&transaction)? != Some(CACHE_VERSION);
+    if wiped {
+        transaction.execute_batch(DERIVED)?;
+        transaction.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_version', ?1)",
+            [CACHE_VERSION.to_string()],
+        )?;
     }
     transaction.commit()?;
+    if wiped {
+        // Not fatal: the automatic checkpoint and the size limit follow.
+        checkpoint(connection).ok();
+    }
     Ok(Init::Ready)
+}
+
+/// The schema and parser versions; no parser before the schema exists.
+fn versions(connection: &Connection) -> rusqlite::Result<(i64, Option<u32>)> {
+    let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let parser = if schema >= 1 {
+        parser_version(connection)?
+    } else {
+        None
+    };
+    Ok((schema, parser))
+}
+
+/// Moves the WAL into the database and truncates it, after a write as
+/// large as the store. Busy readers only defer it: the next automatic
+/// checkpoint and [`JOURNAL_SIZE_LIMIT`] cut it back later.
+fn checkpoint(connection: &Connection) -> rusqlite::Result<()> {
+    connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
 }
 
 fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
@@ -1716,10 +1803,14 @@ mod tests {
         let (_, read) = store.read_one("a.jsonl").unwrap().unwrap();
         assert_eq!(format!("{read:?}"), format!("{base:?}"));
 
-        assert_eq!(
-            store.remove(&["a.jsonl".to_owned()]).unwrap(),
-            Outcome::Written
-        );
+        // A removal based on a ledger the row has moved past keeps it.
+        store
+            .remove(&[("a.jsonl".to_owned(), Some(ledger(2)))])
+            .unwrap();
+        assert!(store.read_one("a.jsonl").unwrap().is_some());
+        store
+            .remove(&[("a.jsonl".to_owned(), Some(ledger(3)))])
+            .unwrap();
         assert!(store.read_one("a.jsonl").unwrap().is_none());
         for table in ["events", "signals", "usage", "codex_usage", "files"] {
             let rows: i64 = store
