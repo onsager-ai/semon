@@ -157,7 +157,7 @@ export default async function sidebarCheck(browser) {
     R.phoneToggle = box;
     r.expect(box && box.w >= 44 && box.h >= 44, "phone: the toggle is at least 44x44: " + JSON.stringify(box));
     r.expect(box?.right && box.lower, "phone: the toggle sits over the right end of the row's meta line: " + JSON.stringify(box));
-    r.expect(box?.color === "rgb(111, 119, 115)", "phone: the chevron is --muted (4.29:1 on the light sidebar): " + box?.color);
+    r.expect(box?.color === "rgb(93, 101, 97)", "phone: the chevron is --muted (5.3:1 on the light sidebar): " + box?.color);
     r.expect(box?.bg === "rgba(0, 0, 0, 0)", "phone: the toggle has no background until hover or focus: " + box?.bg);
     const g = await gutters(page);
     R.phoneGutters = g;
@@ -354,7 +354,7 @@ export default async function sidebarCheck(browser) {
     R.rail = rail;
     r.expect(rail.current.length === 0 && rail.onPath && rail.parentBg === "rgba(0, 0, 0, 0)", "rail: the ancestor has a ring and no highlight, and nothing is the current page: " + JSON.stringify(rail));
     r.expect(rail.ring === "true", "rail: the ringed ancestor carries aria-current=\"true\" for screen readers: " + rail.ring);
-    r.expect(rail.ringColor?.startsWith("rgb(111, 119, 115)"), "rail: the ring is --muted, not --faint: " + rail.ringColor);
+    r.expect(rail.ringColor?.startsWith("rgb(93, 101, 97)"), "rail: the ring is --muted, not --faint: " + rail.ringColor);
     r.expect(page.errors.length === 0, "open: page errors " + page.errors.join("; "));
     await page.context().close();
   }

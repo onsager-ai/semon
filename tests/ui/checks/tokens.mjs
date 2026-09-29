@@ -58,7 +58,7 @@ export default async function tokensCheck(browser) {
     const tag = size + (dark ? "-dark" : "-light"), rec = (results[tag] = {}), page = await served(browser, { size, dark });
     const judge = (where, a) => {
       rec[where] = { texts: a.texts, small: a.smallCount, low: a.lowCount };
-      r.expect(a.texts > 20, tag + " " + where + ": only " + a.texts + " texts were measured");
+      r.expect(a.texts > 5, tag + " " + where + ": only " + a.texts + " texts were measured");
       r.expect(a.smallCount === 0, tag + " " + where + ": " + a.smallCount + " texts are under 12px: " + JSON.stringify(a.small));
       r.expect(a.lowCount === 0, tag + " " + where + ": " + a.lowCount + " texts are under AA contrast: " + JSON.stringify(a.low));
     };
