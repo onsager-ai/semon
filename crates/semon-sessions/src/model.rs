@@ -3030,7 +3030,16 @@ impl<'a> Builder<'a> {
                     let yielded = found.and_then(|found| found.y.as_deref());
                     match (found, yielded, started, entry.at) {
                         (Some(found), Some(yielded), _, _) => SlotKind::Yielded {
-                            shown,
+                            // Running while its session works and its
+                            // session id is open, whichever turn started
+                            // it: its polls may come in a later turn.
+                            shown: match (state, entry.at) {
+                                (ToolState::Pending, Some(at)) if self.live_yield(index, at) => {
+                                    Shown::Live
+                                }
+                                (ToolState::Pending, _) => Shown::Unfinished,
+                                _ => shown,
+                            },
                             first: found.r.as_ref().map(|reply| reply.o),
                             polls: yielded.polls.clone(),
                             cut: yielded.cut,
@@ -3461,7 +3470,8 @@ impl<'a> Builder<'a> {
                 h: None,
             });
         }
-        match content.last().map(|entry| entry.kind) {
+        let last_content = content.last();
+        match last_content.map(|entry| entry.kind) {
             Some(EntryKind::Operation(ToolState::Err)) => {
                 return Some(End {
                     st: "err",
@@ -3476,8 +3486,13 @@ impl<'a> Builder<'a> {
                     h: None,
                 });
             }
-            // Reached only outside the running last turn of a working session.
-            Some(EntryKind::Tool(ToolState::Pending)) => {
+            // Reached only outside the running last turn of a working
+            // session, or for a yielded command still running there.
+            Some(EntryKind::Tool(ToolState::Pending))
+                if !last_content
+                    .and_then(|entry| entry.at)
+                    .is_some_and(|at| self.live_yield(index, at)) =>
+            {
                 return Some(End {
                     st: "err",
                     why: "unfinished_step",
@@ -3515,6 +3530,24 @@ impl<'a> Builder<'a> {
             why: "no_reply",
             h: None,
         })
+    }
+}
+
+impl Builder<'_> {
+    /// A yielded command still running: no completion yet, its session id
+    /// still open in its file, and its session working.
+    fn live_yield(&self, index: usize, at: Ref) -> bool {
+        let found = event(self.files, at);
+        self.sessions[index].out.state == "work"
+            && found
+                .y
+                .as_ref()
+                .is_some_and(|yielded| yielded.done.is_none())
+            && self.files[at.0]
+                .summary
+                .yields
+                .values()
+                .any(|start| *start == at.1)
     }
 }
 
@@ -4307,6 +4340,12 @@ pub(crate) fn build(
                     matches!(
                         slot.kind,
                         SlotKind::Tool {
+                            shown: Shown::Live,
+                            ..
+                        } | SlotKind::Yielded {
+                            shown: Shown::Live,
+                            ..
+                        } | SlotKind::Sent {
                             shown: Shown::Live,
                             ..
                         }

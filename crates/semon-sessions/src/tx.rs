@@ -2395,7 +2395,8 @@ mod tests {
                         {"type":"input_text","text":"hello"},
                     ]}),
                 ),
-                // A poll of a command these logs never saw start.
+                // A poll of a command these logs never saw start: that
+                // command is a step from here on.
                 codex_line(ts(10, 2, 0), "response_item", script_call("orphan", &poll(777, ""))),
                 codex_line(
                     ts(10, 2, 500),
@@ -2410,7 +2411,8 @@ mod tests {
         assert_eq!(steps.len(), 2, "{steps:?}");
         assert_eq!(steps[0]["name"], "exec");
         assert_eq!(steps[0]["out"], "hello");
-        assert_eq!(steps[1]["name"], "exec");
+        assert_eq!(steps[1]["name"], "exec_command");
+        assert_eq!(steps[1]["unfinished"], true);
         assert_eq!(steps[1]["out"], "still running\n");
     }
 
@@ -2452,6 +2454,12 @@ mod tests {
             (page["calls"].as_u64(), page["errors"].as_u64()),
             (Some(3), Some(1))
         );
+        let turn = built
+            .turns
+            .iter()
+            .rfind(|turn| turn.sid == "stopped")
+            .unwrap();
+        assert_eq!((turn.end.st, turn.end.why), ("err", "unfinished_step"));
     }
 
     #[test]
@@ -2479,7 +2487,8 @@ mod tests {
         ]);
         home.lines("codex/sessions/2026/09/24/rollout-reused.jsonl", &records);
         // A poll during which some other process completes: that item is
-        // the poll's own operation, and the poll isn't folded.
+        // the poll's own operation, and the poll isn't folded, but what it
+        // printed of 4242 is 4242's.
         let mut stray = yielded("stray");
         stray.extend([
             codex_line(ts(10, 6, 0), "response_item", script_call("poll-6", &poll(4242, ""))),
@@ -2496,17 +2505,163 @@ mod tests {
         ]);
         home.lines("codex/sessions/2026/09/24/rollout-stray.jsonl", &stray);
         let built = home.built(BASE + 86_400_000);
-        for (sid, other) in [("reused", "date"), ("stray", "echo other")] {
+        // The stray poll's own chunk is still the command's output.
+        for (sid, other, out) in [
+            ("reused", "date", "one\ntwo\nthree\n"),
+            ("stray", "echo other", "one\ntwo\nthree\nfive\n"),
+        ] {
             let page = page_of(&built, sid, &Anchor::Last);
             let steps = tools(&page);
             assert_eq!(steps.len(), 2, "{sid}: {steps:?}");
             assert_eq!(steps[0]["arg"], "make watch", "{sid}");
             assert_eq!(steps[0]["unfinished"], true, "{sid}");
-            assert_eq!(steps[0]["out"], "one\ntwo\nthree\n", "{sid}");
+            assert_eq!(steps[0]["out"], out, "{sid}");
             assert_eq!(steps[1]["name"], "exec_command", "{sid}");
             assert_eq!(steps[1]["arg"], other, "{sid}");
             assert_eq!(steps[1]["ok"], true, "{sid}");
         }
+    }
+
+    #[test]
+    fn a_script_that_starts_and_polls_its_command_is_its_start() {
+        let home = Home::new();
+        // It starts the command and polls it in a loop, and the command
+        // still outlives the script. A comment names another call.
+        let script = "let r = await tools.exec_command({cmd:\"make watch\",yield_time_ms:1000});\n// then tools.write_stdin({session_id, chars:\"q\"}) to quit\nwhile (r.session_id && Date.now() < end) {\n  r = await tools.write_stdin({session_id: r.session_id, chars: \"\"});\n}\ntext(JSON.stringify(r));\n";
+        let mut records = vec![
+            codex_line(
+                ts(10, 0, 0),
+                "session_meta",
+                json!({"id":"looped","cwd":"/work/proj"}),
+            ),
+            codex_line(ts(10, 1, 0), "response_item", script_call("start", script)),
+            codex_line(
+                ts(10, 1, 1000),
+                "response_item",
+                exec_result("start", Some(4242), None, "one\n"),
+            ),
+            codex_line(
+                ts(10, 2, 0),
+                "response_item",
+                script_call("poll-2", &poll(4242, "")),
+            ),
+            codex_line(
+                ts(10, 2, 1000),
+                "response_item",
+                exec_result("poll-2", Some(4242), None, "two\n"),
+            ),
+        ];
+        completed(&mut records, "", "one\ntwo\nfour\n");
+        home.lines("codex/sessions/2026/09/24/rollout-looped.jsonl", &records);
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "looped", &Anchor::Last);
+        let steps = tools(&page);
+        assert_eq!(steps.len(), 1, "{steps:?}");
+        assert_eq!(steps[0]["name"], "exec_command");
+        assert_eq!(steps[0]["arg"], "make watch");
+        assert_eq!(steps[0]["exit"], 0);
+        assert_eq!(steps[0]["out"], "one\ntwo\nfour\n");
+    }
+
+    #[test]
+    fn polls_past_the_bound_fold_in_and_mark_the_output_cut() {
+        let home = Home::new();
+        let mut records = vec![
+            codex_line(
+                ts(12, 0, 0),
+                "session_meta",
+                json!({"id":"many","cwd":"/work/proj"}),
+            ),
+            codex_line(ts(12, 1, 0), "response_item", script_call("start", WATCH)),
+            codex_line(
+                ts(12, 1, 10),
+                "response_item",
+                exec_result("start", Some(4242), None, "one\n"),
+            ),
+        ];
+        for poll_index in 0..=crate::events::POLLS_MAX {
+            let id = format!("poll-{poll_index}");
+            let at = 20 + poll_index as i64 * 20;
+            records.push(codex_line(
+                ts(12, 2, at),
+                "response_item",
+                script_call(&id, &poll(4242, "")),
+            ));
+            records.push(codex_line(
+                ts(12, 2, at + 10),
+                "response_item",
+                exec_result(&id, Some(4242), None, ""),
+            ));
+        }
+        home.lines("codex/sessions/2026/09/24/rollout-many.jsonl", &records);
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "many", &Anchor::Last);
+        let steps = tools(&page);
+        assert_eq!(steps.len(), 1, "{} steps", steps.len());
+        assert_eq!(steps[0]["out"], "one\n\n…");
+        assert!(steps[0]["more"].as_array().unwrap().contains(&json!("out")));
+        let slot = steps[0]["slot"].as_u64().unwrap() as usize;
+        let out: Value =
+            serde_json::from_str(&full_slot(&built, "many", slot, "out").unwrap()).unwrap();
+        assert_eq!(out["text"], "one\n\n…");
+        assert_eq!(out["truncated"], true);
+    }
+
+    #[test]
+    fn a_character_across_the_output_bound_is_never_split() {
+        let home = Home::new();
+        for (sid, head) in [("wide", PREVIEW_MAX - 1), ("huge", FULL_MAX - 1)] {
+            home.lines(
+                &format!("codex/sessions/2026/09/24/rollout-{sid}.jsonl"),
+                &[
+                    codex_line(
+                        ts(13, 0, 0),
+                        "session_meta",
+                        json!({"id":sid,"cwd":"/work/proj"}),
+                    ),
+                    codex_line(ts(13, 1, 0), "response_item", script_call("start", WATCH)),
+                    codex_line(
+                        ts(13, 1, 10),
+                        "response_item",
+                        exec_result("start", Some(4242), None, &"a".repeat(head)),
+                    ),
+                    codex_line(
+                        ts(13, 2, 0),
+                        "response_item",
+                        script_call("poll", &poll(4242, "")),
+                    ),
+                    codex_line(
+                        ts(13, 2, 10),
+                        "response_item",
+                        exec_result("poll", Some(4242), None, "é tail"),
+                    ),
+                ],
+            );
+        }
+        let built = home.built(BASE + 86_400_000);
+        let out_of = |sid: &str| {
+            let page = page_of(&built, sid, &Anchor::Last);
+            let step = tools(&page).remove(0);
+            let slot = step["slot"].as_u64().unwrap() as usize;
+            let full: Value =
+                serde_json::from_str(&full_slot(&built, sid, slot, "out").unwrap()).unwrap();
+            (step, full)
+        };
+        // The two bytes of "é" straddle PREVIEW_MAX: the preview stops
+        // before it; the whole output is under FULL_MAX.
+        let (step, full) = out_of("wide");
+        assert_eq!(step["out"], format!("{}…", "a".repeat(PREVIEW_MAX - 1)));
+        assert!(step["more"].as_array().unwrap().contains(&json!("out")));
+        assert_eq!(
+            full["text"],
+            format!("{}é tail", "a".repeat(PREVIEW_MAX - 1))
+        );
+        assert_eq!(full["truncated"], false);
+        // They straddle FULL_MAX: "View all" stops before it.
+        let (step, full) = out_of("huge");
+        assert_eq!(step["out"], format!("{}…", "a".repeat(PREVIEW_MAX)));
+        assert_eq!(full["text"], format!("{}…", "a".repeat(FULL_MAX - 1)));
+        assert_eq!(full["truncated"], true);
     }
 
     #[test]
