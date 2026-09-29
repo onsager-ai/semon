@@ -43,7 +43,9 @@ thread_local! {
 /// v11: a Codex command that outlived its yield links its polls and its
 /// completion to the script that started it.
 /// v12: thinking extras and the thinking filters follow the viewer rewrite (#38).
-const CACHE_VERSION: u32 = 12;
+/// v13: a plain Codex call links its `CommandExecution` item, which holds the
+/// whole collected output (#52).
+const CACHE_VERSION: u32 = 13;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -604,6 +606,10 @@ pub(crate) struct Event {
     pub(crate) poll: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) r: Option<Reply>,
+    /// A plain Codex call: the line of the `CommandExecution` item with its
+    /// id, whose `aggregated_output` is the command's whole output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) item: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) peer: Option<Peer>,
     /// The Claude record's `uuid`: an id, used to find the lines a
@@ -1553,6 +1559,21 @@ fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Op
     }
 }
 
+/// Links the plain call `id` to the item at `offset` that completed it.
+fn link_item(summary: &mut FileIndex, id: &str, offset: u64) {
+    let Some(index) = summary.tool_ids.get(id).and_then(|indices| {
+        indices.iter().rev().copied().find(|index| {
+            summary
+                .events
+                .get(*index)
+                .is_some_and(|event| event.k == Kind::Tool && !event.code_mode)
+        })
+    }) else {
+        return;
+    };
+    summary.events[index].item = Some(offset);
+}
+
 fn tool_event(summary: &mut FileIndex, event: Event) {
     if let Some(id) = &event.id {
         let index = summary.events.len();
@@ -2004,6 +2025,12 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                         ..Event::default()
                     },
                 );
+            }
+            if legacy_tool
+                && field(item, "type") == Some("CommandExecution")
+                && let Some(id) = field(item, "id")
+            {
+                link_item(summary, id, offset);
             }
             if let (Some(id), Some(code)) = (
                 field(item, "id"),

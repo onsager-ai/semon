@@ -357,6 +357,10 @@ code { overflow-wrap: anywhere; }
 .step .out pre.in + .io { border-top: 1px solid var(--line); margin-top: 2px; }
 .step .out .noout { padding: 3px 12px 8px; font-size: 12.5px; color: var(--faint); }
 .step .out .cutnote { padding: 0 12px 8px; font-size: 12px; color: var(--faint); }
+.cutgap { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 4px 12px; font-size: 12px; text-align: center; color: var(--faint); }
+.cutgap::before, .cutgap::after { content: ""; flex: 1 1 12px; border-top: 1px dashed var(--line); }
+.viewer .cutout { display: grid; gap: 4px; }
+.viewer .cutgap { padding: 2px 0; }
 /* An expanded step is a preview: each block stops at about eleven lines and fades. "View all" opens the whole call. */
 .step .out .clip { max-height: 15.6em; overflow: hidden; }
 .step .out .clip.clipped { -webkit-mask-image: linear-gradient(#000 calc(100% - 32px), transparent); mask-image: linear-gradient(#000 calc(100% - 32px), transparent); }

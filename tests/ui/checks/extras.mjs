@@ -13,9 +13,12 @@
 //     every trace), the document holds exactly one script (/viewer.js), no img and no iframe,
 //     nothing set window.__xss, and the payload shows as text. The payload lane and the failed-send stub also load from
 //     their real URLs.
+//   - output Codex cut before the model saw it (codex-cut): a plain call's step shows a divider with the count where Codex cut, the note
+//     "Codex cut this output before the model saw it" and none of the warning header; a code-mode command cut by the collection cap
+//     shows the same in View all. Neither says "Cut short in this copy of the logs". Screenshots at 390 and 1280, light and dark.
 //   - no page errors.
 import path from "node:path";
-import { ENV, served, goto, data, reporter } from "../lib.mjs";
+import { ENV, served, goto, data, reporter, overflow } from "../lib.mjs";
 import { XSS, XSS_KEY } from "../fixture.mjs";
 
 const inView = (page, sel) => page.evaluate((sel) => { const e = document.querySelector(sel), bar = document.querySelector("#topbar").getBoundingClientRect(); if (!e) return null; const r = e.getBoundingClientRect(); return r.top >= bar.bottom - 1 && r.top < innerHeight - 40; }, sel);
@@ -292,6 +295,50 @@ export default async function (browser) {
     r.expect(data.inputEntry?.in === "y\n" && data.input.value === "y\n" && data.input.labels[0] === "Input" && data.input.labels.indexOf("Output") > data.input.labels.indexOf("Input"), "the write_stdin step shows its sent text under Input, then Output: " + JSON.stringify(data.input));
     r.expect(page.errors.length === 0, "yielded Codex steps have page errors: " + page.errors.join(" | "));
     await page.context().close();
+  }
+
+  // ---- Output Codex cut before the model saw it ----------------------------------------------------------------
+  {
+    R.codexCut = {};
+    for (const [size, dark] of [["phone", false], ["phone", true], ["desktop", false], ["desktop", true]]) {
+      const tag = size + (dark ? "-dark" : "-light");
+      const page = await served(browser, { extras: true, size, dark, path: "/s/codex/codex-cut" });
+      await page.waitForFunction(() => !!document.querySelector(".turns"));
+      await page.evaluate(() => { for (let i = 0; i < 3; i++) document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click()); document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((b) => b.click()); });
+      const steps = await page.evaluate(() => [...document.querySelectorAll(".step")].map((s) => ({
+        arg: s.querySelector(".sa")?.textContent,
+        gaps: [...s.querySelectorAll(".out .cutgap")].map((g) => g.textContent),
+        note: s.querySelector(".out .cutnote")?.textContent ?? null,
+        texts: [...s.querySelectorAll(".out .cutout pre")].map((p) => p.textContent),
+        viewAll: !!s.querySelector(".viewall:not([hidden])"),
+      })));
+      const plain = steps.find((s) => s.arg?.startsWith("cargo test")), capped = steps.find((s) => s.arg?.startsWith("cat build.log"));
+      r.expect(plain && capped, tag + ": both codex-cut steps are shown: " + JSON.stringify(steps.map((s) => s.arg)));
+      if (!plain || !capped) { await page.context().close(); continue; }
+      r.expect(plain.gaps.length === 1 && plain.gaps[0] === "About 19,500 tokens cut here by Codex", tag + ": the plain call shows its token gap with its count: " + JSON.stringify(plain.gaps));
+      r.expect(plain.texts.length === 2 && plain.texts[0].startsWith("test suite::case_000") && plain.texts[1].includes("test result: ok. 900 passed"), tag + ": the head and the tail are on either side of the gap: " + JSON.stringify(plain.texts));
+      r.expect(plain.note?.startsWith("Codex cut this output before the model saw it") && plain.note.includes("24,000 tokens in all"), tag + ": the note says Codex cut it: " + plain.note);
+      r.expect(!plain.texts.some((t) => t.includes("Warning: truncated output") || t.includes("Total output lines")), tag + ": the warning header is not shown as output");
+      r.expect(!plain.viewAll, tag + ": a short cut output has no View all");
+      r.expect(capped.viewAll, tag + ": the capped command offers View all");
+      r.expect(!(await page.evaluate(() => document.body.textContent.includes("Cut short in this copy of the logs"))), tag + ": no step says the logs were cut");
+      r.expect((await overflow(page)) === 0, tag + ": nothing overflows with the steps open");
+      const plainStep = page.locator(".step", { has: page.locator('.sa:text-matches("^cargo test")') });
+      await plainStep.scrollIntoViewIfNeeded(); await page.waitForTimeout(150);
+      await page.screenshot({ path: path.join(ENV.out, "codex-cut-step-" + tag + ".png") });
+      await page.locator(".step", { has: page.locator('.sa:text-matches("^cat build.log")') }).locator(".viewall").click();
+      await page.waitForSelector("dialog.viewer[open] .cutgap"); await page.waitForTimeout(200);
+      const sheet = await page.evaluate(() => { const v = document.querySelector("dialog.viewer[open]"); return { gaps: [...v.querySelectorAll(".cutgap")].map((g) => g.textContent), notes: [...v.querySelectorAll(".vnote")].map((n) => n.textContent), first: v.querySelector(".cutout pre")?.textContent.split("\n").length ?? 0, last: v.querySelector(".cutout pre:last-of-type")?.textContent.trim().split("\n").pop() ?? null }; });
+      r.expect(sheet.gaps.length === 1 && sheet.gaps[0] === "1,048,576 bytes cut here by Codex", tag + ": View all shows the collection gap with its count: " + JSON.stringify(sheet.gaps));
+      r.expect(sheet.first === 40 && sheet.last === "[9999] compiled unit 9999", tag + ": View all shows the whole head: " + JSON.stringify(sheet));
+      r.expect(sheet.notes.some((n) => n.startsWith("Codex cut this output before the model saw it")) && !sheet.notes.some((n) => n.includes("Cut short in this copy")), tag + ": View all says Codex cut it: " + JSON.stringify(sheet.notes));
+      r.expect((await overflow(page)) === 0, tag + ": nothing overflows with View all open");
+      await page.locator("dialog.viewer[open] .cutgap").scrollIntoViewIfNeeded(); await page.waitForTimeout(150);
+      await page.screenshot({ path: path.join(ENV.out, "codex-cut-sheet-" + tag + ".png") });
+      R.codexCut[tag] = { plain, sheet };
+      r.expect(page.errors.length === 0, tag + ": codex-cut page errors: " + page.errors.join(" | "));
+      await page.context().close();
+    }
   }
 
   // ---- Result handoff: the transcript keeps the reply once and shows a compact marker ----------------------------
