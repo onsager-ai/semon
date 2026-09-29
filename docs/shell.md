@@ -8,7 +8,7 @@ Serve the viewer's base stylesheet at `/viewer.css`, the component stylesheet at
 
 The brand mark is an image too. `.mark` paints `/mark.svg` as a CSS mask in the current text colour (`var(--ink)`), so a page that uses `.mark` must serve `semon_sessions::shell::MARK_SVG` at `/mark.svg` as `image/svg+xml`, or the mark is invisible. Serve `semon_sessions::shell::FAVICON_SVG` at `/favicon.svg` as `image/svg+xml` too and link it from the page's `<head>` with `<link rel="icon" href="/favicon.svg" type="image/svg+xml">`; its fill switches between light and dark with the browser's colour scheme. Serve both from the page's own origin: the content security policy allows same-origin assets only, so a `data:` URI or another host will not load.
 
-The Rust API exposes `semon_sessions::shell::{VIEWER_CSS, CSS, JS, MARK_SVG, FAVICON_SVG, FONT_FILES, font}`, and for the viewer page itself `VIEWER_JS`, `PAGE_HTML` and `is_page_path` (see [Embedding the viewer page](#embedding-the-viewer-page)). An embedding server can serve these bytes directly and use `font(name)` for font requests.
+The Rust API exposes `semon_sessions::shell::{VIEWER_CSS, CSS, JS, MARK_SVG, FAVICON_SVG, FONT_FILES, font}`, the sidebar's header and navigation as `sidebar_head` and `NAV` (see [Signed-in page skeleton](#signed-in-page-skeleton)), and for the viewer page itself `VIEWER_JS`, `PAGE_HTML` and `is_page_path` (see [Embedding the viewer page](#embedding-the-viewer-page)). An embedding server can serve these bytes directly and use `font(name)` for font requests.
 
 ## Embedding the viewer page
 
@@ -47,7 +47,11 @@ All three are on `window`.
 
 Keep the sidebar, scrim, and main content as siblings inside `.app`. The menu button belongs in the top bar. The example page content can be replaced with the server's own content.
 
+The sidebar starts with the viewer's header: `.sidebar-head` holding the `.brandrow` (the mark, the `.brandname`, and the drawer's `#drawer-close` button). Inside `.sidebar-head` the row has the viewer's own size and padding at every width, and the close button is the viewer's 44 × 44 at the drawer's right edge. `semon_sessions::shell::sidebar_head(name)` returns exactly that markup, the same bytes `viewer.html` uses (a test holds them together), with `name` escaped; the viewer adds its collapse toggle after the brand row, and a shell page has none (the header keeps the same height without it).
+
 The viewer's own nav rows are `<button class="nav-item">` with a leading 18px icon (`<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">`, then a `<span>` label). A served page links between pages instead, so it uses `<a class="nav-item">` with the same icon and label markup; `shell.css` gives `a.nav-item` the viewer's `.nav-item` colours without the browser's underline, and `a.nav-item[aria-current="page"]` the active row's ink colour.
+
+A page that links to the viewer's own destinations draws them from `semon_sessions::shell::NAV`: Home, Sessions, Analytics and Machines, in the viewer's order, each with its label, the viewer's path and its icon (a test checks that the viewer's script draws the same rows with the same icons). `NavLink::html(href, current)` returns the row as `<a class="nav-item">`, with `href` escaped and `aria-current="page"` when `current`; pass the viewer's `path`, or the page's own path for a destination it serves elsewhere.
 
 Links inside `.page`, `.signin`, and `.notice` content use `var(--accent)` instead of the browser default, in both the link and visited states.
 
@@ -66,12 +70,7 @@ Links inside `.page`, `.signin`, and `.notice` content use `var(--accent)` inste
 <body>
 <div class="app">
   <aside class="sidebar" id="sidebar" aria-label="Navigation">
-    <div class="brandrow">
-      <span class="mark" aria-hidden="true"></span><span>Devices</span>
-      <button class="ibtn close" id="drawer-close" type="button" aria-label="Close menu">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
-      </button>
-    </div>
+    <div class="sidebar-head"><div class="brandrow"><span class="mark" aria-hidden="true"></span><span class="brandname">Devices</span><button class="ibtn close" id="drawer-close" type="button" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button></div></div>
     <nav id="nav" aria-label="Pages">
       <a class="nav-item" href="/overview">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-7 8 7M6 9.5V20h12V9.5M10 20v-5h4v5"></path></svg>
@@ -202,7 +201,9 @@ These viewer chrome classes and shell components form the supported class contra
 ```
 app
 sidebar
+sidebar-head
 brandrow
+brandname
 mark
 scrim
 main
@@ -211,6 +212,7 @@ ttl
 ibtn
 lead
 nav-item
+icon
 page
 ph
 sec-h

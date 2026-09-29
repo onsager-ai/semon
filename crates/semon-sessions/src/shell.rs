@@ -46,6 +46,103 @@ pub const HARNESS_ICONS: &[(&str, &str)] = crate::HARNESS_ICONS;
 /// with `<link rel="icon" href="/favicon.svg" type="image/svg+xml">`.
 pub const FAVICON_SVG: &str = include_str!("favicon.svg");
 
+/// One of the viewer's navigation destinations. [`NAV`] lists them in the order the viewer's sidebar draws them; a page
+/// served beside the viewer draws the same rows with [`NavLink::html`], so its drawer lists what the viewer's does, with
+/// the same labels and icons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NavLink {
+    /// The viewer's name for the destination: `home`, `sessions`, `analytics` or `machines`.
+    pub key: &'static str,
+    pub label: &'static str,
+    /// The viewer's own path for it. An embedding page that serves a destination at another path links there instead.
+    pub path: &'static str,
+    /// The icon's SVG path data, drawn in a 24 × 24 box.
+    pub icon: &'static str,
+}
+
+/// The viewer's navigation, in its sidebar's order. A Rust test checks that the viewer's own script draws exactly these
+/// rows with these icons, so a change here or there that leaves the other behind fails the build.
+pub const NAV: [NavLink; 4] = [
+    NavLink {
+        key: "home",
+        label: "Home",
+        path: "/",
+        icon: "M4 11l8-7 8 7M6 9.5V20h12V9.5M10 20v-5h4v5",
+    },
+    NavLink {
+        key: "sessions",
+        label: "Sessions",
+        path: "/sessions",
+        icon: "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01",
+    },
+    NavLink {
+        key: "analytics",
+        label: "Analytics",
+        path: "/analytics",
+        icon: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7",
+    },
+    NavLink {
+        key: "machines",
+        label: "Machines",
+        path: "/machines",
+        icon: "M3 5h18v11H3zM8 20h8M12 16v4",
+    },
+];
+
+impl NavLink {
+    /// The row as a served page draws it: `<a class="nav-item">` with the viewer's 18 px icon and the label, marked
+    /// `aria-current="page"` when `current`. `href` is escaped here.
+    pub fn html(&self, href: &str, current: bool) -> String {
+        format!(
+            "<a class=\"nav-item\" href=\"{href}\"{current}><svg class=\"icon\" viewBox=\"0 0 24 24\" fill=\"none\" \
+             stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\" \
+             aria-hidden=\"true\"><path d=\"{icon}\"></path></svg><span>{label}</span></a>",
+            href = escape(href),
+            current = if current {
+                " aria-current=\"page\""
+            } else {
+                ""
+            },
+            icon = self.icon,
+            label = self.label,
+        )
+    }
+}
+
+/// The sidebar's header row: the mark, `name`, and the drawer's close button (`#drawer-close`), in the `.sidebar-head`
+/// the viewer's own sidebar starts with, so the row has the viewer's size, padding and close button at every width.
+/// `name` is escaped here. The viewer's header adds its collapse toggle after the brand row; a shell page has none.
+pub fn sidebar_head(name: &str) -> String {
+    format!("<div class=\"sidebar-head\">{}</div>", brand_row(name))
+}
+
+/// The brand row, byte for byte as `viewer.html` has it (a test holds the two together).
+fn brand_row(name: &str) -> String {
+    format!(
+        "<div class=\"brandrow\"><span class=\"mark\" aria-hidden=\"true\"></span><span class=\"brandname\">{name}</span>\
+         <button class=\"ibtn close\" id=\"drawer-close\" type=\"button\" aria-label=\"Close menu\">\
+         <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\" \
+         aria-hidden=\"true\"><path d=\"M6 6l12 12M18 6L6 18\"></path></svg></button></div>",
+        name = escape(name),
+    )
+}
+
+/// Text for an HTML attribute value or element content.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Whether `path` matches a viewer page route.
 ///
 /// Embedders serving the viewer without a `ViewerCore` can use this route-shape check. Fixed page paths match exactly;
@@ -131,6 +228,67 @@ mod tests {
     }
 
     #[test]
+    fn the_viewer_page_has_the_exported_brand_row() {
+        let row = super::brand_row("Semon");
+        assert!(
+            super::PAGE_HTML.contains(&format!("<div class=\"sidebar-head\">{row}")),
+            "viewer.html's .sidebar-head does not start with the exported brand row:\n{row}"
+        );
+        assert!(super::sidebar_head("Semon").contains(&row));
+    }
+
+    #[test]
+    fn the_brand_name_and_href_are_escaped() {
+        assert!(
+            super::sidebar_head("<a & \"b\">")
+                .contains("<span class=\"brandname\">&lt;a &amp; &quot;b&quot;&gt;</span>")
+        );
+        let row = super::NAV[0].html("/x?a=1&b=\"2\"'", true);
+        assert!(row.contains("href=\"/x?a=1&amp;b=&quot;2&quot;&#39;\" aria-current=\"page\""));
+        assert!(!super::NAV[0].html("/", false).contains("aria-current"));
+    }
+
+    /// The viewer's script draws its nav itself; it must draw [`super::NAV`]: the same rows in the same order, each
+    /// with the icon path `NAV` gives it.
+    #[test]
+    fn the_viewer_script_draws_the_exported_nav() {
+        let js = include_str!("viewer.js");
+        let render = js
+            .split("function renderNav()")
+            .nth(1)
+            .expect("viewer.js has renderNav")
+            .split("\n  }\n")
+            .next()
+            .expect("renderNav's body");
+        // The viewer's names for these icons in its `I` table.
+        let icon_names = ["home", "sessions", "chart", "machine"];
+        let mut last = 0;
+        for (link, icon_name) in super::NAV.iter().zip(icon_names) {
+            let call = format!("item(\"{}\", \"{}\", I.{icon_name}", link.key, link.label);
+            let at = render
+                .find(&call)
+                .unwrap_or_else(|| panic!("renderNav lacks `{call}`"));
+            assert!(
+                at >= last,
+                "renderNav draws {} out of NAV's order",
+                link.key
+            );
+            last = at;
+            let entry = format!("{icon_name}: \"{}\"", link.icon);
+            assert!(
+                js.contains(&entry),
+                "viewer.js's I.{icon_name} is not NAV's {} icon",
+                link.key
+            );
+        }
+        assert_eq!(
+            render.matches("item(\"").count(),
+            super::NAV.len(),
+            "renderNav draws a row NAV does not list"
+        );
+    }
+
+    #[test]
     fn scrollbars_are_soft_in_the_base_stylesheet_that_embedding_pages_load() {
         let viewer_css = include_str!("viewer.css");
         for needle in [
@@ -149,9 +307,27 @@ mod tests {
         // Chrome classes the shell's contract deliberately shares with the viewer; everything else shell.css
         // defines must be its own name so cascading shell.css after viewer.css never inherits unrelated rules
         // (as bare .steps/.step once did, leaking the transcript's rail into the shell's steps component).
-        const SHARED_CHROME: [&str; 17] = [
-            "app", "sidebar", "brandrow", "mark", "scrim", "main", "topbar", "ttl", "ibtn", "lead",
-            "nav-item", "page", "ph", "sec-h", "list", "empty", "dot",
+        const SHARED_CHROME: [&str; 20] = [
+            "app",
+            "sidebar",
+            "sidebar-head",
+            "brandrow",
+            "brandname",
+            "mark",
+            "scrim",
+            "main",
+            "topbar",
+            "ttl",
+            "ibtn",
+            "lead",
+            "nav-item",
+            "icon",
+            "page",
+            "ph",
+            "sec-h",
+            "list",
+            "empty",
+            "dot",
         ];
         let viewer_classes = defined_classes(include_str!("viewer.css"));
         let shell_classes = defined_classes(concat!(
@@ -171,9 +347,27 @@ mod tests {
 
     #[test]
     fn documented_classes_are_defined_by_the_stylesheets() {
-        const VIEWER_CLASSES: [&str; 17] = [
-            "app", "sidebar", "brandrow", "mark", "scrim", "main", "topbar", "ttl", "ibtn", "lead",
-            "nav-item", "page", "ph", "sec-h", "list", "empty", "dot",
+        const VIEWER_CLASSES: [&str; 20] = [
+            "app",
+            "sidebar",
+            "sidebar-head",
+            "brandrow",
+            "brandname",
+            "mark",
+            "scrim",
+            "main",
+            "topbar",
+            "ttl",
+            "ibtn",
+            "lead",
+            "nav-item",
+            "icon",
+            "page",
+            "ph",
+            "sec-h",
+            "list",
+            "empty",
+            "dot",
         ];
         let contract = include_str!("../../../docs/shell.md");
         let classes = contract
