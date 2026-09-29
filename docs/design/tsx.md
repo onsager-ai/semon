@@ -1,8 +1,13 @@
 # The viewer in TSX components: bundler and runtime compared
 
-Status: proposal, 2026-09-30. This doc lays the options side by side with measurements and recommends one bundler and one runtime. **Marvin picks** (see [Decisions for Marvin](#decisions-for-marvin)); nothing in the viewer changes until he does. The numbers come from `docs/design/tsx-bench/` and its workflow, `.github/workflows/tsx-bench.yml`.
+Status: decided 2026-09-29. The comparison below is kept as the record of why. The numbers come from `docs/design/tsx-bench/` and its workflow, `.github/workflows/tsx-bench.yml`.
 
-**Recommendation in one line:** esbuild as the bundler, and a hand-written `h()` JSX factory with no runtime, keeping the viewer's own live-update machinery; the runner-up is esbuild with Preact, vendored. The reasons are in [Recommendation](#recommendation).
+## Decision
+
+- **Bundler: esbuild. Runtime: none; our own hand-written `h()` JSX helper.** Marvin's answer: "Yes, esbuild + own helper (Recommended)" (Semon session transcript `10c47490-e569-49f3-a26c-8cbd8399c134.jsonl`, line 30042, 2026-09-29T22:42:24Z).
+- **Local bundling: allowed, once CLAUDE.md carries it.** Marvin answered "Yes, allow bundling" (same transcript, line 30001, 2026-09-29T22:38:21Z). That answer changes CLAUDE.md's "no local compiling", and the change is being written there; until CLAUDE.md carries it, the local loop is the single-file syntax check only (see [The local loop](#the-local-loop)).
+- **esbuild is installed on demand, never committed:** a pinned version fetched by one script with a sha256 check, cached under `target/tools/`, used the same way by CI and by local runs (see [Installing esbuild](#installing-esbuild)).
+- Not asked separately, so the doc's defaults stand until someone asks: the checked-in bundle is unminified, and a stale bundle is rebuilt and committed by whoever works on the branch.
 
 ## Where the viewer is today
 
@@ -129,35 +134,43 @@ Notes on each:
 
 ## How it ships
 
-- **Source** moves to `crates/semon-sessions/web/src/` (TypeScript and TSX, one module per component and one for the API types), with `web/tsconfig.json` and `web/build.sh`. The build script pins the bundler version, fetches the standalone binary from the npm registry into a cache, and bundles `web/src/main.ts` as one IIFE with no exports.
+- **Source** moves to `crates/semon-sessions/web/src/` (TypeScript and TSX, one module per component and one for the API types), with `web/tsconfig.json` and `web/build.sh`. The build script gets esbuild from the install script below and bundles `web/src/main.ts` as one IIFE with no exports.
 - **The bundle is checked in** at `crates/semon-sessions/src/viewer.gen.js`, unminified (readable diffs, and the banned-string test reads the real code), with a first line saying it is generated from `web/src` by `web/build.sh`. `shell::VIEWER_JS` becomes `concat!(tooltip.js, "\n", select.js, "\n", viewer.gen.js)`: that is the one path `include_str!` reads for the viewer's script. The path changes from `viewer.js` on purpose: if the bundle took the old path, git would see `viewer.js` rewritten instead of moved, and every open PR's edits to it would conflict with the whole file. With `viewer.js` moved unchanged to `web/src/viewer.legacy.js` and the bundle at a new path, git's rename detection carries open PRs' edits to the moved file when they rebase.
 - **CI fails when the bundle is stale.** A `web` job, first in `ui.yml` and before the browser job, runs `tsc --noEmit`, bundles, and fails if the result differs from the checked-in file; it uploads the fresh bundle as an artifact. The browser job builds `semon` from the fresh bundle, so the Playwright checks always test the source. esbuild's output is deterministic for a pinned version, which the freshness check relies on. Bundling and type-checking take well under a second at the bench's sizes (esbuild 22 ms for the whole viewer); with the runner's setup, a type error should fail here in about a minute (an estimate) rather than twenty minutes into the UI run.
 - **The Rust tests** follow the code. `harness.rs`'s registry mirror and `shell.rs`'s nav test read the source modules that hold `HARNESSES` and the nav (`include_str!` of the `.ts` or `.tsx` file), with their needles rewritten for the JSX form. `viewer.rs`'s banned-string and native-title tests stay on `VIEWER_JS`, the bytes that ship: with the factory they pass unchanged, with any runtime they need the change described above.
 - **Unchanged for embedders:** the URL (`/viewer.js`), `VIEWER_JS` still starting with `tooltip.js` (so still with `(`), the prelude contract, `window.semonEmbed`, the three events, and no new globals (an IIFE with no name).
 - **`cargo install`** reads checked-in files only, as today.
 
+### Installing esbuild
+
+esbuild is never committed and never installed through npm. One script, written in the foundation PR (step 2 of the migration plan) and not in this one, is the only way CI and local runs get it. Its contract:
+
+- **Pinned.** The script holds one esbuild version and, for each supported platform (at least linux-x64 for CI and the maintainer's machine, plus linux-arm64 and darwin-arm64), the sha256 of that platform's package tarball, `@esbuild/<platform>-<version>.tgz` from the npm registry. Upgrading esbuild is one PR that changes the version and the hashes together, and it shows its effect as a diff of the checked-in bundle.
+- **Verified.** It downloads the tarball with `curl`, checks its sha256 before extracting anything, and fails with a non-zero exit and nothing installed on a mismatch, an unknown platform or a failed download. No Node and no npm.
+- **Cached.** It extracts only `package/bin/esbuild` to `target/tools/esbuild-<version>/esbuild` (under the gitignored `target/`), so `cargo clean` removes it and nothing is committed. If that file already exists, the script does no network access.
+- **One interface.** It prints the binary's absolute path on stdout and nothing else there; `web/build.sh` and the CI `web` job both call it and run what it prints. CI caches `target/tools/` or simply refetches (about 0.2 s, measured).
+- **Checked.** After extracting, it runs `esbuild --version` and fails unless the output is the pinned version.
+
 ## The local loop
 
-The machine rules settle what runs locally (R-20260929-16, Principal's reading, 2026-09-30):
+What runs where, under the machine rules (R-20260929-16, Principal's reading, 2026-09-30) and Marvin's "Yes, allow bundling" (line 30001 above):
 
-- Allowed locally: a syntax check of one file that parses or transforms it without resolving imports or bundling, such as esbuild on a single `.tsx` with no `--bundle`.
-- CI only, however fast: a bundle (`esbuild --bundle`, `bun build`), a project-wide `tsc --noEmit`, and any build of the deployable.
-- Bundling locally would loosen CLAUDE.md's "no local compiling", which only Marvin's own words can change.
+- **Local, now:** a syntax check of one file that parses or transforms it without resolving imports or bundling: esbuild on a single `.tsx` with no `--bundle` (4 ms per file on the runner; it catches syntax and JSX errors, not types or imports).
+- **Local, once CLAUDE.md carries it:** a single esbuild bundle of the viewer (`web/build.sh`), run through `heat-gate`, niced, with `GOMAXPROCS=1` to keep esbuild on one core. The whole viewer bundles in 22 ms (25 ms cold) on the 4-vCPU runner, all cores; on one core it will be slower, still well under a second at this size (an estimate, not measured). This matters because esbuild parses on every core at once, and heat-gate saw 98 °C within 0.5 s on a short multi-core burst on the maintainer's machine. Until CLAUDE.md carries the change, bundling stays CI-only like everything below.
+- **CI only, either way:** the project-wide `tsc --noEmit`, the Playwright checks (the browser suite, pixels, perf), and any build of the deployable.
 
-So the implementer's loop is: edit, run the single-file check on each changed file (esbuild: 4 ms per file measured on the runner; it catches syntax and JSX errors, not types or imports), push, and let CI bundle, type-check and run Playwright. When the `web` job says the bundle is stale, the implementer downloads the job's bundle artifact (`gh run download`, a file copy) and commits it; or a CI step commits it to the PR branch (a choice for Marvin, below). This is what makes a bundler's standalone single-file transform matter: esbuild and Bun have one and work without Node; Vite has none, and Solid under any bundler makes the check a Babel run.
-
-**Option for Marvin: allow local bundling.** This is a CLAUDE.md change, in Marvin's words, not something this doc or a ruling can grant. What it buys: the implementer commits a fresh bundle without the artifact round trip, and import and resolution errors show before the push. esbuild bundles the whole viewer in 22 ms (25 ms cold) on the 4-vCPU runner. What it risks: esbuild parses on every core at once, and heat-gate saw 98 °C within 0.5 s on a short multi-core burst on the maintainer's machine. If allowed, it would run through `heat-gate`, niced, with `GOMAXPROCS=1` to keep it on one core (slower, still well under a second at this size: an estimate, not measured). `tsc` and Playwright stay in CI either way.
+So the implementer's loop is: edit, run the single-file check on each changed file, bundle locally once that is allowed and commit the bundle with the source, push, and let CI type-check, check the bundle is fresh, and run Playwright. Before local bundling is in CLAUDE.md, a stale bundle is fixed by downloading the `web` job's bundle artifact (`gh run download`, a file copy) and committing it. This is also why a bundler's standalone single-file transform mattered in the comparison: esbuild and Bun have one and work without Node; Vite has none, and Solid under any bundler makes the check a Babel run.
 
 ## Migration plan
 
 1. **Now: #81 and #106 finish in plain JS**, on the current layout, as do #126 and #129. Their reviews and CI rounds are the costly part of the overhaul already; adding a toolchain under them would add a bundle step to every round. Nothing below starts until #81 and #106 are merged.
-2. **The toolchain and the move, one PR, no behaviour change.** `viewer.js` moves to `web/src/viewer.legacy.js` byte for byte (a pure rename, so any PR still open rebases through it), `web/build.sh` bundles it as the entry, `viewer.gen.js` is checked in, `shell.rs` points at it, the two source-reading Rust tests point at the legacy file, and the `web` job lands. `tooltip.js` and `select.js` stay where they are, shared with `shell::JS`. Acceptance: the UI suite is green with no pixel-baseline change and the perf budget within noise. The bench's `legacy` row is this bundle already: today's code without its comments (252 KB instead of 269 KB), no banned string, and a leading `(`. This is the one mechanical move of existing code; everything after it moves code screen by screen.
+2. **The toolchain and the move, one PR, no behaviour change.** `viewer.js` moves to `web/src/viewer.legacy.js` byte for byte (a pure rename, so any PR still open rebases through it), the esbuild install script ([above](#installing-esbuild)) and `web/build.sh` land and bundle it as the entry, `viewer.gen.js` is checked in, `shell.rs` points at it, the two source-reading Rust tests point at the legacy file, and the `web` job lands. `tooltip.js` and `select.js` stay where they are, shared with `shell::JS`. Acceptance: the UI suite is green with no pixel-baseline change and the perf budget within noise. The bench's `legacy` row is this bundle already: today's code without its comments (252 KB instead of 269 KB), no banned string, and a leading `(`. This is the one mechanical move of existing code; everything after it moves code screen by screen.
 3. **Types and the factory.** `web/src/api.ts` (the `/api/model` and `/api/tx` shapes), `web/src/jsx.ts` (the factory and `patchList`), and the icon table as a typed module. The legacy file imports what it needs from them. No behaviour change.
 4. **Overhaul PR 4, the sidebar and rail, as components.** The sidebar is rewritten by the overhaul anyway, so writing it as `Sidebar.tsx` costs little beyond the port itself; the bench's session tree (with #126's order rule, which will be on main by then) is a first cut. Coexistence: the legacy file's `renderLanes()` calls the component's mount and update, and the component owns `#lanes`.
 5. **PRs 5 to 8 the same way:** Home, Sessions and Machines (5), Trace with the new Timeline (6, greenfield: no port at all), Analytics with its charts as SVG components (7), and the empty, error and loading states (8). The overhaul's rule that a skeleton is the loaded screen's own components with placeholders (`overhaul.md`, Loading) falls out of components directly: the same component renders a placeholder model.
 6. **After the overhaul, the session page**, the live-update core (`transcript`, `patchSession`, `morph`, `capture` and `restore`, errors mode, Find), ported with no visual change, one part per PR, each accepted on an unchanged pixel baseline and green live checks. Last, `tooltip.js` and `select.js` become TypeScript bundled into both `VIEWER_JS` and `shell::JS` (two entry points).
 
-If PRs 4 to 8 start before step 2 lands, they continue in plain JS, and the port of their screens moves to step 6. With a runtime instead of the factory, the order is the same; the runtime is vendored in step 3.
+If PRs 4 to 8 start before step 2 lands, they continue in plain JS, and the port of their screens moves to step 6.
 
 ## Risks and costs
 
@@ -169,16 +182,16 @@ If PRs 4 to 8 start before step 2 lands, they continue in plain JS, and the port
 - **Maintenance.** esbuild is pinned and fetched as a binary, so an upgrade is a one-line change with a bundle diff to review. A vendored runtime is upgraded by hand. The factory is ours to maintain (about 100 lines).
 - **Type drift.** `api.ts` is written by hand from the Rust structs and can drift from them; generating it is possible later.
 
-## Recommendation
+## Why esbuild and the helper (the recommendation, as it stood)
 
 **Bundler: esbuild.** It is a single 10.9 MB binary that installs in a quarter of a second with no Node, has the standalone single-file transform the local check needs, compiles TSX for the factory and for Preact natively, and bundles the whole viewer in 22 ms (25 ms cold) with deterministic output for the freshness check. Configuration is a line of flags. **Runner-up: Bun**, equally fast and also standalone, but a 76 MB binary that is mostly a runtime we wouldn't use, and it bundled development builds until told otherwise. Vite brings Node and a config for a dev server we can't use.
 
 **Runtime: the hand-written `h()` factory, no runtime.** It is the only option that keeps the banned-string test as it is, adds no bytes, builds with esbuild alone, and changes nothing about how the viewer updates: the port keeps `dirtyTurns`, `morph`, `capture` and `restore`, which is where the anchoring, focus, holds and clamp rules live and where a behaviour change would be most expensive to find with a 20-minute CI loop. What it gives up is reactivity, which the viewer doesn't use today. **Runner-up: Preact, vendored**, if Marvin wants a component model with state and diffing: esbuild-native, 5 KB gzipped, and the security test can be scoped to our code with a source ban on its two HTML and style props. Solid is the best fit for fine-grained live patching on paper, but Babel on every build, `innerHTML` in its core and a rewrite of the update path make it the costliest; lit-html gives up typed templates.
 
-## Decisions for Marvin
+## What was asked, and the answers
 
-1. The bundler: esbuild (recommended), Bun, or Vite.
-2. The runtime: the `h()` factory (recommended), Preact vendored, Solid, or lit-html. Any choice but the factory also asks for a change to the banned-string test in `viewer.rs`.
-3. Local bundling: keep the single-file syntax check as the only local step (recommended, as the rules stand), or allow bundling through `heat-gate` as a CLAUDE.md change in his words.
-4. A stale bundle: the implementer commits CI's bundle artifact (recommended: nothing writes to branches but the people working on them), or a CI step commits it to the PR branch.
-5. The checked-in bundle: unminified (recommended: readable diffs, and the tests read real code) or minified (about 105 KB (42%) smaller on the wire, since the viewer is served uncompressed).
+1. The bundler: esbuild (recommended), Bun, or Vite. **esbuild.**
+2. The runtime: the `h()` factory (recommended), Preact vendored, Solid, or lit-html. Any choice but the factory would also have asked for a change to the banned-string test in `viewer.rs`. **The `h()` factory, our own helper.**
+3. Local bundling: the single-file syntax check only, or bundling through `heat-gate` as a CLAUDE.md change in Marvin's words. **Allow bundling**, in effect once CLAUDE.md carries it.
+4. A stale bundle: committed by whoever works on the branch (from a local bundle, or CI's artifact until local bundling is in effect), or by a CI step. Not asked separately; the first stands.
+5. The checked-in bundle: unminified (readable diffs, and the tests read real code) or minified (about 105 KB, 42%, smaller on the wire, since the viewer is served uncompressed). Not asked separately; unminified stands.
