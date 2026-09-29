@@ -345,7 +345,7 @@ impl Request {
     /// kept, not only the range's). A request that doesn't is answered, but
     /// its answer isn't kept: any value would otherwise be a new key.
     pub(crate) fn known(&self, rows: &[Row]) -> bool {
-        let has = |test: &dyn Fn(&Row) -> bool| rows.iter().any(|row| test(row));
+        let has = |test: &dyn Fn(&Row) -> bool| rows.iter().any(test);
         self.repo
             .as_ref()
             .is_none_or(|repo| has(&|row| row.activity.repo.as_ref() == repo.as_ref()))
