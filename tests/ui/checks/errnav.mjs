@@ -11,6 +11,7 @@
 //   - a failed call written while the mode is open makes it "Error k of N+1" with k unchanged;
 //   - Escape closes it: the badge is back, a group opened before is open again and nothing else is, the scroll position
 //     is back within 2 px, and no step stays marked;
+//   - leaving the mode by navigation while it holds a far page, then coming back, opens the session at its end;
 //   - phone: nothing overflows sideways and the bar's buttons are at least 44 px;
 //   - no page errors.
 //
@@ -85,13 +86,14 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     await sleep(2300); // past the opening pin to the end
     // Before: the last group opened, and the view scrolled to the middle of it (away from both ends, so putting it back is
     // a real test).
-    await page.evaluate(() => { const g = [...document.querySelectorAll("#page .tgroup > .tsum")].at(-1); if (g?.getAttribute("aria-expanded") === "false") g.click(); const sc = window.__sc(); sc.scrollTop = Math.round((sc.scrollHeight - sc.clientHeight) / 2); });
+    // The group holding the last batch's last step, not the last group: earlier schemes' late calls make a small one after it.
+    await page.evaluate(() => { const g = [...document.querySelectorAll("#page .tgroup")].find((x) => [...x.querySelectorAll(".step .sa")].some((a) => a.textContent === "step 1299"))?.querySelector(":scope > .tsum"); if (g?.getAttribute("aria-expanded") === "false") g.click(); const sc = window.__sc(); sc.scrollTop = Math.round((sc.scrollHeight - sc.clientHeight) / 2); });
     await sleep(300);
     const before = await state(page);
     R.before = { top: before.top, max: before.max, badge: before.badge, groups: before.groups };
     r.expect(before.top > 200 && before.top < before.max - 200, tag + "the view before is not away from both ends: " + JSON.stringify(R.before));
     r.expect(before.badge === N + " errors", tag + "the badge reads " + before.badge + ", the model " + N);
-    r.expect(before.groups.at(-1) === true && before.groups.slice(0, -1).every((x) => !x), tag + "only the last group should be open before: " + JSON.stringify(before.groups));
+    r.expect(before.groups.filter(Boolean).length === 1, tag + "exactly one group should be open before: " + JSON.stringify(before.groups));
 
     await page.click("#topbar .errs");
     const t0 = Date.now();
@@ -155,6 +157,18 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     // A group the late calls made at the end is new, and closed.
     r.expect(after.groups.length >= before.groups.length && after.groups.every((x, i) => x === (before.groups[i] ?? false)), tag + "what was open before is not what is open after: " + JSON.stringify({ before: before.groups, after: after.groups }));
     r.expect(after.current === 0 && after.expanded === 0, tag + "a step stayed marked or expanded after Escape");
+    // Leaving the mode by navigation while it holds a page far from the end: coming back opens at the end, tailed, not on
+    // that middle page.
+    await page.click("#topbar .errs");
+    await appear(page, Date.now(), (want) => document.querySelector("#page .step.err-current .sa")?.textContent === want, "step " + FAILED[0], 6000);
+    R.farRange = await page.evaluate(() => [...document.querySelectorAll("#page button.more")].map((b) => b.textContent));
+    const nav = (v) => page.evaluate((r) => { history.pushState(r, ""); dispatchEvent(new PopStateEvent("popstate", { state: r })); }, v);
+    await nav({ v: "home" }); await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
+    await nav({ v: "session", id: "faults" }); await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']") && !!document.querySelector("#topbar .errs"));
+    await sleep(400);
+    R.back = await page.evaluate(() => ({ pagers: [...document.querySelectorAll("#page button.more")].map((b) => b.textContent), mode: !!document.querySelector("#topbar .errnav-bar"), end: [...document.querySelectorAll("#page .msg.assistant")].some((m) => m.textContent.includes("All batches ran.")) }));
+    r.expect(R.farRange.includes("Load later"), tag + "stepping to the first failure did not replace the range with a middle page: " + JSON.stringify(R.farRange));
+    r.expect(!R.back.mode && !R.back.pagers.includes("Load later") && R.back.end, tag + "after leaving errors mode by navigation, the session did not open at its end: " + JSON.stringify(R.back));
     R.errors = page.errors;
     r.expect(page.errors.length === 0, tag + "page errors: " + page.errors.join(" | "));
   } finally {

@@ -686,7 +686,11 @@ impl MachineView {
         }
         let answer = if path == "/api/model" {
             self.model(query, if_none_match)
-        } else if path == "/api/tx" && query_value(query, "errors").is_some() {
+        } else if path == "/api/tx"
+            && query
+                .split('&')
+                .any(|part| part == "errors" || part.starts_with("errors="))
+        {
             self.tx_errors(query, if_none_match)
         } else {
             self.route(path, query)
@@ -2652,6 +2656,7 @@ mod tests {
         for query in [
             "errors=1",
             "sid=faults&errors=0",
+            "sid=faults&errors",
             "sid=faults&errors=",
             "sid=faults&errors=yes",
             "sid=faults&errors=1&before=3",

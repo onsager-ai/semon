@@ -410,7 +410,7 @@
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
     closeAccountMenu();
-    dropErrors(); route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
+    dropErrors(true); route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     const done = () => {
       if (route !== r) return;
@@ -864,8 +864,14 @@
       }, () => { if (ERR.on && ERR.gen === gen) errLive.textContent = "Couldn't load " + errText(); });
     }).catch((e) => { setTimeout(() => { throw e; }); }); // a fault on the page, reported as one; the next step still runs
   }
-  // Leaving the mode by navigation: nothing to put back.
-  function dropErrors() { if (!ERR.on) return; ERR.on = false; ERR.gen++; show.tools = ERR.tools; ERR.saved = ERR.range = null; errLive.textContent = ""; }
+  // Leaves the mode. By navigation (`away`), a range the mode moved is dropped, so the next visit loads the end afresh and
+  // is tailed again; closeErrors puts the range from before back instead.
+  function dropErrors(away) {
+    if (!ERR.on) return;
+    const sid = ERR.sid, range = ERR.range, m = TXM[sid];
+    ERR.on = false; ERR.gen++; show.tools = ERR.tools; ERR.saved = ERR.range = null; errLive.textContent = "";
+    if (away && range && m && (m.from !== range.m.from || m.to < range.m.to)) { delete TX[sid]; delete TXM[sid]; }
+  }
   function closeErrors() {
     if (!ERR.on) return;
     const sid = ERR.sid, saved = ERR.saved, range = ERR.range, m = TXM[sid]; dropErrors();
@@ -886,9 +892,11 @@
   // under an open sheet.
   document.addEventListener("keydown", (e) => {
     if (!ERR.on || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || document.querySelector("dialog[open]")) return;
+    // The drawer and an open menu have the keys first: Escape closes them and leaves the mode on.
+    if (document.body.classList.contains("drawer-open") || document.querySelector(".menu, .lineage-menu")) return;
     if (e.target.closest?.("input, textarea, select, [contenteditable='true']")) return;
     const inBar = !!e.target.closest?.("#topbar .errnav-bar"), onButton = e.target.tagName === "BUTTON";
-    if (e.key === "Escape") { if (!document.body.classList.contains("drawer-open")) { e.preventDefault(); closeErrors(); } return; }
+    if (e.key === "Escape") { e.preventDefault(); closeErrors(); return; }
     if (e.key === "n" || e.key === "N") { e.preventDefault(); stepErrors(1); return; }
     if (e.key === "p" || e.key === "P") { e.preventDefault(); stepErrors(-1); return; }
     if (e.key === "Enter" && (inBar || e.target === document.body)) {
@@ -923,7 +931,7 @@
     const st = el("span", "meta-item meta-state"); st.title = "Status: " + STATE[s.state] + " · " + turnsText; st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", turnsText));
     if (errors) {
       const sep = el("span", "state-sep errs-sep", "·"), j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); j.prepend(mark);
-      j.type = "button"; j.title = j.textContent + ": step through the failed steps"; j.setAttribute("aria-label", j.title);
+      j.type = "button"; j.setAttribute("aria-label", j.textContent + ": step through the failed steps");
       j.addEventListener("click", (ev) => { ev.stopPropagation(); openErrors(s.id); });
       st.append(sep, j); }
     const kind = s.kind ? childKindChip(s, true) : null;
