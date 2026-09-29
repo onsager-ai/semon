@@ -18,6 +18,26 @@ const GALLERY_PATH = "/__shell-gallery.html";
 const PHONE_TARGET_SELECTOR = ".btn, .field input, .code .copy, dialog.sheet button";
 fs.mkdirSync(output, { recursive: true });
 
+// Diagnostics for the hang on a gallery page's first load (see galleryPage): every request's start and end, so a timeout
+// can name the ones still pending, and how many contexts and pages the shared browser holds at that moment.
+function trackRequests(page) {
+  const started = new Map(), done = [];
+  const t0 = Date.now();
+  page.on("request", (request) => started.set(request, Date.now() - t0));
+  page.on("requestfinished", (request) => { done.push([request.url(), started.get(request), Date.now() - t0, "finished"]); started.delete(request); });
+  page.on("requestfailed", (request) => { done.push([request.url(), started.get(request), Date.now() - t0, "failed: " + (request.failure()?.errorText ?? "")]); started.delete(request); });
+  return (browser) => {
+    const contexts = browser.contexts();
+    return JSON.stringify({
+      now: Date.now() - t0,
+      pending: [...started].map(([request, at]) => ({ url: request.url(), type: request.resourceType(), startedAt: at })),
+      done,
+      contexts: contexts.length,
+      pages: contexts.map((context) => context.pages().map((open) => open.url())),
+    });
+  };
+}
+
 async function galleryPage(browser, html, width, height, mobile, scheme) {
   const context = await browser.newContext({
     viewport: { width, height },
@@ -32,6 +52,8 @@ async function galleryPage(browser, html, width, height, mobile, scheme) {
   page.errors = [];
   page.on("pageerror", (error) => page.errors.push(error.message.split("\n")[0]));
   page.setDefaultTimeout(5000);
+  const report = trackRequests(page);
+  try {
   await page.route(/.*/, (route) => (
     route.request().url().startsWith(ENV.base + "/") ? route.continue() : route.abort()
   ));
@@ -49,6 +71,13 @@ async function galleryPage(browser, html, width, height, mobile, scheme) {
   await page.goto(ENV.base + GALLERY_PATH, { waitUntil: "load" });
   await page.emulateMedia({ colorScheme: scheme });
   await page.evaluate(() => document.fonts.ready);
+  } catch (error) {
+    const probe = Date.now();
+    const answered = await fetch(ENV.base + "/shell.css?t=" + ENV.token, { signal: AbortSignal.timeout(5000) }).then((r) => r.status, (e) => e.name);
+    console.log("DIAG probe of /shell.css from node: " + answered + " after " + (Date.now() - probe) + " ms");
+    console.log("DIAG galleryPage " + scheme + " " + width + " " + error.message.split("\n")[0] + " " + report(browser));
+    throw error;
+  }
   return { context, page };
 }
 
