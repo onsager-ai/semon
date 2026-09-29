@@ -309,14 +309,17 @@
   function load(r, signal) {
     if (r.v !== "session" || !SESS[r.id]) return null;
     const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
-    if (TX[r.id] && !deep) return kids(r.id, signal);
-    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal).then(() => kids(r.id, signal));
+    if (TX[r.id] && !deep) return lenient(kids(r.id, signal));
+    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal).then(() => lenient(kids(r.id, signal)));
   }
-  // The last few transcripts opened, kept when the reader leaves them, so opening one again draws it at once. A transcript
-  // is kept only when it was loaded to its end, and the cache is bounded by entries and by bytes (the characters of each
-  // entry's text). Opening one takes it out of the cache; leaving it puts it back at the newest end.
+  // Child work that fails to load leaves its cards as they were: only the session's own transcript failing fails the route.
+  const lenient = (p) => (p ? p.catch(() => {}) : p);
+  // The last few transcripts opened, kept when the reader leaves them, so opening one again draws it at once. (A transcript
+  // still in TX, which only a model update prunes, draws from there just the same.) A transcript is kept only when it was
+  // loaded to its end, and the cache is bounded by entries and by estimated memory: two bytes for each character of an entry's
+  // text, since JavaScript strings are UTF-16. Opening one takes it out of the cache; leaving it puts it back at the newest end.
   const TXCACHE = new Map(), TXCACHE_MAX = 5, TXCACHE_BYTES = 2 * 1024 * 1024;
-  const weigh = (entries) => { let n = 0; for (const e of entries) for (const v of Object.values(e)) n += typeof v === "string" ? v.length : v && typeof v === "object" ? JSON.stringify(v).length : 8; return n; };
+  const weigh = (entries) => { let n = 0; for (const e of entries) for (const v of Object.values(e)) n += typeof v === "string" ? v.length : v && typeof v === "object" ? JSON.stringify(v).length : 4; return n * 2; };
   function cacheTx(sid, entries, meta) {
     if (!entries || !meta || meta.to < meta.total || meta.tok == null) return; // without its mark there is no telling later whether it grew
     TXCACHE.delete(sid);
@@ -485,14 +488,25 @@
     const a = document.activeElement; if (a && a !== document.body && !$("#sidebar").contains(a)) return;
     const h = $("#page .ph h1"); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); }
   }
+  // The session's own transcript couldn't be loaded: the skeleton gives way to the reason and a way to try again.
+  function failLoad(r, err) {
+    if (route !== r || err?.name === "AbortError") return;
+    endLoading();
+    const page = $("#page"), box = el("div", "load-error"), retry = el("button", "more", "Try again");
+    box.setAttribute("role", "alert"); retry.type = "button"; retry.addEventListener("click", () => go({ ...r }, true));
+    box.append(el("p", "empty", "Couldn't load this session: " + (err?.message ?? "no response")), retry);
+    page.classList.remove("child-page"); page.style.paddingBottom = ""; page.replaceChildren(box);
+  }
+  // A deep link to a turn the loaded transcript doesn't hold yet.
+  const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
   function go(r, fromHistory) {
     stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
     closeAccountMenu();
-    // The session left is kept for opening it again; weighing it waits until the click has drawn.
-    if (route.v === "session" && (r.v !== "session" || r.id !== route.id) && TX[route.id] && TXM[route.id]) { const sid = route.id, entries = TX[sid], meta = { ...TXM[sid] }; setTimeout(() => cacheTx(sid, entries, meta), 0); }
+    // The session left is kept for opening it again; weighing it waits until the frame the click drew has been painted.
+    if (route.v === "session" && (r.v !== "session" || r.id !== route.id) && TX[route.id] && TXM[route.id]) { const sid = route.id, entries = TX[sid], meta = { ...TXM[sid] }; requestAnimationFrame(() => setTimeout(() => cacheTx(sid, entries, meta), 0)); }
     dropErrors(true); route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     const done = () => {
@@ -509,16 +523,21 @@
         requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1500); });
       }
     };
-    // A transcript kept in the cache needs no network: the top bar and the sidebar are drawn from the model at once, the page
-    // itself on the next frame (so the first two are on screen before a long transcript is built), and it is brought up to date
-    // afterwards. Otherwise the route waits for its data, with the top bar and the sidebar already drawn.
-    if (r.v === "session" && SESS[r.id] && !TX[r.id] && adoptCached(r)) {
-      paintPending(r);
-      requestAnimationFrame(() => setTimeout(() => { if (route !== r) return; if (!r.turn) spread(r.id); done(); revalidate(r); }, 0));
-      return;
+    // A transcript already in memory, still in TX or kept in the cache, needs no network: the top bar and the sidebar are drawn
+    // from the model at once, the page itself on the next frame (so the first two are on screen before a long transcript is
+    // built), and it is brought up to date afterwards. Otherwise the route waits for its data, with the top bar and the
+    // sidebar already drawn.
+    if (r.v === "session" && SESS[r.id]) {
+      const kept = !TX[r.id];
+      if (kept ? adoptCached(r) : !isDeep(r)) {
+        TXCACHE.delete(r.id);
+        paintPending(r);
+        requestAnimationFrame(() => setTimeout(() => { if (route !== r) return; if (kept && !r.turn) spread(r.id); done(); revalidate(r); }, 0));
+        return;
+      }
     }
     const signal = r.v === "session" ? (navAbort = new AbortController()).signal : undefined, p = load(r, signal);
-    if (p) { if (r.v === "session") paintPending(r); p.then(done, done); } else done();
+    if (p) { if (r.v === "session") paintPending(r); p.then(done, (err) => failLoad(r, err)); } else done();
   }
   window.addEventListener("popstate", (e) => {
     if (skipPop) { skipPop = false; if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close a sheet before opening its session

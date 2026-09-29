@@ -285,8 +285,9 @@ async function runScreen(browser, screen, server, fixture) {
     coldOpen: { samplesMs: [], medianMs: null },
     openAtEnd: null,
     pinYields: [],
-    // A switch to a session not opened before (its transcript is not cached): the time until the top bar shows the new session
-    // (feedback) and until its last message has painted. `cached` is a switch back to a session just left, drawn from the cache.
+    // A switch to a session not opened before (its transcript is not in memory): the time until the top bar shows the new session
+    // (feedback) and until its last message has painted. `cached` is a switch back to a session just left, with no model update
+    // in between, so its transcript is still loaded (the common case; the transcript cache proper is exercised by checks/switch.mjs).
     switch: {
       marathonToRelay: { samplesMs: [], medianMs: null, feedbackSamplesMs: [], medianFeedbackMs: null, clickTaskSamplesMs: [], medianClickTaskMs: null },
       relayToMarathon: { samplesMs: [], medianMs: null, feedbackSamplesMs: [], medianFeedbackMs: null, clickTaskSamplesMs: [], medianClickTaskMs: null },
@@ -407,25 +408,36 @@ async function runScreen(browser, screen, server, fixture) {
     const clickAndPaint = async (page, id) => {
       await prepareSidebarRow(page, id);
       const name = (await page.locator(`.srow[data-id="${id}"] .nm`).textContent()).trim();
-      await page.evaluate(() => { window.__perfPaintWait = null; });
-      // The click is made in the page, so the task it starts is timed as well: what the click itself costs before the browser can paint.
-      // Feedback is read in the page too: the second animation frame after the click, once the top bar names the session, is
-      // when the browser has drawn it (a wait started from here would add this harness's own round trips).
-      const { started, clickMs } = await page.evaluate(([id, expected]) => {
+      // The click is made in the page and everything is timed there, so none of this harness's own round trips (or the polling
+      // of a wait started from here) is counted. `clickMs` is the click's own task. Feedback is the second animation frame after
+      // the top bar names the session (the browser has drawn it by then). Paint is the second frame after the transcript's last
+      // message is in the page, as `waitPaint` reads it.
+      return page.evaluate(([id, expected, marker]) => new Promise((resolve, reject) => {
         const row = [...document.querySelectorAll(".srow[data-id]")].find((x) => x.dataset.id === id), t0 = performance.now();
-        window.__perfFeedback = null;
         row.click();
         const clickMs = performance.now() - t0;
-        const frame = () => requestAnimationFrame(() => requestAnimationFrame(() => {
-          if (document.querySelector("#topbar .t")?.textContent.trim() === expected) window.__perfFeedback = performance.now() - t0; else frame();
-        }));
-        frame();
-        return { started: t0, clickMs };
-      }, [id, name]);
-      await page.waitForFunction(() => window.__perfFeedback != null, null, { timeout: 60_000, polling: 50 });
-      const feedbackMs = await page.evaluate(() => window.__perfFeedback);
-      await waitPaint(page, PAINT_MARKERS[id]);
-      return { clickMs, feedbackMs, paintMs: await page.evaluate((start) => performance.now() - start, started) };
+        let feedbackMs = null, titled = false, node = null;
+        const tick = () => {
+          const now = performance.now();
+          if (now - t0 > 60_000) return reject(new Error("the switch to " + id + " did not paint"));
+          if (!titled && document.querySelector("#topbar .t")?.textContent.trim() === expected) {
+            titled = true;
+            requestAnimationFrame(() => requestAnimationFrame(() => { feedbackMs = performance.now() - t0; }));
+          }
+          const messages = document.querySelectorAll('#page section[aria-label="Transcript"] .msg.assistant'), last = messages[messages.length - 1];
+          if (!node && last && last.textContent.includes(marker)) {
+            node = last;
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              if (node.isConnected && node.textContent.includes(marker) && feedbackMs != null) resolve({ clickMs, feedbackMs, paintMs: performance.now() - t0 });
+              else if (node.isConnected && node.textContent.includes(marker)) { feedbackMs = performance.now() - t0; resolve({ clickMs, feedbackMs, paintMs: feedbackMs }); }
+              else { node = null; requestAnimationFrame(tick); }
+            }));
+            return;
+          }
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }), [id, name, PAINT_MARKERS[id]]);
     };
     const record = (entry, sample) => { entry.samplesMs.push(sample.paintMs); entry.feedbackSamplesMs.push(sample.feedbackMs); entry.clickTaskSamplesMs.push(sample.clickMs); };
 

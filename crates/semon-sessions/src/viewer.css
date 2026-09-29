@@ -340,6 +340,8 @@ code { overflow-wrap: anywhere; }
 .sk-bubble { height: 44px; border-radius: 12px; margin-left: auto; }
 .sk-step { height: 36px; border-radius: 8px; }
 .sk-w1 { width: 100%; } .sk-w2 { width: 78%; } .sk-w3 { width: 62%; } .sk-w4 { width: 46%; } .sk-w5 { width: 30%; }
+.load-error { display: grid; justify-items: start; }
+.load-error .more { min-height: var(--tap, 36px); border: 0; background: none; padding: 10px 0; color: var(--accent); font-size: var(--fs-ui); }
 @keyframes sk-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @media (prefers-reduced-motion: reduce) { .page.loading { transition: none; } .sk-line { animation: none; } }
 .msg .body { line-height: 1.5; }

@@ -5,7 +5,11 @@
 //   - with /api/tx delayed by a second, the skeleton shows (six turn-shaped placeholders, aria-hidden, no sideways overflow),
 //     then the transcript replaces it with the top bar where it was, aria-busy off and focus on the session's title;
 //   - a fast double switch (A, then B while A's response is late) ends on B: A's response is dropped and never flashes;
-//   - a session left a moment ago draws at once from the cache, without waiting for /api/tx and with none requested for it;
+//   - going back to a session (A, B, A) with no model update in between draws from what the page still holds, a frame after the
+//     click, with the top bar and sidebar first: the click's own task is short, and nothing is requested for the session;
+//   - after a model update has pruned it, a session left a moment ago draws the same way from the transcript cache;
+//   - Back and Forward do the same; a cached session whose growth mark has moved asks for its tail (/api/tx?after=);
+//   - a session whose transcript fails to load shows the reason and a way to try again in place of the skeleton;
 //   - the cache is bounded: after seven sessions the first is gone (it waits for the network again), a recent one is not.
 // Skeleton screenshots at 390 and 1280, light and dark, go to out/switch-skeleton-*.png.
 import path from "node:path";
@@ -21,11 +25,12 @@ const HIT_MS = 100;
 async function open(browser, opts) {
   const page = await served(browser, opts);
   page.delays = new Map();
-  page.seen = [];
+  page.seen = []; page.after = []; page.fail = new Set(); page.bump = new Set();
   await page.route("**/api/tx*", async (route) => {
-    const sid = new URL(route.request().url()).searchParams.get("sid");
+    const query = new URL(route.request().url()).searchParams, sid = query.get("sid");
     const ms = page.delays.get(sid) ?? page.delays.get("*") ?? 0;
-    page.seen.push(sid);
+    page.seen.push(sid); if (query.has("after")) page.after.push(sid);
+    if (page.fail.has(sid)) return route.fulfill({ status: 500, contentType: "text/plain", body: "held" });
     if (ms) await sleep(ms);
     try { await route.continue(); } catch {} // the page may have cancelled the request meanwhile
   });
@@ -38,6 +43,9 @@ async function open(browser, opts) {
     page.force = false; page.forced++;
     const response = await route.fetch({ url: url.origin + url.pathname }), body = await response.json();
     body.version = "forced-" + page.forced;
+    // A session named in `bump` looks as if its transcript had grown: its mark moves on (until the next poll says otherwise).
+    for (const sid of page.bump) { const [n, bytes] = String(body.tx?.[sid]).split(".").map(Number); if (Number.isFinite(n) && Number.isFinite(bytes)) body.tx[sid] = (n + 1) + "." + (bytes + 1); }
+    page.bump.clear();
     await route.fulfill({ response, json: body });
   });
   return page;
@@ -51,15 +59,18 @@ async function update(page) {
 }
 
 // Clicks a row and waits, frame by frame, until the page shows that session's transcript (not busy, its title as the heading),
-// up to `limit` ms. Used where the network is held: what draws in that time came from the cache.
+// up to `limit` ms. Also reports the click's own task (`syncMs`), whether the page was already busy when it ended (`busyAtClick`:
+// the page is built after the top bar and sidebar are drawn) and what the top bar said then. Used where the network is held: what
+// draws in that time came from what the page already held.
 const drawn = (page, id, name, limit) => page.evaluate(([id, name, limit]) => new Promise((resolve) => {
   const plain = (t) => String(t ?? "").replace(/\u2009/g, "").replace(/\s+/g, " ").trim(), main = document.querySelector("#page");
   const row = [...document.querySelectorAll("#lanes .srow[data-id]")].find((x) => x.dataset.id === id), t0 = performance.now();
   row.click();
+  const syncMs = performance.now() - t0, busyAtClick = main.getAttribute("aria-busy") === "true", bar = plain(document.querySelector("#topbar .t")?.textContent);
   const look = () => {
     const ms = performance.now() - t0;
-    if (main.getAttribute("aria-busy") !== "true" && !document.querySelector(".skeleton") && plain(main.querySelector(".ph h1")?.textContent) === name) return resolve({ drawn: true, ms });
-    if (ms > limit) return resolve({ drawn: false, ms, busy: main.getAttribute("aria-busy") === "true" });
+    if (main.getAttribute("aria-busy") !== "true" && !document.querySelector(".skeleton") && plain(main.querySelector(".ph h1")?.textContent) === name) return resolve({ drawn: true, ms, syncMs, busyAtClick, bar });
+    if (ms > limit) return resolve({ drawn: false, ms, syncMs, busyAtClick, bar, busy: main.getAttribute("aria-busy") === "true" });
     requestAnimationFrame(look);
   };
   requestAnimationFrame(look);
@@ -157,9 +168,21 @@ export default async function switchCheck(browser) {
     out.double = await page.evaluate(() => ({ path: location.pathname, title: document.querySelector("#topbar .t")?.textContent ?? null, heading: document.querySelector("#page .ph h1")?.textContent ?? null, skeleton: document.querySelectorAll(".skeleton").length, current: document.querySelector('#lanes .srow[aria-current="page"]')?.dataset.id ?? null }));
     r.expect(out.double.path.endsWith("/" + encodeURIComponent(d)) && plain(out.double.title) === nameOf(d) && plain(out.double.heading) === nameOf(d) && out.double.current === d && out.double.skeleton === 0, tag + ": a fast double switch did not end on the second session: " + JSON.stringify(out.double));
 
-    // ---- Back to a session left a moment ago (a): from the cache, with the network held ------------------------------------
-    await update(page);
+    // ---- A, B, A with no model update in between: what the page still holds, with the network held ----------------------------
+    // (Only a model update prunes a loaded transcript, so this is the common case: nothing is writing, or a poll answered 304.)
     page.delays.clear(); page.delays.set("*", 1500); page.seen.length = 0;
+    const warm = await drawn(page, a, nameOf(a), HIT_MS);
+    out.warm = { ...warm, ms: Math.round(warm.ms * 10) / 10, syncMs: Math.round(warm.syncMs * 10) / 10, updates: page.forced };
+    r.expect(page.forced === 0, tag + ": a model update came before the A, B, A switch, so it did not test what it should");
+    r.expect(warm.drawn && warm.ms <= HIT_MS, tag + ": going back to a loaded session did not draw within " + HIT_MS + " ms with the network held: " + JSON.stringify(out.warm));
+    r.expect(warm.busyAtClick && warm.syncMs <= 50 && plain(warm.bar) === nameOf(a), tag + ": the click that went back to a loaded session built its page in its own task, or did not draw the top bar first: " + JSON.stringify(out.warm));
+    await sleep(300);
+    r.expect(!page.seen.includes(a), tag + ": going back to a loaded session asked /api/tx for its own transcript");
+
+    // ---- Back to a session left a moment ago (a): from the cache once a model update has pruned it -----------------------------
+    page.delays.clear(); await click(page, c); await landed(page, c, nameOf(c)); // leave A for another
+    await update(page);
+    page.delays.set("*", 1500); page.seen.length = 0;
     const hit = await drawn(page, a, nameOf(a), HIT_MS);
     out.hit = { ...hit, ms: Math.round(hit.ms * 10) / 10 };
     r.expect(hit.drawn, tag + ": a session left a moment ago did not draw from the cache within " + HIT_MS + " ms with the network held: " + JSON.stringify(hit));
@@ -171,6 +194,49 @@ export default async function switchCheck(browser) {
     await sleep(1600); // child work held for 1.5 s arrives and the page is drawn again; nothing may break
     out.afterHit = await page.evaluate(() => ({ heading: document.querySelector("#page .ph h1")?.textContent ?? null, transcript: !!document.querySelector("#page section[aria-label='Transcript']"), skeleton: document.querySelectorAll(".skeleton").length }));
     r.expect(plain(out.afterHit.heading) === nameOf(a) && out.afterHit.transcript && !out.afterHit.skeleton, tag + ": the cached session broke when its child work arrived: " + JSON.stringify(out.afterHit));
+
+    // ---- Back and Forward, with the network held: the sessions come from the cache --------------------------------------------
+    const step = async (dir, id) => {
+      const t0 = Date.now();
+      await (dir === "back" ? page.goBack() : page.goForward());
+      const ok = await page.waitForFunction(([id, name]) => {
+        const main = document.querySelector("#page"), plain = (t) => String(t ?? "").replace(/\u2009/g, "").replace(/\s+/g, " ").trim();
+        return main.getAttribute("aria-busy") !== "true" && !document.querySelector(".skeleton") && plain(main.querySelector(".ph h1")?.textContent) === name && location.pathname.endsWith("/" + encodeURIComponent(id));
+      }, [id, nameOf(id)], { timeout: 700, polling: "raf" }).then(() => true, () => false);
+      return { ok, ms: Date.now() - t0 };
+    };
+    // The history so far ends ... a, c, a: Back leads to c, Forward to a again.
+    out.back = await step("back", c);
+    out.forward = await step("forward", a);
+    r.expect(out.back.ok, tag + ": Back did not draw the session before within 700 ms with the network held: " + JSON.stringify(out.back));
+    r.expect(out.forward.ok, tag + ": Forward did not draw the session after within 700 ms with the network held: " + JSON.stringify(out.forward));
+
+    // ---- A cached session whose growth mark has moved asks for its tail --------------------------------------------------------
+    const [x, y] = [rows[4], rows[5]];
+    page.delays.clear(); page.after.length = 0;
+    await click(page, x); await landed(page, x, nameOf(x));
+    await click(page, y); await landed(page, y, nameOf(y));
+    page.bump.add(x); await update(page); // the next poll is answered with a model where x has grown; x is now cached only
+    page.delays.set("*", 1500);
+    const grown = await drawn(page, x, nameOf(x), HIT_MS);
+    await sleep(2200); // the tail (held for 1.5 s) arrives and the page is drawn again
+    out.grown = { drawn: grown.drawn, ms: Math.round(grown.ms * 10) / 10, asked: page.after.filter((sid) => sid === x).length, after: await page.evaluate(() => ({ heading: document.querySelector("#page .ph h1")?.textContent ?? null, transcript: !!document.querySelector("#page section[aria-label='Transcript']"), skeleton: document.querySelectorAll(".skeleton").length })) };
+    r.expect(grown.drawn && grown.ms <= HIT_MS, tag + ": a cached session whose mark moved did not draw at once: " + JSON.stringify(out.grown));
+    r.expect(out.grown.asked >= 1, tag + ": a cached session whose mark moved did not ask for its tail");
+    r.expect(plain(out.grown.after.heading) === nameOf(x) && out.grown.after.transcript && !out.grown.after.skeleton, tag + ": the session broke when its tail arrived: " + JSON.stringify(out.grown));
+
+    // ---- A transcript that fails to load: the reason and a way to try again, in place of the skeleton ------------------------
+    const z = rows[6];
+    page.delays.clear(); page.fail.add(z);
+    await click(page, z);
+    await page.waitForSelector(".load-error", { state: "attached", timeout: 3000 });
+    out.failed = await page.evaluate(() => { const main = document.querySelector("#page"), box = main.querySelector(".load-error"); return { role: box?.getAttribute("role"), text: box?.textContent ?? "", button: !!box?.querySelector("button"), skeleton: document.querySelectorAll(".skeleton").length, busy: main.hasAttribute("aria-busy"), inert: main.inert, title: document.querySelector("#topbar .t")?.textContent ?? null }; });
+    r.expect(out.failed.role === "alert" && /Couldn't load this session/.test(out.failed.text) && out.failed.button && !out.failed.skeleton && !out.failed.busy && !out.failed.inert && plain(out.failed.title) === nameOf(z), tag + ": a failed load did not show its reason and a retry button in place of the skeleton: " + JSON.stringify(out.failed));
+    out.overflowFailed = await overflow(page);
+    r.expect(out.overflowFailed === 0, tag + ": the failure notice overflows sideways: " + out.overflowFailed);
+    page.fail.delete(z);
+    await page.click(".load-error button");
+    await landed(page, z, nameOf(z));
     r.expect(page.errors.length === 0, tag + ": page errors: " + page.errors.join(" | "));
     await page.context().close();
   }
