@@ -12,6 +12,11 @@ import { sample, BASE } from "./fixture.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const J = JSON.stringify;
 const min = (t) => (t == null ? t : Math.round(((t - BASE) / 60000) * 1000) / 1000);
+const wallMinute = (value) => {
+  if (typeof value !== "string") return value;
+  const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d))?/.exec(value);
+  return m ? Math.round((Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] ?? 0)) - BASE) / 60000 * 1000) / 1000 : value;
+};
 
 // A served transcript in full: every page, back from the last.
 export async function served(base, token) {
@@ -39,6 +44,8 @@ function align(a, b) {
 export function gaps({ model, tx }) {
   const S = sample(), out = [];
   const say = (x) => out.push(x);
+  // The sample's API_PRICE is only for its static illustration. The served viewer now reads exact per-session `cost`;
+  // pricing and token rates are no longer compared as frontend inputs.
   // Machines.
   const sampleMachines = Object.values(S.MACHINE), servedMachines = [model.machine.name];
   for (const m of sampleMachines) if (!servedMachines.includes(m)) say("machine " + m + ": not served");
@@ -50,6 +57,19 @@ export function gaps({ model, tx }) {
     cmp("name", s.name, v.name); cmp("kind", s.kind, v.kind); cmp("lane", !!s.lane, !!v.lane); cmp("role", !!s.role, !!v.role);
     cmp("harness", s.harness, v.harness); cmp("machine", S.MACHINE[s.machine], v.machine === model.machine.id ? model.machine.name : v.machine);
     cmp("movedFrom", s.movedFrom, v.movedFrom); cmp("model", s.model, v.model); cmp("state", s.state, v.state); cmp("tokens", s.tokens, v.tokens);
+    const parent = S.H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === id && h.from !== id && (h.kind === "spawn" || s.kind === "Relayed" || !s.lane))?.from;
+    cmp("parent", parent, v.parent);
+    const expectedTokens = Object.fromEntries(Object.entries(s.tokensByModel ?? {}).map(([modelId, usage]) => [modelId, { input: usage.input, output: usage.output, cacheWrite: usage.cacheWrite, cacheRead: usage.cacheRead }]));
+    const actualTokens = Object.fromEntries(Object.entries(v.tokens_by_model ?? {}).map(([modelId, usage]) => [modelId, { input: usage.input, output: usage.output, cacheWrite: usage.cache_write, cacheRead: usage.cache_read }]));
+    cmp("tokens_by_model", expectedTokens, actualTokens);
+    if (s.rate_limits) {
+      const expectedRate = {
+        recorded_at: wallMinute(s.rate_limits.recorded_at),
+        windows: [[300, s.rate_limits.five_hour], [10080, s.rate_limits.weekly]].map(([minutes, window]) => ({ minutes, used_percent: window.used_percent, resets_at: wallMinute(window.resets_at) })),
+      };
+      const actualRate = v.rate_limits && { recorded_at: min(v.rate_limits.recorded_at), windows: (v.rate_limits.windows ?? []).map((window) => ({ minutes: window.minutes, used_percent: window.used_percent, resets_at: min(window.resets_at) })) };
+      cmp("rate_limits", expectedRate, actualRate);
+    }
     cmp("repo", s.repo, v.repo); cmp("branch", s.branch, v.branch); cmp("start", s.start, min(v.start)); cmp("last", s.last, min(v.last));
     cmp("busy", s.busy, v.busy.map(([a, b]) => [min(a), min(b)])); cmp("activity", s.activity, v.activity?.slice(0, 3));
   }
@@ -66,9 +86,15 @@ export function gaps({ model, tx }) {
   }
   for (const v of model.handoffs) if (!used.has(v.id)) say("handoff " + v.kind + (v.ask ? " " + v.ask : "") + " " + v.from + "→" + v.to + " at " + min(v.at) + ": served, not in the sample");
   // Transcripts, entry by entry, with the served handoff ids read as the sample's.
+  // The sample records thought kind and timing from its source-log timestamps; the served model normalizes both
+  // harness formats to `think` and may precompute seconds. They are the same UI entry, so compare the shared content.
   const norm = (e) => {
-    const x = { k: e.k };
-    for (const f of ["text", "label", "name", "arg", "ok", "secs", "in", "out", "diff", "live", "unfinished"]) if (e[f] !== undefined) x[f] = e[f];
+    const k = e.k === "reasoning" ? "think" : e.k;
+    const x = { k };
+    for (const f of ["text", "label", "name", "arg", "ok", "secs", "in", "out", "diff", "live", "unfinished"]) {
+      if (f === "secs" && k === "think") continue;
+      if (e[f] !== undefined) x[f] = e[f];
+    }
     if (e.k === "h") x.id = ids.get(e.id) ?? e.id;
     if (e.ret) x.text = "Returned to " + (model.sessions[e.ret.to]?.name ?? e.ret.to) + (e.ret.failed ? " · failed" : "") + " · " + new Date(e.ret.at).toISOString().slice(11, 16);
     return J(x);

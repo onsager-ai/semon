@@ -15,9 +15,9 @@
 //  - no page errors, light or dark.
 //  - zero overflow screens on every screen visited (home, machines, every session, every trace).
 //  - T.modelMismatch is empty: every session's rendered turn list (ids, and which turns show a Trace button) matches
-//    the independent model exactly.
-//  - onwardWithoutButton === 0 and buttonWithoutOnward === 0: a turn shows a Trace button iff it actually sent
-//    something onward.
+//    the independent model and the mockup's child-page rule: its final turn omits the end row when the parent's brief
+//    is represented separately above the transcript.
+//  - onwardWithoutButton === 0 and buttonWithoutOnward === 0 outside that explicit final child-turn rule.
 //  - every trace opened matches the model with no `bad` count (root turn, crumb, title and history state all agree).
 //  - deep links land on the exact expected turn id (fromTrace.turn === expectTurn, fromHome.turn === expectTurn), and
 //    inView with a flash, in every form the original tried (from a trace node, from Home's item, from Home's Trace
@@ -42,14 +42,17 @@ const isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activi
 // and orphan reasons.
 function model(D) {
   const HID = new Map(D.H.map((h) => [h.id, h]));
+  const nativeTurns = new Map((D.model?.turns ?? []).map((t) => [t.id, t]));
+  const hasChildOrigin = (sid) => D.H.some((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === sid && h.from !== sid &&
+    (h.kind === "spawn" || D.SESS[sid]?.kind === "Relayed" || !D.SESS[sid]?.lane));
   const turns = {}, starts = new Map(), holds = new Map(), inTx = new Map();
   for (const [sid, es] of Object.entries(D.TX)) { const ts = turns[sid] = []; let t = null;
     es.forEach((e, i) => { if (isGap(e)) { t = null; return; } const h = e.k === "h" ? HID.get(e.id) : null; if (h) { if (!inTx.has(h.id)) inTx.set(h.id, new Set()); inTx.get(h.id).add(sid); }
       const inc = h ? h.to === sid && ["ask", "relay", "spawn"].includes(h.kind) && !starts.has(h.id) : e.k === "u";
-      if (inc || !t) { t = { id: inc && h ? h.id : (e.turn ?? sid + ":" + i) /* the server names a turn with no start handoff <sid>:<file>:<offset>, on its first entry */, sid, start: inc ? h : null, out: [] }; ts.push(t); if (inc && h) starts.set(h.id, t); }
+      if (inc || !t) { const id = inc && h ? h.id : (e.turn ?? sid + ":" + i) /* the server names a turn with no start handoff <sid>:<file>:<offset>, on its first entry */; t = { id, sid, start: inc ? h : null, out: [], last: !!nativeTurns.get(id)?.last, childOrigin: hasChildOrigin(sid) }; ts.push(t); if (inc && h) starts.set(h.id, t); }
       if (h && !inc && (h.from === sid || h.kind === "move")) { holds.set(h.id, t); if (h.kind !== "move") t.out.push(h); } });
   }
-  return { ...D, HID, turns, starts, holds, inTx };
+  return { ...D, HID, turns, starts, holds, inTx, hasChildOrigin };
 }
 
 export default async function turnsCheck(browser) {
@@ -68,6 +71,7 @@ export default async function turnsCheck(browser) {
     const screen = async (where) => { R.screens++; const n = await over(); if (n) { R.overflowScreens++; R.overflowWhere.push(where + ":" + n); } };
     const small = (sel) => page.evaluate((sel) => { const hs = [...document.querySelectorAll(sel)].filter((x) => x.offsetParent).map((x) => x.getBoundingClientRect().height); return { n: hs.length, min: hs.length ? Math.round(Math.min(...hs) * 10) / 10 : null, under36: hs.filter((h) => h < 35.5).length }; }, sel);
     const taps = {}; const addTap = (k, rr) => { const t = taps[k] ??= { n: 0, min: null, under36: 0 }; t.n += rr.n; t.under36 += rr.under36; if (rr.min != null) t.min = t.min == null ? rr.min : Math.min(t.min, rr.min); };
+    const menuAction = async (label) => { await page.click("#more-btn"); await page.locator('.menu [role="menuitem"]').filter({ hasText: label }).click(); };
 
     // Home and Machines.
     await screen("home"); addTap("ib", await small(".ib")); addTap("ib .tracebtn", await small(".ib .tracebtn"));
@@ -75,15 +79,18 @@ export default async function turnsCheck(browser) {
     for (const m of await page.evaluate(() => [...document.querySelectorAll(".page .nrow")].map((row) => row.dataset.m))) { await goto(page, { v: "machine", id: m }, D0); await screen("machine " + m); addTap("ib", await small(".ib")); }
 
     // Every session page: turns, trace buttons against the model, overflow collapsed and fully opened.
-    const T = { sessions: 0, turns: 0, perSession: {}, withOnward: 0, traceButtons: 0, onwardWithoutButton: 0, buttonWithoutOnward: 0, modelMismatch: [] };
+    const T = { sessions: 0, turns: 0, perSession: {}, withOnward: 0, traceButtons: 0, onwardWithoutButton: 0, buttonWithoutOnward: 0, childTailOnwardWithoutButton: 0, expectedChildTailOnwardWithoutButton: Object.entries(D.turns).filter(([sid, ts]) => D.hasChildOrigin(sid) && ts.at(-1)?.last && ts.at(-1)?.out.length).length, modelMismatch: [], mismatchDetails: [] };
     const traceTurns = [];
     for (const sid of Object.keys(D.SESS)) {
       await goto(page, { v: "session", id: sid }, D0); T.sessions++;
       const info = await page.evaluate(() => [...document.querySelectorAll(".turns > .turn")].map((t) => ({ id: t.dataset.turn, head: !!t.querySelector(":scope > .turn-h"), onward: t.querySelectorAll(":scope > .tx > .hcard:not(.start):not(.move)").length + t.querySelectorAll(":scope > .tx > .result-marker").length, btn: !!t.querySelector(":scope > .turn-end .tracebtn"), end: t.querySelector(":scope > .turn-end .stat")?.textContent ?? null })));
       const exp = D.turns[sid] ?? [];
-      if (info.length !== exp.length || info.some((t, i) => t.id !== exp[i].id || t.btn !== !!exp[i].out.length)) T.modelMismatch.push(sid.slice(0, 12));
+      if (info.length !== exp.length || info.some((t, i) => t.id !== exp[i].id || t.btn !== (!!exp[i].out.length && !(exp[i].last && exp[i].childOrigin)))) {
+        T.modelMismatch.push(sid.slice(0, 12));
+        T.mismatchDetails.push({ sid, expected: exp.map((t) => ({ id: t.id, out: t.out.map((h) => h.id) })), native: (D0.model.turns ?? []).filter((t) => t.sid === sid).map((t) => ({ id: t.id, start: t.start, sent: t.sent, end: t.end })), rendered: info });
+      }
       T.turns += info.length; T.perSession[D.SESS[sid].name.slice(0, 28)] = info.length;
-      for (const t of info) { if (t.onward) T.withOnward++; if (t.btn) { T.traceButtons++; traceTurns.push([sid, t.id]); } if (t.onward && !t.btn) T.onwardWithoutButton++; if (t.btn && !t.onward) T.buttonWithoutOnward++; }
+      for (const t of info) { const modeled = exp.find((x) => x.id === t.id), childTail = !!(modeled?.last && modeled.childOrigin); if (t.onward) T.withOnward++; if (t.btn) { T.traceButtons++; traceTurns.push([sid, t.id]); } if (t.onward && !t.btn) { if (childTail) T.childTailOnwardWithoutButton++; else T.onwardWithoutButton++; } if (t.btn && !t.onward) T.buttonWithoutOnward++; }
       await screen("session " + sid.slice(0, 8)); addTap(".tracebtn", await small(".turn-end .tracebtn")); addTap(".turn-h .from", await small(".turn-h .from"));
       await page.evaluate(() => { for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll('.hcard .more:not([hidden])').forEach((x) => x.click()); });
       await page.waitForTimeout(80); await screen("session open " + sid.slice(0, 8));
@@ -164,12 +171,12 @@ export default async function turnsCheck(browser) {
       await goto(page, { v: "session", id: multiSid }, D0);
       const allTurns = await page.evaluate(() => document.querySelectorAll(".turns > .turn").length);
       const word = "morning sweep";
-      await page.click('.topbar [aria-label="Find in transcript"]'); await page.fill("#find", word); await page.waitForTimeout(150);
+      await menuAction("Find in transcript"); await page.fill("#find", word); await page.waitForTimeout(150);
       const f1 = await page.evaluate(() => ({ turns: document.querySelectorAll(".turns > .turn").length, empty: !!document.querySelector(".turns > .empty") }));
       await page.fill("#find", "zzqqxx"); await page.waitForTimeout(150);
       const f2 = await page.evaluate(() => ({ turns: document.querySelectorAll(".turns > .turn").length, empty: document.querySelector(".turns > .empty")?.textContent }));
       await page.fill("#find", ""); await page.waitForTimeout(100); await page.click('.topbar [aria-label="Close search"]'); await page.waitForTimeout(100);
-      await page.click("#filter-btn"); await page.uncheck("#f-tools"); await page.waitForTimeout(120);
+      await menuAction("Filter transcript"); await page.uncheck("#f-tools"); await page.waitForTimeout(120);
       const f3 = await page.evaluate(() => document.querySelectorAll(".turns > .turn").length);
       const stepsWhileFiltered = await page.evaluate(() => document.querySelectorAll(".turns .step").length);
       await page.check("#f-tools"); await page.waitForTimeout(100);
@@ -204,6 +211,7 @@ export default async function turnsCheck(browser) {
   r.expect(out.dark.overflowScreens === 0, "dark overflowScreens=" + out.dark.overflowScreens + " " + JSON.stringify(out.dark.overflowWhere));
   r.expect(light.turns.modelMismatch.length === 0, "modelMismatch=" + JSON.stringify(light.turns.modelMismatch));
   r.expect(light.turns.onwardWithoutButton === 0, "onwardWithoutButton=" + light.turns.onwardWithoutButton);
+  r.expect(light.turns.childTailOnwardWithoutButton === light.turns.expectedChildTailOnwardWithoutButton, "final child-turn Trace visibility differs from the approved child-page rule: " + JSON.stringify({ actual: light.turns.childTailOnwardWithoutButton, expected: light.turns.expectedChildTailOnwardWithoutButton }));
   r.expect(light.turns.buttonWithoutOnward === 0, "buttonWithoutOnward=" + light.turns.buttonWithoutOnward);
   r.expect(!light.traces.bad, "bad traces=" + light.traces.bad);
   r.expect(light.deepLinks.hadPick === true, "no trace child node with its own turn was found for the fromTrace/crumb deep-link test");

@@ -1,14 +1,14 @@
-// Writes a synthetic ~/.claude, ~/.codex and /proc whose session model reproduces the sample mockup's data: its sessions,
+// Writes a synthetic ~/.claude, ~/.claude.json, ~/.codex and /proc whose session model reproduces the sample mockup's data: its sessions,
 // handoffs, turns, answers, busy intervals and transcripts, as Claude Code and Codex log lines. The sample's data is made up,
 // and every line here is made from it: the texts are read from the committed mockup, never from real logs.
 //
-//   node fixture.mjs OUT_DIR [--extras]   writes OUT_DIR/{claude,codex,proc,work,roles} and prints the `now` to pin
+//   node fixture.mjs OUT_DIR [--extras]   writes OUT_DIR/{.claude.json,claude,codex,proc,work,roles} and prints the `now` to pin
 //   node fixture.mjs OUT_DIR --second     writes a second machine's home (`desktop`) for views across machines
 //
 // --extras writes the sample plus what only the served viewer has to handle, for the check scripts (never for the pixel
 // comparison or the gap check): what the mockup's markdown check page (mkmd.js) added (one message in harbor using every
 // markdown construct, and an answered two-part question from ledger); a harbor step whose command is longer than its
-// summary; a Codex call with no exit status in deps; a `backlog` lane of 460 entries (paging); and a lane whose key, name,
+// summary; a yielded Codex command with a poll that sends input; a Codex call with no exit status in deps; a `backlog` lane of 460 entries (paging); and a lane whose key, name,
 // branch, messages, tools, relay, question, answer and subagent all carry an injection payload (XSS).
 //
 // What the model's rules can't reproduce is listed in gaps.json, and checked by gaps.mjs.
@@ -25,11 +25,16 @@ export function sample() {
   const start = html.indexOf("  const T = (h, m) => h * 60 + m;");
   const end = html.indexOf("  // ====================================================================================\n  const $ = ");
   if (start < 0 || end < start) throw new Error("the sample's data block moved");
-  return vm.runInNewContext("(() => {\n" + html.slice(start, end) + "\nreturn { NOW, MACHINE, MACHINE_UP, SESS, H, TX };\n})()");
+  const values = vm.runInNewContext("(() => {\n" + html.slice(start, end) + "\nreturn { NOW, MACHINE, MACHINE_UP, SESS, H, TX, API_PRICE };\n})()");
+  const historyStart = html.indexOf("  const ANALYTICS_HISTORY = {");
+  const historyEnd = html.indexOf("  function analyticsSessions()", historyStart);
+  if (historyStart < 0 || historyEnd < historyStart) throw new Error("the sample's analytics history moved");
+  const history = vm.runInNewContext("(() => { const T = (h, m) => h * 60 + m;\n" + html.slice(historyStart, historyEnd) + "\nreturn { ANALYTICS_HISTORY, ANALYTICS_WAIT_SAMPLES };\n})()");
+  return { ...values, ...history };
 }
 
-// Sample minutes since midnight map to 2026-09-24 UTC.
-export const BASE = Date.UTC(2026, 8, 24);
+// Sample minutes since midnight map to 2026-09-28 UTC, the date pinned by the approved mockup's allowance sample.
+export const BASE = Date.UTC(2026, 8, 28);
 export const ms = (minutes, seconds = 0, millis = 0) => BASE + minutes * 60000 + seconds * 1000 + millis;
 const T = (h, m) => h * 60 + m;
 const iso = (t) => new Date(t).toISOString();
@@ -42,17 +47,22 @@ export const XSS = '<img src=x onerror="window.__xss=1"><script>window.__xss=2</
 export const XSS_KEY = "<img src=x onerror=window.__xss=4>";
 
 export function write(out, { extras = false } = {}) {
-  const { NOW, SESS, H, TX } = sample();
+  const { NOW, SESS, H, TX, ANALYTICS_HISTORY } = sample();
   const HB = Object.fromEntries(H.map((h) => [h.id, h]));
   const brief = (id) => HB[id].brief;
   const rm = (p) => fs.rmSync(p, { recursive: true, force: true });
   for (const d of ["claude", "codex", "proc", "work", "roles"]) rm(path.join(out, d));
   const put = (rel, text) => { const p = path.join(out, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); return p; };
   // A line given as { raw } is written as is: an unreadable line the log lost.
-  const jsonl = (rel, lines) => put(rel, lines.sort((a, b) => a[0] - b[0]).map(([, v]) => (v.raw != null ? v.raw : JSON.stringify(v))).join("\n") + "\n");
+  const jsonl = (rel, lines) => {
+    // Codex reads session_meta from the first line; history may predate the active session by a week.
+    const meta = lines.filter(([, value]) => value.type === "session_meta"), rest = lines.filter(([, value]) => value.type !== "session_meta").sort((a, b) => a[0] - b[0]);
+    return put(rel, [...meta, ...rest].map(([, v]) => (v.raw != null ? v.raw : JSON.stringify(v))).join("\n") + "\n");
+  };
   // Repositories are directories with a .git; roles work outside any repository.
   const repo = (name) => { fs.mkdirSync(path.join(out, "work", name, ".git"), { recursive: true }); return path.join(out, "work", name); };
   const role = (name) => { fs.mkdirSync(path.join(out, "roles", name), { recursive: true }); return path.join(out, "roles", name); };
+  const historyAt = ([daysAgo, minute]) => BASE - daysAgo * 86400000 + minute * 60000;
   put("proc/sys/kernel/hostname", "laptop\n");
   let locks = "";
 
@@ -78,7 +88,11 @@ export function write(out, { extras = false } = {}) {
       busy: (a, b) => { for (let t = a; t < b; t += 4 * 60000) s.filler(t); s.filler(b); },
     };
     // Token use: one usage record, as the model counts tokens by message id.
-    s.tokens = (t) => lines.push([t, { type: "assistant", timestamp: iso(t), sessionId: agent ? agent.parent : sid, cwd, uuid: "u-" + sid + "-usage", message: { id: "msg-" + sid + "-usage", model: models[model], role: "assistant", content: [], usage: { input_tokens: Math.round(tokens[0] * 1e6), cache_creation_input_tokens: 0, cache_read_input_tokens: Math.round(tokens[1] * 1e6), output_tokens: Math.round(tokens[2] * 1e6) } } }]);
+    s.tokens = (t) => {
+      const target = Object.values(SESS[sid]?.tokensByModel ?? {})[0] ?? { input: tokens[0] * 1e6, cacheWrite: 0, cacheRead: tokens[1] * 1e6, output: tokens[2] * 1e6 };
+      const cacheWrite = target.cacheWrite ?? target.cache_write ?? 0, cacheWrite1h = target.cacheWrite1h ?? target.cache_write_1h ?? 0;
+      lines.push([t, { type: "assistant", timestamp: iso(t), sessionId: agent ? agent.parent : sid, cwd, uuid: "u-" + sid + "-usage", message: { id: "msg-" + sid + "-usage", model: models[model], role: "assistant", content: [], usage: { input_tokens: target.input, cache_creation_input_tokens: cacheWrite, cache_creation: { ephemeral_5m_input_tokens: cacheWrite - cacheWrite1h, ephemeral_1h_input_tokens: cacheWrite1h }, cache_read_input_tokens: target.cacheRead ?? target.cache_read ?? 0, output_tokens: target.output } } }]);
+    };
     s.save = () => {
       if (agent) {
         const dir = "claude/projects/" + agent.slug + "/" + agent.parent + "/subagents/agent-" + sid;
@@ -86,6 +100,9 @@ export function write(out, { extras = false } = {}) {
         put(dir + ".meta.json", JSON.stringify({ agentType: "general-purpose", description: agent.description ?? SESS[sid].name, toolUseId: agent.tool }));
       } else jsonl("claude/projects/" + slug(cwd) + "/" + sid + ".jsonl", lines);
     };
+    const history = ANALYTICS_HISTORY[sid];
+    if (history?.started) s.title(historyAt(history.started), SESS[sid]?.name ?? sid);
+    for (const [daysAgo, a, b] of history?.busy ?? []) s.busy(historyAt([daysAgo, a]), historyAt([daysAgo, b]));
     return s;
   }
   const slug = (cwd) => cwd.replace(/[^A-Za-z0-9]/g, "-");
@@ -106,14 +123,18 @@ export function write(out, { extras = false } = {}) {
     c.peer(ms(T(7, 12)), 102, "Sentinel", "m-h9", brief("h9"));
     c.text(ms(T(7, 14)), tx("principal")[1].text);
     c.ask(ms(T(7, 30)), brief("h8"));
-    c.tool(ms(T(7, 31)), "toolu-p1", "Bash", { command: tx("principal")[3].arg, description: "List open PRs" });
-    c.result(ms(T(7, 31), 2, 300), "toolu-p1", tx("principal")[3].out);
+    // The sample includes two masked Claude thinking blocks before this turn's first tool call.
+    c.think(ms(T(7, 30), 12), "");
+    c.think(ms(T(7, 30), 20), "");
+    c.think(ms(T(7, 30), 40), "");
+    c.tool(ms(T(7, 31)), "toolu-p1", "Bash", { command: tx("principal")[6].arg, description: "List open PRs" });
+    c.result(ms(T(7, 31), 2, 300), "toolu-p1", tx("principal")[6].out);
     c.busy(ms(T(7, 30)), ms(T(7, 48)));
     c.busy(ms(T(9, 8)), ms(T(9, 12)));
     c.tool(ms(T(9, 10)), "toolu-h10", "SendMessage", { to: "Advisor", message: brief("h10") });
     c.result(ms(T(9, 10), 0, 200), "toolu-h10", "Message sent to Advisor", { extra: { toolUseResult: { success: true, msg_id: "m-h10" } } });
     c.busy(ms(T(9, 46)), ms(T(9, 50)));
-    c.text(ms(T(9, 48)), tx("principal")[5].text);
+    c.text(ms(T(9, 48)), tx("principal")[8].text);
     c.text(ms(T(9, 50)), brief("h11"));
     c.tokens(ms(T(9, 50)));
     c.save(); live("principal", "idle");
@@ -139,7 +160,7 @@ export function write(out, { extras = false } = {}) {
     const c = claude("advisor", { cwd: role("advisor"), model: "opus-5.5", tokens: SESS.advisor.tokens });
     c.title(ms(T(9, 10)), "Advisor");
     c.peer(ms(T(9, 10)), 101, "Principal", "m-h10", brief("h10"));
-    c.think(ms(T(9, 10), 30), "Weighing what a SQLite queue buys against a migration that touches every client.");
+    c.think(ms(T(9, 10), 30), tx("advisor")[1].text);
     c.busy(ms(T(9, 10)), ms(T(9, 45)));
     c.text(ms(T(9, 45)), tx("advisor")[2].text);
     c.tokens(ms(T(9, 44)));
@@ -153,7 +174,7 @@ export function write(out, { extras = false } = {}) {
     c.title(ms(T(8, 5)), "harbor");
     c.busy(ms(T(8, 5)), ms(T(8, 12)));
     c.ask(ms(T(11, 40)), brief("h1"));
-    c.think(ms(T(11, 40), 9), "The backoff test failed on a seed before; check whether the delay overflows.");
+    c.think(ms(T(11, 40), 9), t[1].text);
     c.text(ms(T(11, 40), 10), t[2].text);
     c.tool(ms(T(11, 40), 11), "toolu-b1", "Bash", { command: t[3].arg });
     c.result(ms(T(11, 40), 49, 200), "toolu-b1", t[3].out, { error: true });
@@ -174,9 +195,11 @@ export function write(out, { extras = false } = {}) {
     c.tool(ms(T(11, 52)), "toolu-h2", "Bash", { command: "codex exec --full-auto < /tmp/handoff-offline-sync.md", run_in_background: true });
     c.tool(ms(T(12, 31)), "toolu-h3", "Agent", { description: SESS["h-review"].name, subagent_type: "general-purpose", prompt: brief("h3"), run_in_background: true });
     c.result(ms(T(12, 31), 0, 500), "toolu-h3", "Async agent launched successfully.", { extra: { toolUseResult: { status: "async_launched", agentId: "h-review" } } });
+    c.tool(ms(T(12, 33)), "toolu-h20", "Agent", { description: SESS["h-failed"].name, subagent_type: "general-purpose", prompt: brief("h20"), run_in_background: true });
+    c.result(ms(T(12, 36)), "toolu-h20", "Failed before producing a reproducer: the review sandbox could not read the test fixture.", { error: true });
     if (extras) c.text(ms(T(12, 31), 30), MARKDOWN);
-    c.text(ms(T(12, 32)), t[9].text);
-    c.tool(ms(T(12, 39), 18), "toolu-b3", "Bash", { command: t[10].arg });
+    c.text(ms(T(12, 36), 1), t[10].text);
+    c.tool(ms(T(12, 39), 18), "toolu-b3", "Bash", { command: SESS.harbor.activity[1] });
     c.tokens(ms(T(12, 32)));
     c.save(); live("harbor", "busy");
     // h-review: the reviewer subagent, reading the diff as it lands.
@@ -186,9 +209,18 @@ export function write(out, { extras = false } = {}) {
     r.tool(ms(T(12, 32)), "toolu-v1", "Bash", { command: rt[1].arg });
     r.result(ms(T(12, 32), 0, 200), "toolu-v1", rt[1].out);
     r.busy(ms(T(12, 31)), ms(T(12, 40)));
-    r.tool(ms(T(12, 39), 58), "toolu-v2", "Read", { file_path: path.join(harborCwd, rt[2].arg) });
+    r.tool(ms(T(12, 39), 58), "toolu-v2", "Read", { file_path: path.join(harborCwd, SESS["h-review"].activity[1]) });
+    r.tool(ms(T(12, 36)), "toolu-h19", "Agent", { description: SESS["h-review-codex"].name, subagent_type: "general-purpose", prompt: brief("h19"), run_in_background: true });
+    r.result(ms(T(12, 36), 10), "toolu-h19", "Async agent launched successfully.", { extra: { toolUseResult: { status: "async_launched", agentId: "h-review-codex" } } });
     r.tokens(ms(T(12, 33)));
     r.save();
+    const f = claude("h-failed", { cwd: harborCwd, model: "sonnet-5", tokens: SESS["h-failed"].tokens, agent: { parent: "harbor", slug: slug(harborCwd), tool: "toolu-h20" } });
+    f.prompt(ms(T(12, 33)), brief("h20"));
+    const failedTool = tx("h-failed")[1];
+    f.tool(ms(T(12, 35), 57, 200), "toolu-f1", "Read", { file_path: path.join(harborCwd, failedTool.arg) });
+    f.result(ms(T(12, 36)), "toolu-f1", failedTool.out, { error: true });
+    f.tokens(ms(T(12, 36)));
+    f.save();
   }
   // quill: your ask, a planning subagent, a Codex run that failed two layout tests, and a question for you.
   const quillCwd = repo("quill");
@@ -282,16 +314,31 @@ export function write(out, { extras = false } = {}) {
       text: (t, text) => at(t, "response_item", { type: "message", role: "assistant", content: [{ type: "output_text", text }] }),
       think: (t, text) => at(t, "response_item", { type: "reasoning", summary: [{ type: "summary_text", text }], encrypted_content: null }),
       shell: (t, callId, command) => at(t, "response_item", { type: "function_call", name: "shell", arguments: JSON.stringify({ command: command.split(" ") }), call_id: callId }),
+      call: (t, callId, name, input) => at(t, "response_item", { type: "function_call", name, arguments: JSON.stringify(input), call_id: callId }),
       code: (t, callId, script) => at(t, "response_item", { type: "custom_tool_call", status: "completed", call_id: callId, name: "exec", input: script }),
+      scriptResult: (t, callId, result) => at(t, "response_item", { type: "custom_tool_call_output", call_id: callId, output: [
+        { type: "input_text", text: "Script completed\nWall time 1.0s\nOutput:\n" },
+        { type: "input_text", text: JSON.stringify({ chunk_id: "fixture", wall_time_seconds: 1, original_token_count: 1, ...result }) },
+      ] }),
       item: (t, item) => at(t, "event_msg", { type: "item_completed", item }),
       patch: (t, callId, patch) => at(t, "response_item", { type: "custom_tool_call", status: "completed", call_id: callId, name: "apply_patch", input: patch }),
       output: (t, callId, text, code, custom) => at(t, "response_item", { type: custom ? "custom_tool_call_output" : "function_call_output", call_id: callId, output: out(text, code) }),
       busy: (a, b) => { for (let t = a; t < b; t += 4 * 60000) at(t, "turn_context", { cwd, model: "gpt-6-luna", approval_policy: "never" }); at(b, "turn_context", { cwd, model: "gpt-6-luna", approval_policy: "never" }); },
       handback: (t, text) => at(t, "response_item", { type: "agent_message", author: agentPath, content: [{ type: "output_text", text }] }),
       failed: (t) => at(t, "event_msg", { type: "task_complete", error: { message: "the layout suite failed" } }),
-      tokens: (t) => at(t, "event_msg", { type: "token_count", info: { total_token_usage: { input_tokens: Math.round((tokens[0] + tokens[1]) * 1e6), cached_input_tokens: Math.round(tokens[1] * 1e6), output_tokens: Math.round(tokens[2] * 1e6), reasoning_output_tokens: 0, total_tokens: 0 } } }),
-      save: () => jsonl("codex/sessions/2026/09/24/rollout-2026-09-24T" + iso(start).slice(11, 19).replace(/:/g, "-") + "-" + id + ".jsonl", lines),
+      tokens: (t) => {
+        const modelsUsed = Object.values(SESS[id]?.tokensByModel ?? {});
+        const use = modelsUsed.reduce((sum, value) => ({ input: sum.input + value.input, cache_read: sum.cache_read + (value.cacheRead ?? value.cache_read ?? 0), output: sum.output + value.output }), { input: 0, cache_read: 0, output: 0 });
+        const input = modelsUsed.length ? use.input : Math.round(tokens[0] * 1e6), cached = modelsUsed.length ? use.cache_read : Math.round(tokens[1] * 1e6), output = modelsUsed.length ? use.output : Math.round(tokens[2] * 1e6);
+        const limits = SESS[id]?.rate_limits;
+        const window = (source) => ({ window_minutes: source.minutes, used_percent: source.used_percent, resets_in_seconds: (Date.parse(source.resets_at) - Date.parse(limits.recorded_at)) / 1000 });
+        at(t, "event_msg", { type: "token_count", info: { total_token_usage: { input_tokens: input + cached, cached_input_tokens: cached, output_tokens: output, reasoning_output_tokens: 0, total_tokens: input + cached + output }, ...(limits ? { rate_limits: { primary: window({ minutes: 300, ...limits.five_hour }), secondary: window({ minutes: 10080, ...limits.weekly }) } } : {}) } });
+      },
+      save: () => jsonl("codex/sessions/2026/09/28/rollout-2026-09-28T" + iso(start).slice(11, 19).replace(/:/g, "-") + "-" + id + ".jsonl", lines),
     };
+    const history = ANALYTICS_HISTORY[id];
+    if (history?.started) at(historyAt(history.started), "turn_context", { cwd, model: "gpt-6-luna", approval_policy: "never" });
+    for (const [daysAgo, a, b] of history?.busy ?? []) c.busy(historyAt([daysAgo, a]), historyAt([daysAgo, b]));
     return c;
   }
   // A running Codex run holds its thread's writer lock: a lock file, and a /proc/locks line naming its inode.
@@ -307,7 +354,7 @@ export function write(out, { extras = false } = {}) {
     const t = tx("h-codex"), c = codex("h-codex", ms(T(11, 52)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-codex"].tokens });
     c.user(ms(T(11, 52)), "Semon-Parent: claude:harbor:toolu-h2\n" + brief("h2"));
     c.harness(ms(T(11, 52), 1), t[1].label);
-    c.think(ms(T(11, 52), 19), "Flush in queue order and stop at the first Nack; commit only after an Ack.");
+    c.think(ms(T(11, 52), 19), t[2].text);
     c.patch(ms(T(11, 53)), "call-x1", patchOf(t[3].arg, t[3].diff));
     c.output(ms(T(11, 53)), "call-x1", "Success. Updated the following files:\nM " + t[3].arg, 0, true);
     c.shell(ms(T(11, 55)), "call-x2", t[4].arg);
@@ -316,6 +363,17 @@ export function write(out, { extras = false } = {}) {
     c.patch(ms(T(12, 39), 54), "call-x3", "*** Begin Patch\n*** Update File: " + t[5].arg + "\n@@\n-        self.pending.pop_front()\n+        self.pending.pop_front().filter(|batch| !batch.acked)\n*** End Patch\n");
     c.tokens(ms(T(12, 30)));
     c.save(); locked("h-codex");
+  }
+  // h-review-codex: the review's Codex run, launched by its child Claude session.
+  {
+    const rt = tx("h-review-codex"), c = codex("h-review-codex", ms(T(12, 36)), { cwd: harborCwd, branch: "feat/offline-sync", tokens: SESS["h-review-codex"].tokens, nickname: SESS["h-review-codex"].name });
+    c.user(ms(T(12, 36)), "Semon-Parent: claude:h-review:toolu-h19\n" + brief("h19"));
+    c.call(ms(T(12, 37)), "call-h19", "Read", { file_path: path.join(harborCwd, rt[1].arg) });
+    c.output(ms(T(12, 37), 0, 300), "call-h19", rt[1].out, 0);
+    c.think(ms(T(12, 39), 30), "");
+    c.busy(ms(T(12, 36)), ms(T(12, 40)));
+    c.tokens(ms(T(12, 38)));
+    c.save(); locked("h-review-codex");
   }
   // q-codex: quill's Codex run; the layout suite failed and it handed back.
   {
@@ -344,7 +402,7 @@ export function write(out, { extras = false } = {}) {
       c.output(ms(T(12, 30), 2, 100), "call-z0", "{\"packages\":[{\"name\":\"meridian\"}]}", null);
     }
     c.shell(ms(T(12, 39), 49), "call-z1", t[2].arg);
-    c.tokens(ms(T(12, 30)));
+    c.tokens(ms(T(12, 38)));
     c.save(); locked("deps");
   }
   if (extras) {
@@ -367,6 +425,22 @@ export function write(out, { extras = false } = {}) {
       c.item(ms(T(8, 4)), { type: "FileChange", id: "change-1", changes: { [path.join(cwd, "src/code-mode.rs")]: { type: "update", unified_diff: "@@ -1 +1 @@\n-old\n+new\n", move_path: null } } });
       c.output(ms(T(8, 5)), "script-call", "Script completed", null, true);
       c.text(ms(T(8, 6)), "Three operations completed.");
+      c.save();
+    }
+    // yielded-ui: a long command outlives its yield, then a poll sends input before completion.
+    {
+      const cwd = repo("meridian"), start = ms(T(8, 10)), c = codex("yielded-ui", start, { cwd, branch: "feat/yielded-ui", tokens: [0, 0, 0] });
+      const pid = 4242, command = "printf " + "x".repeat(220);
+      const poll = (chars) => "const r = await tools.write_stdin({session_id:" + pid + ",chars:" + JSON.stringify(chars) + ",yield_time_ms:1000});\ntext(JSON.stringify(r));\n";
+      c.user(start, "Run a long command, then send input to its poll.");
+      c.code(start + 1000, "yield-start", "const r = await tools.exec_command({cmd:" + JSON.stringify(command) + ",workdir:\"" + cwd + "\",yield_time_ms:1000});\ntext(JSON.stringify(r));\n");
+      c.scriptResult(start + 2000, "yield-start", { session_id: pid, output: "started\n" });
+      c.code(start + 3000, "yield-input", poll("y\n"));
+      c.scriptResult(start + 4000, "yield-input", { session_id: pid, output: "received\n" });
+      c.code(start + 5000, "yield-finish", poll(""));
+      c.item(start + 5500, { type: "CommandExecution", id: "yield-ui-exec", process_id: String(pid), command: ["/bin/zsh", "-lc", command], cwd: "file://" + cwd, status: "completed", exit_code: 0, duration: { secs: 5, nanos: 0 }, aggregated_output: "started\nreceived\nfinished\n" });
+      c.scriptResult(start + 6000, "yield-finish", { output: "finished\n", exit_code: 0 });
+      c.text(start + 7000, "The long command accepted input and finished.");
       c.save();
     }
     // backlog: a long transcript, two and a half pages of tool calls in ten turns, with one unreadable line.
@@ -406,6 +480,7 @@ export function write(out, { extras = false } = {}) {
     xs.text(ms(T(12, 35), 30), XSS);
     xs.save();
   }
+  put(".claude.json", JSON.stringify({ projects: { "/fixture/principal": { lastSessionId: "principal", lastStartTime: ms(T(9, 45)), lastCost: 40, lastDuration: 300000, lastAPIDuration: 260000, lastToolDuration: 40000, lastLinesAdded: 12, lastLinesRemoved: 3, lastModelUsage: {} } } }));
   put("proc/locks", locks);
   return ms(NOW);
 }

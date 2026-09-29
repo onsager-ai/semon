@@ -42,7 +42,8 @@ thread_local! {
 /// v10: assistant billing splits, timestamps and Codex token-count deltas.
 /// v11: a Codex command that outlived its yield links its polls and its
 /// completion to the script that started it.
-const CACHE_VERSION: u32 = 11;
+/// v12: thinking extras and the thinking filters follow the viewer rewrite (#38).
+const CACHE_VERSION: u32 = 12;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -703,19 +704,9 @@ fn push(summary: &mut FileIndex, event: Event) {
     summary.events.push(event);
 }
 
-/// Adds a transcript-only marker. Consecutive thinking collapses into the
-/// first, as the prototype draws one marker per run.
+/// Adds a transcript-only marker. The viewer groups consecutive thinking
+/// entries, retaining each time so a masked run can show its measured length.
 fn extra(summary: &mut FileIndex, event: Event) {
-    if event.k == Kind::Think
-        && let Some(last) = summary.extras.last()
-        && last.k == Kind::Think
-        && summary
-            .events
-            .last()
-            .is_none_or(|previous| (previous.o, previous.b) < (last.o, last.b))
-    {
-        return;
-    }
     summary.extras.push(event);
 }
 
@@ -1762,13 +1753,9 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                             texts.push(text);
                         }
                     }
-                    // Only thinking with text to show: Claude Code stores most of it
-                    // empty (a signature only), and an empty marker draws nothing.
-                    Some("thinking")
-                        if role == Some("assistant")
-                            && field(item, "thinking")
-                                .is_some_and(|text| !text.trim().is_empty()) =>
-                    {
+                    // Retain empty blocks too: Claude often redacts the text, but
+                    // the viewer still shows a masked thought marker.
+                    Some("thinking") if role == Some("assistant") => {
                         extra(
                             summary,
                             Event {
@@ -2157,10 +2144,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     .get("summary")
                     .and_then(Value::as_array)
                     .is_some_and(|parts| {
-                        parts
-                            .iter()
-                            .filter_map(|part| field(part, "text"))
-                            .any(|text| !text.trim().is_empty())
+                        parts.iter().any(|part| field(part, "text").is_some())
                     }) =>
             {
                 extra(

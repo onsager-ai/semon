@@ -3,8 +3,8 @@
 // Two references, both the committed sample mockup (reference/semon-sample.html) rendered in the same browser:
 //
 //   port    The mockup's own code on the served data: the sample file with its data block replaced by what /api/model and
-//           /api/tx serve, and with the three clock lines and the "Thought" line of the approved real-data mockup (the only
-//           code the served data needs changed, since its times are epoch milliseconds). This isolates the frontend port:
+//           /api/tx serve, and with the clock formatters and Analytics timestamp adapter changed for served epoch milliseconds.
+//           This isolates the frontend port:
 //           the served page must match it within the anti-aliasing tolerance. Enforced.
 //   sample  The sample mockup exactly as committed, with its own data. The differences are the fixture's gaps (gaps.json:
 //           one machine, no moves, …), so this one is reported with its diff images, not enforced.
@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { PNG } from "pngjs";
 import pixelmatch from "pixelmatch";
 import { ENV, launch, context, served, goto, data } from "./lib.mjs";
-import { sample } from "./fixture.mjs";
+import { sample, BASE } from "./fixture.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const J = JSON.stringify;
@@ -35,7 +35,12 @@ const MARK_SVG = fs.readFileSync(path.join(here, "../../crates/semon-sessions/sr
 const OUT = path.join(ENV.out, "pixels");
 
 const MOCKUP = fs.readFileSync(path.join(here, "reference/semon-sample.html"), "utf8");
-const DATA_START = "  const T = (h, m) => h * 60 + m;";
+function stableMockup(html) {
+  const liveDemo = 'if (route.v !== "session") return;';
+  if (html.split(liveDemo).length !== 2) throw new Error("mockup demo tick guard moved");
+  return html.replace(liveDemo, 'if (window.__SEMON_PIXEL_COMPARE || route.v !== "session") return;');
+}
+const DATA_START = "  const T = (h, m) => h * 60 + m; const ST = (h, m, s = 0) => (T(h, m) * 60 + s) * 1000; const NOW = T(12, 40);";
 const DATA_END = "  // ====================================================================================\n  const $ = ";
 const CLOCKS = [
   ['  const clock = (m) => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");',
@@ -44,7 +49,153 @@ const CLOCKS = [
     '  const ago = (t) => { const d = Math.floor((NOW - t) / 60000); return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d"; };'],
   ['  const dur = (a, b) => { const d = (b ?? NOW) - a; return d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };',
     '  const dur = (a, b) => { const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 60000)); return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor((d % 1440) / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };'],
-  ['el("span", null, "Thought for " + e.secs + "s")', 'el("span", null, e.secs != null ? "Thought for " + e.secs + "s" : "Thought")'],
+];
+const ANALYTICS_LINES = [
+  ['  const analyticsAt = ([daysAgo, minute]) => ANALYTICS_DAY0 - daysAgo * DAY_MS + minute * 60000;',
+    '  const analyticsAt = ([daysAgo, minute]) => Number(minute) > 1e11 ? Number(minute) : ANALYTICS_DAY0 - daysAgo * DAY_MS + minute * 60000;'],
+];
+// The server's transcript endpoint owns the complete tool-call and error counts; the static mockup normally counts its
+// sample TX arrays directly. In port mode use the same per-session marks as the served viewer.
+const CALL_LINES = [
+  ['    const es = TX[s.id] ?? [], calls = es.filter((e) => e.k === "tool").length, errors = es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;',
+    '    const es = TX[s.id] ?? [], calls = TXM[s.id]?.calls ?? es.filter((e) => e.k === "tool").length, errors = TXM[s.id]?.errors ?? es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;'],
+  ['    const block = el("div", "child-return"), calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, finished =',
+    '    const block = el("div", "child-return"), calls = TXM[s.id]?.calls ?? (TX[s.id] ?? []).filter((e) => e.k === "tool").length, finished ='],
+  ['    const calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, origin = originHandoff(s.id);',
+    '    const calls = TXM[s.id]?.calls ?? (TX[s.id] ?? []).filter((e) => e.k === "tool").length, origin = originHandoff(s.id);'],
+  ['    if (child) { const calls = (TX[child.id] ?? []).filter((e) => e.k === "tool").length, meta = el("div", "child-meta");',
+    '    if (child) { const calls = TXM[child.id]?.calls ?? (TX[child.id] ?? []).filter((e) => e.k === "tool").length, meta = el("div", "child-meta");'],
+];
+// Port-mode entries already carry the server's measured duration; source-log timing fields stay in the sample only.
+const THOUGHT_LINES = [
+  ['  function thoughtSeconds(entries, i, sid) {\n    const e = entries[i];\n    if (SESS[sid]?.harness === "codex") return Number.isFinite(e.completed_at_ms) && Number.isFinite(e.started_at_ms) && e.completed_at_ms >= e.started_at_ms ? Math.round((e.completed_at_ms - e.started_at_ms) / 1000) : null;\n    const before = entryTimeMs(entries[i - 1]), at = entryTimeMs(e);\n    return Number.isFinite(before) && Number.isFinite(at) && at >= before ? Math.round((at - before) / 1000) : null;\n  }',
+    '  function thoughtSeconds(entries, i, sid) { const secs = entries[i]?.secs; return Number.isFinite(secs) && secs >= 0 ? secs : null; }'],
+  ['  const isPendingThought = (e) => !!(e.pending || e.status === "thinking");\n  const isMaskedThought = (e) => isThought(e) && !isPendingThought(e) && !thoughtText(e);',
+    '  const isPendingThought = (e, entries, i, sid) => !!(e.pending || e.status === "thinking") || Array.isArray(entries) && e.k === "think" && !thoughtText(e) && i === entries.length - 1 && SESS[sid]?.state === "work";\n  const isMaskedThought = (e, entries, i, sid) => isThought(e) && !isPendingThought(e, entries, i, sid) && !thoughtText(e);'],
+  ['      const row = { ...e, k: "think", displaySecs: thoughtSeconds(entries, i, sid) };',
+    '      const pending = isPendingThought(e, entries, i, sid), row = { ...e, k: "think", ...(pending ? { pending: true } : {}), displaySecs: thoughtSeconds(entries, i, sid) };'],
+  ['      if (!isMaskedThought(e)) { out.push(row); continue; }',
+    '      if (!isMaskedThought(e, entries, i, sid)) { out.push(row); continue; }'],
+  ['      while (j < entries.length && isMaskedThought(entries[j])) { const seconds = thoughtSeconds(entries, j, sid);',
+    '      while (j < entries.length && isMaskedThought(entries[j], entries, j, sid)) { const seconds = thoughtSeconds(entries, j, sid);'],
+];
+// Parents show the API-equivalent cost of their own session and descendant runs, as the served viewer does.
+const COST_LINES = [
+  [`  const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cacheWrite", "Cache write"], ["cacheRead", "Cache read"]];
+  const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
+  const usageTotal = (s) => Object.values(s.tokensByModel ?? {}).reduce((sum, m) => sum + TOKEN_KINDS.reduce((n, [k]) => n + (Number(m[k]) || 0), 0), 0);
+  function costForSessions(sessions) {
+    const kinds = Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), models = new Map(), unknown = new Set(); let usd = 0;
+    for (const s of sessions) for (const [modelId, usage] of Object.entries(s.tokensByModel ?? {})) {
+      const price = API_PRICE[modelId], current = models.get(modelId) ?? { modelId, kinds: Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), usd: 0, priced: !!price };
+      if (!price) { unknown.add(modelId); current.priced = false; }
+      for (const [key] of TOKEN_KINDS) {
+        const tokens = Number(usage[key]) || 0; current.kinds[key].tokens += tokens; kinds[key].tokens += tokens;
+        if (price) { const amount = tokens * price[key] / 1e6; current.kinds[key].usd += amount; kinds[key].usd += amount; current.usd += amount; usd += amount; }
+      }
+      models.set(modelId, current);
+    }
+    return { usd: unknown.size ? null : usd, knownUsd: usd, kinds, models: [...models.values()], unknown: [...unknown] };
+  }
+  const costForSession = (sid, includeRuns = false) => costForSessions(SESS[sid] ? [SESS[sid], ...(includeRuns ? descendantsOf(sid, sessionChildren()) : [])] : []);
+  const costText = (cost) => cost.unknown.length ? "—" : asMoney(cost.usd);
+  `, `  const TOTAL_TOKEN_KINDS = ["input", "output", "cacheWrite", "cacheRead"];
+  const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cache_read", "Cache read"], ["cache_write_5m", "Cache write · 5m"], ["cache_write_1h", "Cache write · 1h"], ["web_search", "Web search"]];
+  const asMoney = (usd) => "$" + usd.toFixed(2), shortMoney = (usd) => "$" + usd.toFixed(1);
+  const usageTotal = (s) => Object.values(s.tokensByModel ?? {}).reduce((sum, m) => sum + TOTAL_TOKEN_KINDS.reduce((n, k) => n + (Number(m[k]) || 0), 0), 0);
+  function costForSessions(sessions) {
+    const unknown = new Set(), models = new Map(), by_day = {}; let knownUsd = 0, allPriced = true;
+    for (const s of sessions) {
+      const cost = s.cost ?? {};
+      if (cost.usd == null) allPriced = false; else knownUsd += Number(cost.usd) || 0;
+      for (const modelId of cost.unpriced_models ?? []) unknown.add(modelId);
+      for (const [day, amount] of Object.entries(cost.by_day ?? {})) by_day[day] = (by_day[day] ?? 0) + (Number(amount) || 0);
+      for (const [modelId, model] of Object.entries(cost.by_model ?? {})) {
+        const current = models.get(modelId) ?? { modelId, kinds: Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), usd: 0, priced: true };
+        if (model.usd == null) current.priced = false; else current.usd += Number(model.usd) || 0;
+        for (const [key] of TOKEN_KINDS) { current.kinds[key].tokens += Number(model.tokens?.[key]) || 0; current.kinds[key].usd += Number(model.usd_by_kind?.[key]) || 0; }
+        models.set(modelId, current);
+      }
+    }
+    return { usd: allPriced && !unknown.size ? knownUsd : null, knownUsd, models: [...models.values()], unknown: [...unknown].sort(), by_day };
+  }
+  const costForSession = (sid, includeRuns = false) => costForSessions(SESS[sid] ? [SESS[sid], ...(includeRuns ? descendantsOf(sid, sessionChildren()) : [])] : []);
+  const costText = (cost) => cost.unknown.length || cost.usd == null ? "—" : asMoney(cost.usd);
+  function costSpan(from, to) {
+    const day = Math.floor(to / DAY_MS) * DAY_MS;
+    return [day - (analyticsRange - 1) * DAY_MS, day + DAY_MS];
+  }
+  const wholeDay = (day, a, b) => { const start = Date.parse(day + "T00:00:00.000Z"); return Number.isFinite(start) && start >= a && start + DAY_MS <= b; };
+  function sessionCostInRange(s, from, to) {
+    const [spanFrom, spanTo] = costSpan(from, to), cost = s.cost ?? {}, days = Object.entries(cost.by_day ?? {}).filter(([day]) => wholeDay(day, spanFrom, spanTo));
+    const unknown = days.length ? cost.unpriced_models ?? [] : [];
+    return { usd: unknown.length ? null : days.reduce((sum, [, amount]) => sum + (Number(amount) || 0), 0), unknown, hasData: days.length > 0 };
+  }
+  function analyticsCost(rows, from, to) {
+    const unknown = new Set(); let usd = 0;
+    for (const row of rows) { const cost = sessionCostInRange(row.s, from, to); if (!cost.hasData) continue; usd += Number(cost.usd) || 0; cost.unknown.forEach((model) => unknown.add(model)); }
+    return { usd: unknown.size ? null : usd, unknown: [...unknown] };
+  }
+  `],
+  ['    const cost = costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", cost.unknown.length ? "—" : shortMoney(cost.usd))); costItem.title = COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));',
+    '    const directRunsForCost = childSessions(s.id), descendantRunsForCost = descendantsOf(s.id, sessionChildren()), cost = directRunsForCost.length ? costForSessions([s, ...descendantRunsForCost]) : costForSession(s.id), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", (directRunsForCost.length ? "incl. runs " : "") + (cost.unknown.length ? "—" : shortMoney(cost.usd)))); costItem.title = "API-equivalent cost. " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(cost) + (directRunsForCost.length ? ", including runs" : "") + ". " + COST_TIP + (cost.unknown.length ? " no price for " + cost.unknown.join(", ") : ""));'],
+  ['    const costRows = rows.filter((r) => inRange(r.costAt, from, to)).map((r) => ({ row: r, cost: costForSession(r.id) }));',
+    '    const costRange = analyticsCost(rows, from, to);'],
+  ['    const costUnknown = [...new Set(costRows.flatMap((x) => x.cost.unknown))];',
+    '    const costUnknown = costRange.unknown;'],
+  ['      longestCurrent: current[0] ?? null, waitBy, costRows, costUnknown,\n      apiCost: costUnknown.length ? null : costRows.reduce((sum, x) => sum + x.cost.knownUsd, 0),',
+    '      longestCurrent: current[0] ?? null, waitBy, costUnknown,\n      apiCost: costRange.usd,'],
+  ['    const bins = Array.from({ length: count }, () => ({ claude: 0, codex: 0 })), unpriced = new Set();\n    for (const row of rows) {\n      if (!inRange(row.costAt, from, to)) continue; const cost = costForSession(row.id); if (cost.usd == null) { cost.unknown.forEach((m) => unpriced.add(m)); continue; }\n      const at = Math.min(count - 1, Math.floor((row.costAt - from) / (to - from) * count)); bins[at][row.s.harness] += cost.usd;\n    }',
+    '    const bins = Array.from({ length: count }, () => ({ claude: 0, codex: 0 })), unpriced = new Set(), [spanFrom, spanTo] = costSpan(from, to);\n    for (const row of rows) for (const [day, amount] of Object.entries(row.s.cost?.by_day ?? {})) {\n      if (!wholeDay(day, spanFrom, spanTo)) continue;\n      for (const model of row.s.cost?.unpriced_models ?? []) unpriced.add(model);\n      const index = Math.round((Date.parse(day + "T00:00:00.000Z") - spanFrom) / DAY_MS); bins[index][row.s.harness] += Number(amount) || 0;\n    }'],
+  ['    panel.append(title, el("div", "panel-sub", "API-equivalent cost " + unit + " · stacked by harness"));',
+    '    panel.append(title, el("div", "panel-sub", "API-equivalent cost per UTC day · today so far · stacked by harness"));'],
+  ['    addMetric("API-equivalent cost", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, null, true);',
+    '    addMetric(analyticsRange === 1 ? "Cost today (UTC)" : "Cost, last " + analyticsRange + " UTC days", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, null, true);'],
+  ['      const ms = busyMsIn(row, from, to); if (!ms && !inRange(row.startedAt, from, to)) continue;\n      const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);',
+    '      const ms = busyMsIn(row, from, to), c = sessionCostInRange(row.s, from, to); if (!ms && !inRange(row.startedAt, from, to) && !c.hasData) continue;\n      const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);'],
+  ['      if (inRange(row.costAt, from, to)) { const c = costForSession(row.id); g.cost += c.knownUsd; c.unknown.forEach((x) => g.unknown.add(x)); }',
+    '      if (c.hasData) { g.cost += Number(c.usd) || 0; c.unknown.forEach((x) => g.unknown.add(x)); }'],
+  ['    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", value(item))); if (item.cost?.unknown.length) b.append(el("span", "no-price", "no price for " + item.cost.unknown.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); }',
+    '    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", value(item))); if (item.cost?.unknown.length) b.append(el("span", "no-price", "no price for " + item.cost.unknown.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); }'],
+  ['    const costTop = all.filter((r) => inRange(r.costAt, from, to)).map((r) => { const cost = costForSession(r.id); return { ...r, cost, value: cost.usd }; }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5);',
+    '    const costTop = all.map((r) => { const rangeCost = sessionCostInRange(r.s, from, to), cost = { ...rangeCost, unknown: rangeCost.unknown }; return { ...r, cost, value: cost.usd }; }).filter((r) => r.cost.hasData).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5);'],
+];
+// Port mode keeps the served result status and read behavior so the image comparison covers the chrome faithfully.
+const RESULT_LINES = [
+  ['  const inbox = () => H.filter((h) => h.kind === "toyou" && h.status === "wait").sort((a, b) => b.at - a.at);',
+    '  const inbox = () => H.filter((h) => h.kind === "toyou" && (h.portStatus === "wait" || (h.ask === "result" && !SEEN_RESULTS.has(h.id)))).sort((a, b) => b.at - a.at);'],
+  ['  const statWord = (h) => ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];',
+    '  const statWord = (h) => h.kind === "toyou" && h.ask === "result" ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];'],
+  ['  function renderSession(page, sid) {\n    const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr");',
+    '  function renderSession(page, sid) {\n    markSeenResults(H.filter((h) => h.kind === "toyou" && h.ask === "result" && h.from === sid));\n    const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr");'],
+  ['        if (h.kind === "ask") { if (!show.messages) continue; const m = el("div", "msg user"); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }\n        // A relay or brief that starts a turn is that turn\'s message.',
+    '        if (h.kind === "ask") { if (!show.messages) continue; const m = el("div", "msg user"); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }\n        if (h.kind === "toyou" && h.ask === "result") { const marker = el("div", "result-marker " + (SEEN_RESULTS.has(h.id) ? "read" : "new")); marker.append(icon(I.result), el("span", "word", statWord(h)), el("span", "tm", clock(h.at))); tx.append(marker); continue; }\n        // A relay or brief that starts a turn is that turn\'s message.'],
+];
+// A result stays `new` in the served model, but opening its session/trace makes the turn end read as done.
+const TURN_RESULT_LINES = [
+  ['    if (ty) return { st: ty.status === "wait" ? "wait" : "done", text: (TOYOU[ty.ask] ?? "Sent you a message") + " · " + statWord(ty) + " · " + clock(ty.at) };',
+    '    if (ty) return { st: ty.status === "wait" && !(ty.ask === "result" && SEEN_RESULTS.has(ty.id)) ? "wait" : "done", text: (TOYOU[ty.ask] ?? "Sent you a message") + " · " + statWord(ty) + " · " + clock(ty.at) };'],
+];
+// The served trace marks result handoffs as read before it draws the compact row. Match that state and row in port mode.
+const TRACE_RESULT_LINES = [
+  ['    if (!root) { page.append(el("p", "empty", "This turn isn\'t in the logs on this machine.")); return; }\n    const flow = el("div", "flow"), seen = new Set([root.id]), sess = new Set([root.sid]); let n = 0;',
+    '    if (!root) { page.append(el("p", "empty", "This turn isn\'t in the logs on this machine.")); return; }\n    const readTrace = (turn, visited = new Set()) => { if (!turn || visited.has(turn.id)) return; visited.add(turn.id); markSeenResults(turn.sent); for (const h of turn.sent) if (h.kind === "spawn" || h.kind === "relay") readTrace(STARTS.get(h.id), visited); };\n    readTrace(root);\n    const flow = el("div", "flow"), seen = new Set([root.id]), sess = new Set([root.sid]); let n = 0;'],
+  ['        const c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null, tgt = h.kind === "toyou" ? h.from : h.to, [ic, parts] = sentence(h, null);',
+    '        const result = h.kind === "toyou" && h.ask === "result", c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null, tgt = h.kind === "toyou" ? h.from : h.to, [ic, parts] = result ? [I.result, [el("span", "verb", statWord(h))]] : sentence(h, null);'],
+  ['        const [x, b] = hop("child k-" + h.kind + " s-" + h.status + (c || h.kind === "toyou" || h.kind === "move" ? "" : " stub"), ic, hcls(tgt), parts, h.at); x.dataset.h = h.id; if (c) x.dataset.turn = c.id;\n        clampBrief(b, h.brief);',
+    '        const [x, b] = hop("child k-" + h.kind + " s-" + h.status + (c || h.kind === "toyou" || h.kind === "move" ? "" : " stub"), ic, hcls(tgt), parts, h.at); x.dataset.h = h.id; if (c) x.dataset.turn = c.id;\n        if (result) { n++; continue; }\n        clampBrief(b, h.brief);'],
+];
+const RESULT_CSS = [
+  '.result-marker { display: flex; align-items: center; gap: 7px; min-height: 24px; color: var(--muted); font-size: 12.5px; }',
+  '.result-marker > svg { width: 15px; height: 15px; flex: none; color: var(--faint); }',
+  '.result-marker .tm { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--faint); }',
+  '.result-marker.new { color: var(--accent); }',
+].join('\n');
+// The sample uses illustrative hostnames; in port mode the served model owns the machine names and the viewer
+// shortens those names in sidebar and line-2 labels.
+const HOST_LINES = [
+  ['  const HOST = { laptop: "marvin-mbp.local", studio: "studio.onsager.dev", buildbox: "buildbox.onsager.ai", cloud: "claude.ai-cloud.onsager.dev" };',
+    (D) => "  const HOST = " + J(D.MACHINE) + ";"],
 ];
 // The served viewer's other deliberate differences on the Machines screens (several machines from the server): an
 // offline machine's last-seen time where the sample had a move, and the embedding server's management link.
@@ -58,15 +209,35 @@ const MACHINE_LINES = [
 // The mockup file with the served data in its data block.
 function portReference(D) {
   const start = MOCKUP.indexOf(DATA_START), end = MOCKUP.indexOf(DATA_END);
+  if (start < 0 || end < start) throw new Error("mockup data block markers moved");
   const hhmm = (t) => new Date(t).toISOString().slice(11, 16);
+  const asIso = (t) => new Date(t).toISOString();
   const TX = {};
+  const H = D.H.map((h) => ({ ...h, portStatus: h.status }));
   for (const [sid, es] of Object.entries(D.TX)) TX[sid] = es.map((e) => (e.ret ? { k: "end", text: "Returned to " + D.SESS[e.ret.to].name + (e.ret.failed ? " · failed" : "") + " · " + hhmm(e.ret.at) } : e));
+  const SESS = Object.fromEntries(Object.entries(D.SESS).map(([id, source]) => {
+    const s = { ...source, id, modelId: Object.keys(source.tokens_by_model ?? {})[0] ?? source.model };
+    s.tokensByModel = Object.fromEntries(Object.entries(source.tokens_by_model ?? {}).map(([model, usage]) => [model, { input: usage.input, output: usage.output, cacheWrite: usage.cache_write, cacheRead: usage.cache_read }]));
+    if (source.rate_limits) {
+      const windows = source.rate_limits.windows ?? [], byMinutes = (minutes) => windows.find((w) => w.minutes === minutes);
+      const shape = (window) => window ? { used_percent: window.used_percent, resets_at: asIso(window.resets_at) } : undefined;
+      s.rate_limits = { recorded_at: asIso(source.rate_limits.recorded_at), five_hour: shape(byMinutes(300)), weekly: shape(byMinutes(10080)) };
+    }
+    return [id, s];
+  }));
   const block = ["  const NOW = " + D.NOW + ";", "  const MACHINE = " + J(D.MACHINE) + ";", "  const MACHINE_UP = " + J(D.MACHINE_UP) + ";",
     "  const MACHINE_LAST = " + J(D.MACHINE_LAST ?? {}) + ";", "  const ADMIN = " + J(D.ADMIN ?? null) + ";",
-    '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(D.SESS) + ";", "  for (const [id, s] of Object.entries(SESS)) s.id = id;",
-    "  const H = " + J(D.H) + ";", "  const THREADS = {};", "  const TX = " + J(TX) + ";", ""].join("\n");
+    '  const HARNESS = { claude: "Claude Code", codex: "Codex" };', "  const SESS = " + J(SESS) + ";",
+    "  const API_PRICE = {};", "  const H = " + J(H) + ";", "  const SEEN_RESULTS = new Set();", "  const markSeenResults = (handoffs) => { for (const h of handoffs) if (h.kind === \"toyou\" && h.ask === \"result\") SEEN_RESULTS.add(h.id); };", "  const THREADS = {};", "  const TX = " + J(TX) + ";", "  const TXM = " + J(D.TXM ?? {}) + ";", ""].join("\n");
   let html = MOCKUP.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + MOCKUP.slice(end);
-  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
+  const styleEnd = html.lastIndexOf("</style>");
+  if (styleEnd < 0) throw new Error("mockup style block moved");
+  html = html.slice(0, styleEnd) + RESULT_CSS + "\n" + html.slice(styleEnd);
+  for (const [a, b] of [...CLOCKS, ...MACHINE_LINES, ...ANALYTICS_LINES, ...CALL_LINES, ...THOUGHT_LINES, ...COST_LINES, ...RESULT_LINES, ...TURN_RESULT_LINES, ...TRACE_RESULT_LINES]) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, b); }
+  for (const [a, replacement] of HOST_LINES) { if (html.split(a).length !== 2) throw new Error("mockup line moved: " + a.slice(0, 40)); html = html.replace(a, replacement(D)); }
+  const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
+  if (!histories.test(html)) throw new Error("mockup analytics history block moved");
+  html = html.replace(histories, "  const ANALYTICS_HISTORY = {};\n  const ANALYTICS_WAIT_SAMPLES = [];");
   return html;
 }
 
@@ -78,9 +249,10 @@ async function referencePage(browser, size, dark, html) {
   page.errors = [];
   page.on("pageerror", (e) => page.errors.push(e.message.split("\n")[0]));
   await page.clock.setFixedTime(ENV.now);
+  await page.addInitScript(() => { window.__SEMON_PIXEL_COMPARE = true; });
   await page.route(/.*/, async (r) => {
     const url = new URL(r.request().url());
-    if (url.href === "http://reference.test/") return r.fulfill({ contentType: "text/html; charset=utf-8", body: html });
+    if (url.href === "http://reference.test/") return r.fulfill({ contentType: "text/html; charset=utf-8", body: stableMockup(html) });
     if (url.href === "http://reference.test/mark.svg") return r.fulfill({ contentType: "image/svg+xml", body: MARK_SVG });
     if (url.host === "fonts.googleapis.com") return r.fulfill({ contentType: "text/css", body: FACES.replaceAll('url("/fonts/', 'url("http://reference.test/fonts/') });
     const font = /^\/fonts\/(instrument-sans|jetbrains-mono|source-serif-4)-(latin-ext|latin)\.woff2$/.exec(url.pathname);
@@ -94,7 +266,12 @@ async function referencePage(browser, size, dark, html) {
 const FACE_LOADS = ['400 14px "Instrument Sans"', '500 14px "Instrument Sans"', '600 14px "Instrument Sans"', '400 12px "JetBrains Mono"', '500 12px "JetBrains Mono"', '400 14px "Source Serif 4"', '600 14px "Source Serif 4"'];
 async function ready(page) {
   await page.evaluate((faces) => Promise.all(faces.map((f) => document.fonts.load(f))).then(() => document.fonts.ready), FACE_LOADS);
-  await page.evaluate(() => { window.scrollTo(0, 0); const m = document.querySelector("#main"); if (m) m.scrollTop = 0; });
+  await page.evaluate(() => {
+    const state = history.state, sessionAtEnd = state?.v === "session" && !state.turn, main = document.querySelector("#main");
+    if (!sessionAtEnd) { window.scrollTo(0, 0); if (main) main.scrollTop = 0; }
+    else if (matchMedia("(max-width: 760px)").matches) window.scrollTo(0, document.documentElement.scrollHeight);
+    else if (main) main.scrollTop = main.scrollHeight;
+  });
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
   await page.waitForTimeout(120);
 }
@@ -114,7 +291,7 @@ function compare(a, b) {
 
 // Every screen, as routes on the served viewer and on each reference.
 function screens(D, S, ids) {
-  const list = [["home", { v: "home" }], ["timeline", { v: "timeline" }], ["sessions", { v: "sessions" }], ["machines", { v: "machines" }]];
+  const list = [["home", { v: "home" }], ["analytics", { v: "analytics" }], ["sessions", { v: "sessions" }], ["machines", { v: "machines" }]];
   for (const m of Object.keys(D.MACHINE)) list.push(["machine-" + m, { v: "machine", id: m }]);
   for (const sid of Object.keys(D.SESS)) list.push(["session-" + sid, { v: "session", id: sid }]);
   for (const t of D.turns) {
@@ -131,7 +308,7 @@ function screens(D, S, ids) {
 
 // The sample's handoff for each served one, matched as gaps.mjs matches them.
 function sampleIds(D, S) {
-  const min = (t) => Math.round(((t - Date.UTC(2026, 8, 24)) / 60000) * 1000) / 1000, ids = new Map();
+  const min = (t) => Math.round(((t - BASE) / 60000) * 1000) / 1000, ids = new Map();
   for (const h of S.H) { const v = D.H.find((x) => !ids.has(x.id) && x.kind === h.kind && x.from === h.from && x.to === h.to && min(x.at) === h.at); if (v) ids.set(v.id, h.id); }
   return ids;
 }
@@ -169,12 +346,17 @@ const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.wr
     }
     // The phone's navigation drawer, open on Home.
     if (size === "phone" && !ONLY.length) {
-      await nav(page, { v: "home" }, D, false); await page.click("#lead-btn"); await page.waitForTimeout(350);
-      await nav(port, { v: "home" }, D, true); await port.click("#lead-btn"); await port.waitForTimeout(350);
-      const p = compare(await shot(page, "desktop"), await shot(port, "desktop"));
+      // Each session screenshot can mark result handoffs read. Start the drawer comparison in a fresh served context,
+      // matching the reference page reload below, so both drawers show the fixture's initial unread count.
+      const drawerPage = await served(browser, { size, dark });
+      await drawerPage.click("#lead-btn"); await drawerPage.waitForTimeout(350);
+      await port.goto("http://reference.test/", { waitUntil: "load" }); await port.waitForSelector("#lead-btn"); await port.click("#lead-btn"); await port.waitForTimeout(350);
+      const p = compare(await shot(drawerPage, "desktop"), await shot(port, "desktop"));
       const row = { scheme, screen: "drawer", port: { pixels: p.pixels, ratio: p.ratio, size: p.size, pass: p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size } };
       if (!row.port.pass) { const dir = path.join(OUT, "port", scheme); save(dir, "drawer-served", p.A); save(dir, "drawer-reference", p.B); save(dir, "drawer-diff", p.diff); }
       results.push(row);
+      errors.push(...drawerPage.errors.map((e) => scheme + " served drawer: " + e));
+      await drawerPage.context().close();
     }
     errors.push(...page.errors.map((e) => scheme + " served: " + e), ...port.errors.map((e) => scheme + " port reference: " + e), ...orig.errors.map((e) => scheme + " sample: " + e));
     await page.context().close(); await port.context().close(); await orig.context().close();

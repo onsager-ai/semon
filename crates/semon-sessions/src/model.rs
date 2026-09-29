@@ -2123,11 +2123,11 @@ impl<'a> Builder<'a> {
         let Some(marker) = file.marker.clone() else {
             return (None, None, false);
         };
-        let Some(parent_file) = self
-            .files
-            .iter()
-            .position(|file| matches!(file.role, Role::Top { .. }) && file.id == marker.claude_id)
-        else {
+        let Some(parent_file) = self.files.iter().position(|file| {
+            matches!(file.role, Role::Top { .. } | Role::Agent(_))
+                && file.harness() == "claude"
+                && file.id == marker.claude_id
+        }) else {
             return (None, None, false);
         };
         let spawner = self.of_file[parent_file];

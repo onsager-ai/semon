@@ -53,7 +53,7 @@ export async function served(browser, opts = {}) {
 
 // The screen a route draws has its title in the bar, its transcript loaded, and its fonts in.
 export function titleOf(route, D) {
-  return { home: "Home", timeline: "Timeline", sessions: "Sessions", machines: "Machines", trace: "Trace" }[route.v]
+  return { home: "Home", analytics: "Analytics", sessions: "Sessions", machines: "Machines", trace: "Trace" }[route.v]
     ?? (route.v === "machine" ? D.MACHINE[route.id] : D.SESS[route.id]?.name);
 }
 export async function settled(page) {
@@ -67,6 +67,8 @@ export async function goto(page, route, D) {
   const title = titleOf(route, D);
   if (title) await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, title);
   if (route.v === "session") await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']"));
+  // Analytics draws at once and fills its tool-call counts in as they arrive: the screen is done when none is outstanding.
+  if (route.v === "analytics") await page.waitForFunction(() => document.querySelector(".analytics-metrics")?.dataset.counts === "ready");
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(60);
 }
@@ -81,16 +83,16 @@ export async function data({ extras = false } = {}) {
     return r.json();
   };
   const model = await get("/api/model");
-  const SESS = model.sessions, H = model.handoffs, TX = {};
+  const SESS = model.sessions, H = model.handoffs, TX = {}, TXM = {};
   for (const [id, s] of Object.entries(SESS)) s.id = id;
   for (const sid of Object.keys(SESS)) {
     let page = await get("/api/tx?sid=" + encodeURIComponent(sid)), entries = page.entries;
     while (page.from > 0) { page = await get("/api/tx?sid=" + encodeURIComponent(sid) + "&before=" + page.from); entries = page.entries.concat(entries); }
-    TX[sid] = entries;
+    TX[sid] = entries; TXM[sid] = { calls: page.calls, errors: page.errors };
   }
   const machines = model.machines ?? [model.machine];
   return {
-    model, SESS, H, TX, turns: model.turns, NOW: model.now,
+    model, SESS, H, TX, TXM, turns: model.turns, NOW: model.now,
     MACHINE: Object.fromEntries(machines.map((m) => [m.id, m.name])),
     MACHINE_UP: Object.fromEntries(machines.map((m) => [m.id, m.up])),
     MACHINE_LAST: Object.fromEntries(machines.filter((m) => m.last != null).map((m) => [m.id, m.last])),

@@ -1,0 +1,104 @@
+// Analytics: range, eight headline figures, stacked column charts, slice drill-in, breakdown filtering, cost measure,
+// phone width and the served Codex allowance. This replaces the retired Timeline check.
+import { served, data, reporter, overflow, goto, settled } from "../lib.mjs";
+
+export default async function analyticsCheck(browser) {
+  const D = await data(), r = reporter("analytics"), modes = [];
+  const expectedLabels = ["Agent-hours", "Cost, last 7 UTC days", "Sessions started", "Turns", "Tool calls", "Peak concurrency", "Waited on you", "Longest current wait"];
+  const expectedHarborIds = Object.values(D.SESS).filter((s) => s.repo === "harbor").map((s) => s.id).sort();
+  r.expect(!!D.SESS.deps?.rate_limits, "the fixture must serve Codex rate limits for the allowance panel");
+
+  for (const [mode, size, dark] of [["phone", "phone", false], ["desktop", "desktop", false]]) {
+    const page = await served(browser, { size, dark, path: "/analytics" });
+    await goto(page, { v: "analytics" }, D);
+    const record = { mode };
+    record.range = await page.evaluate(() => ({ labels: [...document.querySelectorAll("#topbar .analytics-range button")].map((b) => b.textContent.trim()), selected: document.querySelector('#topbar .analytics-range button[aria-pressed="true"]')?.textContent.trim(), heading: document.querySelector(".page .sub")?.textContent }));
+    await page.click('#topbar .analytics-range button:has-text("30 d")');
+    record.range30 = await page.evaluate(() => ({ selected: document.querySelector('#topbar .analytics-range button[aria-pressed="true"]')?.textContent.trim(), heading: document.querySelector(".page .sub")?.textContent }));
+    await page.click('#topbar .analytics-range button:has-text("7 d")');
+    record.labels = await page.evaluate(() => [...document.querySelectorAll(".analytics-metric .label")].map((x) => x.textContent.trim()));
+    record.figures = await page.locator(".analytics-metric").count();
+    record.longestCurrentWait = await page.locator('.analytics-metric').filter({ hasText: "Longest current wait" }).locator(".value").textContent();
+    // Cost is served per UTC day: 7 d counts the last 7 UTC days, today so far included.
+    const DAY = 86400000, today = Math.floor(D.NOW / DAY) * DAY, costFrom = today - 6 * DAY, costTo = today + DAY, missingModels = new Set(); let expectedUsd = 0;
+    for (const session of Object.values(D.SESS)) {
+      const days = Object.entries(session.cost?.by_day ?? {}).filter(([day]) => { const start = Date.parse(day + "T00:00:00.000Z"); return start >= costFrom && start + DAY <= costTo; });
+      for (const [, amount] of days) expectedUsd += Number(amount) || 0;
+      if (days.length) for (const model of session.cost?.unpriced_models ?? []) missingModels.add(model);
+    }
+    record.costExpected = missingModels.size ? "—" : "$" + expectedUsd.toFixed(2);
+    record.costHeadline = await page.locator('.analytics-metric').filter({ hasText: "Cost, last 7 UTC days" }).locator(".value").textContent();
+    record.charts = await page.evaluate(() => [...document.querySelectorAll(".analytics-chart svg")].map((svg) => ({ label: svg.getAttribute("aria-label"), columns: [...svg.querySelectorAll("rect.cost-claude, rect.cost-codex")].map((x) => ({ width: Number(x.getAttribute("width")), height: Number(x.getAttribute("height")) })).filter((x) => x.width > 0 && x.height > 0).length })));
+    record.allowance = await page.evaluate(() => ({ heading: [...document.querySelectorAll(".analytics-panel h2")].find((x) => x.textContent === "Codex allowance")?.textContent, windows: [...document.querySelectorAll(".allowance-window .window-name")].map((x) => x.textContent.trim()), used: [...document.querySelectorAll(".allowance-window .window-used")].map((x) => x.textContent.trim()) }));
+    record.sideways = size === "phone" ? await overflow(page) : 0;
+
+    await page.click('.analytics-measure button:has-text("API-equivalent cost")');
+    record.costMode = await page.evaluate(() => ({ pressed: document.querySelector('.analytics-measure button[aria-pressed="true"]')?.textContent.trim(), costRows: document.querySelectorAll(".analytics-row .row-cost.on").length, hoursRows: document.querySelectorAll(".analytics-row .row-hours.on").length }));
+    await page.click('.analytics-measure button:has-text("Agent-hours")');
+
+    const hit = page.locator(".analytics-panel .chart-hit[role=button]").first();
+    if (await hit.count()) await hit.click();
+    await page.waitForSelector("dialog.analytics-slice[open]");
+    record.slice = await page.evaluate(() => { const d = document.querySelector("dialog.analytics-slice"), rect = d.getBoundingClientRect(); return { open: d.open, sessions: d.querySelectorAll(".analytics-session").length, title: d.getAttribute("aria-label"), bottomSheet: matchMedia("(max-width: 760px)").matches ? rect.bottom >= innerHeight - 1 && rect.width >= innerWidth - 1 : null }; });
+    await page.click('dialog.analytics-slice button[aria-label="Close sessions list"]');
+
+    const repoRow = page.locator('.analytics-row[data-breakdown="repo"][data-key="harbor"]');
+    record.repoRow = await repoRow.count();
+    if (record.repoRow) await repoRow.click();
+    await page.waitForFunction(() => history.state?.v === "sessions");
+    record.filtered = await page.evaluate(() => ({ title: document.querySelector(".page h1")?.textContent, rows: [...document.querySelectorAll(".page .nrow")].map((x) => x.dataset.id).sort() }));
+    modes.push({ ...record, errors: page.errors });
+    await page.context().close();
+  }
+
+  // A session whose cost falls on two UTC days around the 24 h window (yesterday $10, today $3): the 24 h headline is
+  // today's UTC day alone, the previous period is yesterday's, and there is no hourly cost series. 7 d counts both days.
+  const fx = await served(browser, { size: "desktop", path: "/analytics" });
+  const isoDay = (t) => new Date(t).toISOString().slice(0, 10);
+  await fx.route(/\/api\/model(\?|$)/, async (route) => {
+    const res = await route.fetch();
+    if (res.status() !== 200) return route.fulfill({ response: res });
+    const m = await res.json(), sessions = Object.values(m.sessions).filter((x) => x.cost);
+    for (const x of sessions) { x.cost.by_day = {}; x.cost.unpriced_models = []; }
+    sessions[0].cost.by_day = { [isoDay(m.now - 86400000)]: 10, [isoDay(m.now)]: 3 };
+    return route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(m) });
+  });
+  await fx.reload({ waitUntil: "load" });
+  await settled(fx);
+  const figure = (label) => fx.locator(".analytics-metric").filter({ hasText: label });
+  const costTwoDays = {};
+  await fx.click('#topbar .analytics-range button:has-text("24 h")');
+  costTwoDays.day = { label: (await fx.locator(".analytics-metric .label").allTextContents()).map((x) => x.trim()).find((x) => x.startsWith("Cost")), value: await figure("Cost today (UTC)").locator(".value").textContent(), note: await figure("Cost today (UTC)").locator(".note").textContent(),
+    charts: await fx.locator(".analytics-chart svg").count(), costChart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .analytics-chart").count() };
+  await fx.click('#topbar .analytics-range button:has-text("7 d")');
+  costTwoDays.week = { value: await figure("Cost, last 7 UTC days").locator(".value").textContent(), chart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .panel-sub").textContent(), columns: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) rect.cost-claude, .analytics-panel:has(h2:has-text('Cost over time')) rect.cost-codex").count() };
+  costTwoDays.errors = fx.errors;
+  await fx.context().close();
+  r.expect(costTwoDays.day.label === "Cost today (UTC)" && costTwoDays.day.value === "$3.00" && costTwoDays.day.note.includes("−$7.00"), "24 h cost headline must be the one UTC day ($3.00 against yesterday's $10.00), not the $13.00 sum: " + JSON.stringify(costTwoDays.day));
+  r.expect(costTwoDays.day.charts === 1 && costTwoDays.day.costChart === 0, "the 24 h range must draw no hourly cost series: " + JSON.stringify(costTwoDays.day));
+  r.expect(costTwoDays.week.value === "$13.00" && costTwoDays.week.chart.includes("today so far") && costTwoDays.week.columns === 2, "7 d must count yesterday and today so far ($13.00, two columns): " + JSON.stringify(costTwoDays.week));
+  r.expect(costTwoDays.errors.length === 0, "cost fixture: page errors: " + costTwoDays.errors.join(" | "));
+
+  const legacy = await served(browser, { size: "desktop", path: "/timeline" });
+  const oldRoute = await legacy.evaluate(() => ({ state: history.state?.v, path: location.pathname, title: document.querySelector("#topbar .t")?.textContent }));
+  const legacyErrors = legacy.errors;
+  await legacy.context().close();
+
+  r.results = { modes, oldRoute, costTwoDays };
+  for (const m of modes) {
+    r.expect(m.errors.length === 0, m.mode + ": page errors: " + m.errors.join(" | "));
+    r.expect(m.range.labels.join(",") === "24 h,7 d,30 d" && m.range30.selected === "30 d" && m.range30.heading?.includes("Last 30 days"), m.mode + ": Analytics range control did not change the selected range: " + JSON.stringify({ before: m.range, after: m.range30 }));
+    r.expect(m.figures === 8 && expectedLabels.every((label) => m.labels.some((value) => value.startsWith(label))), m.mode + ": expected eight headline figures: " + JSON.stringify(m.labels));
+    r.expect(m.longestCurrentWait === "8m", m.mode + ": completed result messages were counted as current waits: " + m.longestCurrentWait);
+    r.expect(m.costHeadline === m.costExpected, m.mode + ": Analytics headline did not sum the served by_day cost: " + JSON.stringify({ actual: m.costHeadline, expected: m.costExpected }));
+    r.expect(m.charts.length === 2 && m.charts.every((chart) => chart.columns > 0), m.mode + ": expected both charts to render vertical columns: " + JSON.stringify(m.charts));
+    r.expect(m.costExpected === "—" || Number(m.costHeadline.replace("$", "")) > 0, m.mode + ": the fixture's cost is all on today, which the 7 d figure must include: " + m.costHeadline);
+    r.expect(m.slice?.open && m.slice.sessions > 0, m.mode + ": an Analytics slice did not open with busy sessions: " + JSON.stringify(m.slice));
+    if (m.mode === "phone") r.expect(m.slice?.bottomSheet && m.sideways === 0, "phone: the slice must be a bottom sheet with no sideways page scroll: " + JSON.stringify({ slice: m.slice, sideways: m.sideways }));
+    r.expect(m.repoRow === 1 && m.filtered?.title === "Sessions" && m.filtered.rows.length === expectedHarborIds.length && m.filtered.rows.join(",") === expectedHarborIds.join(",") && m.filtered.rows.length < Object.keys(D.SESS).length, m.mode + ": a repo breakdown did not filter the Sessions list to every harbor session: " + JSON.stringify({ found: m.repoRow, expected: expectedHarborIds, filtered: m.filtered }));
+    r.expect(m.costMode?.pressed === "API-equivalent cost" && m.costMode.costRows > 0 && m.costMode.hoursRows === 0, m.mode + ": the cost measure did not switch breakdown columns: " + JSON.stringify(m.costMode));
+    r.expect(m.allowance.heading === "Codex allowance" && m.allowance.windows.includes("5-hour window") && m.allowance.windows.includes("Weekly window") && m.allowance.used.length === 2, m.mode + ": served rate limits did not render both allowance windows: " + JSON.stringify(m.allowance));
+  }
+  r.expect(legacyErrors.length === 0 && oldRoute.state === "analytics" && oldRoute.path === "/analytics" && oldRoute.title === "Analytics", "the old /timeline URL did not resolve to /analytics: " + JSON.stringify({ ...oldRoute, errors: legacyErrors }));
+  return r.done();
+}

@@ -103,6 +103,104 @@ async function waitPaint(page, marker) {
   }, marker, { timeout: 60_000, polling: "raf" });
 }
 
+async function checkLongSessionOpenEnd(page) {
+  const opened = await page.evaluate(async () => {
+    await document.fonts.ready;
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    return { top: sc.scrollTop, gap: sc.scrollHeight - sc.scrollTop - sc.clientHeight, jumpHidden: document.querySelector(".jump-bottom")?.hidden ?? true };
+  });
+  const main = await page.locator("#main").boundingBox();
+  await page.mouse.move(main ? main.x + Math.min(main.width / 2, 200) : 195, 300);
+  await page.mouse.wheel(0, await page.evaluate(() => -innerHeight * 2));
+  await page.waitForFunction(() => {
+    const button = document.querySelector(".jump-bottom"), rect = button?.getBoundingClientRect();
+    return !!button && !button.hidden && !!rect && rect.width >= 40 && rect.height >= 40;
+  });
+  const raised = await page.evaluate(() => {
+    const button = document.querySelector(".jump-bottom"), rect = button.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect();
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    const composer = document.querySelector("#composer, .composer, [data-composer]")?.getBoundingClientRect();
+    const overlaps = (a, b) => !!a && !!b && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    return {
+      top: sc.scrollTop,
+      gap: sc.scrollHeight - sc.scrollTop - sc.clientHeight,
+      inside: rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
+      overlapsBar: overlaps(rect, bar),
+      overlapsComposer: overlaps(rect, composer),
+    };
+  });
+  await page.locator(".jump-bottom").click();
+  await page.waitForFunction(() => {
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    return sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 1;
+  }, null, { timeout: 10_000 });
+  const returnedGap = await page.evaluate(() => {
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    return sc.scrollHeight - sc.scrollTop - sc.clientHeight;
+  });
+  return {
+    openedGap: opened.gap,
+    jumpHiddenAtOpen: opened.jumpHidden,
+    scrollUpDistance: opened.top - raised.top,
+    raisedGap: raised.gap,
+    jumpInsideViewport: raised.inside,
+    overlapsBar: raised.overlapsBar,
+    overlapsComposer: raised.overlapsComposer,
+    returnedGap,
+    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && returnedGap <= 1,
+  };
+}
+
+// The open-at-end pin holds the tail for 2 s while the page settles, yields at once to the reader (wheel, or a press such as a
+// scrollbar drag), and lets go for good after the window. Each case opens the long session afresh (`opened` is the page's
+// clock when its last message painted, which is when the pin began or just after) and, once the reader is placed, grows the
+// transcript by 1200 px the way settling fonts and clamped cards would. The reader must not be moved: not to the end
+// while the pin would still be running, and not by growth after the window.
+async function checkPinYields(page, how) {
+  const opened = await page.evaluate(() => {
+    window.__pinInput = null;
+    for (const type of ["wheel", "pointerdown"]) window.addEventListener(type, () => { window.__pinInput ??= performance.now(); }, { passive: true, capture: true });
+    return performance.now();
+  });
+  const scrolled = () => page.evaluate(() => {
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    return { top: sc.scrollTop, height: sc.scrollHeight, gap: sc.scrollHeight - sc.scrollTop - sc.clientHeight };
+  });
+  const main = await page.locator("#main").boundingBox(), x = main ? main.x + Math.min(main.width / 2, 200) : 195;
+  if (how === "wheel") {
+    await page.mouse.move(x, 300);
+    await page.mouse.wheel(0, await page.evaluate(() => -innerHeight * 1.5));
+  } else if (how === "press") {
+    await page.mouse.move(x, 300);
+    await page.mouse.down(); await page.mouse.up();
+    await page.evaluate(() => {
+      const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+      sc.scrollTop = Math.max(0, sc.scrollTop - innerHeight * 1.5); // where a scrollbar drag would have left the reader
+    });
+  } else {
+    await page.waitForFunction((t) => performance.now() - t > 2600, opened, { polling: 100 });
+  }
+  await page.waitForTimeout(600);
+  const before = await scrolled();
+  const inputAt = await page.evaluate(() => window.__pinInput);
+  await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.className = "pin-probe"; probe.style.height = "1200px";
+    document.querySelector("#page section[aria-label='Transcript'] .turns").append(probe);
+  });
+  await page.waitForTimeout(400);
+  const after = await scrolled();
+  const late = await page.evaluate((t) => performance.now() - t, opened);
+  await page.evaluate(() => document.querySelector(".pin-probe")?.remove());
+  const timely = how === "after" ? late > 2000 : inputAt != null && inputAt - opened < 1000;
+  return {
+    how, before, after, inputAfterMs: inputAt == null ? null : Math.round(inputAt - opened), lateMs: Math.round(late),
+    ok: timely && after.height - before.height >= 1000 && Math.abs(after.top - before.top) <= 1 && (how === "after" || before.gap > 80),
+  };
+}
+
 function liveRecords({ sid, cwd, branch, sample, now }) {
   const records = [];
   let seq = 0;
@@ -152,6 +250,8 @@ async function runScreen(browser, screen, server, fixture) {
   const managedPages = new Set();
   const metrics = {
     coldOpen: { samplesMs: [], medianMs: null },
+    openAtEnd: null,
+    pinYields: [],
     switch: {
       marathonToRelay: { samplesMs: [], medianMs: null },
       relayToMarathon: { samplesMs: [], medianMs: null },
@@ -275,10 +375,23 @@ async function runScreen(browser, screen, server, fixture) {
       return await page.evaluate((start) => performance.now() - start, started);
     };
 
+    for (const how of ["wheel", "press", "after"]) {
+      const managed = await makePage();
+      await openMarathon(managed);
+      const result = await checkPinYields(managed.page, how);
+      metrics.pinYields.push(result);
+      if (!result.ok) failures.push(`open-at-end pin (${how}) did not leave the reader where they were: ${JSON.stringify(result)}`);
+      await finishPage(managed);
+    }
+
     let switchPage = null;
     for (let i = 0; i < 3; i++) {
       const managed = await makePage();
       metrics.coldOpen.samplesMs.push(await openMarathon(managed));
+      if (i === 0) {
+        metrics.openAtEnd = await checkLongSessionOpenEnd(managed.page);
+        if (!metrics.openAtEnd.ok) failures.push(`long-session end pin/jump assertions failed: ${JSON.stringify(metrics.openAtEnd)}`);
+      }
       metrics.domSize.samples.push(await managed.page.evaluate(() => document.getElementsByTagName("*").length));
       if (i === 2) switchPage = managed;
       else await finishPage(managed);

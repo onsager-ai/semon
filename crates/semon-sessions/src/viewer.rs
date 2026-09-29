@@ -320,6 +320,7 @@ impl Snapshot {
             &[".lock"],
             &mut watched,
         );
+        watched.insert(options.claude_json.clone(), stamp(&options.claude_json));
         for path in paths {
             let path = PathBuf::from(path);
             watched.entry(path.clone()).or_insert_with(|| stamp(&path));
@@ -722,6 +723,9 @@ impl MachineView {
         }
         let path = EventCache::path(&self.options.cache);
         let cache = self.events.get_or_insert_with(|| EventCache::read(&path));
+        if self.options.facts.is_none() {
+            cache.refresh_reported_runs(&self.options.claude_json, now, &mut self.events_dirty);
+        }
         // The files are stamped before the build reads them: a line that
         // lands while it runs is then a change the next poll sees, never one
         // that is neither parsed nor noticed. (A file created meanwhile
@@ -823,7 +827,9 @@ impl MachineView {
         let html = "text/html; charset=utf-8";
         let json = "application/json; charset=utf-8";
         match path {
-            "/" | "/timeline" | "/sessions" | "/machines" => Ok((200, html, PAGE.into())),
+            "/" | "/timeline" | "/analytics" | "/sessions" | "/machines" => {
+                Ok((200, html, PAGE.into()))
+            }
             "/viewer.js" => Ok((
                 200,
                 "text/javascript; charset=utf-8",
@@ -3011,6 +3017,7 @@ mod tests {
             ("/machines/bravo", 200),
             ("/machines/gamma", 404),
             ("/timeline", 200),
+            ("/analytics", 200),
         ] {
             assert_eq!(core.respond("GET", path, "", None).status, status, "{path}");
         }

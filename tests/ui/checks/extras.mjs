@@ -8,7 +8,7 @@
 //   - a command longer than its summary (harbor) shows its "Command" section with the whole command.
 //   - View all whose fetch fails shows the preview with the "Couldn't load the full text" note; when the fetch works,
 //     no note, and the sheet's text is longer than the preview's.
-//   - injection: on every screen reached (Home, Timeline, Sessions, Machines, every session including the payload lane,
+//   - injection: on every screen reached (Home, Analytics, Sessions, Machines, every session including the payload lane,
 //     its subagent and the failed send's stub, with every step, card and child run opened, and the details menu, and
 //     every trace), the document holds exactly one script (/viewer.js), no img and no iframe,
 //     nothing set window.__xss, and the payload shows as text. The payload lane and the failed-send stub also load from
@@ -176,12 +176,21 @@ export default async function (browser) {
     await page.waitForFunction(() => !!document.querySelector(".turns"));
     await page.evaluate(() => document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click()));
     R.unknown = await page.evaluate(() => {
-      const step = [...document.querySelectorAll(".step")].find((s) => s.querySelector(".sd")?.textContent.startsWith("exit unknown · "));
+      const norm = (s) => String(s ?? "").replace(/\u2009/g, " ").replace(/\s+/g, " ").trim();
+      const step = [...document.querySelectorAll(".step")].find((s) => norm(s.querySelector(".sd")?.textContent).startsWith("exit unknown · "));
       const sum = step?.closest(".tgroup")?.querySelector(".tsum");
-      return step ? { err: step.classList.contains("err"), sd: step.querySelector(".sd").textContent, groupFailed: !!sum?.querySelector(".tf"), grouped: !!sum } : null;
+      return step ? { err: step.classList.contains("err"), sd: norm(step.querySelector(".sd").textContent), groupFailed: !!sum?.querySelector(".tf"), grouped: !!sum } : null;
     });
     r.expect(R.unknown !== null, "a step with no exit status reads \"exit unknown · …\"");
     r.expect(R.unknown && !R.unknown.err && R.unknown.grouped && !R.unknown.groupFailed, "an unknown exit is neither failed nor counted as failed: " + JSON.stringify(R.unknown));
+    R.shortCommand = await page.evaluate(() => {
+      const step = [...document.querySelectorAll(".step")].find((item) => item.querySelector(".sa")?.textContent === "cargo metadata --format-version 1 --no-deps");
+      if (!step) return null;
+      const button = step.querySelector(":scope > button"); if (button?.getAttribute("aria-expanded") === "false") button.click();
+      const out = step.querySelector(":scope > .out"), labels = [...out.querySelectorAll(":scope > .io")].map((label) => label.textContent);
+      return { command: out.querySelector("pre.in")?.textContent ?? null, labels, cwd: labels.find((label) => label.startsWith("Working directory")) ?? null };
+    });
+    r.expect(R.shortCommand?.command === "cargo metadata --format-version 1 --no-deps" && R.shortCommand.labels.indexOf("Command") === 0 && R.shortCommand.labels.indexOf("Output") > R.shortCommand.labels.indexOf("Command") && R.shortCommand.cwd === null, "a short shell detail shows Command then Output and hides the session-root directory: " + JSON.stringify(R.shortCommand));
 
     await page.goto(ENV.extraBase + "/s/claude/harbor", { waitUntil: "load" }); await page.waitForFunction(() => !!document.querySelector(".turns"));
     await page.evaluate(() => document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click()));
@@ -225,6 +234,9 @@ export default async function (browser) {
       const response = await fetch("/api/tx?sid=code-mode&t=" + encodeURIComponent(token));
       const totals = await response.json();
       document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click());
+      const step = [...document.querySelectorAll(".step")].find((item) => item.querySelector(".sa")?.textContent === "git status");
+      const toggle = step?.querySelector(":scope > button"); if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
+      const detail = step?.querySelector(":scope > .out");
       return {
         calls: totals.calls,
         errors: totals.errors,
@@ -232,19 +244,53 @@ export default async function (browser) {
           arg: step.querySelector(".sa")?.textContent ?? "",
           err: step.classList.contains("err"),
         })),
-        scriptButtons: [...document.querySelectorAll(".viewscript")].map((button) => button.textContent),
+        groupedSteps: document.querySelectorAll(".tgroup .steps > .step").length,
+        groupScriptButtons: document.querySelectorAll(".tgroup > .viewscript").length,
+        detailScriptButtons: [...(detail?.querySelectorAll(".viewscript") ?? [])].map((button) => button.textContent),
+        detailLabels: [...(detail?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.textContent),
       };
     });
     R.codeMode = data;
     r.expect(data.calls === 3 && data.errors === 0, "three indexed operations are counted: " + JSON.stringify({ calls: data.calls, errors: data.errors }));
     r.expect(data.steps.map((step) => step.arg).join("|") === "git status|sed -n '1,9p' a.rs|src/code-mode.rs", "the steps show unwrapped commands and the changed path: " + JSON.stringify(data.steps));
     r.expect(data.steps.length === 3 && data.steps.every((step) => !step.err), "three ordinary, successful tool steps are shown");
-    r.expect(data.scriptButtons.length === 1 && data.scriptButtons[0] === "View script", "the operation group has one View script control: " + JSON.stringify(data.scriptButtons));
-    await page.click(".viewscript"); await page.waitForSelector("dialog.viewer[open]");
+    r.expect(data.groupedSteps === 3, "the script-backed operation remains inside a multi-step group: " + data.groupedSteps);
+    r.expect(data.groupScriptButtons === 0, "script controls never sit orphaned on the group summary");
+    r.expect(data.detailScriptButtons.length === 1 && data.detailScriptButtons[0] === "View script", "an expanded code-mode step has exactly one View script action: " + JSON.stringify(data.detailScriptButtons));
+    r.expect(data.detailLabels.indexOf("Command") === 0 && data.detailLabels.indexOf("Output") > data.detailLabels.indexOf("Command") && !data.detailLabels.includes("Working directory · ."), "a short code-mode operation shows Command and Output without the session-root directory: " + JSON.stringify(data.detailLabels));
+    await page.locator(".step > .out:not([hidden]) .viewscript").click(); await page.waitForSelector("dialog.viewer[open]");
     R.codeMode.script = await page.locator(".viewer pre.script").textContent();
     r.expect(R.codeMode.script.includes("Promise.allSettled") && R.codeMode.script.includes("git status"), "View script opens the source in the existing sheet");
     await page.click(".viewer .vclose");
     r.expect(page.errors.length === 0, "code-mode page errors: " + page.errors.join(" | "));
+    await page.context().close();
+  }
+
+  // ---- Yielded Codex command and poll input ---------------------------------------------------------------------
+  {
+    const page = await served(browser, { extras: true, path: "/s/codex/yielded-ui" });
+    await page.waitForFunction(() => !!document.querySelector(".turns"));
+    const data = await page.evaluate(async () => {
+      const token = new URLSearchParams(location.search).get("t");
+      const response = await fetch("/api/tx?sid=yielded-ui&t=" + encodeURIComponent(token));
+      const tx = await response.json(), entries = tx.entries.filter((entry) => entry.k === "tool");
+      const commandEntry = entries.find((entry) => entry.name === "exec_command"), inputEntry = entries.find((entry) => entry.name === "write_stdin");
+      document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click());
+      const steps = [...document.querySelectorAll(".step")];
+      const commandStep = steps.find((step) => step.querySelector(".sv")?.textContent === "Ran");
+      const inputStep = steps.find((step) => step.querySelector(".sv")?.textContent === "Sent input to");
+      for (const step of [commandStep, inputStep]) { const button = step?.querySelector(":scope > button"); if (button?.getAttribute("aria-expanded") === "false") button.click(); }
+      const detail = (step) => {
+        const out = step?.querySelector(":scope > .out");
+        return { labels: [...(out?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.textContent), value: out?.querySelector("pre.in")?.textContent ?? null };
+      };
+      return { commandEntry, inputEntry, command: detail(commandStep), input: detail(inputStep) };
+    });
+    R.yielded = data;
+    r.expect(data.commandEntry?.in?.startsWith("printf ") && data.commandEntry.arg.endsWith("…"), "the yielded command has a full input alongside its short summary: " + JSON.stringify(data.commandEntry));
+    r.expect(data.command.value === data.commandEntry.in && data.command.labels[0] === "Command" && data.command.labels.indexOf("Output") > data.command.labels.indexOf("Command"), "the yielded exec_command step shows its full command under Command, then Output: " + JSON.stringify(data.command));
+    r.expect(data.inputEntry?.in === "y\n" && data.input.value === "y\n" && data.input.labels[0] === "Input" && data.input.labels.indexOf("Output") > data.input.labels.indexOf("Input"), "the write_stdin step shows its sent text under Input, then Output: " + JSON.stringify(data.input));
+    r.expect(page.errors.length === 0, "yielded Codex steps have page errors: " + page.errors.join(" | "));
     await page.context().close();
   }
 
@@ -286,23 +332,24 @@ export default async function (browser) {
     await page.context().close();
   }
 
-  // ---- New results: opening the session persists its read state; unavailable storage leaves pages usable -----------
+  // ---- Needs you: opening a result persists its read state; unavailable storage leaves pages usable -----------------
   {
     const resultHandoff = D.H.find((h) => h.kind === "toyou" && h.ask === "result" && h.from === "result-card");
     r.expect(!!resultHandoff, "the synthetic human-started turn has a result handoff");
     const page = await served(browser, { extras: true, path: "/" });
-    const selector = '.ib.new-result[data-h="' + (resultHandoff?.id ?? "") + '"]';
-    await page.waitForFunction((id) => [...document.querySelectorAll(".sec-h")].some((head) => head.firstChild?.textContent === "New results") && !!document.querySelector('.ib.new-result[data-h="' + CSS.escape(id) + '"]'), resultHandoff?.id ?? "");
+    const selector = '.sec-h + .list .ib[data-h="' + (resultHandoff?.id ?? "") + '"]';
+    await page.waitForFunction((id) => [...document.querySelectorAll(".sec-h")].some((head) => head.firstChild?.textContent === "Needs you") && !!document.querySelector('.sec-h + .list .ib[data-h="' + CSS.escape(id) + '"]'), resultHandoff?.id ?? "");
     const before = await page.locator(selector).evaluate((card) => ({
       brief: card.querySelector(".q")?.innerText ?? "",
-      dots: card.querySelectorAll(".unread-dot").length,
+      resultIds: [...(card.parentElement.querySelectorAll(".ib[data-h]") ?? [])].map((item) => item.dataset.h),
       badge: document.querySelector('.nav-item[data-go="home"] .cnt.hot')?.textContent ?? "",
-      waitingIds: [...([ ...document.querySelectorAll(".sec-h") ].find((head) => head.firstChild?.textContent === "Needs you")?.nextElementSibling?.querySelectorAll(".ib") ?? [])].map((item) => item.dataset.h),
+      needsYou: card.parentElement.innerText,
     }));
-    r.expect(before.brief.includes("Unique result text for the transcript check.") && before.dots === 1, "New results keeps the full card text and unread dot: " + JSON.stringify(before));
-    const waitingKinds = before.waitingIds.map((id) => D.H.find((h) => h.id === id)?.ask);
-    r.expect(waitingKinds.every((ask) => ask === "question" || ask === "decision"), "Needs you lists questions and decisions only: " + JSON.stringify(waitingKinds));
-    r.expect(Number(before.badge) === before.waitingIds.length, "the Home badge counts only waiting questions: " + JSON.stringify(before));
+    r.expect(before.brief.includes("Unique result text for the transcript check.") && before.needsYou.includes("Unique result text for the transcript check."), "Needs you shows the full result card text: " + JSON.stringify(before));
+    r.expect(before.resultIds.includes(resultHandoff?.id), "the unread result is grouped with Needs you: " + JSON.stringify(before));
+    const waitingKinds = before.resultIds.map((id) => D.H.find((h) => h.id === id)?.ask);
+    r.expect(waitingKinds.every((ask) => ask === "question" || ask === "decision" || ask === "result") && waitingKinds.includes("result"), "Needs you lists open questions, decisions, and results: " + JSON.stringify(waitingKinds));
+    r.expect(Number(before.badge) === before.resultIds.length, "the Home badge counts all open inbox items: " + JSON.stringify(before));
 
     await page.goto(ENV.extraBase + "/s/claude/result-card?t=" + ENV.extraToken, { waitUntil: "load" });
     await page.waitForFunction(() => !!document.querySelector(".result-marker"));
@@ -312,8 +359,8 @@ export default async function (browser) {
     r.expect(marker.includes("read"), "the opened session shows the result as read: " + marker);
     await page.goto(ENV.extraBase + "/?t=" + ENV.extraToken, { waitUntil: "load" });
     await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
-    const onHome = () => page.locator(selector).count();
-    r.expect(await onHome() === 0, "the read result leaves New results");
+    const onHome = () => page.evaluate((id) => { const head = [...document.querySelectorAll(".sec-h")].find((item) => item.firstChild?.textContent === "Needs you"); return head?.nextElementSibling?.querySelector('.ib[data-h="' + CSS.escape(id) + '"]') ? 1 : 0; }, resultHandoff?.id ?? "");
+    r.expect(await onHome() === 0, "the read result leaves the Needs-you inbox");
     await page.reload({ waitUntil: "load" });
     await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
     r.expect(await onHome() === 0, "the read result stays cleared after reloading Home");
@@ -343,7 +390,7 @@ export default async function (browser) {
     const openEverything = (page) => page.evaluate(() => { for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"], .step > button[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll(".hcard .more:not([hidden]), .hop .more:not([hidden])").forEach((x) => x.click()); });
     for (const [size, dark] of [["phone", false], ["desktop", true]]) {
       const page = await served(browser, { extras: true, size, dark });
-      for (const v of ["home", "timeline", "sessions", "machines"]) { await goto(page, { v }, D); await scan(page, size + " " + v); }
+      for (const v of ["home", "analytics", "sessions", "machines"]) { await goto(page, { v }, D); await scan(page, size + " " + v); }
       const sids = [...Object.keys(D.SESS), "unsent:" + XSS];
       for (const id of sids) {
         await goto(page, { v: "session", id }, D); await page.waitForTimeout(100); await openEverything(page); await page.waitForTimeout(80);

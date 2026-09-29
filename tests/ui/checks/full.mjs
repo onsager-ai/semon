@@ -4,11 +4,9 @@
 // "more" on its hops. It never drove the sample mockup at all.
 //
 // Ported to drive the served sample fixture instead (the same measurements, on the fixture's data), phone dark only
-// (the original never ran phone light or desktop for this pass). Session ids are unchanged from the sample, so the
-// lane loop ('.srow[data-id]') needs no id mapping. Navigation is done the same way the original did — real clicks
-// on '#lead-btn' / '.srow' / the trace button — but each click that changes screen now also waits for the served
-// page's title (and, for a session, its transcript) rather than only the original's fixed waitForTimeout (kept
-// alongside, per the porting brief).
+// (the original never ran phone light or desktop for this pass). The served sidebar is now a recent-session tree,
+// so this exhaustive pass visits every served session by route; Home covers sidebar opening. Trace buttons remain
+// real clicks, and route changes wait for the served page's title and transcript.
 //
 // Assertions (derived from what these counts stand for in the mockup):
 //  - no page errors.
@@ -19,7 +17,7 @@
 //  - the walk actually visited screens and at least one trace (T.screens > 0, T.traces > 0), so a broken lane list
 //    or a missing Trace button would fail loudly instead of reporting an all-zero pass.
 import path from "node:path";
-import { ENV, served, data, reporter, overflow } from "../lib.mjs";
+import { ENV, served, data, goto, reporter, overflow } from "../lib.mjs";
 
 const afterTitle = (page, text) => page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, text);
 
@@ -44,17 +42,13 @@ export default async function full(browser) {
 
   const T = { screens: 0, overflowScreens: 0, steps: 0, withInput: 0, cutNoInput: 0, more: 0, moreFull: 0, moreStillClipped: 0, navigatedByMore: 0, traces: 0, hopMore: 0, hopMoreStillClipped: 0 };
   const add = (rr) => { for (const k in rr) T[k] += rr[k]; };
-  const top = async () => { await page.evaluate(() => window.scrollTo(0, 0)); await page.mouse.wheel(0, -50); await page.waitForTimeout(350); };
-  const openDrawer = async () => { await page.click("#lead-btn"); await page.waitForTimeout(280); };
   const openLane = async (id) => {
-    await top(); await openDrawer(); await page.click('.srow[data-id="' + id + '"]');
+    await goto(page, { v: "session", id }, D);
     await afterTitle(page, D.SESS[id].name); await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']"));
     await page.waitForTimeout(150);
   };
 
-  await top(); await openDrawer();
-  const lanes = await page.evaluate(() => [...document.querySelectorAll(".srow")].map((row) => row.dataset.id));
-  await page.click("#drawer-close"); await page.waitForTimeout(250);
+  const lanes = Object.keys(D.SESS);
 
   for (const id of lanes) {
     await openLane(id);

@@ -4,7 +4,8 @@
 // alignment. The original only ever drove test-real.html (real logs); it never had a sample pass at all.
 //
 // Ported to drive the served sample fixture instead (the same measurements, on the fixture's data). Every lookup
-// here is by session id or by a live DOM query, so there is no id mapping to do.
+// here is by session id or by a live DOM query, so there is no id mapping to do. The sidebar is now a recent-session
+// tree, so this exhaustive fixture walk routes directly to every served session; Home covers sidebar navigation.
 //
 // Assertions:
 //  - no page errors.
@@ -16,7 +17,7 @@
 //  - the walk actually visited lanes, turns and traces (lanes > 0, turns > 0, traces > 0), so a broken lane list or
 //    a missing Trace button fails loudly instead of an all-zero pass.
 import path from "node:path";
-import { ENV, served, data, reporter, overflow } from "../lib.mjs";
+import { ENV, served, data, goto, reporter, overflow } from "../lib.mjs";
 
 const afterTitle = (page, text) => page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, text);
 
@@ -31,13 +32,11 @@ export default async function checkReal(browser) {
 
   for (const go of ["home", "sessions", "machines"]) { await nav(go); tally.screens++; if (await over()) tally.overflowScreens++; }
   await page.screenshot({ path: path.join(ENV.out, "check-real-home.png") });
-  await page.click("#lead-btn"); await page.waitForTimeout(280);
-  const lanes = await page.evaluate(() => [...document.querySelectorAll(".srow")].map((r) => r.dataset.id));
-  await page.click("#drawer-close"); await page.waitForTimeout(250);
+  const lanes = Object.keys(D.SESS);
+  const openLane = async (id) => { await goto(page, { v: "session", id }, D); await page.waitForTimeout(100); };
 
   for (const id of lanes) {
-    await page.click("#lead-btn"); await page.waitForTimeout(280); await page.click('.srow[data-id="' + id + '"]');
-    await afterTitle(page, D.SESS[id].name); await page.waitForTimeout(100);
+    await openLane(id);
     tally.lanes++; tally.screens++; if (await over()) tally.overflowScreens++;
     await page.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click()); document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((b) => b.click()); });
     await page.waitForTimeout(80); tally.screens++; if (await over()) tally.overflowScreens++;
@@ -48,7 +47,7 @@ export default async function checkReal(browser) {
     await page.waitForTimeout(60); tally.screens++; if (await over()) tally.overflowScreens++;
     const tt = await page.evaluate(() => [...document.querySelectorAll(".turn-end .tracebtn")].map((b) => b.closest(".turn").dataset.turn));
     for (const t of tt) {
-      await page.click("#lead-btn"); await page.waitForTimeout(280); await page.click('.srow[data-id="' + id + '"]'); await afterTitle(page, D.SESS[id].name); await page.waitForTimeout(100);
+      await openLane(id);
       await page.click('.turn[data-turn="' + t + '"] > .turn-end .tracebtn'); await afterTitle(page, "Trace"); await page.waitForTimeout(100);
       tally.traces++; tally.screens++; if (await over()) tally.overflowScreens++;
       await page.evaluate(() => document.querySelectorAll(".hop .more:not([hidden])").forEach((b) => b.click())); await page.waitForTimeout(60); tally.screens++; if (await over()) tally.overflowScreens++;
