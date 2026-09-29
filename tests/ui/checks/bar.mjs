@@ -208,7 +208,8 @@ export default async function barCheck(browser) {
     const out = { ...R };
     if (mode !== "phone-dark") {
       // Find and filter are one mode on the busiest session: the field, its match count and four chips.
-      const busy = sids.sort((a, b) => (D.TX[b]?.length ?? 0) - (D.TX[a]?.length ?? 0))[0];
+      // The busiest session that has both messages and tool steps, so each chip has something to hide and something to keep.
+      const busy = sids.filter((x) => (D.TX[x] ?? []).some((e) => e.k === "tool") && (D.TX[x] ?? []).some((e) => e.k === "a")).sort((a, b) => (D.TX[b]?.length ?? 0) - (D.TX[a]?.length ?? 0))[0];
       await goto(page, { v: "session", id: busy }, D);
       const word = await page.evaluate(() => { const t = document.querySelector(".msg.assistant")?.textContent ?? ""; return (t.match(/[A-Za-z]{6,}/) ?? ["the"])[0].toLowerCase(); });
       const turnsBefore = await page.evaluate(() => document.querySelectorAll(".turns > .turn").length);
