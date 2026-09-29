@@ -40,7 +40,9 @@ thread_local! {
 /// and a script error is read from the harness header alone.
 /// v9: token usage is retained by model and Codex rate limits are indexed.
 /// v10: assistant billing splits, timestamps and Codex token-count deltas.
-const CACHE_VERSION: u32 = 10;
+/// v11: a Codex command that outlived its yield links its polls and its
+/// completion to the script that started it.
+const CACHE_VERSION: u32 = 11;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +129,11 @@ pub(crate) struct FileIndex {
     /// Tool call id -> all event indices with that exact id.
     #[serde(default)]
     tool_ids: BTreeMap<String, Vec<usize>>,
+    /// Codex commands still running after their yield: the exec session id
+    /// the yielded output named -> the event index of the script that
+    /// started it. At most [`YIELDS_MAX`].
+    #[serde(default)]
+    yields: BTreeMap<String, usize>,
     /// Line timestamps clustered into busy intervals (epoch ms).
     #[serde(default)]
     pub(crate) busy: Vec<(i64, i64)>,
@@ -519,6 +526,34 @@ pub(crate) struct Reply {
     pub(crate) m: Option<String>,
 }
 
+/// A code-mode script calls `tools.write_stdin`...
+pub(crate) const STDIN: u8 = 1;
+/// ...with `chars` that aren't an empty string: it sends input.
+pub(crate) const SENDS: u8 = 2;
+
+/// Open yielded commands kept per file; past this the oldest is dropped.
+const YIELDS_MAX: usize = 64;
+/// Poll outputs kept per yielded command; later polls still fold in.
+pub(crate) const POLLS_MAX: usize = 256;
+
+/// A Codex command that outlived its `yield_time_ms`: the script that
+/// started it answered with an exec session id and no exit code. Offsets
+/// only, like the rest of the index.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Yield {
+    /// The output lines of the polls that folded into it, in order: at most
+    /// [`POLLS_MAX`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) polls: Vec<u64>,
+    /// More polls folded in than were kept.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) cut: bool,
+    /// The `CommandExecution` item whose `process_id` is the session id:
+    /// the process's end, its line and outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) done: Option<Reply>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Peer {
     /// `origin.from`: the sender's socket address.
@@ -556,6 +591,16 @@ pub(crate) struct Event {
     /// open when the item completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<usize>,
+    /// Code-mode call: what its source calls, as [`STDIN`] and [`SENDS`].
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub(crate) script: u8,
+    /// Code-mode call: a command it started outlived its yield.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) y: Option<Box<Yield>>,
+    /// Code-mode call: a poll of the yielded command the call at this event
+    /// index started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) poll: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) r: Option<Reply>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1105,6 +1150,323 @@ fn script_error(output: Option<&Value>) -> bool {
         .is_some_and(|text| text.trim_start().starts_with("Script error"))
 }
 
+/// What a code-mode script gives one key of a `tools` call's object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ScriptArg {
+    /// The object has no such key.
+    Absent,
+    /// A plain string literal, unescaped.
+    Literal(String),
+    /// Anything else: a variable, an expression, a template with `${…}`, or
+    /// a call whose argument isn't an object literal this reader can follow.
+    Other,
+}
+
+fn ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// The JavaScript string literal opening at `start` (a quote): its text,
+/// unescaped, or `None` for a template with `${…}`; and where it ends. An
+/// unterminated literal ends at the end of `text`.
+fn read_literal(text: &str, start: usize) -> (Option<String>, usize) {
+    let mut chars = text[start..].char_indices();
+    let Some((_, quote)) = chars.next() else {
+        return (None, text.len());
+    };
+    let mut value = String::new();
+    let mut plain = true;
+    let hex = |digits: &str| u32::from_str_radix(digits, 16).ok();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            _ if c == quote => return (plain.then_some(value), start + at + c.len_utf8()),
+            '$' if quote == '`' && text[start + at..].starts_with("${") => plain = false,
+            '\\' => {
+                let Some((_, escaped)) = chars.next() else {
+                    break;
+                };
+                let rest = chars.as_str();
+                let code = match escaped {
+                    'n' => Some('\n'),
+                    't' => Some('\t'),
+                    'r' => Some('\r'),
+                    'b' => Some('\u{8}'),
+                    'f' => Some('\u{c}'),
+                    'v' => Some('\u{b}'),
+                    '0' => Some('\0'),
+                    '\n' => None,
+                    'x' => {
+                        let code = rest.get(..2).and_then(hex).and_then(char::from_u32);
+                        if code.is_some() {
+                            chars.nth(1);
+                        }
+                        code.or(Some('x'))
+                    }
+                    'u' if rest.starts_with('{') => {
+                        let close = rest.find('}').filter(|close| *close <= 7);
+                        let code = close
+                            .and_then(|close| hex(&rest[1..close]))
+                            .map(|code| char::from_u32(code).unwrap_or('\u{fffd}'));
+                        if let (Some(close), Some(_)) = (close, code) {
+                            chars.nth(close);
+                        }
+                        code.or(Some('u'))
+                    }
+                    'u' => {
+                        let code = rest
+                            .get(..4)
+                            .and_then(hex)
+                            .map(|code| char::from_u32(code).unwrap_or('\u{fffd}'));
+                        if code.is_some() {
+                            chars.nth(3);
+                        }
+                        code.or(Some('u'))
+                    }
+                    other => Some(other),
+                };
+                value.extend(code);
+            }
+            _ => value.push(c),
+        }
+    }
+    (None, text.len())
+}
+
+/// The value at `start`, after a key's colon.
+fn script_value(text: &str, start: usize) -> ScriptArg {
+    let rest = text[start..].trim_start();
+    if !rest.starts_with(['"', '\'', '`']) {
+        return ScriptArg::Other;
+    }
+    match read_literal(text, text.len() - rest.len()).0 {
+        Some(value) => ScriptArg::Literal(value),
+        None => ScriptArg::Other,
+    }
+}
+
+/// What a code-mode script gives `key` in its first call to `tool`
+/// (`tools.<tool>({key: …})`); `None` when the source never calls it. Read
+/// only for what the structured output doesn't carry: a yielded command's
+/// line before it completes, and the input a poll sends.
+pub(crate) fn script_arg(script: &str, tool: &str, key: &str) -> Option<ScriptArg> {
+    let mut from = 0;
+    let open = loop {
+        let at = from + script.get(from..)?.find(tool)?;
+        let after = script[at + tool.len()..].trim_start();
+        if !script[..at].chars().next_back().is_some_and(ident_char) && after.starts_with('(') {
+            break script.len() - after.len() + 1;
+        }
+        from = at + tool.len();
+    };
+    let text = &script[open..];
+    if !text.trim_start().starts_with('{') {
+        return Some(ScriptArg::Other);
+    }
+    // Depth 0 is the argument list, 1 the object literal.
+    let mut depth = 0usize;
+    let mut expect_key = false;
+    let mut at = 0;
+    while let Some(c) = text[at..].chars().next() {
+        match c {
+            '"' | '\'' | '`' => {
+                let (literal, end) = read_literal(text, at);
+                at = end;
+                let rest = text[at..].trim_start();
+                if depth == 1 && expect_key && rest.starts_with(':') {
+                    if literal.as_deref() == Some(key) {
+                        return Some(script_value(text, text.len() - rest.len() + 1));
+                    }
+                    expect_key = false;
+                }
+                continue;
+            }
+            '/' if text[at..].starts_with("//") => {
+                at = text[at..].find('\n').map_or(text.len(), |end| at + end);
+                continue;
+            }
+            '/' if text[at..].starts_with("/*") => {
+                at = text[at + 2..]
+                    .find("*/")
+                    .map_or(text.len(), |end| at + end + 4);
+                continue;
+            }
+            '(' | '[' | '{' => {
+                depth += 1;
+                expect_key = depth == 1 && c == '{';
+            }
+            ')' | ']' | '}' => {
+                if depth == 0 {
+                    return Some(ScriptArg::Absent);
+                }
+                depth -= 1;
+                expect_key = false;
+            }
+            ',' if depth == 1 => expect_key = true,
+            _ if depth == 1 && expect_key && ident_char(c) => {
+                let end = text[at..]
+                    .find(|c: char| !ident_char(c))
+                    .map_or(text.len(), |end| at + end);
+                let word = &text[at..end];
+                at = end;
+                let rest = text[at..].trim_start();
+                if word == key {
+                    return Some(if rest.starts_with(':') {
+                        script_value(text, text.len() - rest.len() + 1)
+                    } else {
+                        // Shorthand `{chars}`: a variable.
+                        ScriptArg::Other
+                    });
+                }
+                expect_key = false;
+                continue;
+            }
+            _ if depth == 1 && !c.is_whitespace() => expect_key = false,
+            _ => {}
+        }
+        at += c.len_utf8();
+    }
+    // The source ends inside the call: it can't be read.
+    Some(ScriptArg::Other)
+}
+
+/// The command line a code-mode script starts with `tools.exec_command`.
+pub(crate) fn script_command(script: &str) -> Option<String> {
+    match script_arg(script, "exec_command", "cmd")? {
+        ScriptArg::Literal(command) if !command.trim().is_empty() => Some(command),
+        _ => None,
+    }
+}
+
+/// [`STDIN`] and [`SENDS`] for a code-mode script's source. `chars` that
+/// can't be read count as input sent, so a poll is never hidden on a guess.
+fn script_flags(script: &str) -> u8 {
+    match script_arg(script, "write_stdin", "chars") {
+        None => 0,
+        Some(ScriptArg::Absent) => STDIN,
+        Some(ScriptArg::Literal(chars)) if chars.is_empty() => STDIN,
+        Some(_) => STDIN | SENDS,
+    }
+}
+
+/// A code-mode script's output that is one exec result: the harness header
+/// and the script's text, a JSON object with the command's `output` and
+/// `wall_time_seconds`, as `text(JSON.stringify(r))` prints it.
+pub(crate) fn yield_json(output: Option<&Value>) -> Option<Value> {
+    let text = match output? {
+        Value::String(text) => text.as_str(),
+        Value::Array(parts) => {
+            let texts: Vec<&str> = parts
+                .iter()
+                .filter_map(|part| field(part, "text"))
+                .collect();
+            match texts.as_slice() {
+                [header, body] if header.trim_start().starts_with("Script completed") => body,
+                [body] => body,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let value: Value = serde_json::from_str(text.trim()).ok()?;
+    (value.get("output").is_some_and(Value::is_string)
+        && value.get("wall_time_seconds").is_some_and(Value::is_number))
+    .then_some(value)
+}
+
+/// An exec session id, from a yielded output's `session_id` or an item's
+/// `process_id`: a number or a short string.
+fn exec_session(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::Number(number) => number.as_u64().map(|number| number.to_string()),
+        Value::String(text) if !text.is_empty() && text.len() <= 64 => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// The exec session a code-mode script's output leaves running: the
+/// command outlived its yield, so there is a session id and no exit code.
+fn yielded_session(output: Option<&Value>) -> Option<String> {
+    let value = yield_json(output)?;
+    if value.get("exit_code").is_some_and(|code| !code.is_null()) {
+        return None;
+    }
+    exec_session(value.get("session_id"))
+}
+
+/// Links a code-mode call whose output just arrived to a yielded command:
+/// as the script that started it, or as one of its polls. A script with
+/// operations of its own, or one that failed, stays a step of its own.
+fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, offset: u64) {
+    let Some(event) = summary.events.get(index) else {
+        return;
+    };
+    let (call_offset, flags, linked) = (event.o, event.script, event.poll);
+    let failed = event.r.as_ref().is_some_and(|reply| reply.e);
+    let operations = summary
+        .extras
+        .iter()
+        .rev()
+        .take_while(|extra| extra.o > call_offset)
+        .any(|extra| extra.k == Kind::Operation && extra.parent == Some(index));
+    if operations || failed {
+        summary.events[index].poll = None;
+        return;
+    }
+    // The command's completion arrived while this poll ran: its last poll.
+    let ended_here = linked.filter(|start| {
+        summary
+            .events
+            .get(*start)
+            .and_then(|found| found.y.as_ref())
+            .and_then(|yielded| yielded.done.as_ref())
+            .is_some_and(|done| done.o > call_offset)
+    });
+    let start = match yielded_session(output) {
+        Some(session) if flags & STDIN != 0 => summary.yields.get(&session).copied().or(ended_here),
+        Some(session) => {
+            // A new command that outlived its yield.
+            if summary.yields.len() >= YIELDS_MAX
+                && !summary.yields.contains_key(&session)
+                && let Some(oldest) = summary
+                    .yields
+                    .iter()
+                    .min_by_key(|(_, start)| **start)
+                    .map(|(session, _)| session.clone())
+            {
+                summary.yields.remove(&oldest);
+            }
+            summary.yields.insert(session, index);
+            summary.events[index].poll = None;
+            summary.events[index].y = Some(Box::default());
+            return;
+        }
+        None => ended_here,
+    };
+    let Some(start) = start.filter(|start| *start < index) else {
+        summary.events[index].poll = None;
+        return;
+    };
+    summary.events[index].poll = Some(start);
+    if let Some(found) = summary.events.get_mut(start)
+        && let Some(yielded) = found.y.as_mut()
+    {
+        if yielded.polls.len() < POLLS_MAX {
+            yielded.polls.push(offset);
+        } else {
+            yielded.cut = true;
+        }
+    }
+}
+
+/// The yielded command a poll that hasn't answered yet is taken to poll:
+/// the only one still open. Its output settles it.
+fn open_poll(summary: &FileIndex, flags: u8) -> Option<usize> {
+    if flags & STDIN == 0 || summary.yields.len() != 1 {
+        return None;
+    }
+    summary.yields.values().next().copied()
+}
+
 fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Option<i64>) {
     if summary.pending.contains_key(id) {
         resolve(summary, id, |_| Reply {
@@ -1513,22 +1875,58 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             let item = &payload["item"];
             let operation = matches!(field(item, "type"), Some("CommandExecution" | "FileChange"));
             let legacy_tool = field(item, "id").is_some_and(|id| non_code_mode_tool(summary, id));
+            let open = open_code_mode_call(summary);
+            let code = item.get("exit_code").and_then(Value::as_i64);
+            let failed =
+                code.is_some_and(|code| code != 0) || field(item, "status") == Some("failed");
+            let known = code.is_some()
+                || field(item, "status") == Some("failed")
+                || field(item, "type") == Some("FileChange");
+            // A yielded command's end: its `process_id` is the session id
+            // the starting script answered with. It arrives inside a poll,
+            // or while no script runs. Inside a script that isn't a poll the
+            // id was used again: that script's own command, and the old
+            // process is gone.
+            let yielded = if field(item, "type") == Some("CommandExecution") && !legacy_tool {
+                exec_session(item.get("process_id")).and_then(|session| {
+                    let start = summary.yields.remove(&session)?;
+                    let own = open.is_some_and(|open| {
+                        summary
+                            .events
+                            .get(open)
+                            .is_some_and(|event| event.script & STDIN == 0)
+                    });
+                    (!own).then_some(start)
+                })
+            } else {
+                None
+            };
+            if let Some(start) = yielded {
+                if let Some(found) = summary.events.get_mut(start)
+                    && let Some(started) = found.y.as_mut()
+                {
+                    started.done = Some(Reply {
+                        o: offset,
+                        t: time,
+                        e: failed,
+                        f: if known { 0 } else { UNKNOWN },
+                        ..Reply::default()
+                    });
+                }
+                if let Some(poll) = open.and_then(|open| summary.events.get_mut(open)) {
+                    poll.poll = Some(start);
+                }
+            }
             // An item is a step of its own only when exactly one code-mode
             // call is open to own it. Otherwise it is a plain call's item, or
             // its owner is ambiguous: its wrapper, or the plain call, is the
             // step, and the item adds nothing but the exit code below.
-            let parent = if operation && !legacy_tool {
-                open_code_mode_call(summary)
+            let parent = if operation && !legacy_tool && yielded.is_none() {
+                open
             } else {
                 None
             };
             if let Some(parent) = parent {
-                let code = item.get("exit_code").and_then(Value::as_i64);
-                let failed =
-                    code.is_some_and(|code| code != 0) || field(item, "status") == Some("failed");
-                let known = code.is_some()
-                    || field(item, "status") == Some("failed")
-                    || field(item, "type") == Some("FileChange");
                 extra(
                     summary,
                     Event {
@@ -1625,21 +2023,31 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     _ => {}
                 }
             }
-            Some("function_call" | "custom_tool_call" | "local_shell_call") => tool_event(
-                summary,
-                Event {
-                    k: Kind::Tool,
-                    o: offset,
-                    t: time,
-                    id: field(payload, "call_id").map(str::to_owned),
-                    n: Some(field(payload, "name").unwrap_or("shell").to_owned()),
-                    code_mode: field(payload, "type") == Some("custom_tool_call")
-                        && field(payload, "name") == Some("exec"),
-                    code_mode_open: field(payload, "type") == Some("custom_tool_call")
-                        && field(payload, "name") == Some("exec"),
-                    ..Event::default()
-                },
-            ),
+            Some("function_call" | "custom_tool_call" | "local_shell_call") => {
+                let code_mode = field(payload, "type") == Some("custom_tool_call")
+                    && field(payload, "name") == Some("exec");
+                let script = if code_mode {
+                    field(payload, "input").map_or(0, script_flags)
+                } else {
+                    0
+                };
+                let poll = open_poll(summary, script);
+                tool_event(
+                    summary,
+                    Event {
+                        k: Kind::Tool,
+                        o: offset,
+                        t: time,
+                        id: field(payload, "call_id").map(str::to_owned),
+                        n: Some(field(payload, "name").unwrap_or("shell").to_owned()),
+                        code_mode,
+                        code_mode_open: code_mode,
+                        script,
+                        poll,
+                        ..Event::default()
+                    },
+                );
+            }
             Some("function_call_output" | "custom_tool_call_output") => {
                 if let Some(id) = field(payload, "call_id") {
                     let output = payload.get("output");
@@ -1648,13 +2056,15 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     if acknowledgement(output) {
                         flags |= ACK;
                     }
-                    let code_mode_call = summary
-                        .pending
-                        .get(id)
-                        .and_then(|index| summary.events.get(*index))
-                        .is_some_and(|event| event.code_mode);
-                    if field(payload, "type") == Some("custom_tool_call_output") || !code_mode_call
-                    {
+                    let code_mode_index = summary.pending.get(id).copied().filter(|index| {
+                        summary
+                            .events
+                            .get(*index)
+                            .is_some_and(|event| event.code_mode)
+                    });
+                    let code_mode_call = code_mode_index.is_some();
+                    let script_output = field(payload, "type") == Some("custom_tool_call_output");
+                    if script_output || !code_mode_call {
                         resolve(summary, id, |_| Reply {
                             o: offset,
                             t: time,
@@ -1663,6 +2073,11 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                             f: flags,
                             ..Reply::default()
                         });
+                    }
+                    if let Some(index) = code_mode_index
+                        && script_output
+                    {
+                        fold_yield(summary, index, output, offset);
                     }
                 }
             }
@@ -2064,5 +2479,112 @@ mod tests {
         ] {
             assert_eq!(is_compact_command(text), skipped, "{text}");
         }
+    }
+
+    #[test]
+    fn a_script_argument_is_read_only_from_a_plain_literal() {
+        let literal = |text: &str| Some(ScriptArg::Literal(text.to_owned()));
+        for (script, tool, key, expected) in [
+            (
+                "await tools.write_stdin({session_id:1,chars:\"\"})",
+                "write_stdin",
+                "chars",
+                literal(""),
+            ),
+            (
+                "tools.write_stdin({session_id: 1, \"chars\": 'y\\n'})",
+                "write_stdin",
+                "chars",
+                literal("y\n"),
+            ),
+            (
+                "tools.write_stdin({session_id:1})",
+                "write_stdin",
+                "chars",
+                Some(ScriptArg::Absent),
+            ),
+            (
+                "tools.write_stdin({session_id:1, chars: input})",
+                "write_stdin",
+                "chars",
+                Some(ScriptArg::Other),
+            ),
+            (
+                "tools.write_stdin({chars})",
+                "write_stdin",
+                "chars",
+                Some(ScriptArg::Other),
+            ),
+            (
+                "tools.write_stdin(args)",
+                "write_stdin",
+                "chars",
+                Some(ScriptArg::Other),
+            ),
+            (
+                "tools.exec_command({cmd:\"echo \\\"hi\\\" \\u0041\\x42\\u{43}\", workdir:\"/w\"})",
+                "exec_command",
+                "cmd",
+                literal("echo \"hi\" ABC"),
+            ),
+            (
+                "tools.exec_command({env: {cmd: \"inner\"}, // cmd: \"comment\"\n cmd: `outer`})",
+                "exec_command",
+                "cmd",
+                literal("outer"),
+            ),
+            (
+                "tools.exec_command({cmd:`ls ${dir}`})",
+                "exec_command",
+                "cmd",
+                Some(ScriptArg::Other),
+            ),
+            (
+                "tools.exec_command({cmd:\"unterminated",
+                "exec_command",
+                "cmd",
+                Some(ScriptArg::Other),
+            ),
+            ("my_exec_command({cmd:\"x\"})", "exec_command", "cmd", None),
+            ("text('no call')", "exec_command", "cmd", None),
+        ] {
+            assert_eq!(script_arg(script, tool, key), expected, "{script}");
+        }
+        assert_eq!(
+            script_flags("tools.write_stdin({session_id:1,chars:\"\"})"),
+            STDIN
+        );
+        assert_eq!(
+            script_flags("tools.write_stdin({session_id:1,chars:\"q\"})"),
+            STDIN | SENDS
+        );
+        assert_eq!(
+            script_flags("tools.write_stdin({session_id:1,chars:keys})"),
+            STDIN | SENDS
+        );
+        assert_eq!(script_flags("tools.exec_command({cmd:\"ls\"})"), 0);
+    }
+
+    #[test]
+    fn a_yielded_output_is_a_session_id_without_an_exit_code() {
+        use serde_json::json;
+        let output = |body: Value| {
+            json!([
+                {"type": "input_text", "text": "Script completed\nWall time 1.0 seconds\nOutput:\n"},
+                {"type": "input_text", "text": body.to_string()},
+            ])
+        };
+        let running = output(json!({"wall_time_seconds": 1.0, "session_id": 7, "output": "a"}));
+        assert_eq!(yielded_session(Some(&running)).as_deref(), Some("7"));
+        let ended = output(
+            json!({"wall_time_seconds": 1.0, "session_id": 7, "exit_code": 0, "output": "a"}),
+        );
+        assert_eq!(yielded_session(Some(&ended)), None);
+        let printed = output(json!({"session_id": 7}));
+        assert_eq!(yielded_session(Some(&printed)), None);
+        let long =
+            output(json!({"wall_time_seconds": 1.0, "session_id": "x".repeat(65), "output": ""}));
+        assert_eq!(yielded_session(Some(&long)), None);
+        assert_eq!(yielded_session(Some(&json!("done"))), None);
     }
 }

@@ -16,6 +16,7 @@ use std::{
 use serde_json::{Map, Value, json};
 
 use crate::{
+    events::{self, Reply, ScriptArg},
     field,
     model::{
         self, Built, MSG_MAX, Shown, Slot, SlotFile, SlotKind, arg_summary, cap, content_text,
@@ -309,10 +310,293 @@ pub(crate) fn result_text(record: &Value, block: usize) -> Option<String> {
         }
         return Some(match output {
             Value::String(text) => text.clone(),
+            Value::Array(parts) => {
+                // One exec result a script printed: its command's output.
+                if let Some(value) = events::yield_json(Some(output))
+                    && let Some(text) = field(&value, "output")
+                {
+                    return Some(text.to_owned());
+                }
+                script_text(parts)
+            }
             other => content_text(other),
         });
     }
     tool_result_text(record, block)
+}
+
+/// A code-mode script's output parts as text: what the script printed,
+/// after the harness's "Script completed" header. A failure's header stays,
+/// as it says what failed.
+fn script_text(parts: &[Value]) -> String {
+    let mut texts: Vec<String> = parts
+        .iter()
+        .filter_map(|part| match field(part, "type") {
+            None | Some("text" | "input_text" | "output_text") => {
+                field(part, "text").map(str::to_owned)
+            }
+            Some("image" | "input_image") => Some("[image]".to_owned()),
+            _ => None,
+        })
+        .collect();
+    if texts
+        .first()
+        .is_some_and(|header| header.trim_start().starts_with("Script completed"))
+    {
+        texts.remove(0);
+    }
+    texts.join("\n")
+}
+
+/// The output chunk a yielded command's script or poll printed.
+fn chunk_of(record: &Value) -> Option<String> {
+    let value = events::yield_json(record.get("payload")?.get("output"))?;
+    field(&value, "output").map(str::to_owned)
+}
+
+/// A yielded command's output as its scripts and polls printed it, in
+/// order, cut at `limit`; `true` when cut or when polls weren't kept.
+fn chunks(
+    lines: &mut Lines,
+    path: &Path,
+    first: Option<u64>,
+    polls: &[u64],
+    dropped: bool,
+    limit: usize,
+) -> (String, bool) {
+    let mut text = String::new();
+    for offset in first.into_iter().chain(polls.iter().copied()) {
+        if text.len() > limit {
+            break;
+        }
+        if let Some(chunk) = lines.get(path, offset).and_then(|record| chunk_of(&record)) {
+            text.push_str(&chunk);
+        }
+    }
+    let (mut text, cut) = clip(&text, limit);
+    if dropped && !cut {
+        text.push_str("\n…");
+    }
+    (text, cut || dropped)
+}
+
+/// The `CommandExecution` item on a line.
+fn command_item(record: &Value) -> Option<&Value> {
+    record
+        .get("payload")?
+        .get("item")
+        .filter(|item| field(item, "type") == Some("CommandExecution"))
+}
+
+/// A `CommandExecution` item's command line: the shell's `-lc` argument,
+/// else its argv joined.
+fn item_command(item: &Value) -> Option<String> {
+    let argv: Vec<&str> = item
+        .get("command")
+        .and_then(Value::as_array)
+        .map(|parts| parts.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if argv.len() == 3 && argv[1] == "-lc" {
+        Some(argv[2].to_owned())
+    } else if !argv.is_empty() {
+        Some(argv.join(" "))
+    } else {
+        field(item, "command").map(str::to_owned)
+    }
+}
+
+/// A code-mode script's source, at its call's line.
+fn script_at(lines: &mut Lines, path: &Path, offset: u64) -> Option<String> {
+    let record = lines.get(path, offset)?;
+    model::tool_input(&record, 0).and_then(|input| input.as_str().map(str::to_owned))
+}
+
+/// A yielded command's line: from the item that completed it, else from
+/// the `cmd` its starting script passed.
+fn yielded_command(
+    lines: &mut Lines,
+    path: &Path,
+    start: u64,
+    done: Option<u64>,
+) -> Option<String> {
+    done.and_then(|done| lines.get(path, done))
+        .and_then(|record| command_item(&record).and_then(item_command))
+        .or_else(|| {
+            script_at(lines, path, start).and_then(|script| events::script_command(&script))
+        })
+}
+
+/// The input a poll sent, as its script passed it.
+fn sent_chars(lines: &mut Lines, path: &Path, offset: u64) -> Option<String> {
+    match events::script_arg(&script_at(lines, path, offset)?, "write_stdin", "chars")? {
+        ScriptArg::Literal(chars) => Some(chars),
+        _ => None,
+    }
+}
+
+/// A step's state fields: running, unfinished, or done with its outcome and
+/// how long it took.
+fn state_fields(
+    entry: &mut Map<String, Value>,
+    shown: Shown,
+    took: String,
+    t: Option<i64>,
+    now: i64,
+) {
+    match shown {
+        Shown::Live => {
+            entry.insert("live".into(), json!(true));
+            entry.insert(
+                "secs".into(),
+                json!(t.map_or_else(|| "—".to_owned(), |t| running(now - t))),
+            );
+        }
+        Shown::Unfinished => {
+            entry.insert("ok".into(), json!(false));
+            entry.insert("unfinished".into(), json!(true));
+            entry.insert("secs".into(), json!("—"));
+        }
+        Shown::Ok | Shown::Err | Shown::Unknown => {
+            entry.insert(
+                "ok".into(),
+                match shown {
+                    Shown::Ok => json!(true),
+                    Shown::Err => json!(false),
+                    _ => Value::Null,
+                },
+            );
+            entry.insert("secs".into(), json!(took));
+        }
+    }
+}
+
+/// A command that outlived its yield, as one `exec_command` step: its line,
+/// then its output as the polls printed it, and once it completed, its exit
+/// code, duration and whole output from the completing item.
+#[allow(clippy::too_many_arguments)]
+fn yielded_entry(
+    lines: &mut Lines,
+    file: &SlotFile,
+    slot: &Slot,
+    index: usize,
+    shown: Shown,
+    first: Option<u64>,
+    polls: &[u64],
+    dropped: bool,
+    done: Option<&Reply>,
+    now: i64,
+) -> Value {
+    let item = done
+        .and_then(|done| lines.get(&file.path, done.o))
+        .and_then(|record| command_item(&record).cloned());
+    let command = item
+        .as_ref()
+        .and_then(item_command)
+        .or_else(|| {
+            script_at(lines, &file.path, slot.offset)
+                .and_then(|script| events::script_command(&script))
+        })
+        .unwrap_or_default();
+    let arg = one_line(&command, 160);
+    let mut entry = Map::new();
+    let mut more = Vec::new();
+    entry.insert("k".into(), json!("tool"));
+    entry.insert("name".into(), json!("exec_command"));
+    entry.insert("arg".into(), json!(arg));
+    if command.trim() != arg {
+        let (text, cut) = clip(&command, PREVIEW_MAX);
+        entry.insert("in".into(), json!(text));
+        if cut {
+            more.push("in");
+        }
+    }
+    let took = item
+        .as_ref()
+        .and_then(codex_duration)
+        .or_else(|| match (slot.t, done.and_then(|done| done.t)) {
+            (Some(start), Some(end)) => Some(secs(end - start)),
+            _ => None,
+        })
+        .unwrap_or_else(|| "—".to_owned());
+    state_fields(&mut entry, shown, took, slot.t, now);
+    if let Some(item) = &item {
+        if let Some(exit) = item.get("exit_code").and_then(Value::as_i64) {
+            entry.insert("exit".into(), json!(exit));
+        }
+        if let Some(cwd) = field(item, "cwd") {
+            entry.insert("cwd".into(), json!(codex_path(cwd, file.cwd.as_deref())));
+        }
+    }
+    let (output, cut) = match item
+        .as_ref()
+        .and_then(|item| field(item, "aggregated_output"))
+    {
+        Some(output) => clip(output, PREVIEW_MAX),
+        None => chunks(lines, &file.path, first, polls, dropped, PREVIEW_MAX),
+    };
+    if !output.is_empty() {
+        entry.insert("out".into(), json!(output));
+        if cut {
+            more.push("out");
+        }
+    }
+    if !more.is_empty() {
+        entry.insert("more".into(), json!(more));
+    }
+    entry.insert("script".into(), json!(slot.offset));
+    entry.insert("slot".into(), json!(index));
+    Value::Object(entry)
+}
+
+/// A poll that sent input to a yielded command: the command it went to,
+/// the input, and what the command printed during that poll.
+#[allow(clippy::too_many_arguments)]
+fn sent_entry(
+    lines: &mut Lines,
+    file: &SlotFile,
+    slot: &Slot,
+    index: usize,
+    shown: Shown,
+    reply: Option<&Reply>,
+    start: u64,
+    done: Option<u64>,
+    now: i64,
+) -> Value {
+    let command = yielded_command(lines, &file.path, start, done).unwrap_or_default();
+    let mut entry = Map::new();
+    let mut more = Vec::new();
+    entry.insert("k".into(), json!("tool"));
+    entry.insert("name".into(), json!("write_stdin"));
+    entry.insert("arg".into(), json!(one_line(&command, 160)));
+    if let Some(chars) = sent_chars(lines, &file.path, slot.offset) {
+        let (text, cut) = clip(&chars, PREVIEW_MAX);
+        entry.insert("in".into(), json!(text));
+        if cut {
+            more.push("in");
+        }
+    }
+    let took = match (slot.t, reply.and_then(|reply| reply.t)) {
+        (Some(start), Some(end)) => secs(end - start),
+        _ => "—".to_owned(),
+    };
+    state_fields(&mut entry, shown, took, slot.t, now);
+    if let Some(output) = reply
+        .and_then(|reply| lines.get(&file.path, reply.o))
+        .and_then(|record| chunk_of(&record).or_else(|| result_text(&record, 0)))
+        .filter(|output| !output.trim().is_empty())
+    {
+        let (output, cut) = clip(&output, PREVIEW_MAX);
+        entry.insert("out".into(), json!(output));
+        if cut {
+            more.push("out");
+        }
+    }
+    if !more.is_empty() {
+        entry.insert("more".into(), json!(more));
+    }
+    entry.insert("script".into(), json!(slot.offset));
+    entry.insert("slot".into(), json!(index));
+    Value::Object(entry)
 }
 
 fn think_text(record: &Value, block: usize) -> Option<String> {
@@ -535,21 +819,7 @@ fn operation_entry(
     }
     match kind {
         "CommandExecution" => {
-            let argv: Vec<&str> = item
-                .get("command")
-                .and_then(Value::as_array)
-                .map(|parts| parts.iter().filter_map(Value::as_str).collect())
-                .unwrap_or_default();
-            let command = if argv.len() == 3 && argv[1] == "-lc" {
-                argv[2].to_owned()
-            } else if !argv.is_empty() {
-                argv.join(" ")
-            } else {
-                item.get("command")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned()
-            };
+            let command = item_command(item).unwrap_or_default();
             entry.insert("arg".into(), json!(one_line(&command, 160)));
             if let Some(exit) = item.get("exit_code").and_then(Value::as_i64) {
                 entry.insert("exit".into(), json!(exit));
@@ -652,6 +922,40 @@ fn render(built: &Built, lines: &mut Lines, slot: &Slot, index: usize, now: i64)
             ok,
             script_offset,
         } => operation_entry(lines, file?, slot, index, kind, *ok, *script_offset)?,
+        SlotKind::Yielded {
+            shown,
+            first,
+            polls,
+            cut,
+            done,
+        } => yielded_entry(
+            lines,
+            file?,
+            slot,
+            index,
+            *shown,
+            *first,
+            polls,
+            *cut,
+            done.as_ref(),
+            now,
+        ),
+        SlotKind::Sent {
+            shown,
+            reply,
+            start,
+            done,
+        } => sent_entry(
+            lines,
+            file?,
+            slot,
+            index,
+            *shown,
+            reply.as_ref(),
+            *start,
+            *done,
+            now,
+        ),
     };
     Some(entry)
 }
@@ -711,6 +1015,41 @@ pub(crate) fn slot_texts(
                     .and_then(|record| result_text(&record, reply.b as usize))
             {
                 texts.push(("out", text));
+            }
+            None
+        }
+        SlotKind::Yielded {
+            first,
+            polls,
+            cut,
+            done,
+            ..
+        } => {
+            let done = done.as_ref().map(|done| done.o);
+            if let Some(command) = yielded_command(lines, &file.path, slot.offset, done) {
+                texts.push(("in", command));
+            }
+            let output = done
+                .and_then(|done| lines.get(&file.path, done))
+                .and_then(|record| {
+                    command_item(&record)
+                        .and_then(|item| field(item, "aggregated_output"))
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| chunks(lines, &file.path, *first, polls, *cut, FULL_MAX).0);
+            texts.push(("out", output));
+            None
+        }
+        SlotKind::Sent { reply, .. } => {
+            if let Some(chars) = sent_chars(lines, &file.path, slot.offset) {
+                texts.push(("in", chars));
+            }
+            if let Some(output) = reply
+                .as_ref()
+                .and_then(|reply| lines.get(&file.path, reply.o))
+                .and_then(|record| chunk_of(&record))
+            {
+                texts.push(("out", output));
             }
             None
         }
@@ -857,6 +1196,9 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
         let (text, truncated) = clip(&script, FULL_MAX);
         return Ok(json!({"text": text, "truncated": truncated}).to_string());
     }
+    if let SlotKind::Yielded { .. } | SlotKind::Sent { .. } = &slot.kind {
+        return full_yielded(file, slot, part);
+    }
     let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "not a tool call");
     let SlotKind::Tool { reply, .. } = &slot.kind else {
         if part == "out"
@@ -910,6 +1252,56 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
         "in" | "diff" => full(&file.path, slot.offset, slot.block as usize, part),
         _ => Err(invalid()),
     }
+}
+
+/// The whole of one part of a yielded command's step or a poll's: its
+/// script, its command line or input (`in`), or its output (`out`).
+fn full_yielded(file: &SlotFile, slot: &Slot, part: &str) -> io::Result<String> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "entry is not expandable");
+    let mut lines = Lines::default();
+    let path = &file.path;
+    let text = match (&slot.kind, part) {
+        (_, "script") => script_at(&mut lines, path, slot.offset),
+        (SlotKind::Yielded { done, .. }, "in") => yielded_command(
+            &mut lines,
+            path,
+            slot.offset,
+            done.as_ref().map(|done| done.o),
+        ),
+        (
+            SlotKind::Yielded {
+                first,
+                polls,
+                cut,
+                done,
+                ..
+            },
+            "out",
+        ) => {
+            let whole = done
+                .as_ref()
+                .and_then(|done| lines.get(path, done.o))
+                .and_then(|record| {
+                    command_item(&record)
+                        .and_then(|item| field(item, "aggregated_output"))
+                        .map(str::to_owned)
+                });
+            if whole.is_none() {
+                let (text, truncated) = chunks(&mut lines, path, *first, polls, *cut, FULL_MAX);
+                return Ok(json!({"text": text, "truncated": truncated}).to_string());
+            }
+            whole
+        }
+        (SlotKind::Sent { .. }, "in") => sent_chars(&mut lines, path, slot.offset),
+        (SlotKind::Sent { reply, .. }, "out") => reply
+            .as_ref()
+            .and_then(|reply| lines.get(path, reply.o))
+            .and_then(|record| chunk_of(&record).or_else(|| result_text(&record, 0))),
+        _ => None,
+    }
+    .ok_or_else(invalid)?;
+    let (text, truncated) = clip(&text, FULL_MAX);
+    Ok(json!({"text": text, "truncated": truncated}).to_string())
 }
 
 /// The whole of one part of a tool call at a line: what it was asked (`in`),
@@ -1747,6 +2139,374 @@ mod tests {
             (page["calls"].as_u64(), page["errors"].as_u64()),
             (Some(2), Some(0))
         );
+    }
+
+    fn codex_line(time: String, kind: &str, payload: Value) -> Value {
+        json!({"timestamp": time, "type": kind, "payload": payload})
+    }
+
+    fn script_call(id: &str, script: &str) -> Value {
+        json!({"type":"custom_tool_call","call_id":id,"name":"exec","status":"completed","input":script})
+    }
+
+    /// A script's output that printed one exec result, as
+    /// `text(JSON.stringify(r))` does.
+    fn exec_result(id: &str, session: Option<u64>, exit: Option<i64>, output: &str) -> Value {
+        let mut result = json!({"chunk_id":"c0ffee","wall_time_seconds":1.0,"original_token_count":1,"output":output});
+        if let Some(session) = session {
+            result["session_id"] = json!(session);
+        }
+        if let Some(exit) = exit {
+            result["exit_code"] = json!(exit);
+        }
+        json!({"type":"custom_tool_call_output","call_id":id,"output":[
+            {"type":"input_text","text":"Script completed\nWall time 1.0 seconds\nOutput:\n"},
+            {"type":"input_text","text":result.to_string()},
+        ]})
+    }
+
+    const WATCH: &str = "const r = await tools.exec_command({cmd:\"make watch\",workdir:\"/work/proj\",yield_time_ms:1000});\ntext(JSON.stringify(r));\n";
+
+    fn poll(session: u64, chars: &str) -> String {
+        format!(
+            "const r = await tools.write_stdin({{session_id:{session},chars:{},yield_time_ms:1000}});\ntext(JSON.stringify(r));\n",
+            json!(chars)
+        )
+    }
+
+    /// `make watch` outlives its yield as session 4242 and prints "one";
+    /// three polls with no input print "two", nothing and "three".
+    fn yielded(sid: &str) -> Vec<Value> {
+        let mut records = vec![
+            codex_line(
+                ts(10, 0, 0),
+                "session_meta",
+                json!({"id":sid,"cwd":"/work/proj"}),
+            ),
+            codex_line(ts(10, 1, 0), "response_item", script_call("start", WATCH)),
+            codex_line(
+                ts(10, 1, 1000),
+                "response_item",
+                exec_result("start", Some(4242), None, "one\n"),
+            ),
+        ];
+        for (minute, output) in [(2, "two\n"), (3, ""), (4, "three\n")] {
+            let id = format!("poll-{minute}");
+            records.push(codex_line(
+                ts(10, minute, 0),
+                "response_item",
+                script_call(&id, &poll(4242, "")),
+            ));
+            records.push(codex_line(
+                ts(10, minute, 1000),
+                "response_item",
+                exec_result(&id, Some(4242), None, output),
+            ));
+        }
+        records
+    }
+
+    /// The last poll: the command exits while it waits, so its completion
+    /// arrives inside it and its output has an exit code and no session.
+    fn completed(records: &mut Vec<Value>, chars: &str, aggregated: &str) {
+        records.push(codex_line(
+            ts(10, 5, 0),
+            "response_item",
+            script_call("poll-last", &poll(4242, chars)),
+        ));
+        records.push(codex_line(
+            ts(10, 5, 500),
+            "event_msg",
+            json!({"type":"item_completed","item":{"type":"CommandExecution","id":"exec-watch","process_id":"4242","command":["/bin/zsh","-lc","make watch"],"cwd":"file:///work/proj","status":"completed","exit_code":0,"duration":{"secs":5,"nanos":0},"aggregated_output":aggregated}}),
+        ));
+        records.push(codex_line(
+            ts(10, 5, 1000),
+            "response_item",
+            exec_result("poll-last", None, Some(0), "four\n"),
+        ));
+    }
+
+    fn tools(page: &Value) -> Vec<Value> {
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["k"] == "tool")
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_yielded_command_and_its_polls_are_one_step() {
+        let home = Home::new();
+        let mut records = yielded("watch");
+        completed(&mut records, "", "one\ntwo\nthree\nfour\n");
+        records.push(codex_line(
+            ts(10, 6, 0),
+            "response_item",
+            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"It passed."}]}),
+        ));
+        home.lines("codex/sessions/2026/09/24/rollout-watch.jsonl", &records);
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "watch", &Anchor::Last);
+        let steps = tools(&page);
+        assert_eq!(steps.len(), 1, "{steps:?}");
+        let step = &steps[0];
+        assert_eq!(step["name"], "exec_command");
+        assert_eq!(step["arg"], "make watch");
+        assert_eq!(step["ok"], true);
+        assert_eq!(step["exit"], 0);
+        assert_eq!(step["secs"], "5.0s");
+        assert_eq!(step["cwd"], ".");
+        assert_eq!(step["out"], "one\ntwo\nthree\nfour\n");
+        assert!(step.get("in").is_none());
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(1), Some(0))
+        );
+        let slot = step["slot"].as_u64().unwrap() as usize;
+        let script: Value =
+            serde_json::from_str(&full_slot(&built, "watch", slot, "script").unwrap()).unwrap();
+        assert_eq!(script["text"], WATCH);
+        let out: Value =
+            serde_json::from_str(&full_slot(&built, "watch", slot, "out").unwrap()).unwrap();
+        assert_eq!(out["text"], "one\ntwo\nthree\nfour\n");
+        assert_eq!(out["truncated"], false);
+    }
+
+    #[test]
+    fn a_yielded_command_that_never_completes_is_one_unfinished_step() {
+        let endings: [(&str, Vec<Value>); 4] = [
+            ("ends", Vec::new()),
+            (
+                "aborted",
+                vec![codex_line(
+                    ts(10, 5, 0),
+                    "event_msg",
+                    json!({"type":"turn_aborted"}),
+                )],
+            ),
+            (
+                "complete",
+                vec![codex_line(
+                    ts(10, 5, 0),
+                    "event_msg",
+                    json!({"type":"task_complete"}),
+                )],
+            ),
+            (
+                "mid-poll",
+                vec![
+                    codex_line(
+                        ts(10, 5, 0),
+                        "response_item",
+                        script_call("poll-5", &poll(4242, "")),
+                    ),
+                    codex_line(ts(10, 5, 1000), "event_msg", json!({"type":"turn_aborted"})),
+                ],
+            ),
+        ];
+        for (sid, ending) in endings {
+            let home = Home::new();
+            let mut records = yielded(sid);
+            records.extend(ending);
+            home.lines(
+                &format!("codex/sessions/2026/09/24/rollout-{sid}.jsonl"),
+                &records,
+            );
+            let built = home.built(BASE + 86_400_000);
+            let page = page_of(&built, sid, &Anchor::Last);
+            let steps = tools(&page);
+            assert_eq!(steps.len(), 1, "{sid}: {steps:?}");
+            let step = &steps[0];
+            assert_eq!(step["name"], "exec_command", "{sid}");
+            assert_eq!(step["arg"], "make watch", "{sid}");
+            assert_eq!(step["unfinished"], true, "{sid}");
+            assert_eq!(step["ok"], false, "{sid}");
+            assert_eq!(step["out"], "one\ntwo\nthree\n", "{sid}");
+            assert_eq!(
+                (page["calls"].as_u64(), page["errors"].as_u64()),
+                (Some(1), Some(1)),
+                "{sid}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_poll_that_sends_input_is_a_step_of_its_own() {
+        let home = Home::new();
+        let mut records = vec![
+            codex_line(
+                ts(10, 0, 0),
+                "session_meta",
+                json!({"id":"sent","cwd":"/work/proj"}),
+            ),
+            codex_line(ts(10, 1, 0), "response_item", script_call("start", WATCH)),
+            codex_line(
+                ts(10, 1, 1000),
+                "response_item",
+                exec_result("start", Some(4242), None, "one\n"),
+            ),
+            codex_line(
+                ts(10, 2, 0),
+                "response_item",
+                script_call("answer", &poll(4242, "y\n")),
+            ),
+            codex_line(
+                ts(10, 2, 1500),
+                "response_item",
+                exec_result("answer", Some(4242), None, "ok\n"),
+            ),
+        ];
+        completed(&mut records, "", "one\nok\n");
+        home.lines("codex/sessions/2026/09/24/rollout-sent.jsonl", &records);
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "sent", &Anchor::Last);
+        let steps = tools(&page);
+        assert_eq!(steps.len(), 2, "{steps:?}");
+        assert_eq!(steps[0]["name"], "exec_command");
+        assert_eq!(steps[0]["out"], "one\nok\n");
+        assert_eq!(steps[0]["exit"], 0);
+        assert_eq!(steps[1]["name"], "write_stdin");
+        assert_eq!(steps[1]["arg"], "make watch");
+        assert_eq!(steps[1]["in"], "y\n");
+        assert_eq!(steps[1]["out"], "ok\n");
+        assert_eq!(steps[1]["ok"], true);
+        assert_eq!(steps[1]["secs"], "1.5s");
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(2), Some(0))
+        );
+    }
+
+    #[test]
+    fn a_script_with_no_operations_shows_its_text_output() {
+        let home = Home::new();
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-printed.jsonl",
+            &[
+                codex_line(ts(10, 0, 0), "session_meta", json!({"id":"printed","cwd":"/work/proj"})),
+                codex_line(ts(10, 1, 0), "response_item", script_call("plain", "text('hello')")),
+                codex_line(
+                    ts(10, 1, 500),
+                    "response_item",
+                    json!({"type":"custom_tool_call_output","call_id":"plain","output":[
+                        {"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},
+                        {"type":"input_text","text":"hello"},
+                    ]}),
+                ),
+                // A poll of a command these logs never saw start.
+                codex_line(ts(10, 2, 0), "response_item", script_call("orphan", &poll(777, ""))),
+                codex_line(
+                    ts(10, 2, 500),
+                    "response_item",
+                    exec_result("orphan", Some(777), None, "still running\n"),
+                ),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "printed", &Anchor::Last);
+        let steps = tools(&page);
+        assert_eq!(steps.len(), 2, "{steps:?}");
+        assert_eq!(steps[0]["name"], "exec");
+        assert_eq!(steps[0]["out"], "hello");
+        assert_eq!(steps[1]["name"], "exec");
+        assert_eq!(steps[1]["out"], "still running\n");
+    }
+
+    #[test]
+    fn an_interrupted_code_mode_call_shows_unfinished_after_its_operations() {
+        let home = Home::new();
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-stopped.jsonl",
+            &[
+                codex_line(ts(11, 0, 0), "session_meta", json!({"id":"stopped","cwd":"/work/proj"})),
+                codex_line(
+                    ts(11, 1, 0),
+                    "response_item",
+                    script_call("call", "await tools.exec_command({cmd:'ls'});\nawait tools.exec_command({cmd:'pwd'});\nawait tools.exec_command({cmd:'sleep 600'});"),
+                ),
+                codex_line(
+                    ts(11, 2, 0),
+                    "event_msg",
+                    json!({"type":"item_completed","item":{"type":"CommandExecution","id":"ls","command":["/bin/zsh","-lc","ls"],"exit_code":0,"aggregated_output":"a.rs\n"}}),
+                ),
+                codex_line(
+                    ts(11, 3, 0),
+                    "event_msg",
+                    json!({"type":"item_completed","item":{"type":"CommandExecution","id":"pwd","command":["/bin/zsh","-lc","pwd"],"exit_code":0,"aggregated_output":"/work/proj\n"}}),
+                ),
+                codex_line(ts(11, 4, 0), "event_msg", json!({"type":"turn_aborted"})),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "stopped", &Anchor::Last);
+        let steps = tools(&page);
+        assert_eq!(steps.len(), 3, "{steps:?}");
+        assert_eq!(steps[0]["arg"], "ls");
+        assert_eq!(steps[1]["arg"], "pwd");
+        assert_eq!(steps[2]["name"], "exec");
+        assert_eq!(steps[2]["unfinished"], true);
+        assert_eq!(steps[2]["ok"], false);
+        assert_eq!(
+            (page["calls"].as_u64(), page["errors"].as_u64()),
+            (Some(3), Some(1))
+        );
+    }
+
+    #[test]
+    fn a_completion_that_matches_no_poll_is_not_the_yielded_step() {
+        let home = Home::new();
+        // Session id 4242 again, for a command the next script starts and
+        // finishes itself: the id was used again, the old process is gone.
+        let mut records = yielded("reused");
+        records.extend([
+            codex_line(
+                ts(10, 6, 0),
+                "response_item",
+                script_call("date", "const r = await tools.exec_command({cmd:\"date\"});\ntext(JSON.stringify(r));"),
+            ),
+            codex_line(
+                ts(10, 6, 500),
+                "event_msg",
+                json!({"type":"item_completed","item":{"type":"CommandExecution","id":"exec-date","process_id":"4242","command":["/bin/zsh","-lc","date"],"exit_code":0,"aggregated_output":"Thu\n"}}),
+            ),
+            codex_line(
+                ts(10, 6, 1000),
+                "response_item",
+                exec_result("date", None, Some(0), "Thu\n"),
+            ),
+        ]);
+        home.lines("codex/sessions/2026/09/24/rollout-reused.jsonl", &records);
+        // A poll during which some other process completes: that item is
+        // the poll's own operation, and the poll isn't folded.
+        let mut stray = yielded("stray");
+        stray.extend([
+            codex_line(ts(10, 6, 0), "response_item", script_call("poll-6", &poll(4242, ""))),
+            codex_line(
+                ts(10, 6, 500),
+                "event_msg",
+                json!({"type":"item_completed","item":{"type":"CommandExecution","id":"exec-other","process_id":"999","command":["/bin/zsh","-lc","echo other"],"exit_code":0,"aggregated_output":"other\n"}}),
+            ),
+            codex_line(
+                ts(10, 6, 1000),
+                "response_item",
+                exec_result("poll-6", Some(4242), None, "five\n"),
+            ),
+        ]);
+        home.lines("codex/sessions/2026/09/24/rollout-stray.jsonl", &stray);
+        let built = home.built(BASE + 86_400_000);
+        for (sid, other) in [("reused", "date"), ("stray", "echo other")] {
+            let page = page_of(&built, sid, &Anchor::Last);
+            let steps = tools(&page);
+            assert_eq!(steps.len(), 2, "{sid}: {steps:?}");
+            assert_eq!(steps[0]["arg"], "make watch", "{sid}");
+            assert_eq!(steps[0]["unfinished"], true, "{sid}");
+            assert_eq!(steps[0]["out"], "one\ntwo\nthree\n", "{sid}");
+            assert_eq!(steps[1]["name"], "exec_command", "{sid}");
+            assert_eq!(steps[1]["arg"], other, "{sid}");
+            assert_eq!(steps[1]["ok"], true, "{sid}");
+        }
     }
 
     #[test]

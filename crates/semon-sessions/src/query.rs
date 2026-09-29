@@ -894,9 +894,10 @@ impl Query {
                     SlotKind::U => ("u", tx::slot_texts(built, &mut lines, slot)),
                     SlotKind::A => ("a", tx::slot_texts(built, &mut lines, slot)),
                     SlotKind::Think => ("think", tx::slot_texts(built, &mut lines, slot)),
-                    SlotKind::Tool { .. } | SlotKind::Operation { .. } => {
-                        ("tool", tx::slot_texts(built, &mut lines, slot))
-                    }
+                    SlotKind::Tool { .. }
+                    | SlotKind::Operation { .. }
+                    | SlotKind::Yielded { .. }
+                    | SlotKind::Sent { .. } => ("tool", tx::slot_texts(built, &mut lines, slot)),
                     _ => continue,
                 };
                 let Some((part, text, at)) = texts
@@ -917,6 +918,8 @@ impl Query {
                 match &slot.kind {
                     SlotKind::H(id) => entry["handoff"] = json!(id),
                     SlotKind::Tool { name, .. } => entry["name"] = json!(name),
+                    SlotKind::Yielded { .. } => entry["name"] = json!("exec_command"),
+                    SlotKind::Sent { .. } => entry["name"] = json!("write_stdin"),
                     SlotKind::Operation { kind, .. } => {
                         entry["name"] = json!(if kind == "CommandExecution" {
                             "exec_command"
