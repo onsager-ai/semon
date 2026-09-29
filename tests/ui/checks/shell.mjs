@@ -2,6 +2,7 @@
 // are exercised exactly as they are for an ordinary page served beside the viewer.
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { ENV, reporter, served } from "../lib.mjs";
 
 const pages = [
@@ -75,6 +76,14 @@ async function galleryPage(browser, html, width, height, mobile, scheme) {
     const probe = Date.now();
     const answered = await fetch(ENV.base + "/shell.css?t=" + ENV.token, { signal: AbortSignal.timeout(5000) }).then((r) => r.status, (e) => e.name);
     console.log("DIAG probe of /shell.css from node: " + answered + " after " + (Date.now() - probe) + " ms");
+    // The sockets on the viewer's port at this moment: a byte count in Recv-Q on the server's side of a connection is a
+    // request the server has not read; nothing anywhere means the browser never sent it.
+    try {
+      console.log("DIAG sockets on " + new URL(ENV.base).port + ":\n" + execFileSync("ss", ["-tnoa", "( sport = :" + new URL(ENV.base).port + " or dport = :" + new URL(ENV.base).port + " )"], { encoding: "utf8" }));
+    } catch (e) { console.log("DIAG ss failed: " + e.message.split("\n")[0]); }
+    console.log("DIAG pending before the wait: " + report(browser));
+    await page.waitForLoadState("load", { timeout: 25000 }).then(() => console.log("DIAG the page did load " + (Date.now() - probe) + " ms after the probe"), () => console.log("DIAG the page had not loaded 25 s later"));
+    console.log("DIAG after the wait: " + report(browser));
     console.log("DIAG galleryPage " + scheme + " " + width + " " + error.message.split("\n")[0] + " " + report(browser));
     throw error;
   }
