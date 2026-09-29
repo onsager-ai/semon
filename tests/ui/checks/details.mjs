@@ -89,6 +89,50 @@ export default async function detailsCheck(browser) {
       await page.close();
     }
   }
+  // (A session with no child runs: its table then counts its own tokens alone.)
+  // The summary rows and the per-model table read one model. A live update (which adopts a newer model but keeps the session
+  // page's top bar) must not leave the ⋯ menu holding the model the page was drawn from: the table already reads the newest.
+  const claude = Object.values(D.SESS).find((s) => s.harness === "claude" && !s.stub && !s.parent && !D.H.some((h) => h.from === s.id) && Object.values(s.cost?.by_model ?? {}).some((m) => m.tokens?.cache_read > 0));
+  r.expect(!!claude, "the fixture holds no Claude session with cache reads to grow");
+  if (claude) {
+    const modelId = Object.keys(claude.cost.by_model).find((k) => claude.cost.by_model[k].tokens?.cache_read > 0), more = 400000;
+    for (const size of ["phone", "desktop"]) {
+      const tag = size + " live growth", page = await served(browser, { size });
+      await goto(page, { v: "session", id: claude.id }, D); await page.waitForTimeout(200);
+      let polled = 0;
+      // Every poll now gets the model as it would be a moment later: 400k more cache reads, in the summary and in the table.
+      await page.route(/\/api\/model\?since=/, async (route) => {
+        const url = new URL(route.request().url()), headers = { ...route.request().headers() }; url.search = ""; delete headers["if-none-match"];
+        const res = await route.fetch({ url: url.toString(), headers }), m = await res.json(), s = m.sessions[claude.id];
+        s.tokens = [s.tokens[0], Math.round((s.tokens[1] + more / 1e6) * 1000) / 1000, s.tokens[2]];
+        s.cost.by_model[modelId].tokens.cache_read += more; m.version += "-grown"; polled++;
+        await route.fulfill({ response: res, json: m });
+      });
+      const t0 = Date.now();
+      while (polled < 2 && Date.now() - t0 < 8000) await page.waitForTimeout(100);
+      r.expect(polled >= 2, tag + ": the page did not poll the model");
+      await page.waitForTimeout(400);
+      // "172k" and "5.3M" as millions, and whether a text reads the same figure as `m` millions, to the digit it shows.
+      const num = (text) => (text.endsWith("M") ? parseFloat(text) : parseFloat(text) / 1000), reads = (text, m) => Math.abs(num(text ?? "0k") - m) <= (text?.endsWith("M") ? 0.051 : 0.0011);
+      const grown = claude.tokens[1] + more / 1e6;
+      await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
+      await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
+      const got = await page.evaluate(() => {
+        const d = document.querySelector("dialog.session-details"), rows = {};
+        for (const x of d.querySelectorAll(".detail-row")) rows[x.querySelector(".detail-label").textContent] = x.querySelector(".detail-value").textContent;
+        const lines = [...d.querySelectorAll(".cost-line")].map((l) => ({ kind: l.children[0].textContent, tokens: Number((l.children[1].dataset.tip ?? "").replace(/[^\d]/g, "")) || 0 }));
+        return { rows, lines };
+      });
+      const read = got.lines.filter((l) => l.kind === "Cache read").reduce((n, l) => n + l.tokens, 0);
+      r.expect(read === claude.cost.by_model[modelId].tokens.cache_read + more, tag + ": the table's cache read is " + read + ", not the grown model's");
+      r.expect(reads(got.rows["Cache read"], grown) && reads(got.rows["Cache read"], read / 1e6), tag + ": the summary's Cache read is " + got.rows["Cache read"] + ", the table's is " + read.toLocaleString());
+      const written = got.lines.filter((l) => l.kind.startsWith("Cache write") || l.kind === "Input").reduce((n, l) => n + l.tokens, 0);
+      r.expect(reads(got.rows["Input + cache write"], written / 1e6), tag + ": the summary's Input + cache write is " + got.rows["Input + cache write"] + ", the table's input and cache writes make " + written.toLocaleString());
+      results[tag] = got.rows;
+      r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join("; "));
+      await page.context().close();
+    }
+  }
   r.results = results;
   return r.done();
 }

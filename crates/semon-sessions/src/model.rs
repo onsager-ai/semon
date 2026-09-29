@@ -1792,13 +1792,15 @@ impl<'a> Builder<'a> {
             tokens.input += used.tokens.input;
             tokens.cached_input += used.tokens.cached_input;
             tokens.output += used.tokens.output;
-            if let Some(model) = &used.model {
-                let model = crate::pricing::normalize_model_id(model).to_owned();
-                tokens_by_model
-                    .entry(model)
-                    .or_insert_with(events::ModelTokens::default)
-                    .add(&used.model_tokens);
-            }
+            // A message that names no model still counts, under the key the
+            // cost table gives it, so the rows always sum to `tokens`.
+            let model =
+                crate::pricing::normalize_model_id(used.model.as_deref().unwrap_or("unknown"))
+                    .to_owned();
+            tokens_by_model
+                .entry(model)
+                .or_insert_with(events::ModelTokens::default)
+                .add(&used.model_tokens);
         }
         let million = |value: u64| (value as f64 / 1e6 * 1000.0).round() / 1000.0;
         let (cwd, branch, fallback_model, fallback_name) = match &last_file.role {
