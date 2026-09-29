@@ -501,6 +501,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 
 /* A quiet note when the server stops answering this page's token. */
 .livenote { position: fixed; z-index: 6; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); margin: 0; padding: 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--sunken); color: var(--muted); font-size: 13px; text-align: center; }
+/* The jump button floats on the same axis: while it shows, the note sits above it (16px offset + 40px button + 12px). */
+.jump-bottom:not([hidden]) ~ .livenote { bottom: calc(68px + env(safe-area-inset-bottom, 0px)); }
 @media (min-width: 761px) { .livenote { left: calc(50% + 148px); max-width: calc(100vw - 296px - 32px); } }
 
 /* ---- Approved viewer UX: compact metadata, session tree and reading controls --------------------- */
