@@ -497,6 +497,23 @@ export function write(out, { extras = false } = {}) {
     xs.prompt(ms(T(12, 35)), XSS);
     xs.text(ms(T(12, 35), 30), XSS);
     xs.save();
+    // fan-out: a live parent with seven subagents. Reader 1, the oldest, is still running; the other six finished, so the
+    // sidebar shows the five newest and the running one, and folds Reader 2 into "Show 1 more".
+    const fan = claude("fan-out", { cwd: role("fan-out"), model: "opus-5.5", tokens: [0, 0, 0] });
+    fan.title(ms(T(11, 0)), "Fan-out");
+    fan.ask(ms(T(11, 0)), "Read the seven audit shards in parallel");
+    for (let i = 1; i <= 7; i++) {
+      const at = T(11, 5 + i * 4), id = "toolu-fan" + i, name = "Reader " + i;
+      fan.tool(ms(at), id, "Agent", { description: name, subagent_type: "general-purpose", prompt: "Read audit shard " + i, ...(i === 1 ? { run_in_background: true } : {}) });
+      if (i === 1) fan.result(ms(at, 1), id, "Async agent launched successfully.", { extra: { toolUseResult: { status: "async_launched", agentId: "fan-reader-1" } } });
+      else fan.result(ms(at + 2), id, "Shard " + i + " read.", { extra: { toolUseResult: { status: "completed", agentId: "fan-reader-" + i } } });
+      const r = claude("fan-reader-" + i, { cwd: role("fan-out"), model: "haiku-4.5", tokens: [0, 0.01, 0], agent: { parent: "fan-out", slug: slug(role("fan-out")), tool: id, description: name } });
+      r.prompt(ms(at), "Read audit shard " + i);
+      if (i > 1) r.text(ms(at + 1), "Shard " + i + " has no findings.");
+      r.save();
+    }
+    fan.busy(ms(T(11, 0)), ms(T(12, 40)));
+    fan.save(); live("fan-out", "busy", "Fan-out");
   }
   put(".claude.json", JSON.stringify({ projects: { "/fixture/principal": { lastSessionId: "principal", lastStartTime: ms(T(9, 45)), lastCost: 40, lastDuration: 300000, lastAPIDuration: 260000, lastToolDuration: 40000, lastLinesAdded: 12, lastLinesRemoved: 3, lastModelUsage: {} } } }));
   put("proc/locks", locks);

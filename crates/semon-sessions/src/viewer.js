@@ -405,8 +405,10 @@
   const syncLayoutPrefs = () => { app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
   function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); }
   function setRailMode(on) { railMode = on; try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("title", on ? "Expand sidebar" : "Collapse sidebar"); }
-  function saveTreePref(id, open) {
-    treePrefs[id] = { open, at: Date.now() };
+  // A parent's saved choices: `open` (expanded or collapsed) and `more` (its hidden children revealed). Older saves hold only `open`.
+  function saveTreePref(id, patch) {
+    const old = treePrefs[id] && typeof treePrefs[id] === "object" ? treePrefs[id] : {};
+    treePrefs[id] = { ...old, ...patch, at: Date.now() };
     treePrefs = Object.fromEntries(Object.entries(treePrefs).sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0)).slice(0, 500));
     try { localStorage.setItem("semon.tree", JSON.stringify(treePrefs)); } catch {}
   }
@@ -616,34 +618,62 @@
     seen.add(sid);
     return sessMatch(SESS[sid], query) || (children.get(sid) ?? []).some((s) => matchesTree(s.id, children, seen));
   };
+  // A parent lists its five newest children; the rest fold into "Show N more". A child that is working or waiting, or has one
+  // below it, always shows. While a search is typed every child shows. The choice to reveal them is saved per parent.
+  const TREE_KIDS = 5;
+  // The open session and the sessions above it. Only the open one is marked current; its ancestors are opened in the tree for this render
+  // (nothing is saved) and never fold into "Show N more", so the current row can always be found.
+  function routedPath() {
+    const current = route.v === "session" ? route.id : route.v === "trace" ? route.sid : null, ancestors = new Set();
+    for (let id = current && SESS[current] ? parentOf(current) : null; id && SESS[id] && id !== current && !ancestors.has(id); id = parentOf(id)) ancestors.add(id);
+    return { current, ancestors };
+  }
+  // Those ancestors open once per navigation, held in memory: a parent collapsed after that stays collapsed until the next one.
+  let forcedOpen = { route: null, ids: new Set() };
+  function forcedOpenIds() { if (forcedOpen.route !== route) forcedOpen = { route, ids: routedPath().ancestors }; return forcedOpen.ids; }
+  function treeGroupFill(group, parent, kids, children, depth, rail) {
+    const sorted = [...kids].sort((a, b) => b.last - a.last);
+    const { current, ancestors } = routedPath();
+    const capped = query ? sorted : sorted.filter((c, i) => i < TREE_KIDS || c.state === "work" || c.state === "wait" || defaultTreeOpen(c.id, children) || c.id === current || ancestors.has(c.id));
+    const hidden = sorted.length - capped.length;
+    const more = hidden > 0 && treePrefs[parent.id]?.more === true;
+    group.replaceChildren();
+    for (const child of more ? sorted : capped) group.append(buildLaneItem(child, depth + 1, children, rail));
+    if (!hidden) return;
+    const button = el("button", "tree-more", more ? "Show fewer" : "Show " + hidden + " more");
+    button.type = "button"; button.setAttribute("role", "treeitem"); button.setAttribute("aria-expanded", String(more));
+    button.setAttribute("aria-label", (more ? "Show fewer sessions" : "Show " + hidden + " more " + (hidden === 1 ? "session" : "sessions")) + " spawned by " + parent.name);
+    button.addEventListener("click", (e) => { e.stopPropagation(); saveTreePref(parent.id, { more: !more }); treeGroupFill(group, parent, kids, children, depth, rail); group.querySelector(":scope > .tree-more")?.focus(); });
+    group.append(button);
+  }
   // The sidebar keeps the 8 most recently active top-level sessions, with children nested beneath their parent.
   function buildLaneItem(s, depth, children, rail) {
     const kids = children.get(s.id) ?? [], allKids = descendantsOf(s.id, children), item = el("div", "treeitem");
     item.dataset.id = s.id; item.setAttribute("role", "treeitem"); item.setAttribute("aria-label", s.name); item.tabIndex = 0;
-    const saved = treePrefs[s.id], open = typeof saved?.open === "boolean" ? saved.open : defaultTreeOpen(s.id, children);
+    const { current, ancestors } = routedPath(), saved = treePrefs[s.id];
+    const open = forcedOpenIds().has(s.id) || (typeof saved?.open === "boolean" ? saved.open : defaultTreeOpen(s.id, children));
     if (kids.length && !rail) item.setAttribute("aria-expanded", String(open));
     const line = el("div", "tree-row");
+    let lineToggle = null;
     if (kids.length && !rail) {
       const toggle = el("button", "tree-toggle"); toggle.type = "button"; toggle.dataset.treeToggle = s.id; toggle.setAttribute("aria-label", (open ? "Collapse " : "Expand ") + s.name); toggle.setAttribute("aria-expanded", String(open)); toggle.append(icon(I.chev));
-      toggle.addEventListener("click", (e) => { e.stopPropagation(); const value = item.getAttribute("aria-expanded") !== "true"; item.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-label", (value ? "Collapse " : "Expand ") + s.name); saveTreePref(s.id, value); });
-      line.append(toggle);
-    } else line.append(el("span", "tree-spacer"));
+      toggle.addEventListener("click", (e) => { e.stopPropagation(); const value = item.getAttribute("aria-expanded") !== "true"; item.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-label", (value ? "Collapse " : "Expand ") + s.name); if (!value) forcedOpenIds().delete(s.id); saveTreePref(s.id, { open: value }); });
+      lineToggle = toggle; line.classList.add("has-toggle");
+    }
     const row = el("button", "srow"); row.type = "button"; row.dataset.id = s.id; row.title = s.name;
     row.setAttribute("aria-label", s.name + ", " + (STATE[s.state] ?? s.state) + ", " + (HARNESS[s.harness] ?? s.harness) + ", " + shortHost(s));
-    const target = route.v === "session" ? route.id : route.v === "trace" ? route.sid : null;
-    let ancestor = target, selected = false; const seen = new Set();
-    while (ancestor && SESS[ancestor] && !seen.has(ancestor)) { if (ancestor === s.id) { selected = true; break; } seen.add(ancestor); ancestor = parentOf(ancestor); }
-    if (selected) row.setAttribute("aria-current", "page");
-    const main = el("span", "srow-main"); main.append(dot(s.state), el("span", "nm", s.name), el("span", "ag", ago(s.last)));
+    if (current === s.id) row.setAttribute("aria-current", "page");
+    if (rail && ancestors.has(s.id)) { row.classList.add("on-path"); row.setAttribute("aria-current", "true"); }
+    const main = el("span", "srow-main"), ag = el("span", "ag", ago(s.last)); main.append(dot(s.state), el("span", "nm", s.name), ag);
     if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work"); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
-    if (kids.length && !rail && !open && allKids.length) { const summary = el("span", "tree-summary"); const state = urgentDescendant(s.id, children); if (state) summary.append(dot(state)); summary.append(String(allKids.length)); main.append(summary); }
+    if (kids.length && !rail && allKids.length) { const summary = el("span", "tree-summary"); const state = urgentDescendant(s.id, children); if (state) summary.append(dot(state)); summary.append(String(allKids.length)); ag.before(summary); }
     const meta = el("span", "srow-meta"); meta.append(harnessName(s.harness, true, true), icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").title = hostOf(s); meta.querySelector(".repo-short").title = branchOf(s);
-    row.append(main, meta); row.addEventListener("click", () => goSession(s.id)); line.append(row); item.append(line);
+    row.append(main, meta); row.addEventListener("click", () => goSession(s.id)); line.append(row); if (lineToggle) line.append(lineToggle); item.append(line);
     item.addEventListener("keydown", (e) => {
-      if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); item.querySelector(":scope > .tree-row .tree-toggle")?.click(); } }
+      if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { if (e.target !== item && e.target !== row && e.target !== lineToggle) return; const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); item.querySelector(":scope > .tree-row .tree-toggle")?.click(); } }
       else if ((e.key === "Enter" || e.key === " ") && e.target === item) { e.preventDefault(); goSession(s.id); }
     });
-    if (kids.length && !rail) { const group = el("div", "tree-group"); group.dataset.depth = String(Math.min(depth + 1, 4)); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Sessions spawned by " + s.name); for (const child of kids) group.append(buildLaneItem(child, depth + 1, children, rail)); item.append(group); }
+    if (kids.length && !rail) { const group = el("div", "tree-group"); group.dataset.depth = String(Math.min(depth + 1, 4)); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Sessions spawned by " + s.name); treeGroupFill(group, s, kids, children, depth, rail); item.append(group); }
     return item;
   }
   function renderLanes() {
