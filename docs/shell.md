@@ -157,6 +157,17 @@ The script uses `#lead-btn`, `#sidebar`, `#drawer-close`, and `#scrim` for the p
 
 Use `form[data-confirm="dialog-id"]` to open that `dialog.sheet` before submission. A `button[value="confirm"]` submits the original form; another button, Escape, or the backdrop closes the sheet. Use `button[data-open="dialog-id"]` to open a sheet, and `[data-close]` to close its enclosing dialog. A `[data-copy="element-id"]` button copies the target's text. An element with `[data-poll="/path"]` checks that same-origin URL every three seconds for up to 30 minutes and navigates to `data-poll-go` (or `/`) when it receives status 200.
 
+## Tooltips
+
+Put `data-tip="text"` on any element to give it a tooltip; `/shell.js` and the viewer's own script both include the controller, and `/viewer.css` styles it, so a page needs nothing else. It replaces the native `title` attribute, which the viewer no longer uses anywhere.
+
+- One `<div id="sh-tooltip" role="tooltip">` is made on first use and reused. The text is set as text, never as markup. Set or change `data-tip` at any time (also when the element is re-rendered): it is read when the tooltip opens, and an open tooltip follows a change or closes if its element is removed or hidden.
+- It opens after about 500 ms of hover. Once one has shown, another element reached within 300 ms shows at once. Keyboard focus (`:focus-visible` only) shows it with no delay. It closes on pointer leave, blur, Esc, a click, or a scroll that moves its element. Esc keeps it closed until the pointer leaves the element.
+- It sits above the element, below when there is no room, at least 8 px inside the viewport, never over the element. It is 13 px text on the inverse surface (`--ink` behind `--ground`), at most 280 px wide, and a popover, so it shows above an open `dialog.sheet`. It fades in unless the user prefers reduced motion.
+- While it shows, the element gets `aria-describedby="sh-tooltip"`, unless its `aria-label` or own text already contains the tip's text. A tip is not a place to keep the only copy of anything: an icon or badge whose text is only in its tip needs `tabindex="0"` (so keyboard focus can show it) and an `aria-label` or hidden text, and a control's own accessible name must carry the information.
+- On touch, tapping a static element with a tip toggles it and tapping anywhere else closes it. Tapping a button, link or other control runs the control and shows no tip.
+- `data-tip-clipped` on an element with an ellipsis shows the tip only while its text is cut off, for a tip that would otherwise repeat the visible text.
+
 ## Classes
 
 These viewer chrome classes and shell components form the supported class contract:

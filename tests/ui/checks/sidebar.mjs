@@ -88,7 +88,7 @@ const collapsedPills = (page) => page.evaluate(() => {
       const layers = []; for (let e = s; e; e = e.parentElement) layers.push(rgba(getComputedStyle(e).backgroundColor));
       let bg = [255, 255, 255, 1]; for (const layer of layers.reverse()) bg = over(layer, bg);
       const cs = getComputedStyle(s), x = lum(rgba(cs.color)), y = lum(bg);
-      out = { id: item.dataset.id, text: s.textContent, dots: s.querySelectorAll(".dot").length, title: s.title, label: row.getAttribute("aria-label"), wait: s.classList.contains("wait"), ratio: Math.round((Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) * 100) / 100, radius: cs.borderRadius, height: s.getBoundingClientRect().height, background: cs.backgroundColor };
+      out = { id: item.dataset.id, text: s.textContent, dots: s.querySelectorAll(".dot").length, tip: s.dataset.tip, label: row.getAttribute("aria-label"), wait: s.classList.contains("wait"), ratio: Math.round((Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) * 100) / 100, radius: cs.borderRadius, height: s.getBoundingClientRect().height, background: cs.backgroundColor };
     }
     if (wasOpen) toggle.click();
     return out;
@@ -106,13 +106,13 @@ const tally = (SESS, H, id) => {
 const breakdown = (t) => [t.total + (t.total === 1 ? " run" : " runs"), t.wait && t.wait + " needs you", t.work && t.work + " working", t.err && t.err + " failed"].filter(Boolean);
 
 // Each pill: the bare total and no dot, fully round, AA against its backdrop; amber (`wait`) exactly when something inside
-// needs you, and neutral otherwise (a failure is named in the text, never coloured); title and label break the total down.
+// needs you, and neutral otherwise (a failure is named in the text, never coloured); tooltip (data-tip) and label break the total down.
 function assertPills(r, where, pills, SESS, H, mustShow) {
   r.expect(pills.length > 0 && pills.every((p) => !p.missing), where + ": a collapsed parent shows no count pill: " + JSON.stringify(pills.filter((p) => p.missing)));
   for (const p of pills.filter((x) => !x.missing)) {
     const t = tally(SESS, H, p.id), parts = breakdown(t), name = SESS[p.id]?.name + " ";
     r.expect(p.dots === 0 && p.text === String(t.total), where + " " + name + ": the pill is the bare total with no state dot: " + JSON.stringify(p));
-    r.expect(p.title === parts.join(" · "), where + " " + name + ": the title is " + JSON.stringify(parts.join(" · ")) + ": " + JSON.stringify(p.title));
+    r.expect(p.tip === parts.join(" · "), where + " " + name + ": the tooltip is " + JSON.stringify(parts.join(" · ")) + ": " + JSON.stringify(p.tip));
     r.expect(p.label?.endsWith(", " + parts.join(", ")), where + " " + name + ": the row's aria-label carries the breakdown: " + JSON.stringify(p.label));
     r.expect(p.wait === t.wait > 0, where + " " + name + ": the wait class is " + p.wait + " with " + t.wait + " waiting");
     r.expect(p.ratio >= 4.5, where + " " + name + ": the pill's text has contrast " + p.ratio + ", under 4.5");
@@ -530,7 +530,7 @@ export default async function sidebarCheck(browser) {
     const collapsedAfter = await groupOf(page, swarm.id);
     r.expect(collapsedAfter && collapsedAfter.expanded === "false" && !collapsedAfter.stuck, "desktop " + tag + ": collapsing the parent drops its sticky row: " + JSON.stringify([collapsedAfter?.expanded, collapsedAfter?.stuck]));
     // The count pill: a neutral total with no state dot (a dot next to "53" read as 53 running); it turns amber only when a
-    // descendant needs you; its title and the row's accessible label break the total down, failures included. It collapses every
+    // descendant needs you; its tooltip and the row's accessible label break the total down, failures included. It collapses every
     // parent in turn and saves that, so it runs after the reload assertions.
     {
       const pills = await collapsedPills(page);
@@ -569,7 +569,7 @@ export default async function sidebarCheck(browser) {
       assertPills(r, "patched " + tag, pills, SESS, M.handoffs, ["Fan-out"]);
       const fanPill = pills.find((p) => p.id === fan.id), t = tally(SESS, M.handoffs, fan.id);
       r.expect(t.wait === 1 && t.err === 1 && t.total === fanKids.length + 1, "patched " + tag + ": the patch did not land: " + JSON.stringify(t));
-      r.expect(fanPill?.wait === true && /1 needs you/.test(fanPill.title) && /1 failed/.test(fanPill.title), "patched " + tag + ": Fan-out's pill is amber and names the waiting and the failed run: " + JSON.stringify(fanPill));
+      r.expect(fanPill?.wait === true && /1 needs you/.test(fanPill.tip) && /1 failed/.test(fanPill.tip), "patched " + tag + ": Fan-out's pill is amber and names the waiting and the failed run: " + JSON.stringify(fanPill));
       // Collapsed for the screenshot.
       await page.evaluate((id) => { const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id); if (item.getAttribute("aria-expanded") === "true") item.querySelector(":scope > .tree-row .tree-toggle").click(); }, fan.id);
       await page.screenshot({ path: path.join(ENV.out, "sidebar-wait-pill-" + tag + ".png") });

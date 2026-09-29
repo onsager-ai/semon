@@ -51,7 +51,8 @@
   const ago = (t) => { const d = Math.floor((NOW - t) / 60000); return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d"; };
   const dur = (a, b) => { const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 60000)); return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor((d % 1440) / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };
   const tok = (m) => m >= 1 ? m.toFixed(1) + "M" : Math.round(m * 1000) + "k";
-  const dot = (st) => { const d = el("span", "dot " + st); d.title = STATE[st] ?? st; d.setAttribute("role", "img"); d.setAttribute("aria-label", d.title); return d; };
+  // A dot is the state's only sign where nothing beside it says the state, and then it carries a tooltip; `tip = false` where a word does.
+  const dot = (st, tip = true) => { const d = el("span", "dot " + st); d.setAttribute("role", "img"); d.setAttribute("aria-label", STATE[st] ?? st); if (tip) d.dataset.tip = STATE[st] ?? st; return d; };
   const STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed", new: "New result", read: "Read result" };
   const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
@@ -63,7 +64,8 @@
   // A harness is named in plain text, never drawn: no logo and no vendor colour. "short" gives "Claude" where the line is tight.
   // The harness is named in plain muted text (.hname); the word itself tells Claude and Codex apart, so its hue is not used here.
   const HARNESS_SHORT = { claude: "Claude", codex: "Codex" };
-  const harnessName = (harness, short = false) => { const name = el("span", "hname h-" + harness, (short ? HARNESS_SHORT : HARNESS)[harness] ?? harness); name.title = HARNESS[harness] ?? harness; return name; };
+  // The short name ("Claude") gets the long one ("Claude Code") as its tooltip; the long one repeats itself, so it has none.
+  const harnessName = (harness, short = false) => { const name = el("span", "hname h-" + harness, (short ? HARNESS_SHORT : HARNESS)[harness] ?? harness); if (short && HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness]) name.dataset.tip = HARNESS[harness]; return name; };
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
   const parentOf = (sid) => SESS[sid]?.parent ?? H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
   const originHandoff = (sid) => H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === sid && h.from !== sid && (h.kind === "spawn" || SESS[sid]?.kind === "Relayed" || !SESS[sid]?.lane));
@@ -445,7 +447,7 @@
   const app = $(".app");
   const syncLayoutPrefs = () => { app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
   function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); }
-  function setRailMode(on) { railMode = on; try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("title", on ? "Expand sidebar" : "Collapse sidebar"); }
+  function setRailMode(on) { railMode = on; try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
   // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
   // it is dropped on load, along with any entry that has no `open`, and the next save writes the pruned list.
   function pruneTreePrefs(saved) {
@@ -458,7 +460,7 @@
     treePrefs = Object.fromEntries(Object.entries(treePrefs).sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0)).slice(0, 500));
     try { localStorage.setItem("semon.tree", JSON.stringify(treePrefs)); } catch {}
   }
-  const railToggle = $("#rail-toggle"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("title", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
+  const railToggle = $("#rail-toggle"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
   let route = { v: "home" }; let groupBy = "recent"; let query = ""; let analyticsRange = 7, analyticsMeasure = "hours";
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
   let pendingSessionOpen = null, pendingFlashHandoff = null;
@@ -725,7 +727,9 @@
   const costText = (cost) => cost.usd == null || cost.unpriced_models?.length ? "—" : asMoney(cost.usd);
   const costMissing = (cost) => cost.unpriced_models ?? [];
   const COST_TIP = "What these tokens would cost at API rates. Subscriptions (Claude Max, ChatGPT plans) aren't billed this way.";
-  function costInfoTip() { const b = el("span", "cost-info"); b.title = COST_TIP; b.setAttribute("role", "img"); b.setAttribute("aria-label", COST_TIP); b.append(icon(I.q)); return b; }
+  // The icon is the only place this text is; it takes keyboard focus so the tip is reachable without a pointer.
+  let metricSeq = 0;
+  function costInfoTip() { const b = el("span", "cost-info"); b.dataset.tip = COST_TIP; b.tabIndex = 0; b.setAttribute("role", "img"); b.setAttribute("aria-label", COST_TIP); b.append(icon(I.q)); return b; }
   const TREE_RANK = { wait: 0, work: 1, err: 2, idle: 3, done: 4 };
   const urgentDescendant = (sid, children) => descendantsOf(sid, children).filter((s) => s.state in TREE_RANK).sort((a, b) => TREE_RANK[a.state] - TREE_RANK[b.state] || b.last - a.last)[0]?.state;
   // What a parent's descendants are doing, as parts to join: the runs, then only the non-zero needs-you, working and failed counts (the viewer's own state words).
@@ -849,15 +853,15 @@
       toggle.addEventListener("click", (e) => { e.stopPropagation(); const value = item.getAttribute("aria-expanded") !== "true"; item.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-label", (value ? "Collapse " : "Expand ") + s.name); if (!value) forcedOpenIds().delete(s.id); saveTreePref(s.id, value); if (!value && (expandedAll === s.id || expandedPath.has(s.id))) { expandedAll = null; renderLanes(); $('#lanes .treeitem[data-id="' + CSS.escape(s.id) + '"] > .tree-row .tree-toggle')?.focus(); } });
       lineToggle = toggle; line.classList.add("has-toggle");
     }
-    const row = el("button", "srow"); row.type = "button"; row.dataset.id = s.id; row.title = s.name;
+    const row = el("button", "srow"); row.type = "button"; row.dataset.id = s.id; if (rail) row.dataset.tip = s.name; // the collapsed rail shows only a dot; otherwise the name has a tip while it is cut off
     row.setAttribute("aria-label", s.name + ", " + (STATE[s.state] ?? s.state) + ", " + (HARNESS[s.harness] ?? s.harness) + ", " + shortHost(s));
     const parts = allKids.length ? childParts(allKids) : []; if (parts.length) row.setAttribute("aria-label", row.getAttribute("aria-label") + ", " + parts.join(", "));
     if (current === s.id) row.setAttribute("aria-current", "page");
     if (rail && ancestors.has(s.id)) { row.classList.add("on-path"); row.setAttribute("aria-current", "true"); }
-    const main = el("span", "srow-main"), ag = el("span", "ag", ago(s.last)); main.append(dot(s.state), el("span", "nm", s.name), ag);
+    const main = el("span", "srow-main"), ag = el("span", "ag", ago(s.last)), nm = el("span", "nm", s.name); nm.dataset.tip = s.name; nm.dataset.tipClipped = ""; main.append(dot(s.state), nm, ag);
     if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work"); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
-    if (kids.length && !rail && allKids.length) { const summary = el("span", "tree-summary", String(allKids.length)); summary.title = parts.join(" · "); summary.classList.toggle("wait", allKids.some((x) => x.state === "wait")); ag.before(summary); }
-    const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").title = hostOf(s); meta.querySelector(".repo-short").title = branchOf(s);
+    if (kids.length && !rail && allKids.length) { const summary = el("span", "tree-summary", String(allKids.length)); summary.dataset.tip = parts.join(" · "); summary.classList.toggle("wait", allKids.some((x) => x.state === "wait")); ag.before(summary); }
+    const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").dataset.tip = "Machine: " + hostOf(s); meta.querySelector(".repo-short").dataset.tip = "Repo: " + (s.repo ?? "none") + " · " + (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s);
     row.append(main, meta); row.addEventListener("click", () => goSession(s.id)); line.append(row); if (lineToggle) line.append(lineToggle); item.append(line);
     item.addEventListener("keydown", (e) => {
       if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { if (e.target !== item && e.target !== row && e.target !== lineToggle) return; const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); item.querySelector(":scope > .tree-row .tree-toggle")?.click(); } }
@@ -915,7 +919,7 @@
       if (phone.matches) { const parent = opts.lineage.at(-1), c = el("button", "crumb lineage-parent", parent.name); c.type = "button"; c.setAttribute("aria-label", "Open session path through " + parent.name); c.addEventListener("click", () => showLineageMenu(s.id, bar)); l1.append(c, el("span", "sep", "›")); }
       else opts.lineage.forEach((item) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); });
     } else if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
-    const tt = el("span", "t", title); tt.title = title; l1.append(tt); t.append(l1);
+    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; l1.append(tt); t.append(l1);
     if (opts.line2) {
       const l2 = el("div", "l2" + (s ? " session-meta" : ""));
       opts.line2(l2); t.append(l2);
@@ -941,7 +945,7 @@
     put.done();
   }
   function appendWideToggle(bar) {
-    const b = el("button", "ibtn wide-toggle"); b.type = "button"; b.setAttribute("aria-label", "Wide reading mode"); b.setAttribute("aria-pressed", String(wideMode)); b.title = "Wide reading mode"; b.append(icon(I.wide));
+    const b = el("button", "ibtn wide-toggle"); b.type = "button"; b.setAttribute("aria-label", "Wide reading mode"); b.setAttribute("aria-pressed", String(wideMode)); b.dataset.tip = "Wide reading mode"; b.append(icon(I.wide));
     b.addEventListener("click", () => setWideMode(!wideMode)); bar.append(b);
   }
   // The Analytics range control, a persistent control of the bar: each redraw keeps it and only sets which button is pressed.
@@ -1153,37 +1157,38 @@
     const c = el("span", meta ? "meta-item meta-kind" : "child-kind"); c.style.setProperty("--h", "var(--" + s.harness + ")");
     const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
     if (mark) c.append(mark);
-    const kindText = s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"); if (meta) c.title = "Kind: " + kindText;
+    const kindText = s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"); if (meta) c.dataset.tip = "Kind: " + kindText;
     c.append(el("span", meta ? "meta-value" : null, kindText)); return c;
   }
   // A session's compact metadata line: state, model, machine, branch, tools, runs, tokens and API-equivalent cost.
-  // Every item is a static badge: a tooltip (title) for the pointer and hidden text ("Tool calls: ") for a screen reader.
+  // Every item is a static badge: a tooltip (data-tip) for the pointer and hidden text ("Tool calls: ") for a screen reader,
+  // so a badge is not a tab stop: its label is read out, and the tooltip only adds the full value for a pointer or a tap.
   // Only the errors jump and the runs item are controls. The session's details live in the ⋯ menu.
   const metaSr = (label) => el("span", "sr-only", label + ": ");
   const sessionLine = (s) => (l2) => {
     const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
     const turnsText = nT + (nT === 1 ? " turn" : " turns");
-    const st = el("span", "meta-item meta-state"); st.title = "Status: " + STATE[s.state] + " · " + turnsText; st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", turnsText));
+    const st = el("span", "meta-item meta-state"); st.dataset.tip = "Status: " + STATE[s.state] + " · " + turnsText; st.append(dot(s.state, false), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", turnsText));
     if (errors) {
       const sep = el("span", "state-sep errs-sep", "·"), j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); j.prepend(mark);
-      j.type = "button"; j.setAttribute("aria-label", j.textContent + ": step through the failed steps");
+      const stepTip = j.textContent + ": step through the failed steps"; j.type = "button"; j.dataset.tip = stepTip; j.setAttribute("aria-label", stepTip);
       j.addEventListener("click", (ev) => { ev.stopPropagation(); openErrors(s.id); });
       st.append(sep, j); }
     const kind = s.kind ? childKindChip(s, true) : null;
-    const model = el("span", "meta-item meta-model"); model.append(metaSr("Model"), harnessName(s.harness), el("span", "meta-value", shortModel(s.model))); model.title = "Model: " + (s.model ?? "Unknown model");
-    const machine = el("span", "meta-item meta-machine"); machine.append(metaSr("Machine"), icon(I.machine), el("span", "meta-value", shortHost(s))); machine.title = "Machine: " + hostOf(s);
-    const branch = el("span", "meta-item meta-branch"); branch.append(metaSr(s.worktree ? "Worktree" : "Branch"), icon(I.branch), el("span", "meta-value", branchOf(s))); branch.title = (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s);
-    const tools = el("span", "meta-item meta-tools"); tools.append(metaSr("Tool calls"), icon(I.wrench), el("span", "meta-value", calls == null ? "—" : String(calls))); tools.title = "Tool calls: " + (calls ?? "—");
+    const model = el("span", "meta-item meta-model"); model.append(metaSr("Model"), harnessName(s.harness), el("span", "meta-value", shortModel(s.model))); model.dataset.tip = "Model: " + (s.model ?? "Unknown model");
+    const machine = el("span", "meta-item meta-machine"); machine.append(metaSr("Machine"), icon(I.machine), el("span", "meta-value", shortHost(s))); machine.dataset.tip = "Machine: " + hostOf(s);
+    const branch = el("span", "meta-item meta-branch"); branch.append(metaSr(s.worktree ? "Worktree" : "Branch"), icon(I.branch), el("span", "meta-value", branchOf(s))); branch.dataset.tip = (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s);
+    const tools = el("span", "meta-item meta-tools"); tools.append(metaSr("Tool calls"), icon(I.wrench), el("span", "meta-value", calls == null ? "—" : String(calls))); tools.dataset.tip = "Tool calls: " + (calls ?? "—");
     const kids = childSessions(s.id), allKids = descendantsOf(s.id, sessionChildren());
     let runs = null;
-    if (kids.length) { const working = allKids.filter((x) => x.state === "work").length; runs = el("button", "meta-item meta-runs"); runs.type = "button"; runs.title = kids.length + (kids.length === 1 ? " child session" : " child sessions") + (working ? ", work in progress" : "") + ": open runs"; runs.setAttribute("aria-label", runs.title); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
+    if (kids.length) { const working = allKids.filter((x) => x.state === "work").length; runs = el("button", "meta-item meta-runs"); const runsTip = kids.length + (kids.length === 1 ? " child session" : " child sessions") + (working ? ", work in progress" : "") + ": open runs"; runs.type = "button"; runs.dataset.tip = runsTip; runs.setAttribute("aria-label", runsTip); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
     const totalTokens = usageTotal(s);
-    const tokens = el("span", "meta-item meta-tokens"); tokens.append(metaSr("Tokens"), icon(I.tokens), el("span", "meta-value", tok(totalTokens / 1e6))); tokens.title = "Tokens: " + totalTokens.toLocaleString();
-    const parentCost = kids.length ? costForSessions([s, ...allKids]) : costForSession(s.id), missing = costMissing(parentCost), costItem = el("span", "meta-item meta-cost"); costItem.append(metaSr("API-equivalent cost"), icon(I.coin), el("span", "meta-value", (kids.length ? "incl. runs " : "") + (costText(parentCost) === "—" ? "—" : shortMoney(parentCost.usd)))); costItem.title = "API-equivalent cost" + (kids.length ? ", including runs" : "") + ": " + costText(parentCost) + ". " + COST_TIP + (missing.length ? " no price for " + missing.join(", ") : "");
+    const tokens = el("span", "meta-item meta-tokens"); tokens.append(metaSr("Tokens"), icon(I.tokens), el("span", "meta-value", tok(totalTokens / 1e6))); tokens.dataset.tip = "Tokens: " + totalTokens.toLocaleString();
+    const parentCost = kids.length ? costForSessions([s, ...allKids]) : costForSession(s.id), missing = costMissing(parentCost), costItem = el("span", "meta-item meta-cost"); costItem.append(metaSr("API-equivalent cost"), icon(I.coin), el("span", "meta-value", (kids.length ? "incl. runs " : "") + (costText(parentCost) === "—" ? "—" : shortMoney(parentCost.usd)))); costItem.dataset.tip = "API-equivalent cost" + (kids.length ? ", including runs" : "") + ": " + costText(parentCost) + ". " + COST_TIP + (missing.length ? " no price for " + missing.join(", ") : "");
     l2.append(...(kind ? [kind] : []), st, model, machine, branch, tools, ...(runs ? [runs] : []), tokens, costItem);
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
-    const st = el("span", "stat " + (!up ? "err" : w ? "work" : "idle")); st.append(dot(!up ? "err" : w ? "work" : "idle"), !up ? "Not responding" : w ? "Up" : "Idle"); l2.append(st, el("span", "sep", " · "));
+    const st = el("span", "stat " + (!up ? "err" : w ? "work" : "idle")); st.append(dot(!up ? "err" : w ? "work" : "idle", false), !up ? "Not responding" : w ? "Up" : "Idle"); l2.append(st, el("span", "sep", " · "));
     l2.append(el("span", "rest", up ? w + " working · " + here.length + (here.length === 1 ? " session" : " sessions") : movedOff(m).length ? "Semon moved its sessions to other machines" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, here.length + (here.length === 1 ? " session" : " sessions")].filter(Boolean).join(" · "))); };
   // One observer for the current page title; the previous page's is disconnected so it can't flip the new bar.
   let titleObs = null;
@@ -1409,7 +1414,7 @@
     body.append(more);
   }
   function traceMeta(body, st, text, sid, turn, note) {
-    const meta = el("div", "meta"), s = SESS[sid]; const sw = el("span", "stat " + st); sw.append(st === "work" ? el("span", "spin") : dot(st), text); meta.append(sw);
+    const meta = el("div", "meta"), s = SESS[sid]; const sw = el("span", "stat " + st); sw.append(st === "work" ? el("span", "spin") : dot(st, false), text); meta.append(sw);
     if (s) meta.append(el("span", "chip-h " + hcls(sid), (s.kind ?? HARNESS[s.harness]) + " · " + MACHINE[s.machine]));
     if (note) meta.append(el("span", "gone", note));
     if (s && !s.stub) { const o = el("button", "open", "Open in " + s.name + " ›"); o.type = "button"; o.addEventListener("click", () => goSession(sid, turn?.id)); meta.append(o); }
@@ -1542,7 +1547,7 @@
       if (opts.excludeH && t.last) return;
       const end = turnEnd(t); if (!end && !t.out.length) return;
       const d = el("div", "turn-end");
-      if (end) { const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st), spaced(end.text)); d.append(st); }
+      if (end) { const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st, false), spaced(end.text)); d.append(st); }
       if (t.out.length) d.append(traceBtn(t)); blk.append(d); };
     const openTurn = (t) => { closeTurn(); const blk = el("section", "turn"); blk.dataset.turn = t.id;
       // Your own message needs no header: the bubble is yours and its time sits under it. A relay or brief says who sent it.
@@ -1696,7 +1701,7 @@
     const block = el("div", "child-return"), finished = s.state === "done" || s.state === "err" || h.status === "done" || h.status === "err";
     const status = finished ? (s.state === "err" || h.status === "err" ? "err" : "done") : "work";
     const text = finished ? (status === "err" ? "Failed" : "Done") : "Working · " + callsText(countOf(s, "calls")) + " · " + dur(s.start, null);
-    const state = el("span", "stat " + status); state.append(status === "work" ? el("span", "spin") : dot(status), el("span", null, finished ? "Returned to " + nameOf(h.from) + " · " + text + " · " + dur(s.start, s.last) : text)); block.append(state);
+    const state = el("span", "stat " + status); state.append(status === "work" ? el("span", "spin") : dot(status, false), el("span", null, finished ? "Returned to " + nameOf(h.from) + " · " + text + " · " + dur(s.start, s.last) : text)); block.append(state);
     if (finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
     return block;
   }
@@ -1709,7 +1714,7 @@
     const [ic, parts] = sentence(h, viewer);
     if (child) { c.append(childKindChip(child)); const ln = el("span", "ln", child.name); ln.append(el("span", "verb", " · " + (child.kind ?? HARNESS[child.harness]))); c.append(ln); }
     else { c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln); }
-    const shownState = child?.state ?? h.status, sw = el("span", "stat " + shownState); sw.append(shownState === "work" ? el("span", "spin") : dot(shownState === "done" ? "done" : shownState), child ? STATE[shownState] : statWord(h)); c.append(sw);
+    const shownState = child?.state ?? h.status, sw = el("span", "stat " + shownState); sw.append(shownState === "work" ? el("span", "spin") : dot(shownState === "done" ? "done" : shownState, false), child ? STATE[shownState] : statWord(h)); c.append(sw);
     if (child) { const meta = el("div", "child-meta"); meta.append(el("span", null, dur(child.start, child.state === "work" ? null : child.last)), el("span", null, callsText(countOf(child, "calls")))); c.append(meta); }
     const br = markdown(h.brief, "brief"); c.append(br);
     // Long messages open in place; the rest of the card still goes to the other session.
@@ -1914,7 +1919,7 @@
     const step = (right - left) / count, w = Math.max(2, step * .64);
     bins.forEach((bin, i) => { const x = left + i * step + (step - w) / 2, ch = (bottom - top) * bin.claude / max, xh = (bottom - top) * bin.codex / max, total = bin.claude + bin.codex;
       if (ch) svg.append(svgEl("rect", { x, y: bottom - ch, width: w, height: ch, class: "cost-claude" })); if (xh) svg.append(svgEl("rect", { x, y: bottom - ch - xh, width: w, height: xh, class: "cost-codex" }));
-      const label = clock(bin.a) + "–" + clock(bin.b) + ": " + hLabel(total), hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); hit.append(svgEl("title", {}, label));
+      const label = clock(bin.a) + "–" + clock(bin.b) + ": " + hLabel(total), hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); hit.dataset.tip = label;
       if (total > 0) { hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", label + ". Open the sessions busy then"); }
       const open = () => { if (total > 0) openAnalyticsSlice(bin.a, bin.b, rows.filter((r) => busyMsIn(r, bin.a, bin.b) > 0)); };
       hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
@@ -1988,7 +1993,9 @@
     const all = analyticsSessions().filter((row) => matchesSessionFacets(row.s)), to = NOW, from = to - rangeMs(analyticsRange), now = analyticsStats(all, from, to), previous = analyticsStats(all, from - rangeMs(analyticsRange), from);
     const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days")));
     const put = placer(page); put(head); observeTitle(h1); put(renderFacetFilters(page, () => render()));
-    const metrics = el("div", "analytics-metrics"), addMetric = (label, value, note, more, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label"); l.append(el("span", null, label)); if (tip) l.append(costInfoTip()); if (more) { m.dataset.more = ""; m.title = more; } m.append(l, el("div", "value", value), note); metrics.append(m); }, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
+    // A card with an explanation carries it for a screen reader all the time (hidden text, its description); the tooltip shows it to a pointer,
+    // and the card takes keyboard focus so the tooltip is reachable.
+    const metrics = el("div", "analytics-metrics"), addMetric = (label, value, note, more, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label"); l.append(el("span", null, label)); if (tip) l.append(costInfoTip()); if (more) { const note = el("span", "sr-only", more); note.id = "metric-more-" + (++metricSeq); m.dataset.more = ""; m.dataset.tip = more; m.tabIndex = 0; m.setAttribute("aria-describedby", note.id); m.append(note); } m.append(l, el("div", "value", value), note); metrics.append(m); }, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
     addMetric("Agent-hours", hoursText(now.agentMs), deltaNote(now.agentMs, previous.agentMs, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
     const costNote = now.apiCost == null || previous.apiCost == null ? el("div", "note", "no price for " + [...new Set([...now.costUnknown, ...previous.costUnknown])].join(", ")) : deltaNote(now.apiCost, previous.apiCost, asMoney);
     addMetric(analyticsRange === 1 ? "Cost today (UTC)" : "Cost, last " + analyticsRange + " UTC days", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, analyticsRange === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + analyticsRange + " UTC days count, today so far, compared with the " + analyticsRange + " whole UTC days before.", true);
@@ -2333,7 +2340,7 @@
     if (whole) morph(box, transcript(route.id).querySelector(".turns"));
     else if (dirty.size) morphTurns(box, transcript(route.id, { only: dirty }).querySelector(".turns"), dirty);
     const h1 = $("#page .ph h1"); if (h1) h1.textContent = s.name;
-    const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.title = s.name; }
+    const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.dataset.tip = s.name; }
     const l2 = $("#topbar .l2"); if (l2) { l2.replaceChildren(); sessionLine(s)(l2); requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); }); }
     const fc = $("#topbar .fcount"); if (fc) { const n = find ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : 0; fc.textContent = find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""; }
     renderNav(); renderLanes(); ticker();

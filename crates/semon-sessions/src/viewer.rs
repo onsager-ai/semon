@@ -1367,7 +1367,7 @@ impl MachineView {
             "/shell.js" => Ok((
                 200,
                 "text/javascript; charset=utf-8",
-                include_str!("shell.js").into(),
+                crate::shell::JS.into(),
             )),
             "/shell.css" => Ok((
                 200,
@@ -3060,7 +3060,7 @@ mod tests {
             .split(|c: char| c.is_whitespace())
             .any(|word| word.starts_with("on") && word.contains('='));
         assert!(!handler, "no inline event handlers");
-        let js = include_str!("viewer.js");
+        let js = crate::shell::VIEWER_JS;
         for banned in [
             "innerHTML",
             "outerHTML",
@@ -3399,7 +3399,7 @@ mod tests {
             (200, "text/html; charset=utf-8", PAGE.as_bytes(), None)
         );
         let script = core.respond("GET", "/viewer.js", "", None);
-        assert_eq!(script.body, include_bytes!("viewer.js"));
+        assert_eq!(script.body, crate::shell::VIEWER_JS.as_bytes());
         let model = core.respond("GET", "/api/model", "", None);
         assert_eq!(model.status, 200);
         let etag = model.etag.clone().unwrap();
@@ -3659,8 +3659,8 @@ mod tests {
         let (capped, truncated) = truncate(&"x".repeat(EXPAND_BYTES + 1), EXPAND_BYTES);
         assert!(truncated);
         assert_eq!(capped.len(), EXPAND_BYTES);
-        assert!(!include_str!("viewer.js").contains("innerHTML"));
-        assert!(include_str!("viewer.js").contains("textContent"));
+        assert!(!crate::shell::VIEWER_JS.contains("innerHTML"));
+        assert!(crate::shell::VIEWER_JS.contains("textContent"));
     }
 
     #[test]
