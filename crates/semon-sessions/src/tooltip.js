@@ -5,10 +5,14 @@
 //
 // Timing (the Radix defaults): it opens after 500 ms of hover; once one has shown, another tipped element reached within
 // 300 ms shows at once; keyboard focus (:focus-visible only) shows it with no delay. It closes on pointer leave, blur, Esc,
-// a click, or a scroll that moves the target. On touch a tap on a static tipped element toggles its tip, and a tap
+// a click, or a scroll that moves the target. When a live update replaces the element under a shown tip, it moves to the
+// replacement under the pointer (or holding focus) and stays open. On touch a tap on a static tipped element toggles its tip, and a tap
 // anywhere else closes it; a tap on a button, link or other control runs the control and shows no tip.
 // data-tip-clipped: show only while the element's own text is cut off (an ellipsis), for a tip that repeats visible text.
 (() => {
+  // One controller per page, even if a page loads both /viewer.js and /shell.js.
+  if (window.__semonTooltip) return;
+  window.__semonTooltip = true;
   const SHOW_DELAY = 500, SKIP_WINDOW = 300, MARGIN = 8, GAP = 8, MAX_WIDTH = 280, ID = "sh-tooltip";
   const INTERACTIVE = 'a[href], button, input, select, textarea, summary, label, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [contenteditable="true"]';
   const HAS_TIP = '[data-tip]:not([data-tip=""])';
@@ -23,6 +27,8 @@
   let described = null;  // the aria-describedby to give back when the tip closes
   let watcher = null;
   let anchor = null;     // where the target stood when the tip opened, to tell whether a scroll moved it
+  let pointer = null;    // the last mouse or pen position, to find the element a re-render put under it
+  let origin = "pointer"; // what opened the tip: the pointer, keyboard focus or a touch
 
   const tipOf = (node) => node?.closest?.(HAS_TIP) ?? null;
   const focusVisible = (node) => { try { return node.matches(":focus-visible"); } catch { return true; } };
@@ -57,8 +63,9 @@
   // The target is described by the tip while it shows, unless its own name or text already says the same thing.
   function link(node, text) {
     const label = node.getAttribute("aria-label") ?? "";
-    if ((label && label.includes(text)) || node.textContent?.trim() === text) return;
     const before = node.getAttribute("aria-describedby");
+    const said = (before ?? "").split(/\s+/).some((id) => id && document.getElementById(id)?.textContent?.includes(text));
+    if ((label && label.includes(text)) || node.textContent?.trim() === text || said) return;
     node.setAttribute("aria-describedby", (before ? before + " " : "") + ID);
     described = { node, before };
   }
@@ -69,13 +76,21 @@
     described = null;
   }
 
+  // The tipped element that stands where a re-render took the target: under the pointer, or holding focus. A live update
+  // rebuilds the top bar and the sidebar every few seconds, so a tip on one of their items must move to the new node.
+  function successor() {
+    const found = origin === "focus" ? tipOf(document.activeElement) : origin === "pointer" && pointer ? tipOf(document.elementFromPoint(pointer.x, pointer.y)) : null;
+    return found && found !== target && shown(found) && !(found.hasAttribute("data-tip-clipped") && !clipped(found)) ? found : null;
+  }
+
   // While a tip is open, a live re-render can remove or hide its target or change its text: follow it, or close.
   function watch() {
     if (watcher || !window.MutationObserver) return;
     watcher = new MutationObserver(() => {
       if (!opened || !target) return;
       const text = target.getAttribute("data-tip");
-      if (!text || !shown(target)) { hide(); return; }
+      if (!shown(target)) { const next = successor(); if (next) show(next, true); else hide(); return; }
+      if (!text) { hide(); return; }
       if (text !== tip.textContent) { unlink(); tip.textContent = text; link(target, text); place(target); }
     });
     watcher.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-tip", "hidden"] });
@@ -116,13 +131,14 @@
   function schedule(node) {
     target = node;
     if (performance.now() - closedAt < SKIP_WINDOW) show(node, true);
-    else timer = window.setTimeout(() => show(node, false), SHOW_DELAY);
+    else timer = window.setTimeout(() => { const now = shown(node) ? node : successor(); if (now) show(now, false); }, SHOW_DELAY);
   }
 
   document.addEventListener("pointerover", (event) => {
     pointerType = event.pointerType || "mouse";
     if (event.pointerType === "touch") return;
-    if (tip?.contains(event.target)) return; // the tip can be hovered too, so it does not close under the pointer
+    pointer = { x: event.clientX, y: event.clientY };
+    origin = "pointer";
     const node = tipOf(event.target);
     if (node !== dismissed) dismissed = null;
     if (node === target) return;
@@ -130,6 +146,7 @@
     hide(true);
     if (node) schedule(node);
   });
+  document.addEventListener("pointermove", (event) => { if (event.pointerType !== "touch") pointer = { x: event.clientX, y: event.clientY }; }, { capture: true, passive: true });
   // Leaving the window sends no pointerover to anything else.
   document.addEventListener("pointerout", (event) => { if (!event.relatedTarget && event.pointerType !== "touch") hide(true); });
 
@@ -147,14 +164,18 @@
     if (!node || !focusVisible(focused)) return;
     hide(true);
     target = node;
+    origin = "focus";
     window.requestAnimationFrame(() => { if (target === node && document.activeElement === focused) show(node, true); });
   });
   document.addEventListener("focusout", (event) => { if (target && tipOf(event.target) === target) hide(true); });
 
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !target) return;
+    // Inside an open dialog, one Esc closes the tip and leaves the dialog: the next Esc closes that.
+    const inDialog = opened && !!target.closest?.("dialog[open]");
     dismissed = target;
     hide();
+    if (inDialog) { event.preventDefault(); event.stopPropagation(); }
   }, true);
 
   // Capture phase, so a control that stops the click's propagation still closes the tip.
@@ -164,6 +185,7 @@
     hide();
     if (!node || wasOpen || event.target.closest?.(INTERACTIVE) || node.closest(INTERACTIVE)) return;
     target = node;
+    origin = "touch";
     show(node, true);
   }, true);
 

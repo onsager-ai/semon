@@ -11,6 +11,7 @@
 //       meets AA against its background; reduced motion turns the fade off;
 //       on a phone, tapping a static tipped element toggles it, tapping elsewhere closes it, and tapping a control runs the
 //       control with no tip.
+//   - a live update that rebuilds the top bar and the sidebar under a resting pointer keeps the tooltip open on the new element.
 // Screenshots with a tooltip open go to out/tooltip/ for the visual pass.
 import fs from "node:fs";
 import path from "node:path";
@@ -72,6 +73,8 @@ async function hover(page, target, ms = 1400) {
   return probe;
 }
 // A corner of the viewport that holds nothing tipped: the pointer leaves whatever it was over.
+// Esc inside a dialog closes an open tooltip first and the dialog on the next press, so it is pressed twice.
+const escape = async (page) => { await page.keyboard.press("Escape"); await page.waitForTimeout(150); await page.keyboard.press("Escape"); await page.waitForTimeout(150); };
 const away = async (page) => { const v = page.viewportSize(); await page.mouse.move(v.width - 2, v.height - 2); };
 // Puts the gallery's tooltip section in the middle of the screen, so its elements have room above and below.
 const reveal = async (page) => { await page.evaluate(() => document.getElementById("tip-static").scrollIntoView({ block: "center" })); await page.waitForTimeout(150); };
@@ -287,7 +290,7 @@ export default async function tooltipCheck(browser) {
           await page.touchscreen.tap(...centre(await box(page, "#topbar .meta-runs"))); await page.waitForTimeout(250);
           const s = await state(page), dialog = await page.evaluate(() => !!document.querySelector("dialog.runs-sheet[open]"));
           r.expect(!s.open && dialog, tag + ": tapping the runs control showed a tooltip or did not run: " + JSON.stringify({ open: s.open, dialog }));
-          await page.keyboard.press("Escape"); await page.waitForTimeout(150);
+          await escape(page);
         }
         // A phone hover-less tap on a tipped control (the collapse toggle is hidden on phones; the drawer's toggle is not tipped).
       }
@@ -309,12 +312,51 @@ export default async function tooltipCheck(browser) {
       if (reached) {
         await page.waitForTimeout(80);
         const s = await state(page), want = await page.evaluate(() => document.activeElement.dataset.tip);
-        r.expect(s.open && s.text === want && s.described === 1, tag + ": focusing a card did not show its tooltip and describe it " + JSON.stringify(s));
+        // The explanation is the card's description all the time (hidden text), so the tooltip adds no second description.
+        const own = await page.evaluate(() => { const c = document.activeElement, n = document.getElementById(c.getAttribute("aria-describedby") ?? ""); return { text: n?.textContent ?? null, sr: n?.classList.contains("sr-only") ?? false, cards: [...document.querySelectorAll(".analytics-metric[data-more]")].filter((x) => document.getElementById(x.getAttribute("aria-describedby") ?? "")?.textContent !== x.dataset.tip).length }; });
+        r.expect(s.open && s.text === want && s.described === 0, tag + ": focusing a card did not show its tooltip, or described it twice " + JSON.stringify(s));
+        r.expect(own.text === want && own.sr && own.cards === 0, tag + ": a metric card does not carry its explanation as hidden text at all times " + JSON.stringify(own));
         await page.keyboard.press("Escape"); await page.waitForTimeout(80);
         const after = await state(page);
         r.expect(!after.open && after.described === 0, tag + ": Esc did not hide the card's tooltip " + JSON.stringify(after));
       }
       results[tag] = reached;
+    });
+  }
+
+  // ---- A live update rebuilds the bar and the sidebar under a resting pointer: the tip follows to the new node ----
+  {
+    const tag = "live", page = await served(browser, { size: "desktop" });
+    await guard(r, tag, page, async () => {
+      await goto(page, { v: "session", id: parent.id }, D); await page.waitForTimeout(250);
+      // Every poll for changes gets the whole model back under a new version, so the bar and the sidebar are rebuilt each time.
+      let polls = 0;
+      await page.route("**/api/model?since=*", async (route) => {
+        const response = await route.fetch({ url: ENV.base + "/api/model" });
+        const body = await response.json(); body.version = "tip-live-" + (++polls);
+        await route.fulfill({ response, json: body });
+      });
+      results[tag] = {};
+      for (const [name, selector] of [["a badge in the top bar", "#topbar .meta-tokens"], ["a row's host in the sidebar", "#lanes .srow-meta .host"]]) {
+        await away(page); await page.waitForTimeout(450);
+        const t = await hover(page, selector, 1500);
+        r.expect(t != null, tag + ": " + name + " never showed a tooltip");
+        const before = await state(page);
+        await page.evaluate((sel) => {
+          window.__was = document.querySelector(sel); window.__hides = 0;
+          const tip = document.getElementById("sh-tooltip");
+          new MutationObserver(() => { if (tip.hidden) window.__hides++; }).observe(tip, { attributes: true, attributeFilter: ["hidden"] });
+        }, selector);
+        const seen = polls;
+        await page.waitForFunction(() => window.__was && !window.__was.isConnected, null, { timeout: 12000 }).catch(() => {});
+        await page.waitForTimeout(400);
+        const after = await state(page), info = await page.evaluate(() => ({ replaced: !window.__was.isConnected, hides: window.__hides }));
+        results[tag][name] = { polls: polls - seen, before: before.text, after: after.text, ...info };
+        r.expect(info.replaced, tag + ": " + name + " was not rebuilt by the live update, so the check proved nothing");
+        r.expect(after.open && after.text === before.text && info.hides === 0, tag + ": " + name + ": the tooltip did not stay open on the rebuilt element " + JSON.stringify({ before: before.text, after: after.text, hides: info.hides }));
+        await away(page); await page.waitForTimeout(200);
+      }
+      r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join("; "));
     });
   }
 
@@ -327,7 +369,7 @@ export default async function tooltipCheck(browser) {
       for (const route of [{ v: "home" }, { v: "sessions" }, { v: "machines" }, { v: "analytics" }]) { await goto(page, route, D); await page.waitForTimeout(80); await scan(route.v); }
       for (const days of [7, 30]) { await page.click('[data-e="analytics-range:' + days + '"]'); await page.waitForTimeout(150); await scan("analytics-" + days + "d"); }
       const hit = page.locator(".chart-hit[role=button]");
-      if (await hit.count()) { await hit.first().dispatchEvent("click"); await page.waitForSelector("dialog.analytics-slice[open]"); await scan("analytics-slice"); await page.keyboard.press("Escape"); await page.waitForTimeout(100); }
+      if (await hit.count()) { await hit.first().dispatchEvent("click"); await page.waitForSelector("dialog.analytics-slice[open]"); await scan("analytics-slice"); await escape(page); }
       for (const m of Object.keys(D.MACHINE)) { await goto(page, { v: "machine", id: m }, D); await page.waitForTimeout(60); await scan("machine-" + m); }
       const traces = [];
       for (const s of Object.values(D.SESS)) {
@@ -339,16 +381,25 @@ export default async function tooltipCheck(browser) {
       await goto(page, { v: "session", id: parent.id }, D); await page.waitForTimeout(150);
       await page.click("#more-btn"); await page.waitForSelector(".session-menu"); await scan("session-menu");
       await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click(); await page.waitForSelector("dialog.session-details[open]"); await scan("session-details");
-      await page.keyboard.press("Escape"); await page.waitForTimeout(150);
+      await escape(page);
       if (await page.locator("#topbar .meta-runs").count() && await page.locator("#topbar .meta-runs").first().isVisible()) {
         await page.locator("#topbar .meta-runs").first().click();
         // A sheet on a phone; a popover in the bar on a desktop.
         const runs = size === "phone" ? "dialog.runs-sheet[open]" : ".runs-popover";
         await page.waitForSelector(runs); await scan("runs-" + (size === "phone" ? "sheet" : "popover"));
-        await page.keyboard.press("Escape"); await page.waitForTimeout(150);
+        await escape(page);
         await goto(page, { v: "session", id: parent.id }, D); await page.waitForTimeout(150);
       }
-      if (size === "desktop") { await page.click("#rail-toggle"); await page.waitForTimeout(250); await scan("rail"); }
+      if (size === "desktop") {
+        await page.click("#rail-toggle"); await page.waitForTimeout(250); await scan("rail");
+        // In the collapsed rail the row's tip is its name: the dots inside it have none.
+        await away(page); await page.waitForTimeout(450);
+        const rowTips = await page.evaluate(() => [...document.querySelectorAll("#lanes .srow")].map((row) => ({ row: row.dataset.tip ?? null, dots: [...row.querySelectorAll(".dot")].filter((d) => d.hasAttribute("data-tip")).length })));
+        r.expect(rowTips.length > 0 && rowTips.every((x) => x.row && x.dots === 0), "rail: a row has no name tip, or a dot inside it has a tip of its own " + JSON.stringify(rowTips.slice(0, 3)));
+        const t = await hover(page, "#lanes .srow", 1500), shown = await state(page), name = await page.evaluate(() => document.querySelector("#lanes .srow").dataset.tip);
+        r.expect(t != null && shown.text === name, "rail: hovering a row shows " + JSON.stringify(shown.text) + ", expected its name " + JSON.stringify(name));
+        await away(page);
+      }
       else { await page.click("#lead-btn"); await page.waitForTimeout(320); await scan("drawer"); }
       r.expect(page.errors.length === 0, "titles " + size + ": page errors " + page.errors.join("; "));
     });

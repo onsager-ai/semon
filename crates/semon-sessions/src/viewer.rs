@@ -3074,6 +3074,22 @@ mod tests {
             assert!(!js.contains(banned), "viewer.js uses {banned}");
         }
         assert!(js.contains("textContent"));
+        // No native tooltips: a tip is `data-tip` (tooltip.js). The browser check scans the screens it renders; this covers
+        // the ones it does not open (menus, the errors stepper, listboxes).
+        for (name, script) in [("viewer.js", js), ("shell.js", crate::shell::JS)] {
+            for banned in [
+                ".title =",
+                ".title=",
+                "setAttribute(\"title\"",
+                "svgEl(\"title\"",
+                "createElementNS(SVGNS, \"title\"",
+            ] {
+                assert!(
+                    !script.contains(banned),
+                    "{name} sets a native title: {banned}"
+                );
+            }
+        }
         for banned in ["@import", "http://", "https://"] {
             assert!(
                 !include_str!("viewer.css").contains(banned),
