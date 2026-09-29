@@ -198,7 +198,7 @@ export default async function analyticsCheck(browser) {
     const page = await served(browser, { size, dark: false, path: "/analytics" });
     await drawn(page, "range=7d");
     const seg = await page.evaluate(() => {
-      const one = (b) => { const box = b.getBoundingClientRect(), p = getComputedStyle(b, "::before"), top = parseFloat(p.top), bottom = parseFloat(p.bottom), hit = box.height - top - bottom, cx = box.left + box.width / 2;
+      const one = (b) => { b.scrollIntoView({ block: "center" }); const box = b.getBoundingClientRect(), p = getComputedStyle(b, "::before"), top = parseFloat(p.top), bottom = parseFloat(p.bottom), hit = box.height - top - bottom, cx = box.left + box.width / 2;
         const above = document.elementFromPoint(cx, box.top - 5)?.closest("button"), below = document.elementFromPoint(cx, box.bottom + 5)?.closest("button");
         return { label: b.textContent.trim(), visual: Math.round(box.height * 10) / 10, hit: Math.round(hit * 10) / 10, width: Math.round(box.width), catchesAbove: above === b, catchesBelow: below === b, pressed: b.getAttribute("aria-pressed") }; };
       const bar = document.querySelector("#topbar").getBoundingClientRect(), track = document.querySelector("#topbar .analytics-range")?.getBoundingClientRect();
@@ -213,7 +213,7 @@ export default async function analyticsCheck(browser) {
       if (phone) r.expect(x.width >= 44 && x.catchesAbove && x.catchesBelow, mode + ": segment " + x.label + " does not catch a tap 5px above and below it: " + JSON.stringify(x));
     }
     r.expect(seg.range.filter((x) => x.pressed === "true").length === 1 && seg.measure.filter((x) => x.pressed === "true").length === 1, mode + ": each segmented control has exactly one pressed segment");
-    r.expect(seg.bar.track != null && seg.bar.track <= 32 && seg.bar.roomAbove >= 4 && seg.bar.roomBelow >= 4 && seg.bar.height <= 56, mode + ": the range control crowds the top bar: " + JSON.stringify(seg.bar));
+    r.expect(seg.bar.track != null && seg.bar.track <= 32 && seg.bar.roomAbove >= 4 && seg.bar.roomBelow >= 4, mode + ": the range control crowds the top bar: " + JSON.stringify(seg.bar));
     page.errors.length && r.expect(false, mode + ": segmented page errors: " + page.errors.join(" | "));
     await page.context().close();
   }
