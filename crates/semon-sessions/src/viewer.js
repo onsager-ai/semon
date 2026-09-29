@@ -2158,12 +2158,19 @@
   const nameOfSid = (A, sid) => SESS[sid]?.name ?? A.sessions[sid]?.name ?? sid;
   const harnessOfSid = (A, sid) => SESS[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
   // A session older than the model's window has no page to open: its row is text.
-  function sessionRow(A, sid, cls, value, onOpen) {
-    const open = !!SESS[sid], b = el(open ? "button" : "div", cls);
-    if (open) { b.type = "button"; b.addEventListener("click", onOpen); }
-    const hid = harnessOfSid(A, sid), label = el("span", "hlabel"), mark = harnessIcon(hid, { size: 14 }); if (mark) label.append(mark); label.append(harnessName(hid, true)); // the mark and the label share the cell the label had
+  // `rank` ({ measure, max }) makes it a ranked row: a link to the session (a plain click still goes through the router) with a bar scaled to the list's largest value, in its harness's colour.
+  function sessionRow(A, sid, cls, value, onOpen, rank) {
+    const open = !!SESS[sid], harness = harnessOfSid(A, sid), b = el(open ? (rank ? "a" : "button") : "div", cls);
+    if (open && rank) { b.href = urlOf({ v: "session", id: sid }); b.addEventListener("click", (e) => { if (e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); onOpen(); }); }
+    else if (open) { b.type = "button"; b.addEventListener("click", onOpen); }
+    const label = el("span", "hlabel"), mark = harnessIcon(harness, { size: 14 }); if (mark) label.append(mark); label.append(harnessName(harness, true)); // the mark and the label share the cell the label had
     b.append(el("span", "session-name", nameOfSid(A, sid)), label, el("span", "session-value", value));
+    if (rank) { b.classList.add("ranked", "h-" + harness); b.append(rankTrack(rank.measure, rank.max).track); }
     return b;
+  }
+  // The bar of a ranked row (a Breakdown row or a top session): its width is the value's share of the list's largest, never under 2 % when there is a value.
+  function rankTrack(measure, max) {
+    const track = el("span", "row-track"), bar = el("i", "row-bar"); bar.style.width = Math.max(measure ? 2 : 0, measure / max * 100) + "%"; track.append(bar); return { track, bar };
   }
   const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
   function matchesSessionFacets(s) { return Object.keys(sessionFilters).every((key) => !sessionFilters[key] || sessionFacetValue(s, key) === sessionFilters[key]); }
@@ -2307,15 +2314,16 @@
     const selected = (x) => analyticsMeasure === "cost" ? x.cost : x.ms, items = groups.map((g) => ({ key: keyFor(g), ms: g.ms, cost: g.usd, unknown: g.unpriced_models, sessions: g.sessions })).sort((a, b) => selected(b) - selected(a) || labelFor(a.key).localeCompare(labelFor(b.key))), max = Math.max(1, ...items.map(selected));
     const panel = el("section", "analytics-panel"); panel.append(el("h3", null, title)); const list = el("div", "analytics-list");
     for (const item of items) { const b = el("button", "analytics-row"); b.type = "button"; b.append(el("span", "row-title", labelFor(item.key)), el("span", "row-count", item.sessions + (item.sessions === 1 ? " session" : " sessions")));
-      const measure = selected(item), track = el("span", "row-track"), bar = el("i", "row-bar"); bar.style.width = Math.max(measure ? 2 : 0, measure / max * 100) + "%"; if (groupKey === "harness") bar.style.background = item.key.startsWith("claude") ? "var(--claude)" : "var(--codex)"; track.append(bar);
+      const { track, bar } = rankTrack(selected(item), max); if (groupKey === "harness") bar.style.background = item.key.startsWith("claude") ? "var(--claude)" : "var(--codex)";
       b.append(track, el("span", "row-hours" + (analyticsMeasure === "hours" ? " on" : ""), hoursText(item.ms)), el("span", "row-cost" + (analyticsMeasure === "cost" ? " on" : ""), item.unknown.length ? "—" : asMoney(item.cost))); if (item.unknown.length) b.append(el("span", "no-price", "no price for " + item.unknown.join(", ")));
       b.dataset.breakdown = groupKey; b.dataset.key = item.key;
       b.addEventListener("click", () => { if (groupKey === "repo") sessionFilters.repo = item.key; else if (groupKey === "machine") sessionFilters.machine = item.key; else { const [harness, model] = item.key.split("\u0000"); sessionFilters.harness = harness; sessionFilters.model = model; } query = ""; groupBy = "recent"; go({ v: "sessions" }); }); list.append(b); }
     if (!items.length) list.append(el("p", "empty", "No activity in this range.")); panel.append(list); return panel;
   }
-  function analyticsList(A, title, items, value) {
+  function analyticsList(A, title, items, value, measure) {
     const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title)); const list = el("div", "analytics-list"); if (!items.length) list.append(el("p", "empty", "No sessions in this range."));
-    for (const item of items) { const b = sessionRow(A, item.sid, "analytics-session", value(item), () => goSession(item.sid)); const missing = item.unpriced_models ?? []; if (missing.length) b.append(el("span", "no-price", "no price for " + missing.join(", "))); list.append(b); } panel.append(list); return panel;
+    const max = Math.max(1, ...items.map(measure));
+    for (const item of items) { const b = sessionRow(A, item.sid, "analytics-session", value(item), () => goSession(item.sid), { measure: measure(item), max }); const missing = item.unpriced_models ?? []; if (missing.length) b.append(el("span", "no-price", "no price for " + missing.join(", "))); list.append(b); } panel.append(list); return panel;
   }
   function renderAnalytics(page) {
     const A = analyticsData();
@@ -2340,17 +2348,19 @@
     addMetric("Waited on you", timeText(now.wait_ms), deltaNote(now.wait_ms, previous.wait_ms, timeText), "Median wait " + timeText(now.median_wait_ms) + " · previous " + rangeName() + ": " + timeText(previous.median_wait_ms));
     const currentWait = A.longest_current_wait; addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longest_wait_ms, timeText), currentWait ? nameOfSid(A, currentWait.sid) + " has waited on you for " + timeText(currentWait.ms) : "No session is waiting on you"); put(metrics);
     const breakdowns = el("div", "analytics-breakdowns"); breakdowns.append(analyticsBreakdown("By repo", A.breakdown.repo, "repo"), analyticsBreakdown("By machine", A.breakdown.machine, "machine"), analyticsBreakdown("By harness and model", A.breakdown.model, "harness"));
-    // The breakdown's heading and its measure toggle: a persistent control (the toggle's state is the page's).
-    const bdHead = slot("measure", page, () => {
-      const bar = el("div", "analytics-bd-head"), title = el("div"), toggle = el("div", "analytics-measure"); title.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Agent-hours and API-equivalent cost; bars follow the toggle"));
+    // The Breakdown is one box: its title, the strip that stays pinned under the top bar (the measure toggle, a persistent control: the toggle's state is the page's), and the groups,
+    // whose headings pin under the strip. The strip has to share a parent with the groups to stay while any of them is in view.
+    const bdBox = slot("breakdown", page, () => {
+      const box = el("div", "analytics-breakdown"), head = el("div", "analytics-bd-head"), strip = el("div", "analytics-bd-bar"), toggle = el("div", "analytics-measure"); head.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Agent-hours and API-equivalent cost; bars follow the toggle"));
       toggle.setAttribute("role", "group"); toggle.setAttribute("aria-label", "Breakdown bar measure");
       for (const [key, label] of [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.measure = key; b.addEventListener("click", () => { if (analyticsMeasure === key) return; const top = currentScroll(); analyticsMeasure = key; render(); restoreScroll(top); }); toggle.append(b); }
-      bar.append(title, toggle); return bar;
+      strip.append(toggle); box.append(head, strip); return box;
     }).el;
-    for (const b of bdHead.querySelectorAll(".analytics-measure button")) b.setAttribute("aria-pressed", String(analyticsMeasure === b.dataset.measure));
+    for (const b of bdBox.querySelectorAll(".analytics-measure button")) b.setAttribute("aria-pressed", String(analyticsMeasure === b.dataset.measure));
+    const oldGroups = bdBox.querySelector(":scope > .analytics-breakdowns"); if (oldGroups) oldGroups.replaceWith(breakdowns); else bdBox.append(breakdowns);
     const bottom = el("div", "analytics-split");
-    bottom.append(analyticsList(A, "Top sessions · busy time", A.top.busy, (x) => timeText(x.ms)), analyticsList(A, "Top sessions · waited on", A.top.waited, (x) => timeText(x.ms)), analyticsList(A, "Most expensive sessions · API-equivalent cost", A.top.cost, (x) => x.usd == null ? "—" : asMoney(x.usd)));
-    put(renderAgentsChart(A), renderCostChart(A), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(A.allowance); if (allowance) put(allowance);
+    bottom.append(analyticsList(A, "Top sessions · busy time", A.top.busy, (x) => timeText(x.ms), (x) => x.ms), analyticsList(A, "Top sessions · waited on", A.top.waited, (x) => timeText(x.ms), (x) => x.ms), analyticsList(A, "Most expensive sessions · API-equivalent cost", A.top.cost, (x) => x.usd == null ? "—" : asMoney(x.usd), (x) => x.usd ?? 0));
+    put(renderAgentsChart(A), renderCostChart(A), bdBox, bottom); const allowance = renderCodexAllowance(A.allowance); if (allowance) put(allowance);
     // data-analytics-ready: the figures and charts are drawn (a stable hook for the budget check); data-query: for which range and filters.
     metrics.dataset.analyticsReady = ""; metrics.dataset.query = analyticsQuery();
     put.done();
