@@ -539,13 +539,16 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .treeitem[aria-expanded="true"] > .tree-row .tree-summary { display: none; }
 .page.wide-mode { max-width: 1400px; }
 
-.topbar .l2.session-meta { position: relative; gap: 12px; width: 100%; min-height: 30px; overflow: hidden; border: 0; border-radius: 8px; background: none; padding: 0; text-align: left; pointer-events: none; }
-.topbar .l2.session-meta .meta-hit { position: absolute; inset: 0; z-index: 0; border: 0; border-radius: 8px; background: none; padding: 0; pointer-events: auto; }
-@media (hover: hover) { .topbar .l2.session-meta:hover .meta-hit { background: var(--sunken); } }
-.topbar .l2.session-meta .meta-item { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; flex: none; min-width: 0; pointer-events: none; }
-.topbar .l2.session-meta .meta-runs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 30px; border: 0; background: none; padding: 0; color: var(--muted); font: inherit; pointer-events: auto; }
+/* Line 2 clips its overflow, so the working dot's 6px pulse ring needs that much room on the left: the line takes it as
+   padding and gives it back as a negative margin, which keeps the dot on the title's left edge. Every item is a static
+   badge with a tooltip; only the errors jump and the runs item are controls. */
+.topbar .l2.session-meta { position: relative; gap: 12px; width: calc(100% + 6px); min-height: 30px; overflow: hidden; border: 0; border-radius: 8px; background: none; margin-left: -6px; padding: 0 0 0 6px; text-align: left; pointer-events: none; }
+.topbar .l2.session-meta .meta-item { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; flex: none; min-width: 0; pointer-events: auto; cursor: default; }
+.topbar .l2.session-meta .meta-runs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 30px; margin: 0 -4px; border: 0; border-radius: 6px; background: none; padding: 0 4px; color: var(--muted); font: inherit; pointer-events: auto; cursor: pointer; }
 .topbar .l2.session-meta .meta-runs svg { width: 15px; height: 15px; color: var(--faint); }
-.topbar .l2.session-meta .meta-runs .dot { width: 6px; height: 6px; }
+@media (hover: hover) { .topbar .l2.session-meta .meta-runs:hover, .topbar .l2.session-meta .errs:hover { background: var(--sunken); color: var(--ink); } }
+.topbar .l2.session-meta .meta-runs:focus-visible, .topbar .l2.session-meta .errs:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--sunken); color: var(--ink); }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .topbar .l2.session-meta .meta-runs .meta-value { font: inherit; }
 .topbar .l2.session-meta .meta-item .meta-value { display: block; min-width: 0; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .l2.session-meta .meta-state { gap: 5px; }
@@ -557,10 +560,10 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--h); }
 .topbar .l2.session-meta .meta-item.meta-cost { gap: 4px; }
 .topbar .l2.session-meta .meta-cost .meta-value, .topbar .l2.session-meta .meta-tokens .meta-value { min-width: 0; max-width: 7ch; }
-.topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; margin: 0; border: 0; background: none; padding: 0 2px; font: inherit; font-weight: 500; color: var(--err); text-decoration: none; pointer-events: auto; }
-.topbar .l2.session-meta .errs:empty { display: none; }
-.topbar .l2.session-meta .errs::before { content: "·"; color: var(--faint); font-weight: 400; }
-.topbar .l2.session-meta .meta-item[hidden], .topbar .l2.session-meta .meta-runs[hidden], .topbar .l2.session-meta .errs[hidden], .topbar .l2.session-meta .meta-value[hidden] { display: none; }
+.topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; margin: 0 -4px; border: 0; border-radius: 6px; background: none; padding: 0 4px; font: inherit; font-weight: 400; color: var(--muted); text-decoration: none; pointer-events: auto; cursor: pointer; }
+.topbar .l2.session-meta .errs-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--err); }
+.topbar .l2.session-meta .errs-sep { color: var(--faint); }
+.topbar .l2.session-meta .meta-item[hidden], .topbar .l2.session-meta .meta-runs[hidden], .topbar .l2.session-meta .errs[hidden], .topbar .l2.session-meta .errs-sep[hidden], .topbar .l2.session-meta .meta-value[hidden] { display: none; }
 .wide-toggle { margin-left: auto; }
 .menu .menu-note { margin-left: auto; color: var(--accent); font-size: 12.5px; }
 
