@@ -18,7 +18,7 @@
 //     "Codex cut this output before the model saw it" and none of the warning header; a code-mode command cut by the collection cap
 //     shows the same in View all. Neither says "Cut short in this copy of the logs". Screenshots at 390 and 1280, light and dark.
 //   - spawn cards: the kind badge and the title share one row (phone and desktop, light and dark, also with a long title, and never sideways),
-//     the title does not repeat the kind its badge shows, and the Subagent badge (card and top bar) carries the delegation icon, not the person icon.
+//     the title does not repeat the kind its badge shows, and the Subagent badge on a card carries the delegation icon, not the person icon, and the top bar names the kind as a plain label.
 //   - no page errors.
 import path from "node:path";
 import { ENV, served, goto, data, reporter, overflow } from "../lib.mjs";
@@ -508,8 +508,9 @@ export default async function (browser) {
         await page.screenshot({ path: path.join(ENV.out, "spawn-card-" + tag + ".png") });
         if (size === "desktop") {
           await goto(page, { v: "session", id: kid.id }, D);
-          const meta = await page.evaluate(() => { const svg = document.querySelector("#topbar .meta-kind svg"); return { present: !!svg, delegate: svg?.classList.contains("kind-delegate") ?? false, person: !!svg && [...svg.querySelectorAll("path")].some((p) => p.getAttribute("d").includes("a4 4 0 1 0 0-8")) }; });
-          r.expect(meta.present && meta.delegate && !meta.person, tag + ": the subagent's top bar meta line should carry the delegation icon: " + JSON.stringify(meta));
+          // The overhaul's bar names the kind in its line of labels, as plain text with no icon: the person icon is never used for it.
+          const meta = await page.evaluate(() => { const labs = [...document.querySelectorAll("#topbar .meta-line > .lab")]; return { present: labs.some((x) => x.textContent === "Subagent"), person: !!document.querySelector("#topbar .meta-line svg path[d*='a4 4 0 1 0 0-8']") }; });
+          r.expect(meta.present && !meta.person, tag + ": the subagent's top bar line should name the kind as a plain label, without the person icon: " + JSON.stringify(meta));
         }
         r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join(" | "));
         await page.context().close();
