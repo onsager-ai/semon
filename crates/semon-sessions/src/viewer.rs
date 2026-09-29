@@ -6040,6 +6040,9 @@ mod tests {
         let pool = RefreshPool::new(1);
         let view = pooled(&fixture, Refresh::Background, &pool);
         let v1 = warm(&view);
+        // A build counts when it starts: the model it shows is what ends it.
+        let shown = || view.shown_model().map(|model| model.built.version.clone());
+        let before = shown();
         let started = pool.peak_and_started().1;
         let armed = Arc::new(AtomicBool::new(true));
         let trigger = armed.clone();
@@ -6057,7 +6060,7 @@ mod tests {
         // No read from here until the new worker has rebuilt it.
         let builds = view.hooks.builds();
         eventually("a rebuild by the new worker", || {
-            (view.hooks.builds() > builds).then_some(())
+            (view.hooks.builds() > builds && shown() != before).then_some(())
         });
         assert!(serves(&view, "after the panic"));
         assert!(pool.threads() <= 1);
