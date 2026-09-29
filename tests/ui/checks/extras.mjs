@@ -218,7 +218,7 @@ export default async function (browser) {
       await btn.click(); await page.waitForSelector("dialog.panel.full[open]"); await page.waitForTimeout(200);
       return page.evaluate(() => { const d = document.querySelector("dialog.panel.full"); return { notes: [...d.querySelectorAll(".vnote")].map((n) => n.textContent), out: [...d.querySelectorAll("pre")].at(-1)?.textContent.length ?? 0 }; });
     };
-    const previewInfo = await page.evaluate(() => { const b = [...document.querySelectorAll(".step > button")].find((x) => x.querySelector(".sa")?.textContent.endsWith("…")); if (b?.getAttribute("aria-expanded") === "false") b.click(); const o = b?.parentElement.querySelector(".out"); return { len: [...(o?.querySelectorAll("pre") ?? [])].at(-1)?.textContent.length ?? 0, lineCut: /^Output · (first|last) \d+/.test([...(o?.querySelectorAll(".io") ?? [])].at(-1)?.textContent ?? "") }; });
+    const previewInfo = await page.evaluate(() => { const b = [...document.querySelectorAll(".step > button")].find((x) => x.querySelector(".sa")?.textContent.endsWith("…")); if (b?.getAttribute("aria-expanded") === "false") b.click(); const o = b?.parentElement.querySelector(".out"); return { len: [...(o?.querySelectorAll("pre") ?? [])].at(-1)?.textContent.length ?? 0, lineCut: /^Output\s*·\s*(first|last)\s+\d+/.test([...(o?.querySelectorAll(".io") ?? [])].at(-1)?.textContent ?? "") }; });
     const preview = previewInfo.len;
     r.expect(preview > 0 && preview <= 1536 + 3, "the preview is the server's cut: " + preview);
     await page.route("**/api/entry**", (x) => x.abort());

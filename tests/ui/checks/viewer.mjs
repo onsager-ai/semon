@@ -50,7 +50,7 @@ export default async function viewerCheck(browser) {
       await page.waitForTimeout(100);
       const rr = await page.evaluate(() => { const r = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0, bad: [] };
         document.querySelectorAll('.step > button[aria-expanded="true"]').forEach((x) => { r.steps++; const o = x.parentElement.querySelector('.out');
-          const cut = /^Output · (first|last) \d+/.test([...o.querySelectorAll('.io')].at(-1)?.textContent ?? "") || /^Cut short/.test(o.querySelector('.cutnote')?.textContent ?? "") || o.querySelector('.viewall:not(.viewscript) span')?.textContent === "View all"; /* a bare "View all", with no line count, is offered where the server cut the preview */ const shown = !!o.querySelector('.viewall:not(.viewscript)');
+          const cut = /^Output\s*·\s*(first|last)\s+\d+/.test([...o.querySelectorAll('.io')].at(-1)?.textContent ?? "") || /^Cut short/.test(o.querySelector('.cutnote')?.textContent ?? "") || o.querySelector('.viewall:not(.viewscript) span')?.textContent === "View all"; /* a bare "View all", with no line count, is offered where the server cut the preview */ const shown = !!o.querySelector('.viewall:not(.viewscript)');
           if (cut) r.cut++; if (shown) r.viewAllShown++; if (cut !== shown) { r.mismatch++; r.bad.push({ arg: x.querySelector('.sa')?.textContent.slice(0, 60), cut, shown, ios: [...o.querySelectorAll('.io')].map((i) => i.textContent), all: o.querySelector('.viewall:not(.viewscript)')?.textContent ?? null, lines: [...o.querySelectorAll('pre')].map((p) => p.textContent.split('\n').length) }); } }); return r; });
       for (const k of ["steps", "cut", "viewAllShown", "mismatch"]) C[k] += rr[k];
       (C.bad ??= []).push(...rr.bad);

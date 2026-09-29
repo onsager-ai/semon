@@ -386,8 +386,19 @@
     b.addEventListener("click", () => {
       stopOpeningEndPin();
       const m = TXM[sid], box = phone.matches ? document.documentElement : $("#main"), h0 = box.scrollHeight; b.disabled = true;
+      // What is on screen stays where it is: the first turn in view is found again after the redraw and put back at its old top, at once
+      // and again after the frame in which measured parts (clamped text, its "Show more") have settled.
+      const seen = where === "before" ? [...document.querySelectorAll("#page .turns > .turn")].find((t) => t.getBoundingClientRect().bottom > edge() + 1) : null;
+      const anchor = seen ? { id: seen.dataset.turn, top: seen.getBoundingClientRect().top } : null;
       fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where).then(() => {
-        render(); if (where === "before") { const d = box.scrollHeight - h0; if (phone.matches) window.scrollBy(0, d); else box.scrollTop += d; } }, () => { b.disabled = false; });
+        render();
+        if (where !== "before") return;
+        const by = (d) => { if (phone.matches) window.scrollBy(0, d); else box.scrollTop += d; };
+        const node = () => anchor && [...document.querySelectorAll("#page .turns > .turn")].find((t) => t.dataset.turn === anchor.id);
+        if (!node()) { by(box.scrollHeight - h0); return; }
+        const put = () => { const n = node(); if (n) { const d = n.getBoundingClientRect().top - anchor.top; if (Math.abs(d) > 0.5) by(d); } };
+        put(); requestAnimationFrame(() => { put(); requestAnimationFrame(put); });
+      }, () => { b.disabled = false; });
     });
     return w;
   }
