@@ -1,6 +1,14 @@
 // Analytics: range, eight headline figures, stacked column charts, slice drill-in, breakdown filtering, cost measure,
-// phone width and the served Codex allowance. This replaces the retired Timeline check.
-import { served, data, reporter, overflow, goto, settled } from "../lib.mjs";
+// phone width and the served Codex allowance. This replaces the retired Timeline check. The figures come from the server
+// (/api/analytics), which reaches past the model's day: on the extras fixture, a session from five days ago (`archive`,
+// absent from /api/model) counts in 7 d and 30 d and not in 24 h. Every range is shot at 390 and 1280, light and dark, into
+// out/analytics/.
+import fs from "node:fs";
+import path from "node:path";
+import { served, data, reporter, overflow, goto, settled, ENV } from "../lib.mjs";
+
+// The drawn answer's range and filters (data-query on the figures), once it is drawn.
+const drawn = (page, query) => page.waitForFunction((q) => document.querySelector(".analytics-metrics[data-analytics-ready]")?.dataset.query === q, query);
 
 export default async function analyticsCheck(browser) {
   const D = await data(), r = reporter("analytics"), modes = [];
@@ -14,8 +22,10 @@ export default async function analyticsCheck(browser) {
     const record = { mode };
     record.range = await page.evaluate(() => ({ labels: [...document.querySelectorAll("#topbar .analytics-range button")].map((b) => b.textContent.trim()), selected: document.querySelector('#topbar .analytics-range button[aria-pressed="true"]')?.textContent.trim(), heading: document.querySelector(".page .sub")?.textContent }));
     await page.click('#topbar .analytics-range button:has-text("30 d")');
+    await drawn(page, "range=30d");
     record.range30 = await page.evaluate(() => ({ selected: document.querySelector('#topbar .analytics-range button[aria-pressed="true"]')?.textContent.trim(), heading: document.querySelector(".page .sub")?.textContent }));
     await page.click('#topbar .analytics-range button:has-text("7 d")');
+    await drawn(page, "range=7d");
     record.labels = await page.evaluate(() => [...document.querySelectorAll(".analytics-metric .label")].map((x) => x.textContent.trim()));
     record.figures = await page.locator(".analytics-metric").count();
     record.longestCurrentWait = await page.locator('.analytics-metric').filter({ hasText: "Longest current wait" }).locator(".value").textContent();
@@ -51,40 +61,73 @@ export default async function analyticsCheck(browser) {
     await page.context().close();
   }
 
-  // A session whose cost falls on two UTC days around the 24 h window (yesterday $10, today $3): the 24 h headline is
-  // today's UTC day alone, the previous period is yesterday's, and there is no hourly cost series. 7 d counts both days.
+  // Cost is recorded per UTC day: 24 h shows today's UTC day and no hourly series; 7 d has a column per UTC day. (Which days
+  // each range counts, and the previous period's, is the server's: crates/semon-sessions/src/analytics.rs tests it.)
   const fx = await served(browser, { size: "desktop", path: "/analytics" });
-  const isoDay = (t) => new Date(t).toISOString().slice(0, 10);
-  await fx.route(/\/api\/model(\?|$)/, async (route) => {
-    const res = await route.fetch();
-    if (res.status() !== 200) return route.fulfill({ response: res });
-    const m = await res.json(), sessions = Object.values(m.sessions).filter((x) => x.cost);
-    for (const x of sessions) { x.cost.by_day = {}; x.cost.unpriced_models = []; }
-    sessions[0].cost.by_day = { [isoDay(m.now - 86400000)]: 10, [isoDay(m.now)]: 3 };
-    return route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(m) });
-  });
-  await fx.reload({ waitUntil: "load" });
-  await settled(fx);
-  const figure = (label) => fx.locator(".analytics-metric").filter({ hasText: label });
+  await drawn(fx, "range=7d");
+  const costPanel = ".analytics-panel:has(h2:has-text('Cost over time'))";
   const costTwoDays = {};
   await fx.click('#topbar .analytics-range button:has-text("24 h")');
-  costTwoDays.day = { label: (await fx.locator(".analytics-metric .label").allTextContents()).map((x) => x.trim()).find((x) => x.startsWith("Cost")), value: await figure("Cost today (UTC)").locator(".value").textContent(), note: await figure("Cost today (UTC)").locator(".note").textContent(),
-    charts: await fx.locator(".analytics-chart svg").count(), costChart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .analytics-chart").count() };
+  await drawn(fx, "range=24h");
+  costTwoDays.day = { label: (await fx.locator(".analytics-metric .label").allTextContents()).map((x) => x.trim()).find((x) => x.startsWith("Cost")), charts: await fx.locator(".analytics-chart svg").count(), costChart: await fx.locator(costPanel + " .analytics-chart").count(), note: await fx.locator(costPanel + " p.empty").count() };
   await fx.click('#topbar .analytics-range button:has-text("7 d")');
-  costTwoDays.week = { value: await figure("Cost, last 7 UTC days").locator(".value").textContent(), chart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .panel-sub").textContent(), columns: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) rect.cost-claude, .analytics-panel:has(h2:has-text('Cost over time')) rect.cost-codex").count() };
+  await drawn(fx, "range=7d");
+  costTwoDays.week = { label: (await fx.locator(".analytics-metric .label").allTextContents()).map((x) => x.trim()).find((x) => x.startsWith("Cost")), chart: await fx.locator(costPanel + " .panel-sub").textContent(), hits: await fx.locator(costPanel + " rect.chart-hit").count() };
   costTwoDays.errors = fx.errors;
   await fx.context().close();
-  r.expect(costTwoDays.day.label === "Cost today (UTC)" && costTwoDays.day.value === "$3.00" && costTwoDays.day.note.includes("−$7.00"), "24 h cost headline must be the one UTC day ($3.00 against yesterday's $10.00), not the $13.00 sum: " + JSON.stringify(costTwoDays.day));
-  r.expect(costTwoDays.day.charts === 1 && costTwoDays.day.costChart === 0, "the 24 h range must draw no hourly cost series: " + JSON.stringify(costTwoDays.day));
-  r.expect(costTwoDays.week.value === "$13.00" && costTwoDays.week.chart.includes("today so far") && costTwoDays.week.columns === 2, "7 d must count yesterday and today so far ($13.00, two columns): " + JSON.stringify(costTwoDays.week));
-  r.expect(costTwoDays.errors.length === 0, "cost fixture: page errors: " + costTwoDays.errors.join(" | "));
+  r.expect(costTwoDays.day.label === "Cost today (UTC)" && costTwoDays.day.charts === 1 && costTwoDays.day.costChart === 0 && costTwoDays.day.note === 1, "the 24 h range must count today's UTC day and draw no hourly cost series: " + JSON.stringify(costTwoDays.day));
+  r.expect(costTwoDays.week.label === "Cost, last 7 UTC days" && costTwoDays.week.chart.includes("today so far") && costTwoDays.week.hits === 7, "7 d must draw a cost column per UTC day: " + JSON.stringify(costTwoDays.week));
+  r.expect(costTwoDays.errors.length === 0, "cost: page errors: " + costTwoDays.errors.join(" | "));
+
+  // A session older than the model's day: `archive`, five days before the extras fixture's now, in its own repo. The model
+  // leaves it out; with the Repo filter on archive, Sessions started is 1 in 7 d and 30 d and 0 in 24 h, and its repo is a
+  // breakdown row in 7 d and 30 d only.
+  const older = { ranges: {} };
+  const ox = await served(browser, { extras: true, size: "desktop", path: "/analytics" });
+  await drawn(ox, "range=7d");
+  older.inModel = await ox.evaluate(async () => Object.keys((await (await fetch("/api/model")).json()).sessions).includes("archive"));
+  const archiveRow = '.analytics-row[data-breakdown="repo"][data-key="archive"]';
+  older.rowWithoutFilter = await ox.locator(archiveRow).count();
+  older.option = await ox.evaluate(() => [...document.querySelectorAll('.facet-filters select[aria-label="Repo"] option')].map((o) => o.value).includes("archive"));
+  if (older.option) {
+    await ox.selectOption('.facet-filters select[aria-label="Repo"]', "archive");
+    for (const [label, range] of [["7 d", "7d"], ["30 d", "30d"], ["24 h", "24h"]]) {
+      await ox.click('#topbar .analytics-range button:has-text("' + label + '")');
+      await drawn(ox, "range=" + range + "&repo=archive");
+      older.ranges[range] = { started: (await ox.locator(".analytics-metric").filter({ hasText: "Sessions started" }).locator(".value").textContent()).trim(), row: await ox.locator(archiveRow).count(), heading: await ox.locator(".page .sub").textContent() };
+    }
+  }
+  older.errors = ox.errors;
+  await ox.context().close();
+  r.expect(older.inModel === false, "the extras fixture's archive session must be older than the model's day: " + JSON.stringify(older));
+  r.expect(older.rowWithoutFilter === 1 && older.option, "7 d must list archive's repo as a breakdown row and a Repo filter value: " + JSON.stringify(older));
+  r.expect(older.ranges["7d"]?.started === "1" && older.ranges["30d"]?.started === "1" && older.ranges["24h"]?.started === "0", "Sessions started for archive must be 1 in 7 d and 30 d, 0 in 24 h: " + JSON.stringify(older.ranges));
+  r.expect(older.ranges["7d"]?.row === 1 && older.ranges["30d"]?.row === 1 && older.ranges["24h"]?.row === 0, "archive's repo row must show in 7 d and 30 d only: " + JSON.stringify(older.ranges));
+  r.expect(older.errors.length === 0, "older session: page errors: " + older.errors.join(" | "));
+
+  // Every range, at 390 and 1280, light and dark: out/analytics/<scheme>-<range>.png.
+  const shots = path.join(ENV.out, "analytics"); fs.mkdirSync(shots, { recursive: true });
+  const shotErrors = [];
+  for (const [scheme, size, dark] of [["390-light", "phone", false], ["390-dark", "phone", true], ["1280-light", "desktop", false], ["1280-dark", "desktop", true]]) {
+    const page = await served(browser, { size, dark, path: "/analytics" });
+    await drawn(page, "range=7d");
+    for (const [label, range] of [["24 h", "24h"], ["7 d", "7d"], ["30 d", "30d"]]) {
+      await page.click('#topbar .analytics-range button:has-text("' + label + '")');
+      await drawn(page, "range=" + range);
+      await page.evaluate(() => document.fonts.ready);
+      await page.screenshot({ path: path.join(shots, scheme + "-" + range + ".png"), fullPage: size === "phone" });
+    }
+    shotErrors.push(...page.errors);
+    await page.context().close();
+  }
+  r.expect(shotErrors.length === 0, "range shots: page errors: " + shotErrors.join(" | "));
 
   const legacy = await served(browser, { size: "desktop", path: "/timeline" });
   const oldRoute = await legacy.evaluate(() => ({ state: history.state?.v, path: location.pathname, title: document.querySelector("#topbar .t")?.textContent }));
   const legacyErrors = legacy.errors;
   await legacy.context().close();
 
-  r.results = { modes, oldRoute, costTwoDays };
+  r.results = { modes, oldRoute, costTwoDays, older };
   for (const m of modes) {
     r.expect(m.errors.length === 0, m.mode + ": page errors: " + m.errors.join(" | "));
     r.expect(m.range.labels.join(",") === "24 h,7 d,30 d" && m.range30.selected === "30 d" && m.range30.heading?.includes("Last 30 days"), m.mode + ": Analytics range control did not change the selected range: " + JSON.stringify({ before: m.range, after: m.range30 }));

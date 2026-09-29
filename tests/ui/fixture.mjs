@@ -522,6 +522,18 @@ export function write(out, { extras = false } = {}) {
       c.text(ms(T(8, 50)), "Unique result text for the transcript check.");
       c.save(); live("result-card", "idle", "Result card");
     }
+    // archive: a session five days before the sample's day, in its own repository. The model's 24 h window leaves it out;
+    // Analytics' 7 d and 30 d count it (#102): an hour of work, one turn, no tool calls, and a cost on its day.
+    {
+      const day = BASE - 5 * 86400000, at = (minutes) => day + minutes * 60000;
+      const c = claude("archive", { cwd: repo("archive"), branch: "main", model: "opus-5.5", tokens: [0.01, 0, 0.01] });
+      c.title(at(T(9, 0)), "Archive sweep");
+      c.ask(at(T(9, 0)), "Sweep last week's stale branches");
+      c.busy(at(T(9, 0)), at(T(10, 0)));
+      c.text(at(T(10, 0)), "Swept: nothing left to archive.");
+      c.tokens(at(T(10, 0)));
+      c.save();
+    }
     // code-mode: one script whose two commands and file change are indexed as three transcript steps.
     {
       const cwd = repo("meridian"), c = codex("code-mode", ms(T(8, 0)), { cwd, branch: "feat/code-mode", tokens: [0, 0, 0] });

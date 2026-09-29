@@ -274,6 +274,11 @@ pub(crate) struct Built {
     /// Where the scan window started (epoch ms): files last modified before
     /// it weren't read. `None` when every file was.
     pub(crate) window_start: Option<i64>,
+    /// What `/api/analytics` reads of each session active in the last
+    /// [`crate::analytics::KEEP_MS`], taken before the model is trimmed to
+    /// its window. Never served by `/api/model`: its JSON and version don't
+    /// change with it.
+    pub(crate) activity: BTreeMap<String, crate::analytics::Activity>,
     #[cfg(test)]
     pub(crate) handoffs: Vec<Handoff>,
     #[cfg(test)]
@@ -4215,6 +4220,9 @@ pub(crate) fn build(
         .iter()
         .map(|session| (session.key.clone(), session.out.clone()))
         .collect();
+    // Analytics reads a month and the month before it, whatever the model's
+    // window: taken from every session before the window trims them.
+    let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
     // A scan window already chose the files; what it read is returned
     // whole, so an answer is never trimmed inside a session.
     if !options.all && !options.scan_window {
@@ -4436,6 +4444,7 @@ pub(crate) fn build(
         tx,
         facts: session_facts,
         window_start,
+        activity,
         #[cfg(test)]
         handoffs,
         #[cfg(test)]

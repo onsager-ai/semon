@@ -22,7 +22,7 @@ use std::{
 use serde_json::{Map, Value, json};
 
 use crate::{
-    Options,
+    Options, analytics,
     model::{self, Built, MODEL_API, fnv},
     received::{Listing, ReceivedMachines},
     refresh::RefreshPool,
@@ -300,6 +300,8 @@ pub struct ViewerCore {
     /// Views [`ViewerCore::follow`] stopped serving, which
     /// [`ViewerCore::close`] still waits out: a rebuild of one may run on.
     retired: Mutex<Vec<Weak<MachineView>>>,
+    /// `/api/analytics`' answers, kept until the model changes.
+    analytics: Mutex<analytics::Cache>,
 }
 
 /// The embedding server's own values in `/api/model`, which can differ per
@@ -808,6 +810,7 @@ impl ViewerCore {
             pool: RefreshPool::shared(),
             open: Gate::default(),
             retired: Mutex::default(),
+            analytics: Mutex::default(),
         }
     }
 
@@ -1084,6 +1087,12 @@ impl ViewerCore {
         if views.is_empty() {
             return text(404, "Not found");
         }
+        // One machine or several, Analytics is the core's own answer.
+        if path == "/api/analytics" {
+            return self
+                .analytics(&views, query, if_none_match)
+                .unwrap_or_else(|error| failed(&error));
+        }
         // With received machines the tree always names each node's machine.
         if views.len() == 1 && !(self.received.is_some() && path == "/api/tree") {
             let mut reply = views[0].1.respond(method, path, query, if_none_match);
@@ -1179,6 +1188,79 @@ impl ViewerCore {
             }
             Err(ids) => Ok(conflict(&ids)),
         }
+    }
+
+    /// `/api/analytics?range=24h|7d|30d` (and the page's filters, see
+    /// [`analytics::Request`]): the figures, charts and lists Analytics draws
+    /// for the range, over every machine served, from the rows each build
+    /// keeps ([`analytics::Activity`]); nothing is built for it. The answer
+    /// is kept per range and filters until the model changes (and at least
+    /// a second), or for 30 s while nothing does, as time moves the range.
+    /// Its `ETag` hashes the answer but for the time it was computed at: a
+    /// poll whose `If-None-Match` still matches is a 304. A filter value no
+    /// session has is answered (empty) but not kept. `version` in the body
+    /// is the model version it was computed from, as `/api/model` names it.
+    fn analytics(
+        &self,
+        views: &Views,
+        query: &str,
+        if_none_match: Option<&str>,
+    ) -> io::Result<ViewerReply> {
+        let json = "application/json; charset=utf-8";
+        let Some(request) = analytics::Request::parse(query) else {
+            return Ok(text(400, "Invalid request"));
+        };
+        let (models, plan) = self.refresh_at(views, Reading::Served)?;
+        if !plan.conflicts.is_empty() {
+            return Ok(conflict(
+                &plan.conflicts.iter().cloned().collect::<Vec<_>>(),
+            ));
+        }
+        let version = match models.as_slice() {
+            [one] => one.version.clone(),
+            _ => plan.version.clone(),
+        };
+        let key = request.key();
+        // The lock is held to look up or to keep an answer, never to
+        // compute one: two reads that miss at once may both compute it.
+        let kept = lock(&self.analytics).kept(&key, &version);
+        let kept = match kept {
+            Some(kept) => kept,
+            None => {
+                let rows = analytics::rows(
+                    plan.machine_ids
+                        .iter()
+                        .zip(&models)
+                        .map(|(machine, built)| (machine.as_str(), &built.activity)),
+                );
+                let answer = analytics::answer(&rows, &request, crate::model::now_ms(), &version);
+                let kept = analytics::Kept {
+                    etag: analytics::etag(&answer),
+                    body: Arc::new(serde_json::to_vec(&answer).map_err(io::Error::other)?),
+                };
+                // A filter value no session has gets its (empty) answer,
+                // not a place among the kept ones.
+                if request.known(&rows) {
+                    lock(&self.analytics).keep(&key, &version, kept.clone());
+                }
+                kept
+            }
+        };
+        let etag = Some(kept.etag.clone());
+        if if_none_match == Some(kept.etag.as_str()) {
+            return Ok(ViewerReply {
+                status: 304,
+                content_type: json,
+                body: Vec::new(),
+                etag,
+            });
+        }
+        Ok(ViewerReply {
+            status: 200,
+            content_type: json,
+            body: kept.body.to_vec(),
+            etag,
+        })
     }
 
     /// `/api/tx` and `/api/entry?sid=…`: the machine that owns the session.
