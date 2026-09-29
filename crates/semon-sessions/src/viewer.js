@@ -1978,9 +1978,12 @@
   }
   const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
   function matchesSessionFacets(s) { return Object.keys(sessionFilters).every((key) => !sessionFilters[key] || sessionFacetValue(s, key) === sessionFilters[key]); }
-  // The four filters (Repo, Machine, Harness, Model) of Analytics and Sessions: one persistent control per page. A redraw
-  // (`sync`) brings its option lists and selections up to date in place. A selected value that no session has now stays
-  // selected, marked "(no sessions)", until the reader changes it.
+  // The four filters (Repo, Machine, Harness, Model) of Analytics and Sessions: one persistent control per page. It is one
+  // "Filter" button (with the count of active filters) and one chip per active filter, whose × clears it. The button opens a
+  // sheet (a bottom sheet on a phone, a dialog on a wide screen) holding the four Selects, with "Clear all" and "Done". The
+  // choices apply when the sheet closes, however it closes. A redraw (`sync`) brings the Selects' option lists, the chips and the
+  // count up to date in place. A selected value that no session has now stays selected, marked "(no sessions)", until the reader
+  // changes it. The sheet lives inside the control, so its Selects are in the page even while it is shut.
   // On Analytics the range's own values join the model's: a repo that worked last week is a choice there.
   const rangeFacet = (key) => route.v !== "analytics" ? [] : (analyticsData()?.facets?.[key] ?? []).map((v) => v ?? "__none__");
   const FACETS = [
@@ -1992,18 +1995,43 @@
   function renderFacetFilters(box, onChange) {
     const s = slot("facets", box, (ctx) => {
       const bar = el("div", "facet-filters"); bar.setAttribute("role", "group"); bar.setAttribute("aria-label", "Filter sessions"); const fields = [];
+      const btn = el("button", "facet-btn"), count = el("span", "facet-n"); btn.type = "button"; btn.setAttribute("aria-haspopup", "dialog"); count.hidden = true; btn.append(icon(I.filter), el("span", null, "Filter"), count);
+      const d = el("dialog", "viewer filters-sheet"), head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose"), body = el("div", "vb"), foot = el("div", "vf"), clear = el("button", "fclear", "Clear all"), done = el("button", "fdone", "Done");
+      d.setAttribute("aria-label", "Filter"); title.append(el("span", null, "Filter")); close.type = "button"; close.setAttribute("aria-label", "Close filters"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
+      clear.type = "button"; done.type = "button"; foot.append(clear, done); d.append(head, body, foot); bar.append(btn);
       for (const [key, label, allLabel, valuesOf, showValue] of FACETS) {
-        const select = SemonShell.select({ label, options: [{ value: "", label: allLabel }], value: sessionFilters[key], onChange: (value) => { sessionFilters[key] = value; ctx.onChange(); } });
-        bar.append(select.el); fields.push({ key, select, allLabel, valuesOf, showValue });
+        const select = SemonShell.select({ label, options: [{ value: "", label: allLabel }], value: sessionFilters[key], onChange: (value) => { sessionFilters[key] = value; } }); body.append(select.el);
+        const chip = el("button", "facet-chip"), text = el("span", "txt"); chip.type = "button"; chip.hidden = true; chip.dataset.facet = key; chip.append(text, icon(I.x));
+        chip.addEventListener("click", () => { sessionFilters[key] = ""; ctx.sync(); btn.focus({ preventScroll: true }); ctx.onChange(); });
+        bar.append(chip); fields.push({ key, label, select, allLabel, valuesOf, showValue, chip, text });
       }
+      bar.append(d);
       ctx.sync = () => {
+        let active = 0;
         for (const f of fields) {
           const current = sessionFilters[f.key], values = f.valuesOf().filter((v) => v !== ""), gone = current !== "" && !values.includes(current);
           if (gone) values.push(current);
           f.select.setOptions([{ value: "", label: f.allLabel }, ...values.map((v) => ({ value: v, label: f.showValue(v) + (gone && v === current ? " (no sessions)" : "") }))]);
           f.select.setValue(current);
+          f.chip.hidden = current === ""; if (current !== "") { active++; f.text.textContent = f.label + ": " + f.showValue(current); f.chip.setAttribute("aria-label", "Clear " + f.label + " filter: " + f.showValue(current)); }
         }
+        count.hidden = !active; count.textContent = active ? String(active) : ""; btn.setAttribute("aria-label", active ? "Filter, " + active + " active" : "Filter");
       };
+      // Opening the sheet is a history entry, like the viewer's other sheets: Back closes it and the page stays.
+      let before = "";
+      btn.addEventListener("click", () => {
+        if (viewerEl || d.open) return; ctx.sync(); before = JSON.stringify(sessionFilters);
+        viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); fields[0].select.focus(); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
+      });
+      clear.addEventListener("click", () => { for (const key of Object.keys(sessionFilters)) sessionFilters[key] = ""; d.close(); });
+      done.addEventListener("click", () => d.close());
+      d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
+      d.addEventListener("close", () => {
+        document.documentElement.classList.remove("viewer-open");
+        if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } }
+        btn.focus({ preventScroll: true });
+        if (JSON.stringify(sessionFilters) !== before) ctx.onChange(); else if (LIVE.pending) refresh();
+      });
       return bar;
     });
     s.ctx.onChange = onChange; s.ctx.sync(); return s.el;

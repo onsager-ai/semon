@@ -101,6 +101,21 @@ export async function data({ extras = false } = {}) {
   };
 }
 
+// The filters of Analytics and Sessions live in a sheet the Filter button opens; its Selects are in the page even while it is shut.
+// A choice applies when the sheet closes ("Done"). `filterSheet` opens it, `doneFilterSheet` closes it by "Done", and `pickFilter`
+// chooses one value (a Select's option: click its button, then the option) and closes the sheet.
+export const FILTER_BUTTON = ".facet-filters .facet-btn", FILTER_SHEET = ".facet-filters dialog.filters-sheet";
+export const filterSheet = async (page) => { await page.click(FILTER_BUTTON); await page.waitForFunction((sel) => document.querySelector(sel)?.open === true, FILTER_SHEET); };
+export const doneFilterSheet = async (page) => { await page.click(FILTER_SHEET + " .fdone"); await page.waitForFunction((sel) => document.querySelector(sel)?.open === false, FILTER_SHEET); };
+export async function pickFilter(page, label, value) {
+  const root = FILTER_SHEET + ' .sh-select[data-label="' + label + '"]';
+  await filterSheet(page);
+  await page.click(root + " .sh-select-trigger");
+  await page.locator(root + ' [role="option"][data-value="' + value + '"]').click();
+  await page.waitForFunction((sel) => document.querySelector(sel + " .sh-select-trigger").getAttribute("aria-expanded") === "false", root);
+  await doneFilterSheet(page);
+}
+
 // Each check writes out/<name>.json and fails when any of its assertions failed.
 export function reporter(name) {
   const failures = [];

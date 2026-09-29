@@ -6,7 +6,7 @@
 // while it fails, and a 304 or 200 clears it.
 import fs from "node:fs";
 import path from "node:path";
-import { served, data, reporter, overflow, goto, settled, ENV } from "../lib.mjs";
+import { served, data, reporter, overflow, pickFilter, goto, settled, ENV } from "../lib.mjs";
 
 // The drawn answer's range and filters (data-query on the figures), once it is drawn.
 const drawn = (page, query) => page.waitForFunction((q) => document.querySelector(".analytics-metrics[data-analytics-ready]")?.dataset.query === q, query);
@@ -89,13 +89,12 @@ export default async function analyticsCheck(browser) {
   older.inModel = await ox.evaluate(async () => Object.keys((await (await fetch("/api/model")).json()).sessions).includes("archive"));
   const archiveRow = '.analytics-row[data-breakdown="repo"][data-key="archive"]';
   older.rowWithoutFilter = await ox.locator(archiveRow).count();
-  // The Repo filter is a Select (no <select> element): its options are on the component, and choosing is a click on its button, then on the option.
+  // The Repo filter is a Select (no <select> element) in the filters' sheet: its options are on the component, and choosing is the Filter button, a click on its button and on the option, then Done.
   const repoSelect = '.facet-filters .sh-select[data-label="Repo"]';
   older.control = await ox.locator(repoSelect + " .sh-select-trigger").count();
   older.option = older.control === 1 && await ox.evaluate((root) => document.querySelector(root).semonSelect.options.map((o) => o.value).includes("archive"), repoSelect);
   if (older.option) {
-    await ox.click(repoSelect + " .sh-select-trigger");
-    await ox.locator(repoSelect + ' [role="option"][data-value="archive"]').click();
+    await pickFilter(ox, "Repo", "archive");
     await ox.waitForFunction((root) => document.querySelector(root + " .sh-select-trigger").textContent.trim() === "Repo: archive", repoSelect);
     for (const [label, range] of [["7 d", "7d"], ["30 d", "30d"], ["24 h", "24h"]]) {
       await ox.click('#topbar .analytics-range button:has-text("' + label + '")');
