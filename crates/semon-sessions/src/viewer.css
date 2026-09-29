@@ -604,8 +604,9 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .side-list { flex: 0 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 8px;
   background: linear-gradient(var(--side), var(--side)) 0 0 / 100% 1px no-repeat local, linear-gradient(var(--side), var(--side)) 0 100% / 100% 1px no-repeat local,
     linear-gradient(var(--line), var(--line)) 0 0 / 100% 1px no-repeat scroll, linear-gradient(var(--line), var(--line)) 0 100% / 100% 1px no-repeat scroll; }
-.sidebar-head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 4px 0; }
-/* Only the viewer's own header row grows and takes the tighter padding; the shell pages' `.brandrow` sits straight in the sidebar column and keeps the base rule. */
+/* As tall with the collapse toggle as without it (8 + 44 + 4), so a shell page's header, which has no toggle, puts its nav where the viewer's search starts. */
+.sidebar-head { display: flex; align-items: center; gap: 4px; min-height: 56px; padding: 8px 8px 4px 0; }
+/* The header row grows and takes the tighter padding inside `.sidebar-head`, the viewer's and the shell pages' (shell::sidebar_head) alike; a bare `.brandrow` straight in the sidebar column keeps the base rule. */
 .sidebar-head .brandrow { flex: 1 1 auto; min-width: 0; padding: 6px 8px 6px 18px; }
 .brandrow .brandname { min-width: 0; }
 .rail-toggle { display: inline-grid; width: 44px; height: 44px; }
