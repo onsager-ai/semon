@@ -509,7 +509,6 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2.session-meta .meta-runs:focus-visible, .topbar .l2.session-meta .errs:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--sunken); color: var(--ink); }
 .topbar .l2.session-meta .meta-runs .meta-value { font: inherit; }
 .topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; margin: 0 -4px; border: 0; border-radius: 6px; background: none; padding: 0 4px; font: inherit; font-weight: 400; color: var(--muted); text-decoration: none; pointer-events: auto; cursor: pointer; }
-.topbar .l2.session-meta .errs:empty { display: none; }
 .topbar .l2.session-meta .errs-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--err); }
 .topbar .l2.session-meta .errs-sep { color: var(--faint); }
 /* fitSessionLine hides overflow items by setting the `hidden` attribute; these selectors must out-specify
@@ -1318,7 +1317,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   const sessionLine = (s) => (l2) => {
     const es = TX[s.id] ?? [], calls = es.filter((e) => e.k === "tool").length, errors = es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
     const st = el("span", "meta-item meta-state"); st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", nT + (nT === 1 ? " turn" : " turns")));
-    if (errors) { const sep = el("span", "state-sep errs-sep", "·"), j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); j.prepend(mark); j.type = "button"; j.title = "Jump to the first failed step"; j.setAttribute("aria-label", j.textContent + ": jump to the first failed step");
+    if (errors) { const sep = el("span", "state-sep errs-sep", "·"), j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); j.prepend(mark); j.type = "button"; j.title = j.textContent + ": jump to the first failed step"; j.setAttribute("aria-label", j.title);
       j.addEventListener("click", (ev) => { ev.stopPropagation(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
       st.append(sep, j); }
     const kind = s.kind ? childKindChip(s, true) : null;
