@@ -368,7 +368,7 @@ export default async function barCheck(browser) {
         maskedLines: masked.every((x) => x.children.length === 1 && x.textContent.trim() === "Thinking hidden by the harness" && !x.querySelector("button, [aria-expanded]")),
         pairs: masked.filter((x) => x.nextElementSibling?.classList.contains("masked")).length,
         zero: [...document.querySelectorAll(".turns .think-label")].filter((x) => /\b0\s*s\b|Thought for/.test(x.textContent)).map((x) => x.textContent),
-        timed: labels.includes("Thinking · 12s"), untimed: labels.filter((x) => x === "Thinking").length > 0,
+        labels: labels.slice(-4), timed: labels.includes("Thinking · 12s"), untimed: labels.filter((x) => x === "Thinking").length > 0,
         oldRows: document.querySelectorAll(".turns button.think").length, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] };
     }, base);
     t.overflow = await overflow(page); t.errors = page.errors;
