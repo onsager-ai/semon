@@ -329,6 +329,19 @@ code { overflow-wrap: anywhere; }
 .tx > * { min-width: 0; }
 .divider { display: flex; align-items: center; gap: 10px; font-size: var(--fs-cap); color: var(--muted); text-align: center; }
 .divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); min-width: 16px; }
+/* Opening a session: the old page is held dimmed and inert, then (after 150 ms, in viewer.js) a skeleton of turn-shaped
+   placeholders stands in for the transcript until it arrives. Only tokens for colour; the shimmer is off under reduced motion. */
+.page.loading { opacity: .55; pointer-events: none; transition: opacity .15s ease; }
+.skeleton { display: grid; grid-template-columns: minmax(0, 1fr); }
+.sk-turn { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 14px 0 16px; }
+.sk-turn + .sk-turn::before { content: ""; position: absolute; top: 0; left: 0; right: 0; border-top: 1px solid var(--line); }
+.sk-text { display: grid; gap: 9px; }
+.sk-line { display: block; height: 13px; max-width: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--sunken) 0%, var(--bubble) 50%, var(--sunken) 100%); background-size: 200% 100%; animation: sk-shimmer 1.4s ease-in-out infinite; }
+.sk-bubble { height: 44px; border-radius: 12px; margin-left: auto; }
+.sk-step { height: 36px; border-radius: 8px; }
+.sk-w1 { width: 100%; } .sk-w2 { width: 78%; } .sk-w3 { width: 62%; } .sk-w4 { width: 46%; } .sk-w5 { width: 30%; }
+@keyframes sk-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .page.loading { transition: none; } .sk-line { animation: none; } }
 .msg .body { line-height: 1.5; }
 .msg .body p { margin: 0 0 7px; } .msg .body p:last-child, .msg .body ul:last-child { margin-bottom: 0; }
 .msg .body ul { margin: 0 0 7px; padding-left: 20px; } .msg .body li + li { margin-top: 2px; }

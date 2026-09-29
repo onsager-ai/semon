@@ -240,7 +240,7 @@
     return value;
   }
   // An error carries the HTTP status (0: no response), so live polling can tell a 403 from a dropped connection.
-  const api = (path) => fetch(path, { credentials: "same-origin" }).then((r) => { if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status }); return r.json(); }, (e) => { throw Object.assign(e, { status: 0 }); });
+  const api = (path, signal) => fetch(path, { credentials: "same-origin", signal }).then((r) => { if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status }); return r.json(); }, (e) => { throw Object.assign(e, { status: 0 }); });
   // NOW follows the client clock from the model's `now`, so every "ago" keeps moving; a running tool's age follows NOW.
   function tick() {
     NOW = serverNow + (Date.now() - fetchedAt);
@@ -285,9 +285,9 @@
   // A return line arrives as data; it reads as the mockup's "Returned to … · HH:MM".
   const txEntry = (e) => e.k === "end" && e.ret ? { k: "end", text: "Returned to " + nameOf(e.ret.to) + (e.ret.failed ? " · failed" : "") + (e.ret.at != null ? " · " + clock(e.ret.at) : ""), turn: e.turn } : e;
   // where: "before" and "after" extend the loaded range; otherwise the page replaces it.
-  function fetchTx(sid, q, where) {
+  function fetchTx(sid, q, where, signal) {
     const tok = TOK[sid];
-    return api("/api/tx?sid=" + enc(sid) + (q ? "&" + q : "")).then((p) => {
+    return api("/api/tx?sid=" + enc(sid) + (q ? "&" + q : ""), signal).then((p) => {
       const es = p.entries.map((e) => txEntry({ ...e, sid })), m = TXM[sid];
       if (where === "before" && m) { TX[sid] = es.concat(TX[sid]); m.from = p.from; }
       else if (where === "after" && m) { TX[sid] = TX[sid].concat(es); m.to = p.to; }
@@ -296,20 +296,52 @@
     });
   }
   // A spawn's child work opens inline under its card: load the turn each brief started, when its session isn't loaded.
-  function kids(sid) {
+  function kids(sid, signal) {
     const jobs = [];
     for (const e of TX[sid] ?? []) {
       const h = e.k === "h" ? HID.get(e.id) : null, c = h && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id) : null;
-      if (c && !TX[c.sid]) jobs.push(fetchTx(c.sid, "turn=" + enc(c.id)));
+      if (c && !TX[c.sid]) jobs.push(fetchTx(c.sid, "turn=" + enc(c.id), undefined, signal));
     }
     return jobs.length ? Promise.all(jobs) : null;
   }
   // What a route needs before it can draw: a session's page (the one holding a deep-linked turn), and its child work.
-  function load(r) {
+  // `signal` cancels what a navigation asked for when the reader goes elsewhere first.
+  function load(r, signal) {
     if (r.v !== "session" || !SESS[r.id]) return null;
     const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
-    if (TX[r.id] && !deep) return kids(r.id);
-    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "").then(() => kids(r.id));
+    if (TX[r.id] && !deep) return kids(r.id, signal);
+    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal).then(() => kids(r.id, signal));
+  }
+  // The last few transcripts opened, kept when the reader leaves them, so opening one again draws it at once. A transcript
+  // is kept only when it was loaded to its end, and the cache is bounded by entries and by bytes (the characters of each
+  // entry's text). Opening one takes it out of the cache; leaving it puts it back at the newest end.
+  const TXCACHE = new Map(), TXCACHE_MAX = 5, TXCACHE_BYTES = 2 * 1024 * 1024;
+  const weigh = (entries) => { let n = 0; for (const e of entries) for (const v of Object.values(e)) n += typeof v === "string" ? v.length : v && typeof v === "object" ? JSON.stringify(v).length : 8; return n; };
+  function cacheTx(sid) {
+    const entries = TX[sid], meta = TXM[sid]; if (!entries || !meta || meta.to < meta.total || meta.tok == null) return; // without its mark there is no telling later whether it grew
+    TXCACHE.delete(sid);
+    const bytes = weigh(entries); if (bytes > TXCACHE_BYTES) return;
+    TXCACHE.set(sid, { entries, meta: { ...meta }, bytes });
+    let sum = 0; for (const c of TXCACHE.values()) sum += c.bytes;
+    for (const [id, c] of TXCACHE) { if (TXCACHE.size <= TXCACHE_MAX && sum <= TXCACHE_BYTES) break; TXCACHE.delete(id); sum -= c.bytes; }
+  }
+  // A kept transcript becomes the session's loaded one. False when there is none, or when the route deep-links to a turn it lacks.
+  function adoptCached(r) {
+    const c = TXCACHE.get(r.id); if (!c) return false;
+    TXCACHE.delete(r.id); TX[r.id] = c.entries; TXM[r.id] = c.meta; spread(r.id);
+    const t = r.turn ? TURN.get(r.turn) : null;
+    if (t && t.sid === r.id && !t.entries.length) { delete TX[r.id]; delete TXM[r.id]; return false; }
+    return true;
+  }
+  // A mark with fewer entries or bytes than the one loaded means the file was cut or rewritten: load it again.
+  function shrank(a, b) { const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number); return s1 < s0 || b1 < b0; }
+  // A transcript drawn from the cache is brought up to date the way a live update does it: when the model's mark for it moved
+  // since it was kept, its tail is fetched (or the whole page, if the file shrank), and its child work loads. Nothing is asked
+  // for when the mark is the same. The page is drawn again, keeping the reader's place, once something arrived.
+  function revalidate(r) {
+    const sid = r.id, m = TXM[sid], moved = m && m.to >= m.total && m.tok != null && TOK[sid] != null && m.tok !== TOK[sid];
+    const job = moved ? (shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid)) : null, work = job ? job.then(() => kids(sid)) : kids(sid);
+    if (work) work.then(() => { if (route === r && rendered === r) refresh(null); }, () => {});
   }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
   function pager(sid, where, label) {
@@ -409,17 +441,59 @@
   $("#main").addEventListener("scroll", queueScrollSave, { passive: true });
   const quietTop = () => { if (phone.matches) window.scrollTo(0, 0); else $("#main").scrollTop = 0; };
   function openSessionAtEnd() { if (location.hash) return; startOpeningEndPin(); }
+  // Opening a session draws what the model already holds at once, before its transcript arrives: the sidebar row, the top bar,
+  // and the old page held dimmed and inert (aria-busy). If the transcript is still on its way after 150 ms, a skeleton of turn-shaped
+  // placeholders stands in for the old page, so fast switches don't flash it. `navAbort` cancels the transcript request of a
+  // navigation the reader has left; a response that still arrives late is dropped because its route is no longer the current one.
+  const SKELETON_MS = 150;
+  let navAbort = null, skeletonTimer = null;
+  // The turn shapes the skeleton cycles through: a bubble (yours), text lines, a step row. Widths are classes, sk-w1..sk-w5, in percent.
+  const SKELETON_TURNS = [["bubble", [1, 3, 5], "step"], [null, [1, 2, 4], "step"], ["bubble", [2, 1, 3], null], [null, [1, 1, 5], "step"]];
+  function skeleton(turns = 6) {
+    const box = el("div", "skeleton"); box.setAttribute("aria-hidden", "true");
+    for (let i = 0; i < turns; i++) {
+      const [bubble, lines, step] = SKELETON_TURNS[i % SKELETON_TURNS.length], t = el("div", "sk-turn"), text = el("div", "sk-text");
+      if (bubble) t.append(el("span", "sk-line sk-bubble sk-w3"));
+      for (const w of lines) text.append(el("span", "sk-line sk-w" + w));
+      t.append(text); if (step) t.append(el("span", "sk-line sk-step sk-w2"));
+      box.append(t);
+    }
+    return box;
+  }
+  function paintPending(r) {
+    const s = SESS[r.id], page = $("#page"), hadFocus = $("#sidebar").contains(document.activeElement);
+    renderNav(); renderLanes(); renderTopbar(s.name, null, { session: s, lineage: lineageOf(r.id).slice(0, -1), line2: sessionLine(s) });
+    document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px"); syncBarLine();
+    if (hadFocus) $("#lanes .srow[data-id='" + CSS.escape(r.id) + "']")?.focus({ preventScroll: true });
+    page.setAttribute("aria-busy", "true"); page.inert = true; page.classList.add("loading");
+    clearTimeout(skeletonTimer);
+    skeletonTimer = setTimeout(() => {
+      if (route !== r || !page.classList.contains("loading")) return;
+      page.classList.remove("loading"); page.classList.remove("child-page"); page.style.paddingBottom = "";
+      page.replaceChildren(skeleton()); quietTop(); syncBarLine();
+    }, SKELETON_MS);
+  }
+  function endLoading() {
+    clearTimeout(skeletonTimer); skeletonTimer = null;
+    const page = $("#page"); page.removeAttribute("aria-busy"); page.inert = false; page.classList.remove("loading");
+  }
+  // Once the transcript is in, a reader who hasn't put focus anywhere else on the page moves to the session's title.
+  function focusTitle() {
+    const a = document.activeElement; if (a && a !== document.body && !$("#sidebar").contains(a)) return;
+    const h = $("#page .ph h1"); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); }
+  }
   function go(r, fromHistory) {
-    stopOpeningEndPin();
+    stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
     closeAccountMenu();
+    if (route.v === "session" && (r.v !== "session" || r.id !== route.id)) cacheTx(route.id); // kept for opening it again
     dropErrors(true); route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     const done = () => {
       if (route !== r) return;
-      render();
+      endLoading(); render(); if (r.v === "session") focusTitle();
       if (fromHistory && Number.isFinite(r.scrollTop)) restoreScroll(r.scrollTop);
       else if (r.v === "session" && r.turn) { revealTurn(r.turn, !fromHistory); if (location.hash) requestAnimationFrame(() => requestAnimationFrame(revealEntryHash)); }
       else if (r.v === "session" && location.hash) revealEntryHash();
@@ -431,7 +505,11 @@
         requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1500); });
       }
     };
-    const p = load(r); if (p) p.then(done, done); else done();
+    // A transcript kept in the cache draws at once and is brought up to date afterwards; otherwise the route waits for its data,
+    // with the top bar and the sidebar already drawn from the model.
+    if (r.v === "session" && SESS[r.id] && !TX[r.id] && adoptCached(r)) { done(); revalidate(r); return; }
+    const signal = r.v === "session" ? (navAbort = new AbortController()).signal : undefined, p = load(r, signal);
+    if (p) { if (r.v === "session") paintPending(r); p.then(done, done); } else done();
   }
   window.addEventListener("popstate", (e) => {
     if (skipPop) { skipPop = false; if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close a sheet before opening its session
@@ -1912,8 +1990,8 @@
   }
   // A 403 or a dropped connection fails the update (and backs off); anything else skips that one transcript.
   const soft = (p) => p.catch((e) => { if (e?.status === 403 || e?.status === 0) throw e; });
-  // The transcripts on screen: a session page's own, and its child runs'. Any other loaded transcript is dropped, so opening
-  // it again loads it fresh.
+  // The transcripts on screen: a session page's own, and its child runs'. Any other loaded transcript is dropped from TX (the
+  // last few opened are kept in TXCACHE, and brought up to date when opened again).
   const viewed = () => { const v = new Set(); if (route.v !== "session") return v; v.add(route.id); for (const h of H) if (h.kind === "spawn" && h.from === route.id && h.to) v.add(h.to); return v; };
   function update(m) {
     const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
@@ -1924,8 +2002,6 @@
     for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
     // Only transcripts whose mark in the model moved are asked for, one at a time.
     let chain = Promise.resolve();
-    // A mark with fewer entries or bytes than the one loaded means the file was cut or rewritten: load it again.
-    const shrank = (a, b) => { const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number); return s1 < s0 || b1 < b0; };
     for (const sid of view) if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
     else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.reload) full = true; })));
     if (route.v === "session" && TX[route.id]) chain = chain.then(() => newKids(route.id, grown));
