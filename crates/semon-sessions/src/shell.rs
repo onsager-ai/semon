@@ -7,8 +7,9 @@
 /// The viewer's base styles, including its tokens, fonts, and chrome.
 pub const VIEWER_CSS: &str = include_str!("viewer.css");
 
-/// The viewer's page script. Embedders serving the viewer without a `ViewerCore` can serve it at `/viewer.js`.
-pub const VIEWER_JS: &str = include_str!("viewer.js");
+/// The viewer's page script. Embedders serving the viewer without a `ViewerCore` can serve it at `/viewer.js`. It starts
+/// with the tooltip (`tooltip.js`, also the start of [`JS`]) and then the viewer itself.
+pub const VIEWER_JS: &str = concat!(include_str!("tooltip.js"), include_str!("viewer.js"));
 
 /// The viewer page returned by its page routes. Embedders serving the viewer without a `ViewerCore` can serve these
 /// bytes for each page route.
@@ -17,8 +18,9 @@ pub const PAGE_HTML: &str = include_str!("viewer.html");
 /// Additional components for forms and other server-rendered pages.
 pub const CSS: &str = include_str!("shell.css");
 
-/// The drawer, copy, dialog, and readiness-poll behavior for shell pages.
-pub const JS: &str = include_str!("shell.js");
+/// The drawer, copy, dialog, and readiness-poll behavior for shell pages, and the tooltip for any element with a
+/// `data-tip` attribute (its source, `tooltip.js`, is also the start of the viewer's own script).
+pub const JS: &str = concat!(include_str!("tooltip.js"), include_str!("shell.js"));
 
 /// The Semon mark, a monochrome glyph. `.mark` paints it as a mask from `/mark.svg`, so a page that uses `.mark` must
 /// serve this at that path (as `image/svg+xml`).
