@@ -2542,3 +2542,53 @@ fn input_paths_are_the_builders_and_nothing_else() {
             .all(|input| { input.full_path(&home.options) != home.options.claude_json })
     );
 }
+
+#[test]
+fn a_worktrees_sessions_belong_to_its_repository_and_keep_their_branch() {
+    let home = Home::new();
+    let main = home.root.join("work/semon");
+    fs::create_dir_all(main.join(".git/worktrees/x")).unwrap();
+    let worktree = home.root.join("work/semon-wt-x");
+    fs::create_dir_all(worktree.join("src")).unwrap();
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", main.join(".git/worktrees/x").display()),
+    )
+    .unwrap();
+    let cwd = worktree.join("src").to_string_lossy().into_owned();
+    home.top(
+        "claude-wt",
+        &[
+            json!({"type":"user","timestamp":ts(17, 0),"sessionId":"claude-wt","cwd":&cwd,
+            "gitBranch":"fix/x","origin":{"kind":"human"},
+            "message":{"role":"user","content":"fix it"}}),
+        ],
+    );
+    home.codex(
+        "codex-wt",
+        json!({"cwd": &cwd, "git": {"branch": "fix/y"}}),
+        &[codex_user(ts(18, 0), "run the suite")],
+    );
+    let built = home.build();
+    for (id, branch) in [("claude-wt", "fix/x"), ("codex-wt", "fix/y")] {
+        assert_eq!(built.sessions[id].repo.as_deref(), Some("semon"), "{id}");
+        assert_eq!(built.sessions[id].branch.as_deref(), Some(branch), "{id}");
+    }
+}
+
+#[test]
+fn the_repo_cache_is_bounded() {
+    let mut texts = Texts::default();
+    for n in 0..REPO_CACHE_MAX * 2 + 3 {
+        assert_eq!(texts.repo(&format!("/nowhere/repo-{n}/plain")), None);
+        assert!(texts.repos.len() <= REPO_CACHE_MAX);
+    }
+    // A cwd met again after the cache was dropped is looked up afresh.
+    assert_eq!(
+        texts
+            .repo("/nowhere/harbor/.claude/worktrees/agent-1")
+            .as_deref(),
+        Some("harbor")
+    );
+    assert!(texts.repos.len() <= REPO_CACHE_MAX);
+}
