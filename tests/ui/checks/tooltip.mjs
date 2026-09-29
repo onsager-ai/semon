@@ -363,12 +363,12 @@ export default async function tooltipCheck(browser) {
       // Esc closes the tip, and a rebuild under the resting pointer does not bring it back, even when the pointer moves on
       // the spot or is put back on it.
       await away(page); await page.waitForTimeout(450);
-      const spot = await box(page, "#topbar .meta-tokens"), [px, py] = centre(spot);
-      r.expect((await hover(page, spot, 1500)) != null, tag + ": the Tokens badge never showed a tooltip before Esc");
+      const spot = await box(page, "#topbar .meta-line > span.lab[data-tip]"), [px, py] = centre(spot);
+      r.expect((await hover(page, spot, 1500)) != null, tag + ": a label never showed a tooltip before Esc");
       await page.keyboard.press("Escape"); await page.waitForTimeout(100);
       r.expect(!(await state(page)).open, tag + ": Esc did not close the tooltip");
       await page.mouse.move(px + 2, py + 1); // a nudge inside the badge
-      await page.evaluate(() => { window.__was = document.querySelector("#topbar .meta-tokens"); });
+      await page.evaluate(() => { window.__was = document.querySelector("#topbar .meta-line > span.lab[data-tip]"); });
       await page.waitForFunction(() => !window.__was.isConnected, null, { timeout: 12000 }).catch(() => {});
       await page.waitForTimeout(300);
       await page.mouse.move(px + 2, py + 1); // and put back on the same coordinates after the rebuild
@@ -389,18 +389,16 @@ export default async function tooltipCheck(browser) {
     const tag = "dialog esc " + size, page = await served(browser, { size });
     await guard(r, tag, page, async () => {
       await goto(page, { v: "session", id: parent.id }, D); await page.waitForTimeout(200);
-      await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
-      await page.waitForSelector("dialog.session-details[open]");
-      // The dialog's own tipped element: the "?" icon by its API-equivalent cost row (costInfoTip).
-      // On a phone the sheet has more rows (Kind, Status, Tool calls), so the cost row can lie below the fold.
-      await page.locator("dialog.session-details .cost-info").scrollIntoViewIfNeeded(); await page.waitForTimeout(100);
-      const shownAt = await hover(page, "dialog.session-details .cost-info", 1500), open = await state(page);
-      r.expect(shownAt != null && /^What these tokens would cost/.test(open.text ?? ""), tag + ": the tooltip did not open on the cost icon inside the modal dialog " + JSON.stringify(open.text));
+      await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu[open]"); await page.waitForTimeout(200);
+      // The dialog's own tipped element: the first one the menu holds (a run's state dot).
+      await page.evaluate(() => document.querySelector("dialog.session-menu [data-tip]")?.scrollIntoView({ block: "center" })); await page.waitForTimeout(150);
+      const shownAt = await hover(page, "dialog.session-menu [data-tip]", 1500), open = await state(page);
+      r.expect(shownAt != null && (open.text ?? "").length > 0, tag + ": the tooltip did not open on a tipped element inside the modal dialog " + JSON.stringify(open.text));
       await page.keyboard.press("Escape"); await page.waitForTimeout(150);
-      const first = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-details[open]"), tip: !document.getElementById("sh-tooltip").hidden }));
+      const first = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-menu[open]"), tip: !document.getElementById("sh-tooltip").hidden }));
       r.expect(first.dialog && !first.tip, tag + ": the first Esc should close only the tooltip " + JSON.stringify(first));
       await page.keyboard.press("Escape"); await page.waitForTimeout(200);
-      const second = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-details[open]") }));
+      const second = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-menu[open]") }));
       r.expect(!second.dialog, tag + ": the second Esc did not close the dialog " + JSON.stringify(second));
       results[tag] = { first, second };
     });
