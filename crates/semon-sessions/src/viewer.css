@@ -455,6 +455,20 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .topbar .find { flex: 1 1 auto; min-width: 0; }
 .topbar .fcount { flex: none; font-family: var(--mono); font-size: 12px; color: var(--muted); padding-right: 4px; }
 .ibtn.on { color: var(--accent); }
+/* Errors mode takes the bar as find does: close, the find pill reading "Error k of N", then previous and next. */
+.topbar .errnav-bar { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
+.topbar .errnav { gap: 8px; font-size: 14px; color: var(--ink-2); white-space: nowrap; }
+.topbar .errnav .errs-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--err); }
+.topbar .errnav .errnav-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.topbar .errnav-bar .ibtn:disabled { color: var(--faint); }
+/* The failed step the mode is on: marked while it is current, and ringed for a moment when reached. It stays closed. */
+.step.err-current > button { background: color-mix(in srgb, var(--err) 9%, transparent); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--err) 55%, transparent); }
+.step.err-ring > button { animation: err-ring 1.4s ease-out; }
+@keyframes err-ring {
+  from { box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--err) 55%, transparent), 0 0 0 3px color-mix(in srgb, var(--err) 45%, transparent); }
+  to { box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--err) 55%, transparent), 0 0 0 14px transparent; }
+}
+@media (prefers-reduced-motion: reduce) { .step.err-ring > button { animation: none; } }
 /* ---- Sessions page and the sidebar's short list ---- */
 .page .groupby { margin: 0; gap: 6px; font-size: 13.5px; }
 .page .groupby button { min-height: 36px; padding: 0 12px; border-radius: 9px; }
@@ -731,7 +745,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .sidebar-head { display: contents; }
   .rail-toggle, .wide-toggle { display: none; }
   .topbar { padding: 6px 6px; gap: 2px; }
-  .topbar > .ibtn { width: 44px; height: 44px; }
+  .topbar > .ibtn, .topbar .errnav-bar > .ibtn { width: 44px; height: 44px; }
+  .topbar .errnav-bar { gap: 2px; }
   .topbar .ttl { padding: 0 4px; }
   .topbar .l2.session-meta { min-height: 44px; }
   .topbar .l2.session-meta .errs { min-height: 40px; }

@@ -44,7 +44,7 @@
     run: "M4 17l5-5-5-5M12 19h8", stack: "M12 3l9 5-9 5-9-5zM3 13l9 5 9-5", read: "M6 3h8l4 4v14H6zM14 3v4h4", edit: "M4 20h4L19 9l-4-4L4 16zM13 7l4 4", find: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4",
     machine: "M3 5h18v11H3zM8 20h8M12 16v4", repo: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6", role: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6",
     out: "M7 17L17 7M9 7h8v8", in: "M17 7L7 17M15 17H7V9", move: "M4 8h13l-3-3M20 16H7l3 3", ask: "M5 18l-1 3 3-1 11-11-2-2zM14 6l4 4", you: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6", q: "M9 9a3 3 0 1 1 4 2.8c-.7.3-1 .9-1 1.7V14M12 18h.01", check: "M5 12l4 4 10-10", qc: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4M12 17h.01", decide: "M12 21v-6M12 15L6 9M12 15l6-6M6 9V4M18 9V4M4 6l2-2 2 2M16 6l2-2 2 2", result: "M14 3H6v18h12V7zM14 3v4h4M9 12h6M9 16h6", done: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12.5l2.7 2.7L16 9.8", x: "M6 6l12 12M18 6L6 18", expand: "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7", copy: "M9 9h11v11H9zM5 15H4V4h11v1", ext: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
-    down: "M12 4v15M5 12l7 7 7-7", branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
+    down: "M12 4v15M5 12l7 7 7-7", up: "M6 15l6-6 6 6", dn: "M6 9l6 6 6-6", branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
     wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z", wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", tokens: "M5 5h14M12 5v14M9 19h6", chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7", coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5", relay: "M4 7h13l-3-3M20 17H7l3 3M17 4l-3 3 3 3M7 14l3 3-3 3",
   };
   const clock = (t) => { const d = new Date(t), n = new Date(NOW); const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(undefined, { weekday: "short" }) + " " + hm; };
@@ -410,7 +410,7 @@
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
     closeAccountMenu();
-    route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
+    dropErrors(); route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     const done = () => {
       if (route !== r) return;
@@ -668,7 +668,8 @@
   // filter drops down from it; the ⋯ menu holds the session's details.
   function renderTopbar(title, crumb, opts = {}) {
     const bar = $("#topbar"), s = opts.session; bar.replaceChildren(); bar.classList.remove("scrolled");
-    bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("searching", !!(s && findOpen));
+    bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("searching", !!(s && (findOpen || errOn(s.id))));
+    if (s && errOn(s.id)) { errorsBar(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
     if (s && findOpen) { searchBar(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
     const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); bar.append(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
@@ -757,6 +758,154 @@
     const c = el("span", "fcount", find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""); c.setAttribute("aria-live", "polite");
     bar.append(back, fr, c);
   }
+  // ---- Errors mode: "N errors" steps through the session's failed steps ---------------------------------------------------------
+  // The bar reads "Error k of N" with previous and next, and a close button (Escape). /api/tx?errors=1 says where every failed
+  // step is (its slot), so a step on a page not loaded yet is reachable: a page next to the loaded range is added to it, one
+  // further away replaces it with the page around the step. Each step is scrolled to the middle and marked, never opened;
+  // its tool group opens so it shows. Closing puts back the pages, what was open and the scroll position from before. The
+  // mode is its own controller, apart from find, so the two can become one mode later.
+  const ERR = { on: false, sid: null, slots: [], listed: false, count: 0, version: null, k: -1, slot: null, saved: null, range: null, tools: true, chain: Promise.resolve(), gen: 0 };
+  const ERR_NEAR = 400, ERR_AROUND = 40; // slots: a page (at most 200 entries) or two away is added; 40 entries of context above
+  const errLive = el("div", "sr-only"); errLive.setAttribute("role", "status"); errLive.setAttribute("aria-live", "polite"); document.body.append(errLive);
+  const errText = () => ERR.k < 0 ? (ERR.count ? "Finding errors…" : "No errors") : "Error " + (ERR.k + 1) + " of " + ERR.count;
+  const errOn = (sid) => ERR.on && ERR.sid === sid;
+  function errorsBar(bar) {
+    const close = el("button", "ibtn"); close.type = "button"; close.id = "err-close"; close.setAttribute("aria-label", "Close errors"); close.append(icon(I.x)); close.addEventListener("click", () => closeErrors());
+    const pill = el("div", "find errnav"), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); pill.append(mark, el("span", "errnav-count", errText()));
+    const prev = el("button", "ibtn errnav-btn"); prev.type = "button"; prev.id = "err-prev"; prev.setAttribute("aria-label", "Previous error"); prev.append(icon(I.up)); prev.addEventListener("click", () => stepErrors(-1));
+    const next = el("button", "ibtn errnav-btn"); next.type = "button"; next.id = "err-next"; next.setAttribute("aria-label", "Next error"); next.append(icon(I.dn)); next.addEventListener("click", () => stepErrors(1));
+    prev.disabled = next.disabled = ERR.listed && !ERR.slots.length;
+    const group = el("div", "errnav-bar"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Failed steps"); group.append(close, pill, prev, next);
+    bar.append(group);
+  }
+  // The label and buttons in place, so focus stays where it is.
+  function errLabel(announce) {
+    const t = $("#topbar .errnav-count"); if (t) t.textContent = errText();
+    for (const id of ["err-prev", "err-next"]) { const b = document.getElementById(id); if (b) b.disabled = ERR.listed && !ERR.slots.length; }
+    if (announce) errLive.textContent = errText();
+  }
+  const drawSessionBar = () => {
+    const s = SESS[route.id]; if (route.v !== "session" || !s) return;
+    renderTopbar(s.name, null, { session: s, lineage: lineageOf(route.id).slice(0, -1), line2: sessionLine(s) });
+    document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px"); syncBarLine();
+  };
+  // A redraw keeps focus on the bar's control that had it.
+  const keepFocus = (fn) => { const id = document.activeElement?.id; fn(); const n = id && document.getElementById(id); if (n && n !== document.activeElement) n.focus({ preventScroll: true }); };
+  function openErrors(sid) {
+    if (ERR.on || route.v !== "session" || route.id !== sid || !TXM[sid]) return;
+    stopOpeningEndPin(); closeFilter(); $(".session-menu")?.remove();
+    Object.assign(ERR, { on: true, sid, slots: [], listed: false, count: countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: show.tools, gen: ERR.gen + 1 });
+    if (!show.tools) { show.tools = true; render(); } else drawSessionBar();
+    document.getElementById("err-next")?.focus({ preventScroll: true }); errLabel(true);
+    const gen = ERR.gen;
+    fetchErrors(sid).then(() => { if (ERR.gen === gen && ERR.on && ERR.slots.length) { ERR.k = 0; showError(true); } else errLabel(true); }, () => { if (ERR.gen === gen && ERR.on) { errLive.textContent = "Couldn't list the errors"; const t = $("#topbar .errnav-count"); if (t) t.textContent = "Couldn't list the errors"; } });
+  }
+  // The list, or nothing new (304) when the model hasn't moved since it was fetched.
+  function fetchErrors(sid) {
+    return fetch("/api/tx?sid=" + enc(sid) + "&errors=1" + (ERR.version ? "&since=" + enc(ERR.version) : ""), { credentials: "same-origin" })
+      .then((r) => r.status === 304 ? null : r.ok ? r.json() : Promise.reject(Object.assign(new Error(r.status + " " + r.statusText), { status: r.status })), (e) => Promise.reject(Object.assign(e, { status: 0 })))
+      .then((x) => {
+        if (!x || !errOn(sid)) return;
+        ERR.listed = true; ERR.slots = Array.isArray(x.slots) ? x.slots.filter(Number.isInteger) : []; ERR.count = Number.isInteger(x.errors) ? Math.max(x.errors, ERR.slots.length) : ERR.slots.length; ERR.version = typeof x.version === "string" ? x.version : null;
+        // The current step stays current wherever it now is in the list; one no longer failed gives way to the next after it.
+        if (ERR.slot != null) {
+          const at = ERR.slots.indexOf(ERR.slot), after = ERR.slots.findIndex((slot) => slot > ERR.slot);
+          ERR.k = at >= 0 ? at : !ERR.slots.length ? -1 : after >= 0 ? after : ERR.slots.length - 1;
+          if (at < 0) ERR.slot = ERR.k >= 0 ? ERR.slots[ERR.k] : null;
+        }
+      });
+  }
+  function stepErrors(delta) {
+    if (!ERR.on || !ERR.slots.length) return;
+    const n = ERR.slots.length; ERR.k = ERR.k < 0 ? 0 : (((ERR.k + delta) % n) + n) % n; showError(true);
+  }
+  const hasSlot = (sid, slot) => { const m = TXM[sid]; return !!m && slot >= m.from && slot < m.to; };
+  // Loads the page holding `slot` when it isn't loaded: resolves true when the loaded range changed.
+  function loadSlot(sid, slot) {
+    if (hasSlot(sid, slot)) return Promise.resolve(false);
+    const m = TXM[sid], up = slot < m.from, near = up ? m.from - slot <= ERR_NEAR : slot - m.to < ERR_NEAR;
+    let tries = 0;
+    const extend = () => hasSlot(sid, slot) || tries++ >= 3 ? null : fetchTx(sid, up ? "before=" + TXM[sid].from : "after=" + TXM[sid].to, up ? "before" : "after").then(extend);
+    const around = () => hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + Math.max(0, slot - ERR_AROUND)).then(() => (hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + slot)));
+    return Promise.resolve(near ? extend() : null).then(around).then(() => kids(sid)).then(() => true);
+  }
+  // The session's own step for a slot: not one in a child run's work drawn inside it.
+  function errNode(sid, slot) {
+    const e = (TX[sid] ?? []).find((x) => x.k === "tool" && x.slot === slot); if (!e?.key) return null;
+    return [...$("#page").querySelectorAll(".turns .step[data-e]")].find((n) => n.dataset.e === e.key && !n.closest(".cw-body")) ?? null;
+  }
+  // Marks the current step (its group opened so it shows); with `ring`, rings it for a moment and centres it under the bar.
+  function markError(ring) {
+    for (const n of $("#page").querySelectorAll(".step.err-current")) n.classList.remove("err-current", "err-ring");
+    if (!ERR.on || ERR.slot == null || route.v !== "session" || route.id !== ERR.sid) return null;
+    const node = errNode(ERR.sid, ERR.slot); if (!node) return null;
+    const g = node.closest(".tgroup"), sum = g && opener(g); if (sum?.getAttribute("aria-expanded") === "false") sum.click();
+    node.classList.add("err-current");
+    if (ring) { node.classList.remove("err-ring"); void node.offsetWidth; node.classList.add("err-ring"); setTimeout(() => node.classList.remove("err-ring"), 1500); }
+    return node;
+  }
+  function centre(node) {
+    if (!node.isConnected) return;
+    const sc = scroller(), r = (node.querySelector(":scope > button") ?? node).getBoundingClientRect(), bottom = phone.matches ? window.innerHeight : $("#main").getBoundingClientRect().bottom;
+    const d = (r.top + r.bottom) / 2 - (edge() + bottom) / 2; if (Math.abs(d) >= 1) sc.scrollTop += d;
+    syncBarLine(); syncJump(); saveHistoryScroll();
+  }
+  function showError(announce) {
+    const sid = ERR.sid, slot = ERR.slots[ERR.k], gen = ERR.gen; ERR.slot = slot; errLabel(announce);
+    ERR.chain = ERR.chain.then(() => {
+      if (!ERR.on || ERR.gen !== gen || ERR.slot !== slot) return null; // a later step or a close since
+      stopOpeningEndPin();
+      return loadSlot(sid, slot).then((moved) => {
+        if (!ERR.on || ERR.gen !== gen || ERR.slot !== slot || route.v !== "session" || route.id !== sid) return;
+        if (moved) keepFocus(render); // render marks the current step again
+        const node = markError(true);
+        if (!node) { if (announce) errLive.textContent = errText() + ", not shown in this transcript"; return; }
+        centre(node); requestAnimationFrame(() => requestAnimationFrame(() => { if (ERR.on && ERR.slot === slot && node.isConnected) centre(node); }));
+      }, () => { if (ERR.on && ERR.gen === gen) errLive.textContent = "Couldn't load " + errText(); });
+    }).catch((e) => { setTimeout(() => { throw e; }); }); // a fault on the page, reported as one; the next step still runs
+  }
+  // Leaving the mode by navigation: nothing to put back.
+  function dropErrors() { if (!ERR.on) return; ERR.on = false; ERR.gen++; show.tools = ERR.tools; ERR.saved = ERR.range = null; errLive.textContent = ""; }
+  function closeErrors() {
+    if (!ERR.on) return;
+    const sid = ERR.sid, saved = ERR.saved, range = ERR.range, m = TXM[sid]; dropErrors();
+    let p = Promise.resolve();
+    // Pages loaded above the range (or a range replaced by a page further off) move its entries' keys: the range from before
+    // comes back, caught up with the tail when it reached the end and the session grew since.
+    if (range && m && TX[sid] && (m.from !== range.m.from || m.to < range.m.to)) {
+      TX[sid] = range.tx; TXM[sid] = range.m; spread(sid);
+      if (range.m.to >= range.m.total && range.m.tok !== TOK[sid]) p = tail(sid).catch(() => null);
+    }
+    p.then(() => {
+      if (route.v !== "session" || route.id !== sid || ERR.on) return;
+      render(); if (saved) restore(saved);
+      const b = $("#topbar .errs"); if (b && !b.hidden && document.activeElement !== b && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) b.focus({ preventScroll: true });
+    });
+  }
+  // Keys while the mode is on: n and p (and Enter, Shift+Enter in the bar) step, Escape closes. Not while typing, and not
+  // under an open sheet.
+  document.addEventListener("keydown", (e) => {
+    if (!ERR.on || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || document.querySelector("dialog[open]")) return;
+    if (e.target.closest?.("input, textarea, select, [contenteditable='true']")) return;
+    const inBar = !!e.target.closest?.("#topbar .errnav-bar"), onButton = e.target.tagName === "BUTTON";
+    if (e.key === "Escape") { if (!document.body.classList.contains("drawer-open")) { e.preventDefault(); closeErrors(); } return; }
+    if (e.key === "n" || e.key === "N") { e.preventDefault(); stepErrors(1); return; }
+    if (e.key === "p" || e.key === "P") { e.preventDefault(); stepErrors(-1); return; }
+    if (e.key === "Enter" && (inBar || e.target === document.body)) {
+      if (e.shiftKey) { e.preventDefault(); stepErrors(-1); }
+      else if (!onButton) { e.preventDefault(); stepErrors(1); }
+    }
+  });
+  // Live: a new model lists the errors again; N grows, the current one stays.
+  function errorsLive() {
+    if (!ERR.on || route.v !== "session" || route.id !== ERR.sid) return null;
+    const sid = ERR.sid, gen = ERR.gen, was = ERR.count;
+    return fetchErrors(sid).then(() => {
+      if (!ERR.on || ERR.gen !== gen) return;
+      if (ERR.k < 0 && ERR.slots.length) { ERR.k = 0; showError(true); return; }
+      errLabel(ERR.count !== was); markError(false);
+    });
+  }
   function childKindChip(s, meta = false) {
     const c = el("span", meta ? "meta-item meta-kind" : "child-kind"); c.style.setProperty("--h", "var(--" + s.harness + ")");
     const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
@@ -774,8 +923,8 @@
     const st = el("span", "meta-item meta-state"); st.title = "Status: " + STATE[s.state] + " · " + turnsText; st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", turnsText));
     if (errors) {
       const sep = el("span", "state-sep errs-sep", "·"), j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); j.prepend(mark);
-      j.type = "button"; j.title = j.textContent + ": jump to the first failed step"; j.setAttribute("aria-label", j.title);
-      j.addEventListener("click", (ev) => { ev.stopPropagation(); stopOpeningEndPin(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
+      j.type = "button"; j.title = j.textContent + ": step through the failed steps"; j.setAttribute("aria-label", j.title);
+      j.addEventListener("click", (ev) => { ev.stopPropagation(); openErrors(s.id); });
       st.append(sep, j); }
     const kind = s.kind ? childKindChip(s, true) : null;
     const model = el("span", "meta-item meta-model"); model.append(metaSr("Model"), harnessName(s.harness), el("span", "meta-value", shortModel(s.model))); model.title = "Model: " + (s.model ?? "Unknown model");
@@ -1359,6 +1508,7 @@
     else if (r.v === "machine") { renderMachine(page, r.id); renderTopbar(MACHINE[r.id], { label: "Machines", go: () => go({ v: "machines" }) }, { line2: machineLine(r.id) }); }
     else if (r.v === "trace") { const sum = renderTrace(page, r.turn) ?? ""; renderTopbar("Trace", { label: SESS[r.sid].name, go: () => goSession(r.sid, r.turn) }, { line2: (l2) => l2.append(el("span", "rest", sum)) }); }
     else if (r.v === "session") { const s = SESS[r.id], lineage = lineageOf(r.id).slice(0, -1); renderSession(page, r.id); renderTopbar(s.name, null, { session: s, lineage, line2: sessionLine(s) }); }
+    if (r.v === "session" && errOn(r.id)) markError(false);
     document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px");
     syncLayoutPrefs(); syncBarLine(); renderNav(); renderLanes(); renderDrawerAccount(); syncJump();
   }
@@ -1679,7 +1829,7 @@
     for (const sid of view) if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
     else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.reload) full = true; })));
     if (route.v === "session" && TX[route.id]) chain = chain.then(() => newKids(route.id, grown));
-    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); });
+    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); const e = errorsLive(); return e && soft(e); });
   }
   // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), those
   // whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw them all.
@@ -1868,7 +2018,7 @@
     return n;
   }
   // What a block shows, without what the reader toggled (open, hidden, measured clipping) or what opening fills in.
-  const VIEW = new Set(["open", "clipped", "flash"]);
+  const VIEW = new Set(["open", "clipped", "flash", "err-current", "err-ring"]);
   function sig(root) {
     let s = [...root.classList].filter((c) => !VIEW.has(c)).join(" ");
     const walk = (x) => { for (const c of x.childNodes) {

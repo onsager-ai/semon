@@ -62,7 +62,7 @@ const QUESTION = "Live check: ship the flush change now?";
 const ENDED = "Session ended: reload with the printed URL";
 
 // ---- The server --------------------------------------------------------------------------------------------------------
-function serve(dir, now) {
+export function serve(dir, now) {
   return new Promise((resolve, reject) => {
     const proc = spawn(BIN, ["sessions", "--serve", "--listen", "127.0.0.1:0", "--claude-home", path.join(dir, "claude"), "--codex-home", path.join(dir, "codex"), "--proc-root", path.join(dir, "proc"), "--cache", path.join(dir, "index.json")],
       { env: { ...process.env, SEMON_TEST_NOW: String(now) }, stdio: ["ignore", "pipe", "pipe"] });
@@ -73,7 +73,7 @@ function serve(dir, now) {
     proc.on("exit", (code) => { clearTimeout(timer); reject(new Error("semon exited " + code + ": " + log)); });
   });
 }
-const model = async (srv) => { const r = await fetch(srv.base + "/api/model?t=" + srv.token); if (!r.ok) throw new Error("/api/model " + r.status); return r.json(); };
+export const model = async (srv) => { const r = await fetch(srv.base + "/api/model?t=" + srv.token); if (!r.ok) throw new Error("/api/model " + r.status); return r.json(); };
 
 // ---- Log lines, in the fixture's shapes ------------------------------------------------------------------------------------
 function logs(dir) {
@@ -115,7 +115,7 @@ function counter() {
   window.__line = () => document.querySelector("#topbar").getBoundingClientRect().bottom;
   window.__left = () => { const s = window.__sc(); return s.scrollHeight - s.scrollTop - s.clientHeight; };
 }
-async function open(browser, srv, where, scheme, before = null) {
+export async function open(browser, srv, where, scheme, before = null) {
   const ctx = await context(browser, scheme);
   await ctx.addInitScript(counter);
   const page = await ctx.newPage();
@@ -132,7 +132,7 @@ async function open(browser, srv, where, scheme, before = null) {
   return page;
 }
 // How long `fn` took to hold after `since`, or null when it didn't within `limit` ms.
-async function appear(page, since, fn, arg, limit = 4000) {
+export async function appear(page, since, fn, arg, limit = 4000) {
   try { await page.waitForFunction(fn, arg, { timeout: Math.max(1, limit - (Date.now() - since)), polling: 50 }); return Date.now() - since; } catch { return null; }
 }
 // An update drawn: the page got a new model, then had time to draw it.
