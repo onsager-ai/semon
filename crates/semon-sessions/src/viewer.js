@@ -314,6 +314,7 @@
   function pager(sid, where, label) {
     const w = el("div", "list"), b = el("button", "more", label); b.type = "button"; w.append(b);
     b.addEventListener("click", () => {
+      stopOpeningEndPin();
       const m = TXM[sid], box = phone.matches ? document.documentElement : $("#main"), h0 = box.scrollHeight; b.disabled = true;
       fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where).then(() => kids(sid)).then(() => {
         render(); if (where === "before") { const d = box.scrollHeight - h0; if (phone.matches) window.scrollBy(0, d); else box.scrollTop += d; } }, () => { b.disabled = false; });
