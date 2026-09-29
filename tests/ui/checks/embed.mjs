@@ -219,7 +219,8 @@ export default async function embedCheck(browser) {
     await page.locator("#lead-btn").click();
     const footer = page.locator("#account-drawer"); await footer.scrollIntoViewIfNeeded();
     await footer.locator(".account-trigger").click();
-    await page.locator("#account-drawer .account-popover").scrollIntoViewIfNeeded();
+    // The menu opens above the row; bring the row's foot into view so the shot shows both.
+    await footer.evaluate((w) => w.scrollIntoView({ block: "end" }));
     return menuOf(page, "#account-drawer");
   };
   for (const [size, dark] of [["desktop", false], ["desktop", true], ["phone", false], ["phone", true]]) {
