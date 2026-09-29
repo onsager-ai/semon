@@ -231,13 +231,39 @@
   const enc = encodeURIComponent;
   const safePath = (href) => typeof href === "string" && href.startsWith("/") && !href.startsWith("//") && !href.includes("\\") && !/[\u0000-\u001f\u007f-\u009f]/.test(href) && href.length <= 512;
   const textField = (value, min, max) => typeof value === "string" && [...value].length >= min && [...value].length <= max && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
-  function accountOf(value) {
-    if (!value || !textField(value.name, 1, 80) || !value.name.trim() || !textField(value.login, 0, 80) || !textField(value.initials, 1, 3) || !value.initials.trim()) return null;
-    if (value.avatar_href != null && !safePath(value.avatar_href)) return null;
-    if (!Array.isArray(value.workspaces) || value.workspaces.length > 50 || !Array.isArray(value.links) || value.links.length > 12) return null;
+  // A validated copy of an account menu, or null. Each field is read once, inside `try` (an embedding page's object may have
+  // getters that throw or answer differently the second time), into plain data, and the copy is what gets checked and kept.
+  function accountOf(source) {
+    let value;
+    try {
+      if (!source || typeof source !== "object") return null;
+      const list = (xs, max, pick) => {
+        if (!Array.isArray(xs)) return null;
+        const n = xs.length; if (!(n <= max)) return null;
+        const out = []; for (let i = 0; i < n; i++) { const x = xs[i]; out.push(x && typeof x === "object" ? pick(x) : null); }
+        return out;
+      };
+      value = {
+        name: source.name, login: source.login, initials: source.initials, avatar_href: source.avatar_href ?? null,
+        workspaces: list(source.workspaces, 50, (w) => ({ name: w.name, role: w.role, current: w.current, switch_href: w.switch_href })),
+        links: list(source.links, 12, (a) => ({ label: a.label, href: a.href, method: a.method, danger: a.danger })),
+      };
+    } catch { return null; }
+    if (!textField(value.name, 1, 80) || !value.name.trim() || !textField(value.login, 0, 80) || !textField(value.initials, 1, 3) || !value.initials.trim()) return null;
+    if (value.avatar_href !== null && !safePath(value.avatar_href)) return null;
+    if (!value.workspaces || !value.links) return null;
     if (value.workspaces.some((w) => !w || !textField(w.name, 1, 80) || !w.name.trim() || !textField(w.role, 0, 80) || typeof w.current !== "boolean" || !safePath(w.switch_href))) return null;
     if (value.links.some((a) => !a || !textField(a.label, 1, 80) || !a.label.trim() || !safePath(a.href) || (a.method !== "get" && a.method !== "post") || typeof a.danger !== "boolean")) return null;
     return value;
+  }
+  // The embedding page's menu, `window.semonEmbed.account`, validated like a server's. A rejected one is reported once on
+  // the console, since the embedding page gets no other sign of it.
+  let embedWarned = false;
+  function embeddedAccount() {
+    let source; try { source = window.semonEmbed?.account; } catch { source = undefined; }
+    const account = accountOf(source);
+    if (source != null && !account && !embedWarned) { embedWarned = true; console.warn("semon: window.semonEmbed.account was rejected (see the account menu rules)"); }
+    return account;
   }
   // An error carries the HTTP status (0: no response), so live polling can tell a 403 from a dropped connection.
   const api = (path, signal) => fetch(path, { credentials: "same-origin", signal }).then((r) => { if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status }); return r.json(); }, (e) => { throw Object.assign(e, { status: 0 }); });
@@ -253,7 +279,8 @@
     // Several machines come as `machines`; one comes as `machine` alone.
     for (const x of m.machines ?? [m.machine]) { MACHINE[x.id] = x.name; MACHINE_UP[x.id] = x.up; if (x.last != null) MACHINE_LAST[x.id] = x.last; }
     ADMIN = m.admin && safePath(m.admin.href) ? m.admin : null;
-    ACCOUNT = accountOf(m.account);
+    // A server-provided menu wins; otherwise an embedding page may set `window.semonEmbed.account`, held to the same rules.
+    ACCOUNT = accountOf(m.account) ?? embeddedAccount();
     NAV_MACHINES = m.nav && safePath(m.nav.machines) ? m.nav.machines : null;
     for (const k of Object.keys(SESS)) delete SESS[k];
     for (const [id, s] of Object.entries(m.sessions)) { s.id = id; SESS[id] = s; }
@@ -468,9 +495,8 @@
     return box;
   }
   function paintPending(r) {
-    const s = SESS[r.id], page = $("#page"), hadFocus = $("#sidebar").contains(document.activeElement);
-    renderNav(); renderLanes(); renderTopbar(s.name, null, { session: s, lineage: lineageOf(r.id).slice(0, -1), line2: sessionLine(s) });
-    document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px"); syncBarLine();
+    const page = $("#page"), hadFocus = $("#sidebar").contains(document.activeElement);
+    renderNav(); renderLanes(); drawSessionBar();
     lanesFor = { r, version: LIVE.version };
     if (hadFocus) $("#lanes .srow[data-id='" + CSS.escape(r.id) + "']")?.focus({ preventScroll: true });
     page.setAttribute("aria-busy", "true"); page.inert = true; page.classList.add("loading");
@@ -478,7 +504,7 @@
     skeletonTimer = setTimeout(() => {
       if (route !== r || !page.classList.contains("loading")) return;
       page.classList.remove("loading"); page.classList.remove("child-page"); page.style.paddingBottom = "";
-      page.replaceChildren(skeleton()); quietTop(); syncBarLine();
+      clearBox(page, r); page.append(skeleton()); quietTop(); syncBarLine();
     }, SKELETON_MS);
   }
   function endLoading() {
@@ -497,7 +523,7 @@
     const page = $("#page"), box = el("div", "load-error"), retry = el("button", "more", "Try again");
     box.setAttribute("role", "alert"); retry.type = "button"; retry.addEventListener("click", () => go({ ...r }, true));
     box.append(el("p", "empty", "Couldn't load this session: " + (err?.message ?? "no response")), retry);
-    page.classList.remove("child-page"); page.style.paddingBottom = ""; page.replaceChildren(box);
+    page.classList.remove("child-page"); page.style.paddingBottom = ""; clearBox(page, r); page.append(box);
   }
   // A deep link to a turn the loaded transcript doesn't hold yet.
   const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
@@ -877,11 +903,13 @@
   // after a crumb up a level, then a one-line summary that ellipsizes. On a session, search takes over the bar and the
   // filter drops down from it; the ⋯ menu holds the session's details.
   function renderTopbar(title, crumb, opts = {}) {
-    const bar = $("#topbar"), s = opts.session; bar.replaceChildren(); bar.classList.remove("scrolled");
+    const bar = $("#topbar"), s = opts.session; clearBox(bar, route); bar.classList.remove("scrolled");
+    // What the bar holds is added through `put`, so the range control on Analytics (a persistent control) stays where it is.
+    const put = placer(bar), sink = { append: put };
     bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("searching", !!(s && (findOpen || errOn(s.id))));
-    if (s && errOn(s.id)) { errorsBar(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
-    if (s && findOpen) { searchBar(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
-    const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); bar.append(m);
+    if (s && errOn(s.id)) { errorsBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
+    if (s && findOpen) { searchBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
+    const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); put(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
     if (opts.lineage?.length) {
       if (phone.matches) { const parent = opts.lineage.at(-1), c = el("button", "crumb lineage-parent", parent.name); c.type = "button"; c.setAttribute("aria-label", "Open session path through " + parent.name); c.addEventListener("click", () => showLineageMenu(s.id, bar)); l1.append(c, el("span", "sep", "›")); }
@@ -893,9 +921,9 @@
       opts.line2(l2); t.append(l2);
       if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); });
     }
-    bar.append(t);
-    if (opts.analytics) { appendAnalyticsRange(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
-    if (!s) { appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
+    put(t);
+    if (opts.analytics) { put(rangeControl(bar)); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
+    if (!s) { appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
     const fb = el("button", "ibtn"); fb.type = "button"; fb.setAttribute("aria-label", "Find in transcript"); fb.append(icon(I.search));
     fb.addEventListener("click", () => { findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
     const pop = el("div", "filters pop"); pop.hidden = !filterOpen;
@@ -907,21 +935,27 @@
     // On phones search and filter live in the ⋯ menu, and the filter hangs from that button.
     const place = () => { const anchor = phone.matches ? more : tb; pop.style.right = Math.max(0, bar.getBoundingClientRect().right - anchor.getBoundingClientRect().right) + "px"; };
     tb.addEventListener("click", place);
-    if (phone.matches) bar.append(more, pop); else bar.append(fb, tb, more, pop);
-    appendWideToggle(bar); if (filterOpen) place();
-    const account = accountWidget(false); if (account) bar.append(account);
+    if (phone.matches) put(more, pop); else put(fb, tb, more, pop);
+    appendWideToggle(sink); if (filterOpen) place();
+    const account = accountWidget(false); if (account) put(account);
+    put.done();
   }
   function appendWideToggle(bar) {
     const b = el("button", "ibtn wide-toggle"); b.type = "button"; b.setAttribute("aria-label", "Wide reading mode"); b.setAttribute("aria-pressed", String(wideMode)); b.title = "Wide reading mode"; b.append(icon(I.wide));
     b.addEventListener("click", () => setWideMode(!wideMode)); bar.append(b);
   }
-  function appendAnalyticsRange(bar) {
-    const group = el("div", "analytics-range"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Analytics range");
-    for (const [days, label] of [[1, "24 h"], [7, "7 d"], [30, "30 d"]]) {
-      const b = el("button", null, label); b.type = "button"; b.dataset.e = "analytics-range:" + days; b.setAttribute("aria-pressed", String(analyticsRange === days));
-      b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); }); group.append(b);
-    }
-    bar.append(group);
+  // The Analytics range control, a persistent control of the bar: each redraw keeps it and only sets which button is pressed.
+  function rangeControl(bar) {
+    const group = slot("range", bar, () => {
+      const g = el("div", "analytics-range"); g.setAttribute("role", "group"); g.setAttribute("aria-label", "Analytics range");
+      for (const [days, label] of [[1, "24 h"], [7, "7 d"], [30, "30 d"]]) {
+        const b = el("button", null, label); b.type = "button"; b.dataset.e = "analytics-range:" + days;
+        b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); }); g.append(b);
+      }
+      return g;
+    }).el;
+    for (const b of group.children) b.setAttribute("aria-pressed", String(analyticsRange === Number(b.dataset.e.split(":")[1])));
+    return group;
   }
   function lineageOf(sid) {
     const path = [], seen = new Set(); let id = sid;
@@ -1705,10 +1739,35 @@
   }
 
   // ---- Render --------------------------------------------------------------------------------------------------------
+  // Persistent controls. A control the reader may be operating (a filter, the search field, a toggle group) is built once for
+  // the page shown and kept by every redraw of that page: it is never taken out of the document, so its focus, an open
+  // dropdown and the caret in a text field survive. `slot` finds or builds it in its box; the caller then hands it the
+  // page's current data and handlers through `ctx` (a handler is read from `ctx` when the control fires, so it never calls
+  // the closure of an earlier draw). A navigation to another route drops every slot.
+  const SLOTS = new Map();
+  function slot(key, box, build) {
+    let s = SLOTS.get(key);
+    if (!s || s.route !== route || s.box !== box || s.el.parentNode !== box) { s = { route, box, ctx: {}, el: null }; s.el = build(s.ctx); SLOTS.set(key, s); }
+    return s;
+  }
+  // Empties `box` of everything but the slots the route being drawn already holds in it.
+  function clearBox(box, r) {
+    for (const [key, s] of SLOTS) if (s.route !== r) SLOTS.delete(key);
+    const kept = new Set([...SLOTS.values()].filter((s) => s.box === box).map((s) => s.el));
+    for (const n of [...box.childNodes]) if (!kept.has(n)) n.remove();
+  }
+  // Adds nodes to `box` in order, after `clearBox`: a node already at the next place stays where it is, and any other
+  // goes in before it. `put.done()` drops what is left over.
+  function placer(box) {
+    let cur = box.firstChild;
+    const put = (...nodes) => { for (const n of nodes) { if (n === cur) cur = cur.nextSibling; else box.insertBefore(n, cur); } };
+    put.done = () => { while (cur) { const next = cur.nextSibling; cur.remove(); cur = next; } };
+    return put;
+  }
   function render() {
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
     closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
-    tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; page.replaceChildren(); page.classList.remove("child-page");
+    tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; clearBox(page, r); page.classList.remove("child-page");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
     else if (r.v === "sessions") { renderSessions(page); renderTopbar("Sessions"); }
@@ -1770,21 +1829,39 @@
   }
   const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
   function matchesSessionFacets(s) { return Object.keys(sessionFilters).every((key) => !sessionFilters[key] || sessionFacetValue(s, key) === sessionFilters[key]); }
-  function renderFacetFilters(onChange) {
-    const box = el("div", "facet-filters"); box.setAttribute("aria-label", "Filter sessions");
-    const specs = [
-      ["repo", "Repo", "All repos", [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "repo")))].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
-      ["machine", "Machine", "All machines", [...new Set(Object.values(SESS).map((s) => s.machine ?? ""))].sort(), (v) => MACHINE[v] ?? v],
-      ["harness", "Harness", "All harnesses", [...new Set(Object.values(SESS).map((s) => s.harness ?? ""))].sort(), (v) => HARNESS[v] ?? v],
-      ["model", "Model", "All models", [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "model")))].sort(), shortModel],
-    ];
-    for (const [key, label, allLabel, values, showValue] of specs) {
-      const field = el("label", "facet-field"); field.append(el("span", null, label)); const select = el("select"); select.setAttribute("aria-label", label);
-      const all = el("option", null, allLabel); all.value = ""; select.append(all);
-      for (const value of values) { const option = el("option", null, showValue(value)); option.value = value; select.append(option); }
-      select.value = sessionFilters[key]; select.addEventListener("change", () => { sessionFilters[key] = select.value; onChange(); }); field.append(select); box.append(field);
-    }
-    return box;
+  // The four filters (Repo, Machine, Harness, Model) of Analytics and Sessions: one persistent control per page. A redraw
+  // (`sync`) brings its option lists and selections up to date in place. A selected value that no session has now stays
+  // selected, marked "(no sessions)", until the reader changes it.
+  const FACETS = [
+    ["repo", "Repo", "All repos", () => [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "repo")))].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
+    ["machine", "Machine", "All machines", () => [...new Set(Object.values(SESS).map((s) => s.machine ?? ""))].sort(), (v) => MACHINE[v] ?? v],
+    ["harness", "Harness", "All harnesses", () => [...new Set(Object.values(SESS).map((s) => s.harness ?? ""))].sort(), (v) => HARNESS[v] ?? v],
+    ["model", "Model", "All models", () => [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "model")))].sort(), shortModel],
+  ];
+  function renderFacetFilters(box, onChange) {
+    const s = slot("facets", box, (ctx) => {
+      const bar = el("div", "facet-filters"); bar.setAttribute("aria-label", "Filter sessions"); const fields = [];
+      for (const [key, label, allLabel, valuesOf, showValue] of FACETS) {
+        const field = el("label", "facet-field"); field.append(el("span", null, label)); const select = el("select"); select.setAttribute("aria-label", label);
+        select.addEventListener("change", () => { sessionFilters[key] = select.value; ctx.onChange(); }); field.append(select); bar.append(field);
+        fields.push({ key, select, allLabel, valuesOf, showValue, options: new Map() });
+      }
+      ctx.sync = () => {
+        for (const f of fields) {
+          const current = sessionFilters[f.key], values = f.valuesOf().filter((v) => v !== ""), gone = current !== "" && !values.includes(current);
+          if (gone) values.push(current);
+          const wanted = [["", f.allLabel], ...values.map((v) => [v, f.showValue(v) + (gone && v === current ? " (no sessions)" : "")])], put = placer(f.select), next = new Map();
+          for (const [value, text] of wanted) {
+            let option = f.options.get(value); if (!option) { option = el("option"); option.value = value; }
+            if (option.textContent !== spaced(text)) option.textContent = spaced(text);
+            next.set(value, option); put(option);
+          }
+          put.done(); f.options = next; f.select.value = current;
+        }
+      };
+      return bar;
+    });
+    s.ctx.onChange = onChange; s.ctx.sync(); return s.el;
   }
   function analyticsStats(rows, from, to) {
     const relevant = rows.filter((r) => inRange(r.startedAt, from, to) || r.busy.some(([a, b]) => a < to && b > from));
@@ -1909,9 +1986,8 @@
   }
   function renderAnalytics(page) {
     const all = analyticsSessions().filter((row) => matchesSessionFacets(row.s)), to = NOW, from = to - rangeMs(analyticsRange), now = analyticsStats(all, from, to), previous = analyticsStats(all, from - rangeMs(analyticsRange), from);
-    const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days"))); page.append(head); observeTitle(h1); page.append(renderFacetFilters(() => render()));
-    const measure = el("div", "analytics-measure"); measure.setAttribute("role", "group"); measure.setAttribute("aria-label", "Breakdown bar measure");
-    for (const [key, label] of [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]]) { const b = el("button", null, label); b.type = "button"; b.setAttribute("aria-pressed", String(analyticsMeasure === key)); b.addEventListener("click", () => { if (analyticsMeasure === key) return; const top = currentScroll(); analyticsMeasure = key; render(); restoreScroll(top); }); measure.append(b); }
+    const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days")));
+    const put = placer(page); put(head); observeTitle(h1); put(renderFacetFilters(page, () => render()));
     const metrics = el("div", "analytics-metrics"), addMetric = (label, value, note, more, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label"); l.append(el("span", null, label)); if (tip) l.append(costInfoTip()); if (more) { m.dataset.more = ""; m.title = more; } m.append(l, el("div", "value", value), note); metrics.append(m); }, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
     addMetric("Agent-hours", hoursText(now.agentMs), deltaNote(now.agentMs, previous.agentMs, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
     const costNote = now.apiCost == null || previous.apiCost == null ? el("div", "note", "no price for " + [...new Set([...now.costUnknown, ...previous.costUnknown])].join(", ")) : deltaNote(now.apiCost, previous.apiCost, asMoney);
@@ -1923,13 +1999,21 @@
     const peak = peakBusy(all, from, to), peakBefore = peakBusy(all, from - rangeMs(analyticsRange), from);
     addMetric("Peak concurrency", countText(peak), deltaNote(peak, peakBefore, countText), "The most sessions busy at the same moment.");
     addMetric("Waited on you", timeText(now.waitsMs), deltaNote(now.waitsMs, previous.waitsMs, timeText), "Median wait " + timeText(now.medianWaitMs) + " · previous " + rangeName() + ": " + timeText(previous.medianWaitMs));
-    const currentWait = now.longestCurrent; addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longestWaitMs, timeText), currentWait ? currentWait.s.name + " has waited on you for " + timeText(currentWait.ms) : "No session is waiting on you"); page.append(metrics);
+    const currentWait = now.longestCurrent; addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longestWaitMs, timeText), currentWait ? currentWait.s.name + " has waited on you for " + timeText(currentWait.ms) : "No session is waiting on you"); put(metrics);
     const breakdowns = el("div", "analytics-breakdowns"); breakdowns.append(analyticsBreakdown("By repo", all, from, to, "repo"), analyticsBreakdown("By machine", all, from, to, "machine"), analyticsBreakdown("By harness and model", all, from, to, "harness"));
-    const bdHead = el("div", "analytics-bd-head"), bdTitle = el("div"); bdTitle.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Agent-hours and API-equivalent cost; bars follow the toggle")); bdHead.append(bdTitle, measure);
+    // The breakdown's heading and its measure toggle: a persistent control (the toggle's state is the page's).
+    const bdHead = slot("measure", page, () => {
+      const bar = el("div", "analytics-bd-head"), title = el("div"), toggle = el("div", "analytics-measure"); title.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Agent-hours and API-equivalent cost; bars follow the toggle"));
+      toggle.setAttribute("role", "group"); toggle.setAttribute("aria-label", "Breakdown bar measure");
+      for (const [key, label] of [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.measure = key; b.addEventListener("click", () => { if (analyticsMeasure === key) return; const top = currentScroll(); analyticsMeasure = key; render(); restoreScroll(top); }); toggle.append(b); }
+      bar.append(title, toggle); return bar;
+    }).el;
+    for (const b of bdHead.querySelectorAll(".analytics-measure button")) b.setAttribute("aria-pressed", String(analyticsMeasure === b.dataset.measure));
     const busyTop = [...all].map((r) => ({ ...r, value: busyMsIn(r, from, to) })).filter((r) => r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5), waitTop = [...now.waitBy].map(([id, ms]) => ({ s: SESS[id], id, value: ms })).filter((r) => r.s && r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5);
     const costTop = all.map((r) => { const cost = sessionCostInRange(r.s, from, to); return { ...r, cost, value: cost.usd }; }).filter((r) => r.cost.hasData).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5), bottom = el("div", "analytics-split");
     bottom.append(analyticsList("Top sessions · busy time", busyTop, (x) => timeText(x.value)), analyticsList("Top sessions · waited on", waitTop, (x) => timeText(x.value)), analyticsList("Most expensive sessions · API-equivalent cost", costTop, (x) => x.value == null ? "—" : asMoney(x.value)));
-    page.append(renderAgentsChart(all, from, to), renderCostChart(all, from, to), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(); if (allowance) page.append(allowance); metrics.dataset.analyticsReady = ""; // data-analytics-ready: the figures and charts are drawn (a stable hook for the budget check);
+    put(renderAgentsChart(all, from, to), renderCostChart(all, from, to), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(); if (allowance) put(allowance); metrics.dataset.analyticsReady = ""; // data-analytics-ready: the figures and charts are drawn (a stable hook for the budget check);
+    put.done();
   }
 
   // ---- Sessions: every top-level session and its child runs ---------------------------------------------------------------
@@ -1942,10 +2026,18 @@
     const all = Object.values(SESS).filter(matchesSessionFacets);
     const head = el("div", "ph"); const h1 = el("h1", null, "Sessions"); head.append(h1);
     const sub = el("div", "sub"); for (const [v, l] of [[all.length, all.length === 1 ? "session" : "sessions"], [all.filter((s) => s.state === "work").length, "working"], [all.filter((s) => s.state === "wait").length, "waiting on you"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
-    head.append(sub); page.append(head); observeTitle(h1);
-    const fr = el("label", "find"); const fi = el("input"); fi.id = "sq"; fi.type = "search"; fi.placeholder = "Search sessions"; fi.setAttribute("aria-label", "Search sessions"); fi.value = query; fr.append(icon(I.search), fi);
-    const gb = el("div", "groupby"); gb.setAttribute("role", "group"); gb.setAttribute("aria-label", "Group by");
-    for (const [g, label] of [["recent", "Recent"], ["project", "Project"], ["machine", "Machine"], ["harness", "Harness"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.g = g; b.addEventListener("click", () => { groupBy = g; draw(); }); gb.append(b); }
+    head.append(sub); const put = placer(page); put(head); observeTitle(h1);
+    // The search field and the group-by buttons are persistent controls: the page's redraws keep them, and the field's focus, text and caret.
+    const found = slot("find", page, (ctx) => {
+      const fr = el("label", "find"), fi = el("input"); fi.id = "sq"; fi.type = "search"; fi.placeholder = "Search sessions"; fi.setAttribute("aria-label", "Search sessions"); fi.value = query; fr.append(icon(I.search), fi);
+      fi.addEventListener("input", () => { query = fi.value.trim(); ctx.draw(); }); return fr;
+    }), fr = found.el, fi = fr.querySelector("input");
+    if (fi.value.trim() !== query) fi.value = query; // the sidebar's search can have changed it
+    const grouped = slot("groupby", page, (ctx) => {
+      const gb = el("div", "groupby"); gb.setAttribute("role", "group"); gb.setAttribute("aria-label", "Group by");
+      for (const [g, label] of [["recent", "Recent"], ["project", "Project"], ["machine", "Machine"], ["harness", "Harness"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.g = g; b.addEventListener("click", () => { groupBy = g; ctx.draw(); }); gb.append(b); }
+      return gb;
+    }), gb = grouped.el;
     const out = el("div", "sess"); out.style.display = "grid"; out.style.gap = "16px";
     const draw = () => {
       out.replaceChildren(); const lanes = all.filter((s) => sessMatch(s, query));
@@ -1962,8 +2054,8 @@
       for (const b of gb.children) b.setAttribute("aria-pressed", String(b.dataset.g === groupBy));
       renderLanes();
     };
-    fi.addEventListener("input", () => { query = fi.value.trim(); draw(); });
-    page.append(renderFacetFilters(() => draw()), fr, gb, out); draw();
+    found.ctx.draw = grouped.ctx.draw = draw;
+    put(renderFacetFilters(page, () => render()), fr, gb, out); put.done(); draw();
   }
 
   // ---- Drawer (phone) ---------------------------------------------------------------------------------------------------------
@@ -1993,7 +2085,7 @@
   // again with its view state kept: the scroll position, anchored to the first visible block; what is open, by stable keys;
   // focus, find and filters; the drawer. A session page follows its transcript's tail
   // with /api/tx?after= and replaces only the turns that changed. An open View all sheet holds the redraw until it closes.
-  const LIVE = { version: null, timer: null, busy: false, delay: 2000, ended: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
+  const LIVE = { version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2000, ended: false, again: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
   // The turn index as last drawn, to tell which turns an update changed.
   const remember = (m) => { LIVE.turns = new Map(m.turns.map((x) => [x.id, turnKey(x)])); };
   // What an update can change in a turn record or a handoff, cheaply (not the text, which a record never rewrites).
@@ -2001,23 +2093,46 @@
   const handKey = (h) => [h.status, h.to, h.done, h.result?.length, h.answer?.length, h.answers?.length, h.declined ? 1 : 0].join("|");
   let rendered = null; // the route the page shows
   const visible = () => document.visibilityState === "visible";
-  function schedule(ms) { clearTimeout(LIVE.timer); LIVE.timer = null; if (!LIVE.ended && visible()) LIVE.timer = setTimeout(poll, ms); }
+  function schedule(ms) { clearTimeout(LIVE.timer); LIVE.timer = null; if (!LIVE.ended && visible()) { LIVE.due = performance.now() + ms; LIVE.timer = setTimeout(poll, ms); } }
   document.addEventListener("visibilitychange", () => {
     if (!visible()) { clearTimeout(LIVE.timer); LIVE.timer = null; } else if (LIVE.version && !LIVE.busy && !LIVE.timer) schedule(LIVE.delay > 2000 ? LIVE.delay : 0); }); // a backoff in progress holds
+  // An embedding page can ask for a poll soon (it knows something changed) with `semon:refresh`. The rule, one floor:
+  // a refresh starts a poll no sooner than REFRESH_FLOOR after the previous poll started, and never touches the backoff.
+  // - Refreshes inside that second merge into the one poll at its end; a pending timer that is due sooner is kept.
+  // - During a poll, a refresh asks for one follow-up (its request may have left before the change), at the same floor.
+  // - The backoff is only what polls set: a refresh-driven poll that succeeds resets it to 2 s like any other, and one that
+  //   fails doubles it. So a listener that refreshes on every `semon:polled` polls at most once a second, even against a
+  //   server answering 500, and when it stops, the timer resumes at the backoff the failures set.
+  // Ignored before the first model has loaded and after the session ended.
+  const REFRESH_FLOOR = 1000;
+  const floorWait = () => Math.max(0, LIVE.started + REFRESH_FLOOR - performance.now());
+  window.addEventListener("semon:refresh", () => {
+    if (!LIVE.version || LIVE.ended) return;
+    if (LIVE.busy) { LIVE.again = true; return; }
+    const wait = floorWait();
+    if (!LIVE.timer || performance.now() + wait < LIVE.due) schedule(wait);
+  });
   function poll() {
-    LIVE.timer = null; if (LIVE.busy || LIVE.ended || !visible()) return; LIVE.busy = true;
+    LIVE.timer = null; if (LIVE.busy || LIVE.ended || !visible()) return; LIVE.busy = true; LIVE.started = performance.now();
+    let ok = false;
     fetch("/api/model?since=" + enc(LIVE.version ?? ""), { credentials: "same-origin" })
       .then((r) => r.status === 304 ? null : r.ok ? r.json() : Promise.reject(Object.assign(new Error(r.status + " " + r.statusText), { status: r.status })), (e) => Promise.reject(Object.assign(e, { status: 0 })))
       .then((m) => (m ? update(m) : null))
-      .then(() => { LIVE.delay = 2000; }, (err) => {
-        if (err?.status === 403) return ended();
+      .then(() => { LIVE.delay = 2000; ok = true; }, (err) => {
+        if (err?.status === 403) return ended(403);
         LIVE.delay = Math.min(30000, LIVE.delay * 2);
         if (err?.status == null) setTimeout(() => { throw err; }); // not the network: a fault on the page, reported as one
       })
-      .finally(() => { LIVE.busy = false; schedule(LIVE.delay); });
+      .finally(() => {
+        LIVE.busy = false; schedule(LIVE.again ? floorWait() : LIVE.delay); LIVE.again = false;
+        // Once per poll, after the next one is scheduled. ok: the server answered 200 or 304 and the update drew.
+        window.dispatchEvent(new CustomEvent("semon:polled", { detail: { ok } }));
+      });
   }
-  function ended() {
+  // An embedding page can cancel `semon:ended` to draw its own note in place of this one.
+  function ended(status) {
     LIVE.ended = true; clearTimeout(LIVE.timer); LIVE.timer = null; if ($(".livenote")) return;
+    if (!window.dispatchEvent(new CustomEvent("semon:ended", { cancelable: true, detail: { status } }))) return;
     const n = el("p", "livenote", "Session ended: reload with the printed URL"); n.setAttribute("role", "status"); document.body.append(n);
   }
   // A 403 or a dropped connection fails the update (and backs off); anything else skips that one transcript.

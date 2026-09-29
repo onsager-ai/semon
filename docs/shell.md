@@ -8,7 +8,40 @@ Serve the viewer's base stylesheet at `/viewer.css`, the component stylesheet at
 
 The brand mark is an image too. `.mark` paints `/mark.svg` as a CSS mask in the current text colour (`var(--ink)`), so a page that uses `.mark` must serve `semon_sessions::shell::MARK_SVG` at `/mark.svg` as `image/svg+xml`, or the mark is invisible. Serve `semon_sessions::shell::FAVICON_SVG` at `/favicon.svg` as `image/svg+xml` too and link it from the page's `<head>` with `<link rel="icon" href="/favicon.svg" type="image/svg+xml">`; its fill switches between light and dark with the browser's colour scheme. Serve both from the page's own origin: the content security policy allows same-origin assets only, so a `data:` URI or another host will not load.
 
-The Rust API exposes `semon_sessions::shell::{VIEWER_CSS, CSS, JS, MARK_SVG, FAVICON_SVG, FONT_FILES, font}`. An embedding server can serve these bytes directly and use `font(name)` for font requests.
+The Rust API exposes `semon_sessions::shell::{VIEWER_CSS, CSS, JS, MARK_SVG, FAVICON_SVG, FONT_FILES, font}`, and for the viewer page itself `VIEWER_JS`, `PAGE_HTML` and `is_page_path` (see [Embedding the viewer page](#embedding-the-viewer-page)). An embedding server can serve these bytes directly and use `font(name)` for font requests.
+
+## Embedding the viewer page
+
+An embedding server that serves the viewer itself, without a `ViewerCore`, serves `semon_sessions::shell::PAGE_HTML` for every path `semon_sessions::shell::is_page_path` accepts and `semon_sessions::shell::VIEWER_JS` at `/viewer.js`, alongside `/viewer.css`, the fonts, `/mark.svg` and `/favicon.svg` above, and the `/api/model` and `/api/tx` answers.
+
+### Adding the embedding page's own script
+
+The page is served verbatim, and its content security policy is `script-src 'self'`, so an inline script or a second `<script>` tag is not an option. The supported way is a prelude: the embedding server answers `/viewer.js` with its own script followed by `VIEWER_JS`, in one response. The prelude runs before the viewer's code, so it can set `window.semonEmbed` before the viewer reads it and add its event listeners; afterwards it dispatches events whenever it learns something.
+
+- End the prelude with a semicolon and a newline. `VIEWER_JS` starts with `(`, so a prelude ending in an expression would call it.
+- Wrap the prelude in its own function so its names stay out of the page's global scope, and keep it to the events and `window.semonEmbed` below; everything else in the viewer's script is private and may change.
+- Anything the prelude loads must come from the page's own origin (`default-src 'self'`).
+
+```js
+(() => {
+  window.semonEmbed = { account: accountFromServer };
+  window.addEventListener("semon:ended", (e) => { e.preventDefault(); showOwnNote(e.detail.status); });
+  window.addEventListener("semon:polled", (e) => markStale(!e.detail.ok));
+  onServerSaysChanged(() => window.dispatchEvent(new Event("semon:refresh")));
+})();
+```
+
+### Events
+
+All three are on `window`.
+
+- `semon:refresh` (dispatched by the embedding page): ask for a poll of `/api/model` soon. A refresh starts a poll no sooner than one second after the previous poll started; refreshes inside that second merge into one poll at its end, and refreshes while a poll is in flight add one follow-up. A refresh never changes the error backoff (2 s, doubling to 30 s): only a poll's own answer does, so a refresh-driven poll that succeeds resets it and one that fails doubles it. A listener that refreshes on every `semon:polled` therefore polls at most once a second, even against a failing server. Ignored before the first model has loaded and after the session ended.
+- `semon:polled` (from the viewer), `detail: {ok}`: fired once after every poll. `ok` is true when the server answered 200 or 304 and the update drew; false after an error or a 403.
+- `semon:ended` (from the viewer), `detail: {status}`, cancelable: the server answered 403 and polling has stopped. Fired before the viewer draws its "Session ended" note; cancel it to draw your own instead.
+
+### Account menu
+
+`window.semonEmbed.account` gives the account menu when the server's model carries none (a valid `account` in `/api/model` wins). It has the same shape and rules as that `account` field (see `docs/design/session-viewer.md`), and one invalid field or path rejects the whole menu, with a console warning. The viewer reads it each time it takes a new model (at load and on every changed update), keeps a validated copy, and renders it as text only; a getter that throws counts as no menu.
 
 ## Signed-in page skeleton
 

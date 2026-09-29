@@ -21,6 +21,7 @@ import sidebarCheck from "./sidebar.mjs";
 import tokensCheck from "./tokens.mjs";
 import scrollbarsCheck from "./scrollbars.mjs";
 import switchCheck from "./switch.mjs";
+import embedCheck from "./embed.mjs";
 
 const checks = [
   ["home", homeCheck],
@@ -38,6 +39,7 @@ const checks = [
   ["tokens", tokensCheck],
   ["scrollbars", scrollbarsCheck],
   ["switch", switchCheck],
+  ["embed", embedCheck],
 ];
 
 const browser = await launch();
