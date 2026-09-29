@@ -36,6 +36,11 @@ pub struct ServeOptions {
     /// Several machines' homes to serve as one view instead of `sessions`,
     /// each with a stable key. Empty: `sessions` alone.
     pub machines: Vec<(String, Options)>,
+    /// Received machines to follow as well
+    /// ([`ViewerCore::with_received`]). With them, `machines` alone (which
+    /// may be empty) are the fixed machines, and `sessions` isn't served
+    /// unless it is among them.
+    pub received: Option<crate::ReceivedMachines>,
     pub listen: String,
 }
 
@@ -251,16 +256,26 @@ fn watch_tree(path: &Path, suffixes: &[&str], watched: &mut BTreeMap<PathBuf, Op
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        // A symbolic link is neither: it is never followed.
+        if kind.is_dir() {
             watch_tree(&path, suffixes, watched);
-        } else if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| suffixes.iter().any(|suffix| name.ends_with(suffix)))
+        } else if kind.is_file()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| suffixes.iter().any(|suffix| name.ends_with(suffix)))
         {
             watched.insert(path.clone(), stamp(&path));
         }
     }
+}
+
+/// Whether `path` is a regular file, itself: a link to one isn't.
+fn regular(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
 fn node_pids(nodes: &[Node], output: &mut BTreeSet<u32>) {
@@ -388,10 +403,10 @@ pub fn serve(options: ServeOptions) -> io::Result<()> {
         .ok_or_else(|| invalid_input("expected TCP listener"))?
         .port();
     let mut viewer = Viewer {
-        core: if options.machines.is_empty() {
-            ViewerCore::new(options.sessions)
-        } else {
-            ViewerCore::with_machines(options.machines)
+        core: match options.received {
+            Some(received) => ViewerCore::with_received(options.machines, received),
+            None if options.machines.is_empty() => ViewerCore::new(options.sessions),
+            None => ViewerCore::with_machines(options.machines),
         },
         token: random_token()?,
         port,
@@ -550,10 +565,15 @@ impl MachineView {
         }
     }
 
+    /// The homes, cache and facts this view reads.
+    pub(crate) fn options(&self) -> &Options {
+        &self.options
+    }
+
     fn update_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
         let paths: BTreeSet<_> = paths
             .into_iter()
-            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl") && path.is_file())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl") && regular(path))
             .collect();
         self.paths.retain(|_, path| paths.contains(path));
         self.known_paths.retain(|path| paths.contains(path));
@@ -857,7 +877,7 @@ impl MachineView {
             return Ok(None);
         }
         if let Some(path) = self.paths.get(&(harness.into(), id.into()))
-            && path.is_file()
+            && regular(path)
         {
             return Ok(Some(path.clone()));
         }
@@ -3053,5 +3073,614 @@ mod tests {
             core.respond("GET", "/machines/twin~two", "", None).status,
             200
         );
+    }
+
+    /// A receiver's copy of machine `name` under `dir/machines/`: one
+    /// session, `sid`, and a `facts.json` naming `host` when given.
+    fn receive(dir: &Path, name: &str, host: Option<&str>, sid: &str) -> PathBuf {
+        let root = dir.join("machines").join(name);
+        let path = root.join(format!("claude/projects/project/{sid}.jsonl"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let lines = [
+            json!({"type":"user","timestamp":"2026-09-24T00:00:00Z","sessionId":sid,"origin":{"kind":"human"},
+                "message":{"role":"user","content":format!("work on {name}")}}),
+            json!({"type":"assistant","timestamp":"2026-09-24T00:02:00Z","sessionId":sid,
+                "message":{"role":"assistant","content":[{"type":"text","text":format!("done on {name}")}]}}),
+        ];
+        fs::write(&path, lines.map(|line| format!("{line}\n")).concat()).unwrap();
+        if let Some(host) = host {
+            crate::write_facts(
+                &root.join("facts.json"),
+                &crate::Facts {
+                    version: crate::FACTS_VERSION,
+                    hostname: host.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        root
+    }
+
+    /// Everything under `dir`, links not followed: each file's bytes, each
+    /// link's target, each directory.
+    fn contents(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    out.insert(path.clone(), b"/".to_vec());
+                    walk(&path, out);
+                } else if kind.is_file() {
+                    out.insert(path.clone(), fs::read(&path).unwrap());
+                } else {
+                    let target = fs::read_link(&path).unwrap();
+                    out.insert(path, target.to_string_lossy().as_bytes().to_vec());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(dir, &mut out);
+        out
+    }
+
+    /// Where received machines are read from, and the options they're read
+    /// with: `local`'s window, and a cache under `receiver`, outside DIR.
+    fn received(receiver: &Fixture, local: &Options) -> crate::ReceivedMachines {
+        crate::ReceivedMachines::new(
+            receiver.root.join("received"),
+            &Options {
+                cache: receiver.root.join("state/index.json"),
+                ..local.clone()
+            },
+        )
+    }
+
+    /// The model's machines: `machines`, or with one machine `machine`.
+    fn machine_ids(model: &Value) -> Vec<String> {
+        match model["machines"].as_array() {
+            Some(machines) => machines
+                .iter()
+                .map(|machine| machine["id"].as_str().unwrap().to_owned())
+                .collect(),
+            None => vec![model["machine"]["id"].as_str().unwrap().to_owned()],
+        }
+    }
+
+    #[test]
+    fn received_machines_join_this_one_each_tagged_and_answering_for_its_own() {
+        let local = machine("home", "lane-home");
+        let receiver = Fixture::new();
+        let dir = receiver.root.join("received");
+        receive(&dir, "alpha", Some("alpha"), "lane-alpha");
+        receive(&dir, "bravo", None, "lane-bravo");
+        let delta = receive(&dir, "delta", None, "lane-delta");
+        fs::write(delta.join("facts.json"), "{not json").unwrap();
+        fs::write(dir.join("machines/stray"), "not a machine").unwrap();
+        let before = contents(&dir);
+
+        let mut core = ViewerCore::with_received(
+            vec![(String::new(), local.options.clone())],
+            received(&receiver, &local.options),
+        );
+        let reply = core.respond("GET", "/api/model", "", None);
+        assert_eq!(reply.status, 200);
+        let model = body_of(&reply);
+        assert_eq!(machine_ids(&model), ["home", "alpha", "bravo", "delta"]);
+        let machines = model["machines"].as_array().unwrap();
+        assert_eq!(machines[0]["up"], true);
+        assert_eq!(machines[1]["up"], true);
+        // No facts, or facts that can't be read: still shown, offline, by
+        // the directory's name.
+        for machine in &machines[2..] {
+            assert_eq!(machine["up"], false, "{machine}");
+            assert!(machine["last"].is_i64(), "{machine}");
+            assert_eq!(machine["name"], machine["id"]);
+        }
+        for (sid, machine) in [
+            ("lane-home", "home"),
+            ("lane-alpha", "alpha"),
+            ("lane-bravo", "bravo"),
+            ("lane-delta", "delta"),
+        ] {
+            assert_eq!(model["sessions"][sid]["machine"], machine, "{sid}");
+        }
+
+        // The tree has every machine's roots, each with its machine.
+        let tree = body_of(&core.respond("GET", "/api/tree", "", None));
+        let roots: BTreeMap<&str, &str> = tree["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|root| {
+                (
+                    root["id"].as_str().unwrap(),
+                    root["machine"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        for (sid, machine) in [
+            ("lane-home", "home"),
+            ("lane-alpha", "alpha"),
+            ("lane-bravo", "bravo"),
+        ] {
+            assert_eq!(roots.get(sid), Some(&machine), "{roots:?}");
+        }
+
+        // A received machine's transcripts open, from its own files.
+        let tx = core.respond("GET", "/api/tx", "sid=lane-bravo", None);
+        assert_eq!(tx.status, 200);
+        assert!(String::from_utf8_lossy(&tx.body).contains("done on bravo"));
+        let transcript = core.respond(
+            "GET",
+            "/api/transcript",
+            "harness=claude&id=lane-alpha",
+            None,
+        );
+        assert_eq!(transcript.status, 200);
+        assert!(String::from_utf8_lossy(&transcript.body).contains("done on alpha"));
+        for path in ["/s/claude/lane-alpha", "/machines/bravo", "/machines/delta"] {
+            assert_eq!(core.respond("GET", path, "", None).status, 200, "{path}");
+        }
+        assert_eq!(core.respond("GET", "/machines/stray", "", None).status, 404);
+        // DIR is only read.
+        assert_eq!(contents(&dir), before);
+
+        // A machine received while serving is served from the next request.
+        let version = model["version"].as_str().unwrap().to_owned();
+        receive(&dir, "charlie", Some("charlie"), "lane-charlie");
+        let reply = core.respond("GET", "/api/model", &format!("since={version}"), None);
+        assert_eq!(reply.status, 200);
+        let model = body_of(&reply);
+        assert_eq!(
+            machine_ids(&model),
+            ["home", "alpha", "bravo", "charlie", "delta"]
+        );
+        assert_eq!(model["sessions"]["lane-charlie"]["machine"], "charlie");
+        // Facts that arrive later bring the machine online.
+        crate::write_facts(
+            &dir.join("machines/bravo/facts.json"),
+            &crate::Facts {
+                version: crate::FACTS_VERSION,
+                hostname: "bravo-host".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        assert_eq!(
+            machine_ids(&model),
+            ["home", "alpha", "bravo-host", "charlie", "delta"]
+        );
+        assert_eq!(model["machines"][2]["up"], true);
+        assert_eq!(model["sessions"]["lane-bravo"]["machine"], "bravo-host");
+        // A machine removed is no longer served.
+        fs::remove_dir_all(dir.join("machines/charlie")).unwrap();
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        assert_eq!(
+            machine_ids(&model),
+            ["home", "alpha", "bravo-host", "delta"]
+        );
+        assert!(model["sessions"].get("lane-charlie").is_none());
+
+        // --no-local: the received machines only.
+        let mut core = ViewerCore::with_received(Vec::new(), received(&receiver, &local.options));
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        assert_eq!(machine_ids(&model), ["alpha", "bravo-host", "delta"]);
+        assert!(model["sessions"].get("lane-home").is_none());
+    }
+
+    #[test]
+    fn a_received_machine_with_this_machines_hostname_stays_distinct() {
+        let local = machine("twin", "lane-here");
+        let receiver = Fixture::new();
+        receive(
+            &receiver.root.join("received"),
+            "twin",
+            Some("twin"),
+            "lane-there",
+        );
+        let mut core = ViewerCore::with_received(
+            vec![(String::new(), local.options.clone())],
+            received(&receiver, &local.options),
+        );
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        assert_eq!(machine_ids(&model), ["twin", "twin~twin"]);
+        assert_eq!(model["sessions"]["lane-here"]["machine"], "twin");
+        assert_eq!(model["sessions"]["lane-there"]["machine"], "twin~twin");
+        assert_eq!(
+            core.respond("GET", "/machines/twin~twin", "", None).status,
+            200
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_out_of_a_machine_directory_is_ignored() {
+        use std::os::unix::fs::symlink;
+        // A home outside DIR, whose every session is a secret.
+        let outside = machine("outside", "secret-claude");
+        outside.codex("secret-codex", &[]);
+        outside.write(
+            "claude/sessions/77.json",
+            &json!({"pid":77,"sessionId":"secret-pid","procStart":5,"status":"busy"}).to_string(),
+        );
+        let receiver = Fixture::new();
+        let dir = receiver.root.join("received");
+
+        // A transcript, a project directory and a pid record that link out.
+        let alpha = receive(&dir, "alpha", None, "lane-alpha");
+        crate::write_facts(
+            &alpha.join("facts.json"),
+            &crate::Facts {
+                version: crate::FACTS_VERSION,
+                hostname: "alpha".into(),
+                proc_starts: BTreeMap::from([(77, 5)]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let projects = outside.root.join("claude/projects/project");
+        symlink(
+            projects.join("secret-claude.jsonl"),
+            alpha.join("claude/projects/project/leak.jsonl"),
+        )
+        .unwrap();
+        symlink(&projects, alpha.join("claude/projects/linked")).unwrap();
+        fs::create_dir_all(alpha.join("claude/sessions")).unwrap();
+        symlink(
+            outside.root.join("claude/sessions/77.json"),
+            alpha.join("claude/sessions/77.json"),
+        )
+        .unwrap();
+        // Homes behind a link, and facts behind one.
+        let bravo = receive(&dir, "bravo", Some("bravo"), "lane-bravo");
+        symlink(outside.root.join("codex"), bravo.join("codex")).unwrap();
+        let charlie = dir.join("machines/charlie");
+        fs::create_dir_all(&charlie).unwrap();
+        symlink(outside.root.join("claude"), charlie.join("claude")).unwrap();
+        let facts = outside.root.join("facts.json");
+        crate::write_facts(
+            &facts,
+            &crate::Facts {
+                version: crate::FACTS_VERSION,
+                hostname: "outside".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        symlink(&facts, charlie.join("facts.json")).unwrap();
+        // A machine directory that is a link.
+        symlink(&outside.root, dir.join("machines/evil")).unwrap();
+        let before = contents(&dir);
+
+        let mut core = ViewerCore::with_received(Vec::new(), received(&receiver, &outside.options));
+        let reply = core.respond("GET", "/api/model", "", None);
+        assert_eq!(reply.status, 200);
+        let text = String::from_utf8_lossy(&reply.body).into_owned();
+        let model = body_of(&reply);
+        assert_eq!(machine_ids(&model), ["alpha", "bravo", "charlie"]);
+        assert_eq!(model["machines"][2]["up"], false);
+        assert!(model["sessions"].get("lane-alpha").is_some());
+        assert!(model["sessions"].get("lane-bravo").is_some());
+        assert!(
+            !text.contains("secret") && !text.contains("outside"),
+            "{text}"
+        );
+        let tree = core.respond("GET", "/api/tree", "", None);
+        assert_eq!(tree.status, 200);
+        let tree = String::from_utf8_lossy(&tree.body).into_owned();
+        assert!(tree.contains("lane-alpha"));
+        assert!(
+            !tree.contains("secret") && !tree.contains("outside"),
+            "{tree}"
+        );
+        for (path, query) in [
+            ("/api/tx", "sid=secret-claude"),
+            ("/api/transcript", "harness=claude&id=secret-claude"),
+            ("/api/transcript", "harness=claude&id=leak"),
+            ("/api/transcript", "harness=codex&id=secret-codex"),
+            ("/machines/evil", ""),
+        ] {
+            assert_eq!(
+                core.respond("GET", path, query, None).status,
+                404,
+                "{path}?{query}"
+            );
+        }
+        assert_eq!(contents(&dir), before);
+    }
+
+    /// `facts` as machine `name`'s received facts.
+    fn received_facts(dir: &Path, name: &str, facts: crate::Facts) -> PathBuf {
+        let path = dir.join("machines").join(name).join("facts.json");
+        crate::write_facts(&path, &facts).unwrap();
+        path
+    }
+
+    fn facts_of(host: &str) -> crate::Facts {
+        crate::Facts {
+            version: crate::FACTS_VERSION,
+            hostname: host.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_session_this_machine_has_is_left_out_of_a_received_one_not_refused() {
+        // This machine pushed to itself, or its logs were copied.
+        let local = machine("home", "same");
+        let receiver = Fixture::new();
+        let dir = receiver.root.join("received");
+        receive(&dir, "alpha", Some("alpha"), "same");
+        receive(&dir, "alpha", None, "lane-alpha");
+        let mut core = ViewerCore::with_received(
+            vec![(String::new(), local.options.clone())],
+            received(&receiver, &local.options),
+        );
+        let reply = core.respond("GET", "/api/model", "", None);
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        let model = body_of(&reply);
+        assert_eq!(machine_ids(&model), ["home", "alpha"]);
+        assert_eq!(model["sessions"]["same"]["machine"], "home");
+        assert_eq!(model["sessions"]["lane-alpha"]["machine"], "alpha");
+        for turn in model["turns"].as_array().unwrap() {
+            assert!(
+                model["sessions"]
+                    .get(turn["sid"].as_str().unwrap())
+                    .is_some()
+            );
+        }
+        let tx = core.respond("GET", "/api/tx", "sid=same", None);
+        assert_eq!(tx.status, 200);
+        assert!(String::from_utf8_lossy(&tx.body).contains("done on home"));
+        let transcript = core.respond("GET", "/api/transcript", "harness=claude&id=same", None);
+        assert_eq!(transcript.status, 200);
+        assert!(String::from_utf8_lossy(&transcript.body).contains("done on home"));
+        let tree = body_of(&core.respond("GET", "/api/tree", "", None));
+        let same: Vec<&Value> = tree["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|root| root["id"] == "same")
+            .collect();
+        assert_eq!(same.len(), 1);
+        assert_eq!(same[0]["machine"], "home");
+        assert_eq!(core.respond("GET", "/s/claude/same", "", None).status, 200);
+    }
+
+    #[test]
+    fn a_pid_record_over_the_cap_is_absent() {
+        let receiver = Fixture::new();
+        let dir = receiver.root.join("received");
+        let alpha = receive(&dir, "alpha", None, "lane-alpha");
+        received_facts(
+            &dir,
+            "alpha",
+            crate::Facts {
+                proc_starts: BTreeMap::from([(77, 5), (78, 5)]),
+                ..facts_of("alpha")
+            },
+        );
+        let record = |sid: &str, pid: u32| {
+            json!({"pid": pid, "sessionId": sid, "procStart": 5, "status": "busy"}).to_string()
+        };
+        fs::create_dir_all(alpha.join("claude/sessions")).unwrap();
+        fs::write(
+            alpha.join("claude/sessions/77.json"),
+            record("small-pid", 77),
+        )
+        .unwrap();
+        let mut big = record("big-pid", 78);
+        big.push_str(&" ".repeat(crate::RECORD_MAX as usize));
+        fs::write(alpha.join("claude/sessions/78.json"), big).unwrap();
+        let mut core =
+            ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
+        let tree =
+            String::from_utf8_lossy(&core.respond("GET", "/api/tree", "", None).body).into_owned();
+        assert!(tree.contains("small-pid"), "{tree}");
+        assert!(!tree.contains("big-pid"), "{tree}");
+
+        let at_most = receiver.write("record.json", &"x".repeat(1024));
+        assert_eq!(
+            crate::read_regular_at_most(&at_most, 1024).unwrap().len(),
+            1024
+        );
+        assert_eq!(
+            crate::read_regular_at_most(&at_most, 1023)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::FileTooLarge
+        );
+    }
+
+    #[test]
+    fn a_received_hostname_that_cant_name_a_machine_gives_way_to_its_directory() {
+        let receiver = Fixture::new();
+        let dir = receiver.root.join("received");
+        for (name, host) in [
+            ("alpha", "alpha-host"),
+            ("gamma", "bad~host"),
+            ("delta", "has space"),
+            ("echo", "\u{1b}[31mred"),
+            ("foxtrot", ""),
+        ] {
+            receive(&dir, name, None, &format!("lane-{name}"));
+            received_facts(&dir, name, facts_of(host));
+        }
+        let long = "x".repeat(254);
+        receive(&dir, "golf", None, "lane-golf");
+        received_facts(&dir, "golf", facts_of(&long));
+        let mut core =
+            ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        assert_eq!(
+            machine_ids(&model),
+            ["alpha-host", "delta", "echo", "foxtrot", "gamma", "golf"]
+        );
+        assert_eq!(model["sessions"]["lane-gamma"]["machine"], "gamma");
+        let text = serde_json::to_string(&model).unwrap();
+        assert!(!text.contains("bad~host") && !text.contains("\u{1b}"));
+    }
+
+    #[test]
+    fn a_machine_whose_facts_stopped_arriving_is_offline_since_they_were_written() {
+        let receiver = Fixture::new();
+        let dir = receiver.root.join("received");
+        let mut written = BTreeMap::new();
+        for name in ["fresh", "stale"] {
+            let root = receive(&dir, name, None, &format!("lane-{name}"));
+            let facts = received_facts(
+                &dir,
+                name,
+                crate::Facts {
+                    proc_starts: BTreeMap::from([(77, 5)]),
+                    ..facts_of(name)
+                },
+            );
+            fs::create_dir_all(root.join("claude/sessions")).unwrap();
+            fs::write(
+                root.join("claude/sessions/77.json"),
+                json!({"pid": 77, "sessionId": format!("lane-{name}"), "procStart": 5, "status": "busy"})
+                    .to_string(),
+            )
+            .unwrap();
+            written.insert(name, facts);
+        }
+        let ten_minutes_ago = std::time::SystemTime::now() - Duration::from_secs(600);
+        fs::File::options()
+            .append(true)
+            .open(&written["stale"])
+            .unwrap()
+            .set_modified(ten_minutes_ago)
+            .unwrap();
+        let last = i64::try_from(
+            ten_minutes_ago
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let mut core =
+            ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        assert_eq!(machine_ids(&model), ["fresh", "stale"]);
+        assert_eq!(model["machines"][0]["up"], true);
+        assert_eq!(model["machines"][1]["up"], false);
+        assert_eq!(model["machines"][1]["last"], last);
+        // Its process no longer counts as running.
+        let tree = body_of(&core.respond("GET", "/api/tree", "", None));
+        let pid = |sid: &str| {
+            tree["roots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|root| root["id"] == sid)
+                .map(|root| root["pid"].clone())
+                .unwrap()
+        };
+        assert_eq!(pid("lane-fresh"), 77);
+        assert_eq!(pid("lane-stale"), Value::Null);
+        // New facts bring it back.
+        received_facts(
+            &dir,
+            "stale",
+            crate::Facts {
+                proc_starts: BTreeMap::from([(77, 5)]),
+                ..facts_of("stale")
+            },
+        );
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        assert_eq!(model["machines"][1]["up"], true);
+    }
+
+    #[test]
+    fn only_machine_names_are_served() {
+        let (longest, too_long) = ("x".repeat(63), "x".repeat(64));
+        for name in ["a", "alpha-1", "0", longest.as_str()] {
+            assert!(crate::is_machine_name(name), "{name}");
+        }
+        for name in [
+            "",
+            "Alpha",
+            "a.b",
+            "a~b",
+            "a_b",
+            "a b",
+            ".hidden",
+            "..",
+            too_long.as_str(),
+            "é",
+        ] {
+            assert!(!crate::is_machine_name(name), "{name}");
+        }
+        let receiver = Fixture::new();
+        let dir = receiver.root.join("received");
+        for name in ["alpha", "Upper", "a~b", "a.b", ".hidden"] {
+            receive(&dir, name, Some(name), &format!("lane-{}", name.len()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let odd = dir
+                .join("machines")
+                .join(std::ffi::OsStr::from_bytes(b"bad\xff"));
+            fs::create_dir_all(odd.join("claude/projects/project")).unwrap();
+            fs::copy(
+                dir.join("machines/alpha/claude/projects/project/lane-5.jsonl"),
+                odd.join("claude/projects/project/odd.jsonl"),
+            )
+            .unwrap();
+        }
+        let mut core =
+            ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
+        let reply = core.respond("GET", "/api/model", "", None);
+        assert_eq!(reply.status, 200);
+        let model = body_of(&reply);
+        assert_eq!(machine_ids(&model), ["alpha"]);
+        assert_eq!(
+            model["sessions"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|id| !id.contains('@'))
+                .collect::<Vec<_>>(),
+            ["lane-5"]
+        );
+        // One received machine: the tree still names it.
+        let tree = body_of(&core.respond("GET", "/api/tree", "", None));
+        for root in tree["roots"].as_array().unwrap() {
+            assert_eq!(root["machine"], "alpha", "{root}");
+        }
+    }
+
+    #[test]
+    fn machine_ids_stay_unique_whatever_the_hostnames() {
+        let machines = [
+            ("", machine("h", "s0")),
+            ("a", machine("h~3", "s1")),
+            ("b", machine("h~c", "s2")),
+            ("c", machine("h", "s3")),
+        ];
+        let mut core = ViewerCore::with_machines(
+            machines
+                .iter()
+                .map(|(key, fixture)| ((*key).to_owned(), fixture.options.clone()))
+                .collect(),
+        );
+        let reply = core.respond("GET", "/api/model", "", None);
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        assert_eq!(machine_ids(&body_of(&reply)), ["h", "h~3", "h~c", "h~3~2"]);
     }
 }

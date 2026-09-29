@@ -108,6 +108,11 @@ struct SessionsArgs {
     options: semon_sessions::Options,
     /// `--machine DIR`, repeated: several machines' homes in one model.
     machines: Vec<PathBuf>,
+    /// `--machines DIR`: every machine a receiver wrote under
+    /// `DIR/machines/`, followed while serving.
+    received: Option<PathBuf>,
+    /// This machine's own homes too; `--no-local` leaves them out.
+    local: bool,
     json: bool,
     model_json: bool,
     watch: bool,
@@ -184,6 +189,8 @@ fn parse_sessions_args(
     let mut listen = "127.0.0.1:0".to_owned();
     let mut listen_given = false;
     let mut machines = Vec::new();
+    let mut received = None;
+    let mut local = true;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -191,6 +198,8 @@ fn parse_sessions_args(
                 .ok_or_else(|| format!("{argument} requires a value"))
         };
         match argument.as_str() {
+            "--machines" => received = Some(PathBuf::from(value()?)),
+            "--no-local" => local = false,
             "--claude-home" => options.claude_home = value()?.into(),
             "--codex-home" => options.codex_home = value()?.into(),
             "--proc-root" => options.proc_root = value()?.into(),
@@ -229,9 +238,21 @@ fn parse_sessions_args(
     if !machines.is_empty() && !(model_json || serve) {
         return Err("--machine works with --model-json or --serve".into());
     }
+    if received.is_some() {
+        if !machines.is_empty() {
+            return Err("--machine and --machines are exclusive".into());
+        }
+        if watch || !(model_json || serve || json) {
+            return Err("--machines works with --serve, --model-json or --json".into());
+        }
+    } else if !local {
+        return Err("--no-local requires --machines".into());
+    }
     Ok(SessionsArgs {
         options,
         machines,
+        received,
+        local,
         json,
         model_json,
         watch,
@@ -546,16 +567,69 @@ fn run(command: Command) -> Result<(), String> {
 fn print_machines_model(args: &SessionsArgs) -> Result<(), String> {
     let mut core =
         semon_sessions::ViewerCore::with_machines(machine_options(&args.options, &args.machines));
-    let reply = core.respond("GET", "/api/model", "", None);
+    print_route(&mut core, "/api/model", "the model of these machines")
+}
+
+/// Prints one of a core's routes, the viewer's model or its tree, as it
+/// would serve it.
+fn print_route(
+    core: &mut semon_sessions::ViewerCore,
+    path: &str,
+    what: &str,
+) -> Result<(), String> {
+    let reply = core.respond("GET", path, "", None);
     let body = String::from_utf8_lossy(&reply.body);
     if reply.status != 200 {
-        return Err(format!(
-            "the model of these machines: {} {body}",
-            reply.status
-        ));
+        return Err(format!("{what}: {} {body}", reply.status));
     }
     println!("{body}");
     Ok(())
+}
+
+/// `--machines DIR`: this machine's homes (unless `--no-local`), and the
+/// received machines under `DIR/machines/`.
+fn received_machines(
+    args: &SessionsArgs,
+    dir: &Path,
+) -> (
+    Vec<(String, semon_sessions::Options)>,
+    semon_sessions::ReceivedMachines,
+) {
+    if !dir.join("machines").is_dir() {
+        eprintln!(
+            "semon: {} doesn't exist yet; machines are shown as they are received",
+            dir.join("machines").display()
+        );
+    }
+    let local = if args.local {
+        vec![(String::new(), args.options.clone())]
+    } else {
+        Vec::new()
+    };
+    (
+        local,
+        semon_sessions::ReceivedMachines::new(dir, &args.options),
+    )
+}
+
+/// `--machines DIR` with `--model-json` or `--json`: the model, or the tree,
+/// of every machine at once.
+fn print_received(args: &SessionsArgs, dir: &Path) -> Result<(), String> {
+    let (local, received) = received_machines(args, dir);
+    let mut core = semon_sessions::ViewerCore::with_received(local, received);
+    let (path, what) = if args.model_json {
+        ("/api/model", "the model of these machines")
+    } else {
+        ("/api/tree", "the tree of these machines")
+    };
+    let printed = print_route(&mut core, path, what);
+    if core.machines() == 0 {
+        return Err(format!(
+            "no machines: none under {} and --no-local",
+            dir.join("machines").display()
+        ));
+    }
+    printed
 }
 
 /// Each `--machine DIR`'s options.
@@ -581,9 +655,23 @@ fn machine_options(
 }
 
 fn run_sessions(args: SessionsArgs) -> Result<(), String> {
+    if let Some(dir) = args.received.clone() {
+        if !args.serve {
+            return print_received(&args, &dir);
+        }
+        let (machines, received) = received_machines(&args, &dir);
+        return semon_sessions::serve(semon_sessions::ServeOptions {
+            machines,
+            received: Some(received),
+            sessions: args.options,
+            listen: args.listen,
+        })
+        .map_err(|error| error.to_string());
+    }
     if args.serve {
         return semon_sessions::serve(semon_sessions::ServeOptions {
             machines: machine_options(&args.options, &args.machines),
+            received: None,
             sessions: args.options,
             listen: args.listen,
         })
@@ -971,11 +1059,13 @@ fn query_usage() -> String {
 
 fn usage() -> String {
     format!(
-        "Usage: semon sessions [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]]\n\
+        "Usage: semon sessions [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
          Shows a read-only tree of local Claude Code and Codex sessions. --model-json writes the viewer's\n\
          session model (sessions, handoffs, turns, busy) instead; it reads every log, --all/--since trim the output.\n\
          --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
          --machine DIR (repeated, with --model-json or --serve): one view over several machines' homes, DIR/{{claude,codex,proc}}.\n\
+         --machines DIR (with --serve, --model-json or --json): this machine and every machine `semon receive` wrote under\n\
+         DIR/machines/, followed while serving; --no-local leaves this machine out. DIR is only read.\n\
          \n\
          Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [home options as for sessions, and --machine DIR]\n\
          The agent read surface over the same session model: list_sessions, get_session, read_transcript, find,\n\
