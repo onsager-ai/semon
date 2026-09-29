@@ -10,8 +10,10 @@
 //! - `DIR/machines/<name>/facts.json`: the machine's last facts.
 //!
 //! Every answer of 200 is durable: the file's data is on disk (fsync) before
-//! it is given, and an append that fails partway is cut back off, so the
-//! copy is as it was. Appends to one file are serialized; different files
+//! it is given. An append that fails partway is cut back off, so the copy is
+//! as it was. A replace is a rename, so the copy is the old one or the new
+//! one, never a mix; when only the directory's sync after the rename fails,
+//! the answer is 500 with the new copy in place, and it is counted as such. Appends to one file are serialized; different files
 //! proceed in parallel. Each machine's copy may hold at most
 //! [`Receiver::with_max_bytes`] bytes (20 GiB by default): a request that
 //! would grow it past that gets 507. The receiver never follows a symbolic link under `DIR`: it
@@ -103,6 +105,31 @@ impl From<io::Error> for Refusal {
     }
 }
 
+/// A write that failed, and whether it changed the copy anyway.
+#[derive(Debug)]
+struct Failed {
+    refusal: Refusal,
+    changed: bool,
+}
+
+impl From<io::Error> for Failed {
+    fn from(error: io::Error) -> Self {
+        Self {
+            refusal: Refusal::Storage(error),
+            changed: false,
+        }
+    }
+}
+
+impl From<Refusal> for Failed {
+    fn from(refusal: Refusal) -> Self {
+        Self {
+            refusal,
+            changed: false,
+        }
+    }
+}
+
 impl Refusal {
     fn reply(self) -> Reply {
         match self {
@@ -178,18 +205,28 @@ impl Receiver {
     }
 
     /// Runs `write` with `grow` bytes reserved for `machine`: they stay
-    /// counted, and `shrink` bytes are released, only if it succeeds.
+    /// counted, and `shrink` bytes are released, only if it changed the copy.
+    ///
+    /// A write that fails having changed the copy anyway (a replace renamed
+    /// before its directory sync failed) counts as having succeeded.
     fn counted<T>(
         &self,
         machine: &str,
         grow: u64,
         shrink: u64,
-        write: impl FnOnce() -> Result<T, Refusal>,
+        write: impl FnOnce() -> Result<T, Failed>,
     ) -> Result<T, Refusal> {
         self.reserve(machine, grow)?;
-        let result = write();
-        self.release(machine, if result.is_ok() { shrink } else { grow });
-        result
+        match write() {
+            Ok(value) => {
+                self.release(machine, shrink);
+                Ok(value)
+            }
+            Err(Failed { refusal, changed }) => {
+                self.release(machine, if changed { shrink } else { grow });
+                Err(refusal)
+            }
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -363,7 +400,7 @@ impl Receiver {
             machine,
             new.saturating_sub(old),
             old.saturating_sub(new),
-            || Ok(replace_file(&dir, FACTS_FILE, bytes)?),
+            || replace_file(&dir, FACTS_FILE, bytes),
         )?;
         Ok(Reply::new(200, json!({})))
     }
@@ -496,39 +533,66 @@ fn read_head(file: &File) -> io::Result<Vec<u8>> {
 
 /// Writes `bytes` at `offset` (the file's length) and syncs them, and the
 /// directory `created_in` when the file is new. On any failure the file is
-/// cut back to `offset`, so a partial write never stays.
+/// cut back to `offset` and synced, so a partial write never stays; only if
+/// that fails too has the copy changed.
 fn append_durably(
     file: &mut File,
     offset: u64,
     bytes: &[u8],
     created_in: Option<&Path>,
-) -> io::Result<()> {
-    let result = (|| {
+) -> Result<(), Failed> {
+    let result = (|| -> io::Result<()> {
         file.seek(SeekFrom::Start(offset))?;
         write_bytes(file, bytes)?;
-        file.sync_data()?;
+        sync_data(file)?;
         if let Some(parent) = created_in {
             sync_dir(parent)?;
         }
         Ok(())
     })();
-    if result.is_err() {
-        let _ = file.set_len(offset).and_then(|()| file.sync_data());
-    }
-    result
+    let Err(error) = result else {
+        return Ok(());
+    };
+    let restored = file.set_len(offset).and_then(|()| file.sync_data()).is_ok();
+    Err(Failed {
+        refusal: Refusal::Storage(error),
+        changed: !restored,
+    })
+}
+
+/// A failure the tests inject into the next matching step.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fault {
+    /// A write stops after this many bytes and fails.
+    WriteAfter(usize),
+    /// An append's data sync fails.
+    SyncData,
+    /// A directory sync fails.
+    SyncDir,
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Makes the next write stop after this many bytes and fail.
-    static FAIL_WRITE_AFTER: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
+    static FAULT: std::cell::Cell<Option<Fault>> = const { std::cell::Cell::new(None) };
+}
+
+/// The injected fault, once, if it is of the kind `matches` accepts.
+#[cfg(test)]
+fn take_fault(matches: impl Fn(Fault) -> bool) -> Option<Fault> {
+    FAULT.with(|cell| {
+        let fault = cell.get().filter(|fault| matches(*fault))?;
+        cell.set(None);
+        Some(fault)
+    })
 }
 
 fn write_bytes(file: &mut File, bytes: &[u8]) -> io::Result<()> {
     #[cfg(test)]
     {
-        if let Some(limit) = FAIL_WRITE_AFTER.with(std::cell::Cell::take) {
+        if let Some(Fault::WriteAfter(limit)) =
+            take_fault(|fault| matches!(fault, Fault::WriteAfter(_)))
+        {
             file.write_all(&bytes[..limit.min(bytes.len())])?;
             return Err(io::Error::other("an injected write failure"));
         }
@@ -536,8 +600,25 @@ fn write_bytes(file: &mut File, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)
 }
 
+fn sync_data(file: &File) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if take_fault(|fault| fault == Fault::SyncData).is_some() {
+            return Err(io::Error::other("an injected sync failure"));
+        }
+    }
+    file.sync_data()
+}
+
+/// A replace's temporary file, `.<name>.<pid>.<n>.tmp`, which a crash can
+/// leave behind. No input file's name has this shape.
+fn is_leftover(name: &str) -> bool {
+    name.starts_with('.') && name.ends_with(".tmp")
+}
+
 /// Each machine's bytes under `machines`: its `claude/` and `codex/` trees
-/// and its facts, never following a link.
+/// and its facts, never following a link. Leftover temporary files are
+/// removed on the way, and not counted.
 fn measure(machines: &Path) -> HashMap<String, u64> {
     let mut usage = HashMap::new();
     let Ok(entries) = fs::read_dir(machines) else {
@@ -551,6 +632,13 @@ fn measure(machines: &Path) -> HashMap<String, u64> {
             continue;
         }
         let dir = entry.path();
+        // A facts replace's leftovers sit beside facts.json.
+        for inner in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let leftover = inner.file_name().to_str().is_some_and(is_leftover);
+            if leftover && inner.file_type().is_ok_and(|kind| kind.is_file()) {
+                let _ = fs::remove_file(inner.path());
+            }
+        }
         let bytes: u64 = ["claude", "codex", FACTS_FILE]
             .iter()
             .map(|part| tree_size(&dir.join(part), 0))
@@ -565,6 +653,11 @@ fn tree_size(path: &Path, depth: usize) -> u64 {
         return 0;
     };
     if meta.is_file() {
+        let name = path.file_name().and_then(|name| name.to_str());
+        if name.is_some_and(is_leftover) {
+            let _ = fs::remove_file(path);
+            return 0;
+        }
         return meta.len();
     }
     if !meta.is_dir() || depth > 32 {
@@ -579,34 +672,54 @@ fn tree_size(path: &Path, depth: usize) -> u64 {
 }
 
 /// Replaces `parent/name` with `bytes`: a new file beside it, synced, then
-/// renamed over it, and the directory synced.
-fn replace_file(parent: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+/// renamed over it, and the directory synced. A failure before the rename
+/// leaves the copy as it was; one after it (the directory sync) has
+/// changed it.
+fn replace_file(parent: &Path, name: &str, bytes: &[u8]) -> Result<(), Failed> {
     let temporary = parent.join(format!(
         ".{name}.{}.{}.tmp",
         std::process::id(),
         NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
     ));
-    let result = (|| {
+    let mut renamed = false;
+    let result = (|| -> io::Result<()> {
         let mut file = create_new(&temporary)?;
-        file.write_all(bytes)?;
+        write_bytes(&mut file, bytes)?;
         file.sync_all()?;
         fs::rename(&temporary, parent.join(name))?;
+        renamed = true;
         sync_dir(parent)
     })();
-    if result.is_err() {
+    let Err(error) = result else {
+        return Ok(());
+    };
+    if !renamed {
         let _ = fs::remove_file(&temporary);
     }
-    result
+    Err(Failed {
+        refusal: Refusal::Storage(error),
+        changed: renamed,
+    })
 }
 
 /// Makes a directory's entries durable.
-#[cfg(unix)]
 fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if take_fault(|fault| fault == Fault::SyncDir).is_some() {
+            return Err(io::Error::other("an injected directory sync failure"));
+        }
+    }
+    sync_dir_now(dir)
+}
+
+#[cfg(unix)]
+fn sync_dir_now(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> io::Result<()> {
+fn sync_dir_now(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -1002,13 +1115,13 @@ mod tests {
             200
         );
         // The next write stops after two bytes and fails.
-        FAIL_WRITE_AFTER.with(|limit| limit.set(Some(2)));
+        FAULT.with(|fault| fault.set(Some(Fault::WriteAfter(2))));
         let reply = receiver.append("laptop", &append(LOG, b"one\n", 4, b"two\n", false));
         assert_eq!(reply.status, 500, "{reply:?}");
         assert_eq!(copy(&receiver, "laptop", &path), b"one\n", "cut back");
         assert_eq!(receiver.used_bytes("laptop"), 4, "not counted");
         // A new file that fails is left empty, which is length 0.
-        FAIL_WRITE_AFTER.with(|limit| limit.set(Some(1)));
+        FAULT.with(|fault| fault.set(Some(Fault::WriteAfter(1))));
         let reply = receiver.append(
             "laptop",
             &append("projects/-w/new.jsonl", b"", 0, b"x\n", false),
@@ -1022,6 +1135,78 @@ mod tests {
         let reply = receiver.append("laptop", &append(LOG, b"one\n", 4, b"two\n", false));
         assert_eq!(reply, Reply::new(200, json!({"length": 8})));
         assert_eq!(copy(&receiver, "laptop", &path), b"one\ntwo\n");
+    }
+
+    #[test]
+    fn a_failed_sync_is_cut_back_and_a_renamed_replace_counts_as_the_new_copy() {
+        let (_dir, receiver) = receiver();
+        let path = format!("claude/{LOG}");
+        let reply = receiver.append("laptop", &append(LOG, b"", 0, b"one\n", false));
+        assert_eq!(reply.status, 200);
+        // The data sync fails: the append is cut back off.
+        FAULT.with(|fault| fault.set(Some(Fault::SyncData)));
+        let reply = receiver.append("laptop", &append(LOG, b"one\n", 4, b"two\n", false));
+        assert_eq!(reply.status, 500, "{reply:?}");
+        assert_eq!(copy(&receiver, "laptop", &path), b"one\n");
+        assert_eq!(receiver.used_bytes("laptop"), 4);
+        // The directory sync after a replace's rename fails: 500, but the
+        // new copy is in place and counted.
+        FAULT.with(|fault| fault.set(Some(Fault::SyncDir)));
+        let reply = receiver.append("laptop", &append(LOG, b"", 0, b"replaced!\n", true));
+        assert_eq!(reply.status, 500, "{reply:?}");
+        assert_eq!(copy(&receiver, "laptop", &path), b"replaced!\n");
+        assert_eq!(receiver.used_bytes("laptop"), 10);
+        FAULT.with(|fault| fault.set(Some(Fault::SyncDir)));
+        let reply = receiver.append("laptop", &append(LOG, b"", 0, b"x\n", true));
+        assert_eq!(reply.status, 500);
+        assert_eq!(copy(&receiver, "laptop", &path), b"x\n");
+        assert_eq!(receiver.used_bytes("laptop"), 2);
+        // A replace whose write fails before the rename leaves the copy,
+        // its count, and no temporary file.
+        FAULT.with(|fault| fault.set(Some(Fault::WriteAfter(3))));
+        let reply = receiver.append("laptop", &append(LOG, b"", 0, b"longer\n", true));
+        assert_eq!(reply.status, 500);
+        assert_eq!(copy(&receiver, "laptop", &path), b"x\n");
+        assert_eq!(receiver.used_bytes("laptop"), 2);
+        let parent = receiver.machine_dir("laptop").join("claude/projects/-work");
+        let names: Vec<_> = fs::read_dir(parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["lane.jsonl"]);
+    }
+
+    #[test]
+    fn leftover_temporary_files_are_removed_at_start_and_not_counted() {
+        let (dir, receiver) = receiver();
+        assert_eq!(
+            receiver
+                .append("laptop", &append(LOG, b"", 0, b"one\n", false))
+                .status,
+            200
+        );
+        let machine = receiver.machine_dir("laptop");
+        let facts = Facts {
+            version: 2,
+            hostname: "laptop".into(),
+            ..Facts::default()
+        };
+        assert_eq!(receiver.facts("laptop", &facts).status, 200);
+        let facts_bytes = fs::metadata(machine.join(FACTS_FILE)).unwrap().len();
+        // What a crash mid-replace leaves.
+        let leftovers = [
+            machine.join("claude/projects/-work/.lane.jsonl.77.0.tmp"),
+            machine.join(".facts.json.77.1.tmp"),
+        ];
+        for leftover in &leftovers {
+            fs::write(leftover, vec![b'x'; 1000]).unwrap();
+        }
+        let again = Receiver::new(&dir.0);
+        assert_eq!(again.used_bytes("laptop"), 4 + facts_bytes);
+        for leftover in &leftovers {
+            assert!(!leftover.exists(), "{}", leftover.display());
+        }
+        assert_eq!(copy(&again, "laptop", &format!("claude/{LOG}")), b"one\n");
     }
 
     #[test]
