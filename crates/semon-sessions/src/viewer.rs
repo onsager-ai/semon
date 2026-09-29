@@ -443,9 +443,9 @@ type Routed = (u16, &'static str, Vec<u8>, Option<String>);
 /// The viewer's page: every screen's URL serves it.
 const PAGE: &str = crate::shell::PAGE_HTML;
 
-/// The mockup's three families, vendored (D1): Instrument Sans, JetBrains
-/// Mono and Source Serif 4, each in its latin and latin-ext subsets.
-pub(crate) const FONTS: [(&str, &[u8]); 6] = [
+/// The mockup's two families, vendored (D1): Instrument Sans and JetBrains
+/// Mono, each in its latin and latin-ext subsets.
+pub(crate) const FONTS: [(&str, &[u8]); 4] = [
     (
         "instrument-sans-latin",
         include_bytes!("fonts/instrument-sans/latin.woff2"),
@@ -461,14 +461,6 @@ pub(crate) const FONTS: [(&str, &[u8]); 6] = [
     (
         "jetbrains-mono-latin-ext",
         include_bytes!("fonts/jetbrains-mono/latin-ext.woff2"),
-    ),
-    (
-        "source-serif-4-latin",
-        include_bytes!("fonts/source-serif-4/latin.woff2"),
-    ),
-    (
-        "source-serif-4-latin-ext",
-        include_bytes!("fonts/source-serif-4/latin-ext.woff2"),
     ),
 ];
 
@@ -3246,8 +3238,6 @@ mod tests {
             ("/fonts/instrument-sans-latin-ext.woff2", "font/woff2"),
             ("/fonts/jetbrains-mono-latin.woff2", "font/woff2"),
             ("/fonts/jetbrains-mono-latin-ext.woff2", "font/woff2"),
-            ("/fonts/source-serif-4-latin.woff2", "font/woff2"),
-            ("/fonts/source-serif-4-latin-ext.woff2", "font/woff2"),
             ("/api/model", "application/json; charset=utf-8"),
             ("/api/tx?sid=lane", "application/json; charset=utf-8"),
             ("/api/tree", "application/json; charset=utf-8"),
@@ -3269,7 +3259,7 @@ mod tests {
             .skip(1)
             .map(|rest| rest.split('"').next().unwrap())
             .collect();
-        assert_eq!(urls.len(), 14);
+        assert_eq!(urls.len(), 10);
         for url in urls {
             let name = url
                 .strip_prefix("/fonts/")

@@ -145,7 +145,7 @@ The model endpoint returns the mockup's globals verbatim in shape; other shapes 
 
 - **`viewer.html`:** the mockup's `<body>` shell (sidebar, scrim, main and top bar). There is no inline script or style.
 - **`viewer.css`:** the mockup's `<style>` block, unchanged.
-- **Fonts:** the mockup loads Instrument Sans, Source Serif 4 and JetBrains Mono from Google Fonts. The CSP and #47's no-CDN rule forbid that, so the fonts are vendored as woff2 (all three are OFL) and served from the binary with `@font-face`. That's decision D1.
+- **Fonts:** the mockup loaded Instrument Sans, Source Serif 4 and JetBrains Mono from Google Fonts. The CSP and #47's no-CDN rule forbid that, so the fonts are vendored as woff2 (all OFL) and served from the binary with `@font-face`. That's decision D1. Source Serif 4 is no longer used: agent text is set in Instrument Sans (see the Type section of `overhaul.md`), so two families are served.
 - **`viewer.js`:** the mockup's script, with its data block replaced by a loader:
   - `boot()` fetches `/api/model`, assigns the globals and renders.
   - `transcript()` asks for `TX[sid]` on demand, with a `Load earlier` control at the top.
@@ -232,7 +232,7 @@ M1 and M2 can overlap once the `/api/model` shape is frozen. That shape is the m
 
 ## Decisions (the user, 2026-09-26, Semon session)
 
-- **D1, fonts:** bundle. The three OFL fonts are vendored as woff2 in the binary.
+- **D1, fonts:** bundle. The OFL fonts are vendored as woff2 in the binary (two since the serif was dropped).
 - **D2, CI browser job:** add it. Node, Playwright and Chromium run in CI only, for the pixel and behaviour suites.
 - **D3, relays by name:** resolve a unique name only. Otherwise the other end is "not matched".
 - **D4, resume chains:** if M0 finds no exact link, each file is its own session. There is no stitching by timing. M0 found `session_id` and `continued-in`, which are exact, so those chains are one session.

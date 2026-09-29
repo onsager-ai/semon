@@ -11,7 +11,7 @@ import viewerCheck from "./viewer.mjs";
 import turnsCheck from "./turns.mjs";
 import barCheck from "./bar.mjs";
 import mdCheck from "./md.mjs";
-import mdSerifCheck from "./mdserif.mjs";
+import agentFontCheck from "./agentfont.mjs";
 import homeCheck from "./home.mjs";
 import analyticsCheck from "./analytics.mjs";
 import checkReal from "./check-real.mjs";
@@ -38,7 +38,7 @@ const checks = [
   ["viewer", viewerCheck],
   ["analytics", analyticsCheck],
   ["md", mdCheck],
-  ["mdserif", mdSerifCheck],
+  ["agentfont", agentFontCheck],
   ["full", full],
   ["check-real", checkReal],
   ["extras", extras],
