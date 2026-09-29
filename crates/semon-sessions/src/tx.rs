@@ -1639,6 +1639,40 @@ pub(crate) fn page_limited(
     .to_string())
 }
 
+/// `/api/tx?errors=1` lists at most this many failed steps.
+pub(crate) const ERRORS_MAX: usize = 10_000;
+
+/// Where `sid`'s failed steps are, so the viewer can step through them
+/// without loading every page: the slot of each call the transcript's
+/// `errors` counts (the model's errors badge), in transcript order. A page
+/// holding slot `s` is `after=s` (it starts there) or `before=s+1` (it ends
+/// there). `errors` is the whole count; `truncated` says the list stops
+/// short of it, at [`ERRORS_MAX`]. `version` is the model's, for `since=`.
+pub(crate) fn errors(built: &Built, sid: &str) -> io::Result<String> {
+    errors_limited(built, sid, ERRORS_MAX)
+}
+
+/// [`errors`] listing at most `limit` slots.
+pub(crate) fn errors_limited(built: &Built, sid: &str, limit: usize) -> io::Result<String> {
+    let transcript = built.tx.get(sid).ok_or(io::ErrorKind::NotFound)?;
+    let slots: Vec<usize> = transcript
+        .slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.failed_call() == Some(true))
+        .map(|(index, _)| index)
+        .take(limit)
+        .collect();
+    Ok(json!({
+        "version": built.version,
+        "total": transcript.slots.len(),
+        "errors": transcript.errors,
+        "truncated": transcript.errors > slots.len(),
+        "slots": slots,
+    })
+    .to_string())
+}
+
 /// The whole of one part of a session's tool call, by its slot, for "View
 /// all": what it was asked (`in`), what came back (`out`) or its diff.
 pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> io::Result<String> {

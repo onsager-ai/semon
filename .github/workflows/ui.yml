@@ -4,7 +4,8 @@
 #   - the fixture's gaps against the sample mockup's data (tests/ui/gaps.mjs, listed in tests/ui/gaps.json),
 #   - the mockup's check scripts, ported to the served viewer (tests/ui/checks/),
 #   - a pixel comparison of every screen with the mockup (tests/ui/pixels.mjs), at 390×844 light and dark and 1280×860.
-# and, on fixtures of its own that it writes to while the page is open, the live-update check (tests/ui/checks/live.mjs).
+# and, on fixtures of its own that it writes to while the page is open, the live-update check (tests/ui/checks/live.mjs) and
+# the errors-mode check (tests/ui/checks/errnav.mjs).
 # Then the sample pushed to `semon receive` by `semon push`, whose model must equal the machine's own and whose viewer must
 # render it like the local one (tests/ui/pushed-parity.mjs, and a subset of the gaps and pixel checks).
 # Node and Playwright are CI-only tooling in tests/ui/package.json; the Rust build doesn't depend on them. Nothing here
@@ -131,6 +132,14 @@ jobs:
         env:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
         run: node checks/live.mjs
+
+      # "N errors" stepping through failed steps spread over unloaded pages, with a failure written while it is open.
+      - name: Errors mode
+        if: ${{ !cancelled() }}
+        working-directory: tests/ui
+        env:
+          SEMON_BIN: ${{ github.workspace }}/target/debug/semon
+        run: node checks/errnav.mjs
 
       - name: Long-session performance
         if: ${{ !cancelled() }}
