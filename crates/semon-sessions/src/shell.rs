@@ -127,6 +127,34 @@ fn brand_row(name: &str) -> String {
     )
 }
 
+/// The viewer's collapse toggle, after the brand row in its `.sidebar-head`. The viewer's script draws its icon.
+const RAIL_TOGGLE: &str = "<button class=\"ibtn rail-toggle\" id=\"rail-toggle\" type=\"button\" aria-label=\"Collapse sidebar\" aria-expanded=\"true\"></button>";
+
+/// The sidebar's search field, above the navigation. It narrows the Recent list as the reader types.
+const SIDEBAR_SEARCH: &str = "<label class=\"side-search\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\"><path d=\"M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4\"/></svg><input id=\"q\" type=\"search\" placeholder=\"Search\" autocomplete=\"off\"></label>";
+
+/// The Recent heading and the list the viewer's script draws the sessions into, below the navigation.
+const SIDEBAR_RECENT: &str = "<div class=\"side-h\">Recent</div>\n<div class=\"side-list\" id=\"side-list\"><div id=\"lanes\" role=\"tree\" aria-label=\"Recent sessions\"></div></div>";
+
+/// The viewer's own sidebar, for a page that shows the viewer's session list beside its own content (docs/shell.md, "The
+/// viewer's sidebar on an embedding page"): the header with the collapse toggle, the search field, `nav` inside
+/// `<nav id="nav">`, then the Recent heading and its list, each as `viewer.html` has it (a test holds them together).
+/// `name` is escaped here; `nav` is markup, the page's own rows (see [`NavLink::html`]), shown until the viewer's script
+/// draws its navigation in their place. The page adds anything of its own (an account row) after this, inside the
+/// `<aside class="sidebar" id="sidebar">`, marks its `.app` with [`SIDEBAR_ONLY`], and loads `/viewer.js` after
+/// `/shell.js`.
+pub fn session_sidebar(name: &str, nav: &str) -> String {
+    format!(
+        "<div class=\"sidebar-head\">{brand}{RAIL_TOGGLE}</div>\n{SIDEBAR_SEARCH}\n\
+         <nav id=\"nav\" aria-label=\"Pages\">\n{nav}</nav>\n{SIDEBAR_RECENT}",
+        brand = brand_row(name),
+    )
+}
+
+/// The attribute on a page's `.app` that has the viewer's script draw only the sidebar ([`session_sidebar`]) and leave
+/// the page and its top bar to the page. Add ` data-viewer-nav="<key>"`, a [`NAV`] key, to mark that row current.
+pub const SIDEBAR_ONLY: &str = "data-viewer=\"sidebar\"";
+
 /// Text for an HTML attribute value or element content.
 fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -235,6 +263,73 @@ mod tests {
             "viewer.html's .sidebar-head does not start with the exported brand row:\n{row}"
         );
         assert!(super::sidebar_head("Semon").contains(&row));
+    }
+
+    /// Markup with the whitespace between tags dropped, which a browser draws alike.
+    fn squeezed(html: &str) -> String {
+        let mut out = String::with_capacity(html.len());
+        let mut rest = html;
+        while let Some(at) = rest.find('>') {
+            out.push_str(&rest[..=at]);
+            rest = &rest[at + 1..];
+            let text = rest.trim_start();
+            if text.starts_with('<') {
+                rest = text;
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn the_viewer_page_has_the_exported_session_sidebar() {
+        let page = squeezed(super::PAGE_HTML);
+        let head = format!(
+            "<div class=\"sidebar-head\">{}{}</div>",
+            super::brand_row("Semon"),
+            super::RAIL_TOGGLE
+        );
+        let sidebar = squeezed(&super::session_sidebar("Semon", ""));
+        assert!(sidebar.starts_with(&head));
+        // The viewer's page has the same header, search and Recent list around its (empty) navigation.
+        let (before, after) = sidebar
+            .split_once("<nav id=\"nav\" aria-label=\"Pages\"></nav>")
+            .expect("the exported sidebar has its navigation");
+        let viewer = format!("{before}<div id=\"nav\"></div>{after}");
+        assert!(
+            page.contains(&viewer),
+            "viewer.html's sidebar is not the exported one:\n{viewer}"
+        );
+        assert!(
+            super::session_sidebar("<a & \"b\">", "")
+                .contains("<span class=\"brandname\">&lt;a &amp; &quot;b&quot;&gt;</span>")
+        );
+        let nav = super::NAV[3].html(super::NAV[3].path, true);
+        assert!(super::session_sidebar("Semon", &nav).contains(&format!(
+            "<nav id=\"nav\" aria-label=\"Pages\">\n{nav}</nav>"
+        )));
+    }
+
+    /// The embedding page the browser check opens (tests/ui/shell-sidebar.html) is drawn with this API's markup.
+    #[test]
+    fn the_embedding_page_check_uses_the_exported_session_sidebar() {
+        let page = include_str!("../../../tests/ui/shell-sidebar.html");
+        let nav: String = super::NAV
+            .iter()
+            .map(|link| link.html(link.path, link.key == "machines") + "\n")
+            .collect();
+        assert!(
+            page.contains(&super::session_sidebar("Semon", &nav)),
+            "tests/ui/shell-sidebar.html does not draw shell::session_sidebar(\"Semon\", NAV rows):\n{}",
+            super::session_sidebar("Semon", &nav)
+        );
+        assert!(page.contains(&format!(
+            "<div class=\"app\" {} data-viewer-nav=\"machines\">",
+            super::SIDEBAR_ONLY
+        )));
+        assert!(page.contains(
+            "<script src=\"/shell.js\" defer></script>\n<script src=\"/viewer.js\" defer></script>"
+        ));
     }
 
     #[test]

@@ -16,6 +16,9 @@
   let ADMIN = null;
   let ACCOUNT = null;
   let NAV_MACHINES = null;
+  // An embedding page that shows the viewer's sidebar beside its own content marks its .app data-viewer="sidebar" (docs/shell.md):
+  // only the sidebar is drawn there, and every destination opens the viewer's own page.
+  const SIDEBAR_ONLY = document.querySelector(".app")?.dataset.viewer === "sidebar";
   // The harnesses Semon can name. Mirrors crates/semon-sessions/src/harness.rs (a Rust test keeps them equal). Icons identify the source only; the artwork is served unmodified.
   const HARNESSES = { claude: { name: "Claude Code", short: "Claude", icon: { light: "/harness/claude-code.svg", dark: "/harness/claude-code.svg" } }, codex: { name: "Codex", short: "Codex", icon: { light: "/harness/codex-black.svg", dark: "/harness/codex.svg" } }, opencode: { name: "OpenCode", short: "OpenCode", icon: { light: "/harness/opencode-light.svg", dark: "/harness/opencode-dark.svg" } } };
   const HARNESS = Object.fromEntries(Object.entries(HARNESSES).map(([id, h]) => [id, h.name]));
@@ -426,7 +429,7 @@
   }
   function boot() {
     api("/api/model").then((m) => {
-      adopt(m); route = routeOf(location); LIVE.version = m.version; remember(m);
+      adopt(m); LIVE.version = m.version; remember(m); if (SIDEBAR_ONLY) { render(); schedule(2000); return; } route = routeOf(location);
       if (route.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
       try { history.replaceState({ ...route, scrollTop: 0 }, "", urlOf(route) + (route.v === "session" ? location.hash : "")); } catch {}
       const done = () => {
@@ -438,7 +441,7 @@
         schedule(2000); setInterval(ticker, 1000);
       };
       const p = load(route); if (p) p.then(done, done); else done();
-    }, (err) => { $("#page").replaceChildren(el("p", "empty", "Couldn't load the sessions: " + err.message)); });
+    }, (err) => { $(SIDEBAR_ONLY ? "#lanes" : "#page").replaceChildren(el("p", SIDEBAR_ONLY ? "ghead" : "empty", "Couldn't load the sessions: " + err.message)); });
   }
 
   // ---- State & navigation ---------------------------------------------------------------
@@ -537,6 +540,7 @@
   // A deep link to a turn the loaded transcript doesn't hold yet.
   const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
   function go(r, fromHistory) {
+    if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
     stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
@@ -2047,6 +2051,7 @@
     return put;
   }
   function render() {
+    if (SIDEBAR_ONLY) { CHILDREN = null; tick(); rendered = route; renderNav(); renderLanes(); return; } // the embedding page draws its own page and bar
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
     closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
     ordPageState = ordState("page"); tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; clearBox(page, r); page.classList.remove("child-page");
@@ -2516,6 +2521,7 @@
   function refresh(dirty) {
     if (accountOpen && !$(".account-popover")?.isConnected) closeAccountMenu(); // a menu some redraw took away is closed
     if (viewerEl || accountOpen) { LIVE.pending = true; return; } // drawn whole when the sheet or the account menu closes
+    if (SIDEBAR_ONLY) { LIVE.pending = false; render(); return; } // the page is the embedding page's: only the sidebar is redrawn
     LIVE.pending = false; const r = route;
     if (rendered !== r || (r.v === "session" && !SESS[r.id]) || (r.v === "trace" && !SESS[r.sid]) || (r.v === "machine" && !MACHINE[r.id])) return;
     const st = capture(); $("#page").style.paddingBottom = "";
@@ -2739,5 +2745,8 @@
     for (const n of document.querySelectorAll(".nrow[data-id] .act .el")) { const a = SESS[n.closest(".nrow").dataset.id]?.activity; if (a) n.textContent = Math.max(0, a[2]) + "s"; }
   }
 
+  // An embedding page's sidebar: the row its data-viewer-nav names (home, sessions or machines) is current, and the wide page, a
+  // preference for the viewer's own pages, leaves the embedding page's alone. (Before anything is painted: this runs with the script.)
+  if (SIDEBAR_ONLY) { const nav = app.dataset.viewerNav; route = { v: ["home", "sessions", "machines"].includes(nav) ? nav : "" }; wideMode = false; syncLayoutPrefs(); }
   boot();
 })();
