@@ -140,7 +140,7 @@
     }
   },
   "pricing": {
-    "as_of": "2026-09-28",
+    "as_of": "2026-09-29",
     "models": {
       "claude-3-5-haiku": {
         "input": 0.8,
@@ -311,6 +311,13 @@
         "source": "https://platform.claude.com/docs/en/about-claude/pricing"
       },
       "claude-sonnet-5": {
+        "input": 2.0,
+        "output": 10.0,
+        "cache_write": 2.5,
+        "cache_read": 0.2,
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+      },
+      "claude-sonnet-5-5": {
         "input": 2.0,
         "output": 10.0,
         "cache_write": 2.5,
