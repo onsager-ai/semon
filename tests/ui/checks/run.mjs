@@ -12,7 +12,7 @@ import turnsCheck from "./turns.mjs";
 import barCheck from "./bar.mjs";
 import mdCheck from "./md.mjs";
 import homeCheck from "./home.mjs";
-import timelineCheck from "./timeline.mjs";
+import analyticsCheck from "./analytics.mjs";
 import checkReal from "./check-real.mjs";
 import extras from "./extras.mjs";
 import shellCheck from "./shell.mjs";
@@ -22,7 +22,7 @@ const checks = [
   ["bar", barCheck],
   ["turns", turnsCheck],
   ["viewer", viewerCheck],
-  ["timeline", timelineCheck],
+  ["analytics", analyticsCheck],
   ["md", mdCheck],
   ["full", full],
   ["check-real", checkReal],

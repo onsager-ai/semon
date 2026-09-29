@@ -1,170 +1,242 @@
 [
- {
-  "gap": "machine mac-studio: not served",
-  "why": "One machine until M5 (deliberate difference 4): the model serves this machine only, so the sample's other machines don't exist."
- },
- {
-  "gap": "machine buildbox: not served",
-  "why": "One machine until M5 (deliberate difference 4): the model serves this machine only, so the sample's other machines don't exist."
- },
- {
-  "gap": "machine claude.ai cloud: not served",
-  "why": "One machine until M5 (deliberate difference 4): the model serves this machine only, so the sample's other machines don't exist."
- },
- {
-  "gap": "session principal.start: sample 450, served 432",
-  "why": "The sample's own data disagrees: Principal's busy time and Sentinel's relay start at 07:12, its start says 07:30. The model's start is the earliest timestamp."
- },
- {
-  "gap": "session sentinel.machine: sample \"claude.ai cloud\", served \"laptop\"",
-  "why": "One machine until M5: every session runs on this machine."
- },
- {
-  "gap": "session advisor.state: sample \"idle\", served \"done\"",
-  "why": "The model has no idle-after-a-reply state: a live session whose last message is a reply is waiting on you (a result), and one that exited is done. Advisor exited."
- },
- {
-  "gap": "session quill.machine: sample \"mac-studio\", served \"laptop\"",
-  "why": "One machine until M5: every session runs on this machine."
- },
- {
-  "gap": "session q-plan.machine: sample \"mac-studio\", served \"laptop\"",
-  "why": "One machine until M5: every session runs on this machine."
- },
- {
-  "gap": "session q-codex.machine: sample \"mac-studio\", served \"laptop\"",
-  "why": "One machine until M5: every session runs on this machine."
- },
- {
-  "gap": "session atlas.movedFrom: sample \"buildbox\", served undefined",
-  "why": "Moves come from the relay's takeovers.jsonl in M5; the model has none yet."
- },
- {
-  "gap": "session atlas.busy: sample [[630,662],[667,668]], served [[630,668]]",
-  "why": "The model's busy rule merges stamps no more than 5 minutes apart; the sample's gap (11:02 to 11:07) is exactly 5 minutes."
- },
- {
-  "gap": "session deps.kind: sample undefined, served \"Codex run\"",
-  "why": "Every Codex session is a \"Codex run\" in the model, including one you started directly."
- },
- {
-  "gap": "handoff h10.done: sample 585, served undefined",
-  "why": "A relay has no result in the model: the reply comes back as a separate relay, or not at all."
- },
- {
-  "gap": "handoff h10.result: sample \"Not this quarter. Revisit when offline sync (#212) lands and there are real queue sizes.\", served undefined",
-  "why": "A relay has no result in the model: the reply comes back as a separate relay, or not at all."
- },
- {
-  "gap": "handoff h13 (move atlas→atlas at 667): not served",
-  "why": "Moves come from the relay's takeovers.jsonl in M5; the model has none yet."
- },
- {
-  "gap": "handoff h14.ask: sample \"decision\", served \"result\"",
-  "why": "The model's messages to you are questions (AskUserQuestion) and results (a live session's last message); \"decision\" isn't in the logs."
- },
- {
-  "gap": "handoff h15 (ask you→deps at 740): not served",
-  "why": "Your messages are asks only in Claude Code sessions; a Codex run's prompt is its turn's text (a u turn)."
- },
- {
-  "gap": "handoff h18 (toyou result ledger→you at 482): not served",
-  "why": "A result for you exists only while its session is live and waiting; ledger exited, so its last message is a reply."
- },
- {
-  "gap": "tx harbor: sample entry not served: {\"k\":\"think\",\"secs\":9}",
-  "why": "The logs don't record how long thinking took: a thinking block carries its text, and reads \"Thought\"."
- },
- {
-  "gap": "tx harbor: sample entry not served: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"cargo test -p harbor-sync\",\"ok\":false,\"secs\":\"38.2s\",\"in\":\"cd ~/work/harbor && RUST_BACKTRACE=1 cargo test -p harbor-sync -- --test-threads=4\",\"out\":\"running 128 tests\\ntest queue::enqueue_basic ... ok\\ntest queue::enqueue_many ... ok\\ntest queue::dequeue_empty ... ok\\ntest queue::dequeue_order ... ok\\ntest queue::retry_backoff ... FAILED\\ntest queue::retry_limit ... ok\\ntest queue::retry_jitter ... ok\\ntest queue::dead_letter ... ok\\ntest queue::visibility_timeout ... ok\\ntest queue::ack_twice ... ok\\ntest store::open_fresh ... ok\\ntest store::open_existing ... ok\\ntest store::migrate_v3 ... ok\\ntest store::migrate_v4 ... ok\\ntest store::compact ... ok\\ntest store::crash_recovery ... ok\\ntest sync::push_one ... ok\\ntest sync::push_batch ... ok\\ntest sync::pull_since ... ok\\ntest sync::pull_gap ... ok\\ntest sync::conflict_lww ... ok\\ntest sync::conflict_merge ... ok\\ntest sync::tombstone ... ok\\ntest sync::clock_skew ... ok\\ntest net::connect_timeout ... ok\\ntest net::tls_reject ... ok\\ntest net::reconnect ... ok\\ntest net::backpressure ... ok\\n...\\n\\nfailures:\\n\\n---- queue::retry_backoff stdout ----\\nseed 0x5f3a: expected 3 attempts, got 4\\nthread 'queue::retry_backoff' panicked at crates/sync/src/queue.rs:212:9:\\nassertion `left == right` failed\\n  left: 4\\n right: 3\\n\\ntest result: FAILED. 127 passed; 1 failed\"}",
-  "why": "A step's summary is its command; the sample's short summary with a longer Command preview has no source in the logs."
- },
- {
-  "gap": "tx harbor: served entry not in the sample: {\"k\":\"think\",\"text\":\"The backoff test failed on a seed before; check whether the delay overflows.\"}",
-  "why": "The logs don't record how long thinking took: a thinking block carries its text, and reads \"Thought\"."
- },
- {
-  "gap": "tx harbor: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"cargo test -p harbor-sync\",\"ok\":false,\"secs\":\"38.2s\",\"out\":\"running 128 tests\\ntest queue::enqueue_basic ... ok\\ntest queue::enqueue_many ... ok\\ntest queue::dequeue_empty ... ok\\ntest queue::dequeue_order ... ok\\ntest queue::retry_backoff ... FAILED\\ntest queue::retry_limit ... ok\\ntest queue::retry_jitter ... ok\\ntest queue::dead_letter ... ok\\ntest queue::visibility_timeout ... ok\\ntest queue::ack_twice ... ok\\ntest store::open_fresh ... ok\\ntest store::open_existing ... ok\\ntest store::migrate_v3 ... ok\\ntest store::migrate_v4 ... ok\\ntest store::compact ... ok\\ntest store::crash_recovery ... ok\\ntest sync::push_one ... ok\\ntest sync::push_batch ... ok\\ntest sync::pull_since ... ok\\ntest sync::pull_gap ... ok\\ntest sync::conflict_lww ... ok\\ntest sync::conflict_merge ... ok\\ntest sync::tombstone ... ok\\ntest sync::clock_skew ... ok\\ntest net::connect_timeout ... ok\\ntest net::tls_reject ... ok\\ntest net::reconnect ... ok\\ntest net::backpressure ... ok\\n...\\n\\nfailures:\\n\\n---- queue::retry_backoff stdout ----\\nseed 0x5f3a: expected 3 attempts, got 4\\nthread 'queue::retry_backoff' panicked at crates/sync/src/queue.rs:212:9:\\nassertion `left == right` failed\\n  left: 4\\n right: 3\\n\\ntest result: FAILED. 127 passed; 1 failed\"}",
-  "why": "A step's summary is its command; the sample's short summary with a longer Command preview has no source in the logs."
- },
- {
-  "gap": "tx h-codex: sample entry not served: {\"k\":\"think\",\"secs\":18}",
-  "why": "The logs don't record how long thinking took: a thinking block carries its text, and reads \"Thought\"."
- },
- {
-  "gap": "tx h-codex: served entry not in the sample: {\"k\":\"think\",\"text\":\"Flush in queue order and stop at the first Nack; commit only after an Ack.\"}",
-  "why": "The logs don't record how long thinking took: a thinking block carries its text, and reads \"Thought\"."
- },
- {
-  "gap": "tx principal: served entry not in the sample: {\"k\":\"a\",\"text\":\"Sweep done: 2 CI failures (quill is real, ledger was flaky), 5 open PRs, and the SQLite queue move is deferred on Advisor's advice.\"}",
-  "why": "A result waiting for you is the session's last message, so that message is served too, just before its card; the sample draws only the card."
- },
- {
-  "gap": "tx advisor: sample entry not served: {\"k\":\"think\",\"secs\":21}",
-  "why": "The logs don't record how long thinking took: a thinking block carries its text, and reads \"Thought\"."
- },
- {
-  "gap": "tx advisor: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to Principal · 09:45\"}",
-  "why": "A return line is drawn only for a spawned run handing back; Advisor answered a relay."
- },
- {
-  "gap": "tx advisor: served entry not in the sample: {\"k\":\"think\",\"text\":\"Weighing what a SQLite queue buys against a migration that touches every client.\"}",
-  "why": "The logs don't record how long thinking took: a thinking block carries its text, and reads \"Thought\"."
- },
- {
-  "gap": "tx atlas: sample entry not served: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"terraform plan -out staging.plan\",\"ok\":true,\"secs\":\"48s\",\"out\":\"Plan: 3 to add, 2 to change, 0 to destroy.\"}",
-  "why": "Durations under a minute are shown to a tenth of a second (48.0s), as the real-data mockup does."
- },
- {
-  "gap": "tx atlas: sample entry not served: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"terraform apply -auto-approve staging.plan\",\"ok\":false,\"secs\":\"—\",\"out\":\"(no result: buildbox stopped responding while this was running)\",\"unfinished\":true}",
-  "why": "A step with no result shows \"No result recorded\"; the sample's explanation came from the move, which is M5."
- },
- {
-  "gap": "tx atlas: sample entry not served: {\"k\":\"h\",\"id\":\"h13\"}",
-  "why": "Moves come from the relay's takeovers.jsonl in M5; the model has none yet."
- },
- {
-  "gap": "tx atlas: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"terraform plan -out staging.plan\",\"ok\":true,\"secs\":\"48.0s\",\"out\":\"Plan: 3 to add, 2 to change, 0 to destroy.\"}",
-  "why": "Durations under a minute are shown to a tenth of a second (48.0s), as the real-data mockup does."
- },
- {
-  "gap": "tx atlas: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"terraform apply -auto-approve staging.plan\",\"ok\":false,\"secs\":\"—\",\"unfinished\":true}",
-  "why": "A step with no result shows \"No result recorded\"; the sample's explanation came from the move, which is M5."
- },
- {
-  "gap": "tx atlas: served entry not in the sample: {\"k\":\"a\",\"text\":\"One tool call didn't finish before the move: `terraform apply -auto-approve`. Check the real infrastructure state before I resume.\"}",
-  "why": "A result waiting for you is the session's last message, so that message is served too, just before its card; the sample draws only the card."
- },
- {
-  "gap": "tx deps: sample entry not served: {\"k\":\"h\",\"id\":\"h15\"}",
-  "why": "Your messages are asks only in Claude Code sessions; a Codex run's prompt is its turn's text (a u turn)."
- },
- {
-  "gap": "tx deps: served entry not in the sample: {\"k\":\"u\",\"text\":\"Audit meridian's Cargo dependencies for advisories and yanked versions. Report only.\"}",
-  "why": "Your messages are asks only in Claude Code sessions; a Codex run's prompt is its turn's text (a u turn)."
- },
- {
-  "gap": "tx ledger: sample entry not served: {\"k\":\"h\",\"id\":\"h18\"}",
-  "why": "A result for you exists only while its session is live and waiting; ledger exited, so its last message is a reply."
- },
- {
-  "gap": "tx ledger: served entry not in the sample: {\"k\":\"a\",\"text\":\"Rounding now happens once, after summing. 42 tests pass. Committed on `fix/rounding`.\"}",
-  "why": "A result for you exists only while its session is live and waiting; ledger exited, so its last message is a reply."
- },
- {
-  "gap": "session principal.state: sample \"wait\", served \"idle\"",
-  "why": "Results no longer make a session wait (#21)."
- },
- {
-  "gap": "session atlas.state: sample \"wait\", served \"idle\"",
-  "why": "Results no longer make a session wait (#21)."
- },
- {
-  "gap": "handoff h11.status: sample \"wait\", served \"new\"",
-  "why": "Results no longer make a session wait (#21)."
- },
- {
-  "gap": "handoff h14.status: sample \"wait\", served \"new\"",
-  "why": "Results no longer make a session wait (#21)."
- }
+  {
+    "gap": "machine mac-studio: not served",
+    "why": "One machine until M5 (deliberate difference 4): the model serves this machine only, so the sample's other machines don't exist."
+  },
+  {
+    "gap": "machine buildbox: not served",
+    "why": "One machine until M5 (deliberate difference 4): the model serves this machine only, so the sample's other machines don't exist."
+  },
+  {
+    "gap": "machine claude.ai cloud: not served",
+    "why": "One machine until M5 (deliberate difference 4): the model serves this machine only, so the sample's other machines don't exist."
+  },
+  {
+    "gap": "session sentinel.machine: sample \"claude.ai cloud\", served \"laptop\"",
+    "why": "One machine until M5: every session runs on this machine."
+  },
+  {
+    "gap": "session advisor.state: sample \"idle\", served \"done\"",
+    "why": "An exited Advisor session is done in the served model; the sample keeps its separate idle state. Results are new and read or unread per device (#26), rather than making the session wait."
+  },
+  {
+    "gap": "session quill.machine: sample \"mac-studio\", served \"laptop\"",
+    "why": "One machine until M5: every session runs on this machine."
+  },
+  {
+    "gap": "session q-plan.machine: sample \"mac-studio\", served \"laptop\"",
+    "why": "One machine until M5: every session runs on this machine."
+  },
+  {
+    "gap": "session q-codex.machine: sample \"mac-studio\", served \"laptop\"",
+    "why": "One machine until M5: every session runs on this machine."
+  },
+  {
+    "gap": "session atlas.movedFrom: sample \"buildbox\", served undefined",
+    "why": "Moves come from the relay's takeovers.jsonl in M5; the model has none yet."
+  },
+  {
+    "gap": "session atlas.busy: sample [[630,662],[667,668]], served [[630,668]]",
+    "why": "The model's busy rule merges stamps no more than 5 minutes apart; the sample's gap (11:02 to 11:07) is exactly 5 minutes."
+  },
+  {
+    "gap": "session deps.kind: sample undefined, served \"Codex run\"",
+    "why": "Every Codex session is a \"Codex run\" in the model, including one you started directly."
+  },
+  {
+    "gap": "handoff h10.done: sample 585, served undefined",
+    "why": "A relay has no result in the model: the reply comes back as a separate relay, or not at all."
+  },
+  {
+    "gap": "handoff h10.result: sample \"Not this quarter. Revisit when offline sync (#212) lands and there are real queue sizes.\", served undefined",
+    "why": "A relay has no result in the model: the reply comes back as a separate relay, or not at all."
+  },
+  {
+    "gap": "handoff h13 (move atlas→atlas at 667): not served",
+    "why": "Moves come from the relay's takeovers.jsonl in M5; the model has none yet."
+  },
+  {
+    "gap": "handoff h14.ask: sample \"decision\", served \"result\"",
+    "why": "This log contains an assistant reply that the model attributes as a result, not an AskUserQuestion decision prompt."
+  },
+  {
+    "gap": "handoff h15 (ask you→deps at 740): not served",
+    "why": "Your messages are asks only in Claude Code sessions; a Codex run's prompt is its turn's text (a u turn)."
+  },
+  {
+    "gap": "handoff h18 (toyou result ledger→you at 482): not served",
+    "why": "The ledger reply follows a turn with a subagent handback, so the model cannot attribute it to a direct result for you. Results that are identified are served as new and read or unread per device (#26)."
+  },
+  {
+    "gap": "tx harbor: sample entry not served: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"cargo test -p harbor-sync\",\"ok\":false,\"secs\":\"38.2s\",\"in\":\"cd ~/work/harbor && RUST_BACKTRACE=1 cargo test -p harbor-sync -- --test-threads=4\",\"out\":\"running 128 tests\\ntest queue::enqueue_basic ... ok\\ntest queue::enqueue_many ... ok\\ntest queue::dequeue_empty ... ok\\ntest queue::dequeue_order ... ok\\ntest queue::retry_backoff ... FAILED\\ntest queue::retry_limit ... ok\\ntest queue::retry_jitter ... ok\\ntest queue::dead_letter ... ok\\ntest queue::visibility_timeout ... ok\\ntest queue::ack_twice ... ok\\ntest store::open_fresh ... ok\\ntest store::open_existing ... ok\\ntest store::migrate_v3 ... ok\\ntest store::migrate_v4 ... ok\\ntest store::compact ... ok\\ntest store::crash_recovery ... ok\\ntest sync::push_one ... ok\\ntest sync::push_batch ... ok\\ntest sync::pull_since ... ok\\ntest sync::pull_gap ... ok\\ntest sync::conflict_lww ... ok\\ntest sync::conflict_merge ... ok\\ntest sync::tombstone ... ok\\ntest sync::clock_skew ... ok\\ntest net::connect_timeout ... ok\\ntest net::tls_reject ... ok\\ntest net::reconnect ... ok\\ntest net::backpressure ... ok\\n...\\n\\nfailures:\\n\\n---- queue::retry_backoff stdout ----\\nseed 0x5f3a: expected 3 attempts, got 4\\nthread 'queue::retry_backoff' panicked at crates/sync/src/queue.rs:212:9:\\nassertion `left == right` failed\\n  left: 4\\n right: 3\\n\\ntest result: FAILED. 127 passed; 1 failed\"}",
+    "why": "A step's summary is its command; the sample's short summary with a longer Command preview has no source in the logs."
+  },
+  {
+    "gap": "tx harbor: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"cargo test -p harbor-sync\",\"ok\":false,\"secs\":\"38.2s\",\"out\":\"running 128 tests\\ntest queue::enqueue_basic ... ok\\ntest queue::enqueue_many ... ok\\ntest queue::dequeue_empty ... ok\\ntest queue::dequeue_order ... ok\\ntest queue::retry_backoff ... FAILED\\ntest queue::retry_limit ... ok\\ntest queue::retry_jitter ... ok\\ntest queue::dead_letter ... ok\\ntest queue::visibility_timeout ... ok\\ntest queue::ack_twice ... ok\\ntest store::open_fresh ... ok\\ntest store::open_existing ... ok\\ntest store::migrate_v3 ... ok\\ntest store::migrate_v4 ... ok\\ntest store::compact ... ok\\ntest store::crash_recovery ... ok\\ntest sync::push_one ... ok\\ntest sync::push_batch ... ok\\ntest sync::pull_since ... ok\\ntest sync::pull_gap ... ok\\ntest sync::conflict_lww ... ok\\ntest sync::conflict_merge ... ok\\ntest sync::tombstone ... ok\\ntest sync::clock_skew ... ok\\ntest net::connect_timeout ... ok\\ntest net::tls_reject ... ok\\ntest net::reconnect ... ok\\ntest net::backpressure ... ok\\n...\\n\\nfailures:\\n\\n---- queue::retry_backoff stdout ----\\nseed 0x5f3a: expected 3 attempts, got 4\\nthread 'queue::retry_backoff' panicked at crates/sync/src/queue.rs:212:9:\\nassertion `left == right` failed\\n  left: 4\\n right: 3\\n\\ntest result: FAILED. 127 passed; 1 failed\"}",
+    "why": "A step's summary is its command; the sample's short summary with a longer Command preview has no source in the logs."
+  },
+  {
+    "gap": "tx principal: served entry not in the sample: {\"k\":\"a\",\"text\":\"Sweep done: 2 CI failures (quill is real, ledger was flaky), 5 open PRs, and the SQLite queue move is deferred on Advisor's advice.\"}",
+    "why": "The model serves the assistant reply in the transcript as well as its result card; the sample draws only the card. Results are new and read or unread per device (#26)."
+  },
+  {
+    "gap": "tx advisor: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to Principal · 09:45\"}",
+    "why": "A return line is drawn only for a spawned run handing back; Advisor answered a relay."
+  },
+  {
+    "gap": "tx atlas: sample entry not served: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"terraform plan -out staging.plan\",\"ok\":true,\"secs\":\"48s\",\"out\":\"Plan: 3 to add, 2 to change, 0 to destroy.\"}",
+    "why": "Durations under a minute are shown to a tenth of a second (48.0s), as the real-data mockup does."
+  },
+  {
+    "gap": "tx atlas: sample entry not served: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"terraform apply -auto-approve staging.plan\",\"ok\":false,\"secs\":\"—\",\"out\":\"(no result: buildbox stopped responding while this was running)\",\"unfinished\":true}",
+    "why": "A step with no result shows \"No result recorded\"; the sample's explanation came from the move, which is M5."
+  },
+  {
+    "gap": "tx atlas: sample entry not served: {\"k\":\"h\",\"id\":\"h13\"}",
+    "why": "Moves come from the relay's takeovers.jsonl in M5; the model has none yet."
+  },
+  {
+    "gap": "tx atlas: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"terraform plan -out staging.plan\",\"ok\":true,\"secs\":\"48.0s\",\"out\":\"Plan: 3 to add, 2 to change, 0 to destroy.\"}",
+    "why": "Durations under a minute are shown to a tenth of a second (48.0s), as the real-data mockup does."
+  },
+  {
+    "gap": "tx atlas: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"terraform apply -auto-approve staging.plan\",\"ok\":false,\"secs\":\"—\",\"unfinished\":true}",
+    "why": "A step with no result shows \"No result recorded\"; the sample's explanation came from the move, which is M5."
+  },
+  {
+    "gap": "tx atlas: served entry not in the sample: {\"k\":\"a\",\"text\":\"One tool call didn't finish before the move: `terraform apply -auto-approve`. Check the real infrastructure state before I resume.\"}",
+    "why": "The model serves the assistant reply in the transcript as well as its result card; the sample draws only the card. Results are new and read or unread per device (#26)."
+  },
+  {
+    "gap": "tx deps: sample entry not served: {\"k\":\"h\",\"id\":\"h15\"}",
+    "why": "Your messages are asks only in Claude Code sessions; a Codex run's prompt is its turn's text (a u turn)."
+  },
+  {
+    "gap": "tx deps: served entry not in the sample: {\"k\":\"u\",\"text\":\"Audit meridian's Cargo dependencies for advisories and yanked versions. Report only.\"}",
+    "why": "Your messages are asks only in Claude Code sessions; a Codex run's prompt is its turn's text (a u turn)."
+  },
+  {
+    "gap": "tx ledger: sample entry not served: {\"k\":\"h\",\"id\":\"h18\"}",
+    "why": "The ledger reply follows a turn with a subagent handback, so the model cannot attribute it to a direct result for you. Results that are identified are served as new and read or unread per device (#26)."
+  },
+  {
+    "gap": "tx ledger: served entry not in the sample: {\"k\":\"a\",\"text\":\"Rounding now happens once, after summing. 42 tests pass. Committed on `fix/rounding`.\"}",
+    "why": "The ledger reply follows a turn with a subagent handback, so the model cannot attribute it to a direct result for you. Results that are identified are served as new and read or unread per device (#26)."
+  },
+  {
+    "gap": "session principal.state: sample \"wait\", served \"idle\"",
+    "why": "Results have status new, with read or unread tracked per device, and no longer put the session into wait (#26)."
+  },
+  {
+    "gap": "session atlas.state: sample \"wait\", served \"idle\"",
+    "why": "Results have status new, with read or unread tracked per device, and no longer put the session into wait (#26)."
+  },
+  {
+    "gap": "handoff h11.status: sample \"wait\", served \"new\"",
+    "why": "Results have status new, with read or unread tracked per device, and no longer put the session into wait (#26)."
+  },
+  {
+    "gap": "handoff h14.status: sample \"wait\", served \"new\"",
+    "why": "Results have status new, with read or unread tracked per device, and no longer put the session into wait (#26)."
+  },
+  {
+    "gap": "session principal.tokens: sample [0.52,44.1,0.23], served [0.64,43.98,0.23]",
+    "why": "The fixture's Claude usage event records the model-derived input and output split, while the sample stores separate aggregate token totals. API-equivalent cost comes from the served cost record."
+  },
+  {
+    "gap": "session principal.start: sample 450, served -8208",
+    "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  },
+  {
+    "gap": "session sentinel.start: sample 360, served -8280",
+    "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  },
+  {
+    "gap": "session advisor.kind: sample \"Relayed\", served undefined",
+    "why": "Advisor is reached by a peer relay, not a spawned child; the model does not assign a child kind to relay sessions."
+  },
+  {
+    "gap": "session advisor.lane: sample false, served true",
+    "why": "The sample marks Advisor as a peer role, while the model infers a lane for this role session."
+  },
+  {
+    "gap": "session advisor.parent: sample \"principal\", served undefined",
+    "why": "Advisor is reached by a peer relay, not a spawned child; the model only assigns parent links to child sessions."
+  },
+  {
+    "gap": "session advisor.start: sample 550, served -6650",
+    "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  },
+  {
+    "gap": "session harbor.tokens: sample [0.41,38.2,0.19], served [0.61,38,0.19]",
+    "why": "The fixture's Claude usage event records the model-derived input and output split, while the sample stores separate aggregate token totals. API-equivalent cost comes from the served cost record."
+  },
+  {
+    "gap": "session harbor.start: sample 485, served -955",
+    "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  },
+  {
+    "gap": "session h-codex.tokens: sample [0.9,11.4,0.06], served [0.9,11.34,0.06]",
+    "why": "The model's aggregate token total and the sample's manually entered total differ slightly. API-equivalent cost comes from the served cost record."
+  },
+  {
+    "gap": "session h-codex.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":900000,\"output\":60000,\"cacheWrite\":60000,\"cacheRead\":11340000}}, served {\"gpt-6-luna\":{\"input\":900000,\"output\":60000,\"cacheWrite\":0,\"cacheRead\":11340000}}",
+    "why": "Codex logs expose cached input tokens but do not report cache-write tokens separately."
+  },
+  {
+    "gap": "session h-codex.start: sample 712, served -728",
+    "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  },
+  {
+    "gap": "session h-review-codex.activity: sample [\"Read\",\"crates/sync/src/flush.rs\",3], served undefined",
+    "why": "The sample displays a completed Read as current activity; the model reports only pending activity."
+  },
+  {
+    "gap": "session quill.tokens: sample [0.22,19.7,0.11], served [0.3,19.62,0.11]",
+    "why": "The fixture's Claude usage event records the model-derived input and output split, while the sample stores separate aggregate token totals. API-equivalent cost comes from the served cost record."
+  },
+  {
+    "gap": "session quill.start: sample 610, served -3800",
+    "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  },
+  {
+    "gap": "session q-plan.start: sample 640, served -3680",
+    "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  },
+  {
+    "gap": "session q-codex.tokens: sample [0.7,9.8,0.05], served [0.7,9.76,0.05]",
+    "why": "The model's aggregate token total and the sample's manually entered total differ slightly. API-equivalent cost comes from the served cost record."
+  },
+  {
+    "gap": "session q-codex.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":700000,\"output\":50000,\"cacheWrite\":40000,\"cacheRead\":9760000}}, served {\"gpt-6-luna\":{\"input\":700000,\"output\":50000,\"cacheWrite\":0,\"cacheRead\":9760000}}",
+    "why": "Codex logs expose cached input tokens but do not report cache-write tokens separately."
+  },
+  {
+    "gap": "session q-codex.start: sample 680, served -3640",
+    "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  },
+  {
+    "gap": "session atlas.start: sample 630, served -2250",
+    "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  },
+  {
+    "gap": "session deps.tokens: sample [0.3,2.2,0.02], served [0.3,2.17,0.02]",
+    "why": "The model's aggregate token total and the sample's manually entered total differ slightly. API-equivalent cost comes from the served cost record."
+  },
+  {
+    "gap": "session deps.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":300000,\"output\":20000,\"cacheWrite\":30000,\"cacheRead\":2170000}}, served {\"gpt-6-luna\":{\"input\":300000,\"output\":20000,\"cacheWrite\":0,\"cacheRead\":2170000}}",
+    "why": "Codex logs expose cached input tokens but do not report cache-write tokens separately."
+  },
+  {
+    "gap": "session ledger.state: sample \"idle\", served \"done\"",
+    "why": "The model reports an exited session as done; it has no idle-after-exit state."
+  },
+  {
+    "gap": "session ledger.start: sample 430, served -5330",
+    "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  },
+  {
+    "gap": "session l-sub.start: sample 442, served -5318",
+    "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  }
 ]
