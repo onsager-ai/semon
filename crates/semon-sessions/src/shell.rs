@@ -7,6 +7,13 @@
 /// The viewer's base styles, including its tokens, fonts, and chrome.
 pub const VIEWER_CSS: &str = include_str!("viewer.css");
 
+/// The viewer's page script. Embedders serving the viewer without a `ViewerCore` can serve it at `/viewer.js`.
+pub const VIEWER_JS: &str = include_str!("viewer.js");
+
+/// The viewer page returned by its page routes. Embedders serving the viewer without a `ViewerCore` can serve these
+/// bytes for each page route.
+pub const PAGE_HTML: &str = include_str!("viewer.html");
+
 /// Additional components for forms and other server-rendered pages.
 pub const CSS: &str = include_str!("shell.css");
 
@@ -20,6 +27,37 @@ pub const MARK_SVG: &str = include_str!("mark.svg");
 /// The mark as a favicon: its fill follows the browser's light or dark scheme. Serve it at `/favicon.svg` and link it
 /// with `<link rel="icon" href="/favicon.svg" type="image/svg+xml">`.
 pub const FAVICON_SVG: &str = include_str!("favicon.svg");
+
+/// Whether `path` matches a viewer page route.
+///
+/// Embedders serving the viewer without a `ViewerCore` can use this route-shape check. Fixed page paths match exactly;
+/// machine, session and trace routes must have the right number of valid, decoded path segments. Dynamic routes are
+/// matched without checking whether their ids exist in the model.
+pub fn is_page_path(path: &str) -> bool {
+    if matches!(
+        path,
+        "/" | "/timeline" | "/analytics" | "/sessions" | "/machines"
+    ) {
+        return true;
+    }
+    if !(path.starts_with("/machines/") || path.starts_with("/s/") || path.starts_with("/trace/")) {
+        return false;
+    }
+
+    let Some(parts) = path
+        .trim_start_matches('/')
+        .split('/')
+        .map(crate::viewer::decoded)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let parts = parts.iter().map(String::as_str).collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        ["machines", _] | ["s", _, _] | ["trace", _, _, _]
+    )
+}
 
 /// Font file names used by [`VIEWER_CSS`], as served under `/fonts/`.
 pub const FONT_FILES: [&str; 6] = [
