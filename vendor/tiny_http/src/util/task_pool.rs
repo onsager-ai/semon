@@ -69,7 +69,13 @@ impl TaskPool {
     pub fn spawn(&self, code: Box<dyn FnMut() + Send>) {
         let mut queue = self.sharing.todo.lock().unwrap();
 
-        if self.sharing.waiting_tasks.load(Ordering::Acquire) == 0 {
+        // semon patch (onsager-ai/semon#74): a woken worker stays counted in
+        // `waiting_tasks` until it re-takes this lock, so when connections
+        // arrive in a burst the count includes workers already notified for
+        // tasks still queued. Queuing on `waiting_tasks > 0` alone then left
+        // a connection with no thread until another connection closed.
+        // Queue only while there are more waiting workers than queued tasks.
+        if self.sharing.waiting_tasks.load(Ordering::Acquire) <= queue.len() {
             self.add_thread(Some(code));
         } else {
             queue.push_back(code);
