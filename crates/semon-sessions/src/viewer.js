@@ -1291,7 +1291,7 @@
     rows.push(["Session id", s.sessionId ?? s.id], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Last activity", clock(s.last)], ["Input + cache write", tok(s.tokens?.[0] ?? 0)], ["Output", tok(s.tokens?.[2] ?? 0)], ["Cache read", tok(s.tokens?.[1] ?? 0)]);
     for (const [label, value] of rows) { const row = el("div", "detail-row"); row.append(el("span", "detail-label", label), el("span", "detail-value", String(value))); list.append(row); }
     const hasRuns = childSessions(s.id).length > 0;
-    if (hasRuns) list.append(el("div", "reported-cost tokens-own", "This session only; the table below includes its runs."));
+    if (hasRuns) list.append(el("div", "tokens-own", "This session only; the table below includes its runs."));
     const ownCost = costForSession(s.id), allCost = costForSession(s.id, true);
     const costRow = el("div", "detail-row cost-row");
     costRow.append(el("span", "detail-label", "API-equivalent cost"), el("span", "detail-value", hasRuns ? costText(ownCost) + " own · " + costText(allCost) + " incl. runs" : costText(ownCost)));

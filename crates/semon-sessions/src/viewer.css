@@ -867,7 +867,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .session-details .cost-line + .cost-line { border-top: 1px solid var(--line); }
 .session-details .cost-kind { min-width: 0; overflow-wrap: anywhere; }
 .session-details .cost-amount, .session-details .cost-value { position: relative; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-.session-details .no-price, .session-details .reported-cost, .session-details .cost-warning { padding: 8px 0 0; color: var(--muted); font-size: var(--fs-cap); line-height: 1.4; }
+.session-details .no-price, .session-details .reported-cost, .session-details .cost-warning, .session-details .tokens-own { padding: 8px 0 0; color: var(--muted); font-size: var(--fs-cap); line-height: 1.4; }
 @media (min-width: 761px) {
   .app.rail { grid-template-columns: 64px minmax(0, 1fr); }
   .app.rail .sidebar { overflow-x: hidden; }
