@@ -1405,7 +1405,7 @@
     // One choice at a time: everything, only messages, or only steps. "Failed steps" is not a filter: it steps through them (errors mode).
     const MODES = { all: { ...SHOW_ALL }, messages: { messages: true, tools: false, thinking: false }, steps: { messages: false, tools: true, thinking: false } };
     const mode = show.messages && show.tools ? "all" : show.messages ? "messages" : "steps";
-    const chip = (key, label, count) => { const b = btn("chip"); b.dataset.filter = key; b.setAttribute("aria-pressed", String(mode === key)); b.append(el("span", null, label)); if (count != null) b.append(el("span", "n", String(count))); b.addEventListener("click", () => { if (key === "failures") { findOpen = false; find = ""; show = { ...SHOW_ALL }; openErrors(s.id); return; } show = { ...MODES[key] }; render(); }); chips.append(b); };
+    const chip = (key, label, count) => { const b = btn("chip"); b.dataset.filter = key; b.setAttribute("aria-pressed", String(mode === key)); b.append(el("span", null, label)); if (count != null) b.append(el("span", "n", String(count))); b.addEventListener("click", () => { if (key === "failures") { openErrors(s.id); return; } show = { ...MODES[key] }; render(); }); chips.append(b); };
     chip("all", "All"); chip("messages", "Messages"); chip("steps", "Steps"); if (failed) chip("failures", "Failed steps", failed);
     bar.append(chips);
   }
