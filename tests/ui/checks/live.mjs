@@ -99,14 +99,20 @@ function logs(dir) {
 // ---- Pages -------------------------------------------------------------------------------------------------------------
 // The page counts its own /api/model and /api/tx requests in flight (window.__live.max), from the call to its response.
 function counter() {
-  const orig = window.fetch; let n = 0;
-  window.__live = { max: 0, reset() { this.max = n; } };
-  window.fetch = function (...a) { const mine = /\/api\/(model|tx)\b/.test(String(a[0])); if (mine) { n++; window.__live.max = Math.max(window.__live.max, n); } const p = orig.apply(window, a); return mine ? p.finally(() => { n--; }) : p; };
+  const orig = window.fetch; let n = 0, models = 0;
+  window.__live = { max: 0, models: 0, reset() { this.max = n; this.models = models; } };
+  window.fetch = function (...a) {
+    const url = String(a[0]), mine = /\/api\/(model|tx)\b/.test(url), model = /\/api\/model\b/.test(url);
+    if (mine) { n++; window.__live.max = Math.max(window.__live.max, n); }
+    if (model) { models++; window.__live.models = Math.max(window.__live.models, models); }
+    const p = orig.apply(window, a);
+    return mine ? p.finally(() => { n--; if (model) models--; }) : p;
+  };
   window.__sc = () => (matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main"));
   window.__line = () => document.querySelector("#topbar").getBoundingClientRect().bottom;
   window.__left = () => { const s = window.__sc(); return s.scrollHeight - s.scrollTop - s.clientHeight; };
 }
-async function open(browser, srv, where, scheme) {
+async function open(browser, srv, where, scheme, before = null) {
   const ctx = await context(browser, scheme);
   await ctx.addInitScript(counter);
   const page = await ctx.newPage();
@@ -116,6 +122,7 @@ async function open(browser, srv, where, scheme) {
   page.on("response", (r) => { if (r.url().includes("/api/model") && r.status() === 200) page.updates++; });
   page.setDefaultTimeout(8000);
   await page.route(/.*/, (r) => (r.request().url().startsWith(srv.base + "/") ? r.continue() : r.abort()));
+  await before?.(page); // routes added here run before the one above
   await page.goto(srv.base + where + "?t=" + srv.token, { waitUntil: "load" });
   await settled(page);
   if (where.startsWith("/s/")) await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']"));
@@ -429,10 +436,58 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.overflow.ended === 0, name + ": overflow with the note=" + R.overflow.ended);
     await AN.screenshot({ path: path.join(ENV.out, "live-" + name + "-ended.png") });
 
-    R.inFlight = {}; for (const [k, p] of [["harbor", S], ["analytics", AN], ["home", Hm], ["sessions", SP]]) R.inFlight[k] = await p.evaluate(() => window.__live.max);
-    for (const [k, v] of Object.entries(R.inFlight)) r.expect(v <= 1, name + ": " + k + " had " + v + " polls in flight at once");
+    // One poll at a time everywhere. Analytics also asks for its sessions' counts beside the poll, at most four at once.
+    R.inFlight = {}; R.pollsInFlight = {}; for (const [k, p] of [["harbor", S], ["analytics", AN], ["home", Hm], ["sessions", SP]]) { R.inFlight[k] = await p.evaluate(() => window.__live.max); R.pollsInFlight[k] = await p.evaluate(() => window.__live.models); }
+    for (const [k, v] of Object.entries(R.inFlight)) r.expect(v <= (k === "analytics" ? 5 : 1), name + ": " + k + " had " + v + " requests in flight at once");
+    for (const [k, v] of Object.entries(R.pollsInFlight)) r.expect(v <= 1, name + ": " + k + " had " + v + " polls in flight at once");
     R.errors = pages.flatMap((p) => p.errors);
     r.expect(R.errors.length === 0, name + ": page errors: " + R.errors.join(" | "));
+  } finally {
+    for (const p of pages) await p.context().close();
+    srv.proc.kill("SIGTERM");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return R;
+}
+
+// Analytics fills its tool-call counts in from /api/tx, one page a session. Here one session's page answers 500 and the others
+// answer 300 ms late: Analytics still draws at once (eight figures, counts still coming), asks for at most four pages at a time
+// (more than one), counts every other session, marks the failed one, and a later live update still applies.
+async function analyticsCounts(browser, r) {
+  const R = { name: "analytics-counts" }, dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-live-counts-")), now = write(dir);
+  const srv = await serve(dir, now + 10 * 60000), L = logs(dir), atlas = L.lane("atlas"), pages = [];
+  const scheme = { size: "desktop", dark: false };
+  const tool = (page) => page.locator(".analytics-metric").filter({ hasText: "Tool calls" });
+  const total = async (page) => Number((await tool(page).locator(".value").textContent()).replace(/,/g, ""));
+  const ready = (page) => page.waitForFunction(() => document.querySelector(".analytics-metrics")?.dataset.counts === "ready");
+  try {
+    const control = await open(browser, srv, "/analytics", scheme); pages.push(control);
+    await ready(control);
+    R.control = await total(control);
+    let live = 0; R.peak = 0; R.failedAsked = 0;
+    const page = await open(browser, srv, "/analytics", scheme, (p) => p.route((u) => u.pathname === "/api/tx", async (route) => {
+      if (new URL(route.request().url()).searchParams.get("sid") === "harbor") { R.failedAsked++; return route.fulfill({ status: 500, contentType: "text/plain", body: "boom" }); }
+      live++; R.peak = Math.max(R.peak, live); await sleep(300); live--; return route.fallback();
+    }));
+    pages.push(page);
+    R.early = await page.evaluate(() => ({ metrics: document.querySelectorAll(".analytics-metric").length, charts: document.querySelectorAll(".analytics-chart svg").length, counts: document.querySelector(".analytics-metrics")?.dataset.counts }));
+    r.expect(R.early.metrics === 8 && R.early.charts === 2 && R.early.counts === "loading", "analytics-counts: Analytics didn't draw before its counts arrived: " + JSON.stringify(R.early));
+    await ready(page);
+    R.failed = await total(page);
+    R.note = await tool(page).locator(".note").textContent();
+    r.expect(R.failed > 0 && R.failed < R.control, "analytics-counts: with one session's page failing, the others must still be counted: " + JSON.stringify({ control: R.control, failed: R.failed }));
+    r.expect(R.note.includes("— for 1 session"), "analytics-counts: the failed session isn't marked: " + R.note);
+    r.expect(R.failedAsked >= 1 && R.peak >= 2 && R.peak <= 4, "analytics-counts: expected between 2 and 4 count requests at once, got " + R.peak);
+    // A later update: atlas makes one more tool call. The update applies, the figure follows, and Analytics keeps polling.
+    await page.evaluate(() => { document.querySelector(".analytics-metrics").dataset.liveProbe = "before"; });
+    const updates = page.updates; let t0 = Date.now();
+    atlas.append(atlas.tool(at(12, 42), "toolu-counts1", "Bash", { command: "true" }), atlas.result(at(12, 42, 5), "toolu-counts1", "ok"));
+    R.redrawn = await appear(page, t0, () => document.querySelector(".analytics-metrics")?.dataset.liveProbe !== "before", null, 6000);
+    r.expect(R.redrawn != null && page.updates > updates, "analytics-counts: a live update after a failed count did not redraw Analytics");
+    R.grew = await appear(page, t0, (was) => { const v = document.querySelector(".analytics-metric:nth-child(5) .value")?.textContent; return document.querySelector(".analytics-metrics")?.dataset.counts === "ready" && Number((v ?? "").replace(/,/g, "")) === was + 1; }, R.failed, 8000);
+    r.expect(R.grew != null, "analytics-counts: the new tool call never reached the Tool calls figure: " + await tool(page).locator(".value").textContent());
+    R.errors = pages.flatMap((p) => p.errors);
+    r.expect(R.errors.length === 0, "analytics-counts: page errors: " + R.errors.join(" | "));
   } finally {
     for (const p of pages) await p.context().close();
     srv.proc.kill("SIGTERM");
@@ -448,6 +503,8 @@ export default async function liveCheck(browser) {
     try { out[name] = await scheme(browser, name, opts, r, name === "desktop"); }
     catch (e) { r.expect(false, name + ": threw " + (e?.stack ?? e)); }
   }
+  try { out.analyticsCounts = await analyticsCounts(browser, r); }
+  catch (e) { r.expect(false, "analytics-counts: threw " + (e?.stack ?? e)); }
   r.results = out;
   return r.done();
 }

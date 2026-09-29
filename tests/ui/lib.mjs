@@ -67,6 +67,8 @@ export async function goto(page, route, D) {
   const title = titleOf(route, D);
   if (title) await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, title);
   if (route.v === "session") await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']"));
+  // Analytics draws at once and fills its tool-call counts in as they arrive: the screen is done when none is outstanding.
+  if (route.v === "analytics") await page.waitForFunction(() => document.querySelector(".analytics-metrics")?.dataset.counts === "ready");
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(60);
 }
