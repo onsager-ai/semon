@@ -25,6 +25,16 @@
         "wait": 6500
       },
       {
+        "name": "session-jump-rail",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('#rail-toggle').click(); var phone = window.matchMedia('(max-width: 760px)').matches; if (phone) { window.scrollBy(0, -320); } else { document.querySelector('#main').scrollTop -= 320; }",
+        "wait": 6500
+      },
+      {
+        "name": "session-jump-wide",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.wide-toggle').click(); var phone = window.matchMedia('(max-width: 760px)').matches; if (phone) { window.scrollBy(0, -320); } else { document.querySelector('#main').scrollTop -= 320; }",
+        "wait": 6500
+      },
+      {
         "name": "session-details-cost",
         "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('#more-btn').click(); [...document.querySelectorAll('.menu button')].find((b) => b.textContent.includes('Session details')).click(); document.querySelector('.session-details .cost-row').click();"
       },

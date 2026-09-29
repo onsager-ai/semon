@@ -439,6 +439,16 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.overflow.ended === 0, name + ": overflow with the note=" + R.overflow.ended);
     await AN.screenshot({ path: path.join(ENV.out, "live-" + name + "-ended.png") });
 
+    // The same ending on a session page scrolled up, where the jump button shows: the note sits above it, not under it.
+    await S.evaluate(() => { window.__sc().scrollTop = 0; });
+    await S.waitForFunction(() => { const b = document.querySelector(".jump-bottom"); return !!b && !b.hidden; }, null, { timeout: 5000 });
+    await S.route("**/api/model**", (q) => q.fulfill({ status: 403, contentType: "text/plain", body: "Forbidden" }));
+    R.endedOnSession = await appear(S, Date.now(), (t) => document.querySelector(".livenote")?.textContent === t, ENDED, 8000);
+    r.expect(R.endedOnSession != null, name + ": no \"" + ENDED + "\" note on the session page after a 403");
+    R.noteVsJump = await S.evaluate(() => { const n = document.querySelector(".livenote")?.getBoundingClientRect(), j = document.querySelector(".jump-bottom"), b = j?.getBoundingClientRect(); return n && b ? { jumpShown: !j.hidden, noteTop: n.top, noteBottom: n.bottom, noteLeft: n.left, noteRight: n.right, jumpTop: b.top, jumpBottom: b.bottom, jumpLeft: b.left, jumpRight: b.right, overlaps: n.left < b.right && n.right > b.left && n.top < b.bottom && n.bottom > b.top } : null; });
+    r.expect(!!R.noteVsJump && R.noteVsJump.jumpShown && !R.noteVsJump.overlaps, name + ": the ended note and the jump button overlap or the button was gone: " + JSON.stringify(R.noteVsJump));
+    await S.screenshot({ path: path.join(ENV.out, "live-" + name + "-ended-session.png") });
+
     // One poll at a time everywhere.
     R.inFlight = {}; R.pollsInFlight = {}; for (const [k, p] of [["harbor", S], ["analytics", AN], ["home", Hm], ["sessions", SP]]) { R.inFlight[k] = await p.evaluate(() => window.__live.max); R.pollsInFlight[k] = await p.evaluate(() => window.__live.models); }
     for (const [k, v] of Object.entries(R.inFlight)) r.expect(v <= 1, name + ": " + k + " had " + v + " requests in flight at once");

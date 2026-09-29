@@ -131,11 +131,42 @@ async function checkLongSessionOpenEnd(page) {
       overlapsComposer: overlaps(rect, composer),
     };
   });
+  // The button sits over the middle of the transcript column, not the viewport: measured as delivered, and on a desktop
+  // page again in wide mode and in rail mode, where the column moves.
+  const centred = async (mode) => page.evaluate((mode) => {
+    const button = document.querySelector(".jump-bottom"), column = document.querySelector("#page section[aria-label='Transcript']");
+    if (!button || button.hidden || !column) return { mode, visible: false, dx: null };
+    const b = button.getBoundingClientRect(), c = column.getBoundingClientRect();
+    return { mode, visible: true, dx: Math.round((b.left + b.width / 2 - (c.left + c.width / 2)) * 100) / 100, button: Math.round(b.left + b.width / 2), column: Math.round(c.left + c.width / 2), viewport: innerWidth };
+  }, mode);
+  const centring = [await centred("default")];
+  if (!await page.evaluate(() => matchMedia("(max-width: 760px)").matches)) {
+    for (const [mode, toggle] of [["wide", ".wide-toggle"], ["rail", "#rail-toggle"]]) {
+      await page.locator(toggle).click(); await page.waitForTimeout(300);
+      centring.push(await centred(mode));
+      await page.locator(toggle).click(); await page.waitForTimeout(300);
+    }
+  }
   await page.locator(".jump-bottom").click();
   await page.waitForFunction(() => {
     const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
     return sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 1;
   }, null, { timeout: 10_000 });
+  // The tail of the page sits clear of where the button floats. A 36 px button is appended as the very last thing in the
+  // transcript (cancelling the section's grid gap) and the page is scrolled to its end, where the jump button is hidden; the
+  // button is shown for one synchronous read to get its box. The floating button can still cover content mid-scroll: what is
+  // guaranteed is that it never sits over the tail.
+  const tail = await page.evaluate(async () => {
+    const button = document.querySelector(".jump-bottom"), section = document.querySelector("#page section[aria-label='Transcript']");
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    const probe = document.createElement("button"); probe.className = "tail-probe"; probe.textContent = "View all";
+    probe.style.cssText = "display:block;width:100%;height:36px;margin-top:-" + getComputedStyle(section).rowGap;
+    section.append(probe); sc.scrollTop = sc.scrollHeight;
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const wasHidden = button.hidden; button.hidden = false; const b = button.getBoundingClientRect(); button.hidden = wasHidden;
+    const r = probe.getBoundingClientRect(); probe.remove();
+    return { hiddenAtEnd: wasHidden, probeBottom: Math.round(innerHeight - r.bottom), buttonTop: Math.round(innerHeight - b.top), overlaps: r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top };
+  });
   const returnedGap = await page.evaluate(() => {
     const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
     return sc.scrollHeight - sc.scrollTop - sc.clientHeight;
@@ -148,8 +179,10 @@ async function checkLongSessionOpenEnd(page) {
     jumpInsideViewport: raised.inside,
     overlapsBar: raised.overlapsBar,
     overlapsComposer: raised.overlapsComposer,
+    centring,
+    tail,
     returnedGap,
-    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && returnedGap <= 1,
+    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && tail.hiddenAtEnd && !tail.overlaps && tail.probeBottom - tail.buttonTop >= 12 && returnedGap <= 1,
   };
 }
 
