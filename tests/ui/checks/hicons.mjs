@@ -43,8 +43,8 @@ const PLACES = {
   "child-kind": { selector: ".page .child-kind > .hicon", size: 14 },
 };
 
-// Every mark matching `selector`, as the page shows it.
-const read = (page, selector) => page.evaluate((sel) => [...document.querySelectorAll(sel)].map((box) => {
+// Every mark matching `selector` that is drawn (a collapsed sidebar group holds marks that are not), as the page shows it.
+const read = (page, selector) => page.evaluate((sel) => [...document.querySelectorAll(sel)].filter((box) => box.getClientRects().length > 0).map((box) => {
   const imgs = [...box.querySelectorAll(":scope > img")], shown = imgs.filter((i) => getComputedStyle(i).display !== "none");
   const b = box.getBoundingClientRect(), parent = box.parentElement;
   const beside = [...parent.childNodes].filter((n) => n !== box).map((n) => (n.nodeType === 1 && n.matches(".sr-only") ? "" : n.textContent)).join("").trim();

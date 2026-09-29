@@ -10,7 +10,7 @@
 //     no note, and the sheet's text is longer than the preview's.
 //   - injection: on every screen reached (Home, Analytics, Sessions, Machines, every session including the payload lane,
 //     its subagent and the failed send's stub, with every step, card and child run opened, and the details menu, and
-//     every trace), the document holds exactly one script (/viewer.js), no img (but the viewer's own attachment
+//     every trace), the document holds exactly one script (/viewer.js), no img (but the viewer's own harness marks and attachment
 //     thumbnails, on /api/attachment) and no iframe,
 //     nothing set window.__xss, and the payload shows as text. The payload lane and the failed-send stub also load from
 //     their real URLs.
@@ -433,7 +433,7 @@ export default async function (browser) {
   {
     const X = { screens: 0, bad: [], payloadShown: 0 };
     const scan = async (page, where) => {
-      const s = await page.evaluate((text) => ({ scripts: [...document.querySelectorAll("script")].map((x) => x.getAttribute("src")), img: [...document.querySelectorAll("img")].filter((x) => !(x.matches("button.attach > img.attach-img, dialog.image-viewer img.attach-full") && /^\/api\/attachment\?sid=[^&]*&o=\d+&b=\d+&v=[0-9a-f]{16}$/.test(x.getAttribute("src") ?? "") && [...x.attributes].every((a) => ["class", "alt", "src", "width", "height", "loading", "decoding"].includes(a.name)))).length, iframe: document.querySelectorAll("iframe").length, xss: window.__xss ?? null, shown: document.body.textContent.includes(text) }), "<script>window.__xss=2</script>");
+      const s = await page.evaluate((text) => ({ scripts: [...document.querySelectorAll("script")].map((x) => x.getAttribute("src")), img: [...document.querySelectorAll("img")].filter((x) => !(x.matches("span.hicon > img") && /^\/harness\/(claude-code|codex|codex-black|opencode-light|opencode-dark)\.svg$/.test(x.getAttribute("src") ?? "") && x.getAttribute("alt") === "" && [...x.attributes].every((a) => ["class", "alt", "src", "draggable", "loading", "decoding"].includes(a.name))) && !(x.matches("button.attach > img.attach-img, dialog.image-viewer img.attach-full") && /^\/api\/attachment\?sid=[^&]*&o=\d+&b=\d+&v=[0-9a-f]{16}$/.test(x.getAttribute("src") ?? "") && [...x.attributes].every((a) => ["class", "alt", "src", "width", "height", "loading", "decoding"].includes(a.name)))).length, iframe: document.querySelectorAll("iframe").length, xss: window.__xss ?? null, shown: document.body.textContent.includes(text) }), "<script>window.__xss=2</script>");
       X.screens++; if (s.shown) X.payloadShown++;
       if (s.scripts.length !== 1 || s.scripts[0] !== "/viewer.js" || s.img || s.iframe || s.xss !== null) X.bad.push(where + ": " + JSON.stringify(s));
     };
