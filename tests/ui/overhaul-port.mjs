@@ -68,7 +68,7 @@ function convert(D) {
 // has four kinds; the served five-minute and one-hour cache writes are shown together as one.
 const COST_FUNCTION = `  function costForSessions(sessions) {
     const kinds = Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), models = new Map(), unknown = new Set(); let usd = 0, allPriced = true;
-    const KEY = { input: "input", output: "output", cache_read: "cacheRead", cache_write_5m: "cacheWrite", cache_write_1h: "cacheWrite" };
+    const KEY = { input: "input", output: "output", cache_read: "cacheRead", cache_write_5m: "cacheWrite", cache_write_1h: "cacheWrite", web_search: "webSearch" };
     for (const s of sessions) {
       const cost = s.cost ?? {};
       if (cost.usd == null) allPriced = false; else usd += Number(cost.usd) || 0;

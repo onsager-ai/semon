@@ -47,7 +47,7 @@ export default async function detailsCheck(browser) {
         // The amounts share one right edge, and so do the token counts that have text.
       }
       for (const i of [1, 2]) { const edges = m.rows.map((x) => x.cells[i].right).filter((v) => v != null); r.expect(edges.every((v) => Math.abs(v - edges[0]) <= 1), tag + ": column " + i + " does not end at one x: " + JSON.stringify(edges)); }
-      if (name === "web-search") r.expect(m.rows.some((x) => x.kind === "Input" && x.tokens === "2k") && m.rows.some((x) => x.kind === "Output" && x.tokens === "3k") && !m.rows.some((x) => x.kind === "Cache read"), tag + ": the priced token rows are wrong: " + JSON.stringify(m.rows.map((x) => x.kind + " " + x.tokens)));
+      if (name === "web-search") r.expect(m.rows.some((x) => x.kind === "Input" && x.tokens === "2k") && m.rows.some((x) => x.kind === "Output" && x.tokens === "3k") && !m.rows.some((x) => x.kind === "Cache read") && m.rows.some((x) => x.kind === "Web search" && x.tokens === "" && x.cost === "$0.04" && x.cells[1].tip === null), tag + ": the priced rows are wrong (Input 2k, Output 3k, a Web search row with an empty tokens cell and $0.04, no Cache read): " + JSON.stringify(m.rows.map((x) => x.kind + " " + x.tokens)));
       await page.screenshot({ path: path.join(OUT, "menu-" + (extras ? "web-search-" : "") + size + (dark ? "-dark" : "-light") + ".png") });
       await page.close();
     }

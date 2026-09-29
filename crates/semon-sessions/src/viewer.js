@@ -1160,7 +1160,8 @@
   // the session menu. On a session, Find takes over the bar and the filters sit under it as chips.
   const btn = (cls, text, label) => { const b = el("button", cls, text); b.type = "button"; if (label) b.setAttribute("aria-label", label); return b; };
   const kindText = (s) => s.kind ?? HARNESS[s.harness];
-  const modelIdOf = (s) => Object.keys(s.tokens_by_model ?? {})[0] ?? s.model;
+  // The model the session is on (what the line's label abbreviates), so the label, its tip and the Details row name the same one; a session that used more than one is priced per model in the cost section.
+  const modelIdOf = (s) => s.model ?? Object.keys(s.tokens_by_model ?? {})[0];
   function renderTopbar(title, crumb, opts = {}) {
     closeAccountMenu(); // the bar is redrawn from scratch, the desktop menu with it: close it properly, not by detaching it
     const bar = $("#topbar"), s = opts.session; clearBox(bar, route); bar.classList.remove("scrolled"); bar.classList.toggle("session-bar", !!s);
@@ -1471,7 +1472,7 @@
   }
   // 739,682 reads "740k" and 12,422,228 "12.4M"; the exact figure is the cell's tooltip.
   const compactCount = (n) => { if (n < 1e3) return String(n); if (n < 1e4) return +(n / 1e3).toFixed(1) + "k"; const k = Math.round(n / 1e3); return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M"; };
-  const MENU_KINDS = [["Input", ["input"]], ["Output", ["output"]], ["Cache write", ["cache_write_5m", "cache_write_1h"]], ["Cache read", ["cache_read"]]];
+  const MENU_KINDS = [["Input", ["input"]], ["Output", ["output"]], ["Cache write", ["cache_write_5m", "cache_write_1h"]], ["Cache read", ["cache_read"]], ["Web search", ["web_search"]]];
   const COST_NOTE = "What these tokens would cost at API rates. Subscriptions aren't billed this way.";
   function costSection(s, kids, dialog) {
     const sec = el("section", "panel-sec cost"); sec.append(el("h3", null, "Cost"));
@@ -1760,12 +1761,8 @@
     const firsts = turnMode ? new Map((TURNS[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t])) : new Map(); let cur = null;
     // A live update draws only the turns that changed (opts.only, by turn id).
     const owner = opts.only ? new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : null;
-    const closeTurn = () => { flush(); if (!cur) return; const { t, blk, masked } = cur; cur = null; tx = box;
-      // A turn whose only thinking was masked is left with nothing to draw (no header, no rows): it goes, unless its end row still says something.
-      const bare = masked && !blk.querySelector(".tx > *, .turn-h");
-      if (bare && (opts.excludeH && t.last || !turnEnd(t) && !t.out.length)) { blk.remove(); return; }
-      if (bare) blk.querySelector(":scope > .tx")?.remove(); // its end row stays alone, with no empty space above it
-      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .tgroup, .hcard, .thought, .think, .think-pending")) { blk.remove(); return; }
+    const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
+      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .tgroup, .hcard, .thought, .think-pending")) { blk.remove(); return; }
       if (opts.excludeH && t.last) return;
       // The page's footer says the session is working, so the last turn doesn't say it too (its trace button stays).
       const shown = turnEnd(t), end = opts.footer && t.last && shown?.st === "work" ? null : shown; if (!end && !t.out.length) return;

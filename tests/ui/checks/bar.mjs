@@ -108,8 +108,21 @@ export default async function barCheck(browser) {
       // On a phone a session's line of labels is not drawn (its state is the dot before the title); it stays in the page, undisplayed.
       const l2 = bar.querySelector(".meta-line"), l2Shown = !!l2 && getComputedStyle(l2).display !== "none", lead = bar.querySelector(".l1-state");
       const sessionMeta = l2Shown && !!l2.querySelector(".lab.state") && !!bar.querySelector("#more-btn");
-      const crumb = bar.querySelector(".l1 .crumb"), lb = lead?.getBoundingClientRect(), cb = crumb?.getBoundingClientRect();
-      const phoneRow = bar.classList.contains("session-bar") ? { phone, chevW: cb ? Math.round(cb.width) : null, leadW: lb ? Math.round(lb.width) : null, leadH: lb ? Math.round(lb.height) : null, l2Shown, leadShown: !!lead && getComputedStyle(lead).display !== "none", dot: !!lead?.querySelector(".dot[role=img]"), tip: lead?.dataset.tip ?? null, h: Math.round(br.height * 10) / 10 } : null;
+      const crumb = bar.querySelector(".l1 .crumb"), sep = bar.querySelector(".l1 .crumb-sep"), lb = lead?.getBoundingClientRect(), cb = crumb?.getBoundingClientRect();
+      // #112's guards on the phone's one row, read against this bar's classes (the crumb's separator is .crumb-sep here, the line is .meta-line).
+      const phoneRow = bar.classList.contains("session-bar") ? (() => {
+        const btn = bar.querySelector("#lead-btn"), more = bar.querySelector("#more-btn"), l1 = bar.querySelector(".l1"), title = l1.querySelector(".t"), dotEl = lead?.querySelector(".dot");
+        const inside = (n) => { const r = n.getBoundingClientRect(); return r.top >= br.top - 0.5 && r.bottom <= br.bottom + 0.5; }, dr = dotEl?.getBoundingClientRect(), tr = title.getBoundingClientRect(), cr = cb;
+        // What the bar was before: the same page with the phone rules off (the line drawn), a floor on the gain.
+        bar.classList.remove("session-bar"); const oldH = bar.getBoundingClientRect().height; bar.classList.add("session-bar");
+        return { phone, h: Math.round(br.height * 10) / 10, oldH, l2Shown, leadShown: !!lead && getComputedStyle(lead).display !== "none",
+          oneRow: !!btn && !!more && [btn, more, title].every((n) => inside(n)) && Math.max(btn.getBoundingClientRect().top, more.getBoundingClientRect().top, tr.top) < Math.min(btn.getBoundingClientRect().bottom, more.getBoundingClientRect().bottom, tr.bottom),
+          dot: !!dotEl && dotEl.getAttribute("role") === "img", dotState: dotEl ? [...dotEl.classList].find((c) => c !== "dot") : null, dotName: dotEl?.getAttribute("aria-label") ?? null, dotVisible: !!dr && dr.width > 0,
+          dotBeforeTitle: !!dr && dr.right <= tr.left + 0.5, dotAfterCrumb: !cr || (!!dr && dr.left >= cr.right - 0.5),
+          tip: /^Status: .*\d+ turns?$/.test(lead?.dataset.tip ?? ""), tipText: lead?.dataset.tip ?? null,
+          crumbW: cr ? Math.round(cr.width) : null, crumbH: cr ? Math.round(cr.height) : null, leadW: lb ? Math.round(lb.width) : null, leadH: lb ? Math.round(lb.height) : null,
+          leadOverlapsCrumb: !!cr && !!lb && lb.left < cr.right - 0.5, sepShown: !!sep && getComputedStyle(sep).display !== "none", titleW: Math.round(tr.width) };
+      })() : null;
       // A segmented control's buttons are drawn 24px tall on purpose; their tap target is the ::before box, so that is what counts here.
       const segmentHit = (x) => { if (!x.closest(".analytics-range")) return null; const p = getComputedStyle(x, "::before"), h = x.getBoundingClientRect().height, top = parseFloat(p.top), bottom = parseFloat(p.bottom); return Number.isFinite(top) && Number.isFinite(bottom) ? h - top - bottom : h; };
       // Every control in the bar is at least the tap size (36 px, 44 on a phone). A crumb is link text with a padded hit area.
@@ -135,8 +148,22 @@ export default async function barCheck(browser) {
       if (c.l2) { R.l2Pages++; if (!c.l2.oneLine) R.l2NotOneLine.push(name + ":" + c.l2.h); if (c.l2.overflows) R.l2Overflowing++; if (c.l2.sessionMeta) R.sessionMetaPages++; }
       const pr = c.phoneRow;
       if (pr) {
-        if (pr.phone) { if (pr.l2Shown || !pr.leadShown || !pr.dot || !/^Status: /.test(pr.tip ?? "") || pr.h > 57.5 || pr.leadW < 32 || pr.leadH < 32 || (pr.chevW != null && (pr.chevW < 44 || pr.chevW > 48))) R.metaFailures.push(name + ": a phone's session bar is not one row (line hidden, state dot at least 32 px before the title with its tip, a 44-48 px back chevron, at most 57.5 px): " + JSON.stringify(pr)); }
-        else if (pr.leadShown || !pr.l2Shown) R.metaFailures.push(name + ": a desktop's session bar shows the phone's state dot or hides its line: " + JSON.stringify(pr));
+        if (pr.phone) {
+          const bad = [];
+          if (pr.h > 57.5) bad.push("height " + pr.h);
+          if (pr.oldH < pr.h + 10) bad.push("no shorter than before: " + pr.oldH + " -> " + pr.h);
+          if (!pr.oneRow) bad.push("not one row");
+          if (pr.l2Shown) bad.push("the line of labels is displayed");
+          if (!pr.leadShown || !pr.dot || !pr.dotVisible) bad.push("no state dot");
+          if (!pr.dotName || stateWord[pr.dotState] !== pr.dotName) bad.push("the dot's name " + pr.dotName + " for its state " + pr.dotState);
+          if (!pr.dotBeforeTitle || !pr.dotAfterCrumb) bad.push("the dot is not between the chevron and the title");
+          if (!pr.tip) bad.push("the dot's tip is " + JSON.stringify(pr.tipText) + ", not \"Status: … N turns\"");
+          if (pr.crumbW != null && (pr.crumbW < 44 || pr.crumbW > 48 || pr.sepShown)) bad.push("the chevron is " + pr.crumbW + " px wide (44 to 48) or shows its separator " + pr.sepShown);
+          if (pr.crumbH != null && pr.crumbH < 35.5) bad.push("the chevron's tap height " + pr.crumbH);
+          if (pr.leadW < 32 || pr.leadH < 32 || pr.leadOverlapsCrumb) bad.push("the dot's tap area " + pr.leadW + "x" + pr.leadH + (pr.leadOverlapsCrumb ? ", overlapping the chevron" : ""));
+          if (bad.length) R.metaFailures.push(name + ": a phone's session bar: " + bad.join(", "));
+          R.phoneBars = (R.phoneBars ?? 0) + 1;
+        } else if (pr.leadShown || !pr.l2Shown) R.metaFailures.push(name + ": a desktop's session bar shows the phone's state dot or hides its line: " + JSON.stringify(pr));
       }
       const mf = c.metaFacts;
       if (mf) {
@@ -591,7 +618,7 @@ export default async function barCheck(browser) {
     r.expect(m.smallControls.length === 0, m.mode + ": bar controls under the tap size (36px, 44px on a phone): " + JSON.stringify(m.smallControls));
     r.expect(m.l2NotOneLine.length === 0, m.mode + ": the label line is not one line: " + JSON.stringify(m.l2NotOneLine));
     r.expect(m.l2Overflowing === 0, m.mode + ": the label line overflows: count=" + m.l2Overflowing);
-    r.expect((m.mode !== "desktop" || m.sessionMetaPages > 0) && m.metaFailures.length === 0, m.mode + ": session label line (state first with its dot, labels in order, none a control, Find and the menu only): " + JSON.stringify(m.metaFailures.slice(0, 6)));
+    r.expect((m.mode !== "desktop" ? (m.phoneBars ?? 0) > 0 : m.sessionMetaPages > 0) && m.metaFailures.length === 0, m.mode + ": session label line (state first with its dot, labels in order, none a control, Find and the menu only): " + JSON.stringify(m.metaFailures.slice(0, 6)));
     if (m.mode !== "desktop") {
       const sl = m.startedLine;
       r.expect(!!sl, m.mode + ": no session showed a Started line to check");
@@ -654,6 +681,8 @@ export default async function barCheck(browser) {
         r.expect(d.title === facts.name && /^Working|^Needs you|^Idle|^Done|^Failed/.test(d.sub), m.mode + ": the menu's header is not the session's name and its state: " + JSON.stringify({ title: d.title, sub: d.sub }));
         r.expect(d.actions.some((a) => a.startsWith("Copy resume command")) && (facts.harness !== "claude" || d.actions.some((a) => a.startsWith("Open in claude.ai"))) && d.wideSwitch === !m.mode.startsWith("phone"), m.mode + ": the menu's actions are wrong (copy, open in claude.ai for Claude, and the wide switch on desktop only): " + JSON.stringify({ actions: d.actions, wide: d.wideSwitch }));
         r.expect(["Harness", "Model", "Machine", "Started", "Duration", "Session id"].every((k) => d.labels.includes(k)) && (d.labels.includes("Branch") || d.labels.includes("Worktree")), m.mode + ": the menu omitted a detail: " + JSON.stringify(d.labels));
+        // What the phone bar's line held that has no other place: Status, Tool calls, the Kind of a child, and the Errors of a session that has them (#112's guard, plus Errors).
+        { const failedN = (D.TX[facts.id] ?? []).filter((e) => e.k === "tool" && e.ok === false).length, want = ["Status", "Tool calls", ...(facts.kind ? ["Kind"] : []), ...(failedN ? ["Errors"] : [])], missing = want.filter((x) => !d.labels.includes(x)); r.expect(missing.length === 0, m.mode + ": the menu's Details omits what the phone bar's line held: " + JSON.stringify({ missing, labels: d.labels })); }
         if (facts.cwd) r.expect(d.labels.includes("Directory"), m.mode + ": the menu omitted the directory the model has");
         if (facts.pid != null && facts.pid !== "") r.expect(d.labels.includes("Process id"), m.mode + ": the menu omitted the process id the model has");
         r.expect(/^\$|^—$/.test(d.costBig) && d.costCap.startsWith("this session"), m.mode + ": the menu's cost figure or caption is wrong: " + JSON.stringify({ big: d.costBig, cap: d.costCap }));

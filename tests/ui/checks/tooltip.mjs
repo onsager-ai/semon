@@ -302,7 +302,7 @@ export default async function tooltipCheck(browser) {
           const state0 = await box(page, await stat.first().evaluate((n) => { n.dataset.probe = "touch"; return '#topbar [data-probe="touch"]'; })), blank = [4, 400];
           await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
           const opened = await state(page);
-          r.expect(opened.open && opened.text.length > 0, tag + ": tapping a label did not show its tooltip " + JSON.stringify(opened));
+          r.expect(opened.open && /^Status: /.test(opened.text ?? ""), tag + ": tapping the state dot did not show its Status tooltip " + JSON.stringify(opened));
           await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
           r.expect(!(await state(page)).open, tag + ": tapping the label again did not close its tooltip");
           await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
@@ -416,7 +416,7 @@ export default async function tooltipCheck(browser) {
       // The dialog's own tipped element: the first one the menu holds (a run's state dot).
       await page.evaluate(() => document.querySelector("dialog.session-menu [data-tip]")?.scrollIntoView({ block: "center" })); await page.waitForTimeout(150);
       const shownAt = await hover(page, "dialog.session-menu [data-tip]", 1500), open = await state(page);
-      r.expect(shownAt != null && (open.text ?? "").length > 0, tag + ": the tooltip did not open on a tipped element inside the modal dialog " + JSON.stringify(open.text));
+      r.expect(shownAt != null && /^(Working|Needs you|Idle|Done|Failed)$/.test(open.text ?? ""), tag + ": the tooltip did not open on a run's state dot inside the modal dialog with its state word " + JSON.stringify(open.text));
       await page.keyboard.press("Escape"); await page.waitForTimeout(150);
       const first = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-menu[open]"), tip: !document.getElementById("sh-tooltip").hidden }));
       r.expect(first.dialog && !first.tip, tag + ": the first Esc should close only the tooltip " + JSON.stringify(first));

@@ -1234,7 +1234,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     if (anchor) anchor.setAttribute("aria-expanded", "true");
     show(); if (scrollTo) body.querySelector(scrollTo)?.scrollIntoView({ block: "nearest" }); return d;
   }
-  const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cacheWrite", "Cache write"], ["cacheRead", "Cache read"]];
+  const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cacheWrite", "Cache write"], ["cacheRead", "Cache read"], ["webSearch", "Web search"]];
   const asMoney = (usd) => "$" + usd.toFixed(2);
   function costForSessions(sessions) {
     const kinds = Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), models = new Map(), unknown = new Set(); let usd = 0;
@@ -1243,7 +1243,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
       if (!price) { unknown.add(modelId); current.priced = false; }
       for (const [key] of TOKEN_KINDS) {
         const tokens = Number(usage[key]) || 0; current.kinds[key].tokens += tokens; kinds[key].tokens += tokens;
-        if (price) { const amount = tokens * price[key] / 1e6; current.kinds[key].usd += amount; kinds[key].usd += amount; current.usd += amount; usd += amount; }
+        if (price) { const amount = tokens * (price[key] ?? 0) / 1e6; current.kinds[key].usd += amount; kinds[key].usd += amount; current.usd += amount; usd += amount; }
       }
       models.set(modelId, current);
     }
