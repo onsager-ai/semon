@@ -924,6 +924,8 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   const thoughtText = (e) => String(e.text ?? e.summary ?? "").trim();
   const isPendingThought = (e) => !!(e.pending || e.status === "thinking");
   // A masked thought (redacted, encrypted, or an empty summary) has nothing to read, so it isn't drawn at all.
+  // 739,682 reads "740k" and 12,422,228 "12.4M"; the exact figure is the cell's tooltip.
+  const compactCount = (n) => { if (n < 1e3) return String(n); if (n < 1e4) return +(n / 1e3).toFixed(1) + "k"; const k = Math.round(n / 1e3); return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M"; };
   const isMaskedThought = (e) => isThought(e) && !isPendingThought(e) && !thoughtText(e);
   function entryTimeMs(e) { if (e?.k === "h") return Number.isFinite(HID.get(e.id)?.at) ? HID.get(e.id).at * 60000 : null; return Number.isFinite(e?.atMs) ? e.atMs : null; }
   function thoughtSeconds(entries, i, sid) {
@@ -1251,7 +1253,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     }
     const t = btn("disclose"); t.setAttribute("aria-expanded", "false"); t.append(el("span", null, "Tokens by model"), icon(I.chev, "chev"));
     const tb = el("div", "tokens"); tb.hidden = true;
-    for (const model of all.models) { tb.append(el("div", "tok-model", model.modelId)); for (const [key, label] of TOKEN_KINDS) { const k = model.kinds[key], r = el("div", "tok-line"); r.append(el("span", null, label), el("span", null, k.tokens.toLocaleString()), el("span", null, model.priced ? asMoney(k.usd) : "—")); tb.append(r); } }
+    for (const model of all.models) { tb.append(el("div", "tok-model", model.modelId)); for (const [key, label] of TOKEN_KINDS) { const k = model.kinds[key], r = el("div", "tok-line"); if (k.tokens === 0 && (!model.priced || k.usd < 0.005)) continue; const count = el("span", null, k.tokens ? compactCount(k.tokens) : ""); if (k.tokens) { count.dataset.tip = k.tokens.toLocaleString() + " tokens"; count.append(el("span", "sr", " (" + k.tokens.toLocaleString() + ")")); } r.append(el("span", null, label), count, el("span", null, model.priced ? asMoney(k.usd) : "—")); tb.append(r); } }
     t.addEventListener("click", () => { tb.hidden = !tb.hidden; t.setAttribute("aria-expanded", String(!tb.hidden)); });
     sec.append(t, tb); return sec;
   }

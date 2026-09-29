@@ -1458,6 +1458,8 @@
     anchor?.setAttribute("aria-expanded", "true");
     open(); if (scrollTo) body.querySelector(scrollTo)?.scrollIntoView({ block: "nearest" }); return d;
   }
+  // 739,682 reads "740k" and 12,422,228 "12.4M"; the exact figure is the cell's tooltip.
+  const compactCount = (n) => { if (n < 1e3) return String(n); if (n < 1e4) return +(n / 1e3).toFixed(1) + "k"; const k = Math.round(n / 1e3); return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M"; };
   const MENU_KINDS = [["Input", ["input"]], ["Output", ["output"]], ["Cache write", ["cache_write_5m", "cache_write_1h"]], ["Cache read", ["cache_read"]]];
   const COST_NOTE = "What these tokens would cost at API rates. Subscriptions aren't billed this way.";
   function costSection(s, kids, dialog) {
@@ -1486,7 +1488,7 @@
     const tb = el("div", "tokens"); tb.hidden = true;
     for (const [modelId, model] of Object.entries(all.by_model ?? {})) {
       const priced = model.usd != null && !missing.includes(modelId); tb.append(el("div", "tok-model", modelId));
-      for (const [label, keys] of MENU_KINDS) { const tokens = keys.reduce((n, k) => n + (Number(model.tokens?.[k]) || 0), 0), amount = keys.reduce((n, k) => n + (Number(model.usd_by_kind?.[k]) || 0), 0), r = el("div", "tok-line"); r.append(el("span", null, label), el("span", null, tokens.toLocaleString()), el("span", null, priced ? asMoney(amount) : "—")); tb.append(r); }
+      for (const [label, keys] of MENU_KINDS) { const tokens = keys.reduce((n, k) => n + (Number(model.tokens?.[k]) || 0), 0), amount = keys.reduce((n, k) => n + (Number(model.usd_by_kind?.[k]) || 0), 0), r = el("div", "tok-line"); if (tokens === 0 && (!priced || amount < 0.005)) continue; const count = el("span", null, tokens ? compactCount(tokens) : ""); if (tokens) { count.dataset.tip = tokens.toLocaleString() + " tokens"; count.append(el("span", "sr-only", " (" + tokens.toLocaleString() + ")")); } r.append(el("span", null, label), count, el("span", null, priced ? asMoney(amount) : "—")); tb.append(r); }
     }
     t.addEventListener("click", () => { tb.hidden = !tb.hidden; t.setAttribute("aria-expanded", String(!tb.hidden)); });
     sec.append(t, tb); return sec;
