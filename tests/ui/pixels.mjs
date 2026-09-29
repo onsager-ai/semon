@@ -374,9 +374,7 @@ const regionsOf = (name) => REGIONS.filter((r) => r.screens.some((x) => (x.endsW
 async function regionShot(page, region) {
   // A region that does not depend on how far the page is scrolled (the bar, whose border shows once it is) is taken at the top, so a
   // pending page that happens to be a few pixels taller on one side cannot change it.
-  // A sticky bar is drawn in its own layer only when the page scrolls, and text in a layer is antialiased differently, so both pages are
-  // made to scroll (a pending page a few pixels taller on one side would otherwise differ in the bar's letters alone).
-  if (region.top) { await page.evaluate(() => { if (!document.getElementById("pixel-pad")) { const pad = document.createElement("div"); pad.id = "pixel-pad"; pad.style.cssText = "height:400px;flex:none"; (document.querySelector("#page") ?? document.body).append(pad); } window.scrollTo(0, 0); const main = document.querySelector("#main"); if (main) main.scrollTop = 0; }); await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))); await page.waitForTimeout(120); }
+  if (region.top) { await page.evaluate(() => { window.scrollTo(0, 0); const main = document.querySelector("#main"); if (main) main.scrollTop = 0; }); await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))); await page.waitForTimeout(120); }
   if (region.open) { await page.click(region.open); await page.waitForTimeout(200); }
   const target = page.locator(region.selector).first();
   await target.waitFor({ state: "visible", timeout: 3000 });
