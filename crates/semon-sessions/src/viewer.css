@@ -684,7 +684,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .jump-bottom svg { width: 18px; height: 18px; flex: none; }
 .jump-bottom .new-count { font-size: 12.5px; font-weight: 500; white-space: nowrap; }
 @media (hover: hover) { .jump-bottom:hover { background: var(--sunken); } }
-.think-masked, .think-pending { display: flex; align-items: center; gap: 6px; min-height: 28px; color: var(--muted); font-size: 13.5px; }
+.think-pending { display: flex; align-items: center; gap: 6px; min-height: 28px; color: var(--muted); font-size: 13.5px; }
 .think-text { margin: 2px 0 0 14px; padding: 4px 0 4px 12px; border-left: 1px solid var(--line); color: var(--ink-2); font: 15px/1.5 var(--serif); }
 html.viewer-open, html.viewer-open body { overflow: hidden; }
 dialog.session-details { padding: 0; border: 0; color: var(--ink); background: var(--ground); }

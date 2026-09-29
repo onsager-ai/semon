@@ -74,10 +74,6 @@ const THOUGHT_LINES = [
     '  const isPendingThought = (e, entries, i, sid) => !!(e.pending || e.status === "thinking") || Array.isArray(entries) && e.k === "think" && !thoughtText(e) && i === entries.length - 1 && SESS[sid]?.state === "work";\n  const isMaskedThought = (e, entries, i, sid) => isThought(e) && !isPendingThought(e, entries, i, sid) && !thoughtText(e);'],
   ['      const row = { ...e, k: "think", displaySecs: thoughtSeconds(entries, i, sid) };',
     '      const pending = isPendingThought(e, entries, i, sid), row = { ...e, k: "think", ...(pending ? { pending: true } : {}), displaySecs: thoughtSeconds(entries, i, sid) };'],
-  ['      if (!isMaskedThought(e)) { out.push(row); continue; }',
-    '      if (!isMaskedThought(e, entries, i, sid)) { out.push(row); continue; }'],
-  ['      while (j < entries.length && isMaskedThought(entries[j])) { const seconds = thoughtSeconds(entries, j, sid);',
-    '      while (j < entries.length && isMaskedThought(entries[j], entries, j, sid)) { const seconds = thoughtSeconds(entries, j, sid);'],
 ];
 // Parents show the API-equivalent cost of their own session and descendant runs, as the served viewer does.
 const COST_LINES = [
