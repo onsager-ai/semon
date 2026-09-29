@@ -939,7 +939,7 @@ pub(crate) fn pid_files(options: &Options, machine: &MachineFacts) -> Vec<PidFil
         else {
             continue;
         };
-        let Some(record) = fs::read(entry.path())
+        let Some(record) = crate::read_regular(&entry.path())
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .filter(Value::is_object)
@@ -1049,7 +1049,7 @@ fn scan(
         {
             let meta = texts
                 .meta(&path.with_extension("meta.json"), false, |meta| {
-                    Ok(fs::read(meta)
+                    Ok(crate::read_regular(meta)
                         .ok()
                         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                         .filter(Value::is_object))

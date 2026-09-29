@@ -44,7 +44,7 @@ cargo run --locked -p semon-store --bin semon -- sessions --model-json --all
 
 The JSON tree route is `GET /api/tree` and has the same schema as `--json`. Transcript pages use `GET /api/transcript?harness=claude|codex&id=ID&before=N` to page backward from `before` (an opaque byte cursor returned by the previous page; omit it to open at the end), or `&after=N` to read only entries appended past a previously served page's `end`; `before` and `after` are exclusive. Paging always reads backward from the end or forward from a cursor in fixed-size chunks, never the whole file. A page contains `entries`, `before`, `end`, `live`, and `children`, with at most 200 entries or about 2 MB of preview data. Each entry has `offset`, `block`, `kind`, `text`, `name`, `tool_id`, `link`, `collapsed`, and `truncated`; `offset` is also the paging cursor. Tool input and results over 64 KB have a preview and `truncated: true`; `GET /api/entry?harness=...&id=...&offset=...&block=...` expands one entry, capped at 8 MB. Transcript data is sent as JSON and placed in the page using text nodes, so source HTML remains inert.
 
-The viewer is also a library API, so another server can embed it: `semon_sessions::ViewerCore` answers the same pages, assets and API routes without a listener, token or Host check of its own. The embedding server authenticates each request itself, calls `ViewerCore::respond` with the method, path, query and `If-None-Match`, and sends the returned status, body and `ETag` with `semon_sessions::SECURITY_HEADERS`. A call does blocking file I/O, so an async server makes it off its runtime, with the core behind a lock. `ViewerCore::with_machines` serves several machines' homes (each with its own `Options`, facts included) as one model: every session keeps its machine, each machine answers for its own transcripts, and nothing is linked across machines. `semon sessions --model-json --machine DIR --machine DIR …` prints that model.
+The viewer is also a library API, so another server can embed it: `semon_sessions::ViewerCore` answers the same pages, assets and API routes without a listener, token or Host check of its own. The embedding server authenticates each request itself, calls `ViewerCore::respond` with the method, path, query and `If-None-Match`, and sends the returned status, body and `ETag` with `semon_sessions::SECURITY_HEADERS`. A call does blocking file I/O, so an async server makes it off its runtime, with the core behind a lock. `ViewerCore::with_machines` serves several machines' homes (each with its own `Options`, facts included) as one model: every session keeps its machine, each machine answers for its own transcripts, and nothing is linked across machines. `semon sessions --model-json --machine DIR --machine DIR …` prints that model. `ViewerCore::with_received` also follows the machines a receiver keeps under one directory (`semon_sessions::ReceivedMachines`), as `semon sessions --machines` does below.
 
 Server-rendered pages that share the viewer's visual language can use the documented shell contract in [docs/shell.md](docs/shell.md).
 
@@ -53,6 +53,41 @@ Server-rendered pages that share the viewer's visual language can use the docume
 Live Claude statuses observed so far are `busy`, `idle`, and `shell`; any other status on a verified live process is shown verbatim. An unreadable transcript or rollout shows `unknown` state with whatever metadata is available. The default view contains roots active in the last 24 hours plus live roots. `--all` includes older sessions; `--since 2h` or `--since 3d` changes the window; `--session ID` selects one subtree. `--claude-home`, `--codex-home`, `--proc-root`, and `--cache` override every source and the cache for fixtures or alternate installations. The cache defaults to `$XDG_STATE_HOME/semon/sessions-index.json`, or `~/.local/state/semon/sessions-index.json`; it contains metadata summaries only and can be deleted safely.
 
 JSON output has `schema_version: 1` and a `roots` array of nested nodes. Every node has `id`, `harness`, `kind`, `label`, `state`, `pid`, `models`, `cwd`, `branch`, `first_activity`, `last_activity`, `last_activity_age_seconds`, `tokens`, `malformed_lines`, `open_tools`, `claude_link`, `via_tool`, `unlinked`, and `children`. Nullable fields use `null`, `tokens` contains `input`, `cached_input`, `output`, `reasoning_output`, and `total`, and each tool has `id` and `name`. Timestamps are RFC 3339 strings from source records. `malformed_lines` counts complete lines that are not JSON objects; they are skipped, and text output shows `malformed:N` when the count is nonzero. The view includes metadata only; it never prints prompts, transcript text, tool inputs, or tool outputs.
+
+## See all your machines
+
+`semon push` sends a machine's session logs, and `semon receive` writes each machine it receives under one directory, `DIR/machines/<name>/`: that machine's `claude/` and `codex/` input files, and its `facts.json`. `semon sessions --serve --machines DIR` shows every one of them in one viewer, next to this machine's own sessions:
+
+```sh
+semon sessions --serve --machines ~/semon-machines              # this machine and every received one
+semon sessions --serve --machines ~/semon-machines --no-local   # the received machines only
+semon sessions --model-json --machines ~/semon-machines         # the same model, printed
+semon sessions --json --machines ~/semon-machines               # the tree, each node with its machine
+```
+
+Every session keeps its machine, each machine answers for its own transcripts, and nothing is linked across machines. The viewer follows DIR while it runs: the stat pass that already decides whether to rebuild also looks at `DIR/machines/`, so a machine received after the viewer started appears on the next poll, and one removed goes away. Only directories named with `a-z`, `0-9` and `-` (1 to 63 of them) are machines; any other entry is ignored, with a warning. A machine whose `facts.json` is missing or can't be read is still shown, offline and named after its directory, with a warning on stderr; it comes online when its facts arrive. `semon push --watch` rewrites a machine's facts every 10 seconds, so facts over two minutes old make it offline since they were written, with nothing running. A received hostname that can't name a machine (empty, over 253 bytes, or holding whitespace, a control character or `~`) gives way to the directory's name. A received machine is told apart from this one even when it has the same hostname: it is shown as `<hostname>~<name>`. A session an earlier machine already has (this machine's own push, or a copied home) is left out of the received machine, with a warning naming how many; use `--no-local` when this machine pushes to DIR. Received machines are read with the same rules as this one's homes: the model indexes every log, and the tree takes `--since` and `--all`.
+
+DIR is only read. Nothing is written there, and no symbolic link is followed out of a machine's directory: a machine directory, a home (`claude/`, `codex/` or their `projects/` and `sessions/`), a `facts.json` or a log file that is a link is ignored. What the viewer keeps for each received machine (its metadata cache and the facts it serves) goes beside `--cache`, under `received/`.
+
+`--machines` changes nothing about who can reach the viewer: it listens only on `127.0.0.1`, and wants the token URL (then its cookie) and an exact local Host header. To see it from another computer, forward the port over SSH. The Host check includes the port, so use the same port number on both ends:
+
+1. On the machine that holds DIR, serve on a fixed port:
+
+   ```sh
+   semon sessions --serve --machines ~/semon-machines --listen 127.0.0.1:8765
+   ```
+
+   It prints `http://127.0.0.1:8765/?t=TOKEN`.
+
+2. On the computer you view from, open the tunnel and leave it running:
+
+   ```sh
+   ssh -N -L 8765:127.0.0.1:8765 you@that-machine
+   ```
+
+3. Open the printed URL, unchanged, in a browser on the computer you view from.
+
+If port 8765 is taken on either side, pick another and use it in both `--listen` and `-L`. A different local port (`-L 8080:127.0.0.1:8765`, then `http://127.0.0.1:8080/…`) is refused by the Host check with 403.
 
 ## For agents: `semon query` and `semon mcp`
 
