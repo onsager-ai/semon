@@ -125,85 +125,60 @@ pub(crate) struct RateLimits {
 
 /// One file's event index and the facts the model needs about it. Metadata
 /// only (risk:secret).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct FileIndex {
-    #[serde(default)]
     pub(crate) events: Vec<Event>,
     /// Transcript-only items the model's rules never read: thinking blocks,
     /// harness text added before a Codex prompt, and completed Codex operations.
     /// Kept apart from `events` so they can't change how events collapse or
     /// turns split.
-    #[serde(default)]
     pub(crate) extras: Vec<Event>,
     /// Harness signals indexed for analysis, never shown in the transcript.
-    #[serde(default)]
     pub(crate) signals: Vec<Signal>,
     /// Tool calls still waiting for a result: call id -> event index.
-    #[serde(default)]
     pub(crate) pending: BTreeMap<String, usize>,
     /// Tool call id -> all event indices with that exact id.
-    #[serde(default)]
     tool_ids: BTreeMap<String, Vec<usize>>,
     /// Codex commands still running after their yield: the exec session id
     /// the yielded output named -> the event index of the script that
     /// started it. At most [`YIELDS_MAX`].
-    #[serde(default)]
     pub(crate) yields: BTreeMap<String, usize>,
     /// Line timestamps clustered into busy intervals (epoch ms).
-    #[serde(default)]
     pub(crate) busy: Vec<(i64, i64)>,
-    #[serde(default)]
     pub(crate) links: Links,
     /// Claude `entrypoint` or Codex `originator`.
-    #[serde(default)]
     pub(crate) entrypoint: Option<String>,
-    #[serde(default)]
     pub(crate) title: Option<String>,
-    #[serde(default)]
     pub(crate) agent_name: Option<String>,
-    #[serde(default)]
     pub(crate) last_model: Option<String>,
     /// Codex: the last `task_complete` carried an error.
-    #[serde(default)]
     pub(crate) failed: bool,
-    #[serde(default)]
     pub(crate) first: Option<i64>,
-    #[serde(default)]
     pub(crate) last: Option<i64>,
-    #[serde(default)]
     pub(crate) cwd: Option<String>,
-    #[serde(default)]
     pub(crate) branch: Option<String>,
-    #[serde(default)]
     usage_by_id: BTreeMap<String, MessageUsage>,
-    #[serde(default)]
     codex_tokens: Tokens,
-    #[serde(default)]
     codex_tokens_by_model: BTreeMap<String, ModelTokens>,
-    #[serde(default)]
     codex_usage_events: Vec<CodexUsageEvent>,
-    #[serde(default)]
     pub(crate) rate_limits: Option<RateLimits>,
 }
 
 /// A harness signal that isn't a transcript event: indexed for analysis only,
 /// never shown in the transcript. Content-free like the rest of the cache:
 /// `n` holds only a short enum-like tag, never log text.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Signal {
     pub(crate) k: SignalKind,
     /// Byte offset of the line.
     pub(crate) o: u64,
     /// Timestamp (same unit and source as `Event::t`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) t: Option<i64>,
     /// `events.len()` when the signal was pushed: its place among the file's events.
     pub(crate) at: u32,
     /// A short tag: the compaction trigger, the interrupt kind or reason.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) n: Option<String>,
     /// A number the harness reported with it (tokens before a compaction).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) v: Option<u64>,
 }
 
@@ -505,6 +480,12 @@ impl EventCache {
         v1_cache.with_extension("sqlite3")
     }
 
+    /// The retired JSON event cache, `sessions-index.events.json`: its
+    /// reported runs are imported when the store opens, and it is removed.
+    pub(crate) fn legacy_path(v1_cache: &Path) -> PathBuf {
+        v1_cache.with_extension("events.json")
+    }
+
     /// Opens the index beside `v1_cache` and reads all of it. When the
     /// store can't be opened, the index lives in memory for this run, and
     /// that is said once.
@@ -512,7 +493,7 @@ impl EventCache {
         #[cfg(test)]
         CACHE_READS.with(|reads| reads.set(reads.get() + 1));
         let path = Self::path(v1_cache);
-        let mut cache = match store::open(&path) {
+        let mut cache = match store::open(&path, &Self::legacy_path(v1_cache)) {
             Ok((store, loaded)) => {
                 let mut cache = Self::from_loaded(loaded);
                 cache.store = Some(store);
@@ -546,7 +527,7 @@ impl EventCache {
         let Some(v1_cache) = self.v1_cache.clone() else {
             return;
         };
-        match store::open(&Self::path(&v1_cache)) {
+        match store::open(&Self::path(&v1_cache), &Self::legacy_path(&v1_cache)) {
             Ok((store, loaded)) => {
                 let runs: Vec<_> = self.reported_runs().cloned().collect();
                 let stamp = self.claude_json_stamp.take();
@@ -4116,6 +4097,377 @@ mod tests {
         assert_eq!(format!("{index:?}"), cold(&log));
         assert!(!EventCache::path(&v1).exists());
         restore();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // ---- The retired JSON cache's import ----------------------------------------------
+
+    /// A JSON event cache as an older semon wrote it (any version), with a
+    /// reported run per name.
+    fn legacy_json(runs: &[&str]) -> Value {
+        let mut reported = serde_json::Map::new();
+        for (n, run) in runs.iter().enumerate() {
+            let start = 1000 + n as i64;
+            let mut by_start = serde_json::Map::new();
+            by_start.insert(
+                start.to_string(),
+                serde_json::json!({"lastSessionId":run,"lastStartTime":start,"lastCost":1.5,"captureAt":900}),
+            );
+            reported.insert((*run).to_owned(), Value::Object(by_start));
+        }
+        serde_json::json!({
+            "version": 9,
+            "files": {"/logs/gone.jsonl": {"dev":1,"ino":2,"offset":3,"size":3,"modified_ns":4,"index":{"events":[]}}},
+            "reported_runs": reported,
+            "claude_json_stamp": {"dev":1,"ino":2,"size":3,"modified_ns":4}
+        })
+    }
+
+    fn ran(cache: &EventCache) -> Vec<String> {
+        cache
+            .reported_runs()
+            .map(|run| run.last_session_id.clone())
+            .collect()
+    }
+
+    /// Imports of `legacy` this thread made.
+    fn imports(legacy: &Path) -> usize {
+        store::IMPORTS.with(|imports| {
+            imports
+                .borrow()
+                .iter()
+                .filter(|path| *path == legacy)
+                .count()
+        })
+    }
+
+    #[test]
+    fn the_json_cache_is_imported_whenever_found_then_removed() {
+        let root = scratch("import");
+        let v1 = root.join("index.json");
+        let legacy = EventCache::legacy_path(&v1);
+        fs::write(&legacy, legacy_json(&["run-a", "run-b"]).to_string()).unwrap();
+        let cache = EventCache::open(&v1);
+        assert!(cache.store.is_some());
+        assert_eq!(ran(&cache), ["run-a", "run-b"]);
+        assert_eq!(
+            cache.claude_json_stamp,
+            Some(ReportedFileStamp {
+                dev: 1,
+                ino: 2,
+                size: 3,
+                modified_ns: 4
+            })
+        );
+        assert!(!legacy.exists(), "removed once the import committed");
+        assert_eq!(imports(&legacy), 1);
+        // Only the runs: its files are read again from their logs.
+        assert_eq!(cache.paths().count(), 0);
+        drop(cache);
+
+        // A second open with no JSON cache imports nothing.
+        drop(EventCache::open(&v1));
+        assert_eq!(imports(&legacy), 1);
+
+        // An older semon, still running after the upgrade, rewrites it with
+        // a run it captured since: the next open imports that run too, and
+        // removes the file again.
+        fs::write(&legacy, legacy_json(&["run-a", "run-c"]).to_string()).unwrap();
+        let cache = EventCache::open(&v1);
+        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c"]);
+        assert!(!legacy.exists());
+        assert_eq!(imports(&legacy), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_run_the_store_captured_since_is_kept_over_the_json_caches() {
+        let root = scratch("import-kept");
+        let v1 = root.join("index.json");
+        let claude_json = root.join(".claude.json");
+        fs::write(
+            &claude_json,
+            serde_json::json!({"projects":{"/p":{"lastSessionId":"run-a","lastStartTime":1000,"lastCost":9.0}}})
+                .to_string(),
+        )
+        .unwrap();
+        let mut cache = EventCache::open(&v1);
+        cache.refresh_reported_runs(&claude_json, 5000, &mut false);
+        let stamp = cache.claude_json_stamp.clone();
+        drop(cache);
+        let legacy = EventCache::legacy_path(&v1);
+        fs::write(&legacy, legacy_json(&["run-a", "run-b"]).to_string()).unwrap();
+        let cache = EventCache::open(&v1);
+        let cost = |id: &str| {
+            cache
+                .reported_runs()
+                .find(|run| run.last_session_id == id)
+                .and_then(|run| run.last_cost)
+        };
+        assert_eq!(cost("run-a"), Some(9.0), "the store's capture stays");
+        assert_eq!(cost("run-b"), Some(1.5), "the JSON's other run joins it");
+        assert_eq!(
+            cache.claude_json_stamp, stamp,
+            "and so does the store's stamp"
+        );
+        assert!(!legacy.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_json_cache_that_cannot_be_read_is_set_aside_not_imported() {
+        let root = scratch("import-corrupt");
+        for (name, bytes) in [
+            (
+                "truncated",
+                b"{\"version\":14,\"files\":{\"/a.jsonl\":{".to_vec(),
+            ),
+            (
+                "other-shape",
+                br#"{"version":3,"reported_runs":[1,2,3]}"#.to_vec(),
+            ),
+        ] {
+            let v1 = root.join(name).join("index.json");
+            fs::create_dir_all(v1.parent().unwrap()).unwrap();
+            let legacy = EventCache::legacy_path(&v1);
+            fs::write(&legacy, &bytes).unwrap();
+            let cache = EventCache::open(&v1);
+            assert!(cache.store.is_some(), "{name}: the store opens");
+            assert!(ran(&cache).is_empty(), "{name}");
+            assert!(!legacy.exists(), "{name}");
+            let aside = root.join(name).join("index.events.json.corrupt");
+            assert_eq!(fs::read(&aside).unwrap(), bytes, "{name}: kept aside");
+            drop(cache);
+            // Never read again.
+            assert!(EventCache::open(&v1).store.is_some());
+            assert_eq!(fs::read(&aside).unwrap(), bytes, "{name}");
+            assert_eq!(imports(&legacy), 1, "{name}");
+            // A later unreadable one is set aside beside it, never over it.
+            fs::write(&legacy, b"not json").unwrap();
+            drop(EventCache::open(&v1));
+            assert_eq!(fs::read(&aside).unwrap(), bytes, "{name}");
+            let later = fs::read_dir(root.join(name))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("index.events.json.corrupt.")
+                })
+                .count();
+            assert_eq!(later, 1, "{name}");
+            assert!(!legacy.exists(), "{name}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn two_processes_opening_at_once_end_with_one_import_of_each_run() {
+        let root = scratch("import-race");
+        let v1 = root.join("index.json");
+        // The store exists (a1 made it); the JSON cache is still there.
+        drop(EventCache::open(&v1));
+        let legacy = EventCache::legacy_path(&v1);
+        fs::write(&legacy, legacy_json(&["run-a", "run-b"]).to_string()).unwrap();
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let openers: Vec<_> = (0..2)
+            .map(|_| {
+                let (v1, start) = (v1.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    let cache = EventCache::open(&v1);
+                    (cache.store.is_some(), ran(&cache))
+                })
+            })
+            .collect();
+        for opener in openers {
+            let (store, runs) = opener.join().unwrap();
+            assert!(store);
+            // Each made the import, or found it made: the file is removed
+            // only after its import commits.
+            assert_eq!(runs, ["run-a", "run-b"]);
+        }
+        assert_eq!(ran(&EventCache::open(&v1)), ["run-a", "run-b"]);
+        assert!(!legacy.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_import_between_the_parse_and_the_lock_is_kept_and_a_rewrite_waits() {
+        let root = scratch("import-interleave");
+        let v1 = root.join("index.json");
+        drop(EventCache::open(&v1));
+        let path = EventCache::path(&v1);
+        let legacy = EventCache::legacy_path(&v1);
+        fs::write(&legacy, legacy_json(&["run-a", "run-b"]).to_string()).unwrap();
+        // After this open parses the file, another process imports `run-a`
+        // with its own snapshot and commits first.
+        let other = path.clone();
+        store::BEFORE_IMPORT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let connection = rusqlite::Connection::open(&other).unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO reported_runs (session_id, start, cost, model_usage, capture_at) \
+                         VALUES ('run-a', 1000, 7.0, '{}', 1)",
+                        [],
+                    )
+                    .unwrap();
+            }));
+        });
+        let cache = EventCache::open(&v1);
+        let cost = |cache: &EventCache, id: &str| {
+            cache
+                .reported_runs()
+                .find(|run| run.last_session_id == id)
+                .and_then(|run| run.last_cost)
+        };
+        assert_eq!(
+            cost(&cache, "run-a"),
+            Some(7.0),
+            "the first import's row stays"
+        );
+        assert_eq!(cost(&cache, "run-b"), Some(1.5));
+        assert!(!legacy.exists());
+        drop(cache);
+
+        // An older semon rewrites the file (a new one renamed over it) after
+        // this open parsed it: the claim takes the new file, sees it isn't
+        // the one parsed, and imports it before removing it.
+        fs::write(&legacy, legacy_json(&["run-a"]).to_string()).unwrap();
+        let (hook_legacy, next) = (legacy.clone(), root.join("next.json"));
+        store::BEFORE_IMPORT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::write(&next, legacy_json(&["run-a", "run-b", "run-c"]).to_string()).unwrap();
+                fs::rename(&next, &hook_legacy).unwrap();
+            }));
+        });
+        let cache = EventCache::open(&v1);
+        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c"]);
+        assert!(!legacy.exists());
+        drop(cache);
+
+        // A save renamed over the path after the claim, before the claimed
+        // file is removed: only the claimed file goes, and the new one is
+        // imported at the next open.
+        fs::write(&legacy, legacy_json(&["run-a"]).to_string()).unwrap();
+        let (hook_legacy, next) = (legacy.clone(), root.join("next.json"));
+        store::AFTER_CLAIM.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let runs = ["run-a", "run-b", "run-c", "run-d"];
+                fs::write(&next, legacy_json(&runs).to_string()).unwrap();
+                fs::rename(&next, &hook_legacy).unwrap();
+            }));
+        });
+        drop(EventCache::open(&v1));
+        assert!(legacy.exists(), "the save after the claim is kept");
+        let cache = EventCache::open(&v1);
+        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c", "run-d"]);
+        assert!(!legacy.exists());
+        drop(cache);
+
+        // A claim a crash left is imported, then removed; a file that only
+        // looks like one is left alone.
+        let unrelated = root.join("index.events.json.importing.notes");
+        fs::write(&unrelated, b"notes").unwrap();
+        let leftover = root.join("index.events.json.importing.4242.0.0123456789abcdef");
+        fs::write(
+            &leftover,
+            legacy_json(&["run-a", "run-b", "run-c", "run-d", "run-e"]).to_string(),
+        )
+        .unwrap();
+        let cache = EventCache::open(&v1);
+        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c", "run-d", "run-e"]);
+        assert!(!leftover.exists());
+        assert_eq!(fs::read(&unrelated).unwrap(), b"notes");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Opens the index on another thread, failing (not hanging) if it
+    /// doesn't return within 10 s.
+    #[cfg(unix)]
+    fn open_promptly(v1: &Path) -> EventCache {
+        let (sent, opened) = std::sync::mpsc::channel();
+        let v1 = v1.to_owned();
+        std::thread::spawn(move || {
+            let _ = sent.send(EventCache::open(&v1));
+        });
+        opened
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the index opens promptly")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_or_fifo_at_the_json_cache_or_a_claim_is_never_read() {
+        let root = scratch("import-special");
+        let target = root.join("elsewhere.json");
+        let target_json = legacy_json(&["run-x"]).to_string();
+        fs::write(&target, &target_json).unwrap();
+        let claim_suffix = ".importing.4242.0.0123456789abcdef";
+        for case in ["legacy symlink", "claim symlink", "legacy fifo"] {
+            let dir = root.join(case.replace(' ', "-"));
+            fs::create_dir(&dir).unwrap();
+            let v1 = dir.join("index.json");
+            let legacy = EventCache::legacy_path(&v1);
+            let special = match case {
+                "claim symlink" => {
+                    let mut name = legacy.clone().into_os_string();
+                    name.push(claim_suffix);
+                    PathBuf::from(name)
+                }
+                _ => legacy.clone(),
+            };
+            if case == "legacy fifo" {
+                let made = std::process::Command::new("mkfifo").arg(&special).status();
+                if !made.is_ok_and(|status| status.success()) {
+                    // No mkfifo here: nothing to test for this case.
+                    continue;
+                }
+            } else {
+                std::os::unix::fs::symlink(&target, &special).unwrap();
+            }
+            let cache = open_promptly(&v1);
+            assert!(cache.store.is_some(), "{case}: the store opens");
+            assert!(ran(&cache).is_empty(), "{case}: the target isn't imported");
+            assert!(
+                fs::symlink_metadata(&special).is_ok(),
+                "{case}: left where it is"
+            );
+            assert_eq!(fs::read_to_string(&target).unwrap(), target_json, "{case}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_json_cache_that_cannot_be_opened_is_left_for_the_next_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("import-unreadable");
+        let v1 = root.join("index.json");
+        let legacy = EventCache::legacy_path(&v1);
+        fs::write(&legacy, legacy_json(&["run-a"]).to_string()).unwrap();
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&legacy).is_ok() {
+            // Running as root, which reads a mode-000 file anyway: the
+            // unreadable case can't happen, so check the file is simply
+            // imported and removed.
+            let cache = EventCache::open(&v1);
+            assert_eq!(ran(&cache), ["run-a"]);
+            assert!(!legacy.exists());
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let cache = EventCache::open(&v1);
+        assert!(cache.store.is_some(), "the store opens");
+        assert!(ran(&cache).is_empty());
+        assert!(legacy.exists(), "kept, not set aside");
+        drop(cache);
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o600)).unwrap();
+        let cache = EventCache::open(&v1);
+        assert_eq!(ran(&cache), ["run-a"]);
+        assert!(!legacy.exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

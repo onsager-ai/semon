@@ -602,4 +602,66 @@ mod tests {
         assert!(serialized.contains("inputTokens"));
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// Runs the JSON event cache captured before the SQLite index (a1) are
+    /// in the facts again once it is imported: `~/.claude.json` has since
+    /// overwritten them, so nothing else could give them back.
+    #[test]
+    fn reported_runs_from_before_the_index_show_again() {
+        let root = env::temp_dir().join(format!(
+            "semon-facts-legacy-runs-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let options = crate::Options {
+            claude_home: root.join("claude"),
+            claude_json: root.join(".claude.json"),
+            codex_home: root.join("codex"),
+            proc_root: root.join("proc"),
+            cache: root.join("index.json"),
+            all: true,
+            since: Duration::from_secs(86_400),
+            session: None,
+            facts: None,
+            scan_window: false,
+        };
+        fs::create_dir_all(options.proc_root.join("sys/kernel")).unwrap();
+        fs::write(options.proc_root.join("locks"), "").unwrap();
+        fs::write(options.proc_root.join("sys/kernel/hostname"), "fixture\n").unwrap();
+        fs::create_dir_all(&options.claude_home).unwrap();
+        fs::create_dir_all(&options.codex_home).unwrap();
+        // Today's `~/.claude.json` holds only the latest run.
+        fs::write(
+            &options.claude_json,
+            serde_json::json!({"projects":{"/p":{"lastSessionId":"latest-run","lastStartTime":2000}}})
+                .to_string(),
+        )
+        .unwrap();
+        // The JSON event cache still holds an earlier one.
+        fs::write(
+            crate::events::EventCache::legacy_path(&options.cache),
+            serde_json::json!({
+                "version": 14,
+                "files": {},
+                "reported_runs": {"earlier-run": {"1000": {
+                    "lastSessionId":"earlier-run","lastStartTime":1000,"lastCost":0.25,"captureAt":1500
+                }}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let facts = local_facts(&options).unwrap();
+        let ids: BTreeSet<&str> = facts
+            .reported_runs
+            .iter()
+            .map(|run| run.last_session_id.as_str())
+            .collect();
+        assert_eq!(ids, BTreeSet::from(["earlier-run", "latest-run"]));
+        assert!(!crate::events::EventCache::legacy_path(&options.cache).exists());
+        // And they stay: the next process reads them from the index.
+        let again = local_facts(&options).unwrap();
+        assert_eq!(again.reported_runs.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
