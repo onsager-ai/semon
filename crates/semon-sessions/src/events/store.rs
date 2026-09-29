@@ -311,6 +311,10 @@ struct Legacy {
     claude_json_stamp: Option<ReportedFileStamp>,
 }
 
+/// A test hook: runs once, at a set point of the import.
+#[cfg(test)]
+type Hook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+
 #[cfg(test)]
 thread_local! {
     /// The JSON caches this thread imported (or set aside), in order.
@@ -318,16 +322,14 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     /// Runs once, after the JSON cache is parsed and before its import
     /// takes the write lock.
-    pub(super) static BEFORE_IMPORT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
+    pub(super) static BEFORE_IMPORT: Hook = const { std::cell::RefCell::new(None) };
     /// Runs once, after the JSON cache is claimed and before the claimed
     /// file is checked and removed.
-    pub(super) static AFTER_CLAIM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
+    pub(super) static AFTER_CLAIM: Hook = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
-fn hook(slot: &'static std::thread::LocalKey<std::cell::RefCell<Option<Box<dyn FnOnce()>>>>) {
+fn hook(slot: &'static std::thread::LocalKey<Hook>) {
     if let Some(hook) = slot.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
