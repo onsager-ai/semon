@@ -504,7 +504,10 @@ fn unknown_models_keep_usage_but_have_no_price_row() {
     );
     let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
     assert!(model["pricing"]["models"].get("gpt-test").is_none());
-    assert_eq!(model["pricing"]["as_of"], "2026-09-28");
+    assert_eq!(
+        model["pricing"]["as_of"],
+        serde_json::to_value(crate::pricing::table()).unwrap()["as_of"]
+    );
     assert_eq!(
         model["pricing"]["models"]["gpt-6-luna"]["cache_write"],
         0.125

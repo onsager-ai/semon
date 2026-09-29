@@ -5,14 +5,13 @@
 //! cache-write, context, speed and tool rates below.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::events::{BillingUsage, CodexUsageEvent, MessageUsage};
 
-pub const AS_OF: &str = "2026-09-28";
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
 pub struct Price {
     pub input: Option<f64>,
     pub output: Option<f64>,
@@ -24,7 +23,7 @@ pub struct Price {
     pub web_search_per_1k: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 pub struct LongContextPrice {
     pub threshold_tokens: u64,
     pub input: Option<f64>,
@@ -34,12 +33,12 @@ pub struct LongContextPrice {
     pub cache_write_1h: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 pub struct FastPrice {
     pub multiplier: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 struct LegacyPrice {
     input: f64,
     output: f64,
@@ -47,249 +46,43 @@ struct LegacyPrice {
     cache_read: f64,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Serialize)]
 struct PricedModel {
     #[serde(flatten)]
     price: LegacyPrice,
-    source: &'static str,
+    source: String,
 }
 
 #[derive(Serialize)]
 pub(crate) struct Pricing {
-    as_of: &'static str,
-    models: BTreeMap<&'static str, PricedModel>,
+    as_of: String,
+    models: BTreeMap<String, PricedModel>,
 }
 
-const ANTHROPIC: &str = "https://platform.claude.com/docs/en/about-claude/pricing";
-const OPENAI: &str = "https://developers.openai.com/api/docs/pricing";
-
-const fn legacy(input: f64, output: f64, cache_write: f64, cache_read: f64) -> LegacyPrice {
-    LegacyPrice {
-        input,
-        output,
-        cache_write,
-        cache_read,
-    }
+#[derive(Deserialize)]
+struct PriceRow {
+    #[serde(flatten)]
+    price: Price,
+    legacy: LegacyPrice,
+    source: String,
+    #[serde(default, rename = "sync")]
+    _sync: bool,
 }
 
-const fn anthropic(input: f64, output: f64, cache_read: f64, fast: bool) -> Price {
-    anthropic_with_fast(
-        input,
-        output,
-        cache_read,
-        if fast {
-            Some(FastPrice { multiplier: 2.0 })
-        } else {
-            None
-        },
-    )
+#[derive(Deserialize)]
+struct PriceTableData {
+    as_of: String,
+    models: BTreeMap<String, PriceRow>,
 }
 
-const fn anthropic_with_fast(
-    input: f64,
-    output: f64,
-    cache_read: f64,
-    fast: Option<FastPrice>,
-) -> Price {
-    Price {
-        input: Some(input),
-        output: Some(output),
-        cache_read: Some(cache_read),
-        cache_write_5m: Some(input * 1.25),
-        cache_write_1h: Some(input * 2.0),
-        long_context: None,
-        fast,
-        web_search_per_1k: Some(10.0),
-    }
-}
+const PRICE_JSON: &str = include_str!("pricing.json");
+static PRICE_DATA: OnceLock<PriceTableData> = OnceLock::new();
 
-const fn openai(input: f64, output: f64, cache_write: f64, cache_read: f64, fast: bool) -> Price {
-    Price {
-        input: Some(input),
-        output: Some(output),
-        cache_read: Some(cache_read),
-        cache_write_5m: Some(cache_write),
-        // The page publishes one cache-write price, without a time split.
-        cache_write_1h: None,
-        // The page lists another context tier but not its token threshold.
-        long_context: None,
-        fast: if fast {
-            Some(FastPrice { multiplier: 2.0 })
-        } else {
-            None
-        },
-        web_search_per_1k: Some(10.0),
-    }
+fn price_data() -> &'static PriceTableData {
+    PRICE_DATA.get_or_init(|| {
+        serde_json::from_str(PRICE_JSON).expect("pricing.json must be valid and complete")
+    })
 }
-
-const fn unverified() -> Price {
-    Price {
-        input: None,
-        output: None,
-        cache_read: None,
-        cache_write_5m: None,
-        cache_write_1h: None,
-        long_context: None,
-        fast: None,
-        web_search_per_1k: None,
-    }
-}
-
-/// Exact model ids and prices read from the official pricing pages. Rows
-/// marked `unverified()` remain in the legacy object for compatibility, but
-/// their rates are deliberately unavailable to the new cost calculation.
-const PRICE_ROWS: &[(&str, Price, LegacyPrice, &str)] = &[
-    (
-        "claude-fable-5-1",
-        anthropic(10.0, 50.0, 0.25, false),
-        legacy(10.0, 50.0, 12.5, 0.25),
-        ANTHROPIC,
-    ),
-    (
-        "claude-opus-5-5",
-        anthropic(4.0, 20.0, 0.2, true),
-        legacy(4.0, 20.0, 5.0, 0.2),
-        ANTHROPIC,
-    ),
-    (
-        "claude-sonnet-5",
-        anthropic(2.0, 10.0, 0.2, false),
-        legacy(2.0, 10.0, 2.5, 0.2),
-        ANTHROPIC,
-    ),
-    (
-        "claude-haiku-4-5-20251001",
-        anthropic(1.0, 5.0, 0.1, false),
-        legacy(1.0, 5.0, 1.25, 0.1),
-        ANTHROPIC,
-    ),
-    (
-        "claude-mythos-5-1",
-        anthropic(10.0, 50.0, 0.25, false),
-        legacy(10.0, 50.0, 12.5, 0.25),
-        ANTHROPIC,
-    ),
-    (
-        "claude-fable-5",
-        anthropic(10.0, 50.0, 1.0, false),
-        legacy(10.0, 50.0, 12.5, 1.0),
-        ANTHROPIC,
-    ),
-    (
-        "claude-mythos-5",
-        anthropic(10.0, 50.0, 1.0, false),
-        legacy(10.0, 50.0, 12.5, 1.0),
-        ANTHROPIC,
-    ),
-    (
-        "claude-opus-5",
-        anthropic(5.0, 25.0, 0.5, true),
-        legacy(5.0, 25.0, 6.25, 0.5),
-        ANTHROPIC,
-    ),
-    (
-        "claude-opus-4-8",
-        anthropic(5.0, 25.0, 0.5, true),
-        legacy(5.0, 25.0, 6.25, 0.5),
-        ANTHROPIC,
-    ),
-    (
-        "claude-opus-4-7",
-        anthropic(5.0, 25.0, 0.5, false),
-        legacy(5.0, 25.0, 6.25, 0.5),
-        ANTHROPIC,
-    ),
-    (
-        "claude-opus-4-6",
-        anthropic_with_fast(5.0, 25.0, 0.5, Some(FastPrice { multiplier: 1.0 })),
-        legacy(5.0, 25.0, 6.25, 0.5),
-        ANTHROPIC,
-    ),
-    (
-        "claude-opus-4-5-20251101",
-        anthropic(5.0, 25.0, 0.5, false),
-        legacy(5.0, 25.0, 6.25, 0.5),
-        ANTHROPIC,
-    ),
-    (
-        "claude-opus-4-1-20250805",
-        anthropic(15.0, 75.0, 1.5, false),
-        legacy(15.0, 75.0, 18.75, 1.5),
-        ANTHROPIC,
-    ),
-    (
-        "claude-opus-4-20250514",
-        anthropic(15.0, 75.0, 1.5, false),
-        legacy(15.0, 75.0, 18.75, 1.5),
-        ANTHROPIC,
-    ),
-    (
-        "claude-sonnet-4-6",
-        anthropic(3.0, 15.0, 0.3, false),
-        legacy(3.0, 15.0, 3.75, 0.3),
-        ANTHROPIC,
-    ),
-    (
-        "claude-sonnet-4-5-20250929",
-        anthropic(3.0, 15.0, 0.3, false),
-        legacy(3.0, 15.0, 3.75, 0.3),
-        ANTHROPIC,
-    ),
-    (
-        "claude-sonnet-4-20250514",
-        anthropic(3.0, 15.0, 0.3, false),
-        legacy(3.0, 15.0, 3.75, 0.3),
-        ANTHROPIC,
-    ),
-    (
-        "claude-3-5-haiku-20241022",
-        anthropic(0.8, 4.0, 0.08, false),
-        legacy(0.8, 4.0, 1.0, 0.08),
-        ANTHROPIC,
-    ),
-    (
-        "gpt-6-astra",
-        openai(10.0, 50.0, 12.5, 1.0, true),
-        legacy(10.0, 50.0, 12.5, 1.0),
-        OPENAI,
-    ),
-    (
-        "gpt-6-sol",
-        openai(2.0, 10.0, 2.5, 0.2, true),
-        legacy(2.0, 10.0, 2.5, 0.2),
-        OPENAI,
-    ),
-    (
-        "gpt-6-luna",
-        openai(0.1, 0.5, 0.125, 0.01, true),
-        legacy(0.1, 0.5, 0.125, 0.01),
-        OPENAI,
-    ),
-    (
-        "gpt-5.6-sol",
-        openai(4.0, 20.0, 5.0, 0.4, false),
-        legacy(4.0, 20.0, 5.0, 0.4),
-        OPENAI,
-    ),
-    (
-        "gpt-5.6-terra",
-        unverified(),
-        legacy(2.0, 12.0, 2.5, 0.2),
-        OPENAI,
-    ),
-    (
-        "gpt-5.6-luna",
-        unverified(),
-        legacy(0.2, 1.2, 0.25, 0.02),
-        OPENAI,
-    ),
-    (
-        "gpt-5.6-cyber",
-        openai(12.5, 75.0, 15.625, 1.25, false),
-        legacy(12.5, 75.0, 15.625, 1.25),
-        OPENAI,
-    ),
-];
 
 pub(crate) fn normalize_model_id(model: &str) -> &str {
     let model = model
@@ -308,24 +101,28 @@ pub(crate) fn normalize_model_id(model: &str) -> &str {
 
 fn price_for(model: &str) -> Option<Price> {
     let model = normalize_model_id(model);
-    PRICE_ROWS
+    price_data()
+        .models
         .iter()
-        .find(|(id, _, _, _)| normalize_model_id(id) == model)
-        .map(|(_, price, _, _)| *price)
+        .find(|(id, _)| normalize_model_id(id.as_str()) == model)
+        .map(|(_, row)| row.price)
 }
 
 pub(crate) fn table() -> Pricing {
     let mut models = BTreeMap::new();
-    for &(model, _, price, source) in PRICE_ROWS {
-        let priced = PricedModel { price, source };
-        models.insert(model, priced);
+    for (model, row) in &price_data().models {
+        let priced = PricedModel {
+            price: row.legacy,
+            source: row.source.clone(),
+        };
+        models.insert(model.clone(), priced.clone());
         let alias = normalize_model_id(model);
-        if alias != model {
-            models.insert(alias, priced);
+        if alias != model.as_str() {
+            models.insert(alias.to_owned(), priced);
         }
     }
     Pricing {
-        as_of: AS_OF,
+        as_of: price_data().as_of.clone(),
         models,
     }
 }
@@ -620,7 +417,7 @@ pub(crate) fn cost_check_ok(computed: Option<f64>, reported: Option<f64>) -> Opt
 mod tests {
     use super::{
         FastPrice, LongContextPrice, Price, calculate_cost, calculate_cost_with, cost_check_ok,
-        normalize_model_id, table,
+        normalize_model_id, price_data, table,
     };
     use crate::events::{BillingUsage, CodexUsageEvent, MessageUsage, ModelTokens};
 
@@ -649,6 +446,18 @@ mod tests {
                 timestamp: Some(0),
                 split_unknown: false,
             },
+        }
+    }
+
+    #[test]
+    fn generated_price_json_parses_and_every_model_has_a_source() {
+        let parsed = price_data();
+        assert!(!parsed.models.is_empty());
+        for (model, row) in &parsed.models {
+            assert!(
+                !row.source.trim().is_empty(),
+                "{model} has no pricing source"
+            );
         }
     }
 
