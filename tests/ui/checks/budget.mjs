@@ -262,7 +262,8 @@ const scenarios = {
   }),
 
   analytics: (server, vp, browser) => open(browser, vp, async (page, rec) => {
-    const counted = () => softly(page.waitForFunction(() => document.querySelector(".analytics-metrics")?.dataset.counts === "ready", null, { timeout: 30_000, polling: 100 }));
+    // Analytics draws all its figures at once (the tool-call counts come with the model), so the screen is done when they are there.
+    const counted = () => softly(page.waitForFunction(() => document.querySelectorAll(".analytics-metric").length === 8 && document.querySelectorAll(".analytics-chart svg").length === 2, null, { timeout: 30_000, polling: 100 }));
     await page.goto(url(server, "/analytics"), { waitUntil: "load" });
     await settled(page);
     const ready = await counted();
