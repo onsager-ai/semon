@@ -2804,10 +2804,6 @@ mod tests {
         );
     }
 
-    fn codex_line(time: String, kind: &str, payload: Value) -> Value {
-        json!({"timestamp": time, "type": kind, "payload": payload})
-    }
-
     fn script_call(id: &str, script: &str) -> Value {
         json!({"type":"custom_tool_call","call_id":id,"name":"exec","status":"completed","input":script})
     }
