@@ -4,6 +4,12 @@ use std::{
     io::{self, Read, Seek, SeekFrom},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        TryLockError, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
@@ -20,7 +26,7 @@ use crate::{
     field, file_list, is_agent_output,
     model::{self, Built, Texts},
     proc_start, read_index, save_index, tx,
-    union::ViewerCore,
+    union::{Refresh, ViewerCore},
     user_text,
 };
 
@@ -73,31 +79,181 @@ struct ChildLink {
     label: Option<String>,
 }
 
+/// How often a machine's background refresher looks for changed logs: a
+/// stat pass over the files and directories its models were built from.
+const CHECK_EVERY: Duration = Duration::from_millis(250);
+/// The least time from the start of one rebuild of a machine's models to
+/// the start of the next: changes within it are one rebuild.
+pub(crate) const REBUILD_SPACING: Duration = Duration::from_secs(1);
+/// A refresher stops after this long without a read.
+pub(crate) const IDLE_AFTER: Duration = Duration::from_secs(30);
+/// While background rebuilds fail, reads answer from the last model built
+/// until it was last checked this long ago; then each read refreshes
+/// itself, and answers the error (500) for as long as the build fails.
+pub(crate) const FAILING_AFTER: Duration = Duration::from_secs(3);
+
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The lock if it is free, poisoned or not.
+fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
+pub(crate) fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// One machine's viewer: the pages, assets and API routes over one set of
 /// agent homes, with the in-memory model, caches and live refresh behind
 /// them. [`ViewerCore`] serves one or several of these.
+///
+/// Every method takes `&self`, and reads run at once from many threads:
+/// - `shown` holds the models reads answer from, each behind an `Arc`. A
+///   read takes its lock only to clone the `Arc`, then answers from that
+///   snapshot alone; a rebuild takes it only to swap a new one in. The
+///   `ETag` is the snapshot's version.
+/// - `work` holds what a rebuild changes (the index, the event cache, the
+///   texts, when each was saved). A rebuild holds it from its stat pass to
+///   its swap, so one machine rebuilds once at a time. In
+///   [`Refresh::Background`] a read takes it only when there is no model
+///   checked in the last second and no refresher to keep it so (the first
+///   read, and the first after [`IDLE_AFTER`] without one), or when
+///   background rebuilds have failed for [`FAILING_AFTER`].
+/// - `files` holds the transcript paths and Codex harness offsets the V1
+///   routes look up, held for a lookup or an insert, never for a file read.
+/// - `live` is the refresher's state, held for a few field reads.
+///
+/// Locks are only ever taken in the order work, files, shown, live.
 pub(crate) struct MachineView {
     options: Options,
+    /// Reads answer from snapshots a background refresher keeps up to
+    /// date ([`Refresh::Background`]), instead of refreshing first.
+    background: AtomicBool,
+    work: Mutex<Work>,
+    shown: RwLock<Shown>,
+    files: Mutex<Files>,
+    live: Arc<Live>,
+    /// This view, for its refresher: a thread never keeps a view alive.
+    me: Weak<MachineView>,
+    #[cfg(test)]
+    hooks: tests::Hooks,
+}
+
+/// What a rebuild changes, and only a rebuild.
+#[derive(Default)]
+struct Work {
     index: Option<Index>,
     index_dirty: bool,
+    last_save: Option<Instant>,
     events: Option<EventCache>,
     events_dirty: bool,
     events_saved: Option<Instant>,
-    last_save: Option<Instant>,
-    tree: Option<TreeCache>,
-    model: Option<ModelCache>,
     texts: Texts,
+    /// When the last rebuild of either model started.
+    built_at: Option<Instant>,
+}
+
+/// The snapshots reads answer from.
+#[derive(Default)]
+struct Shown {
+    model: Option<Arc<ModelCache>>,
+    tree: Option<Arc<TreeCache>>,
+}
+
+/// Transcript files by session, and each Codex file's harness offsets.
+#[derive(Default)]
+struct Files {
     paths: BTreeMap<(String, String), PathBuf>,
-    known_paths: BTreeSet<PathBuf>,
+    known: BTreeSet<PathBuf>,
     harness: BTreeMap<PathBuf, ((u64, u64), BTreeSet<u64>)>,
 }
 
-// An embedding server moves a core to a blocking thread and shares it
-// behind a lock: it must stay `Send`.
+/// A machine's background refresher, shared with its thread.
+#[derive(Default)]
+struct Live {
+    state: Mutex<LiveState>,
+    /// Signalled when the refresher stops, or should wake up.
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct LiveState {
+    /// A refresher thread is running.
+    running: bool,
+    /// Which refresher is the running one: each start counts one up.
+    generation: u64,
+    /// No refresher starts again, and a running one stops.
+    closed: bool,
+    /// The last read that answered from a snapshot.
+    read_at: Option<Instant>,
+    /// When the shown model, and the shown tree, were last checked
+    /// against the logs and found built ([`Kind`] indexes them).
+    checked_at: [Option<Instant>; 2],
+    /// When the refresher next looks: [`CHECK_EVERY`] after the last
+    /// check, and never before [`REBUILD_SPACING`] after the last rebuild.
+    due: Option<Instant>,
+    /// Each kind's last refresh error, printed once; `None` after a
+    /// refresh of it that worked. A failing tree never fails the model.
+    error: [Option<String>; 2],
+    /// [`IDLE_AFTER`], but for tests.
+    idle_after: Duration,
+}
+
+/// What a machine builds from its logs, each refreshed and failing on its
+/// own: the model, and the V1 tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Model = 0,
+    Tree = 1,
+}
+
+impl Kind {
+    fn other(self) -> Self {
+        match self {
+            Kind::Model => Kind::Tree,
+            Kind::Tree => Kind::Model,
+        }
+    }
+}
+
+impl LiveState {
+    /// Notes how a refresh of `kind` that started at `started` went. Reads
+    /// go on answering from the last one built while it fails; its error
+    /// is printed once, not on every check.
+    fn record(&mut self, kind: Kind, started: Instant, result: &io::Result<()>) {
+        let at = kind as usize;
+        match result {
+            Ok(()) => {
+                self.checked_at[at] = Some(started);
+                self.error[at] = None;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if self.error[at].as_deref() != Some(message.as_str()) {
+                    eprintln!("semon sessions viewer: {message}");
+                }
+                self.error[at] = Some(message);
+            }
+        }
+    }
+}
+
+// An embedding server shares one core between threads and calls it from
+// many at once: it must stay `Send` and `Sync`.
 const _: fn() = || {
-    fn send<T: Send>() {}
-    send::<ViewerCore>();
-    send::<MachineView>();
+    fn shared<T: Send + Sync>() {}
+    shared::<ViewerCore>();
+    shared::<MachineView>();
 };
 
 /// The loopback server around a [`ViewerCore`]: the per-run token and its
@@ -210,7 +366,7 @@ struct TreeCache {
 }
 
 struct ModelCache {
-    built: Built,
+    built: Arc<Built>,
     snapshot: Snapshot,
 }
 
@@ -403,22 +559,57 @@ pub fn serve(options: ServeOptions) -> io::Result<()> {
         .to_ip()
         .ok_or_else(|| invalid_input("expected TCP listener"))?
         .port();
-    let mut viewer = Viewer {
-        core: match options.received {
-            Some(received) => ViewerCore::with_received(options.machines, received),
-            None if options.machines.is_empty() => ViewerCore::new(options.sessions),
-            None => ViewerCore::with_machines(options.machines),
-        },
+    let mut core = match options.received {
+        Some(received) => ViewerCore::with_received(options.machines, received),
+        None if options.machines.is_empty() => ViewerCore::new(options.sessions),
+        None => ViewerCore::with_machines(options.machines),
+    };
+    // Reads answer from the last built model; a rebuild never holds one up.
+    core.set_refresh(Refresh::Background);
+    let viewer = Arc::new(Viewer {
+        core,
         token: random_token()?,
         port,
-    };
+    });
+    let server = Arc::new(server);
     println!("http://127.0.0.1:{port}/?t={}", viewer.token);
-    loop {
-        // recv blocks. No timer or scanner runs between requests.
-        let request = server.recv()?;
-        viewer.handle(request);
+    // A few requests at once, so a long transcript page doesn't hold up a
+    // poll. recv blocks; between requests only each machine's refresher
+    // runs, and it stops IDLE_AFTER the last read.
+    let (done, stopped) = std::sync::mpsc::channel();
+    for _ in 0..SERVE_THREADS {
+        let (server, viewer, done) = (server.clone(), viewer.clone(), done.clone());
+        thread::spawn(move || {
+            let error = loop {
+                match server.recv() {
+                    // A request that panics fails alone (dropping it
+                    // answers an empty 500) and this thread serves on,
+                    // rather than the server losing a thread for good.
+                    Ok(request) => {
+                        let viewer = &viewer;
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                            viewer.handle(request)
+                        }))
+                        .is_err()
+                        {
+                            eprintln!("semon sessions viewer: a request panicked");
+                        }
+                    }
+                    Err(error) => break error,
+                }
+            };
+            let _ = done.send(error);
+        });
     }
+    drop(done);
+    // The listener failing ends the server, as it did with one thread.
+    Err(stopped
+        .recv()
+        .unwrap_or_else(|_| io::Error::other("every viewer thread stopped")))
 }
+
+/// How many requests the local server answers at once.
+const SERVE_THREADS: usize = 4;
 
 fn header(name: &str, value: &str) -> Header {
     Header::from_bytes(name, value).expect("static HTTP header")
@@ -516,7 +707,7 @@ fn authorized(request: &Request, query: &str, token: &str, port: u16) -> Option<
 }
 
 impl Viewer {
-    fn handle(&mut self, request: Request) {
+    fn handle(&self, request: Request) {
         let url = request.url().to_owned();
         let (path, query) = url.split_once('?').unwrap_or((&url, ""));
         let Some(set_cookie) = authorized(&request, query, &self.token, self.port) else {
@@ -545,25 +736,131 @@ impl Viewer {
     }
 }
 
-impl MachineView {
-    /// A view over the agent homes, `/proc` and cache that `options` name.
-    /// Nothing is read until the first request.
-    pub(crate) fn new(options: Options) -> Self {
-        Self {
-            options,
-            index: None,
-            index_dirty: false,
-            events: None,
-            events_dirty: false,
-            events_saved: None,
-            last_save: None,
-            tree: None,
-            model: None,
-            texts: Texts::default(),
-            paths: BTreeMap::new(),
-            known_paths: BTreeSet::new(),
-            harness: BTreeMap::new(),
+/// How a read gets a machine's model.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Reading {
+    /// As a request is answered, in the view's [`Refresh`] mode.
+    Served,
+    /// Brought up to date first, built at `now` if it must be rebuilt.
+    At(i64),
+}
+
+/// The session a transcript file holds, as the V1 routes name it: the
+/// harness, and the id (a Codex file's is read from its first line).
+fn transcript_key(options: &Options, path: &Path) -> Option<(String, String)> {
+    let harness = if path.starts_with(options.claude_home.join("projects")) {
+        "claude"
+    } else {
+        "codex"
+    };
+    let id = if harness == "claude" {
+        let stem = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "subagents")
+        {
+            stem.strip_prefix("agent-").unwrap_or(stem).to_owned()
+        } else {
+            stem.to_owned()
         }
+    } else {
+        codex_meta(path)
+            .ok()
+            .flatten()
+            .and_then(|meta| field(&meta, "id").map(str::to_owned))
+            .or_else(|| codex_id_from_filename(path))
+            .unwrap_or_default()
+    };
+    (!id.is_empty()).then(|| (harness.to_owned(), id))
+}
+
+/// When a background refresher next looks, after a check that started at
+/// `started` and a last rebuild that started at `built_at`.
+fn next_check(started: Instant, built_at: Option<Instant>) -> Instant {
+    let next = started + CHECK_EVERY;
+    built_at.map_or(next, |built| next.max(built + REBUILD_SPACING))
+}
+
+/// A machine's background refresher: it looks for changed logs every
+/// [`CHECK_EVERY`] and rebuilds what is shown when they changed, at most
+/// once every [`REBUILD_SPACING`]. It stops after [`IDLE_AFTER`] without a
+/// read, when its view is closed, or when its view is dropped.
+fn refresher(live: Arc<Live>, view: Weak<MachineView>, generation: u64) {
+    /// Marks the refresher stopped however it ends, a panic included, so
+    /// the next read starts another instead of trusting one that is gone;
+    /// never a later refresher, started once this one said it stopped.
+    struct Stopped(Arc<Live>, u64);
+    impl Drop for Stopped {
+        fn drop(&mut self) {
+            let mut state = lock(&self.0.state);
+            if state.generation == self.1 {
+                state.running = false;
+            }
+            self.0.changed.notify_all();
+        }
+    }
+    let stopped = Stopped(live, generation);
+    let live = &stopped.0;
+    loop {
+        {
+            let mut state = lock(&live.state);
+            loop {
+                let idle_after = state.idle_after;
+                let idle = state
+                    .read_at
+                    .is_none_or(|read| read.elapsed() >= idle_after);
+                if state.closed || idle {
+                    // Under the same lock a read tests `running` under.
+                    state.running = false;
+                    drop(state);
+                    return;
+                }
+                let wait = state.due.map_or(Duration::ZERO, |due| {
+                    due.saturating_duration_since(Instant::now())
+                });
+                if wait.is_zero() {
+                    break;
+                }
+                state = live
+                    .changed
+                    .wait_timeout(state, wait)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+        }
+        let Some(view) = view.upgrade() else {
+            return;
+        };
+        view.tick();
+    }
+}
+
+impl MachineView {
+    /// A view over the agent homes, `/proc` and cache that `options` name,
+    /// refreshed before each read until [`MachineView::set_background`].
+    /// Nothing is read until the first request.
+    pub(crate) fn new(options: Options) -> Arc<Self> {
+        Arc::new_cyclic(|me| Self {
+            options,
+            background: AtomicBool::new(false),
+            work: Mutex::default(),
+            shown: RwLock::default(),
+            files: Mutex::default(),
+            live: Arc::new(Live {
+                state: Mutex::new(LiveState {
+                    idle_after: IDLE_AFTER,
+                    ..LiveState::default()
+                }),
+                changed: Condvar::new(),
+            }),
+            me: me.clone(),
+            #[cfg(test)]
+            hooks: tests::Hooks::default(),
+        })
     }
 
     /// The homes, cache and facts this view reads.
@@ -571,61 +868,38 @@ impl MachineView {
         &self.options
     }
 
-    fn update_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
-        let paths: BTreeSet<_> = paths
-            .into_iter()
-            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl") && regular(path))
-            .collect();
-        self.paths.retain(|_, path| paths.contains(path));
-        self.known_paths.retain(|path| paths.contains(path));
-        for path in paths.difference(&self.known_paths) {
-            let harness = if path.starts_with(self.options.claude_home.join("projects")) {
-                "claude"
-            } else {
-                "codex"
-            };
-            let id = if harness == "claude" {
-                let stem = path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or_default();
-                if path
-                    .parent()
-                    .and_then(Path::file_name)
-                    .is_some_and(|name| name == "subagents")
-                {
-                    stem.strip_prefix("agent-").unwrap_or(stem).to_owned()
-                } else {
-                    stem.to_owned()
-                }
-            } else {
-                codex_meta(path)
-                    .ok()
-                    .flatten()
-                    .and_then(|meta| field(&meta, "id").map(str::to_owned))
-                    .or_else(|| codex_id_from_filename(path))
-                    .unwrap_or_default()
-            };
-            if !id.is_empty() {
-                self.paths.insert((harness.into(), id), path.clone());
-            }
-        }
-        self.known_paths = paths;
+    /// Whether reads answer from snapshots a background refresher keeps
+    /// fresh ([`Refresh::Background`]) rather than refreshing first.
+    pub(crate) fn set_background(&self, background: bool) {
+        self.background.store(background, Ordering::Relaxed);
     }
 
-    fn refresh_tree(&mut self) -> io::Result<()> {
-        if self
-            .tree
-            .as_ref()
-            .is_some_and(|tree| !tree.snapshot.changed(&self.options))
+    fn shown_model(&self) -> Option<Arc<ModelCache>> {
+        read_lock(&self.shown).model.clone()
+    }
+
+    fn shown_tree(&self) -> Option<Arc<TreeCache>> {
+        read_lock(&self.shown).tree.clone()
+    }
+
+    /// Rebuilds the V1 tree if anything it was built from changed. The
+    /// caller holds `work`.
+    fn refresh_tree_locked(&self, work: &mut Work) -> io::Result<Arc<TreeCache>> {
+        if let Some(tree) = self.shown_tree()
+            && !tree.snapshot.changed(&self.options)
         {
-            return self.persist_if_due();
+            self.persist_if_due(work)?;
+            return Ok(tree);
         }
-        if self.index.is_none() {
-            self.index = Some(read_index(&self.options.cache));
+        work.built_at = Some(Instant::now());
+        #[cfg(test)]
+        if self.hooks.tree_failing.load(Ordering::SeqCst) {
+            return Err(io::Error::other("a tree build failed on purpose"));
         }
-        let index = self.index.as_mut().expect("index loaded");
-        let roots = collect_with_index(&self.options, index, &mut self.index_dirty)?;
+        let index = work
+            .index
+            .get_or_insert_with(|| read_index(&self.options.cache));
+        let roots = collect_with_index(&self.options, index, &mut work.index_dirty)?;
         let json = crate::render_json(&roots);
         let snapshot = Snapshot::capture(&self.options, &roots, index);
         let paths = snapshot
@@ -633,34 +907,298 @@ impl MachineView {
             .iter()
             .filter_map(|(path, value)| value.is_some().then_some(path.clone()))
             .collect::<Vec<_>>();
-        self.update_paths(paths);
-        self.tree = Some(TreeCache {
+        self.update_files(paths);
+        let tree = Arc::new(TreeCache {
             roots,
             json,
             snapshot,
         });
-        self.persist_if_due()
+        write_lock(&self.shown).tree = Some(tree.clone());
+        self.persist_if_due(work)?;
+        Ok(tree)
     }
 
-    fn persist_if_due(&mut self) -> io::Result<()> {
-        if self.index_dirty
-            && self
+    fn persist_if_due(&self, work: &mut Work) -> io::Result<()> {
+        if work.index_dirty
+            && work
                 .last_save
                 .is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
         {
             save_index(
                 &self.options.cache,
-                self.index.as_ref().expect("index loaded"),
+                work.index.as_ref().expect("index loaded"),
             )?;
-            self.index_dirty = false;
-            self.last_save = Some(Instant::now());
+            work.index_dirty = false;
+            work.last_save = Some(Instant::now());
         }
         Ok(())
     }
 
-    fn tree_json(&mut self) -> io::Result<String> {
-        self.refresh_tree()?;
-        Ok(self.tree.as_ref().expect("tree loaded").json.clone())
+    /// Rebuilds the model at `now` if its logs or facts changed. The caller
+    /// holds `work`.
+    fn refresh_model_locked(&self, work: &mut Work, now: i64) -> io::Result<Arc<ModelCache>> {
+        if let Some(model) = self.shown_model()
+            && !model.snapshot.changed(&self.options)
+        {
+            self.persist_events_if_due(work)?;
+            return Ok(model);
+        }
+        work.built_at = Some(Instant::now());
+        let path = EventCache::path(&self.options.cache);
+        let cache = work.events.get_or_insert_with(|| EventCache::read(&path));
+        if self.options.facts.is_none() {
+            cache.refresh_reported_runs(&self.options.claude_json, now, &mut work.events_dirty);
+        }
+        // The files are stamped before the build reads them: a line that
+        // lands while it runs is then a change the next check sees, never
+        // one that is neither parsed nor noticed. (A file created meanwhile
+        // changes its directory's stamp.)
+        let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
+        #[cfg(test)]
+        self.hooks.building()?;
+        let built = model::build(
+            &self.options,
+            cache,
+            &mut work.events_dirty,
+            &mut work.texts,
+            now,
+        )?;
+        if self.options.facts.is_none() {
+            snapshot.pids = built
+                .pids
+                .iter()
+                .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
+                .collect();
+        }
+        let model = Arc::new(ModelCache {
+            built: Arc::new(built),
+            snapshot,
+        });
+        write_lock(&self.shown).model = Some(model.clone());
+        self.persist_events_if_due(work)?;
+        Ok(model)
+    }
+
+    /// The event cache is saved at most every 30 s, like V1's index.
+    fn persist_events_if_due(&self, work: &mut Work) -> io::Result<()> {
+        if work.events_dirty
+            && work
+                .events_saved
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
+            && let Some(cache) = &work.events
+        {
+            cache.save(&EventCache::path(&self.options.cache))?;
+            work.events_dirty = false;
+            work.events_saved = Some(Instant::now());
+        }
+        Ok(())
+    }
+
+    /// The model, rebuilt at `now` first if its logs or facts changed.
+    fn fresh_model(&self, now: i64) -> io::Result<Arc<ModelCache>> {
+        // Unchanged, as most reads find it: a stat pass and no lock held
+        // but for cloning the `Arc`. Concurrent reads don't wait on each
+        // other, only on a rebuild of a change they found.
+        if let Some(model) = self.shown_model()
+            && !model.snapshot.changed(&self.options)
+        {
+            if let Some(mut work) = try_lock(&self.work) {
+                self.persist_events_if_due(&mut work)?;
+            }
+            return Ok(model);
+        }
+        self.refresh_model_locked(&mut lock(&self.work), now)
+    }
+
+    /// The V1 tree, rebuilt first if anything changed.
+    fn fresh_tree(&self) -> io::Result<Arc<TreeCache>> {
+        if let Some(tree) = self.shown_tree()
+            && !tree.snapshot.changed(&self.options)
+        {
+            if let Some(mut work) = try_lock(&self.work) {
+                self.persist_if_due(&mut work)?;
+            }
+            return Ok(tree);
+        }
+        self.refresh_tree_locked(&mut lock(&self.work))
+    }
+
+    /// The model a request answers from. Refreshed on read, it is
+    /// [`MachineView::fresh_model`]. In the background mode it is the last
+    /// one built, at once; only when there is none, or none was checked in
+    /// the last second and no refresher runs to check it, is it refreshed
+    /// first.
+    fn served_model(&self) -> io::Result<Arc<ModelCache>> {
+        if !self.background.load(Ordering::Relaxed) {
+            return self.fresh_model(model::now_ms());
+        }
+        if let Some(model) = self.shown_model()
+            && self.keep_fresh(Kind::Model)
+        {
+            return Ok(model);
+        }
+        self.refresh_first(Kind::Model)?;
+        self.shown_model()
+            .ok_or_else(|| io::Error::other("no model was built"))
+    }
+
+    /// The V1 tree a request answers from, as [`MachineView::served_model`].
+    fn served_tree(&self) -> io::Result<Arc<TreeCache>> {
+        if !self.background.load(Ordering::Relaxed) {
+            return self.fresh_tree();
+        }
+        if let Some(tree) = self.shown_tree()
+            && self.keep_fresh(Kind::Tree)
+        {
+            return Ok(tree);
+        }
+        self.refresh_first(Kind::Tree)?;
+        self.shown_tree()
+            .ok_or_else(|| io::Error::other("no tree was built"))
+    }
+
+    /// Whether the model or the tree has been built, and so is kept fresh.
+    fn is_shown(&self, kind: Kind) -> bool {
+        let shown = read_lock(&self.shown);
+        match kind {
+            Kind::Model => shown.model.is_some(),
+            Kind::Tree => shown.tree.is_some(),
+        }
+    }
+
+    /// Rebuilds the model or the tree if its logs changed. The caller holds
+    /// `work`.
+    fn refresh_kind(&self, work: &mut Work, kind: Kind) -> io::Result<()> {
+        match kind {
+            Kind::Model => self.refresh_model_locked(work, model::now_ms()).map(drop),
+            Kind::Tree => self.refresh_tree_locked(work).map(drop),
+        }
+    }
+
+    /// Notes a read of the model or the tree, and says whether the shown
+    /// one may answer it: a refresher keeps it fresh, or it was checked in
+    /// the last second (and a refresher starts to keep it so).
+    fn keep_fresh(&self, kind: Kind) -> bool {
+        let mut state = lock(&self.live.state);
+        let now = Instant::now();
+        state.read_at = Some(now);
+        if state.closed {
+            return true;
+        }
+        let at = kind as usize;
+        let age = state.checked_at[at].map(|at| now.saturating_duration_since(at));
+        // Rebuilds that keep failing aren't hidden behind an ever older
+        // one: past FAILING_AFTER a read refreshes itself, and answers the
+        // error if the build still fails.
+        if state.error[at].is_some() && age.is_none_or(|age| age >= FAILING_AFTER) {
+            return false;
+        }
+        if state.running {
+            return true;
+        }
+        let fresh = age.is_some_and(|age| age < REBUILD_SPACING);
+        if fresh {
+            self.start(&mut state);
+        }
+        fresh
+    }
+
+    /// A read's own refresh of the kind it wants, when nothing keeps it
+    /// fresh, and of the other kind if that is shown, which a refresher
+    /// then keeps fresh. Only the wanted kind's error is the read's.
+    fn refresh_first(&self, kind: Kind) -> io::Result<()> {
+        let mut work = lock(&self.work);
+        let started = Instant::now();
+        let wanted = self.refresh_kind(&mut work, kind);
+        let other = kind.other();
+        let others = self
+            .is_shown(other)
+            .then(|| self.refresh_kind(&mut work, other));
+        let built_at = work.built_at;
+        drop(work);
+        let mut state = lock(&self.live.state);
+        if let Some(result) = &others {
+            state.record(other, started, result);
+        }
+        if wanted.is_ok() {
+            state.record(kind, started, &wanted);
+            state.due = Some(next_check(started, built_at));
+            state.read_at = Some(Instant::now());
+            self.start(&mut state);
+        }
+        wanted
+    }
+
+    /// Starts the refresher, unless one runs or the view is closed.
+    fn start(&self, state: &mut LiveState) {
+        if state.running || state.closed {
+            return;
+        }
+        state.generation += 1;
+        let (live, view, generation) = (self.live.clone(), self.me.clone(), state.generation);
+        let spawned = thread::Builder::new()
+            .name("semon-refresh".into())
+            .spawn(move || refresher(live, view, generation));
+        // Without a thread, a read refreshes itself once a second is up.
+        state.running = spawned.is_ok();
+    }
+
+    /// One background check: rebuilds what is shown if its logs changed,
+    /// never sooner than [`REBUILD_SPACING`] after the last rebuild. The
+    /// model and the tree are refreshed, and fail, each on its own.
+    fn tick(&self) {
+        let mut work = lock(&self.work);
+        let started = Instant::now();
+        if let Some(built) = work.built_at
+            && started < built + REBUILD_SPACING
+        {
+            drop(work);
+            lock(&self.live.state).due = Some(built + REBUILD_SPACING);
+            return;
+        }
+        let results: Vec<_> = [Kind::Model, Kind::Tree]
+            .into_iter()
+            .filter(|kind| self.is_shown(*kind))
+            .map(|kind| (kind, self.refresh_kind(&mut work, kind)))
+            .collect();
+        let built_at = work.built_at;
+        drop(work);
+        let mut state = lock(&self.live.state);
+        state.due = Some(next_check(started, built_at));
+        for (kind, result) in &results {
+            state.record(*kind, started, result);
+        }
+    }
+
+    /// Stops the refresher at its next wake, without waiting: the view is
+    /// no longer served. [`MachineView::close`] still waits it out.
+    pub(crate) fn retire(&self) {
+        lock(&self.live.state).closed = true;
+        self.live.changed.notify_all();
+    }
+
+    /// Stops the refresher and waits out a rebuild in progress; none
+    /// starts again. The caller makes sure no read is in progress or
+    /// starts after, as [`ViewerCore::close`] does: a read would still
+    /// build a model it has none of.
+    pub(crate) fn close(&self) {
+        let mut state = lock(&self.live.state);
+        state.closed = true;
+        self.live.changed.notify_all();
+        while state.running {
+            state = self
+                .live
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(state);
+        // A rebuild a read started has finished too.
+        drop(lock(&self.work));
+    }
+
+    fn tree_json(&self) -> io::Result<String> {
+        Ok(self.served_tree()?.json.clone())
     }
 
     /// Answers one request: `path` and `query` split at the `?`, still
@@ -668,7 +1206,7 @@ impl MachineView {
     /// answered (405 otherwise); every URL the viewer uses is a GET. The
     /// caller authenticates first: the core serves whoever it is handed.
     pub(crate) fn respond(
-        &mut self,
+        &self,
         method: &str,
         path: &str,
         query: &str,
@@ -714,68 +1252,12 @@ impl MachineView {
         }
     }
 
-    fn refresh_model(&mut self) -> io::Result<()> {
-        self.refresh_model_at(model::now_ms())
-    }
-
-    /// Rebuilds the model at `now` if its logs or facts changed.
-    fn refresh_model_at(&mut self, now: i64) -> io::Result<()> {
-        if self
-            .model
-            .as_ref()
-            .is_some_and(|model| !model.snapshot.changed(&self.options))
-        {
-            return self.persist_events_if_due();
-        }
-        let path = EventCache::path(&self.options.cache);
-        let cache = self.events.get_or_insert_with(|| EventCache::read(&path));
-        if self.options.facts.is_none() {
-            cache.refresh_reported_runs(&self.options.claude_json, now, &mut self.events_dirty);
-        }
-        // The files are stamped before the build reads them: a line that
-        // lands while it runs is then a change the next poll sees, never one
-        // that is neither parsed nor noticed. (A file created meanwhile
-        // changes its directory's stamp.)
-        let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
-        let built = model::build(
-            &self.options,
-            cache,
-            &mut self.events_dirty,
-            &mut self.texts,
-            now,
-        )?;
-        if self.options.facts.is_none() {
-            snapshot.pids = built
-                .pids
-                .iter()
-                .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
-                .collect();
-        }
-        self.model = Some(ModelCache { built, snapshot });
-        self.persist_events_if_due()
-    }
-
-    /// The event cache is saved at most every 30 s, like V1's index.
-    fn persist_events_if_due(&mut self) -> io::Result<()> {
-        if self.events_dirty
-            && self
-                .events_saved
-                .is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
-            && let Some(cache) = &self.events
-        {
-            cache.save(&EventCache::path(&self.options.cache))?;
-            self.events_dirty = false;
-            self.events_saved = Some(Instant::now());
-        }
-        Ok(())
-    }
-
     /// `/api/model`: the whole model, or 304 when the client's `ETag` or
     /// `?since=` version is still current.
-    fn model(&mut self, query: &str, if_none_match: Option<&str>) -> io::Result<Routed> {
+    fn model(&self, query: &str, if_none_match: Option<&str>) -> io::Result<Routed> {
         let json = "application/json; charset=utf-8";
-        self.refresh_model()?;
-        let built = &self.model.as_ref().expect("model loaded").built;
+        let cache = self.served_model()?;
+        let built = &cache.built;
         let etag = format!("\"{}\"", built.version);
         let since = query_value(query, "since").and_then(decoded);
         if if_none_match == Some(etag.as_str()) || since.as_deref() == Some(built.version.as_str())
@@ -791,8 +1273,9 @@ impl MachineView {
     }
 
     /// `/api/tx?sid=&before=|after=|turn=`: a page of one session's
-    /// transcript.
-    fn tx(&mut self, query: &str) -> io::Result<String> {
+    /// transcript, from the model's index and the source lines it points
+    /// to. No lock is held while the lines are read.
+    fn tx(&self, query: &str) -> io::Result<String> {
         let sid = query_value(query, "sid")
             .and_then(decoded)
             .ok_or_else(|| invalid_input("sid"))?;
@@ -804,16 +1287,15 @@ impl MachineView {
         let turn = query_value(query, "turn").and_then(decoded);
         let anchor = tx::Anchor::of(index("before")?, index("after")?, turn)
             .ok_or_else(|| invalid_input("before, after and turn are exclusive"))?;
-        self.refresh_model()?;
-        let built = &self.model.as_ref().expect("model loaded").built;
-        tx::page(built, &sid, &anchor, model::now_ms())
+        let cache = self.served_model()?;
+        tx::page(&cache.built, &sid, &anchor, model::now_ms())
     }
 
     /// `/api/tx?sid=&errors=1`: where the session's failed steps are
     /// ([`tx::errors`]), or 304 when the client's `ETag` or `?since=` version
     /// is still current. It names no page: `before`, `after` and `turn` are
     /// refused with it.
-    fn tx_errors(&mut self, query: &str, if_none_match: Option<&str>) -> io::Result<Routed> {
+    fn tx_errors(&self, query: &str, if_none_match: Option<&str>) -> io::Result<Routed> {
         let json = "application/json; charset=utf-8";
         if query_value(query, "errors") != Some("1") {
             return Err(invalid_input("errors"));
@@ -830,8 +1312,8 @@ impl MachineView {
         let since = query_value(query, "since")
             .map(|value| decoded(value).ok_or_else(|| invalid_input("since")))
             .transpose()?;
-        self.refresh_model()?;
-        let built = &self.model.as_ref().expect("model loaded").built;
+        let cache = self.served_model()?;
+        let built = &cache.built;
         if !built.tx.contains_key(&sid) {
             return Err(io::ErrorKind::NotFound.into());
         }
@@ -845,7 +1327,7 @@ impl MachineView {
 
     /// Whether a page URL names something in the model: `/machines/<id>`,
     /// `/s/<harness>/<id>` and `/trace/<harness>/<id>/<turn>`.
-    fn page_exists(&mut self, path: &str) -> io::Result<bool> {
+    fn page_exists(&self, path: &str) -> io::Result<bool> {
         let parts: Option<Vec<String>> = path
             .trim_start_matches('/')
             .split('/')
@@ -853,8 +1335,8 @@ impl MachineView {
             .collect();
         let parts = parts.ok_or_else(|| invalid_input("path"))?;
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-        self.refresh_model()?;
-        let built = &self.model.as_ref().expect("model loaded").built;
+        let cache = self.served_model()?;
+        let built = &cache.built;
         Ok(match parts.as_slice() {
             ["machines", id] => *id == built.machine_id,
             ["s", harness, id] => has_session_page(built, harness, id),
@@ -863,7 +1345,7 @@ impl MachineView {
         })
     }
 
-    fn route(&mut self, path: &str, query: &str) -> io::Result<(u16, &'static str, Vec<u8>)> {
+    fn route(&self, path: &str, query: &str) -> io::Result<(u16, &'static str, Vec<u8>)> {
         let html = "text/html; charset=utf-8";
         let json = "application/json; charset=utf-8";
         match path {
@@ -920,15 +1402,18 @@ impl MachineView {
         }
     }
 
-    fn transcript_path(&mut self, harness: &str, id: &str) -> io::Result<Option<PathBuf>> {
+    fn transcript_path(&self, harness: &str, id: &str) -> io::Result<Option<PathBuf>> {
         if id.is_empty() || id.len() > 256 || !matches!(harness, "claude" | "codex") {
             return Ok(None);
         }
-        if let Some(path) = self.paths.get(&(harness.into(), id.into()))
-            && regular(path)
+        let key = (harness.to_owned(), id.to_owned());
+        let known = lock(&self.files).paths.get(&key).cloned();
+        if let Some(path) = known
+            && regular(&path)
         {
-            return Ok(Some(path.clone()));
+            return Ok(Some(path));
         }
+        // Listed without the lock: another lookup isn't held up by a walk.
         let mut paths = Vec::new();
         file_list(
             &self.options.claude_home.join("projects"),
@@ -940,28 +1425,87 @@ impl MachineView {
             &mut paths,
             "jsonl",
         )?;
-        self.update_paths(paths);
-        Ok(self.paths.get(&(harness.into(), id.into())).cloned())
+        self.update_files(paths);
+        Ok(lock(&self.files).paths.get(&key).cloned())
     }
 
-    fn harness_offsets_cached(&mut self, path: &Path) -> io::Result<BTreeSet<u64>> {
+    /// Brings the transcript paths in line with `paths`, keeping the
+    /// `.jsonl` files that are regular files. The files are looked at, and
+    /// a new Codex file's first line read, without the `files` lock: it is
+    /// held only to find which paths are new and to store the result.
+    fn update_files(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        let (paths, new) = self.files_to_key(paths);
+        let keys = self.keys_of(&new);
+        self.store_files(paths, &new, keys);
+    }
+
+    /// The regular `.jsonl` files among `paths`, and those of them not yet
+    /// known: the ones this update keys.
+    fn files_to_key(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> (BTreeSet<PathBuf>, BTreeSet<PathBuf>) {
+        let paths: BTreeSet<_> = paths
+            .into_iter()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl") && regular(path))
+            .collect();
+        let new = paths
+            .difference(&lock(&self.files).known)
+            .cloned()
+            .collect();
+        (paths, new)
+    }
+
+    fn keys_of(&self, new: &BTreeSet<PathBuf>) -> Vec<((String, String), PathBuf)> {
+        new.iter()
+            .filter_map(|path| transcript_key(&self.options, path).map(|key| (key, path.clone())))
+            .collect()
+    }
+
+    /// Stores one update. Other updates may have stored in between, from
+    /// older or newer listings, so a path is known afterwards only if it
+    /// still was or this update looked at it (`looked`): a path no update
+    /// has keyed stays new, and the next one keys it.
+    fn store_files(
+        &self,
+        paths: BTreeSet<PathBuf>,
+        looked: &BTreeSet<PathBuf>,
+        keys: Vec<((String, String), PathBuf)>,
+    ) {
+        let mut files = lock(&self.files);
+        files.paths.retain(|_, path| paths.contains(path));
+        for (key, path) in keys {
+            files.paths.insert(key, path);
+        }
+        let known = paths
+            .into_iter()
+            .filter(|path| files.known.contains(path) || looked.contains(path))
+            .collect();
+        files.known = known;
+    }
+
+    fn harness_offsets_cached(&self, path: &Path) -> io::Result<BTreeSet<u64>> {
         let metadata = fs::metadata(path)?;
         #[cfg(unix)]
         let identity = (metadata.dev(), metadata.ino());
         #[cfg(not(unix))]
-        let identity = (0, 0);
-        if let Some((old_identity, offsets)) = self.harness.get(path)
-            && *old_identity == identity
-        {
-            return Ok(offsets.clone());
+        let identity: (u64, u64) = (0, 0);
+        let cached = lock(&self.files)
+            .harness
+            .get(path)
+            .filter(|(old_identity, _)| *old_identity == identity)
+            .map(|(_, offsets)| offsets.clone());
+        if let Some(offsets) = cached {
+            return Ok(offsets);
         }
         let offsets = harness_offsets(path)?;
-        self.harness
+        lock(&self.files)
+            .harness
             .insert(path.into(), (identity, offsets.clone()));
         Ok(offsets)
     }
 
-    fn transcript(&mut self, query: &str) -> io::Result<TranscriptPage> {
+    fn transcript(&self, query: &str) -> io::Result<TranscriptPage> {
         let harness = query_value(query, "harness")
             .and_then(decoded)
             .ok_or_else(|| invalid_input("harness"))?;
@@ -971,15 +1515,12 @@ impl MachineView {
         let path = self
             .transcript_path(&harness, &id)?
             .ok_or(io::ErrorKind::NotFound)?;
-        // Cheap when nothing changed (a stat pass, no reparsing): needed so
-        // liveness and child links are correct even when a transcript page
-        // is opened directly, without a prior `/api/tree` poll to warm the
-        // cache in this process.
-        self.refresh_tree()?;
-        let node = self
-            .tree
-            .as_ref()
-            .and_then(|tree| find_node(&tree.roots, &harness, &id));
+        // Needed so liveness and child links are correct even when a
+        // transcript page is opened directly, without a prior `/api/tree`
+        // poll to warm the cache in this process. Refreshed on read, it is
+        // cheap when nothing changed (a stat pass, no reparsing).
+        let tree = self.served_tree()?;
+        let node = find_node(&tree.roots, &harness, &id);
         let live = node.is_some_and(|node| node.pid.is_some() || node.state == "running");
         let links = node.map(tool_links).unwrap_or_default();
         let children = node
@@ -1020,7 +1561,7 @@ impl MachineView {
 
     /// `/api/entry`: one entry in full. With `sid`, `slot` and
     /// `as=in|out|diff|script`, one part of a transcript tool entry for "View all".
-    fn expand(&mut self, query: &str) -> io::Result<String> {
+    fn expand(&self, query: &str) -> io::Result<String> {
         if let Some(part) = query_value(query, "as") {
             let sid = query_value(query, "sid")
                 .and_then(decoded)
@@ -1028,9 +1569,8 @@ impl MachineView {
             let slot = query_value(query, "slot")
                 .and_then(|value| value.parse::<usize>().ok())
                 .ok_or_else(|| invalid_input("slot"))?;
-            self.refresh_model()?;
-            let built = &self.model.as_ref().expect("model loaded").built;
-            return tx::full_slot(built, &sid, slot, part);
+            let cache = self.served_model()?;
+            return tx::full_slot(&cache.built, &sid, slot, part);
         }
         let harness = query_value(query, "harness")
             .and_then(decoded)
@@ -1064,30 +1604,22 @@ impl MachineView {
 }
 
 impl MachineView {
-    /// This machine's model, rebuilt first if its logs or facts changed.
-    pub(crate) fn built(&mut self) -> io::Result<&Built> {
-        self.built_at(model::now_ms())
+    /// This machine's model, read as `read` says.
+    pub(crate) fn built(&self, read: Reading) -> io::Result<Arc<Built>> {
+        let cache = match read {
+            Reading::Served => self.served_model()?,
+            Reading::At(now) => self.fresh_model(now)?,
+        };
+        Ok(cache.built.clone())
     }
 
-    /// [`MachineView::built`], a rebuild taking `now` as its clock.
-    pub(crate) fn built_at(&mut self, now: i64) -> io::Result<&Built> {
-        self.refresh_model_at(now)?;
-        Ok(&self.model.as_ref().expect("model loaded").built)
-    }
-
-    /// The model last built, if any.
-    pub(crate) fn last_built(&self) -> Option<&Built> {
-        self.model.as_ref().map(|model| &model.built)
-    }
-
-    /// The V1 tree's roots, rebuilt first if anything changed.
-    pub(crate) fn tree_roots(&mut self) -> io::Result<Vec<Node>> {
-        self.refresh_tree()?;
-        Ok(self.tree.as_ref().expect("tree loaded").roots.clone())
+    /// The V1 tree's roots, as a request is answered.
+    pub(crate) fn tree_roots(&self) -> io::Result<Vec<Node>> {
+        Ok(self.served_tree()?.roots.clone())
     }
 
     /// Whether this machine has a transcript file for a V1 tree node.
-    pub(crate) fn has_transcript(&mut self, harness: &str, id: &str) -> io::Result<bool> {
+    pub(crate) fn has_transcript(&self, harness: &str, id: &str) -> io::Result<bool> {
         Ok(self.transcript_path(harness, id)?.is_some())
     }
 }
@@ -1787,7 +2319,10 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpStream,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            mpsc,
+        },
         thread,
         time::Duration,
     };
@@ -1797,6 +2332,53 @@ mod tests {
     use super::*;
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    /// A view's test hooks, seen from any thread (a background rebuild runs
+    /// on its refresher's).
+    #[derive(Default)]
+    pub(super) struct Hooks {
+        /// How many times the model was built.
+        builds: AtomicU64,
+        /// Runs in each build, after the files are stamped.
+        building: Mutex<Option<Hook>>,
+        /// Builds fail while set.
+        failing: AtomicBool,
+        /// V1 tree builds fail while set.
+        pub(super) tree_failing: AtomicBool,
+    }
+
+    type Hook = Arc<dyn Fn() + Send + Sync>;
+
+    impl Hooks {
+        pub(super) fn building(&self) -> io::Result<()> {
+            self.builds.fetch_add(1, Ordering::SeqCst);
+            let hook = lock(&self.building).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+            if self.failing.load(Ordering::SeqCst) {
+                return Err(io::Error::other("a build failed on purpose"));
+            }
+            Ok(())
+        }
+
+        fn builds(&self) -> u64 {
+            self.builds.load(Ordering::SeqCst)
+        }
+
+        /// Holds every build from now on until the returned sender is
+        /// dropped; the receiver hears when one starts.
+        fn hold(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+            let (started, starts) = mpsc::channel();
+            let (release, released) = mpsc::channel::<()>();
+            let (started, released) = (Mutex::new(started), Mutex::new(released));
+            *lock(&self.building) = Some(Arc::new(move || {
+                let _ = lock(&started).send(());
+                let _ = lock(&released).recv();
+            }));
+            (starts, release)
+        }
+    }
 
     struct Fixture {
         root: PathBuf,
@@ -1866,7 +2448,7 @@ mod tests {
             )
         }
 
-        fn viewer(&self) -> MachineView {
+        fn viewer(&self) -> Arc<MachineView> {
             MachineView::new(self.options.clone())
         }
     }
@@ -1884,7 +2466,7 @@ mod tests {
     fn http(fixture: &Fixture, request: &str) -> String {
         let server = Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
-        let mut viewer = Viewer {
+        let viewer = Viewer {
             core: ViewerCore::new(fixture.options.clone()),
             token: "0123456789abcdef0123456789abcdef".into(),
             port,
@@ -1992,7 +2574,7 @@ mod tests {
     #[test]
     fn model_api_version_is_served() {
         let fixture = Fixture::new();
-        let mut core = ViewerCore::new(fixture.options.clone());
+        let core = ViewerCore::new(fixture.options.clone());
         let reply = core.respond("GET", "/api/model", "", None);
         assert_eq!(reply.status, 200);
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
@@ -2031,7 +2613,7 @@ mod tests {
             "claude/projects/project/lane/subagents/agent-sub.meta.json",
             r#"{"agentType":"general-purpose","description":"Checker"}"#,
         );
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         let version = |routed: &Routed| {
             serde_json::from_slice::<Value>(&routed.2).unwrap()["version"]
                 .as_str()
@@ -2164,7 +2746,7 @@ mod tests {
             &json!({"pid":100,"sessionId":"lane","procStart":777,"status":"busy","name":"lane"})
                 .to_string(),
         );
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         let model = |routed: &Routed| serde_json::from_slice::<Value>(&routed.2).unwrap();
         let alive = model(&viewer.model("", None).unwrap());
         assert_eq!(alive["sessions"]["lane"]["state"], "work");
@@ -2211,7 +2793,7 @@ mod tests {
             "proc/locks",
             &format!("2: FLOCK  ADVISORY  WRITE 1234 {major:02x}:{minor:02x}:{ino} 0 EOF\n"),
         );
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         let model = |routed: &Routed| serde_json::from_slice::<Value>(&routed.2).unwrap();
         let alive = model(&viewer.model("", None).unwrap());
         assert_eq!(alive["sessions"]["run"]["state"], "work");
@@ -2242,7 +2824,7 @@ mod tests {
         let fixture = lane_fixture();
         let lock = fixture.write("codex/thread-writer-locks/run.lock", "");
         let path = fixture.root.join("claude/projects/project/lane.jsonl");
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         let builds = || crate::model::BUILDS.with(std::cell::Cell::get);
         let version = |routed: &Routed| {
             serde_json::from_slice::<Value>(&routed.2).unwrap()["version"]
@@ -2342,7 +2924,7 @@ mod tests {
     #[test]
     fn every_screen_url_serves_the_page_and_unknown_ones_404() {
         let fixture = lane_fixture();
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         let model: Value = serde_json::from_str(
             &viewer
                 .model("", None)
@@ -2452,7 +3034,7 @@ mod tests {
     #[test]
     fn shell_font_api_matches_the_font_routes() {
         let fixture = lane_fixture();
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         for name in crate::shell::FONT_FILES {
             let library_bytes = crate::shell::font(name).expect(name);
             let (status, content_type, route_bytes) = viewer
@@ -2595,14 +3177,14 @@ mod tests {
     #[test]
     fn failed_steps_are_listed_where_the_badge_counts_them() {
         let fixture = faults_fixture();
-        let mut core = fixture.viewer();
-        let body = |core: &mut MachineView, query: &str| -> Value {
+        let core = fixture.viewer();
+        let body = |core: &MachineView, query: &str| -> Value {
             let reply = core.respond("GET", "/api/tx", query, None);
             assert_eq!(reply.status, 200, "{query}");
             serde_json::from_slice(&reply.body).unwrap()
         };
         let model = body_of(&core.respond("GET", "/api/model", "", None));
-        let list = body(&mut core, "sid=faults&errors=1");
+        let list = body(&core, "sid=faults&errors=1");
         assert_eq!(list["errors"], 5);
         assert_eq!(list["errors"], model["sessions"]["faults"]["errors"]);
         assert_eq!(list["truncated"], false);
@@ -2615,7 +3197,7 @@ mod tests {
             .collect();
         // Every failed step of the whole transcript, read page by page.
         let mut failed = Vec::new();
-        let mut page = body(&mut core, "sid=faults");
+        let mut page = body(&core, "sid=faults");
         assert_eq!(list["total"], page["total"]);
         loop {
             let entries = page["entries"].as_array().unwrap();
@@ -2629,7 +3211,7 @@ mod tests {
             if page["from"] == 0 {
                 break;
             }
-            page = body(&mut core, &format!("sid=faults&before={}", page["from"]));
+            page = body(&core, &format!("sid=faults&before={}", page["from"]));
         }
         assert_eq!(slots, failed);
         assert_eq!(slots.len(), 5);
@@ -2638,13 +3220,13 @@ mod tests {
             "the failures span pages: {slots:?}"
         );
         for slot in slots {
-            let after = body(&mut core, &format!("sid=faults&after={slot}"));
+            let after = body(&core, &format!("sid=faults&after={slot}"));
             let first = &after["entries"][0];
             assert_eq!(
                 (first["slot"].as_u64(), &first["ok"]),
                 (Some(slot), &json!(false))
             );
-            let before = body(&mut core, &format!("sid=faults&before={}", slot + 1));
+            let before = body(&core, &format!("sid=faults&before={}", slot + 1));
             let last = before["entries"].as_array().unwrap().last().unwrap();
             assert_eq!(
                 (last["slot"].as_u64(), &last["ok"]),
@@ -2652,17 +3234,17 @@ mod tests {
             );
         }
         // The one never answered is among them, as the badge counts it.
-        let unfinished = body(&mut core, "sid=faults&errors=1")["slots"][2]
+        let unfinished = body(&core, "sid=faults&errors=1")["slots"][2]
             .as_u64()
             .unwrap();
-        let page = body(&mut core, &format!("sid=faults&after={unfinished}"));
+        let page = body(&core, &format!("sid=faults&after={unfinished}"));
         assert_eq!(page["entries"][0]["unfinished"], true);
     }
 
     #[test]
     fn the_error_list_refuses_bad_requests_and_unknown_sessions() {
         let fixture = faults_fixture();
-        let mut core = fixture.viewer();
+        let core = fixture.viewer();
         for query in [
             "errors=1",
             "sid=faults&errors=0",
@@ -2699,7 +3281,7 @@ mod tests {
     #[test]
     fn the_error_list_is_304_until_the_model_moves() {
         let fixture = faults_fixture();
-        let mut core = fixture.viewer();
+        let core = fixture.viewer();
         let first = core.respond("GET", "/api/tx", "sid=faults&errors=1", None);
         assert_eq!(first.status, 200);
         let etag = first.etag.clone().unwrap();
@@ -2761,12 +3343,20 @@ mod tests {
     fn the_error_list_is_capped_and_says_so() {
         assert_eq!(tx::ERRORS_MAX, 10_000);
         let fixture = faults_fixture();
-        let mut core = fixture.viewer();
-        let whole: Value =
-            serde_json::from_str(&tx::errors(core.built().unwrap(), "faults").unwrap()).unwrap();
-        let capped: Value =
-            serde_json::from_str(&tx::errors_limited(core.built().unwrap(), "faults", 2).unwrap())
-                .unwrap();
+        let core = fixture.viewer();
+        let whole: Value = serde_json::from_str(
+            &tx::errors(&core.built(Reading::At(model::now_ms())).unwrap(), "faults").unwrap(),
+        )
+        .unwrap();
+        let capped: Value = serde_json::from_str(
+            &tx::errors_limited(
+                &core.built(Reading::At(model::now_ms())).unwrap(),
+                "faults",
+                2,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(capped["errors"], 5);
         assert_eq!(capped["truncated"], true);
         assert_eq!(
@@ -2774,12 +3364,19 @@ mod tests {
             whole["slots"].as_array().unwrap()[..2]
         );
         assert_eq!(whole["truncated"], false);
-        let exact: Value =
-            serde_json::from_str(&tx::errors_limited(core.built().unwrap(), "faults", 5).unwrap())
-                .unwrap();
+        let exact: Value = serde_json::from_str(
+            &tx::errors_limited(
+                &core.built(Reading::At(model::now_ms())).unwrap(),
+                "faults",
+                5,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(exact["truncated"], false);
         assert!(matches!(
-            tx::errors(core.built().unwrap(), "nobody").map_err(|error| error.kind()),
+            tx::errors(&core.built(Reading::At(model::now_ms())).unwrap(), "nobody")
+                .map_err(|error| error.kind()),
             Err(io::ErrorKind::NotFound)
         ));
     }
@@ -2790,7 +3387,7 @@ mod tests {
     #[test]
     fn the_core_answers_without_a_transport() {
         let fixture = lane_fixture();
-        let mut core = fixture.viewer();
+        let core = fixture.viewer();
         let page = core.respond("GET", "/timeline", "", None);
         assert_eq!(
             (
@@ -2835,7 +3432,7 @@ mod tests {
     #[test]
     fn public_shell_exports_match_viewer_core_routes() {
         let fixture = lane_fixture();
-        let mut core = crate::ViewerCore::new(fixture.options.clone());
+        let core = crate::ViewerCore::new(fixture.options.clone());
 
         let script = core.respond("GET", "/viewer.js", "", None);
         assert_eq!(script.body, crate::shell::VIEWER_JS.as_bytes());
@@ -2899,7 +3496,7 @@ mod tests {
                 writeln!(file, "{}", json!({"type":"user","message":{"content":[{"type":"text","text":format!("message {number}")}]}})).unwrap();
             }
         }
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         let mut before = None;
         let mut entries = Vec::new();
         loop {
@@ -2951,7 +3548,7 @@ mod tests {
             &json!({"description":"worker","toolUseId":"task-1"}).to_string(),
         );
         fixture.codex("run", &[json!({"type":"event_msg","payload":{"type":"user_message","message":format!("Semon-Parent: claude:parent\nSemon-Handoff: {prompt}\nPrompt")}})]);
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         let page = viewer.transcript("harness=claude&id=parent").unwrap();
         assert_eq!(page.children.len(), 2);
         assert!(
@@ -2993,7 +3590,7 @@ mod tests {
             json!({"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call-1","arguments":"ls"}}),
             json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"file"}}),
         ]);
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         let page = viewer.transcript("harness=codex&id=codex").unwrap();
         assert!(
             page.entries
@@ -3028,7 +3625,7 @@ mod tests {
             json!({"type":"tool_use","id":"call","name":"Bash","input":{"value":format!("\"><img onerror=alert(1)>{long}")}}),
             json!({"type":"tool_result","tool_use_id":"call","content":format!("<script>{long}")}),
         ])]);
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         let page = viewer.transcript("harness=claude&id=xss").unwrap();
         assert!(
             page.entries
@@ -3071,7 +3668,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.codex("root", &[]);
         fixture.write("codex/sessions/2026/09/24/rollout-child.jsonl", &format!("{}\n", json!({"type":"session_meta","timestamp":"2026-09-24T00:00:00Z","payload":{"id":"child","session_id":"root","parent_thread_id":"root","thread_source":"subagent","agent_nickname":"worker"}})));
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         let page = viewer.transcript("harness=codex&id=root").unwrap();
         assert_eq!(page.children.len(), 1);
         assert_eq!(page.children[0].id, "child");
@@ -3136,7 +3733,7 @@ mod tests {
                 vec![json!({"type":"text","text":"hello"})],
             )],
         );
-        let mut viewer = fixture.viewer();
+        let viewer = fixture.viewer();
         let warm = viewer.tree_json().unwrap();
         assert!(warm.contains("warm"));
         // Nothing changes from here on: revoke read access so that a
@@ -3227,9 +3824,13 @@ mod tests {
     #[test]
     fn one_machine_through_with_machines_is_todays_viewer_byte_for_byte() {
         let fixture = machine("laptop", "lane");
-        let mut today = fixture.viewer();
+        let today = fixture.viewer();
         let mut core =
             ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);
+        // `--serve`'s mode answers the same bytes.
+        let mut background =
+            ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);
+        background.set_refresh(Refresh::Background);
         for (path, query) in [
             ("/api/model", ""),
             ("/api/tx", "sid=lane"),
@@ -3239,23 +3840,26 @@ mod tests {
             ("/machines/laptop", ""),
             ("/viewer.js", ""),
         ] {
-            let (a, b) = (
-                today.respond("GET", path, query, None),
+            let a = today.respond("GET", path, query, None);
+            for b in [
                 core.respond("GET", path, query, None),
-            );
-            assert_eq!(
-                (a.status, a.content_type, a.etag.clone()),
-                (b.status, b.content_type, b.etag.clone()),
-                "{path}"
-            );
-            if path == "/api/model" {
-                assert_eq!(without_now(&a.body), without_now(&b.body));
-            } else if path == "/api/tree" {
-                assert_eq!(without_age(&a.body), without_age(&b.body), "{path}");
-            } else {
-                assert_eq!(a.body, b.body, "{path}");
+                background.respond("GET", path, query, None),
+            ] {
+                assert_eq!(
+                    (a.status, a.content_type, a.etag.clone()),
+                    (b.status, b.content_type, b.etag.clone()),
+                    "{path}"
+                );
+                if path == "/api/model" {
+                    assert_eq!(without_now(&a.body), without_now(&b.body));
+                } else if path == "/api/tree" {
+                    assert_eq!(without_age(&a.body), without_age(&b.body), "{path}");
+                } else {
+                    assert_eq!(a.body, b.body, "{path}");
+                }
             }
         }
+        background.close();
         // No admin link unless the embedder sets one, and then first.
         assert!(
             !String::from_utf8_lossy(&core.respond("GET", "/api/model", "", None).body)
@@ -3351,12 +3955,30 @@ mod tests {
         assert_eq!(unchanged.status, 304);
         assert!(unchanged.body.is_empty());
         assert_eq!(unchanged.etag.as_deref(), Some(etag.as_str()));
+
+        // Per request, without touching the shared core: its own extras.
+        let mut extras = crate::Extras::default();
+        extras.set_account(Some(menu("Per request")));
+        let own = core.respond_with(&extras, "GET", "/api/model", "", None);
+        let own_model = body_of(&own);
+        assert_eq!(own_model["account"]["name"], "Per request");
+        assert!(own_model.get("nav").is_none());
+        assert_eq!(own_model["version"], version);
+        assert_eq!(own.etag.as_deref(), Some(etag.as_str()));
+        let shared = body_of(&core.respond("GET", "/api/model", "", None));
+        assert_eq!(shared["account"]["name"], "Another account");
+        assert_eq!(core.extras().clone(), {
+            let mut set = crate::Extras::default();
+            set.set_account(Some(menu("Another account")));
+            assert!(set.set_nav_override("machines", "/account/workspaces"));
+            set
+        });
     }
 
     #[test]
     fn several_machines_serve_one_model_and_each_answers_for_its_own() {
         let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
-        let mut core = ViewerCore::with_machines(vec![
+        let core = ViewerCore::with_machines(vec![
             ("a".into(), alpha.options.clone()),
             ("b".into(), bravo.options.clone()),
         ]);
@@ -3435,7 +4057,7 @@ mod tests {
     #[test]
     fn a_session_id_two_machines_share_is_refused_not_picked() {
         let (alpha, bravo) = (machine("alpha", "same"), machine("bravo", "same"));
-        let mut core = ViewerCore::with_machines(vec![
+        let core = ViewerCore::with_machines(vec![
             ("a".into(), alpha.options.clone()),
             ("b".into(), bravo.options.clone()),
         ]);
@@ -3461,7 +4083,7 @@ mod tests {
         crate::write_facts(&facts, &recorded).unwrap();
         let mut offline = second.options.clone();
         offline.facts = Some(facts);
-        let mut core = ViewerCore::with_machines(vec![
+        let core = ViewerCore::with_machines(vec![
             ("one".into(), first.options.clone()),
             ("two".into(), offline),
         ]);
@@ -3566,7 +4188,7 @@ mod tests {
         fs::write(dir.join("machines/stray"), "not a machine").unwrap();
         let before = contents(&dir);
 
-        let mut core = ViewerCore::with_received(
+        let core = ViewerCore::with_received(
             vec![(String::new(), local.options.clone())],
             received(&receiver, &local.options),
         );
@@ -3671,7 +4293,7 @@ mod tests {
         assert!(model["sessions"].get("lane-charlie").is_none());
 
         // --no-local: the received machines only.
-        let mut core = ViewerCore::with_received(Vec::new(), received(&receiver, &local.options));
+        let core = ViewerCore::with_received(Vec::new(), received(&receiver, &local.options));
         let model = body_of(&core.respond("GET", "/api/model", "", None));
         assert_eq!(machine_ids(&model), ["alpha", "bravo-host", "delta"]);
         assert!(model["sessions"].get("lane-home").is_none());
@@ -3687,7 +4309,7 @@ mod tests {
             Some("twin"),
             "lane-there",
         );
-        let mut core = ViewerCore::with_received(
+        let core = ViewerCore::with_received(
             vec![(String::new(), local.options.clone())],
             received(&receiver, &local.options),
         );
@@ -3761,7 +4383,7 @@ mod tests {
         symlink(&outside.root, dir.join("machines/evil")).unwrap();
         let before = contents(&dir);
 
-        let mut core = ViewerCore::with_received(Vec::new(), received(&receiver, &outside.options));
+        let core = ViewerCore::with_received(Vec::new(), received(&receiver, &outside.options));
         let reply = core.respond("GET", "/api/model", "", None);
         assert_eq!(reply.status, 200);
         let text = String::from_utf8_lossy(&reply.body).into_owned();
@@ -3821,7 +4443,7 @@ mod tests {
         let dir = receiver.root.join("received");
         receive(&dir, "alpha", Some("alpha"), "same");
         receive(&dir, "alpha", None, "lane-alpha");
-        let mut core = ViewerCore::with_received(
+        let core = ViewerCore::with_received(
             vec![(String::new(), local.options.clone())],
             received(&receiver, &local.options),
         );
@@ -3886,8 +4508,7 @@ mod tests {
         let mut big = record("big-pid", 78);
         big.push_str(&" ".repeat(crate::RECORD_MAX as usize));
         fs::write(alpha.join("claude/sessions/78.json"), big).unwrap();
-        let mut core =
-            ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
+        let core = ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
         let tree =
             String::from_utf8_lossy(&core.respond("GET", "/api/tree", "", None).body).into_owned();
         assert!(tree.contains("small-pid"), "{tree}");
@@ -3923,8 +4544,7 @@ mod tests {
         let long = "x".repeat(254);
         receive(&dir, "golf", None, "lane-golf");
         received_facts(&dir, "golf", facts_of(&long));
-        let mut core =
-            ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
+        let core = ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
         let model = body_of(&core.respond("GET", "/api/model", "", None));
         assert_eq!(
             machine_ids(&model),
@@ -3973,8 +4593,7 @@ mod tests {
                 .as_millis(),
         )
         .unwrap();
-        let mut core =
-            ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
+        let core = ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
         let model = body_of(&core.respond("GET", "/api/model", "", None));
         assert_eq!(machine_ids(&model), ["fresh", "stale"]);
         assert_eq!(model["machines"][0]["up"], true);
@@ -4044,8 +4663,7 @@ mod tests {
             )
             .unwrap();
         }
-        let mut core =
-            ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
+        let core = ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
         let reply = core.respond("GET", "/api/model", "", None);
         assert_eq!(reply.status, 200);
         let model = body_of(&reply);
@@ -4074,7 +4692,7 @@ mod tests {
             ("b", machine("h~c", "s2")),
             ("c", machine("h", "s3")),
         ];
-        let mut core = ViewerCore::with_machines(
+        let core = ViewerCore::with_machines(
             machines
                 .iter()
                 .map(|(key, fixture)| ((*key).to_owned(), fixture.options.clone()))
@@ -4088,5 +4706,418 @@ mod tests {
             String::from_utf8_lossy(&reply.body)
         );
         assert_eq!(machine_ids(&body_of(&reply)), ["h", "h~3", "h~c", "h~3~2"]);
+    }
+
+    /// Appends an assistant line saying `text` to session `sid`'s log.
+    fn say(fixture: &Fixture, sid: &str, second: usize, text: &str) {
+        let path = fixture
+            .root
+            .join(format!("claude/projects/project/{sid}.jsonl"));
+        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"assistant","timestamp":format!("2026-09-24T00:03:{:02}Z", second % 60),"sessionId":sid,
+                "message":{"role":"assistant","content":[{"type":"text","text":text}]}})
+        )
+        .unwrap();
+    }
+
+    fn version_of(reply: &ViewerReply) -> String {
+        body_of(reply)["version"].as_str().unwrap().to_owned()
+    }
+
+    /// Asks `answer` every 20 ms until it gives something, for at most 10 s.
+    fn eventually<T>(what: &str, mut answer: impl FnMut() -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(found) = answer() {
+                return found;
+            }
+            assert!(Instant::now() < deadline, "{what}: not within 10 s");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Background refresh (#29): a read while a rebuild runs answers at
+    /// once, from the model before it and with that model's `ETag`; the
+    /// rebuilt model answers once it is done.
+    #[test]
+    fn a_read_during_a_rebuild_answers_from_the_last_model_at_once() {
+        let fixture = lane_fixture();
+        let view = fixture.viewer();
+        view.set_background(true);
+        let first = view.respond("GET", "/api/model", "", None);
+        assert_eq!(first.status, 200);
+        let v1 = version_of(&first);
+        let (starts, release) = view.hooks.hold();
+        say(&fixture, "lane", 1, "written while the rebuild waits");
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the refresher rebuilds a changed log");
+        let asked = Instant::now();
+        let during = view.respond("GET", "/api/model", &format!("since={v1}"), None);
+        let took = asked.elapsed();
+        assert_eq!(during.status, 304, "the model before the rebuild answers");
+        assert_eq!(during.etag, Some(format!("\"{v1}\"")));
+        assert!(
+            took < Duration::from_millis(500),
+            "a read waited {took:?} for a rebuild"
+        );
+        let page = view.respond("GET", "/api/tx", "sid=lane", None);
+        assert_eq!(page.status, 200);
+        assert!(!String::from_utf8_lossy(&page.body).contains("while the rebuild waits"));
+        drop(release);
+        let after = eventually("the rebuilt model", || {
+            let reply = view.respond("GET", "/api/model", &format!("since={v1}"), None);
+            (reply.status == 200).then_some(reply)
+        });
+        assert_ne!(version_of(&after), v1);
+        assert_eq!(after.etag, Some(format!("\"{}\"", version_of(&after))));
+        let page = view.respond("GET", "/api/tx", "sid=lane", None);
+        assert!(String::from_utf8_lossy(&page.body).contains("while the rebuild waits"));
+        view.close();
+    }
+
+    /// Background refresh (#29): reads with no change rebuild nothing, and
+    /// the changes of one second after a rebuild are one rebuild.
+    #[test]
+    fn changes_within_a_second_are_one_rebuild_and_none_without_a_change() {
+        let fixture = lane_fixture();
+        let view = fixture.viewer();
+        view.set_background(true);
+        let v1 = version_of(&view.respond("GET", "/api/model", "", None));
+        assert_eq!(view.hooks.builds(), 1);
+        let idle = |version: &str| {
+            let until = Instant::now() + Duration::from_millis(1500);
+            while Instant::now() < until {
+                let poll = view.respond("GET", "/api/model", &format!("since={version}"), None);
+                assert_eq!(poll.status, 304);
+                thread::sleep(Duration::from_millis(50));
+            }
+        };
+        idle(&v1);
+        assert_eq!(view.hooks.builds(), 1, "no change, no rebuild");
+
+        // One line: one rebuild, seen by a later read.
+        say(&fixture, "lane", 0, "line 0");
+        let v2 = eventually("the first line", || {
+            let reply = view.respond("GET", "/api/model", &format!("since={v1}"), None);
+            (reply.status == 200).then(|| version_of(&reply))
+        });
+        assert_eq!(view.hooks.builds(), 2);
+        // Nineteen more, each its own change, within the second after that
+        // rebuild: one rebuild takes them all.
+        for number in 1..20 {
+            say(&fixture, "lane", number, &format!("line {number}"));
+            thread::sleep(Duration::from_millis(10));
+        }
+        let page = eventually("the nineteen lines", || {
+            let page = view.respond("GET", "/api/tx", "sid=lane", None);
+            let done = String::from_utf8_lossy(&page.body).contains("\"line 19\"");
+            done.then_some(page)
+        });
+        let text = String::from_utf8_lossy(&page.body);
+        assert!((1..20).all(|number| text.contains(&format!("\"line {number}\""))));
+        assert_eq!(
+            view.hooks.builds(),
+            3,
+            "nineteen changes in a second, one rebuild"
+        );
+        let v3 = version_of(&view.respond("GET", "/api/model", "", None));
+        assert_ne!(v3, v2);
+        idle(&v3);
+        assert_eq!(view.hooks.builds(), 3, "no change, no rebuild");
+        view.close();
+    }
+
+    /// Background refresh (#29): many threads read one shared core while
+    /// two machines' logs grow. Every answer is one whole snapshot (its
+    /// `ETag` is its version, and a transcript page never has fewer entries
+    /// than the model read before it counted), no thread sees an older
+    /// snapshot after a newer one, and the last lines are served.
+    #[test]
+    fn concurrent_reads_see_whole_snapshots_while_logs_grow() {
+        let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
+        let mut core = ViewerCore::with_machines(vec![
+            ("a".into(), alpha.options.clone()),
+            ("b".into(), bravo.options.clone()),
+        ]);
+        core.set_refresh(Refresh::Background);
+        let core = Arc::new(core);
+        assert_eq!(core.respond("GET", "/api/model", "", None).status, 200);
+        let writing = Arc::new(AtomicBool::new(true));
+        let readers: Vec<_> = (0..8)
+            .map(|_| {
+                let (core, writing) = (core.clone(), writing.clone());
+                thread::spawn(move || {
+                    let mut seen = [0_u64; 2];
+                    let mut reads = 0;
+                    while writing.load(Ordering::SeqCst) || reads < 10 {
+                        let reply = core.respond("GET", "/api/model", "", None);
+                        assert_eq!(reply.status, 200);
+                        let model = body_of(&reply);
+                        assert_eq!(
+                            reply.etag,
+                            Some(format!("\"{}\"", model["version"].as_str().unwrap()))
+                        );
+                        for (at, sid) in ["lane-a", "lane-b"].into_iter().enumerate() {
+                            let slots: u64 = model["tx"][sid]
+                                .as_str()
+                                .unwrap()
+                                .split('.')
+                                .next()
+                                .unwrap()
+                                .parse()
+                                .unwrap();
+                            assert!(slots >= seen[at], "{sid}: {slots} after {}", seen[at]);
+                            let page = core.respond("GET", "/api/tx", &format!("sid={sid}"), None);
+                            assert_eq!(page.status, 200);
+                            let total = body_of(&page)["total"].as_u64().unwrap();
+                            assert!(total >= slots, "{sid}: a page of {total} after {slots}");
+                            seen[at] = total;
+                        }
+                        reads += 1;
+                    }
+                    seen
+                })
+            })
+            .collect();
+        for number in 0..40 {
+            say(&alpha, "lane-a", number, &format!("line {number}"));
+            say(&bravo, "lane-b", number, &format!("line {number}"));
+            thread::sleep(Duration::from_millis(25));
+        }
+        eventually("the last lines", || {
+            ["lane-a", "lane-b"]
+                .iter()
+                .all(|sid| {
+                    let page = core.respond("GET", "/api/tx", &format!("sid={sid}"), None);
+                    String::from_utf8_lossy(&page.body).contains("\"line 39\"")
+                })
+                .then_some(())
+        });
+        writing.store(false, Ordering::SeqCst);
+        for reader in readers {
+            let seen = reader.join().expect("a reader failed");
+            assert!(seen.iter().all(|total| *total > 0));
+        }
+        // Closed: no call reads a file again.
+        core.close();
+        assert_eq!(core.respond("GET", "/api/model", "", None).status, 404);
+    }
+
+    /// A background view whose first model is built and whose refresher has
+    /// looked for over a second: past the spacing after that first build.
+    fn warm_background(fixture: &Fixture) -> (Arc<MachineView>, String) {
+        let view = fixture.viewer();
+        view.set_background(true);
+        let version = version_of(&view.respond("GET", "/api/model", "", None));
+        let until = Instant::now() + REBUILD_SPACING + Duration::from_millis(200);
+        while Instant::now() < until {
+            view.respond("GET", "/api/model", &format!("since={version}"), None);
+            thread::sleep(Duration::from_millis(50));
+        }
+        (view, version)
+    }
+
+    fn serves(view: &MachineView, text: &str) -> bool {
+        let page = view.respond("GET", "/api/tx", "sid=lane", None);
+        String::from_utf8_lossy(&page.body).contains(text)
+    }
+
+    /// The documented bound: a line is served within the rebuild spacing
+    /// and one check of when it lands, plus a build (given 750 ms here),
+    /// even when it lands just after a rebuild.
+    #[test]
+    fn a_change_is_served_within_the_staleness_bound() {
+        let fixture = lane_fixture();
+        let (view, _) = warm_background(&fixture);
+        let bound = REBUILD_SPACING + CHECK_EVERY + Duration::from_millis(750);
+        for (second, text) in [(1, "first of two"), (2, "right after a rebuild")] {
+            let written = Instant::now();
+            say(&fixture, "lane", second, text);
+            eventually(text, || serves(&view, text).then_some(()));
+            let took = written.elapsed();
+            assert!(
+                took < bound,
+                "{text}: served after {took:?}, over {bound:?}"
+            );
+        }
+        view.close();
+    }
+
+    /// After IDLE_AFTER without a read the refresher stops; the next read,
+    /// its model last checked over a second ago, refreshes before it
+    /// answers and starts a refresher again.
+    #[test]
+    fn after_an_idle_spell_the_first_read_refreshes_first() {
+        let fixture = lane_fixture();
+        let view = fixture.viewer();
+        view.set_background(true);
+        lock(&view.live.state).idle_after = Duration::from_millis(300);
+        let v1 = version_of(&view.respond("GET", "/api/model", "", None));
+        let running = || lock(&view.live.state).running;
+        assert!(running());
+        eventually("the refresher stops when idle", || {
+            (!running()).then_some(())
+        });
+        thread::sleep(REBUILD_SPACING + Duration::from_millis(100));
+        say(&fixture, "lane", 1, "written while idle");
+        assert!(
+            serves(&view, "written while idle"),
+            "the first read after an idle spell answered from the old model"
+        );
+        assert!(running(), "the read started a refresher again");
+        assert_ne!(version_of(&view.respond("GET", "/api/model", "", None)), v1);
+        view.close();
+    }
+
+    /// A refresher that panics mid-build is marked stopped (the model it
+    /// had stays served), and the next reads get the change all the same.
+    #[test]
+    fn a_refresher_that_panics_is_replaced() {
+        let fixture = lane_fixture();
+        let (view, v1) = warm_background(&fixture);
+        let armed = Arc::new(AtomicBool::new(true));
+        let trigger = armed.clone();
+        *lock(&view.hooks.building) = Some(Arc::new(move || {
+            if trigger.swap(false, Ordering::SeqCst) {
+                panic!("a rebuild panicked on purpose");
+            }
+        }));
+        say(&fixture, "lane", 1, "after the panic");
+        eventually("the panic, and the refresher stopped", || {
+            (!armed.load(Ordering::SeqCst) && !lock(&view.live.state).running).then_some(())
+        });
+        let during = view.respond("GET", "/api/model", &format!("since={v1}"), None);
+        assert!(matches!(during.status, 200 | 304), "{}", during.status);
+        eventually("the line, after the panic", || {
+            serves(&view, "after the panic").then_some(())
+        });
+        view.close();
+    }
+
+    /// Background builds that keep failing aren't hidden forever behind
+    /// the last model: past FAILING_AFTER each read tries itself and
+    /// answers the error, and the model comes back once builds work.
+    #[test]
+    fn background_builds_that_keep_failing_answer_the_error() {
+        let fixture = lane_fixture();
+        let (view, v1) = warm_background(&fixture);
+        view.hooks.failing.store(true, Ordering::SeqCst);
+        say(&fixture, "lane", 1, "while builds fail");
+        let first = view.respond("GET", "/api/model", &format!("since={v1}"), None);
+        assert_eq!(first.status, 304, "at first the last model answers");
+        let failed = Instant::now();
+        eventually("the error", || {
+            (view.respond("GET", "/api/model", "", None).status == 500).then_some(())
+        });
+        assert!(failed.elapsed() >= FAILING_AFTER - REBUILD_SPACING - CHECK_EVERY);
+        view.hooks.failing.store(false, Ordering::SeqCst);
+        eventually("the model again", || {
+            (view
+                .respond("GET", "/api/model", &format!("since={v1}"), None)
+                .status
+                == 200)
+                .then_some(())
+        });
+        assert!(serves(&view, "while builds fail"));
+        view.close();
+    }
+
+    /// Refreshed on read, the reads that find one change share its one
+    /// rebuild: the others wait for it, then answer the same new model.
+    #[test]
+    fn on_read_the_reads_that_find_a_change_share_one_rebuild() {
+        let fixture = lane_fixture();
+        let view = fixture.viewer();
+        let v1 = version_of(&view.respond("GET", "/api/model", "", None));
+        assert_eq!(view.hooks.builds(), 1);
+        let (starts, release) = view.hooks.hold();
+        say(&fixture, "lane", 1, "one change");
+        let readers: Vec<_> = (0..8)
+            .map(|_| {
+                let view = view.clone();
+                thread::spawn(move || version_of(&view.respond("GET", "/api/model", "", None)))
+            })
+            .collect();
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a read rebuilds");
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(view.hooks.builds(), 2, "eight reads, one rebuild");
+        drop(release);
+        let versions: BTreeSet<String> = readers
+            .into_iter()
+            .map(|reader| reader.join().expect("a reader failed"))
+            .collect();
+        assert_eq!(versions.len(), 1, "{versions:?}");
+        assert!(!versions.contains(&v1));
+        assert_eq!(view.hooks.builds(), 2);
+    }
+
+    /// Three lookups' updates of the transcript paths, interleaved (each
+    /// is a listing, then the new paths read without the lock, then a
+    /// store): an older listing's store between two newer ones never
+    /// leaves a new file known without its session, which would 404 it
+    /// until restart.
+    #[test]
+    fn interleaved_path_updates_never_lose_a_new_file() {
+        let fixture = lane_fixture();
+        let view = fixture.viewer();
+        let file = fixture.root.join("claude/projects/project/lane.jsonl");
+        // C listed before the file was there; B and A after it.
+        let (c_paths, c_new) = view.files_to_key(Vec::new());
+        let (b_paths, b_new) = view.files_to_key(vec![file.clone()]);
+        let b_keys = view.keys_of(&b_new);
+        view.store_files(b_paths, &b_new, b_keys);
+        // To A the file isn't new any more: B knows it.
+        let (a_paths, a_new) = view.files_to_key(vec![file.clone()]);
+        assert!(a_new.is_empty());
+        let a_keys = view.keys_of(&a_new);
+        let c_keys = view.keys_of(&c_new);
+        view.store_files(c_paths, &c_new, c_keys);
+        view.store_files(a_paths, &a_new, a_keys);
+        {
+            let files = lock(&view.files);
+            let key = ("claude".to_owned(), "lane".to_owned());
+            assert!(
+                files.paths.contains_key(&key) || !files.known.contains(&file),
+                "the file is known, but no session is"
+            );
+        }
+        assert_eq!(
+            view.transcript_path("claude", "lane").unwrap(),
+            Some(file),
+            "the next lookup finds it"
+        );
+    }
+
+    /// The model and the V1 tree fail on their own: a tree that won't
+    /// build answers the error on `/api/tree`, and `/api/model` goes on
+    /// serving a model that builds, past FAILING_AFTER too.
+    #[test]
+    fn a_failing_tree_leaves_the_model_served() {
+        let fixture = lane_fixture();
+        let (view, v1) = warm_background(&fixture);
+        assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
+        view.hooks.tree_failing.store(true, Ordering::SeqCst);
+        say(&fixture, "lane", 1, "while the tree fails");
+        eventually("the tree's error", || {
+            (view.respond("GET", "/api/tree", "", None).status == 500).then_some(())
+        });
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until {
+            let reply = view.respond("GET", "/api/model", &format!("since={v1}"), None);
+            assert_eq!(reply.status, 200, "the model with the new line");
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(serves(&view, "while the tree fails"));
+        view.hooks.tree_failing.store(false, Ordering::SeqCst);
+        eventually("the tree again", || {
+            (view.respond("GET", "/api/tree", "", None).status == 200).then_some(())
+        });
+        view.close();
     }
 }
