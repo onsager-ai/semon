@@ -67,8 +67,35 @@ pub(crate) struct Activity {
     pub(crate) cost_by_day: Vec<(i64, f64)>,
     pub(crate) unpriced_models: Vec<String>,
     pub(crate) rate_limits: Option<RateLimits>,
-    /// When each of its messages to you that still waits was sent.
+    /// When each of its messages to you that still waits was sent: a
+    /// question nobody has answered yet.
     pub(crate) waits: Vec<i64>,
+    /// Each question of its that was answered or declined since
+    /// [`KEEP_MS`] ago: when it was asked and when it was answered.
+    pub(crate) answered: Vec<(i64, i64)>,
+}
+
+impl Activity {
+    /// The time it waited on you as spans (start, end), in order and not
+    /// overlapping: each open question runs to now, without an end, and
+    /// questions that overlap (a session's parallel calls) count once.
+    fn wait_spans(&self) -> Vec<(i64, i64)> {
+        let mut spans: Vec<(i64, i64)> = self
+            .answered
+            .iter()
+            .copied()
+            .chain(self.waits.iter().map(|sent| (*sent, i64::MAX)))
+            .collect();
+        spans.sort_unstable();
+        let mut merged: Vec<(i64, i64)> = Vec::with_capacity(spans.len());
+        for (start, end) in spans {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        merged
+    }
 }
 
 /// A `YYYY-MM-DD` UTC day's start (epoch ms).
@@ -130,6 +157,7 @@ pub(crate) fn activity(
                 unpriced_models: session.cost.unpriced_models.clone(),
                 rate_limits: session.rate_limits.clone(),
                 waits: Vec::new(),
+                answered: Vec::new(),
             };
             (id.clone(), row)
         })
@@ -155,12 +183,24 @@ pub(crate) fn activity(
             }
         }
     }
+    // A question waits on you from when it is asked to when it is answered
+    // (or declined): open ones are still waiting, answered ones have a time
+    // of answer. A result (`ask == "result"`) asks nothing of you.
     for handoff in handoffs {
-        if handoff.kind == "toyou"
-            && handoff.status == "wait"
-            && let Some(row) = rows.get_mut(&handoff.from)
-        {
+        if handoff.kind != "toyou" {
+            continue;
+        }
+        let Some(row) = rows.get_mut(&handoff.from) else {
+            continue;
+        };
+        if handoff.status == "wait" {
             row.waits.push(handoff.at);
+        } else if matches!(handoff.ask, Some("question" | "decision"))
+            && let Some(done) = handoff.done
+            && done > handoff.at
+            && done >= since
+        {
+            row.answered.push((handoff.at, done));
         }
     }
     // Collected and pushed without knowing their lengths: give back what
@@ -170,6 +210,7 @@ pub(crate) fn activity(
         row.turns.shrink_to_fit();
         row.cost_by_day.shrink_to_fit();
         row.waits.shrink_to_fit();
+        row.answered.shrink_to_fit();
     }
     rows
 }
@@ -201,6 +242,7 @@ pub(crate) fn heap_bytes(rows: &BTreeMap<String, Activity>) -> usize {
                     limits.windows.capacity() * size_of::<crate::events::RateLimitWindow>()
                 })
                 + row.waits.capacity() * size_of::<i64>()
+                + row.answered.capacity() * size_of::<(i64, i64)>()
         })
         .sum()
 }
@@ -512,14 +554,14 @@ fn period(rows: &[Live], from: i64, to: i64, days: i64) -> (Value, BTreeMap<Stri
             tools += calls;
             errors += activity.errors.unwrap_or(0).min(calls);
         }
-        // A message to you still waiting has waited since it was sent.
-        for sent in &activity.waits {
-            if *sent < to {
-                let ms = to - (*sent).max(from);
-                if ms > 0 {
-                    waits.push(ms);
-                    *waited.entry(row.row.id.to_owned()).or_default() += ms;
-                }
+        // A question to you has waited from when it was asked to when it was
+        // answered, or until now while it still waits; what falls in the
+        // range counts.
+        for (start, end) in activity.wait_spans() {
+            let ms = end.min(to) - start.max(from);
+            if ms > 0 {
+                waits.push(ms);
+                *waited.entry(row.row.id.to_owned()).or_default() += ms;
             }
         }
         let cost = cost_in(activity, span);
@@ -628,6 +670,7 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
     let touches = |row: &Activity| {
         row.working
             || !row.waits.is_empty()
+            || row.answered.iter().any(|(a, b)| *a < to && *b > before)
             || in_range(row.start, before, to)
             || row.busy.iter().any(|(a, b)| *a < to && *b > before)
             || row.turns.iter().any(|at| in_range(*at, before, to))
@@ -999,6 +1042,7 @@ mod tests {
             unpriced_models: Vec::new(),
             rate_limits: None,
             waits: Vec::new(),
+            answered: Vec::new(),
         }
     }
 
@@ -1216,6 +1260,51 @@ mod tests {
         assert_eq!(
             at("range=30d&model=Other", &activity)["current"]["started"],
             0
+        );
+    }
+
+    /// Answered questions count as the time between asking and answering,
+    /// clipped to the range, once where a session's questions overlap, and
+    /// the longest waited lists first.
+    #[test]
+    fn answered_waits_are_clipped_merged_and_listed_longest_first() {
+        const MIN: i64 = 60_000;
+        let mut rows = BTreeMap::new();
+        let mut slow = session("slow", "claude", None);
+        slow.start = NOW - 3 * HOUR;
+        // 4 min, and two overlapping calls of 3 min each that share 1 min,
+        // 5 min between them: 9 min in all.
+        slow.answered = vec![
+            (NOW - 3 * HOUR, NOW - 3 * HOUR + 4 * MIN),
+            (NOW - 2 * HOUR, NOW - 2 * HOUR + 3 * MIN),
+            (NOW - 2 * HOUR + 2 * MIN, NOW - 2 * HOUR + 5 * MIN),
+        ];
+        rows.insert("slow".into(), slow);
+        let mut quick = session("quick", "codex", None);
+        quick.start = NOW - 3 * HOUR;
+        quick.answered = vec![(NOW - HOUR, NOW - HOUR + MIN)];
+        rows.insert("quick".into(), quick);
+        // Asked 25 h ago, answered 23 h ago: one hour of it is in 24 h, and
+        // the rest is before it.
+        let mut edge = session("edge", "claude", None);
+        edge.start = NOW - 26 * HOUR;
+        edge.answered = vec![(NOW - 25 * HOUR, NOW - 23 * HOUR)];
+        rows.insert("edge".into(), edge);
+        let mut none = session("none", "claude", None);
+        none.start = NOW - HOUR;
+        rows.insert("none".into(), none);
+        let day = at("range=24h", &rows);
+        assert_eq!(day["current"]["wait_ms"], (9 + 1 + 60) * MIN);
+        assert_eq!(day["current"]["longest_wait_ms"], 60 * MIN);
+        assert!(day["longest_current_wait"].is_null());
+        assert_eq!(day["previous"]["wait_ms"], 60 * MIN);
+        assert_eq!(
+            day["top"]["waited"],
+            json!([
+                { "sid": "edge", "ms": 60 * MIN },
+                { "sid": "slow", "ms": 9 * MIN },
+                { "sid": "quick", "ms": MIN },
+            ])
         );
     }
 

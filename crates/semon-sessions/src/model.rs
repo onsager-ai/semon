@@ -2642,13 +2642,19 @@ impl<'a> Builder<'a> {
                     // output for the call beyond an acknowledgement, and no
                     // later user message.
                     _ if codex => {
-                        let answered = found.r.as_ref().is_some_and(|reply| reply.f & ACK == 0);
-                        let followed = refs[position + 1..]
+                        let reply = found.r.as_ref().filter(|reply| reply.f & ACK == 0);
+                        let following = refs[position + 1..]
                             .iter()
-                            .any(|later| event(self.files, *later).k == Kind::U);
-                        if self.sessions[index].alive && !answered && !followed {
+                            .map(|later| event(self.files, *later))
+                            .find(|later| later.k == Kind::U);
+                        if self.sessions[index].alive && reply.is_none() && following.is_none() {
                             handoff.status = "wait";
                         }
+                        // It was answered when its output says so, else when
+                        // your next message came.
+                        handoff.done = reply
+                            .and_then(|reply| reply.t)
+                            .or_else(|| following.and_then(|later| later.t));
                     }
                     Some(reply) => {
                         handoff.done = reply.t;

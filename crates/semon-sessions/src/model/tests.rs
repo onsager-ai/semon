@@ -2799,3 +2799,43 @@ fn a_codex_question_is_time_waited_on_you() {
         json!({ "sid": "cx-open", "ms": open })
     );
 }
+
+/// "Top sessions · waited on" lists the sessions that waited longest first.
+#[test]
+fn top_sessions_waited_on_list_the_longest_first() {
+    let home = Home::new();
+    for (sid, minutes) in [("brief", 1), ("long", 4)] {
+        let id = format!("{sid}-q");
+        home.top(
+            sid,
+            &[
+                human(sid, ts(14, 0), "ask me"),
+                assistant(
+                    sid,
+                    ts(14, 1),
+                    vec![tool(
+                        &id,
+                        "AskUserQuestion",
+                        json!({"questions":[question("Which?", &["A", "B"], false)]}),
+                    )],
+                ),
+                result(
+                    sid,
+                    ts(14, 1 + minutes),
+                    &id,
+                    "",
+                    false,
+                    json!({"answers":{"Which?":"A"}}),
+                ),
+            ],
+        );
+    }
+    let week = week(&home.build());
+    assert_eq!(
+        week["top"]["waited"],
+        json!([
+            { "sid": "long", "ms": 4 * MINUTE },
+            { "sid": "brief", "ms": MINUTE },
+        ])
+    );
+}
