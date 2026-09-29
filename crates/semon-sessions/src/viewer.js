@@ -1309,8 +1309,8 @@
     });
   }
   function analyticsWaits() {
-    return H.filter((h) => h.kind === "toyou" && SESS[h.from])
-      .map((h) => ({ sid: h.from, startAt: h.at, endAt: h.status === "wait" ? null : Number.isFinite(h.done) ? h.done : null }));
+    return H.filter((h) => h.kind === "toyou" && h.status === "wait" && SESS[h.from])
+      .map((h) => ({ sid: h.from, startAt: h.at, endAt: null }));
   }
   function busyMsIn(row, from, to) { return row.busy.reduce((sum, [a, b]) => sum + Math.max(0, Math.min(b, to) - Math.max(a, from)), 0); }
   function sessionCostInRange(s, from, to) {

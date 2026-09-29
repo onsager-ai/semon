@@ -18,6 +18,7 @@ export default async function analyticsCheck(browser) {
     await page.click('#topbar .analytics-range button:has-text("7 d")');
     record.labels = await page.evaluate(() => [...document.querySelectorAll(".analytics-metric .label")].map((x) => x.textContent.trim()));
     record.figures = await page.locator(".analytics-metric").count();
+    record.longestCurrentWait = await page.locator('.analytics-metric').filter({ hasText: "Longest current wait" }).locator(".value").textContent();
     const costFrom = D.NOW - 7 * 86400000, missingModels = new Set(); let expectedUsd = 0;
     for (const session of Object.values(D.SESS)) {
       const days = Object.entries(session.cost?.by_day ?? {}).filter(([day]) => { const start = Date.parse(day + "T00:00:00.000Z"); return start < D.NOW && start + 86400000 > costFrom; });
@@ -59,6 +60,7 @@ export default async function analyticsCheck(browser) {
     r.expect(m.errors.length === 0, m.mode + ": page errors: " + m.errors.join(" | "));
     r.expect(m.range.labels.join(",") === "24 h,7 d,30 d" && m.range30.selected === "30 d" && m.range30.heading?.includes("Last 30 days"), m.mode + ": Analytics range control did not change the selected range: " + JSON.stringify({ before: m.range, after: m.range30 }));
     r.expect(m.figures === 8 && expectedLabels.every((label) => m.labels.some((value) => value.startsWith(label))), m.mode + ": expected eight headline figures: " + JSON.stringify(m.labels));
+    r.expect(m.longestCurrentWait === "8m", m.mode + ": completed result messages were counted as current waits: " + m.longestCurrentWait);
     r.expect(m.costHeadline === m.costExpected, m.mode + ": Analytics headline did not sum the served by_day cost: " + JSON.stringify({ actual: m.costHeadline, expected: m.costExpected }));
     r.expect(m.charts.length === 2 && m.charts.every((chart) => chart.columns > 0), m.mode + ": expected both charts to render vertical columns: " + JSON.stringify(m.charts));
     r.expect(m.slice?.open && m.slice.sessions > 0, m.mode + ": an Analytics slice did not open with busy sessions: " + JSON.stringify(m.slice));
