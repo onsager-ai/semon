@@ -304,7 +304,7 @@ async function scheme(browser, name, opts, r) {
       L.bump("order-old", at(13, 40));
       say(await until(page, () => document.querySelector("#lanes > .treeitem")?.dataset.id === "order-old"), "in the rail a session that turned active didn't enter the icons (the sidebar is frozen)");
       say(!(await chip(page, "side")) && !(await pillOf("side")), "the rail shows a chip or pill");
-      await page.click("#rail-toggle"); await page.waitForFunction(() => !document.querySelector(".app.rail")); await sleep(400);
+      await page.evaluate(() => document.querySelector("#rail-toggle").click()); await page.waitForFunction(() => !document.querySelector(".app.rail")); await sleep(400); // (in the rail a nav item covers the toggle)
       say((await sideRows(page))[0]?.id === "order-old", "leaving the rail didn't draw the sidebar sorted");
     }
 
