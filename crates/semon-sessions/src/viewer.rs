@@ -4278,6 +4278,111 @@ mod tests {
         );
     }
 
+    /// A filter value no session has is answered, empty, with a 200.
+    #[test]
+    fn analytics_answers_a_filter_no_session_has_with_nothing() {
+        let fixture = dated("testbox", model::now_ms(), &[("today", 60 * MINUTE, 2)]);
+        let core = ViewerCore::new(fixture.options.clone());
+        let known = analytics_of(&core, "range=7d&machine=testbox");
+        assert_eq!(known["current"]["started"], 1);
+        for query in [
+            "range=7d&repo=nowhere",
+            "range=7d&machine=elsewhere",
+            "range=7d&model=x",
+        ] {
+            let answer = analytics_of(&core, query);
+            assert_eq!(answer["current"]["started"], 0, "{query}");
+            assert_eq!(answer["top"]["busy"], json!([]), "{query}");
+            // The filters' values are still the range's.
+            assert_eq!(answer["facets"]["machine"], json!(["testbox"]), "{query}");
+        }
+    }
+
+    /// What the 60-day rows cost in memory, on a fixture shaped like a busy
+    /// machine: ten sessions a day for seventy days, in four repos and two
+    /// models, each eight turns of your message, a tool call, its result and
+    /// a reply, twenty minutes apart. The measurement is written to the
+    /// test's real stdout (and as a CI notice); the bound guards it.
+    #[test]
+    fn analytics_rows_memory_on_a_busy_fixture() {
+        let now = model::now_ms();
+        let mut fixture = Fixture::new();
+        fixture.options.all = false;
+        fixture.write("proc/sys/kernel/hostname", "testbox\n");
+        let repos = ["harbor", "atlas", "quill", "ledger"];
+        for repo in repos {
+            fs::create_dir_all(fixture.root.join("work").join(repo).join(".git")).unwrap();
+        }
+        let models = ["claude-opus-5-5", "claude-sonnet-5"];
+        let usage = json!({"input_tokens":1000,"output_tokens":200,"cache_read_input_tokens":5000,"cache_creation_input_tokens":0});
+        for day in 0..70i64 {
+            for n in 0..10i64 {
+                let sid = format!("s-{day:02}-{n}");
+                let cwd = fixture
+                    .root
+                    .join("work")
+                    .join(repos[usize::try_from(n).unwrap() % repos.len()]);
+                let cwd = cwd.to_string_lossy();
+                let model = models[usize::try_from(n).unwrap() % models.len()];
+                let start = now - day * DAY - n * 47 * MINUTE - 60 * MINUTE;
+                let mut lines = Vec::new();
+                for turn in 0..8i64 {
+                    let t = start + turn * 20 * MINUTE;
+                    let tool = format!("t-{sid}-{turn}");
+                    lines.extend([
+                        json!({"type":"user","timestamp":iso(t),"sessionId":sid,"cwd":cwd,"origin":{"kind":"human"},
+                            "message":{"role":"user","content":format!("turn {turn}")}}),
+                        json!({"type":"assistant","timestamp":iso(t + 3 * MINUTE),"sessionId":sid,"cwd":cwd,
+                            "message":{"id":format!("m-{sid}-{turn}"),"model":model,"role":"assistant","usage":usage,
+                                "content":[{"type":"tool_use","id":tool,"name":"Bash","input":{"command":"true"}}]}}),
+                        json!({"type":"user","timestamp":iso(t + 6 * MINUTE),"sessionId":sid,"cwd":cwd,
+                            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":tool,"content":"ok"}]}}),
+                        json!({"type":"assistant","timestamp":iso(t + 9 * MINUTE),"sessionId":sid,"cwd":cwd,
+                            "message":{"id":format!("r-{sid}-{turn}"),"model":model,"role":"assistant","usage":usage,
+                                "content":[{"type":"text","text":"done"}]}}),
+                    ]);
+                }
+                fixture.claude(&sid, &lines);
+            }
+        }
+        let built = MachineView::new(fixture.options.clone())
+            .built(Reading::At(now))
+            .unwrap();
+        let rows = &built.activity;
+        let bytes = crate::analytics::heap_bytes(rows);
+        let intervals: usize = rows.values().map(|row| row.busy.len()).sum();
+        let turns: usize = rows.values().map(|row| row.turns.len()).sum();
+        let days: usize = rows.values().map(|row| row.cost_by_day.len()).sum();
+        let line = format!(
+            "analytics rows: {} of 700 sessions kept, {intervals} busy intervals, {turns} turns, \
+             {days} cost days, {bytes} bytes ({} per session)",
+            rows.len(),
+            bytes / rows.len().max(1)
+        );
+        // Past the test harness's capture, so a passing run shows it.
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}\n::notice title=Analytics memory::{line}");
+        drop(out);
+        // Sixty days of ten a day, and the two of day 60 whose last line is
+        // still inside the window.
+        assert!((600..=610).contains(&rows.len()), "{line}");
+        // Those well inside it keep every interval, turn and cost day; at
+        // its edge only what is inside is kept.
+        let inside = rows.values().filter(|row| row.start >= now - 59 * DAY);
+        assert!(
+            inside
+                .clone()
+                .all(|row| row.busy.len() == 8 && row.turns.len() == 8),
+            "{line}"
+        );
+        assert!(
+            inside.clone().all(|row| !row.cost_by_day.is_empty()),
+            "{line}"
+        );
+        assert!(inside.count() >= 590, "{line}");
+        assert!(bytes < 1024 * rows.len(), "{line}");
+    }
+
     /// Across machines: every machine's sessions, each under its machine's
     /// id, and the union's version.
     #[test]

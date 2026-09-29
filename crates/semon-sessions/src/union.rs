@@ -1102,9 +1102,10 @@ impl ViewerCore {
     /// keeps ([`analytics::Activity`]); nothing is built for it. The answer
     /// is kept per range and filters until the model changes (and at least
     /// a second), or for 30 s while nothing does, as time moves the range.
-    /// Its `ETag` hashes the body: a poll whose `If-None-Match` still
-    /// matches is a 304. `version` in the body is the model version it was
-    /// computed from, as `/api/model` names it.
+    /// Its `ETag` hashes the answer but for the time it was computed at: a
+    /// poll whose `If-None-Match` still matches is a 304. A filter value no
+    /// session has is answered (empty) but not kept. `version` in the body
+    /// is the model version it was computed from, as `/api/model` names it.
     fn analytics(
         &self,
         views: &Views,
@@ -1125,18 +1126,34 @@ impl ViewerCore {
             [one] => one.version.clone(),
             _ => plan.version.clone(),
         };
-        let mut cache = lock(&self.analytics);
-        let entry = cache.answer(&request.key(), &version, || {
-            let rows = analytics::rows(
-                plan.machine_ids
-                    .iter()
-                    .zip(&models)
-                    .map(|(machine, built)| (machine.as_str(), &built.activity)),
-            );
-            analytics::answer(&rows, &request, crate::model::now_ms(), &version)
-        });
-        let etag = Some(entry.etag.clone());
-        if if_none_match == Some(entry.etag.as_str()) {
+        let key = request.key();
+        // The lock is held to look up or to keep an answer, never to
+        // compute one: two reads that miss at once may both compute it.
+        let kept = lock(&self.analytics).kept(&key, &version);
+        let kept = match kept {
+            Some(kept) => kept,
+            None => {
+                let rows = analytics::rows(
+                    plan.machine_ids
+                        .iter()
+                        .zip(&models)
+                        .map(|(machine, built)| (machine.as_str(), &built.activity)),
+                );
+                let answer = analytics::answer(&rows, &request, crate::model::now_ms(), &version);
+                let kept = analytics::Kept {
+                    etag: analytics::etag(&answer),
+                    body: Arc::new(serde_json::to_vec(&answer).map_err(io::Error::other)?),
+                };
+                // A filter value no session has gets its (empty) answer,
+                // not a place among the kept ones.
+                if request.known(&rows) {
+                    lock(&self.analytics).keep(&key, &version, kept.clone());
+                }
+                kept
+            }
+        };
+        let etag = Some(kept.etag.clone());
+        if if_none_match == Some(kept.etag.as_str()) {
             return Ok(ViewerReply {
                 status: 304,
                 content_type: json,
@@ -1147,7 +1164,7 @@ impl ViewerCore {
         Ok(ViewerReply {
             status: 200,
             content_type: json,
-            body: entry.body.clone(),
+            body: kept.body.to_vec(),
             etag,
         })
     }

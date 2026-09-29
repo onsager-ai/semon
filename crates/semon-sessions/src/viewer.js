@@ -1809,7 +1809,7 @@
     const key = analyticsQuery(), kept = AN.answers.get(key);
     const asked = fetch("/api/analytics?" + key, { credentials: "same-origin", headers: kept?.etag ? { "If-None-Match": kept.etag } : {} })
       .then((r) => {
-        if (r.status === 304) return false;
+        if (r.status === 304) { const cleared = AN.error != null; AN.error = null; return cleared; } // unchanged, and asking works again
         if (r.status === 403) { ended(403); return false; }
         if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status });
         const etag = r.headers.get("ETag");
@@ -1827,11 +1827,12 @@
     });
     return AN.inflight;
   }
-  // Asks again in 10 s, or in a little over a second when the answer came from an older model than the page has.
+  // Asks again in 10 s, or in a little over a second when the answer came from an older model than the page has. While
+  // asking fails (a 409 or a 500), it waits the 10 s: the kept answer stays drawn, with the error above it.
   function scheduleAnalytics() {
     clearTimeout(AN.timer); AN.timer = null;
     if (route.v !== "analytics" || LIVE.ended || !visible()) return;
-    const data = analyticsData(), behind = data && LIVE.version && data.version !== LIVE.version;
+    const data = analyticsData(), behind = !AN.error && data && LIVE.version && data.version !== LIVE.version;
     AN.timer = setTimeout(refreshAnalytics, behind ? 1200 : AN_EVERY);
   }
   function refreshAnalytics() {
@@ -1987,6 +1988,8 @@
     const put = placer(page); put(head); observeTitle(h1); put(renderFacetFilters(page, () => { render(); refreshAnalytics(); }));
     // Until the range's answer is here (the first time a range or filter is asked for), the page says so.
     if (!A) { const wait = el("p", "empty", AN.error ? "Couldn't load Analytics: " + AN.error : "Loading…"); wait.setAttribute("role", "status"); put(wait); put.done(); return; }
+    // An answer kept from before a request that failed is still drawn, under the error.
+    if (AN.error) { const stale = el("p", "empty", "Couldn't update Analytics: " + AN.error + ". Showing the last answer."); stale.setAttribute("role", "status"); put(stale); }
     const now = A.current, previous = A.previous;
     // A card with an explanation carries it for a screen reader all the time (hidden text, its description); the tooltip shows it to a pointer,
     // and the card takes keyboard focus so the tooltip is reachable.

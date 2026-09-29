@@ -11,6 +11,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -162,7 +163,46 @@ pub(crate) fn activity(
             row.waits.push(handoff.at);
         }
     }
+    // Collected and pushed without knowing their lengths: give back what
+    // the growth left over, since these rows live as long as the model.
+    for row in rows.values_mut() {
+        row.busy.shrink_to_fit();
+        row.turns.shrink_to_fit();
+        row.cost_by_day.shrink_to_fit();
+        row.waits.shrink_to_fit();
+    }
     rows
+}
+
+/// What `rows` hold on the heap and inline, in bytes: each key and row,
+/// and what their strings and vectors allocated (their capacity). The
+/// allocator's and the map's own overhead are not counted.
+#[cfg(test)]
+pub(crate) fn heap_bytes(rows: &BTreeMap<String, Activity>) -> usize {
+    use std::mem::size_of;
+    rows.iter()
+        .map(|(id, row)| {
+            size_of::<String>()
+                + id.capacity()
+                + size_of::<Activity>()
+                + row.name.capacity()
+                + row.repo.as_ref().map_or(0, String::capacity)
+                + row.model.capacity()
+                + row.busy.capacity() * size_of::<(i64, i64)>()
+                + row.turns.capacity() * size_of::<i64>()
+                + row.cost_by_day.capacity() * size_of::<(i64, f64)>()
+                + row.unpriced_models.capacity() * size_of::<String>()
+                + row
+                    .unpriced_models
+                    .iter()
+                    .map(String::capacity)
+                    .sum::<usize>()
+                + row.rate_limits.as_ref().map_or(0, |limits| {
+                    limits.windows.capacity() * size_of::<crate::events::RateLimitWindow>()
+                })
+                + row.waits.capacity() * size_of::<i64>()
+        })
+        .sum()
 }
 
 /// One session as a core serves it: its id, the id of the machine it ran
@@ -299,6 +339,28 @@ impl Request {
             self.model
         ]))
         .expect("serializable key")
+    }
+
+    /// Whether each filter names a value some row has (over every row
+    /// kept, not only the range's). A request that doesn't is answered, but
+    /// its answer isn't kept: any value would otherwise be a new key.
+    pub(crate) fn known(&self, rows: &[Row]) -> bool {
+        let has = |test: &dyn Fn(&Row) -> bool| rows.iter().any(|row| test(row));
+        self.repo
+            .as_ref()
+            .is_none_or(|repo| has(&|row| row.activity.repo.as_ref() == repo.as_ref()))
+            && self
+                .machine
+                .as_deref()
+                .is_none_or(|machine| has(&|row| row.machine == machine))
+            && self
+                .harness
+                .as_deref()
+                .is_none_or(|harness| has(&|row| row.activity.harness == harness))
+            && self
+                .model
+                .as_deref()
+                .is_none_or(|model| has(&|row| row.activity.model == model))
     }
 
     fn matches(&self, row: &Row) -> bool {
@@ -551,8 +613,27 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
         .filter(|row| row.activity.harness == "codex")
         .filter_map(|row| row.activity.rate_limits.as_ref())
         .max_by_key(|limits| limits.recorded_at);
-    let all: Vec<Live> = rows.iter().map(|row| live(row, now)).collect();
     let span = cost_span(to, days);
+    // Only the rows that touch the range or the period before it are
+    // walked: a start, busy time, a turn or a cost day in them, or working
+    // or waiting on you now.
+    let (before, cost_from) = (from - days * DAY_MS, cost_span(from, days).0);
+    let touches = |row: &Activity| {
+        row.working
+            || !row.waits.is_empty()
+            || in_range(row.start, before, to)
+            || row.busy.iter().any(|(a, b)| *a < to && *b > before)
+            || row.turns.iter().any(|at| in_range(*at, before, to))
+            || row
+                .cost_by_day
+                .iter()
+                .any(|(day, _)| *day >= cost_from && *day < span.1)
+    };
+    let all: Vec<Live> = rows
+        .iter()
+        .filter(|row| touches(row.activity))
+        .map(|row| live(row, now))
+        .collect();
     let active = |row: &Live| {
         in_range(row.activity().start, from, to)
             || row.busy_in(from, to) > 0
@@ -806,57 +887,78 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
     Value::Object(out)
 }
 
-/// One kept answer.
-pub(crate) struct Entry {
+/// An answer's `ETag`: a hash of it without the time it was computed at
+/// (`now`, and the range's and each agent column's ends, which follow it),
+/// so an answer that didn't change keeps its tag. `version` is in it.
+pub(crate) fn etag(answer: &Value) -> String {
+    let mut stable = answer.clone();
+    if let Some(fields) = stable.as_object_mut() {
+        for key in ["now", "from", "to"] {
+            fields.remove(key);
+        }
+    }
+    if let Some(columns) = stable["agents"]["columns"].as_array_mut() {
+        for column in columns.iter_mut().filter_map(Value::as_object_mut) {
+            column.remove("from");
+            column.remove("to");
+        }
+    }
+    format!("\"a{:016x}\"", fnv(&stable.to_string()))
+}
+
+/// A kept answer: its `ETag` and its body.
+#[derive(Clone)]
+pub(crate) struct Kept {
+    pub(crate) etag: String,
+    pub(crate) body: Arc<Vec<u8>>,
+}
+
+struct Entry {
     key: String,
     version: String,
     at: Instant,
-    pub(crate) body: Vec<u8>,
-    pub(crate) etag: String,
+    kept: Kept,
 }
 
 /// The answers a core keeps, at most [`CACHE_MAX`], one per range and
-/// filters. An answer is computed again only when the model it came from
-/// changed (and [`SPACING`] has passed), or when it is [`STALE_AFTER`] old.
+/// filters. A kept answer serves until the model it came from changed (and
+/// [`SPACING`] has passed), or until it is [`STALE_AFTER`] old. The caller
+/// computes a new one without holding the cache.
 #[derive(Default)]
 pub(crate) struct Cache {
     entries: Vec<Entry>,
 }
 
 impl Cache {
-    /// The answer for `key` over the model at `version`: the kept one, or
-    /// `compute`'s, kept in its place.
-    pub(crate) fn answer(
-        &mut self,
-        key: &str,
-        version: &str,
-        compute: impl FnOnce() -> Value,
-    ) -> &Entry {
-        let kept = self.entries.iter().position(|entry| {
-            entry.key == key
-                && (entry.at.elapsed() < SPACING
-                    || (entry.version == version && entry.at.elapsed() < STALE_AFTER))
-        });
-        if let Some(index) = kept {
-            return &self.entries[index];
-        }
-        let body = serde_json::to_vec(&compute()).expect("serializable answer");
-        let etag = format!("\"a{:016x}\"", fnv(&String::from_utf8_lossy(&body)));
+    /// The kept answer for `key` that may still answer for the model at
+    /// `version`.
+    pub(crate) fn kept(&self, key: &str, version: &str) -> Option<Kept> {
+        self.entries
+            .iter()
+            .find(|entry| {
+                entry.key == key
+                    && (entry.at.elapsed() < SPACING
+                        || (entry.version == version && entry.at.elapsed() < STALE_AFTER))
+            })
+            .map(|entry| entry.kept.clone())
+    }
+
+    /// Keeps `kept` for `key`, in place of any older answer for it; the
+    /// oldest answer goes when the cache is full.
+    pub(crate) fn keep(&mut self, key: &str, version: &str, kept: Kept) {
         self.entries.retain(|entry| entry.key != key);
-        if self.entries.len() >= CACHE_MAX {
-            let oldest = (0..self.entries.len())
-                .min_by_key(|index| self.entries[*index].at)
-                .expect("a full cache has entries");
+        if self.entries.len() >= CACHE_MAX
+            && let Some(oldest) =
+                (0..self.entries.len()).min_by_key(|index| self.entries[*index].at)
+        {
             self.entries.remove(oldest);
         }
         self.entries.push(Entry {
             key: key.to_owned(),
             version: version.to_owned(),
             at: Instant::now(),
-            body,
-            etag,
+            kept,
         });
-        self.entries.last().expect("just added")
     }
 
     #[cfg(test)]
@@ -1190,28 +1292,86 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_recomputes_only_for_a_new_version_or_a_new_key() {
+    fn the_cache_keeps_an_answer_per_key_until_its_version_changes() {
         let mut cache = Cache::default();
-        let mut computed = 0;
-        let mut ask = |cache: &mut Cache, key: &str, version: &str| {
-            let etag = cache
-                .answer(key, version, || {
-                    computed += 1;
-                    json!({ "n": computed })
-                })
-                .etag
-                .clone();
-            (etag, computed)
+        let answer = |n: i64| Kept {
+            etag: format!("\"{n}\""),
+            body: Arc::new(n.to_string().into_bytes()),
         };
-        let (first, n) = ask(&mut cache, "a", "v1");
-        assert_eq!(n, 1);
-        assert_eq!(ask(&mut cache, "a", "v1"), (first.clone(), 1));
+        assert!(cache.kept("a", "v1").is_none());
+        cache.keep("a", "v1", answer(1));
+        assert_eq!(cache.kept("a", "v1").unwrap().etag, "\"1\"");
         // Within SPACING a new version is answered from the kept one.
-        assert_eq!(ask(&mut cache, "a", "v2"), (first.clone(), 1));
-        assert_eq!(ask(&mut cache, "b", "v1").1, 2);
+        assert_eq!(cache.kept("a", "v2").unwrap().etag, "\"1\"");
+        assert!(cache.kept("b", "v1").is_none());
+        cache.keep("a", "v2", answer(2));
+        assert_eq!(cache.kept("a", "v2").unwrap().etag, "\"2\"");
+        assert_eq!(cache.len(), 1);
         for key in 0..CACHE_MAX + 3 {
-            ask(&mut cache, &key.to_string(), "v1");
+            cache.keep(&key.to_string(), "v1", answer(3));
         }
         assert_eq!(cache.len(), CACHE_MAX);
+    }
+
+    #[test]
+    fn the_etag_ignores_when_the_answer_was_computed() {
+        let activity = fixture();
+        let first = at("range=7d", &activity);
+        // The same figures computed a little later: only the times differ.
+        let mut later = first.clone();
+        later["now"] = json!(NOW + 30_000);
+        later["from"] = json!(NOW + 30_000 - 7 * DAY_MS);
+        later["to"] = json!(NOW + 30_000);
+        for column in later["agents"]["columns"].as_array_mut().unwrap() {
+            column["from"] = json!(column["from"].as_i64().unwrap() + 30_000);
+            column["to"] = json!(column["to"].as_i64().unwrap() + 30_000);
+        }
+        assert_ne!(first, later);
+        assert_eq!(etag(&first), etag(&later));
+        // A figure, or the model it came from, changes it.
+        let mut busier = later.clone();
+        busier["current"]["agent_ms"] = json!(1);
+        assert_ne!(etag(&first), etag(&busier));
+        let mut moved = later;
+        moved["version"] = json!("v2");
+        assert_ne!(etag(&first), etag(&moved));
+    }
+
+    #[test]
+    fn a_filter_no_row_has_is_not_known() {
+        let activity = fixture();
+        let rows = rows([("laptop", &activity)]);
+        for query in [
+            "range=7d",
+            "range=7d&repo=harbor",
+            "range=7d&repo=",
+            "range=7d&machine=laptop&harness=codex&model=Opus%205.5",
+        ] {
+            assert!(get(query).known(&rows), "{query}");
+        }
+        for query in [
+            "range=7d&repo=nowhere",
+            "range=7d&machine=desktop",
+            "range=7d&harness=other",
+            "range=7d&model=Other",
+        ] {
+            assert!(!get(query).known(&rows), "{query}");
+        }
+    }
+
+    #[test]
+    fn rows_outside_the_range_and_the_one_before_are_not_walked() {
+        let mut activity = fixture();
+        // Fifty days ago: outside 7 d and the week before, inside 30 d's before.
+        let mut old = session("old", "claude", Some("ledger"));
+        old.start = NOW - 50 * DAY_MS;
+        old.busy = vec![(NOW - 50 * DAY_MS, NOW - 50 * DAY_MS + HOUR)];
+        activity.insert("old".into(), old);
+        let week = at("range=7d", &activity);
+        assert_eq!(week["facets"]["repo"], json!([null, "atlas", "harbor"]));
+        assert_eq!(week["previous"]["agent_ms"], 4 * HOUR);
+        let month = at("range=30d", &activity);
+        assert_eq!(month["previous"]["agent_ms"], HOUR);
+        assert_eq!(month["previous"]["started"], 1);
     }
 }
