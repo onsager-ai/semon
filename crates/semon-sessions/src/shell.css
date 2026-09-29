@@ -85,7 +85,7 @@ dialog.sheet > .btn-row { margin-top: 20px; }
 
 /* Sign-in pages use a narrow column without the navigation shell. */
 .signin { display: flex; flex-direction: column; justify-content: center; gap: 18px; width: min(100%, 380px); min-height: 100vh; margin: 0 auto; padding: 40px 24px; }
-.signin > .mark { width: 28px; height: 28px; }
+.signin > .mark { width: 32px; height: 32px; }
 .signin h1 { margin: 0; font: 400 26px/1.2 var(--serif); }
 .signin p { margin: 0; color: var(--muted); }
 .signin form { display: grid; gap: 14px; }
