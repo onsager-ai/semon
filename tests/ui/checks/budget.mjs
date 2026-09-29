@@ -82,40 +82,47 @@ async function stopServer(proc) {
 
 // ---- Requests ---------------------------------------------------------------------------------------------------------------
 // Every request of the context (its pages and their workers): grouped by path without the query, /api/* by path and
-// everything else as "static". A request counts where it finished; its sizes come from the browser's own accounting.
+// everything else as "static". A request counts where it ended, finished or failed. A bare 304 answer to
+// a fetch as a failed request (seen in the first CI run, as many failures as polls), so the status comes from the response event: a failed
+// request with a status counts as an answered one, and only one with none counts as failed. The browser cannot size such
+// an answer, so it adds no bytes. Transfer bytes are the browser's own (headers plus body as sent); decoded bytes are the
+// body's length, read from the body when the response is compressed and equal to the sent body otherwise (the served
+// responses are never compressed: reading the body back is unreliable for `Cache-Control: no-store` responses).
 function recorder(ctx) {
   const state = { paths: {}, inflight: 0, lastActivity: Date.now(), pending: [], unread: 0 };
+  const answered = new WeakMap();
   const mine = (request) => /^https?:/.test(request.url());
   const keyOf = (request) => { try { const p = new URL(request.url()).pathname; return p.startsWith("/api/") ? p : "static"; } catch { return "static"; } };
-  const entry = (key) => (state.paths[key] ??= { count: 0, statuses: {}, failed: 0, transferBytes: 0, decodedBytes: 0 });
+  const entry = (key) => (state.paths[key] ??= { count: 0, statuses: {}, failed: 0, errors: {}, transferBytes: 0, decodedBytes: 0 });
   ctx.on("request", (request) => { if (!mine(request)) return; state.inflight++; state.lastActivity = Date.now(); });
-  ctx.on("requestfailed", (request) => {
+  ctx.on("response", (response) => { answered.set(response.request(), response); });
+  const ended = (request, failure) => {
     if (!mine(request)) return;
     state.inflight--; state.lastActivity = Date.now();
-    entry(keyOf(request)).failed++;
-  });
-  ctx.on("requestfinished", (request) => {
-    if (!mine(request)) return;
-    state.inflight--; state.lastActivity = Date.now();
-    const e = entry(keyOf(request));
+    const e = entry(keyOf(request)), response = answered.get(request);
+    if (failure) e.errors[failure] = (e.errors[failure] ?? 0) + 1;
+    if (!response) { e.failed++; return; }
     e.count++;
+    const status = String(response.status());
+    e.statuses[status] = (e.statuses[status] ?? 0) + 1;
+    if (failure) return;
     state.pending.push((async () => {
       try {
-        const response = await request.response();
-        const status = String(response ? response.status() : 0);
-        e.statuses[status] = (e.statuses[status] ?? 0) + 1;
         const sizes = await request.sizes();
         e.transferBytes += sizes.responseBodySize + sizes.responseHeadersSize;
-        e.decodedBytes += (await response.body()).length;
+        const encoding = response.headers()["content-encoding"] ?? "identity";
+        e.decodedBytes += encoding === "identity" ? sizes.responseBodySize : (await response.body()).length;
       } catch { state.unread++; }
     })());
-  });
+  };
+  ctx.on("requestfinished", (request) => ended(request, null));
+  ctx.on("requestfailed", (request) => ended(request, request.failure()?.errorText ?? "failed"));
   const settle = async () => { while (state.pending.length) { const batch = state.pending; state.pending = []; await Promise.all(batch); } };
   return {
     // Forgets what was recorded so far: the next snapshot covers what follows.
     async reset() { await settle(); state.paths = {}; state.unread = 0; },
     async snapshot() { await settle(); return { paths: JSON.parse(JSON.stringify(state.paths)), unreadBodies: state.unread }; },
-    // True once nothing is in flight and nothing finished for `quiet` ms; false when `cap` ms pass first.
+    // True once nothing is in flight and nothing ended for `quiet` ms; false when `cap` ms pass first.
     async idle(quiet = 1000, cap = 20_000) {
       const start = Date.now();
       while (Date.now() - start < cap) {
