@@ -50,7 +50,6 @@ V_ESBUILD=$(bin/esbuild --version) V_BUN=$(bin/bun --version) V_VITE=$(pkgver pk
 V_TS=$($TSC --version | sed 's/^Version //') V_NODE=$(node --version) V_PREACT=$(pkgver node_modules/preact) V_SOLID=$(pkgver node_modules/solid-js) V_LIT=$(pkgver node_modules/lit-html)
 V_BABEL=$(pkgver pkg/babel/node_modules/@babel/core) V_BPS=$(pkgver pkg/babel/node_modules/babel-preset-solid) V_VPS=$(pkgver pkg/vite-solid/node_modules/vite-plugin-solid)
 endgroup
-group "probe bun"; bash probe-bun.sh; endgroup
 
 # ---- Type checks: tsc --noEmit per runtime (none of the bundlers type-check) -------------------------------------------
 declare -A TSC_MS
@@ -75,10 +74,12 @@ build_cmd() { # bundler runtime min(1|0) out
   [ "$rt" = solid ] && dir=vite-solid
   case "$b" in
     esbuild) if [ "$rt" = solid ]; then echo "node pkg/babel/solid.mjs esbuild $min $out"; else echo "bin/esbuild $(entry "$rt") --bundle --format=iife --platform=browser --target=es2022 --log-level=warning $flag --outfile=$out"; fi ;;
-    bun) if [ "$rt" = solid ]; then echo "bin/bun pkg/babel/solid.mjs bun $min $out"; else echo "bin/bun build $(entry "$rt") --target=browser --format=iife $flag --outfile=$out"; fi ;;
+    bun) if [ "$rt" = solid ]; then echo "NODE_ENV=production bin/bun pkg/babel/solid.mjs bun $min $out"; else echo "NODE_ENV=production bin/bun build $(entry "$rt") --target=browser --format=iife $flag --outfile=$out"; fi ;;
     vite) echo "RT=$rt ENTRY=$(entry "$rt") MIN=$min OUT=$out node pkg/$dir/node_modules/vite/bin/vite.js build --config pkg/$dir/vite.config.mjs --logLevel warn" ;;
   esac
 }
+# Bun resolves packages' "development" export condition unless NODE_ENV is production (the first run bundled lit-html's and
+# solid-js's development builds), so every Bun command sets it.
 # The needles crates/semon-sessions/src/viewer.rs bans from VIEWER_JS (the_page_has_no_inline_script_style_or_html_injection).
 NEEDLES=("innerHTML" "outerHTML" "insertAdjacentHTML" "document.write" "eval(" "new Function" 'setAttribute("style"' "cssText" ".title =" ".title=" 'setAttribute("title"')
 scan() { # file -> "needle×n, ..." or "none"
@@ -91,7 +92,7 @@ scan() { # file -> "needle×n, ..." or "none"
   [ "$n" -gt 0 ] && hits+=("\`title:\`×$n")
   if [ ${#hits[@]} -eq 0 ]; then echo "none"; else local IFS=","; echo "${hits[*]}" | sed 's/,/, /g'; fi
 }
-declare -A COLD WARM MIN GZ DEV HITS OPEN
+declare -A COLD WARM MIN GZ DEV HITS OPEN DEVMARK
 for rt in "${TARGETS[@]}"; do
   for b in "${BUNDLERS[@]}"; do
     id="$b-$rt" min="out/$b-$rt.min.js" dev="out/$b-$rt.js"
@@ -106,9 +107,10 @@ for rt in "${TARGETS[@]}"; do
       MIN[$id]=$(stat -c %s "$min") GZ[$id]=$(gzip -9c "$min" | wc -c) DEV[$id]=$(stat -c %s "$dev" 2>/dev/null || echo 0)
       HITS[$id]=$(scan "$dev")
       OPEN[$id]="$(head -c 1 "$dev")$(head -c 1 "$min")"
+      DEVMARK[$id]=$({ grep -o -E "DEV_MODE|registerGraph" "$min" || true; } | wc -l)
       echo "cold ${COLD[$id]} ms, warm ${WARM[$id]} ms, ${MIN[$id]} B min, ${GZ[$id]} B gzip, ${DEV[$id]} B unminified; banned: ${HITS[$id]}"
     else
-      COLD[$id]="failed" WARM[$id]="failed" MIN[$id]=0 GZ[$id]=0 DEV[$id]=0 HITS[$id]="-" OPEN[$id]="-"
+      COLD[$id]="failed" WARM[$id]="failed" MIN[$id]=0 GZ[$id]=0 DEV[$id]=0 HITS[$id]="-" OPEN[$id]="-" DEVMARK[$id]="-"
       FAILED+=("$id")
     fi
     endgroup
@@ -179,6 +181,8 @@ done
     for b in "${BUNDLERS[@]}"; do row+=" | ${HITS[$b-$rt]} (\`${OPEN[$b-$rt]}\`)"; done
     echo "$row |"
   done
+  echo
+  echo "Development-build markers (lit-html's \`DEV_MODE\`, solid-js's \`registerGraph\`) in the minified bundles, all should be 0:$(for rt in "${TARGETS[@]}"; do for b in "${BUNDLERS[@]}"; do printf ' %s %s' "$b-$rt" "${DEVMARK[$b-$rt]}"; done; done)."
   echo
   echo "### One file, transformed without bundling (ms)"
   echo

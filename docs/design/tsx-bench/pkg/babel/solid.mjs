@@ -23,8 +23,7 @@ if (bundler === "esbuild") {
   const esbuild = await import("esbuild");
   await esbuild.build({ entryPoints: [entry], bundle: true, format: "iife", platform: "browser", target: "es2022", minify, outfile, plugins: [plugin], logLevel: "warning" });
 } else if (bundler === "bun") {
-  const extra = JSON.parse(process.env.BUN_EXTRA ?? "{}");
-  const result = await Bun.build({ entrypoints: [entry], target: "browser", format: "iife", minify, outdir: path.dirname(outfile), naming: path.basename(outfile), plugins: [plugin], ...extra });
+  const result = await Bun.build({ entrypoints: [entry], target: "browser", format: "iife", minify, outdir: path.dirname(outfile), naming: path.basename(outfile), plugins: [plugin] });
   if (!result.success) {
     for (const log of result.logs) console.error(log);
     process.exit(1);
