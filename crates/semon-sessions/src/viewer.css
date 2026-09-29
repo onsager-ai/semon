@@ -800,12 +800,26 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .session-details .vt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .session-details .vclose { grid-row: 1; grid-column: 2; width: 40px; height: 40px; display: grid; place-items: center; border: 0; background: none; border-radius: 10px; color: var(--ink-2); }
 .session-details .vclose svg { width: 20px; height: 20px; }
-.session-details .detail-list { display: grid; grid-template-columns: minmax(0, 1fr); }
-.session-details .detail-row { display: grid; grid-template-columns: minmax(94px, .3fr) minmax(0, 1fr); gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); user-select: text; -webkit-user-select: text; }
-.session-details .detail-label { color: var(--muted); font-size: var(--fs-sm); }
-.session-details .detail-value { min-width: 0; overflow-wrap: anywhere; color: var(--ink-2); font-size: var(--fs-ui); user-select: text; -webkit-user-select: text; }
-.session-details .reported-cost, .session-details .cost-warning { padding: 6px 0; color: var(--muted); font-size: var(--fs-cap); }
-.session-details .cost-warning { color: var(--wait); }
+/* One label column for the whole list, sized to its longest label (subgrid), so every label stays on one line at 390 px and every value starts at the same x. */
+.session-details .detail-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 12px; }
+.session-details .detail-list > * { grid-column: 1 / -1; }
+.session-details .detail-row { display: grid; grid-template-columns: minmax(94px, .3fr) minmax(0, 1fr); grid-template-columns: subgrid; align-items: baseline; padding: 11px 0; border-bottom: 1px solid var(--line); user-select: text; -webkit-user-select: text; }
+.session-details .detail-label { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; }
+.session-details .detail-value { min-width: 0; overflow-wrap: anywhere; color: var(--ink-2); font-size: var(--fs-ui); font-variant-numeric: tabular-nums; user-select: text; -webkit-user-select: text; }
+/* The cost breakdown: always shown, a quiet table per model. Kind, tokens, cost; the two number columns are fixed so their right edges line up down the whole sheet. */
+.session-details .cost-breakdown { padding: 14px 0 6px; }
+.session-details .cost-breakdown-head { display: flex; align-items: center; gap: 2px; margin-bottom: 10px; color: var(--muted); font-size: var(--fs-cap); }
+.session-details .cost-breakdown-head .cost-info { margin-left: 0; color: var(--faint); }
+.session-details .cost-model + .cost-model { margin-top: 18px; }
+.session-details .cost-model-head, .session-details .cost-line { display: grid; grid-template-columns: minmax(0, 1fr) 4.25rem 4.5rem; column-gap: 12px; align-items: baseline; }
+.session-details .cost-model-head { padding-bottom: 6px; border-bottom: 1px solid var(--line-2); color: var(--muted); font-size: var(--fs-cap); }
+.session-details .cost-model-head > :nth-child(n+2) { text-align: right; }
+.session-details .cost-model-name { color: var(--ink-2); font: var(--fs-cap) var(--mono); overflow-wrap: anywhere; }
+.session-details .cost-line { padding: 7px 0; font-size: var(--fs-sm); }
+.session-details .cost-line + .cost-line { border-top: 1px solid var(--line); }
+.session-details .cost-kind { min-width: 0; color: var(--ink-2); overflow-wrap: anywhere; }
+.session-details .cost-amount, .session-details .cost-value { position: relative; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.session-details .no-price, .session-details .reported-cost, .session-details .cost-warning { padding: 8px 0 0; color: var(--muted); font-size: var(--fs-cap); line-height: 1.4; }
 @media (min-width: 761px) {
   .app.rail { grid-template-columns: 64px minmax(0, 1fr); }
   .app.rail .sidebar { overflow-x: hidden; }
