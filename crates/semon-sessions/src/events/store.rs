@@ -292,9 +292,10 @@ pub(super) fn open(path: &Path, legacy: &Path) -> Result<(Box<dyn IndexStore>, L
     Ok((Box::new(store), loaded))
 }
 
-/// The `meta` key that marks the retired JSON event cache as imported (or
-/// set aside): its value is when, in epoch ms.
-const IMPORTED: &str = "legacy_json_imported";
+/// The `meta` key recording when a retired JSON event cache that couldn't
+/// be read was set aside (epoch ms). A readable one needs no marker: it is
+/// imported whenever it is found, and removed.
+const SET_ASIDE: &str = "legacy_json_set_aside";
 
 /// What the retired JSON event cache (`sessions-index.events.json`) holds
 /// that the logs can't give back: the reported runs `~/.claude.json` has
@@ -315,90 +316,99 @@ thread_local! {
     /// The JSON caches this thread imported (or set aside), in order.
     pub(super) static IMPORTS: std::cell::RefCell<Vec<PathBuf>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Runs once, after the JSON cache is parsed and before its import
+    /// takes the write lock.
+    pub(super) static BEFORE_IMPORT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Imports the retired JSON event cache once, then removes it.
+/// The JSON cache as found: its identity, so it is removed only if it is
+/// still the file that was read.
+fn identity(legacy: &Path) -> Option<(u64, u64, u64, Option<std::time::SystemTime>)> {
+    let metadata = fs::symlink_metadata(legacy)
+        .ok()
+        .filter(fs::Metadata::is_file)?;
+    #[cfg(unix)]
+    let (dev, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let (dev, ino) = (0, 0);
+    Some((dev, ino, metadata.len(), metadata.modified().ok()))
+}
+
+/// Imports the retired JSON event cache whenever it is found, then removes
+/// it.
 ///
-/// Under `BEGIN IMMEDIATE`, with the [`IMPORTED`] marker checked inside it,
-/// so of two processes opening at once exactly one reads and imports the
-/// file, and the other finds it done and never needs the file. The file is
-/// removed only after the import commits; a crash between the two leaves a
-/// file the marker says is done, removed at the next open.
+/// Its reported runs join the store's with `INSERT OR IGNORE`, so a run the
+/// store holds (captured since, or imported before) keeps its snapshot, and
+/// importing the same file twice, or from two processes at once, changes
+/// nothing. Its stamp is taken only if the store has none. It is imported
+/// again whenever it is present: an older semon still running after the
+/// upgrade rewrites it with runs no process here has seen, and
+/// `~/.claude.json` has since overwritten them.
 ///
-/// Its reported runs join the store's without replacing any (a run the
-/// store holds was captured since), and its stamp is taken only if the store
-/// has none. A file that isn't that JSON (unreadable as it, whatever its
-/// version) is marked done and renamed to `.corrupt`: it is kept, but never
-/// read again. A file that can't be opened is left for the next open.
+/// The file is parsed before the write lock is taken, reading only those
+/// two fields as it streams past. The import commits with
+/// `synchronous = FULL`, so it is on disk before the file goes; and the
+/// file is removed only if it is still the one that was read, so a rewrite
+/// meanwhile waits for the next open.
+///
+/// A file that isn't that JSON, whatever its version, is renamed aside
+/// (`.corrupt`, never over an earlier one) and recorded in `meta`. A file
+/// that can't be opened or read to its end is left for the next open.
 fn import_legacy(connection: &mut Connection, legacy: &Path) -> rusqlite::Result<()> {
-    let present = || fs::symlink_metadata(legacy).is_ok_and(|metadata| metadata.is_file());
-    // Without the lock first: after the import, every open ends here.
-    if imported(connection)? {
-        if present() {
-            remove_legacy(legacy);
-        }
+    let Some(read_as) = identity(legacy) else {
         return Ok(());
-    }
-    if !present() {
-        return Ok(());
-    }
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if imported(&transaction)? {
-        drop(transaction);
-        remove_legacy(legacy);
-        return Ok(());
-    }
+    };
     let parsed = match fs::File::open(legacy) {
         Ok(file) => serde_json::from_reader::<_, Legacy>(io::BufReader::new(file)),
-        // Removed meanwhile by something else: nothing to import.
+        // Removed meanwhile, by another process's import: nothing to do.
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             warn_import(legacy, &error);
             return Ok(());
         }
     };
+    let parsed = match parsed {
+        Err(error) if error.is_io() => {
+            warn_import(legacy, &error);
+            return Ok(());
+        }
+        parsed => parsed,
+    };
+    #[cfg(test)]
+    {
+        if let Some(hook) = BEFORE_IMPORT.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_millis())
         .to_string();
-    let runs = match &parsed {
-        Ok(Legacy {
-            reported_runs,
-            claude_json_stamp,
-        }) => {
-            let mut put = transaction.prepare(&PUT_RUN.replacen("OR REPLACE", "OR IGNORE", 1))?;
-            let mut runs = 0;
-            for run in reported_runs.values().flat_map(BTreeMap::values) {
-                put_run(&mut put, run)?;
-                runs += 1;
-            }
-            if let Some(stamp) = claude_json_stamp {
-                transaction.execute(
-                    "INSERT OR IGNORE INTO meta (key, value) VALUES ('claude_json_stamp', ?1)",
-                    [json(stamp)?],
-                )?;
-            }
-            runs
-        }
-        Err(_) => 0,
-    };
-    transaction.execute(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
-        [IMPORTED, now.as_str()],
-    )?;
-    transaction.commit()?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    let committed = import_rows(connection, parsed.as_ref().ok(), &now);
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    let runs = committed?;
     #[cfg(test)]
     IMPORTS.with(|imports| imports.borrow_mut().push(legacy.to_owned()));
     match parsed {
         Ok(_) => {
-            remove_legacy(legacy);
-            eprintln!(
-                "semon: imported {runs} reported runs from {} into the session index, and removed it",
-                legacy.display()
-            );
+            if identity(legacy) == Some(read_as) {
+                remove_legacy(legacy);
+                eprintln!(
+                    "semon: imported {runs} reported runs from {} into the session index, and removed it",
+                    legacy.display()
+                );
+            }
         }
         Err(error) => {
-            let aside = sibling(legacy, ".corrupt");
+            let mut aside = sibling(legacy, ".corrupt");
+            if fs::symlink_metadata(&aside).is_ok() {
+                aside = sibling(legacy, &format!(".corrupt.{now}"));
+            }
             if let Err(rename) = fs::rename(legacy, &aside) {
                 warn_import(legacy, &rename);
             }
@@ -412,15 +422,47 @@ fn import_legacy(connection: &mut Connection, legacy: &Path) -> rusqlite::Result
     Ok(())
 }
 
-fn imported(connection: &Connection) -> rusqlite::Result<bool> {
-    Ok(connection
-        .query_row("SELECT 1 FROM meta WHERE key = ?1", [IMPORTED], |_| Ok(()))
-        .optional()?
-        .is_some())
+/// Writes a parsed JSON cache's runs and stamp in one `BEGIN IMMEDIATE`
+/// transaction, or, for one that couldn't be read (`None`), the record
+/// that it is set aside. Returns how many runs it held.
+fn import_rows(
+    connection: &mut Connection,
+    parsed: Option<&Legacy>,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut runs = 0;
+    match parsed {
+        Some(Legacy {
+            reported_runs,
+            claude_json_stamp,
+        }) => {
+            let mut put = transaction.prepare(&PUT_RUN.replacen("OR REPLACE", "OR IGNORE", 1))?;
+            for run in reported_runs.values().flat_map(BTreeMap::values) {
+                put_run(&mut put, run)?;
+                runs += 1;
+            }
+            drop(put);
+            if let Some(stamp) = claude_json_stamp {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO meta (key, value) VALUES ('claude_json_stamp', ?1)",
+                    [json(stamp)?],
+                )?;
+            }
+        }
+        None => {
+            transaction.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                [SET_ASIDE, now],
+            )?;
+        }
+    }
+    transaction.commit()?;
+    Ok(runs)
 }
 
-/// Removes the imported JSON cache; failing that, it is tried again at the
-/// next open.
+/// Removes the imported JSON cache; failing that, it is imported again at
+/// the next open.
 fn remove_legacy(legacy: &Path) {
     match fs::remove_file(legacy) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => warn_import(legacy, &error),

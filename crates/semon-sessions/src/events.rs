@@ -4142,7 +4142,7 @@ mod tests {
     }
 
     #[test]
-    fn the_json_cache_is_imported_once_then_removed() {
+    fn the_json_cache_is_imported_whenever_found_then_removed() {
         let root = scratch("import");
         let v1 = root.join("index.json");
         let legacy = EventCache::legacy_path(&v1);
@@ -4165,13 +4165,18 @@ mod tests {
         assert_eq!(cache.paths().count(), 0);
         drop(cache);
 
-        // A second open imports nothing; a JSON cache an older semon wrote
-        // since is removed unread.
-        fs::write(&legacy, legacy_json(&["run-c"]).to_string()).unwrap();
-        let cache = EventCache::open(&v1);
-        assert_eq!(ran(&cache), ["run-a", "run-b"]);
-        assert!(!legacy.exists());
+        // A second open with no JSON cache imports nothing.
+        drop(EventCache::open(&v1));
         assert_eq!(imports(&legacy), 1);
+
+        // An older semon, still running after the upgrade, rewrites it with
+        // a run it captured since: the next open imports that run too, and
+        // removes the file again.
+        fs::write(&legacy, legacy_json(&["run-a", "run-c"]).to_string()).unwrap();
+        let cache = EventCache::open(&v1);
+        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c"]);
+        assert!(!legacy.exists());
+        assert_eq!(imports(&legacy), 2);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4237,12 +4242,28 @@ mod tests {
             assert!(EventCache::open(&v1).store.is_some());
             assert_eq!(fs::read(&aside).unwrap(), bytes, "{name}");
             assert_eq!(imports(&legacy), 1, "{name}");
+            // A later unreadable one is set aside beside it, never over it.
+            fs::write(&legacy, b"not json").unwrap();
+            drop(EventCache::open(&v1));
+            assert_eq!(fs::read(&aside).unwrap(), bytes, "{name}");
+            let later = fs::read_dir(root.join(name))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("index.events.json.corrupt.")
+                })
+                .count();
+            assert_eq!(later, 1, "{name}");
+            assert!(!legacy.exists(), "{name}");
         }
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn two_processes_opening_at_once_import_the_json_cache_once() {
+    fn two_processes_opening_at_once_end_with_one_import_of_each_run() {
         let root = scratch("import-race");
         let v1 = root.join("index.json");
         // The store exists (a1 made it); the JSON cache is still there.
@@ -4252,27 +4273,108 @@ mod tests {
         let start = Arc::new(std::sync::Barrier::new(2));
         let openers: Vec<_> = (0..2)
             .map(|_| {
-                let (v1, legacy, start) = (v1.clone(), legacy.clone(), start.clone());
+                let (v1, start) = (v1.clone(), start.clone());
                 std::thread::spawn(move || {
                     start.wait();
                     let cache = EventCache::open(&v1);
-                    (cache.store.is_some(), ran(&cache), imports(&legacy))
+                    (cache.store.is_some(), ran(&cache))
                 })
             })
             .collect();
-        let opened: Vec<_> = openers
-            .into_iter()
-            .map(|opener| opener.join().unwrap())
-            .collect();
-        for (store, runs, _) in &opened {
-            assert!(*store);
-            assert_eq!(runs, &["run-a", "run-b"], "each sees the import");
+        for opener in openers {
+            let (store, runs) = opener.join().unwrap();
+            assert!(store);
+            // Each made the import, or found it made: the file is removed
+            // only after its import commits.
+            assert_eq!(runs, ["run-a", "run-b"]);
         }
+        assert_eq!(ran(&EventCache::open(&v1)), ["run-a", "run-b"]);
+        assert!(!legacy.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_import_between_the_parse_and_the_lock_is_kept_and_a_rewrite_waits() {
+        let root = scratch("import-interleave");
+        let v1 = root.join("index.json");
+        drop(EventCache::open(&v1));
+        let path = EventCache::path(&v1);
+        let legacy = EventCache::legacy_path(&v1);
+        fs::write(&legacy, legacy_json(&["run-a", "run-b"]).to_string()).unwrap();
+        // After this open parses the file, another process imports `run-a`
+        // with its own snapshot and commits first.
+        let other = path.clone();
+        store::BEFORE_IMPORT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let connection = rusqlite::Connection::open(&other).unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO reported_runs (session_id, start, cost, model_usage, capture_at) \
+                         VALUES ('run-a', 1000, 7.0, '{}', 1)",
+                        [],
+                    )
+                    .unwrap();
+            }));
+        });
+        let cache = EventCache::open(&v1);
+        let cost = |cache: &EventCache, id: &str| {
+            cache
+                .reported_runs()
+                .find(|run| run.last_session_id == id)
+                .and_then(|run| run.last_cost)
+        };
         assert_eq!(
-            opened.iter().map(|(_, _, imports)| imports).sum::<usize>(),
-            1,
-            "imported once"
+            cost(&cache, "run-a"),
+            Some(7.0),
+            "the first import's row stays"
         );
+        assert_eq!(cost(&cache, "run-b"), Some(1.5));
+        assert!(!legacy.exists());
+        drop(cache);
+
+        // An older semon rewrites the file (a new one renamed over it) after
+        // this open parsed it: the file stays, and the next open imports it.
+        fs::write(&legacy, legacy_json(&["run-a"]).to_string()).unwrap();
+        let (hook_legacy, next) = (legacy.clone(), root.join("next.json"));
+        store::BEFORE_IMPORT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::write(&next, legacy_json(&["run-a", "run-b", "run-c"]).to_string()).unwrap();
+                fs::rename(&next, &hook_legacy).unwrap();
+            }));
+        });
+        drop(EventCache::open(&v1));
+        assert!(
+            legacy.exists(),
+            "a file rewritten since it was read is kept"
+        );
+        let cache = EventCache::open(&v1);
+        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c"]);
+        assert!(!legacy.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_json_cache_that_cannot_be_opened_is_left_for_the_next_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("import-unreadable");
+        let v1 = root.join("index.json");
+        let legacy = EventCache::legacy_path(&v1);
+        fs::write(&legacy, legacy_json(&["run-a"]).to_string()).unwrap();
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&legacy).is_ok() {
+            // A privileged user reads it anyway: nothing to test here.
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let cache = EventCache::open(&v1);
+        assert!(cache.store.is_some(), "the store opens");
+        assert!(ran(&cache).is_empty());
+        assert!(legacy.exists(), "kept, not set aside");
+        drop(cache);
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o600)).unwrap();
+        let cache = EventCache::open(&v1);
+        assert_eq!(ran(&cache), ["run-a"]);
         assert!(!legacy.exists());
         fs::remove_dir_all(root).unwrap();
     }
