@@ -220,9 +220,11 @@
 
   // ---- Loading: the model from /api/model, transcripts a page at a time from /api/tx --------------------------
   const TXM = {}; // per session: the loaded range of its transcript { from, to, total } and its totals { calls, errors }
-  // A session's tool calls and errors: its loaded transcript's totals, else the model's (`calls` and `errors` on each session,
-  // absent from an older server or cache: null, shown as "—"). Nothing fetches a transcript only to count it.
-  const countOf = (s, key) => TXM[s.id]?.[key] ?? s[key] ?? null;
+  // A session's tool calls and errors, from the model (`calls` and `errors` on each session; absent from an older server or
+  // cache: null, shown as "—"). Nothing fetches a transcript only to count it. A transcript loaded to its end is tailed by
+  // every update, so its own totals agree with its entries; a range that stops short (a deep link, a child's start turn)
+  // keeps the totals from when it was fetched, so the model's win there.
+  const countOf = (s, key) => { const m = TXM[s.id]; return (m && m.to >= m.total ? m[key] : undefined) ?? s[key] ?? m?.[key] ?? null; };
   const callsText = (calls) => (calls == null ? "—" : calls) + (calls === 1 ? " tool call" : " tool calls");
   let serverNow = 0, fetchedAt = 0;
   let TOK = {}; // per session: its transcript's growth mark in the model; a loaded transcript is tailed only when it moved
@@ -1333,8 +1335,8 @@
   const inRange = (t, from, to) => Number.isFinite(t) && t >= from && t < to;
   function analyticsSessions() {
     return Object.values(SESS).map((s) => {
-      const startedAt = Number(s.start) || 0, calls = s.calls ?? TXM[s.id]?.calls ?? 0;
-      const errors = s.errors ?? TXM[s.id]?.errors ?? 0;
+      const startedAt = Number(s.start) || 0, calls = countOf(s, "calls") ?? 0;
+      const errors = countOf(s, "errors") ?? 0;
       const turns = (TURNS[s.id] ?? []).filter(hasTurn);
       return { s, id: s.id, startedAt, busy: busyOf(s),
         turnEvents: turns.map((t) => Number.isFinite(t.at) ? t.at : Number.isFinite(t.start?.at) ? t.start.at : startedAt),

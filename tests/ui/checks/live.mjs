@@ -23,6 +23,8 @@
 //     the drawer stays
 //     open (phone);
 //   - Analytics keeps its selected range and eight figures while live model updates redraw the page;
+//   - a session page deep-linked to a middle turn (not loaded to its end) shows the model's tool-call count in its meta line, and
+//     follows it as the session makes more calls;
 //   - Analytics makes no /api/tx request: its tool-call counts come from the model, equal to each session's /api/tx totals;
 //   - steps opened inside child work that was then closed are still open when it opens again after a redraw;
 //   - no poll overlaps another (the page's own count of /api/model and /api/tx requests in flight never exceeds 1), and
@@ -124,7 +126,7 @@ async function open(browser, srv, where, scheme, before = null) {
   page.setDefaultTimeout(8000);
   await page.route(/.*/, (r) => (r.request().url().startsWith(srv.base + "/") ? r.continue() : r.abort()));
   await before?.(page); // routes added here run before the one above
-  await page.goto(srv.base + where + "?t=" + srv.token, { waitUntil: "load" });
+  await page.goto(srv.base + where + (where.includes("?") ? "&" : "?") + "t=" + srv.token, { waitUntil: "load" });
   await settled(page);
   if (where.startsWith("/s/")) await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']"));
   return page;
@@ -497,6 +499,38 @@ async function analyticsCounts(browser, r) {
   return R;
 }
 
+// A transcript loaded only part of the way (a deep link to a middle turn) isn't tailed, so the totals it was fetched with go
+// stale. The meta line's tool-call count follows the model there: it is the model's before, and grows with the session.
+async function middleCounts(browser, r) {
+  const R = { name: "middle-counts" }, dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-live-middle-")), now = write(dir, { extras: true });
+  const srv = await serve(dir, now + 10 * 60000), L = logs(dir), backlog = L.lane("backlog"), pages = [];
+  const count = (page) => page.evaluate(() => { const n = document.querySelector(".meta-tools .meta-value"); return n ? Number(n.textContent.replace(/,/g, "")) : null; });
+  try {
+    const m0 = await model(srv), turn = m0.turns.filter((t) => t.sid === "backlog")[1];
+    r.expect(!!turn && m0.sessions.backlog.calls > 200, "middle-counts: the backlog fixture is not long enough: " + JSON.stringify({ turn: turn?.id, calls: m0.sessions.backlog?.calls }));
+    const page = await open(browser, srv, "/s/claude/backlog?turn=" + encodeURIComponent(turn.id), { size: "desktop", dark: false }); pages.push(page);
+    await page.waitForFunction((id) => !!document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]'), turn.id);
+    R.later = await page.evaluate(() => [...document.querySelectorAll("#page button.more")].some((b) => b.textContent === "Load later"));
+    r.expect(R.later, "middle-counts: the deep link did not stop short of the end (no Load later)");
+    R.before = await count(page);
+    r.expect(R.before === m0.sessions.backlog.calls, "middle-counts: the meta line shows " + R.before + " tool calls, the model " + m0.sessions.backlog.calls);
+    const t0 = Date.now();
+    for (let i = 0; i < 3; i++) backlog.append(backlog.tool(at(12, 43 + i), "toolu-mid" + i, "Bash", { command: "true" }), backlog.result(at(12, 43 + i, 5), "toolu-mid" + i, "ok"));
+    R.grew = await appear(page, t0, (want) => Number(document.querySelector(".meta-tools .meta-value")?.textContent.replace(/,/g, "")) === want, R.before + 3, 8000);
+    R.after = await count(page);
+    r.expect(R.grew != null, "middle-counts: the meta line stayed at " + R.after + " after the session made 3 more calls (model " + (await model(srv)).sessions.backlog.calls + ")");
+    R.stillMiddle = await page.evaluate(() => [...document.querySelectorAll("#page button.more")].some((b) => b.textContent === "Load later"));
+    r.expect(R.stillMiddle, "middle-counts: the page reached the end, so it isn't a middle page any more");
+    R.errors = pages.flatMap((p) => p.errors);
+    r.expect(R.errors.length === 0, "middle-counts: page errors: " + R.errors.join(" | "));
+  } finally {
+    for (const p of pages) await p.context().close();
+    srv.proc.kill("SIGTERM");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return R;
+}
+
 export default async function liveCheck(browser) {
   const r = reporter("live");
   const out = {};
@@ -506,6 +540,8 @@ export default async function liveCheck(browser) {
   }
   try { out.analyticsCounts = await analyticsCounts(browser, r); }
   catch (e) { r.expect(false, "analytics-counts: threw " + (e?.stack ?? e)); }
+  try { out.middleCounts = await middleCounts(browser, r); }
+  catch (e) { r.expect(false, "middle-counts: threw " + (e?.stack ?? e)); }
   r.results = out;
   return r.done();
 }
