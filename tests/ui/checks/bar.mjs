@@ -295,6 +295,11 @@ export default async function barCheck(browser) {
 
     const middleIndex = Math.floor(parentKids.length / 2), middle = parentKids[middleIndex];
     await goto(page, { v: "session", id: middle.id }, D);
+    for (const scheme of ["light", "dark"]) {
+      await page.emulateMedia({ colorScheme: scheme }); await page.waitForTimeout(120);
+      await page.screenshot({ path: path.join(ENV.out, "bar-child-" + size + "-" + scheme + ".png"), clip: { x: 0, y: 0, width: size === "phone" ? 390 : 1280, height: size === "phone" ? 360 : 220 } });
+    }
+    await page.emulateMedia({ colorScheme: "light" });
     const siblingNav = await page.evaluate(() => ({ nav: document.querySelectorAll(".sibling-nav, .sibling-count").length, buttons: [...document.querySelectorAll("button")].filter((b) => /^(Previous|Next) sibling/.test(b.getAttribute("aria-label") ?? "")).length, count: /\b\d+ of \d+\b/.test(document.querySelector("#topbar")?.textContent ?? "") }));
 
     await goto(page, { v: "session", id: "harbor" }, D);
