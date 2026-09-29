@@ -5,6 +5,8 @@
 #   - the mockup's check scripts, ported to the served viewer (tests/ui/checks/),
 #   - a pixel comparison of every screen with the mockup (tests/ui/pixels.mjs), at 390×844 light and dark and 1280×860.
 # and, on fixtures of its own that it writes to while the page is open, the live-update check (tests/ui/checks/live.mjs).
+# Then the sample pushed to `semon receive` by `semon push`, whose model must equal the machine's own and whose viewer must
+# render it like the local one (tests/ui/pushed-parity.mjs, and a subset of the gaps and pixel checks).
 # Node and Playwright are CI-only tooling in tests/ui/package.json; the Rust build doesn't depend on them. Nothing here
 # touches a real ~/.claude or ~/.codex: the server reads only the fixture.
 name: Viewer UI
@@ -158,9 +160,68 @@ jobs:
           cd tests/ui
           SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}" node pixels.mjs
 
+      # A second machine the way one really arrives: the sample fixture pushed over loopback (plain http, so no TLS) to `semon
+      # receive`, which writes it under recv/machines/laptop. The token is written to a 0600 file and never echoed. Both the
+      # receiver and `semon push --watch` keep running for the step below, as they would on a real pair of machines.
+      # The model built from that copy must equal the machine's own, byte for byte (tests/ui/pushed-parity.mjs).
+      - name: Pushed data, received and compared with the machine's own model
+        if: ${{ !cancelled() }}
+        env:
+          SEMON_BIN: ${{ github.workspace }}/target/debug/semon
+          SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/pushed
+        run: |
+          recv="$RUNNER_TEMP/recv"; home="$RUNNER_TEMP/sample"
+          mkdir -p "$RUNNER_TEMP/recv-home" "$RUNNER_TEMP/pushed"
+          (umask 077; HOME="$RUNNER_TEMP/recv-home" target/debug/semon receive token add laptop --dir "$recv" \
+            2> "$RUNNER_TEMP/token-add.log" | tr -d '\n' > "$RUNNER_TEMP/recv.token")
+          chmod 600 "$RUNNER_TEMP/recv.token"
+          [ "$(wc -c < "$RUNNER_TEMP/recv.token")" -eq 43 ] || { cat "$RUNNER_TEMP/token-add.log"; echo "no token was written"; exit 1; }
+          HOME="$RUNNER_TEMP/recv-home" setsid nohup target/debug/semon receive --listen 127.0.0.1:0 --dir "$recv" \
+            < /dev/null > "$RUNNER_TEMP/receive.log" 2>&1 &
+          for _ in $(seq 1 100); do
+            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*' "$RUNNER_TEMP/receive.log" || true)
+            [ -n "$url" ] && break
+            sleep 0.2
+          done
+          [ -n "$url" ] || { cat "$RUNNER_TEMP/receive.log"; exit 1; }
+          HOME="$home" XDG_STATE_HOME="$RUNNER_TEMP/push-state" SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon push --watch \
+            --to "$url" --token-file "$RUNNER_TEMP/recv.token" --state "$RUNNER_TEMP/push-state.json" \
+            --claude-home "$home/claude" --codex-home "$home/codex" --proc-root "$home/proc" --cache "$RUNNER_TEMP/push-index.json" \
+            < /dev/null > "$RUNNER_TEMP/push.log" 2>&1 &
+          SEMON_TEST_NOW="$SEMON_NOW" node tests/ui/pushed-parity.mjs --home "$home" --received "$recv" --scratch "$RUNNER_TEMP/pushed"
+
+      # The viewer over the pushed copy alone (--no-local), and the subset of the suite that shows the pushed data renders as
+      # the local one does: the fixture gaps (the served model and every transcript against the sample mockup's data, so the
+      # pushed transcripts are the machine's own), and the pixel comparison of the sessions list, two session transcripts (one
+      # with its details and cost, one a subagent's) and Analytics, at 390×844 light and dark and 1280×860. The rest of the
+      # suite is about the viewer, not the data, and runs on the local fixture above.
+      - name: Pushed data in the viewer
+        if: ${{ !cancelled() }}
+        env:
+          SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/pushed
+          SEMON_PIXEL_SCREENS: home,sessions,session-details-cost,child-session,analytics-7d
+        run: |
+          [ -d "$RUNNER_TEMP/recv/machines/laptop" ] || { echo "nothing was received"; exit 1; }
+          reader="$RUNNER_TEMP/pushed/reader"
+          HOME="$reader" SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen 127.0.0.1:8769 \
+            --machines "$RUNNER_TEMP/recv" --no-local --claude-home "$reader/claude" --codex-home "$reader/codex" \
+            --proc-root "$reader/proc" --cache "$reader/serve-index.json" < /dev/null > "$RUNNER_TEMP/pushed-viewer.log" 2>&1 &
+          for _ in $(seq 1 100); do
+            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/pushed-viewer.log" || true)
+            [ -n "$url" ] && break
+            sleep 0.2
+          done
+          [ -n "$url" ] || { cat "$RUNNER_TEMP/pushed-viewer.log"; exit 1; }
+          export SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}"
+          cd tests/ui
+          failed=0
+          node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN" || failed=1
+          node pixels.mjs || failed=1
+          exit "$failed"
+
       - name: Server logs
         if: ${{ always() }}
-        run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/account-menu.log "$RUNNER_TEMP"/two-machines.log || true
+        run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/account-menu.log "$RUNNER_TEMP"/two-machines.log "$RUNNER_TEMP"/receive.log "$RUNNER_TEMP"/push.log "$RUNNER_TEMP"/pushed-viewer.log || true
 
       - name: Upload reports, screenshots and diffs
         if: ${{ always() }}
