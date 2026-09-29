@@ -2574,7 +2574,7 @@ mod tests {
     #[test]
     fn model_api_version_is_served() {
         let fixture = Fixture::new();
-        let mut core = ViewerCore::new(fixture.options.clone());
+        let core = ViewerCore::new(fixture.options.clone());
         let reply = core.respond("GET", "/api/model", "", None);
         assert_eq!(reply.status, 200);
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
@@ -3432,7 +3432,7 @@ mod tests {
     #[test]
     fn public_shell_exports_match_viewer_core_routes() {
         let fixture = lane_fixture();
-        let mut core = crate::ViewerCore::new(fixture.options.clone());
+        let core = crate::ViewerCore::new(fixture.options.clone());
 
         let script = core.respond("GET", "/viewer.js", "", None);
         assert_eq!(script.body, crate::shell::VIEWER_JS.as_bytes());

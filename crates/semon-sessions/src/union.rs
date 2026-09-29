@@ -1349,7 +1349,7 @@ mod tests {
                 scan_window: false,
             }
         };
-        let mut core = ViewerCore::with_machines(vec![
+        let core = ViewerCore::with_machines(vec![
             ("first".into(), options("first")),
             ("second".into(), options("second")),
         ]);
