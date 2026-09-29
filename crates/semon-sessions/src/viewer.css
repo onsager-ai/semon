@@ -72,6 +72,19 @@ body{margin:0}[hidden]{display:none!important}img{max-width:100%}
   :root { --fs-ui: 15px; --lh-ui: 22px; --fs-title: 17px; --tap: 44px; --row: 44px; --gutter: 16px; }
 }
 
+/* Scrollbars are a quiet tint of the ink over whatever surface they sit on, on a transparent track: visible, never loud.
+   The tokens derive from --ink, so each theme's --ink carries them; an embedding page that loads this file first gets
+   them too. Only the webkit fallback below can style the thumb under the pointer (--scroll-thumb-hover). */
+:root { --scroll-thumb: color-mix(in srgb, var(--ink) 22%, transparent); --scroll-thumb-hover: color-mix(in srgb, var(--ink) 34%, transparent); }
+* { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
+/* Browsers that do not know scrollbar-color (Safari before 18.2) draw the same thing from these. */
+@supports not (scrollbar-color: auto) {
+  ::-webkit-scrollbar { width: 8px; height: 8px; background: transparent; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+}
+
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body { background: var(--ground); color: var(--ink); font: var(--fs-ui)/var(--lh-ui) var(--sans); -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
