@@ -1180,7 +1180,7 @@
     if (opts.analytics) { put(rangeControl(bar)); account(); put.done(); return; }
     if (!s) { account(); put.done(); return; }
     const fb = btn("ibtn", null, "Find and filter"); fb.id = "find-btn"; fb.append(icon(I.search)); fb.addEventListener("click", () => { findOpen = true; render(); $("#find")?.focus(); });
-    const mb = btn("ibtn", null, "Session menu: details, cost and actions"); mb.id = "more-btn"; mb.setAttribute("aria-haspopup", "dialog"); mb.setAttribute("aria-expanded", "false"); mb.append(icon(I.more)); mb.addEventListener("click", () => openSessionMenu(s, mb));
+    const mb = btn("ibtn", null, "Session menu: details, cost and actions"); mb.id = "more-btn"; mb.setAttribute("aria-haspopup", "dialog"); mb.setAttribute("aria-expanded", "false"); mb.append(icon(I.more)); mb.addEventListener("click", () => openSessionMenu(SESS[s.id] ?? s, mb));
     put(fb, mb); account(); put.done();
   }
   // The Analytics range control, a persistent control of the bar: each redraw keeps it and only sets which button is pressed.
@@ -1391,7 +1391,7 @@
     // Failed steps and runs are the two labels that lead somewhere, so they are the last two the fitter drops.
     if (failed) l2.append(lab(failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ": step through them", 0, "lab-errs", () => openErrors(s.id)));
     const runs = descendantsOf(s.id, sessionChildren());
-    if (runs.length) l2.append(lab(runs.length + (runs.length === 1 ? " run" : " runs"), runs.length + (runs.length === 1 ? " run" : " runs") + " under this session: open the list with their cost", 1, "lab-runs", () => openSessionMenu(s, $("#more-btn"), ".runs")));
+    if (runs.length) l2.append(lab(runs.length + (runs.length === 1 ? " run" : " runs"), runs.length + (runs.length === 1 ? " run" : " runs") + " under this session: open the list with their cost", 1, "lab-runs", () => openSessionMenu(SESS[s.id] ?? s, $("#more-btn"), ".runs")));
     l2.append(lab(MACHINE[s.machine], "Machine: " + MACHINE[s.machine] + " · " + hostOf(s), 5));
     if (s.branch) l2.append(lab(s.branch, "Branch: " + s.branch, 6));
     const cost = runs.length ? costForSessions([s, ...runs]) : costForSession(s.id);
@@ -1496,7 +1496,7 @@
       if (rows.length > RUNS_CAP) { const m = btn("link", "Show " + (rows.length - RUNS_CAP) + " more"); m.addEventListener("click", () => { list.querySelectorAll(".run-row").forEach((r) => { r.hidden = false; }); m.remove(); }); list.append(m); }
       sec.append(list);
     }
-    const t = btn("disclose"); t.setAttribute("aria-expanded", "false"); t.append(el("span", null, "Tokens by model"), icon(I.chev, "chev"));
+    const t = btn("disclose"); t.setAttribute("aria-expanded", "false"); t.append(el("span", null, "Tokens by model" + (kids.length ? " · incl. runs" : "")), icon(I.chev, "chev"));
     const tb = el("div", "tokens"); tb.hidden = true;
     for (const [modelId, model] of Object.entries(all.by_model ?? {})) {
       const priced = model.usd != null && !missing.includes(modelId); tb.append(el("div", "tok-model", modelId));

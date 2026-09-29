@@ -52,27 +52,23 @@ export default async function detailsCheck(browser) {
       await page.close();
     }
   }
-  // The summary rows and the per-model table read one model. A live update (which adopts a newer model but keeps the session
-  // page's top bar) must not leave the ⋯ menu, or Session details opened from a menu that was already open, holding the model the
-  // page was drawn from: the table already reads the newest. Measured on a session with no child runs (its table then counts its
-  // own tokens alone), with the menu opened after the update and before it.
+  // The ⋯ menu reads the newest model. A live update (which adopts a newer model but keeps the session page's top bar) must not leave the menu
+  // holding the model the page was drawn from (#131's behaviour: the menu opens on `SESS[s.id] ?? s`): its tokens table, opened after the update,
+  // and after being opened before it and opened again, reads the grown figures. Measured on a session with no child runs (its table then counts
+  // its own tokens alone). The menu has no separate summary rows to disagree with the table: the table is the only place the totals are shown.
   const claude = Object.values(D.SESS).find((s) => s.harness === "claude" && !s.stub && !s.parent && !D.H.some((h) => h.from === s.id) && Object.values(s.cost?.by_model ?? {}).some((m) => m.tokens?.cache_read > 0));
   r.expect(!!claude, "the fixture holds no Claude session with cache reads to grow");
-  // "172k" and "5.3M" as millions, and whether a text reads the same figure as `m` millions, to the digit it shows.
-  const num = (text) => (text.endsWith("M") ? parseFloat(text) : parseFloat(text) / 1000), reads = (text, m) => Math.abs(num(text ?? "0k") - m) <= (text?.endsWith("M") ? 0.051 : 0.0011);
-  const readSheet = (page) => page.evaluate(() => {
-    const d = document.querySelector("dialog.session-details"), rows = {};
-    for (const x of d.querySelectorAll(".detail-row")) rows[x.querySelector(".detail-label").textContent] = x.querySelector(".detail-value").textContent;
-    const lines = [...d.querySelectorAll(".cost-line")].map((l) => ({ kind: l.children[0].textContent, tokens: Number((l.children[1].dataset.tip ?? "").replace(/[^\d]/g, "")) || 0 }));
-    return { rows, lines, note: d.querySelector(".tokens-own")?.textContent ?? null, head: d.querySelector(".cost-breakdown-head")?.textContent ?? "" };
+  const readTable = (page) => page.evaluate(() => {
+    const t = document.querySelector("dialog.session-menu .tokens"), disc = document.querySelector("dialog.session-menu .disclose");
+    return { head: disc?.textContent ?? "", lines: [...(t?.querySelectorAll(".tok-line") ?? [])].map((l) => ({ kind: l.children[0].textContent, tokens: Number((l.children[1].dataset.tip ?? "").replace(/[^\d]/g, "")) || 0 })) };
   });
   if (claude) {
     const modelId = Object.keys(claude.cost.by_model).find((k) => claude.cost.by_model[k].tokens?.cache_read > 0), more = 400000;
     for (const size of ["phone", "desktop"]) {
-      for (const order of ["menu after the update", "menu before the update"]) {
+      for (const order of ["menu after the update", "menu opened before the update, then again"]) {
         const tag = size + " live growth, " + order, page = await served(browser, { size });
         await goto(page, { v: "session", id: claude.id }, D); await page.waitForTimeout(200);
-        if (order === "menu before the update") await page.click("#more-btn");
+        if (order !== "menu after the update") { await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu[open]"); }
         let polled = 0;
         // Every poll now gets the model as it would be a moment later: 400k more cache reads, in the summary and in the table.
         await page.route(/\/api\/model\?since=/, async (route) => {
@@ -86,28 +82,19 @@ export default async function detailsCheck(browser) {
         while (polled < 2 && Date.now() - t0 < 8000) await page.waitForTimeout(100);
         r.expect(polled >= 2, tag + ": the page did not poll the model");
         await page.waitForTimeout(400);
-        const grown = claude.tokens[1] + more / 1e6;
-        if (order === "menu after the update") {
-          await page.click("#more-btn");
-          const menu = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll(".session-menu dl dt")].map((dt) => [dt.textContent, dt.nextElementSibling.textContent])));
-          r.expect(reads(menu["Cache read"], grown) && reads(menu["Output"], claude.tokens[2]) && reads(menu["Input + cache write"], claude.tokens[0]), tag + ": the menu's rows are " + JSON.stringify(menu) + ", not the grown model's");
-        }
-        await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
-        await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
-        const got = await readSheet(page), sum = (f) => got.lines.filter(f).reduce((n, l) => n + l.tokens, 0);
-        const read = sum((l) => l.kind === "Cache read"), written = sum((l) => l.kind.startsWith("Cache write") || l.kind === "Input"), output = sum((l) => l.kind === "Output");
-        r.expect(read === claude.cost.by_model[modelId].tokens.cache_read + more, tag + ": the table's cache read is " + read + ", not the grown model's");
-        r.expect(reads(got.rows["Cache read"], grown) && reads(got.rows["Cache read"], read / 1e6), tag + ": the summary's Cache read is " + got.rows["Cache read"] + ", the table's is " + read.toLocaleString());
-        r.expect(reads(got.rows["Input + cache write"], written / 1e6), tag + ": the summary's Input + cache write is " + got.rows["Input + cache write"] + ", the table's input and cache writes make " + written.toLocaleString());
-        r.expect(reads(got.rows["Output"], output / 1e6), tag + ": the summary's Output is " + got.rows["Output"] + ", the table's is " + output.toLocaleString());
-        r.expect(got.note === null && !got.head.includes("incl. runs"), tag + ": a session with no runs shows the runs note or heading: " + got.note);
-        results[tag] = got.rows;
+        if (order !== "menu after the update") { await page.keyboard.press("Escape"); await page.waitForTimeout(500); }
+        await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu[open]"); await page.click("dialog.session-menu .disclose"); await page.waitForTimeout(150);
+        const got = await readTable(page), sum = (f) => got.lines.filter(f).reduce((n, l) => n + l.tokens, 0);
+        r.expect(sum((l) => l.kind === "Cache read") === claude.cost.by_model[modelId].tokens.cache_read + more, tag + ": the table's cache read is " + sum((l) => l.kind === "Cache read") + ", not the grown model's " + (claude.cost.by_model[modelId].tokens.cache_read + more));
+        r.expect(sum((l) => l.kind === "Output") === claude.cost.by_model[modelId].tokens.output && sum((l) => l.kind === "Input") === claude.cost.by_model[modelId].tokens.input, tag + ": the table's input or output moved with a poll that only grew the cache reads: " + JSON.stringify(got.lines));
+        r.expect(!got.head.includes("incl. runs"), tag + ": a session with no runs says its table includes runs: " + got.head);
+        results[tag] = got.lines.map((l) => l.kind + " " + l.tokens);
         r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join("; "));
         await page.context().close();
       }
     }
   }
-  // A session with runs: its table counts them ("incl. runs"), so the summary says it does not.
+  // A session with runs: its table counts them, and its heading says so.
   const spawned = (s) => D.H.filter((h) => h.kind === "spawn" && h.from === s.id && h.to).length;
   const parent = Object.values(D.SESS).find((s) => spawned(s) === 1) ?? Object.values(D.SESS).find((s) => spawned(s) > 0);
   r.expect(!!parent, "the fixture holds no session with a run");
@@ -115,13 +102,10 @@ export default async function detailsCheck(browser) {
     for (const size of ["phone", "desktop"]) {
       const tag = size + " session with runs", page = await served(browser, { size });
       await goto(page, { v: "session", id: parent.id }, D); await page.waitForTimeout(200);
-      await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
-      await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
-      const got = await readSheet(page);
-      r.expect(got.head.includes("incl. runs"), tag + ": the table heading does not say it includes runs: " + got.head);
-      r.expect(got.note === "This session only; the table below includes its runs.", tag + ": the summary's note reads " + JSON.stringify(got.note));
-      for (const label of ["Input + cache write", "Output", "Cache read"]) r.expect(label in got.rows, tag + ": the summary lost its row " + label);
-      results[tag] = { note: got.note, head: got.head };
+      await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu[open]"); await page.click("dialog.session-menu .disclose"); await page.waitForTimeout(150);
+      const got = await readTable(page);
+      r.expect(got.head.includes("incl. runs"), tag + ": the table's heading does not say it includes runs: " + got.head);
+      results[tag] = { head: got.head };
       await page.context().close();
     }
   }

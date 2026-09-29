@@ -1273,7 +1273,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
       if (rows.length > CHILD_CAP) { const m = btn("link", "Show " + (rows.length - CHILD_CAP) + " more"); m.addEventListener("click", () => { list.querySelectorAll(".run-row").forEach((r) => { r.hidden = false; }); m.remove(); }); list.append(m); }
       sec.append(list);
     }
-    const t = btn("disclose"); t.setAttribute("aria-expanded", "false"); t.append(el("span", null, "Tokens by model"), icon(I.chev, "chev"));
+    const t = btn("disclose"); t.setAttribute("aria-expanded", "false"); t.append(el("span", null, "Tokens by model" + (kids.length ? " · incl. runs" : "")), icon(I.chev, "chev"));
     const tb = el("div", "tokens"); tb.hidden = true;
     for (const model of all.models) { tb.append(el("div", "tok-model", model.modelId)); for (const [key, label] of TOKEN_KINDS) { const k = model.kinds[key], r = el("div", "tok-line"); if (k.tokens === 0 && (!model.priced || k.usd < 0.005)) continue; const count = el("span", null, k.tokens ? compactCount(k.tokens) : ""); if (k.tokens) { count.dataset.tip = k.tokens.toLocaleString() + " tokens"; count.append(el("span", "sr", " (" + k.tokens.toLocaleString() + ")")); } r.append(el("span", null, label), count, el("span", null, model.priced ? asMoney(k.usd) : "—")); tb.append(r); } }
     t.addEventListener("click", () => { tb.hidden = !tb.hidden; t.setAttribute("aria-expanded", String(!tb.hidden)); });
