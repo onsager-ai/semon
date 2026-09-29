@@ -54,6 +54,39 @@ Live Claude statuses observed so far are `busy`, `idle`, and `shell`; any other 
 
 JSON output has `schema_version: 1` and a `roots` array of nested nodes. Every node has `id`, `harness`, `kind`, `label`, `state`, `pid`, `models`, `cwd`, `branch`, `first_activity`, `last_activity`, `last_activity_age_seconds`, `tokens`, `malformed_lines`, `open_tools`, `claude_link`, `via_tool`, `unlinked`, and `children`. Nullable fields use `null`, `tokens` contains `input`, `cached_input`, `output`, `reasoning_output`, and `total`, and each tool has `id` and `name`. Timestamps are RFC 3339 strings from source records. `malformed_lines` counts complete lines that are not JSON objects; they are skipped, and text output shows `malformed:N` when the count is nonzero. The view includes metadata only; it never prints prompts, transcript text, tool inputs, or tool outputs.
 
+## Receive pushes from your other machines
+
+`semon receive` is a receiver for `semon push`, for one person with several machines, and the [mirror protocol](docs/mirror-protocol.md)'s reference implementation (`semon_push::mirror::Receiver`). Each machine pushes with its own token, and its copy lands in `DIR/machines/NAME/`: `claude/` and `codex/` hold the input files at their paths under each home, and `facts.json` holds the machine's facts. A token decides the machine, so one machine's token can't write another's files.
+
+On the machine that receives, make a token per machine. It is printed once, and `DIR/tokens` (0600, in a 0700 directory) keeps only its SHA-256 and the name. A name is 1 to 63 of `a-z`, `0-9` and `-`.
+
+```sh
+(umask 077; semon receive token add laptop --dir ~/semon-mirror > laptop.token)
+semon receive token list --dir ~/semon-mirror
+semon receive --dir ~/semon-mirror            # listens on 127.0.0.1:8735
+```
+
+Put the token on that machine in a 0600 file, and point `semon push` at the receiver. The simplest route keeps the receiver on loopback and forwards a port over SSH, since plain `http` to a loopback address is allowed:
+
+```sh
+ssh -N -L 8735:127.0.0.1:8735 receiving-host &
+semon push --to http://127.0.0.1:8735 --token-file ~/.config/semon/laptop.token --watch
+```
+
+`semon receive token revoke laptop --dir ~/semon-mirror` removes a token. A running receiver re-reads `DIR/tokens` when the file changes, so the next request with that token gets 401 without a restart.
+
+The receiver listens on `127.0.0.1:8735` unless `--listen ADDR` says otherwise. A non-loopback address is refused unless `--tls-cert PEM --tls-key PEM` are given and `DIR/tokens` holds at least one token; plain HTTP off loopback is always refused. These are `semon-relay receive`'s rules. Semon never opens a port or obtains a certificate: the address, the firewall, DNS and the certificate stay your choices. `semon push` checks a certificate against the standard web roots only, so a TLS receiver needs a certificate that chains to them; otherwise use the SSH route above.
+
+Its limits:
+
+- A request body is at most 6 MiB (one append's 4 MiB of file bytes, as base64, plus the JSON around it). A larger declared body gets 413 before any of it is read, and a chunked body gets 411.
+- The token is checked (401) before the body is read.
+- At most 32 connections at once. A request head must arrive within 10 s, a body within 120 s with no gap over 30 s, and a kept-alive connection closes after 30 s idle.
+- Paths are checked with `semon_sessions::is_input_path`. The receiver creates its directories itself and refuses a request whose path meets a symbolic link.
+- Each file has one writer at a time, and a 200 is answered only once the bytes are synced to disk.
+
+To see the received machines, serve `DIR` with `semon sessions --serve --machines DIR` ([See all your machines](#see-all-your-machines)).
+
 ## See all your machines
 
 `semon push` sends a machine's session logs, and `semon receive` writes each machine it receives under one directory, `DIR/machines/<name>/`: that machine's `claude/` and `codex/` input files, and its `facts.json`. `semon sessions --serve --machines DIR` shows every one of them in one viewer, next to this machine's own sessions:

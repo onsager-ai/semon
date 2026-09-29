@@ -8,6 +8,10 @@
 //!   waits until it is complete.
 //! - Where each file stands is kept in a private state file, so an
 //!   interrupted push resumes.
+//!
+//! The receiving side is here too, as the protocol's reference
+//! implementation: [`mirror::Receiver`] over a directory, its tokens
+//! ([`tokens`]) and `semon receive`'s listener ([`serve`]).
 
 use std::{
     collections::BTreeMap,
@@ -21,7 +25,10 @@ use std::{
 use semon_sessions::{Facts, FactsSource, Input, Options};
 use serde::{Deserialize, Serialize};
 
+pub mod mirror;
 pub mod redact;
+pub mod serve;
+pub mod tokens;
 pub mod wire;
 
 use wire::{Append, CHUNK_BYTES, HEAD_BYTES, Length, base64_encode, head_sha256, sha256_hex};

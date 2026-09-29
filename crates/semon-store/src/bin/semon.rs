@@ -32,6 +32,7 @@ enum Command {
     Forget(ForgetArgs),
     Sessions(SessionsArgs),
     Push(PushArgs),
+    Receive(ReceiveArgs),
     Query(QueryArgs),
     Mcp(HomeArgs),
 }
@@ -104,6 +105,14 @@ struct PushArgs {
     watch: bool,
 }
 
+/// `semon receive`: serve pushes, or manage the tokens that may push.
+enum ReceiveArgs {
+    Serve(semon_push::serve::ServeOptions),
+    TokenAdd { dir: PathBuf, name: String },
+    TokenRevoke { dir: PathBuf, name: String },
+    TokenList { dir: PathBuf },
+}
+
 struct SessionsArgs {
     options: semon_sessions::Options,
     /// `--machine DIR`, repeated: several machines' homes in one model.
@@ -166,6 +175,7 @@ fn parse_args() -> Result<Command, String> {
     match arguments.next().as_deref() {
         Some("sessions") => parse_sessions_args(arguments).map(Command::Sessions),
         Some("push") => parse_push_args(arguments).map(Command::Push),
+        Some("receive") => parse_receive_args(arguments).map(Command::Receive),
         Some("query") => parse_query_args(arguments).map(Command::Query),
         Some("mcp") => parse_mcp_args(arguments).map(Command::Mcp),
         Some("ship") => parse_ship_args(arguments).map(Command::Ship),
@@ -391,6 +401,135 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
     })
 }
 
+/// `semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM]`,
+/// or `semon receive token (add NAME | revoke NAME | list) --dir DIR`.
+fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<ReceiveArgs, String> {
+    let mut arguments = arguments.peekable();
+    if arguments.peek().is_some_and(|argument| argument == "token") {
+        arguments.next();
+        return parse_receive_token_args(arguments);
+    }
+    let mut dir = None;
+    let mut listen = semon_push::serve::DEFAULT_LISTEN.to_owned();
+    let mut certificate = None;
+    let mut private_key = None;
+    while let Some(argument) = arguments.next() {
+        let mut value = || {
+            arguments
+                .next()
+                .ok_or_else(|| format!("{argument} requires a value"))
+        };
+        match argument.as_str() {
+            "--dir" => dir = Some(PathBuf::from(value()?)),
+            "--listen" => listen = value()?,
+            "--tls-cert" => certificate = Some(PathBuf::from(value()?)),
+            "--tls-key" => private_key = Some(PathBuf::from(value()?)),
+            "-h" | "--help" => return Err(usage()),
+            _ => return Err(format!("unknown receive argument: {argument}")),
+        }
+    }
+    let dir = dir.ok_or("receive requires --dir DIR")?;
+    let listen = listen
+        .parse::<std::net::SocketAddr>()
+        .map_err(|error| format!("invalid --listen address {listen}: {error}"))?;
+    let tls = match (certificate, private_key) {
+        (Some(certificate), Some(private_key)) => Some(semon_push::serve::TlsFiles {
+            certificate,
+            private_key,
+        }),
+        (None, None) => None,
+        _ => return Err("TLS requires both --tls-cert and --tls-key".into()),
+    };
+    Ok(ReceiveArgs::Serve(semon_push::serve::ServeOptions {
+        dir,
+        listen,
+        tls,
+    }))
+}
+
+fn parse_receive_token_args(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<ReceiveArgs, String> {
+    let action = arguments
+        .next()
+        .ok_or("receive token requires add NAME, revoke NAME or list")?;
+    let mut name = None;
+    let mut dir = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--dir" => {
+                dir = Some(PathBuf::from(
+                    arguments.next().ok_or("--dir requires a value")?,
+                ));
+            }
+            "-h" | "--help" => return Err(usage()),
+            flag if flag.starts_with('-') => {
+                return Err(format!("unknown receive token argument: {flag}"));
+            }
+            _ if name.is_none() && action != "list" => name = Some(argument.clone()),
+            _ => return Err(format!("unexpected receive token argument: {argument}")),
+        }
+    }
+    let dir = dir.ok_or("receive token requires --dir DIR")?;
+    let name = || {
+        name.clone()
+            .ok_or_else(|| format!("receive token {action} requires NAME"))
+    };
+    match action.as_str() {
+        "add" => Ok(ReceiveArgs::TokenAdd { name: name()?, dir }),
+        "revoke" => Ok(ReceiveArgs::TokenRevoke { name: name()?, dir }),
+        "list" => Ok(ReceiveArgs::TokenList { dir }),
+        _ => Err(format!(
+            "unknown receive token action: {action} (add, revoke or list)"
+        )),
+    }
+}
+
+fn run_receive(args: ReceiveArgs) -> Result<(), String> {
+    use semon_push::tokens;
+    match args {
+        ReceiveArgs::Serve(options) => {
+            let server = semon_push::serve::Server::bind(&options)?;
+            let address = server
+                .local_addr()
+                .map_err(|error| format!("the listening address: {error}"))?;
+            eprintln!(
+                "semon receive: listening on {}://{address}, writing {}",
+                server.scheme(),
+                options.dir.join(semon_push::mirror::MACHINES_DIR).display()
+            );
+            if server.tokens() == 0 {
+                eprintln!(
+                    "semon receive: no token yet, so every push is refused (401); add one with `semon receive token add NAME --dir {}`",
+                    options.dir.display()
+                );
+            }
+            server.run()
+        }
+        ReceiveArgs::TokenAdd { dir, name } => {
+            let token = tokens::add_token(&dir, &name)?;
+            println!("{token}");
+            eprintln!(
+                "semon receive: added a token for {name}. It is shown only this once: put it in a 0600 file on {name} and run `semon push --to URL --token-file FILE` there."
+            );
+            Ok(())
+        }
+        ReceiveArgs::TokenRevoke { dir, name } => {
+            tokens::revoke_token(&dir, &name)?;
+            eprintln!(
+                "semon receive: revoked {name}'s token; a running receiver refuses it from its next request"
+            );
+            Ok(())
+        }
+        ReceiveArgs::TokenList { dir } => {
+            for name in tokens::token_names(&dir)? {
+                println!("{name}");
+            }
+            Ok(())
+        }
+    }
+}
+
 fn parse_ship_args(mut arguments: impl Iterator<Item = String>) -> Result<ShipArgs, String> {
     let mut store = default_store_path();
     let mut endpoint = env::var(REPLICATION_ENDPOINT_ENV)
@@ -552,6 +691,7 @@ fn run(command: Command) -> Result<(), String> {
     match command {
         Command::Sessions(args) => run_sessions(args),
         Command::Push(args) => semon_push::push(&args.options, args.watch),
+        Command::Receive(args) => run_receive(args),
         Command::Query(args) => run_query(args),
         Command::Mcp(home) => run_mcp(&home),
         Command::Ship(args) => run_ship(args).map(|message| println!("{message}")),
@@ -1079,6 +1219,12 @@ fn usage() -> String {
          Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\
          (docs/mirror-protocol.md), appending as they grow. The token file must be mode 0600. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s.\n\
+         \n\
+         Usage: semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM]\n\
+         Usage: semon receive token (add NAME | revoke NAME | list) --dir DIR\n\
+         A mirror-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
+         DIR/machines/NAME/. It listens on 127.0.0.1:8735 by default; another address needs TLS (an operator-supplied\n\
+         certificate and key) and at least one token. A token, printed once by token add, decides its machine.\n\
          \n\
          Usage: semon ship [--store PATH] [--endpoint URL]\n\
          Endpoint defaults to ${REPLICATION_ENDPOINT_ENV}; when unset, ship succeeds without reading the store.\n\
