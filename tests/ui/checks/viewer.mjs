@@ -25,6 +25,8 @@
 //  - back, the close button and Escape each close the sheet, restore the same history state, and leave the page's
 //    expanded steps as they were (afterBack/afterClose/afterEsc: dialog === false, sameState === true, stepsStillOpen
 //    unchanged, and back also drops the viewer-open html class).
+//  - the measure at 1280, light and dark: an assistant message is at most 68ch wide (in its own font) with wide mode off, and
+//    with it on is wider than 68ch and fills its column.
 //  - the desktop dialog: at least one "View all" is visible on the sample's first expanded step, the dialog is not
 //    sideways-clipped off the 1280px viewport, and a backdrop click closes it (closedByBackdrop === true).
 import path from "node:path";
@@ -112,6 +114,38 @@ export default async function viewerCheck(browser) {
     await page.context().close();
   }
 
+  // ---- Desktop, light and dark: an assistant message's measure with wide mode off (68ch) and on (the column's width). ----
+  R.measure = {};
+  for (const dark of [false, true]) {
+    const page = await served(browser, { size: "desktop", dark });
+    const ids = ["harbor", ...Object.keys(D.SESS).filter((id) => id !== "harbor")];
+    let found = null;
+    for (const id of ids) {
+      await goto(page, { v: "session", id }, D); await page.waitForTimeout(100);
+      if (await page.locator("#page section[aria-label='Transcript'] .msg.assistant").count()) { found = id; break; }
+    }
+    // The message's width against a probe that is 68ch in the message's own font, and against the column it sits in.
+    const measure = () => page.evaluate(() => {
+      const msg = document.querySelector("#page section[aria-label='Transcript'] .msg.assistant");
+      const probe = document.createElement("div");
+      probe.style.cssText = "position:absolute;visibility:hidden;height:0;width:68ch";
+      msg.append(probe);
+      const ch68 = probe.getBoundingClientRect().width; probe.remove();
+      const cs = getComputedStyle(msg.parentElement), col = msg.parentElement.getBoundingClientRect().width - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      return { wide: document.querySelector("#page").classList.contains("wide-mode"), w: msg.getBoundingClientRect().width, ch68, col, vw: document.documentElement.clientWidth, sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+    });
+    const key = dark ? "dark" : "light";
+    R.measure[key] = { session: found };
+    if (found) {
+      R.measure[key].off = await measure();
+      await page.click(".wide-toggle"); await page.waitForTimeout(150);
+      R.measure[key].on = await measure();
+      await page.screenshot({ path: path.join(ENV.out, "wide-session-" + key + ".png") });
+    }
+    R.measure[key].errors = page.errors;
+    await page.context().close();
+  }
+
   r.results = R;
   r.expect((R.phoneErrors ?? []).length === 0, "phone page errors: " + (R.phoneErrors ?? []).join(" | "));
   r.expect((R.deskErrors ?? []).length === 0, "desktop page errors: " + (R.deskErrors ?? []).join(" | "));
@@ -137,6 +171,18 @@ export default async function viewerCheck(browser) {
   if (R.desk) {
     r.expect(R.desk.x >= 0 && R.desk.x + R.desk.w <= R.desk.vw + 0.5, "desktop dialog sideways: " + JSON.stringify(R.desk));
     r.expect(R.desk.closedByBackdrop === true, "backdrop click did not close the desktop dialog");
+  }
+
+  for (const key of ["light", "dark"]) {
+    const m = R.measure[key];
+    r.expect(!!m.session, "no session with an assistant message, so the wide-mode measure (" + key + ") was never checked");
+    r.expect(m.errors.length === 0, "wide-mode measure page errors (" + key + "): " + m.errors.join(" | "));
+    if (!m.session) continue;
+    r.expect(m.off.wide === false && m.on.wide === true, "the wide toggle did not switch the mode (" + key + "): " + JSON.stringify(m));
+    r.expect(m.off.w <= m.off.ch68 + 0.5, "with wide mode off an assistant message is wider than 68ch (" + key + "): " + JSON.stringify(m.off));
+    r.expect(m.on.w > m.on.ch68 + 1, "with wide mode on an assistant message is still capped at 68ch (" + key + "): " + JSON.stringify(m.on));
+    r.expect(m.on.w >= m.on.col - 1 && m.on.w <= m.on.col + 1, "with wide mode on an assistant message does not fill its column (" + key + "): " + JSON.stringify(m.on));
+    r.expect(m.on.sideways === 0, "wide mode scrolls sideways (" + key + "): " + JSON.stringify(m.on));
   }
 
   return r.done();
