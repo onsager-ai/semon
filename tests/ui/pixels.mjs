@@ -342,6 +342,8 @@ const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.wr
   const D = await data(), S = sample("semon-sample.html"), ids = sampleIds(D, S), list = screens(D, S, ids);
   const unmapped = list.filter((s) => referenceOf(s.name) === undefined).map((s) => s.name);
   if (unmapped.length) throw new Error("reference-map.json has no entry for: " + unmapped.join(", "));
+  // The phone's navigation drawer isn't in the screen list, so its entry is checked by name.
+  if (referenceOf("drawer") === undefined) throw new Error("reference-map.json has no entry for: drawer");
   const skipped = Object.entries(MAP.screens).filter(([, ref]) => ref === null).map(([name]) => name);
   const browser = await launch();
   const results = [], errors = [];
@@ -368,7 +370,7 @@ const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.wr
       results.push(row);
     }
     // The phone's navigation drawer, open on Home.
-    if (size === "phone" && !ONLY.length && referenceOf("drawer")) {
+    if (size === "phone" && !ONLY.length && referenceOf("drawer") !== null) {
       const port = await portFor(referenceOf("drawer"));
       // Each session screenshot can mark result handoffs read. Start the drawer comparison in a fresh served context,
       // matching the reference page reload below, so both drawers show the fixture's initial unread count.
@@ -392,11 +394,12 @@ const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.wr
   const md = ["| Screen | Scheme | vs port reference | vs sample mockup |", "|---|---|---|---|",
     ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.pass ? "✓ " : "✗ ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
   fs.writeFileSync(path.join(ENV.out, "pixels.json"), J({ threshold: THRESHOLD, maxRatio: MAX_RATIO, results, errors }, null, 1));
-  fs.writeFileSync(path.join(ENV.out, "pixels.md"), md + "\n");
+  const note = skipped.length ? "\nNot compared (unmapped in reference-map.json, not drawn by the viewer yet): " + skipped.join(", ") + "\n" : "";
+  fs.writeFileSync(path.join(ENV.out, "pixels.md"), md + "\n" + note);
   console.log(md);
   console.log("screens: " + results.length + ", port mismatches: " + failed.length + ", page errors: " + errors.length);
   if (skipped.length) console.log("unmapped, not compared: " + skipped.join(", "));
   for (const e of errors) console.log("  page error: " + e);
-  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Pixel comparison\n\n" + md + "\n");
+  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Pixel comparison\n\n" + md + "\n" + note);
   process.exit(failed.length || errors.length ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(2); });

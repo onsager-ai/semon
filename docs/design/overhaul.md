@@ -1,8 +1,8 @@
 # Viewer UI/UX overhaul
 
-Status: approved 2026-09-29 (Marvin: "Approve, build per screen"). Phases 1 (audit) and 2 (reworked mockup) are done; phase 3 ports it one screen per PR.
+Status: approved 2026-09-29. Phases 1 (audit) and 2 (reworked mockup) are done; phase 3 ports it one screen per PR.
 
-Go: Marvin, 2026-09-29, in the Semon session: "please do an overhaul on the UI/UX, which i believe is poorly implemented by low-capable luna model", then "Audit, mockup, per-screen PRs", "Opus designs, Sonnet 5.5 builds", "Finish fixes, stop redesigns". Loading skeletons: "also use skeletons for better UX on loading".
+Scope: a UI/UX overhaul of the session viewer, approved and ported one screen per PR.
 
 The reference is `tests/ui/reference/overhaul.html`; the previous mockup, `semon-sample.html`, stays beside it until every screen is ported. `tests/ui/reference-map.json` says which reference each screen of the pixel comparison uses, and a screen's port PR flips it to `overhaul.html`. Its screenshots come from the Mockup screenshots workflow (`tests/ui/shots.json`), at 390 and 1280 px, light and dark.
 
@@ -74,7 +74,7 @@ A harness is named in words: "Claude Code", "Codex", and for child sessions "Sub
 
 ## Loading
 
-Marvin: "also use skeletons for better UX on loading".
+Loading states use skeletons.
 
 - **Geometry.** A skeleton is the loaded screen's own components with placeholders in place of text: the same rows, the same line boxes, the same heights and positions. Nothing moves when content lands. The mockup measures it: each `loading-*` shot renders the loaded screen offscreen, compares row tops and heights, and logs a console error if any differs by more than 1 px (the shots' diagnostics record console errors). Rows are compared by height, and by position for as long as the loaded layout has the same rows in the same order: a parent's runs arrive beneath it.
 - **Delay.** Nothing shows for the first 150 ms (a CSS animation delay), so a fast load never flashes.
@@ -84,7 +84,7 @@ Marvin: "also use skeletons for better UX on loading".
 
 ## Audit
 
-Evidence: the viewer on main (Viewer UI run 36523657501, `viewer-ui` artifact, main at 4512f9f) and the mockup it mirrors (Mockup screenshots run 36522889130, `mockup-shots`, #38's head 92e9ef6). Shot names below are from the mockup artifact unless marked "viewer". Severity: High breaks a principle on a primary screen or was reported by Marvin; Medium costs time or clarity; Low is polish.
+Evidence: the viewer on main (Viewer UI run 36523657501, `viewer-ui` artifact, main at 4512f9f) and the mockup it mirrors (Mockup screenshots run 36522889130, `mockup-shots`, #38's head 92e9ef6). Shot names below are from the mockup artifact unless marked "viewer". Severity: High breaks a principle on a primary screen or was reported by a user; Medium costs time or clarity; Low is polish.
 
 ### Patterns behind the defects
 
@@ -120,7 +120,7 @@ Evidence: the viewer on main (Viewer UI run 36523657501, `viewer-ui` artifact, m
 | The whole second line is one button that opens details, while its parts look like labels; the error count and runs count are buttons inside it | `session-jump-1280-light` | High | P5 |
 | Icons with numbers and no words: wrench 6, stack 3•, "T 38.8M", "$14.0" | `session-jump-1280-light` | Medium | P3, P5 |
 | "1 error" in red, bold, next to the state; a second state dot beside the runs count | `session-jump-390-light` | Medium | P3, P6 |
-| The state dot is clipped on the left | Marvin's report; viewer `check-real-home.png` | High | P1 |
+| The state dot is clipped on the left | a user report; viewer `check-real-home.png` | High | P1 |
 | Four icon buttons on the desktop bar (find, filter, more, wide) | `session-jump-1280-light` | Low | P3 |
 | The "…" menu lists Model, Machine, Started, Duration, Tokens and Session id, which the details sheet lists again | `session-details-cost-1280-dark`, mockup `toggleMenu` | High | P4 |
 | Session details is a list of label/value rows, then a full-width grey button "$14.04 own · $15.16 incl. runs" | `session-details-cost-390-light` | High | P5 |
@@ -149,7 +149,7 @@ Evidence: the viewer on main (Viewer UI run 36523657501, `viewer-ui` artifact, m
 | Three coloured 3 px rails: beside the brief, the whole transcript, and the return block | `child-session-390-light` | High | P3 |
 | Three ways to the parent: the crumb, the "harbor" link in "Brief from harbor", and "Open in harbor" | `child-session-390-light` | Medium | P4 |
 | A sibling pager ("‹ 1 of 3 ›") in the brief header: a fourth way between siblings | `child-session-390-light` | Low | P4 |
-| "Show more" and "Open in harbor" touch with no gap | Marvin's report | Low | P2 |
+| "Show more" and "Open in harbor" touch with no gap | a user report | Low | P2 |
 | "Working" in the bar and again in the foot block ("Working · 3 tool calls · 48m") | `child-session-390-light` | Medium | P6 |
 
 ### Sessions
@@ -217,7 +217,7 @@ Folded into Trace as "Timeline", because it answers what the transcript can't (w
 - **Gap.** #63's missing gap goes away: the child page no longer has "Open in".
 - **Meta line.** Supersedes the in-flight meta-line fix: labels, not a button. Failed steps are a label; finding them is the Find chip, not a link in the bar.
 - **Wide mode.** Moved into the session menu (a switch, remembered per device). It only ever mattered on transcripts. It lifts the prose caps too (an assistant message's 68 ch, the bubbles' 600 and 640 px), so replies use the whole 1200 px column; the normal width keeps its reading measure.
-- **Details and cost.** One menu, as Marvin suggested. The headline figure includes runs when there are runs, because that is what the work cost; "This session" and "Its runs" split it. The harness's own figure is a row, and a difference is a sentence, not an alarm.
+- **Details and cost.** One menu, as suggested in review. The headline figure includes runs when there are runs, because that is what the work cost; "This session" and "Its runs" split it. The harness's own figure is a row, and a difference is a sentence, not an alarm.
 - **Sessions page.** Shows the sessions you started, with their runs beneath them, so the page and the sidebar agree.
 - **Analytics taps.** Phone buckets are wider (6–7 bars) so each bar is a 44 px target; desktop keeps the finer buckets.
 - **Home.** No Trace button per item: the row opens the turn, and the Trace link is at the turn's foot.
