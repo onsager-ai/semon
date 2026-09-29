@@ -1441,8 +1441,8 @@
   function renderSession(page, sid) {
     markSeenResults(H.filter((h) => isResult(h) && h.from === sid));
     const s = SESS[sid], head = el("div", "ph sr"); const h1 = el("h1", null, s.name); head.append(h1); page.append(head); observeTitle(h1);
-    page.append(transcript(sid));
-    page.append(jumpWrap);
+    // The jump button sits in the transcript's own grid, so its row adds no page gap when it appears.
+    const t = transcript(sid); t.append(jumpWrap); page.append(t);
   }
 
   const thoughtText = (e) => String(e.text ?? "").trim();
@@ -1560,7 +1560,7 @@
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
-        if (e.live) { const r = keyed(el("div", "step live"), e); r.dataset.live = sid; r.append(el("span", "spin"), el("span", "sv", v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd tick", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs, key: e.key }); continue; }
+        if (e.live) { const r = keyed(el("div", "step live"), e); r.dataset.live = sid; r.append(el("span", "spin"), el("span", "sv", verbNow(e.name)), el("code", "sa", e.arg), el("span", "sd tick", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs, key: e.key }); continue; }
         const box2 = keyed(el("div", "step" + (e.ok || e.ok === null ? "" : " err")), e), b = btn(); b.setAttribute("aria-expanded", "false");
         b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "No result" : e.exit != null ? "Exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "Exit unknown · " + e.secs : "Failed · " + e.secs), icon(I.chev, "chev"));
         // The detail is built when the step is first opened: what was asked first, then what came back.

@@ -226,7 +226,7 @@ export default async function (browser) {
     await page.unroute("**/api/entry**");
     const ok = await openAll(); await page.click("dialog.panel.full .panel-h .ibtn"); await page.waitForTimeout(250);
     R.viewAll = { preview, failed, ok };
-    r.expect(failed.notes.length === 1 && failed.notes[0].startsWith("Couldn't load the full text") && (previewInfo.lineCut ? failed.out >= preview && failed.out <= 1536 + 3 : failed.out === preview), "a failed fetch shows the preview with only its note: " + JSON.stringify(failed));
+    r.expect(failed.notes.length === 1 && failed.notes[0].startsWith("Couldn't load the full text") && (previewInfo.lineCut ? failed.out >= preview && failed.out <= 1536 + 3 : failed.out === preview), "a failed fetch shows the preview with only its note: " + JSON.stringify({ failed, previewInfo }));
     r.expect(ok.notes.length === 0 && ok.out > preview, "a working fetch shows the whole text, longer than the preview: " + JSON.stringify(ok));
     r.expect(page.errors.length === 0, "steps: page errors " + page.errors.join(" | "));
     await page.context().close();

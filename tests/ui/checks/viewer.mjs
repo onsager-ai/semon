@@ -48,11 +48,12 @@ export default async function viewerCheck(browser) {
         document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => x.click()); });
       // ResizeObserver measures previews after their containing turn opens; inspect the resulting state on a later frame.
       await page.waitForTimeout(100);
-      const rr = await page.evaluate(() => { const r = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0 };
+      const rr = await page.evaluate(() => { const r = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0, bad: [] };
         document.querySelectorAll('.step > button[aria-expanded="true"]').forEach((x) => { r.steps++; const o = x.parentElement.querySelector('.out');
           const cut = /^Output · (first|last) \d+/.test([...o.querySelectorAll('.io')].at(-1)?.textContent ?? "") || /^Cut short/.test(o.querySelector('.cutnote')?.textContent ?? "") || o.querySelector('.viewall:not(.viewscript) span')?.textContent === "View all"; /* a bare "View all", with no line count, is offered where the server cut the preview */ const shown = !!o.querySelector('.viewall:not(.viewscript)');
-          if (cut) r.cut++; if (shown) r.viewAllShown++; if (cut !== shown) r.mismatch++; }); return r; });
-      for (const k in C) C[k] += rr[k];
+          if (cut) r.cut++; if (shown) r.viewAllShown++; if (cut !== shown) { r.mismatch++; r.bad.push({ arg: x.querySelector('.sa')?.textContent.slice(0, 60), cut, shown, ios: [...o.querySelectorAll('.io')].map((i) => i.textContent), all: o.querySelector('.viewall:not(.viewscript)')?.textContent ?? null, lines: [...o.querySelectorAll('pre')].map((p) => p.textContent.split('\n').length) }); } }); return r; });
+      for (const k of ["steps", "cut", "viewAllShown", "mismatch"]) C[k] += rr[k];
+      (C.bad ??= []).push(...rr.bad);
       if (rr.cut) cutLanes.push(id);
     }
     R.census = C;
@@ -149,7 +150,7 @@ export default async function viewerCheck(browser) {
   r.results = R;
   r.expect((R.phoneErrors ?? []).length === 0, "phone page errors: " + (R.phoneErrors ?? []).join(" | "));
   r.expect((R.deskErrors ?? []).length === 0, "desktop page errors: " + (R.deskErrors ?? []).join(" | "));
-  r.expect(R.census?.mismatch === 0, "census mismatch=" + R.census?.mismatch);
+  r.expect(R.census?.mismatch === 0, "census mismatch=" + R.census?.mismatch + " " + JSON.stringify(R.census?.bad ?? []));
   r.expect(!!R.sheet, "the 'View all' sheet was never opened, so nothing below could be checked");
   if (R.sheet) {
     r.expect(R.sheet.open === true, "sheet did not open");
