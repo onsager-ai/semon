@@ -59,6 +59,7 @@ dialog.sheet > .btn-row { margin-top: 20px; }
 
 /* Notices are a quiet fill; only an error takes a colour, on its words, never on a border. */
 .notice { padding: 11px 14px; border-radius: var(--r2); background: var(--sunken); color: var(--ink-2); }
+.notice.ok { background: var(--sunken); color: var(--ink-2); }
 .notice.sh-err { background: var(--err-soft); color: var(--err); }
 .notice + .notice { margin-top: 8px; }
 
