@@ -50,7 +50,7 @@ export default async function viewerCheck(browser) {
       await page.waitForTimeout(100);
       const rr = await page.evaluate(() => { const r = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0 };
         document.querySelectorAll('.step > button[aria-expanded="true"]').forEach((x) => { r.steps++; const o = x.parentElement.querySelector('.out');
-          const cut = /^Output · (first|last) \d+/.test([...o.querySelectorAll('.io')].at(-1)?.textContent ?? "") || /^Cut short/.test(o.querySelector('.cutnote')?.textContent ?? "") || o.querySelector('.viewall:not(.viewscript) span')?.textContent === "View all"; // a bare "View all" (no line count) is offered where the server cut the preview const shown = !!o.querySelector('.viewall:not(.viewscript)');
+          const cut = /^Output · (first|last) \d+/.test([...o.querySelectorAll('.io')].at(-1)?.textContent ?? "") || /^Cut short/.test(o.querySelector('.cutnote')?.textContent ?? "") || o.querySelector('.viewall:not(.viewscript) span')?.textContent === "View all"; /* a bare "View all", with no line count, is offered where the server cut the preview */ const shown = !!o.querySelector('.viewall:not(.viewscript)');
           if (cut) r.cut++; if (shown) r.viewAllShown++; if (cut !== shown) r.mismatch++; }); return r; });
       for (const k in C) C[k] += rr[k];
       if (rr.cut) cutLanes.push(id);

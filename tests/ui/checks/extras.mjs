@@ -3,7 +3,7 @@
 //     "Load earlier" adds entries above without moving what was on screen; the first page ends with the "Started"
 //     divider and every one of its 10 turns, with one gap divider where the log lost a line. A deep link (/s/claude/backlog?turn=<an older turn>) lands on that turn,
 //     in view, with "Load earlier" above and "Load later" below, and "Load later" reaches the last turn.
-//   - a Codex call with no exit status (deps) draws as neither failed nor succeeded: no failed styling, "exit unknown ·",
+//   - a Codex call with no exit status (deps) draws as neither failed nor succeeded: no failed styling, "Exit unknown ·",
 //     and its group summary counts no failure.
 //   - a command longer than its summary (harbor) shows its "Command" section with the whole command.
 //   - View all whose fetch fails shows the preview with the "Couldn't load the full text" note; when the fetch works,
@@ -183,17 +183,17 @@ export default async function (browser) {
     await page.evaluate(() => document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click()));
     R.unknown = await page.evaluate(() => {
       const norm = (s) => String(s ?? "").replace(/\u2009/g, " ").replace(/\s+/g, " ").trim();
-      const step = [...document.querySelectorAll(".step")].find((s) => norm(s.querySelector(".sd")?.textContent).startsWith("exit unknown · "));
+      const step = [...document.querySelectorAll(".step")].find((s) => norm(s.querySelector(".sd")?.textContent).startsWith("Exit unknown · "));
       const sum = step?.closest(".tgroup")?.querySelector(".tsum");
       return step ? { err: step.classList.contains("err"), sd: norm(step.querySelector(".sd").textContent), groupFailed: !!sum?.querySelector(".tf"), grouped: !!sum } : null;
     });
-    r.expect(R.unknown !== null, "a step with no exit status reads \"exit unknown · …\"");
+    r.expect(R.unknown !== null, "a step with no exit status reads \"Exit unknown · …\"");
     r.expect(R.unknown && !R.unknown.err && R.unknown.grouped && !R.unknown.groupFailed, "an unknown exit is neither failed nor counted as failed: " + JSON.stringify(R.unknown));
     R.shortCommand = await page.evaluate(() => {
       const step = [...document.querySelectorAll(".step")].find((item) => item.querySelector(".sa")?.textContent === "cargo metadata --format-version 1 --no-deps");
       if (!step) return null;
       const button = step.querySelector(":scope > button"); if (button?.getAttribute("aria-expanded") === "false") button.click();
-      const out = step.querySelector(":scope > .out"), labels = [...out.querySelectorAll(":scope > .io")].map((label) => label.textContent);
+      const out = step.querySelector(":scope > .out"), labels = [...out.querySelectorAll(":scope > .io")].map((label) => label.querySelector("span")?.textContent ?? label.textContent);
       return { command: out.querySelector("pre.in")?.textContent ?? null, labels, cwd: labels.find((label) => label.startsWith("Working directory")) ?? null };
     });
     r.expect(R.shortCommand?.command === "cargo metadata --format-version 1 --no-deps" && R.shortCommand.labels.indexOf("Command") === 0 && R.shortCommand.labels.indexOf("Output") > R.shortCommand.labels.indexOf("Command") && R.shortCommand.cwd === null, "a short shell detail shows Command then Output and hides the session-root directory: " + JSON.stringify(R.shortCommand));
@@ -289,7 +289,7 @@ export default async function (browser) {
       for (const step of [commandStep, inputStep]) { const button = step?.querySelector(":scope > button"); if (button?.getAttribute("aria-expanded") === "false") button.click(); }
       const detail = (step) => {
         const out = step?.querySelector(":scope > .out");
-        return { labels: [...(out?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.textContent), value: out?.querySelector("pre.in")?.textContent ?? null };
+        return { labels: [...(out?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.querySelector("span")?.textContent ?? label.textContent), value: out?.querySelector("pre.in")?.textContent ?? null };
       };
       return { commandEntry, inputEntry, command: detail(commandStep), input: detail(inputStep) };
     });

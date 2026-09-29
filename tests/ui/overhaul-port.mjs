@@ -121,6 +121,9 @@ export function overhaulPortReference(D, html) {
   const styleEnd = out.lastIndexOf("</style>");
   if (styleEnd < 0) throw new Error("overhaul mockup style block moved");
   out = out.slice(0, styleEnd) + "@media (min-width: 761px) { .app:not(.rail) { grid-template-columns: 296px minmax(0, 1fr); } }\n" + out.slice(styleEnd);
+  // A working run's card names its current call. The mockup reads it from the run's transcript (the last call, finished or not); the
+  // served model reports only a call still running (gaps.json: h-review-codex.activity), so the card shows that.
+  out = swapLine(out, '    else if (c.state === "work") { const last = (TX[c.id] ?? []).filter', '    else if (c.state === "work" && c.activity) { const n = el("span", "cc-now"); n.append(el("span", "spin"), el("span", null, verbNow(c.activity[0])), el("code", null, c.activity[1])); b.append(n); }');
   // Each of the mockup's histories is inside the served sessions' busy intervals already.
   const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
   if (!histories.test(out)) throw new Error("overhaul mockup analytics history block moved");
