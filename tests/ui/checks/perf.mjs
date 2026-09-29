@@ -152,6 +152,17 @@ async function checkLongSessionOpenEnd(page) {
     const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
     return sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 1;
   }, null, { timeout: 10_000 });
+  // With the button shown, the last thing in the transcript sits clear of it: measured at the end, where the button is
+  // hidden, by showing it for one synchronous read. The floating button can still cover content mid-scroll; it is only
+  // guaranteed never to sit over the tail of the page.
+  await page.waitForTimeout(200);
+  const tail = await page.evaluate(() => {
+    const button = document.querySelector(".jump-bottom"), wasHidden = button.hidden; button.hidden = false; const b = button.getBoundingClientRect(); button.hidden = wasHidden;
+    const live = [...document.querySelectorAll("#page button, #page a[href], #page [role=link]")].map((x) => ({ x, r: x.getBoundingClientRect() })).filter(({ x, r }) => r.width > 0 && r.height > 0 && x.offsetParent !== null && r.top < innerHeight);
+    const last = live.sort((p, q) => q.r.bottom - p.r.bottom)[0];
+    const overlaps = !!last && last.r.left < b.right && last.r.right > b.left && last.r.top < b.bottom && last.r.bottom > b.top;
+    return { hiddenAtEnd: wasHidden, last: last ? (last.x.className || last.x.tagName) : null, clear: last ? Math.round(innerHeight - last.r.bottom) : null, buttonTop: Math.round(innerHeight - b.top), overlaps };
+  });
   const returnedGap = await page.evaluate(() => {
     const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
     return sc.scrollHeight - sc.scrollTop - sc.clientHeight;
@@ -165,8 +176,9 @@ async function checkLongSessionOpenEnd(page) {
     overlapsBar: raised.overlapsBar,
     overlapsComposer: raised.overlapsComposer,
     centring,
+    tail,
     returnedGap,
-    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && returnedGap <= 1,
+    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && !!tail.last && !tail.overlaps && returnedGap <= 1,
   };
 }
 

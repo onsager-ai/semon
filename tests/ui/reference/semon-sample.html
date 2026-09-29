@@ -664,7 +664,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .lead { display: inline-grid; }
   .sidebar-head { display: contents; }
   .rail-toggle { display: none; }
-  .page { padding: 2px 16px 56px; gap: 16px; }
+  /* The bottom padding is the jump button's offset, height and a 16px gap, so the last content scrolls clear of it. */
+  .page { padding: 2px 16px calc(72px + env(safe-area-inset-bottom, 0px)); gap: 16px; }
   .msg.user { max-width: 88%; }
   .step > button, .step.live { min-height: 36px; }
   .menu, .filters.pop { right: 10px; }

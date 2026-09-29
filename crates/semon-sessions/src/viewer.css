@@ -483,7 +483,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .topbar { top: env(safe-area-inset-top, 0px); padding: 6px 10px; min-height: 50px; }
   .topbar.detail { min-height: 56px; }
   .lead { display: inline-grid; }
-  .page { padding: 2px 16px 56px; gap: 16px; }
+  /* The bottom padding is the jump button's offset, height and a 16px gap, so the last content scrolls clear of it. */
+  .page { padding: 2px 16px calc(72px + env(safe-area-inset-bottom, 0px)); gap: 16px; }
   .msg.user { max-width: 88%; }
   .step > button, .step.live { min-height: 36px; }
   .menu, .filters.pop { right: 10px; }
