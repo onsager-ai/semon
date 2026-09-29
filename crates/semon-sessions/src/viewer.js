@@ -313,7 +313,7 @@
   }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
   function pager(sid, where, label) {
-    const w = el("div", "list"), b = el("button", "more", label); b.type = "button"; w.append(b);
+    const w = el("div", "list"), b = el("button", "more", label); b.type = "button"; if (where === "before") b.dataset.loadEarlier = ""; w.append(b); // data-load-earlier: a stable hook for the budget check
     b.addEventListener("click", () => {
       stopOpeningEndPin();
       const m = TXM[sid], box = phone.matches ? document.documentElement : $("#main"), h0 = box.scrollHeight; b.disabled = true;
@@ -1573,7 +1573,7 @@
     const busyTop = [...all].map((r) => ({ ...r, value: busyMsIn(r, from, to) })).filter((r) => r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5), waitTop = [...now.waitBy].map(([id, ms]) => ({ s: SESS[id], id, value: ms })).filter((r) => r.s && r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5);
     const costTop = all.map((r) => { const cost = sessionCostInRange(r.s, from, to); return { ...r, cost, value: cost.usd }; }).filter((r) => r.cost.hasData).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5), bottom = el("div", "analytics-split");
     bottom.append(analyticsList("Top sessions · busy time", busyTop, (x) => timeText(x.value)), analyticsList("Top sessions · waited on", waitTop, (x) => timeText(x.value)), analyticsList("Most expensive sessions · API-equivalent cost", costTop, (x) => x.value == null ? "—" : asMoney(x.value)));
-    page.append(renderAgentsChart(all, from, to), renderCostChart(all, from, to), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(); if (allowance) page.append(allowance);
+    page.append(renderAgentsChart(all, from, to), renderCostChart(all, from, to), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(); if (allowance) page.append(allowance); metrics.dataset.analyticsReady = ""; // data-analytics-ready: the figures and charts are drawn (a stable hook for the budget check);
   }
 
   // ---- Sessions: every top-level session and its child runs ---------------------------------------------------------------
