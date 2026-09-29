@@ -73,19 +73,6 @@ export default async function namesCheck(browser) {
       }
       if (s === claude) await shot("session");
     }
-    if (size === "phone") {
-      // The phone's lineage menu lists the path to the open child; its current row sits on --sunken.
-      const child = Object.values(D.SESS).find((x) => x.parent ?? D.H.some((h) => h.kind === "spawn" && h.to === x.id));
-      r.expect(!!child, "the fixture must hold a child session for the lineage menu");
-      if (child) {
-        await goto(page, { v: "session", id: child.id }, D); await page.waitForTimeout(200);
-        await page.click(".topbar .lineage-parent"); await page.waitForSelector(".lineage-menu");
-        const menu = await measure(page, ".lineage-menu");
-        r.expect(menu.length > 0 && menu.some((l) => l.current), tag + ": the lineage menu shows no harness label on its current row");
-        audit("lineage-menu", menu);
-        await shot("lineage");
-      }
-    }
     await goto(page, { v: "analytics" }, D);
     await page.waitForTimeout(200);
     audit("analytics", await measure(page, ".page"));

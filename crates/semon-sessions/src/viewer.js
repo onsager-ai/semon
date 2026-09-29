@@ -1490,8 +1490,12 @@
     const firsts = turnMode ? new Map((TURNS[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t])) : new Map(); let cur = null;
     // A live update draws only the turns that changed (opts.only, by turn id).
     const owner = opts.only ? new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : null;
-    const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
-      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .thought, .think-pending")) { blk.remove(); return; }
+    const closeTurn = () => { flush(); if (!cur) return; const { t, blk, masked } = cur; cur = null; tx = box;
+      // A turn whose only thinking was masked is left with nothing to draw (no header, no rows): it goes, unless its end row still says something.
+      const bare = masked && !blk.querySelector(".tx > *, .turn-h");
+      if (bare && (opts.excludeH && t.last || !turnEnd(t) && !t.out.length)) { blk.remove(); return; }
+      if (bare) blk.querySelector(":scope > .tx")?.remove(); // its end row stays alone, with no empty space above it
+      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .tgroup, .hcard, .thought, .think, .think-pending")) { blk.remove(); return; }
       if (opts.excludeH && t.last) return;
       const end = turnEnd(t); if (!end && !t.out.length) return;
       const d = el("div", "turn-end");
