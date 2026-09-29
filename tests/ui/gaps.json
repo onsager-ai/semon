@@ -238,5 +238,45 @@
   {
     "gap": "session l-sub.start: sample 442, served -5318",
     "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
+  },
+  {
+    "gap": "session atlas-ingest.busy: sample [[670,684],[725,728],[738,751]], served [[670,685],[700,700],[708,708],[725,728],[738,751]]",
+    "why": "The spawn at 11:25 (1 minute after the sample's first interval) stretches it, and the results of the docs subagent (11:40) and the storage run (11:48) are lone stamps between the sample's intervals."
+  },
+  {
+    "gap": "session a-scan.busy: sample [[672,677]], served [[672,680]]",
+    "why": "The model's busy rule merges stamps no more than 5 minutes apart, and every line of a session is a stamp, so the calls and results the fixture writes at each handoff's time close the sample's gaps and stretch its intervals."
+  },
+  {
+    "gap": "session a-parse.busy: sample [[682,706],[710,725]], served [[682,725]]",
+    "why": "The model's busy rule merges stamps no more than 5 minutes apart; the sample's gap (11:46 to 11:50) is 4 minutes."
+  },
+  {
+    "gap": "session a-store.busy: sample [[682,696],[700,708]], served [[682,708]]",
+    "why": "The model's busy rule merges stamps no more than 5 minutes apart; the sample's gap (11:36 to 11:40) is 4 minutes."
+  },
+  {
+    "gap": "session a-review.busy: sample [[726,733],[737,746]], served [[726,746]]",
+    "why": "The model's busy rule merges stamps no more than 5 minutes apart; the sample's gap (12:13 to 12:17) is 4 minutes."
+  },
+  {
+    "gap": "session a-docs.busy: sample [[685,698]], served [[685,700]]",
+    "why": "The model's busy rule merges stamps no more than 5 minutes apart, and every line of a session is a stamp, so the calls and results the fixture writes at each handoff's time close the sample's gaps and stretch its intervals."
+  },
+  {
+    "gap": "session a-review-grep.busy: sample [[730,733]], served [[730,734]]",
+    "why": "The model's busy rule merges stamps no more than 5 minutes apart, and every line of a session is a stamp, so the calls and results the fixture writes at each handoff's time close the sample's gaps and stretch its intervals."
+  },
+  {
+    "gap": "handoff a-relay.done: sample 740, served undefined",
+    "why": "A relay has no result in the model: the reply comes back as a separate relay, or not at all."
+  },
+  {
+    "gap": "handoff a-result.status: sample \"done\", served \"new\"",
+    "why": "Results have status new, with read or unread tracked per device, and no longer put the session into wait (#26)."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"a\",\"text\":\"The ingest parser and storage work are ready. Review is clear; the index run needs a CI fix.\"}",
+    "why": "The model serves the assistant reply in the transcript as well as its result card; the sample draws only the card. Results are new and read or unread per device (#26)."
   }
 ]
