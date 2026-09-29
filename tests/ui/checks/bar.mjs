@@ -337,45 +337,69 @@ export default async function barCheck(browser) {
   }
   r.expect(childAssertions.length === 2, "lineage, no-sibling-nav, brief/return and Runs checks did not run on phone and desktop: " + childAssertions.length);
 
-  // Masked thinking (Claude redacts it, leaving only a duration) draws nothing. Injected through the served /api/tx path:
-  // a readable thought, two timed masked thoughts, another readable thought and two untimed masked thoughts. Only the two
-  // readable thoughts get a row, each with its disclosure control.
+  // Thinking shows inline. Readable thinking is drawn in full, with no control to open (no button, nothing hidden), under a
+  // "Thinking" label that carries a duration only from one second up. Masked thinking (Claude redacts it, Codex encrypts it) is
+  // one quiet line, "Thinking hidden by the harness", at most one per turn. Checked at 390 and 1280.
+  // Injected through the served /api/tx path: a readable thought timed 0 s holding one very long unbroken token, two masked
+  // thoughts, a readable thought timed 12 s holding a fenced code block with a long line, then two more masked thoughts: two
+  // readable thoughts are added, at most one masked line however many the session had, and the page never scrolls sideways.
   const thoughtSid = Object.keys(D.SESS).find((sid) => (D.TX[sid] ?? []).length);
-  let thoughts = null;
-  if (thoughtSid) {
-    const plain = await served(browser, { size: "phone" });
+  const countThoughts = () => ({ readable: document.querySelectorAll(".turns .thought:not(.masked)").length, masked: document.querySelectorAll(".turns .thought.masked").length });
+  const thoughtsBySize = {};
+  if (thoughtSid) for (const size of ["phone", "desktop"]) {
+    const plain = await served(browser, { size });
     await goto(plain, { v: "session", id: thoughtSid }, D);
-    const baseThoughts = await plain.evaluate(() => document.querySelectorAll(".turns .think").length);
+    const base = await plain.evaluate(countThoughts);
     await plain.context().close();
-    const page = await served(browser, { size: "phone" });
+    const page = await served(browser, { size });
     await page.route("**/api/tx*", async (route) => {
       const u = new URL(route.request().url()); if (u.searchParams.get("sid") !== thoughtSid) return route.continue();
       const response = await route.fetch(), body = await response.json();
-      body.entries.push({ k: "think", text: "Timing separator" }, { k: "think", text: "", secs: 2 }, { k: "think", text: "", secs: 3 }, { k: "think", text: "A readable thought" }, { k: "think", text: "" }, { k: "think", text: "" });
+      body.entries.push({ k: "think", text: "Timing separator " + "A".repeat(300), secs: 0 }, { k: "think", text: "", secs: 2 }, { k: "think", text: "", secs: 3 }, { k: "think", text: "A readable thought\n\n```\nconst longLine = \"" + "y".repeat(240) + "\";\n```", secs: 12 }, { k: "think", text: "" }, { k: "think", text: "" });
       await route.fulfill({ response, json: body });
     });
     await goto(page, { v: "session", id: thoughtSid }, D);
-    await page.waitForFunction((base) => document.querySelectorAll(".turns .think").length >= base + 2, baseThoughts);
-    thoughts = await page.evaluate((base) => { const rows = [...document.querySelectorAll(".turns .think")]; return { addedThoughts: rows.length - base, readable: rows.length > 0 && rows.every((x) => x.tagName === "BUTTON" && x.querySelector(".chev") && x.nextElementSibling?.hidden), emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] }; }, baseThoughts);
-    thoughts.errors = page.errors;
+    await page.waitForFunction((n) => document.querySelectorAll(".turns .thought:not(.masked)").length >= n + 2, base.readable);
+    const t = await page.evaluate((base) => {
+      const readable = [...document.querySelectorAll(".turns .thought:not(.masked)")], masked = [...document.querySelectorAll(".turns .thought.masked")];
+      const shown = (x) => { const b = x.getBoundingClientRect(); return b.width > 0 && b.height > 0; };
+      const labels = readable.map((x) => (x.querySelector(".think-label")?.textContent ?? "").replace(/\s+/g, " ").trim()); // the viewer spaces a "·" out
+      return { addedReadable: readable.length - base.readable, addedMasked: masked.length - base.masked, maxPerTurn: Math.max(0, ...[...document.querySelectorAll(".turns .turn")].map((b) => b.querySelectorAll(".thought.masked").length)),
+        inline: readable.length > 0 && readable.every((x) => shown(x.querySelector(".think-text")) && !x.querySelector("button, [aria-expanded], [hidden]") && x.querySelector(".think-text").textContent.trim().length > 0),
+        maskedLines: masked.every((x) => x.children.length === 1 && x.textContent.trim() === "Thinking hidden by the harness" && !x.querySelector("button, [aria-expanded]")),
+        pairs: masked.filter((x) => x.nextElementSibling?.classList.contains("masked")).length,
+        zero: [...document.querySelectorAll(".turns .think-label")].filter((x) => /\b0\s*s\b|Thought for/.test(x.textContent)).map((x) => x.textContent),
+        timed: labels.includes("Thinking · 12s"), untimed: labels.filter((x) => x === "Thinking").length > 0,
+        oldRows: document.querySelectorAll(".turns button.think").length, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] };
+    }, base);
+    t.overflow = await overflow(page); t.errors = page.errors;
+    await page.context().close();
+    thoughtsBySize[size] = t;
+  }
+  // The fixture's harbor session has real readable thinking: it is on the page with no click, at both sizes.
+  const harborThinking = {};
+  if (D.SESS.harbor) for (const size of ["phone", "desktop"]) {
+    const page = await served(browser, { size });
+    await goto(page, { v: "session", id: "harbor" }, D);
+    harborThinking[size] = await page.evaluate(() => { const x = document.querySelector(".turns .thought:not(.masked) .think-text"), b = x?.getBoundingClientRect(); return { text: x?.textContent.trim().length ?? 0, visible: !!b && b.width > 0 && b.height > 0, fits: !!b && b.right <= document.documentElement.clientWidth + 0.5 && b.left >= -0.5 }; });
+    harborThinking[size].overflow = await overflow(page); harborThinking[size].errors = page.errors;
     await page.context().close();
   }
-  // The fixture's principal session opens a turn with three masked thoughts before its first tool call: no thought rows,
-  // the tool call still there, and no turn block left empty.
+  // The fixture's principal session opens a turn with three masked thoughts before its first tool call: they are one quiet
+  // line, the tool call is still there, and no turn block is left empty.
   let maskedTurn = null;
   if (D.SESS.principal) {
     const page = await served(browser, { size: "phone" });
     await goto(page, { v: "session", id: "principal" }, D);
     await page.waitForSelector(".turns .step", { state: "attached" });
-    maskedTurn = await page.evaluate(() => ({ thoughtRows: document.querySelectorAll(".turns .think, .turns .think-pending").length, steps: document.querySelectorAll(".turns .step").length, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] }));
+    maskedTurn = await page.evaluate(() => ({ maskedLines: document.querySelectorAll(".turns .thought.masked").length, adjacent: [...document.querySelectorAll(".turns .thought.masked")].filter((x) => x.nextElementSibling?.classList.contains("masked")).length, label: document.querySelector(".turns .thought.masked")?.textContent.trim() ?? null, steps: document.querySelectorAll(".turns .step").length, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] }));
     maskedTurn.errors = page.errors;
     await page.context().close();
   }
 
   // Two turns are added to the served model and transcript of the principal session: one holding only masked thoughts, with
-  // no start, no message and no end (nothing to draw: its block must go, leaving no empty .tx), and one with a masked thought
-  // and then a reply (its block stays, with the reply and no thought row). The second also proves the injection reached the
-  // page: without it, "the first turn is gone" could mean the turn never existed.
+  // no start, no message and no end (it draws its one quiet line and nothing else), and one with a masked thought and then a
+  // reply (the line, then the reply). The second also proves the injection reached the page.
   let bareTurns = null;
   if (D.SESS.principal) {
     const page = await served(browser, { size: "phone" });
@@ -383,22 +407,29 @@ export default async function barCheck(browser) {
       const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response }); // a 304 has no body
       const body = await response.json();
       const base = body.turns.filter((t) => t.sid === "principal").at(-1);
-      for (const id of ["bt-bare-turn", "bt-masked-then-reply"]) body.turns.push({ id, sid: "principal", at: base?.at ?? 0, start: null, u: false, text: "", sent: [], end: null });
+      for (const id of ["bt-bare-turn", "bt-masked-then-reply", "bt-alternating", "bt-in-run"]) body.turns.push({ id, sid: "principal", at: base?.at ?? 0, start: null, u: false, text: "", sent: [], end: null });
       await route.fulfill({ response, json: body });
     });
     await page.route("**/api/tx*", async (route) => {
       const u = new URL(route.request().url()); if (u.searchParams.get("sid") !== "principal") return route.continue();
       const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response });
       const body = await response.json();
-      body.entries.push({ k: "think", text: "", secs: 4, turn: "bt-bare-turn" }, { k: "think", text: "", secs: 5, turn: "bt-masked-then-reply" }, { k: "a", text: "Reply after a masked thought" });
+      const call = (extra = {}) => ({ k: "tool", name: "Bash", arg: "true", in: "true", out: "", ok: true, exit: 0, secs: "0.1s", ...extra }), masked = (extra = {}) => ({ k: "think", text: "", ...extra });
+      body.entries.push({ k: "think", text: "", secs: 4, turn: "bt-bare-turn" }, { k: "think", text: "", secs: 5, turn: "bt-masked-then-reply" }, { k: "a", text: "Reply after a masked thought" },
+        // masked, call, masked, call, masked, call: one line, then one group of three calls
+        masked({ turn: "bt-alternating" }), call(), masked(), call(), masked(), call(),
+        // a call, then masked inside the run that is still gathering, then two more calls: the line goes before the run
+        call({ turn: "bt-in-run" }), masked(), call(), call());
       await route.fulfill({ response, json: body });
     });
     await page.reload({ waitUntil: "load" }); // served() loaded the model before these routes existed
     await goto(page, { v: "session", id: "principal" }, D);
     await page.waitForSelector('section.turn[data-turn="bt-masked-then-reply"]', { timeout: 8000 }).catch(() => {});
     bareTurns = await page.evaluate(() => {
-      const withReply = document.querySelector('section.turn[data-turn="bt-masked-then-reply"]');
-      return { bareBlock: !!document.querySelector('section.turn[data-turn="bt-bare-turn"]'), replyBlock: !!withReply, replyText: withReply?.querySelector(".msg")?.textContent ?? null, thoughtRowsInReply: withReply?.querySelectorAll(".think, .think-pending").length ?? null, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] };
+      const withReply = document.querySelector('section.turn[data-turn="bt-masked-then-reply"]'), bare = document.querySelector('section.turn[data-turn="bt-bare-turn"]');
+      const shape = (id) => { const b = document.querySelector('section.turn[data-turn="' + id + '"]'), tx = b?.querySelector(".tx"), g = b ? [...b.querySelectorAll(".tgroup")] : [];
+        return { block: !!b, masked: b?.querySelectorAll(".thought.masked").length ?? null, groups: g.length, summary: g[0]?.querySelector(".tt")?.textContent.trim() ?? null, steps: g[0]?.querySelectorAll(".step").length ?? null, singles: b?.querySelectorAll(".tx > .steps").length ?? null, order: tx ? [...tx.children].map((c) => c.classList.contains("thought") ? "masked" : c.classList.contains("tgroup") ? "group" : c.className) : null }; };
+      return { alternating: shape("bt-alternating"), inRun: shape("bt-in-run"), bareBlock: !!bare, bareLines: bare?.querySelectorAll(".thought.masked").length ?? null, bareMessages: bare?.querySelectorAll(".msg").length ?? null, replyBlock: !!withReply, replyText: withReply?.querySelector(".msg")?.textContent ?? null, linesInReply: withReply?.querySelectorAll(".thought.masked").length ?? null, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] };
     });
     bareTurns.errors = page.errors;
     await page.context().close();
@@ -418,25 +449,39 @@ export default async function barCheck(browser) {
     await page.context().close();
   }
 
-  r.results = { modes, expected: X, thoughts, maskedTurn, bareTurns, extra, childAssertions };
-  r.expect(!!thoughtSid, "no session transcript was available for the masked-thinking check");
-  if (thoughts) {
-    r.expect(thoughts.errors.length === 0, "masked-thinking route: page errors: " + thoughts.errors.join(" | "));
-    r.expect(thoughts.addedThoughts === 2, "the two readable injected thoughts should add exactly two thought rows, the four masked ones none: " + JSON.stringify(thoughts));
-    r.expect(thoughts.readable === true, "readable thinking did not keep its disclosure control");
-    r.expect(thoughts.emptyBlocks === 0, "a turn block was left empty by masked thoughts: " + JSON.stringify(thoughts));
+  r.results = { modes, expected: X, thoughtsBySize, harborThinking, maskedTurn, bareTurns, extra, childAssertions };
+  r.expect(!!thoughtSid, "no session transcript was available for the thinking check");
+  for (const [size, t] of Object.entries(thoughtsBySize)) {
+    r.expect(t.errors.length === 0, size + " thinking route: page errors: " + t.errors.join(" | "));
+    r.expect(t.addedReadable === 2 && t.addedMasked <= 1 && t.maxPerTurn <= 1, size + ": the injected thoughts should add two readable thoughts and at most one masked line, and no turn should hold two: " + JSON.stringify(t));
+    r.expect(t.inline === true, size + ": readable thinking is not shown in full without a click: " + JSON.stringify(t));
+    r.expect(t.maskedLines === true && t.pairs === 0, size + ": masked thinking is not a single quiet line: " + JSON.stringify(t));
+    r.expect(t.zero.length === 0 && t.oldRows === 0, size + ": a thinking label names a zero duration, or the collapsed row is back: " + JSON.stringify(t));
+    r.expect(t.timed && t.untimed, size + ": labels should read \"Thinking · 12s\" for 12 s and \"Thinking\" for 0 s: " + JSON.stringify(t));
+    r.expect(t.emptyBlocks === 0, size + ": a turn block was left empty by thinking: " + JSON.stringify(t));
+    r.expect(t.overflow === 0, size + ": thinking makes the page scroll sideways: " + t.overflow);
+  }
+  r.expect(!D.SESS.harbor || Object.keys(harborThinking).length === 2, "harbor's inline thinking was not checked at both sizes");
+  for (const [size, t] of Object.entries(harborThinking)) {
+    r.expect(t.errors.length === 0, size + " harbor: page errors: " + t.errors.join(" | "));
+    r.expect(t.text > 0 && t.visible && t.fits, size + ": harbor's readable thinking is not on the page without a click: " + JSON.stringify(t));
+    r.expect(t.overflow === 0, size + ": harbor scrolls sideways: " + t.overflow);
   }
   if (bareTurns) {
+    for (const id of ["alternating", "inRun"]) {
+      const x = bareTurns[id];
+      r.expect(x.block && x.masked === 1 && x.groups === 1 && x.summary === "Ran 3 commands" && x.steps === 3 && x.singles === 0 && x.order.join() === "masked,group", id + ": a turn with masked thoughts among its calls should draw one masked line, then one \"Ran 3 commands\" group: " + JSON.stringify(x));
+    }
     r.expect(bareTurns.errors.length === 0, "bare masked turn: page errors: " + bareTurns.errors.join(" | "));
-    r.expect(bareTurns.replyBlock && bareTurns.replyText?.includes("Reply after a masked thought") && bareTurns.thoughtRowsInReply === 0, "the injected masked-then-reply turn did not draw as its reply alone: " + JSON.stringify(bareTurns));
-    r.expect(!bareTurns.bareBlock && bareTurns.emptyBlocks === 0, "a turn holding only masked thoughts was left as a block: " + JSON.stringify(bareTurns));
+    r.expect(bareTurns.replyBlock && bareTurns.replyText?.includes("Reply after a masked thought") && bareTurns.linesInReply === 1, "the injected masked-then-reply turn did not draw as one quiet line and its reply: " + JSON.stringify(bareTurns));
+    r.expect(bareTurns.bareBlock && bareTurns.bareLines === 1 && bareTurns.bareMessages === 0 && bareTurns.emptyBlocks === 0, "a turn holding only masked thoughts did not draw as one quiet line: " + JSON.stringify(bareTurns));
   }
   r.expect(!D.SESS.principal || !!bareTurns, "the bare masked turn check did not run");
   r.expect(!D.SESS.principal || !!maskedTurn, "the principal session's masked-thinking turn was not checked");
   if (maskedTurn) {
     r.expect(maskedTurn.errors.length === 0, "principal masked-thinking route: page errors: " + maskedTurn.errors.join(" | "));
-    r.expect(maskedTurn.thoughtRows === 0, "a turn of masked thoughts still shows thought rows: " + JSON.stringify(maskedTurn));
-    r.expect(maskedTurn.steps > 0 && maskedTurn.emptyBlocks === 0, "hiding masked thoughts lost the turn's steps or left an empty block: " + JSON.stringify(maskedTurn));
+    r.expect(maskedTurn.maskedLines > 0 && maskedTurn.adjacent === 0 && maskedTurn.label === "Thinking hidden by the harness", "a turn of masked thoughts is not one quiet line: " + JSON.stringify(maskedTurn));
+    r.expect(maskedTurn.steps > 0 && maskedTurn.emptyBlocks === 0, "masked thoughts lost the turn's steps or left an empty block: " + JSON.stringify(maskedTurn));
   }
   r.expect(!!process.env.SEMON_EXTRA_BASE, "SEMON_EXTRA_BASE not set: the tables-render positive check did not run");
   if (extra) {

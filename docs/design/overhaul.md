@@ -135,7 +135,7 @@ Evidence: the viewer on main (Viewer UI run 36523657501, `viewer-ui` artifact, m
 | Child cards carry a 3 px harness border (orange even on Codex runs) and say the kind three times ("⌘ Codex run", "feat/offline-sync · Codex run") | `session-jump-390-light` | High | P3 |
 | A child card is a link with "Open" and "What X did" inside it; the inline mini-transcript duplicates the child's page | `session-jump-390-light` | Medium | P4, P5 |
 | Relays and messages to you use coloured left borders (orange, amber) | `thinking-masked-390-light` | Medium | P3 |
-| Masked thoughts show as bare "Thought for 40s" rows | `thinking-masked-390-light` | High | Decision: hide them |
+| Masked thoughts show as bare "Thought for 40s" rows | `thinking-masked-390-light` | High | Decision: one quiet "Thinking hidden by the harness" line per turn that never splits a run of steps (was: hide them; changed on Marvin's request that thinking be visible by default, semon #114) |
 | Every turn ends in a status row ("● Replied") that repeats what the turn shows | `thinking-masked-390-light` | Low | P3, P6 |
 | Group summaries are cut at 390: "Ran 2 commands, read 1 file, edited 1 fi… · 1 failed" | `session-jump-390-light` | Medium | P3 |
 | The jump pill sits at the bottom right, 40 px tall, over the text it should reveal | `session-jump-390-light` | Medium | P2 |
@@ -211,7 +211,7 @@ Folded into Trace as "Timeline", because it answers what the transcript can't (w
 - **Sidebar toggle.** Agrees with #56 (on the right, quiet, 5 newest then "Show N more"). Goes further: the toggle is a pill with the descendant count, so it also says how many runs are folded, and it turns amber when something inside needs you.
 - **Selection.** Only the open session's row is highlighted; its ancestors expand so it is visible.
 - **Harness names.** Agrees with #64: plain words. Top-level sessions say "Claude Code" or "Codex"; children say "Subagent" or "Codex run". The sidebar shows no harness at all: it is navigation, and the name and state are enough.
-- **Masked thoughts.** Agrees with #60: hidden, and a turn left empty is dropped.
+- **Masked thoughts.** Was hidden (#60). Changed on Marvin's request that thinking be visible by default (#114): at most one quiet "Thinking hidden by the harness" line per turn, at the first masked thought's place or before the run of steps it falls in, never splitting a run. Readable thinking is shown inline in full, with no control to open.
 - **Rails.** Agrees with #59 and goes further: no coloured borders anywhere.
 - **Jump.** Agrees with #62 (centred), and makes it sticky inside the transcript column so it centres on the text, not the window.
 - **Gap.** #63's missing gap goes away: the child page no longer has "Open in".

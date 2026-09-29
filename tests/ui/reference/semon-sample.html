@@ -6,7 +6,7 @@
 <style>
 :root {
   --ground: #ffffff; --side: #f7f7f5; --sunken: #f0f1ee; --bubble: #eeefeb;
-  --ink: #191d1b; --ink-2: #3f4642; --muted: #6f7773; --faint: #9aa19d; --line: #e5e7e3;
+  --ink: #191d1b; --ink-2: #3f4642; --muted: #6f7773; --faint: #9aa19d; --line: #e5e7e3; --line-2: #d3d7d2;
   --accent: #4152c4; --claude: #c0643f; --codex: #2b8070; --you: #4152c4;
   --work: #1f78c1; --wait: #b9740b; --wait-soft: #faf0da; --err: #c23b3b; --done: #8b928e;
   --diff-add: #e3f3e8; --diff-del: #fbe8e6;
@@ -18,7 +18,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --ground: #141817; --side: #181c1b; --sunken: #202523; --bubble: #242927;
-    --ink: #e5e9e6; --ink-2: #c3c9c5; --muted: #8b938f; --faint: #646c68; --line: #272d2a;
+    --ink: #e5e9e6; --ink-2: #c3c9c5; --muted: #8b938f; --faint: #646c68; --line: #272d2a; --line-2: #3d4541;
     --accent: #8f9cf0; --claude: #de8a63; --codex: #4fb5a0; --you: #8f9cf0;
     --work: #58a9ec; --wait: #e2a23a; --wait-soft: #33280f; --err: #ef6b66; --done: #737b77;
     --diff-add: #173022; --diff-del: #381d1b; color-scheme: dark;
@@ -26,7 +26,7 @@
 }
 :root[data-theme="dark"] {
   --ground: #141817; --side: #181c1b; --sunken: #202523; --bubble: #242927;
-  --ink: #e5e9e6; --ink-2: #c3c9c5; --muted: #8b938f; --faint: #646c68; --line: #272d2a;
+  --ink: #e5e9e6; --ink-2: #c3c9c5; --muted: #8b938f; --faint: #646c68; --line: #272d2a; --line-2: #3d4541;
   --accent: #8f9cf0; --claude: #de8a63; --codex: #4fb5a0; --you: #8f9cf0;
   --work: #58a9ec; --wait: #e2a23a; --wait-soft: #33280f; --err: #ef6b66; --done: #737b77;
   --diff-add: #173022; --diff-del: #381d1b; color-scheme: dark;
@@ -341,11 +341,14 @@ code { overflow-wrap: anywhere; }
 .msg.user .body code { background: color-mix(in srgb, var(--ink) 7%, transparent); }
 .msg.assistant { max-width: 68ch; }
 .msg.assistant .body { font-family: var(--serif); font-size: 16px; color: var(--ink); }
-.think { justify-self: start; display: inline-flex; align-items: center; gap: 4px; min-height: 28px; border: 0; background: none; padding: 0; color: var(--muted); font-size: 13.5px; }
-.think .chev { transition: transform .15s; }
-.think[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.thought { display: grid; gap: 3px; max-width: 68ch; padding-left: 12px; border-left: 1px solid var(--line-2); color: var(--muted); font-family: var(--sans); }
+.thought.masked { padding-block: 0; }
+.think-label { font-size: 12px; font-weight: 600; letter-spacing: .04em; line-height: 1.4; color: var(--muted); }
+.thought.masked .think-label { font-weight: 400; letter-spacing: 0; font-size: 13px; }
 .think-pending { display: flex; align-items: center; gap: 6px; min-height: 28px; color: var(--muted); font-size: 13.5px; }
-.think-text { margin: 2px 0 0 14px; padding: 4px 0 4px 12px; border-left: 1px solid var(--line); color: var(--ink-2); font: 15px/1.5 var(--serif); }
+.think-text { min-width: 0; overflow-wrap: anywhere; color: var(--muted); font: 14px/1.55 var(--sans); }
+.think-text .mh { color: var(--ink-2); }
+.think-text code { font-size: .88em; background: var(--sunken); padding: 1px 5px; border-radius: 5px; }
 .chev { width: 14px; height: 14px; flex: none; }
 .harness-note { font-size: 12.5px; color: var(--faint); font-style: italic; }
 .steps { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; border-left: 2px solid var(--line); padding-left: 12px; margin-left: 2px; }
@@ -497,7 +500,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .child-return { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 13px; }
 .child-return .stat { flex: none; }
 .flash.hcard, .child-card.flash { background: color-mix(in srgb, var(--h) 12%, var(--ground)); }
-@media (prefers-reduced-motion: reduce) { .cw-toggle .chev, .think .chev { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .cw-toggle .chev { transition: none; } }
 
 /* ---- Top bar: always visible. A detail page's title is two lines: its name, then a summary that ellipsizes. ---- */
 .topbar .l1 { display: flex; align-items: baseline; gap: 6px; min-width: 0; line-height: 20px; }
@@ -692,7 +695,6 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .topbar .l2.session-meta { min-height: 44px; }
   .topbar .l2.session-meta .errs { min-height: 40px; }
   .wide-toggle { display: none; }
-  .think { min-height: 44px; }
   .tree-toggle { width: 44px; height: 44px; }
   .tree-row.has-toggle .srow-meta { padding-right: 44px; }
   .srow-meta .host { max-width: 10ch; flex-shrink: 3; }
@@ -1038,6 +1040,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const before = entryTimeMs(entries[i - 1]), at = entryTimeMs(e);
     return Number.isFinite(before) && Number.isFinite(at) && at >= before ? Math.round((at - before) / 1000) : null;
   }
+  const thoughtLabel = (secs) => { const n = Number.isFinite(secs) ? Math.round(secs) : 0; return n < 1 ? "Thinking" : "Thinking · " + (n >= 60 ? Math.floor(n / 60) + "m " + (n % 60) + "s" : n + "s"); };
   function transcriptEntries(entries, sid) {
     const out = [];
     for (let i = 0; i < entries.length; i++) {
@@ -1616,7 +1619,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     if (!find && turnMode) box.append(el("div", "divider", "Started " + clock(SESS[sid].start) + " on " + MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine]));
     // Adjacent tool calls collapse into one summary line ("Ran 2 commands, read 1 file · 1 failed"),
     // expandable to the individual steps. A lone call stays a single line; while finding, matches show directly.
-    let run = [];
+    let run = []; const maskedIn = new WeakSet();
     const flush = () => {
       if (!run.length) return;
       const steps = el("div", "steps"); run.forEach((r) => steps.append(r.node));
@@ -1636,12 +1639,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     };
     // A turn block: who started it, the work, and how it ended. While finding or filtering, a turn left with nothing drops out.
     const firsts = turnMode ? new Map((TURNS[sid] ?? []).map((t) => [t.entries[0], t])) : new Map(); let cur = null;
-    const closeTurn = () => { flush(); if (!cur) return; const { t, blk, masked } = cur; cur = null; tx = box;
-      // A turn whose only thinking was masked is left with nothing to draw (no header, no rows): it goes, unless its end row still says something.
-      const bare = masked && !blk.querySelector(".tx > *, .turn-h");
-      if (bare && (opts.excludeH && t.last || !turnEnd(t))) { blk.remove(); return; }
-      if (bare) blk.querySelector(":scope > .tx")?.remove(); // its end row stays alone, with no empty space above it
-      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .think, .think-pending")) { blk.remove(); return; }
+    const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
+      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .thought, .think-pending")) { blk.remove(); return; }
       if (opts.excludeH && t.last) return;
       const end = turnEnd(t); if (!end) return;
       const d = el("div", "turn-end"); const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st), spaced(end.text)); d.append(st);
@@ -1657,9 +1656,15 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       if (firsts.has(e)) openTurn(firsts.get(e));
       if (opts.excludeH && e.k === "h" && e.id === opts.excludeH) continue;
       if (opts.excludeH && e.k === "end" && /^Returned to /.test(e.text ?? "")) continue;
-      // Entries that render nothing (empty thinking, hidden kinds) must not split a run of tool calls.
+      // Entries that render nothing (hidden kinds) must not split a run of tool calls.
       if (isThought(e) && (!show.thinking || find)) continue;
-      if (isMaskedThought(e)) { if (cur) cur.masked = true; continue; }
+      // Masked thinking is one quiet line per turn (per list, when nested), at the first masked thought's place. Later ones draw
+      // nothing, and the line never splits a run of steps: drawn before flush(), it lands ahead of a run still being gathered.
+      if (isMaskedThought(e)) {
+        const scope = cur ?? box;
+        if (!maskedIn.has(scope)) { maskedIn.add(scope); const m = el("div", "thought masked"); m.append(el("div", "think-label", "Thinking hidden by the harness")); tx.append(m); }
+        continue;
+      }
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
@@ -1687,8 +1692,11 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       else if (e.k === "think") {
         if (!show.thinking || find) continue;
         if (isPendingThought(e)) { const pending = el("div", "think-pending"); pending.append(el("span", "spin"), el("span", null, "Thinking…")); tx.append(pending); }
-        else if (thoughtText(e)) { const group = el("div", "thought"), b = el("button", "think"); b.type = "button"; b.setAttribute("aria-expanded", "false"); b.append(el("span", null, e.displaySecs == null ? "Thought" : "Thought for " + e.displaySecs + "s"), icon(I.chev, "chev"));
-          const text = markdown(thoughtText(e), "think-text"); text.hidden = true; b.addEventListener("click", () => { text.hidden = !text.hidden; b.setAttribute("aria-expanded", String(!text.hidden)); }); group.append(b, text); tx.append(group); }
+        else {
+          const group = el("div", "thought");
+          group.append(el("div", "think-label", thoughtLabel(e.displaySecs)), markdown(thoughtText(e), "think-text"));
+          tx.append(group);
+        }
       }
       else if (e.k === "harness") { if (!show.messages || find) continue; tx.append(el("div", "harness-note", "Harness text added before the prompt (" + e.label + ")")); }
       else if (e.k === "end") { if (find) continue; tx.append(el("div", "divider", e.text)); }
@@ -1705,7 +1713,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       }
     }
     closeTurn();
-    if (!box.querySelector(".msg, .step, .hcard, .think, .think-pending")) box.append(el("p", "empty", find ? "Nothing matches “" + find + "”." : "Nothing to show with these filters."));
+    if (!box.querySelector(".msg, .step, .hcard, .thought, .think-pending")) box.append(el("p", "empty", find ? "Nothing matches “" + find + "”." : "Nothing to show with these filters."));
     sec.append(box); return sec;
   }
   const diffEl = (rows, cls) => { const d = el("div", "diff" + (cls ? " " + cls : "")); rows.forEach(([c, t]) => d.append(el("div", c, t))); return d; };

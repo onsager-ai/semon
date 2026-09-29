@@ -80,11 +80,11 @@
       },
       {
         "name": "thinking-unmasked",
-        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); var b = document.querySelector('.think'); if (b) { b.scrollIntoView({ block: 'center' }); b.click(); }"
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); var b = document.querySelector('.thought:not(.masked)'); if (b) b.scrollIntoView({ block: 'center' });"
       },
       {
-        "name": "thinking-masked-hidden",
-        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"principal\"]').click(); var m = document.querySelector('.turns .tgroup, .turns .step'); if (m) m.scrollIntoView({ block: 'center' });"
+        "name": "thinking-masked",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"principal\"]').click(); var m = document.querySelector('.turns .thought.masked'); if (m) m.scrollIntoView({ block: 'center' });"
       }
     ]
   },
