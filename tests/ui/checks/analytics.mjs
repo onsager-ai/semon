@@ -191,6 +191,33 @@ export default async function analyticsCheck(browser) {
   }
   r.expect(shotErrors.length === 0, "range shots: page errors: " + shotErrors.join(" | "));
 
+  // The two segmented controls (the top bar's range, the Breakdown measure) are compact: each segment is drawn at most 32 px tall,
+  // and its tap target (the segment plus its ::before reach) is 44 px on a phone, 30 px on a pointer, and really receives the tap
+  // a few px above and below the drawn segment. In the bar the range sits inside the row and does not make it taller.
+  for (const [mode, size, phone] of [["phone", "phone", true], ["desktop", "desktop", false]]) {
+    const page = await served(browser, { size, dark: false, path: "/analytics" });
+    await drawn(page, "range=7d");
+    const seg = await page.evaluate(() => {
+      const one = (b) => { b.scrollIntoView({ block: "center" }); const box = b.getBoundingClientRect(), p = getComputedStyle(b, "::before"), top = parseFloat(p.top), bottom = parseFloat(p.bottom), hit = box.height - top - bottom, cx = box.left + box.width / 2;
+        const above = document.elementFromPoint(cx, box.top - 5)?.closest("button"), below = document.elementFromPoint(cx, box.bottom + 5)?.closest("button");
+        return { label: b.textContent.trim(), visual: Math.round(box.height * 10) / 10, hit: Math.round(hit * 10) / 10, width: Math.round(box.width), catchesAbove: above === b, catchesBelow: below === b, pressed: b.getAttribute("aria-pressed") }; };
+      const bar = document.querySelector("#topbar").getBoundingClientRect(), track = document.querySelector("#topbar .analytics-range")?.getBoundingClientRect();
+      return { range: [...document.querySelectorAll("#topbar .analytics-range button")].map(one), measure: [...document.querySelectorAll(".analytics-measure button")].map(one), rangeGroup: document.querySelector("#topbar .analytics-range")?.getAttribute("role"), measureGroup: document.querySelector(".analytics-measure")?.getAttribute("role"),
+        bar: { height: Math.round(bar.height), track: track ? Math.round(track.height) : null, roomAbove: track ? Math.round((track.top - bar.top) * 10) / 10 : null, roomBelow: track ? Math.round((bar.bottom - track.bottom) * 10) / 10 : null } };
+    });
+    r.expect(seg.range.length === 3 && seg.measure.length === 2, mode + ": segment counts " + JSON.stringify({ range: seg.range.length, measure: seg.measure.length }));
+    r.expect(seg.rangeGroup === "group" && seg.measureGroup === "group", mode + ": the segmented controls lost role=group");
+    for (const x of [...seg.range, ...seg.measure]) {
+      r.expect(x.visual <= 32 && x.visual >= 20, mode + ": segment " + x.label + " is drawn " + x.visual + "px tall, want 20-32: " + JSON.stringify(x));
+      r.expect(x.hit >= (phone ? 44 : 30), mode + ": segment " + x.label + " tap target is " + x.hit + "px, want " + (phone ? 44 : 30) + ": " + JSON.stringify(x));
+      if (phone) r.expect(x.width >= 44 && x.catchesAbove && x.catchesBelow, mode + ": segment " + x.label + " does not catch a tap 5px above and below it: " + JSON.stringify(x));
+    }
+    r.expect(seg.range.filter((x) => x.pressed === "true").length === 1 && seg.measure.filter((x) => x.pressed === "true").length === 1, mode + ": each segmented control has exactly one pressed segment");
+    r.expect(seg.bar.track != null && seg.bar.track <= 32 && seg.bar.roomAbove >= 4 && seg.bar.roomBelow >= 4, mode + ": the range control crowds the top bar: " + JSON.stringify(seg.bar));
+    page.errors.length && r.expect(false, mode + ": segmented page errors: " + page.errors.join(" | "));
+    await page.context().close();
+  }
+
   const legacy = await served(browser, { size: "desktop", path: "/timeline" });
   const oldRoute = await legacy.evaluate(() => ({ state: history.state?.v, path: location.pathname, title: document.querySelector("#topbar .t")?.textContent }));
   const legacyErrors = legacy.errors;
