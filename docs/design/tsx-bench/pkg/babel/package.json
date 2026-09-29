@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@babel/core": "^7.29.0",
+    "@babel/preset-typescript": "^7.29.0",
+    "babel-preset-solid": "1.9.15",
+    "esbuild": "0.28.2"
+  }
+}
