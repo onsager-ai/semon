@@ -1,7 +1,7 @@
 // The sidebar tree, on the extras fixture, phone and desktop. It holds two live parents: `Fan-out` (seven subagents, only the
 // oldest, Reader 1, still running) and `Swarm` (twelve: Workers 1 to 10 running, 11 and 12 finished and newer).
 //   - an open parent lists its waiting children, then its running ones (at most 8), then the newest finished ones until three rows
-//     are listed, and ends with one "All N" row when anything is hidden, N being the count pill's number. Fan-out lists Reader 1
+//     are listed, and ends with one "All N" row when anything is hidden, N being the number of sessions under the parent. Fan-out lists Reader 1
 //     (old, but running) ahead of the newer finished Readers 7 and 6; Swarm lists Workers 10 to 3 and no finished worker.
 //   - there is no "Show N more" or "Show fewer" list control, and an old saved `more` is ignored and pruned on the next save.
 //   - a parent with no waiting or running session below it, and not holding the open session, is collapsed by default.
@@ -18,10 +18,9 @@
 //     the whole list open, its rows in place and focus on "Show fewer" (the pill then reorders it); crossing 760 px, the rail, collapsing the parent or an ancestor, and a list with
 //     nothing left to fold all drop the open list; Esc in a phone's sheet leaves the drawer open; the sheet says which parent a
 //     grandchild is under.
-//   - a collapsed parent's count pill is the bare total with no state dot, fully round and AA in both themes; it is amber (`wait`) exactly when a run inside needs you, and its title and the row's aria-label break the total down (runs, needs you, working, failed). A patched model puts a waiting and a failed run, and a grandchild, under Fan-out.
+//   - no parent row shows a count pill, open or collapsed (the chevron says there are children), and a collapsed row says it is collapsed (aria-expanded); the row's aria-label still breaks the total down as text (runs, needs you, working, failed). A patched model puts a waiting and a failed run, and a grandchild, under Fan-out.
 //   - the toggle sits over the right end of its row's meta line, and only rows with children have one: no row has a left gutter.
-//   - the toggle's box is at least 44x44 at 390 px and at least 28x36 at 1280 px, and a collapsed parent's summary does not
-//     overlap it.
+//   - the toggle's box is at least 44x44 at 390 px and at least 28x36 at 1280 px.
 //   - the header puts the logo first and the collapse toggle at the right end of the row (on a phone, the drawer's close button
 //     there instead), both at least 44x44; in the rail the toggle shows with the logo mark above it, and the keyboard reaches
 //     the toggle before the search field.
@@ -35,6 +34,11 @@
 //     only while rows lie beyond that edge (read from a screenshot strip: none at rest above the rows, both when scrolled to the
 //     middle, none below at the end, none on a short list).
 //   - the nav runs Home, Sessions, Analytics, Machines top to bottom in the expanded sidebar, the rail and the phone drawer.
+//   - an expanded top-level parent's row pins at the top of the list (position: sticky, opaque, in the sidebar's colour) while its
+//     children scroll, in the phone drawer and the 1280x800 sidebar, light and dark: its top equals the list's top, it is the topmost
+//     element there, its children are under it and its chevron takes a tap; past the group it goes with it and the next parent is
+//     pinned; a focused child scrolls clear of it; a collapsed parent and a nested one do not stick. The model is patched so two
+//     parents overflow the list (out/sidebar-sticky-*.png).
 //   - screenshots of the sidebar (and of the sheet, and of the sticky list) at 390 and 1280, light and dark, go to out/sidebar-*.png.
 import path from "node:path";
 import { PNG } from "pngjs";
@@ -42,17 +46,17 @@ import { ENV, served, goto, data, reporter, overflow, settled } from "../lib.mjs
 
 const openDrawer = async (page) => { await page.click("#lead-btn"); await page.waitForTimeout(300); };
 
-// A root's direct children, its "All N" row, its pill, and what is saved for it.
+// A root's direct children, its "All N" row, how many count pills its row has (none), and what is saved for it.
 const groupOf = (page, id) => page.evaluate((id) => {
   const item = [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id);
   if (!item) return null;
-  const all = item.querySelector(":scope > .tree-group > .tree-all"), summary = item.querySelector(":scope > .tree-row .tree-summary");
+  const all = item.querySelector(":scope > .tree-group > .tree-all"), pills = item.querySelectorAll(":scope > .tree-row .tree-summary").length;
   const stored = JSON.parse(localStorage.getItem("semon.tree") ?? "{}")[id] ?? null;
   return {
     ids: [...item.querySelectorAll(":scope > .tree-group > .treeitem")].map((x) => x.dataset.id),
     all: all ? { text: all.textContent, role: all.getAttribute("role"), label: all.getAttribute("aria-label"), tag: all.tagName, tabIndex: all.tabIndex, height: Math.round(all.getBoundingClientRect().height * 10) / 10 } : null,
     oldButtons: document.querySelectorAll("#lanes .tree-more").length, dialogs: document.querySelectorAll("dialog").length,
-    pill: summary ? summary.textContent.trim() : null, expanded: item.getAttribute("aria-expanded"), stored,
+    pills, expanded: item.getAttribute("aria-expanded"), stored,
     stuck: !!item.querySelector(":scope > .tree-row.stuck"), fewer: item.querySelector(":scope > .tree-row .tree-fewer")?.textContent ?? null,
   };
 }, id);
@@ -78,24 +82,23 @@ const toggleBox = (page, id) => page.evaluate((id) => {
   return { w: Math.round(a.width * 10) / 10, h: Math.round(a.height * 10) / 10, right: a.right <= b.right + 0.5 && a.right >= b.right - 12, lower: (a.top + a.bottom) / 2 >= (line.top + line.bottom) / 2 - 1 && a.bottom <= line.bottom + 0.5, color: getComputedStyle(t).color, bg: getComputedStyle(t).backgroundColor };
 }, id);
 
-// Every top-level parent with children, collapsed in turn (and put back as it was): its count pill, measured. Contrast is taken
-// against the pill's real backdrop.
-const collapsedPills = (page) => page.evaluate(() => {
-  const canvas = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-  const rgba = (css) => { canvas.clearRect(0, 0, 1, 1); canvas.fillStyle = "#000"; canvas.fillStyle = css; canvas.fillRect(0, 0, 1, 1); const [r, g, b, a] = canvas.getImageData(0, 0, 1, 1).data; return [r, g, b, a / 255]; };
-  const over = (top, under) => { const a = top[3] + under[3] * (1 - top[3]); return a ? [0, 1, 2].map((i) => (top[i] * top[3] + under[i] * under[3] * (1 - top[3])) / a).concat(a) : [0, 0, 0, 0]; };
-  const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+// Every top-level parent with children, collapsed in turn (and put back as it was): whether a count pill shows in its row, open
+// or collapsed, the row's accessible label, and its attention dot (`.kid-flag`: its state class, colour, and whether it is decorative
+// and bare) with what the two tokens resolve to in the page's theme.
+const collapsedRows = (page) => page.evaluate(() => {
+  const token = (name) => { const p = document.createElement("i"); p.style.background = "var(" + name + ")"; document.body.append(p); const c = getComputedStyle(p).backgroundColor; p.remove(); return c; };
+  const want = { wait: token("--wait-dot"), err: token("--err") };
+  const pillsIn = (item) => item.querySelectorAll(":scope > .tree-row .tree-summary").length;
+  const flagIn = (item) => {
+    const fs = [...item.querySelectorAll(":scope > .tree-row .kid-flag")], f = fs[0];
+    if (!f) return { count: 0 };
+    const b = f.getBoundingClientRect(), ag = item.querySelector(":scope > .tree-row .ag").getBoundingClientRect();
+    return { count: fs.length, kind: f.classList.contains("wait") ? "wait" : f.classList.contains("err") ? "err" : null, bg: getComputedStyle(f).backgroundColor, hidden: f.getAttribute("aria-hidden") === "true", bare: f.textContent === "", shown: b.width > 0 && b.height > 0, beforeTime: b.right <= ag.left + 0.5 };
+  };
   return [...document.querySelectorAll("#lanes > .treeitem")].filter((item) => item.querySelector(":scope > .tree-row .tree-toggle")).map((item) => {
-    const toggle = item.querySelector(":scope > .tree-row .tree-toggle"), wasOpen = item.getAttribute("aria-expanded") === "true";
+    const toggle = item.querySelector(":scope > .tree-row .tree-toggle"), wasOpen = item.getAttribute("aria-expanded") === "true", open = wasOpen ? pillsIn(item) : null, flagOpen = wasOpen ? flagIn(item) : null;
     if (wasOpen) toggle.click();
-    const s = item.querySelector(":scope > .tree-row .tree-summary"), row = item.querySelector(":scope > .tree-row .srow");
-    let out = { id: item.dataset.id, missing: true };
-    if (s) {
-      const layers = []; for (let e = s; e; e = e.parentElement) layers.push(rgba(getComputedStyle(e).backgroundColor));
-      let bg = [255, 255, 255, 1]; for (const layer of layers.reverse()) bg = over(layer, bg);
-      const cs = getComputedStyle(s), x = lum(rgba(cs.color)), y = lum(bg);
-      out = { id: item.dataset.id, text: s.textContent, dots: s.querySelectorAll(".dot").length, tip: s.dataset.tip, label: row.getAttribute("aria-label"), wait: s.classList.contains("wait"), ratio: Math.round((Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) * 100) / 100, radius: cs.borderRadius, height: s.getBoundingClientRect().height, background: cs.backgroundColor };
-    }
+    const out = { id: item.dataset.id, expanded: item.getAttribute("aria-expanded"), pills: pillsIn(item), pillsOpen: open, label: item.querySelector(":scope > .tree-row .srow").getAttribute("aria-label"), flag: flagIn(item), flagOpen, want };
     if (wasOpen) toggle.click();
     return out;
   });
@@ -111,20 +114,24 @@ const tally = (SESS, H, id) => {
 };
 const breakdown = (t) => [t.total + (t.total === 1 ? " run" : " runs"), t.wait && t.wait + " needs you", t.work && t.work + " working", t.err && t.err + " failed"].filter(Boolean);
 
-// Each pill: the bare total and no dot, fully round, AA against its backdrop; amber (`wait`) exactly when something inside
-// needs you, and neutral otherwise (a failure is named in the text, never coloured); tooltip (data-tip) and label break the total down.
-function assertPills(r, where, pills, SESS, H, mustShow) {
-  r.expect(pills.length > 0 && pills.every((p) => !p.missing), where + ": a collapsed parent shows no count pill: " + JSON.stringify(pills.filter((p) => p.missing)));
-  for (const p of pills.filter((x) => !x.missing)) {
+// No parent row shows a count pill, open or collapsed (the chevron already says there are children); the row's accessible label
+// still carries the count and the breakdown as text (a run that needs you, working, failed), and a collapsed row says it is collapsed.
+// A small dot, open or collapsed, shows exactly when a session under the parent needs you (amber, --wait-dot) or failed (red, --err),
+// amber first when both; it is decorative (aria-hidden), bare (no number) and before the time, and there is none otherwise.
+function assertNoPills(r, where, rows, SESS, H, mustShow) {
+  r.expect(rows.length > 0, where + ": no parent row was found");
+  for (const p of rows) {
     const t = tally(SESS, H, p.id), parts = breakdown(t), name = SESS[p.id]?.name + " ";
-    r.expect(p.dots === 0 && p.text === String(t.total), where + " " + name + ": the pill is the bare total with no state dot: " + JSON.stringify(p));
-    r.expect(p.tip === parts.join(" · "), where + " " + name + ": the tooltip is " + JSON.stringify(parts.join(" · ")) + ": " + JSON.stringify(p.tip));
-    r.expect(p.label?.endsWith(", " + parts.join(", ")), where + " " + name + ": the row's aria-label carries the breakdown: " + JSON.stringify(p.label));
-    r.expect(p.wait === t.wait > 0, where + " " + name + ": the wait class is " + p.wait + " with " + t.wait + " waiting");
-    r.expect(p.ratio >= 4.5, where + " " + name + ": the pill's text has contrast " + p.ratio + ", under 4.5");
-    r.expect(parseFloat(p.radius) >= p.height / 2, where + " " + name + ": the pill is not fully round: radius " + p.radius + " for height " + p.height);
+    const kind = t.wait > 0 ? "wait" : t.err > 0 ? "err" : null;
+    for (const [state, f] of [["collapsed", p.flag], ...(p.flagOpen ? [["open", p.flagOpen]] : [])]) {
+      if (kind) r.expect(f.count === 1 && f.kind === kind && f.bg === p.want[kind] && f.hidden && f.bare && f.shown && f.beforeTime, where + " " + name + " (" + state + "): one bare, decorative " + kind + " dot in " + p.want[kind] + " before the time, as " + t.wait + " wait and " + t.err + " failed sit under it: " + JSON.stringify(f));
+      else r.expect(f.count === 0, where + " " + name + " (" + state + "): no attention dot with nothing waiting or failed under it: " + JSON.stringify(f));
+    }
+    r.expect(p.pills === 0 && !p.pillsOpen, where + " " + name + ": a parent row shows no count pill, collapsed (" + p.pills + ") or open (" + p.pillsOpen + ")");
+    r.expect(p.expanded === "false", where + " " + name + ": the collapsed row says it is collapsed (aria-expanded): " + p.expanded);
+    r.expect(p.label?.endsWith(", " + parts.join(", ")), where + " " + name + ": the row's aria-label carries the count and breakdown as text: " + JSON.stringify(p.label));
   }
-  for (const name of mustShow) r.expect(pills.some((p) => SESS[p.id]?.name === name), where + ": " + name + " has no pill");
+  for (const name of mustShow) r.expect(rows.some((p) => SESS[p.id]?.name === name), where + ": " + name + " has no parent row");
 }
 
 // The model with a waiting and a failed run under Fan-out and a grandchild under one of its runs, served in place of the real
@@ -274,21 +281,21 @@ export default async function sidebarCheck(browser) {
     r.expect(first?.expanded === "true", "phone: Fan-out is open by default (a child is running)");
     r.expect(first?.all?.text === "All 7" && first.all.tag === "BUTTON" && first.all.tabIndex === 0 && first.all.role === "treeitem", "phone: one focusable 'All 7' row: " + JSON.stringify(first?.all));
     r.expect(first?.all?.label === "All 7 sessions under Fan-out", "phone: the row's aria-label names the parent: " + first?.all?.label);
-    r.expect(first?.pill === "7", "phone: N is the count pill's number: pill " + first?.pill);
+    r.expect(first?.pills === 0, "phone: a parent row shows no count pill: " + first?.pills);
     r.expect(first?.all && first.all.height >= 44, "phone: the 'All N' row is at least 44 px tall: " + first?.all?.height);
     r.expect(first?.oldButtons === 0, "phone: no 'Show more' button is left");
     r.expect(first?.stored === null, "phone: nothing is saved until a parent is toggled: " + JSON.stringify(first?.stored));
     r.expect(second && JSON.stringify(second.ids) === JSON.stringify(swarmShort), "phone: Swarm lists its eight newest running workers and no finished one: " + JSON.stringify(second?.ids.map(name)));
-    r.expect(second?.all?.text === "All 12" && second.pill === "12", "phone: Swarm ends with 'All 12', its pill's number: " + JSON.stringify([second?.all?.text, second?.pill]));
+    r.expect(second?.all?.text === "All 12" && second.pills === 0, "phone: Swarm ends with 'All 12' and its row shows no count pill: " + JSON.stringify([second?.all?.text, second?.pills]));
     await page.screenshot({ path: path.join(ENV.out, "sidebar-390-light.png") });
 
     // Defaults: a parent is open only when something below it is waiting or running (nothing is saved yet, and no session is open).
-    const defaults = await page.evaluate(() => [...document.querySelectorAll("#lanes > .treeitem[aria-expanded]")].map((x) => ({ id: x.dataset.id, expanded: x.getAttribute("aria-expanded"), pill: x.querySelector(":scope > .tree-row .tree-summary")?.textContent.trim() ?? null })));
-    R.defaults = defaults.map((d) => ({ name: name(d.id), expanded: d.expanded, pill: d.pill }));
+    const defaults = await page.evaluate(() => [...document.querySelectorAll("#lanes > .treeitem[aria-expanded]")].map((x) => ({ id: x.dataset.id, expanded: x.getAttribute("aria-expanded"), pills: x.querySelectorAll(":scope > .tree-row .tree-summary").length })));
+    R.defaults = defaults.map((d) => ({ name: name(d.id), expanded: d.expanded, pills: d.pills }));
     for (const d of defaults) {
       const active = below(d.id).some((k) => k.state === "work" || k.state === "wait");
       r.expect(d.expanded === String(active), "phone: " + name(d.id) + " is " + (d.expanded === "true" ? "open" : "collapsed") + " by default but " + (active ? "has" : "has no") + " running or waiting session below it");
-      if (!active) r.expect(d.pill === String(below(d.id).length), "phone: the collapsed " + name(d.id) + " shows its count pill, " + below(d.id).length + ": " + d.pill);
+      r.expect(d.pills === 0, "phone: " + name(d.id) + " (" + (d.expanded === "true" ? "open" : "collapsed") + ") shows no count pill: " + d.pills);
     }
     r.expect(defaults.some((d) => d.expanded === "false"), "phone: the fixture shows a collapsed parent, so the default-collapsed check proves nothing: " + JSON.stringify(R.defaults));
 
@@ -447,27 +454,21 @@ export default async function sidebarCheck(browser) {
       const g = await gutters(page);
       R.desktopGutters = g;
       r.expect(g.spacers === 0 && g.mixed >= 1 && g.groups.every((x) => x.lefts.length === 1 && x.ends.length === 1), "desktop: names in a group start at one x and times end at one x: " + JSON.stringify(g));
-      // Open, the child count is hidden; collapsed, the count and state dot sit inside the row, clear of the toggle.
-      const summaryShown = () => page.evaluate((id) => { const s = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-summary"); return !!s && getComputedStyle(s).display !== "none"; }, fan.id);
-      r.expect(!(await summaryShown()), "desktop: an open parent shows no child count");
+      // No count pill in a parent's row: not open, not collapsed, and not after collapsing and expanding again.
+      const pillCount = () => page.evaluate((id) => [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelectorAll(":scope > .tree-row .tree-summary").length, fan.id);
+      r.expect(await pillCount() === 0, "desktop: an open parent shows no count pill");
       await page.evaluate((id) => [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-toggle").click(), fan.id);
-      r.expect(await summaryShown(), "desktop: collapsing shows the child count at once, without a re-render");
-      const collapsed = await page.evaluate((id) => {
-        const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id), s = item.querySelector(":scope > .tree-row .tree-summary"), t = item.querySelector(":scope > .tree-row .tree-toggle");
-        if (!s || !t) return null;
-        const a = s.getBoundingClientRect(), b = t.getBoundingClientRect();
-        return { expanded: item.getAttribute("aria-expanded"), summary: s.textContent, gap: Math.round((b.left - a.right) * 10) / 10 };
-      }, fan.id);
+      const collapsed = await page.evaluate((id) => { const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id); return { expanded: item.getAttribute("aria-expanded"), pills: item.querySelectorAll(":scope > .tree-row .tree-summary").length }; }, fan.id);
       R.desktopCollapsed = collapsed;
-      r.expect(collapsed?.expanded === "false" && collapsed.summary === String(fanKids.length) && collapsed.gap >= 0, "desktop: the collapsed summary clears the toggle: " + JSON.stringify(collapsed));
+      r.expect(collapsed.expanded === "false" && collapsed.pills === 0, "desktop: a collapsed parent shows no count pill: " + JSON.stringify(collapsed));
       await page.screenshot({ path: path.join(ENV.out, "sidebar-1280-light-collapsed.png") });
       await page.evaluate((id) => [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-toggle").click(), fan.id);
       await page.waitForTimeout(300);
-      r.expect(!(await summaryShown()), "desktop: expanding hides the child count again");
+      r.expect(await pillCount() === 0, "desktop: expanding again shows no count pill either");
     }
     const first = await groupOf(page, fan.id), second = await groupOf(page, swarm.id);
     R.desktopFirst = { fan: first, swarm: second };
-    r.expect(first && JSON.stringify(first.ids) === JSON.stringify(fanShort) && first.all?.text === "All 7" && first.pill === "7", "desktop " + tag + ": Fan-out's short list and 'All 7': " + JSON.stringify(first));
+    r.expect(first && JSON.stringify(first.ids) === JSON.stringify(fanShort) && first.all?.text === "All 7" && first.pills === 0, "desktop " + tag + ": Fan-out's short list and 'All 7': " + JSON.stringify(first));
     r.expect(second && JSON.stringify(second.ids) === JSON.stringify(swarmShort) && second.all?.text === "All 12", "desktop " + tag + ": Swarm's short list and 'All 12': " + JSON.stringify(second));
     await page.screenshot({ path: path.join(ENV.out, "sidebar-1280-" + tag + ".png") });
 
@@ -552,19 +553,18 @@ export default async function sidebarCheck(browser) {
     await page.waitForTimeout(100);
     const collapsedAfter = await groupOf(page, swarm.id);
     r.expect(collapsedAfter && collapsedAfter.expanded === "false" && !collapsedAfter.stuck, "desktop " + tag + ": collapsing the parent drops its sticky row: " + JSON.stringify([collapsedAfter?.expanded, collapsedAfter?.stuck]));
-    // The count pill: a neutral total with no state dot (a dot next to "53" read as 53 running); it turns amber only when a
-    // descendant needs you; its tooltip and the row's accessible label break the total down, failures included. It collapses every
+    // No count pill in any parent's row; the row's accessible label carries the total and breakdown as text. It collapses every
     // parent in turn and saves that, so it runs after the reload assertions.
     {
-      const pills = await collapsedPills(page);
-      (R.desktopPill ??= {})[tag] = pills;
-      assertPills(r, "desktop " + tag, pills, D.SESS, D.H, ["Fan-out"]);
+      const rows = await collapsedRows(page);
+      (R.desktopRows ??= {})[tag] = rows;
+      assertNoPills(r, "desktop " + tag, rows, D.SESS, D.H, ["Fan-out"]);
     }
     r.expect(page.errors.length === 0, "desktop " + tag + ": page errors " + page.errors.join("; "));
     await page.context().close();
   }
 
-  // ---- The count pill with a waiting and a failed run inside (a patched model), desktop and phone -------------------------
+  // ---- A waiting and a failed run inside a parent (a patched model), desktop and phone: no pill, the label says it ----------
   {
     const kidIds = fanKids.map((c) => c.id), M = patchModel(structuredClone(D.model), kidIds), SESS = M.sessions;
     for (const [size, dark] of [["desktop", false], ["desktop", true], ["phone", false], ["phone", true]]) {
@@ -587,15 +587,29 @@ export default async function sidebarCheck(browser) {
         await page.keyboard.press("Escape");
         await page.waitForFunction(() => !document.querySelector("dialog.kids-sheet"));
       }
-      const pills = await collapsedPills(page);
-      (R.patchedPill ??= {})[tag] = pills.filter((p) => SESS[p.id]?.name === "Fan-out");
-      assertPills(r, "patched " + tag, pills, SESS, M.handoffs, ["Fan-out"]);
-      const fanPill = pills.find((p) => p.id === fan.id), t = tally(SESS, M.handoffs, fan.id);
+      const rows = await collapsedRows(page);
+      (R.patchedRows ??= {})[tag] = rows.filter((p) => SESS[p.id]?.name === "Fan-out");
+      assertNoPills(r, "patched " + tag, rows, SESS, M.handoffs, ["Fan-out"]);
+      const fanRow = rows.find((p) => p.id === fan.id), t = tally(SESS, M.handoffs, fan.id);
       r.expect(t.wait === 1 && t.err === 1 && t.total === fanKids.length + 1, "patched " + tag + ": the patch did not land: " + JSON.stringify(t));
-      r.expect(fanPill?.wait === true && /1 needs you/.test(fanPill.tip) && /1 failed/.test(fanPill.tip), "patched " + tag + ": Fan-out's pill is amber and names the waiting and the failed run: " + JSON.stringify(fanPill));
+      r.expect(/, 1 needs you/.test(fanRow?.label ?? "") && /, 1 failed/.test(fanRow?.label ?? ""), "patched " + tag + ": Fan-out's label names the waiting and the failed run: " + JSON.stringify(fanRow));
+      r.expect(fanRow?.flag.kind === "wait" && fanRow.flagOpen?.kind === "wait" && fanRow.flag.bg === fanRow.want.wait, "patched " + tag + ": Fan-out's dot is amber (--wait-dot) with a run waiting and one failed, open and collapsed: " + JSON.stringify(fanRow));
       // Collapsed for the screenshot.
       await page.evaluate((id) => { const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id); if (item.getAttribute("aria-expanded") === "true") item.querySelector(":scope > .tree-row .tree-toggle").click(); }, fan.id);
       await page.screenshot({ path: path.join(ENV.out, "sidebar-wait-pill-" + tag + ".png") });
+      await page.context().close();
+    }
+    // Only a failed run under Fan-out (nothing waiting): the dot is red, in --err.
+    for (const dark of [false, true]) {
+      const tag = "red-" + (dark ? "dark" : "light"), red = (m) => { m.sessions[kidIds[1]].state = "err"; return m; }, MR = red(structuredClone(D.model));
+      const { page } = await servedModel(browser, { extras: true, size: "desktop", dark }, red);
+      await page.waitForSelector("#lanes .treeitem");
+      const rows = await collapsedRows(page), fanRow = rows.find((p) => p.id === fan.id), t = tally(MR.sessions, MR.handoffs, fan.id);
+      R["redRows" + tag] = rows.filter((p) => MR.sessions[p.id]?.name === "Fan-out");
+      r.expect(t.wait === 0 && t.err === 1, tag + ": the patch did not land: " + JSON.stringify(t));
+      assertNoPills(r, tag, rows, MR.sessions, MR.handoffs, ["Fan-out"]);
+      r.expect(fanRow?.flag.kind === "err" && fanRow.flagOpen?.kind === "err" && fanRow.flag.bg === fanRow.want.err && fanRow.want.err !== fanRow.want.wait, tag + ": Fan-out's dot is red (--err), open and collapsed: " + JSON.stringify(fanRow));
+      await page.screenshot({ path: path.join(ENV.out, "sidebar-flag-" + tag + ".png") });
       await page.context().close();
     }
   }
@@ -624,7 +638,7 @@ export default async function sidebarCheck(browser) {
       await page.waitForSelector("#lanes .treeitem");
       const start = await groupOf(page, fan.id), inner = await groupOf(page, c1);
       R["nested" + tag] = { start, inner };
-      r.expect(start && JSON.stringify(start.ids) === JSON.stringify(fanShort) && start.all?.text === "All 12" && start.pill === "12", "nested " + tag + ": Fan-out counts its 12 descendants: " + JSON.stringify([start?.ids.map(nname), start?.all?.text, start?.pill]));
+      r.expect(start && JSON.stringify(start.ids) === JSON.stringify(fanShort) && start.all?.text === "All 12" && start.pills === 0, "nested " + tag + ": Fan-out counts its 12 descendants in 'All 12' and its row shows no count pill: " + JSON.stringify([start?.ids.map(nname), start?.all?.text, start?.pills]));
       r.expect(inner && JSON.stringify(inner.ids) === JSON.stringify(nestShort) && inner.all?.text === "All 5" && inner.expanded === "true", "nested " + tag + ": Reader 1 lists its running helper and the two newest finished, and 'All 5': " + JSON.stringify([inner?.ids.map(nname), inner?.all?.text, inner?.expanded]));
 
       // A parent's "All N" reveals exactly N: every descendant, under its own parent, all open.
@@ -903,9 +917,11 @@ export default async function sidebarCheck(browser) {
   }
   // ---- The nav order: Home, Sessions, Analytics, Machines, in the sidebar, the rail and the drawer ------------------------
   {
-    const order = (page) => page.evaluate(() => [...document.querySelectorAll("#nav .nav-item")].map((b) => ({ go: b.dataset.go, label: b.querySelector("span:not(.cnt)")?.textContent, shown: b.getClientRects().length > 0, top: Math.round(b.getBoundingClientRect().top) })));
+    const order = (page) => page.evaluate(() => [...document.querySelectorAll("#nav .nav-item")].map((b) => ({ go: b.dataset.go, label: b.querySelector("span:not(.cnt)")?.textContent, cnt: !!b.querySelector(".cnt"), shown: b.getClientRects().length > 0, top: Math.round(b.getBoundingClientRect().top) })));
     const want = ["home", "sessions", "analytics", "machines"], labels = ["Home", "Sessions", "Analytics", "Machines"];
-    const ok = (o) => JSON.stringify(o.map((b) => b.go)) === JSON.stringify(want) && JSON.stringify(o.map((b) => b.label)) === JSON.stringify(labels) && o.every((b) => b.shown) && o.every((b, i) => i === 0 || b.top > o[i - 1].top);
+    // The Sessions item carries no count pill (a total there says nothing you act on); it is the only one that never has one.
+    const noCount = (o) => o.find((b) => b.go === "sessions")?.cnt === false;
+    const ok = (o) => JSON.stringify(o.map((b) => b.go)) === JSON.stringify(want) && JSON.stringify(o.map((b) => b.label)) === JSON.stringify(labels) && o.every((b) => b.shown) && o.every((b, i) => i === 0 || b.top > o[i - 1].top) && noCount(o);
     const desktop = await served(browser, { extras: true, size: "desktop", dark: false });
     await desktop.waitForSelector("#nav .nav-item");
     const expanded = await order(desktop);
@@ -914,7 +930,7 @@ export default async function sidebarCheck(browser) {
     await desktop.click("#rail-toggle"); await desktop.waitForTimeout(300);
     const rail = await order(desktop);
     R.navRail = rail;
-    r.expect(rail.map((b) => b.go).join() === want.join() && rail.every((b) => b.shown) && rail.every((b, i) => i === 0 || b.top > rail[i - 1].top), "nav: the rail's icons run Home, Sessions, Analytics, Machines top to bottom: " + JSON.stringify(rail));
+    r.expect(rail.map((b) => b.go).join() === want.join() && rail.every((b) => b.shown) && rail.every((b, i) => i === 0 || b.top > rail[i - 1].top) && noCount(rail), "nav: the rail's icons run Home, Sessions, Analytics, Machines top to bottom, and Sessions has no count: " + JSON.stringify(rail));
     await desktop.screenshot({ path: path.join(ENV.out, "sidebar-nav-1280-light-rail.png") });
     r.expect(desktop.errors.length === 0, "nav desktop: page errors " + desktop.errors.join("; "));
     await desktop.context().close();
@@ -993,6 +1009,97 @@ export default async function sidebarCheck(browser) {
       r.expect(await overflow(page) === 0, P + ": no sideways overflow");
       r.expect(page.errors.length === 0, P + ": page errors " + page.errors.join("; "));
       await page.context().close();
+    }
+  }
+
+  // ---- An expanded top-level parent stays pinned while its children scroll (phone drawer and desktop sidebar, light and dark) --------
+  // The model is patched so two parents overflow the list on their own: Swarm gets four grandchildren (under Workers 10 to 7), and a copy
+  // of it, "Swarm B", gets the same. Scrolling into each group then shows its row pinned at the list's top, the topmost thing there, with
+  // its children under it; past the group the next parent takes over. Nested parents and collapsed ones do not pin.
+  {
+    const runningKids = swarmKids.filter((c) => c.state === "work"), topKids = runningKids.slice(0, 4);
+    const stickyPatch = (m) => {
+      const spawnTo = (to) => m.handoffs.find((h) => h.kind === "spawn" && h.to === to);
+      const put = (src, id, nm, parent, extra = {}) => {
+        m.sessions[id] = { ...structuredClone(m.sessions[src]), id, name: nm, parent, ...extra };
+        const sp = spawnTo(src); if (sp) m.handoffs.push({ ...structuredClone(sp), id: id + "-spawn", from: parent, to: id });
+      };
+      const b = "sticky-swarm-b";
+      m.sessions[b] = { ...structuredClone(m.sessions[swarm.id]), id: b, name: "Swarm B", last: m.sessions[swarm.id].last - 1 };
+      for (const k of runningKids) put(k.id, "sticky-b-" + k.id, k.name, b);
+      for (const [i, k] of topKids.entries()) {
+        put(k.id, "sticky-gc-a-" + i, "Helper " + (i + 1), k.id, { state: "work" });
+        put(k.id, "sticky-gc-b-" + i, "Helper " + (i + 1), "sticky-b-" + k.id, { state: "work" });
+      }
+      return m;
+    };
+    const layout = (page) => page.evaluate(() => {
+      const list = document.querySelector("#side-list"), lr = list.getBoundingClientRect();
+      return {
+        client: list.clientHeight, max: list.scrollHeight - list.clientHeight,
+        tops: [...document.querySelectorAll("#lanes > .treeitem")].map((x) => { const row = x.querySelector(":scope > .tree-row"), b = x.getBoundingClientRect(); return { id: x.dataset.id, name: x.getAttribute("aria-label"), open: x.getAttribute("aria-expanded") === "true", kids: !!x.querySelector(":scope > .tree-group"), top: b.top - lr.top + list.scrollTop, height: b.height, position: getComputedStyle(row).position }; }),
+        nested: [...document.querySelectorAll("#lanes .tree-group .treeitem[aria-expanded='true'] > .tree-row")].map((row) => getComputedStyle(row).position),
+      };
+    });
+    // Where the item's row is, what is topmost at the list's top edge and just under the row, and whether the chevron can be tapped.
+    const probe = (page, id) => page.evaluate((id) => {
+      const list = document.querySelector("#side-list"), lr = list.getBoundingClientRect();
+      const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id), row = item.querySelector(":scope > .tree-row"), rr = row.getBoundingClientRect();
+      const x = rr.left + Math.min(40, rr.width / 2), atTop = document.elementFromPoint(x, lr.top + 2), under = document.elementFromPoint(x, lr.top + rr.height + 8);
+      const t = row.querySelector(".tree-toggle"), tb = t?.getBoundingClientRect(), hit = tb ? document.elementFromPoint(tb.left + tb.width / 2, tb.top + tb.height / 2) : null;
+      const cs = getComputedStyle(row), side = getComputedStyle(document.querySelector("#sidebar")).backgroundColor;
+      return {
+        rowTop: Math.round((rr.top - lr.top) * 10) / 10, rowH: Math.round(rr.height * 10) / 10, position: cs.position, topmost: !!atTop && row.contains(atTop),
+        underIsChild: !!under && item.querySelector(":scope > .tree-group").contains(under), bg: cs.backgroundColor, side, scrollTop: Math.round(list.scrollTop),
+        toggleTappable: !!t && !!hit && (hit === t || t.contains(hit)) && tb.top >= lr.top - 0.5 && tb.bottom <= lr.bottom + 0.5, aboveList: rr.bottom <= lr.top + 0.5,
+      };
+    }, id);
+    for (const [size, tagSize, viewport] of [["phone", "390", null], ["desktop", "1280", { width: 1280, height: 800 }]]) {
+      for (const dark of [false, true]) {
+        const tag = dark ? "dark" : "light", P = "sticky parent " + tagSize + " " + tag;
+        const { page } = await servedModel(browser, { extras: true, size, dark }, stickyPatch);
+        if (viewport) { await page.setViewportSize(viewport); await page.waitForTimeout(150); }
+        if (size === "phone") await openDrawer(page);
+        await page.waitForFunction(() => document.querySelectorAll("#lanes > .treeitem[aria-expanded='true']").length >= 2);
+        const L = await layout(page);
+        R[P + " layout"] = L;
+        const tall = L.tops.filter((t) => t.open && t.height >= L.client + 60);
+        r.expect(tall.length >= 2, P + ": the patched fixture needs two open parents taller than the list (" + L.client + " px), so the check proves nothing: " + JSON.stringify(L.tops));
+        r.expect(L.tops.some((t) => t.kids && !t.open) && L.tops.filter((t) => t.kids && !t.open).every((t) => t.position !== "sticky"), P + ": a collapsed parent's row does not stick: " + JSON.stringify(L.tops));
+        r.expect(L.nested.length >= 1 && L.nested.every((p) => p !== "sticky"), P + ": a nested parent's row does not stick (only the top level does): " + JSON.stringify(L.nested));
+        if (tall.length >= 2) {
+          const [a, b] = tall;
+          const check = async (which, want, other) => {
+            const p = await probe(page, want.id);
+            R[P + " " + which] = p;
+            r.expect(p.position === "sticky", P + " " + which + ": " + want.name + "'s row is position: sticky: " + JSON.stringify(p));
+            r.expect(Math.abs(p.rowTop) <= 1, P + " " + which + ": " + want.name + "'s row top equals the list's top: " + JSON.stringify(p));
+            r.expect(p.topmost, P + " " + which + ": " + want.name + "'s row is the topmost element at the list's top: " + JSON.stringify(p));
+            r.expect(p.underIsChild, P + " " + which + ": its children are under the row: " + JSON.stringify(p));
+            r.expect(p.toggleTappable, P + " " + which + ": the chevron is in view and takes the tap: " + JSON.stringify(p));
+            r.expect(p.bg === p.side && /^rgb\(/.test(p.bg), P + " " + which + ": the row is opaque, in the sidebar's colour: " + p.bg + " vs " + p.side);
+            if (other) { const o = await probe(page, other.id); r.expect(o.aboveList, P + " " + which + ": " + other.name + "'s row has gone with its group: " + JSON.stringify(o)); }
+          };
+          await scrollSidebar(page, a.top + 30);
+          await check("first", a, null);
+          await page.screenshot({ path: path.join(ENV.out, "sidebar-sticky-" + tagSize + "-" + tag + "-first.png") });
+          // Focus lands clear of the pinned row: the first child starts under it and is scrolled to below the row.
+          const kid = await page.evaluate((id) => {
+            const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id), k = item.querySelector(":scope > .tree-group > .treeitem .srow");
+            k.focus();
+            return new Promise((res) => setTimeout(() => { const kr = k.getBoundingClientRect(), rr = item.querySelector(":scope > .tree-row").getBoundingClientRect(); res({ kidTop: Math.round(kr.top * 10) / 10, rowBottom: Math.round(rr.bottom * 10) / 10, focused: document.activeElement === k }); }, 150));
+          }, a.id);
+          R[P + " focus"] = kid;
+          r.expect(kid.focused && kid.kidTop >= kid.rowBottom - 1, P + ": a focused child is scrolled clear of the pinned row: " + JSON.stringify(kid));
+          await scrollSidebar(page, Math.min(b.top + 30, L.max));
+          await check("second", b, a);
+          await page.screenshot({ path: path.join(ENV.out, "sidebar-sticky-" + tagSize + "-" + tag + "-second.png") });
+          await scrollSidebar(page, 0);
+        }
+        r.expect(await overflow(page) === 0, P + ": no sideways overflow");
+        r.expect(page.errors.length === 0, P + ": page errors " + page.errors.join("; "));
+        await page.context().close();
+      }
     }
   }
   return r.done();
