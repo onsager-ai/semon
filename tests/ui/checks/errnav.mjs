@@ -73,6 +73,11 @@ const state = (page) => page.evaluate(() => {
   };
 });
 
+// On a phone the bar's line 2 is not drawn, so the errors are stepped through from the ⋯ menu.
+async function openErrors(page, opts) {
+  if (opts.size === "phone") { await page.click("#more-btn"); await page.click(".session-menu .menu-errors"); } else await page.click("#topbar .errs");
+}
+
 async function scheme(browser, srv, lane, name, opts, r, full) {
   const R = { name }, tag = name + ": ";
   const page = await open(browser, srv, "/s/claude/faults", opts);
@@ -95,7 +100,7 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     r.expect(before.badge === N + " errors", tag + "the badge reads " + before.badge + ", the model " + N);
     r.expect(before.groups.filter(Boolean).length === 1, tag + "exactly one group should be open before: " + JSON.stringify(before.groups));
 
-    await page.click("#topbar .errs");
+    await openErrors(page, opts);
     const t0 = Date.now();
     R.entered = await appear(page, t0, (want) => document.querySelector("#topbar .errnav-count")?.textContent === want, "Error 1 of " + N, 6000);
     await page.waitForFunction(() => document.querySelector("#page .step.err-current"), null, { timeout: 6000 }).catch(() => {});
@@ -159,7 +164,7 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     r.expect(after.current === 0 && after.expanded === 0, tag + "a step stayed marked or expanded after Escape");
     // Leaving the mode by navigation while it holds a page far from the end: coming back opens at the end, tailed, not on
     // that middle page.
-    await page.click("#topbar .errs");
+    await openErrors(page, opts);
     await appear(page, Date.now(), (want) => document.querySelector("#page .step.err-current .sa")?.textContent === want, "step " + FAILED[0], 6000);
     R.farRange = await page.evaluate(() => [...document.querySelectorAll("#page button.more")].map((b) => b.textContent));
     const nav = (v) => page.evaluate((r) => { history.pushState(r, ""); dispatchEvent(new PopStateEvent("popstate", { state: r })); }, v);

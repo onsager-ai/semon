@@ -246,7 +246,8 @@ export default async function tooltipCheck(browser) {
       rec.items = items.map((x) => x.cls.replace(/meta-item ?/, "") || x.tag + ":" + x.tip.slice(0, 20));
       r.expect(items.length >= (size === "desktop" ? 4 : 0), tag + ": only " + items.length + " tipped items in the session line: " + JSON.stringify(rec.items));
       const at = (i) => box(page, '#topbar [data-probe="' + i + '"]');
-      const dotBox = await box(page, "#topbar .meta-state > .dot"), reach = [dotBox, ...(await Promise.all(items.slice(0, 3).map((x) => at(x.i))))];
+      // On a phone the state is the small dot before the title (line 2 is not drawn there).
+      const stateDot = size === "phone" ? "#topbar .l1-state > .dot" : "#topbar .meta-state > .dot", dotBox = await box(page, stateDot), reach = [dotBox, ...(await Promise.all(items.slice(0, 3).map((x) => at(x.i))))];
       if (reach.length >= 2) await behaviour(page, tag, r, rec, { first: reach[0], second: reach[1] });
       // Every visible tipped item in the bar and the sidebar stays inside the margin and off its target.
       const spots = await page.evaluate(() => { const list = [...document.querySelectorAll("#topbar [data-tip], #sidebar [data-tip]")].filter((n) => { const b = n.getBoundingClientRect(); return n.getClientRects().length && b.width > 0 && b.left >= 0 && b.right <= innerWidth && b.top >= 0 && b.bottom <= innerHeight && (() => { const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return !!hit && (n === hit || n.contains(hit)); })() && (!n.hasAttribute("data-tip-clipped") || n.scrollWidth > n.clientWidth + 1); }); return list.slice(0, 40).map((n, i) => { n.dataset.spot = String(i); return { i, tip: n.dataset.tip, clipped: n.hasAttribute("data-tip-clipped") }; }); });
@@ -266,7 +267,7 @@ export default async function tooltipCheck(browser) {
       r.expect(checked >= (size === "desktop" ? 5 : 1), tag + ": only " + checked + " tooltips were placed");
       // A long tip (the cost badge, or the state), for the contrast, the size and the screenshot.
       await away(page); await page.waitForTimeout(450);
-      const shot = (await page.locator("#topbar .meta-cost").count()) && await page.locator("#topbar .meta-cost").first().isVisible() ? "#topbar .meta-cost" : "#topbar .meta-state";
+      const shot = (await page.locator("#topbar .meta-cost").count()) && await page.locator("#topbar .meta-cost").first().isVisible() ? "#topbar .meta-cost" : size === "phone" ? "#topbar .l1-state" : "#topbar .meta-state";
       await hover(page, shot, 1500);
       const c = await contrast(page); rec.contrast = c.ratio;
       r.expect(c.ratio >= 4.5 && c.alpha === 1, tag + ": the tooltip's contrast is " + c.ratio + ", under 4.5");
@@ -276,7 +277,7 @@ export default async function tooltipCheck(browser) {
 
       if (size === "phone") {
         // Touch: a static badge toggles its tip; elsewhere closes it; a control runs and shows none.
-        const state0 = await box(page, "#topbar .meta-state > .dot"), blank = [4, 400];
+        const state0 = await box(page, stateDot), blank = [4, 400];
         await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
         const opened = await state(page);
         r.expect(opened.open && /^Status: /.test(opened.text), tag + ": tapping the state badge did not show its tooltip " + JSON.stringify(opened));

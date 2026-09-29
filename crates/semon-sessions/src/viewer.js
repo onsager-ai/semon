@@ -913,7 +913,7 @@
     const bar = $("#topbar"), s = opts.session; clearBox(bar, route); bar.classList.remove("scrolled");
     // What the bar holds is added through `put`, so the range control on Analytics (a persistent control) stays where it is.
     const put = placer(bar), sink = { append: put };
-    bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("searching", !!(s && (findOpen || errOn(s.id))));
+    bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("session-bar", !!s); bar.classList.toggle("searching", !!(s && (findOpen || errOn(s.id))));
     if (s && errOn(s.id)) { errorsBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
     if (s && findOpen) { searchBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
     const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); put(m);
@@ -922,7 +922,7 @@
       if (phone.matches) { const parent = opts.lineage.at(-1), c = el("button", "crumb lineage-parent", parent.name); c.type = "button"; c.setAttribute("aria-label", "Open session path through " + parent.name); c.addEventListener("click", () => showLineageMenu(s.id, bar)); l1.append(c, el("span", "sep", "›")); }
       else opts.lineage.forEach((item) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); });
     } else if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
-    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; l1.append(tt); t.append(l1);
+    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; if (s) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
     if (opts.line2) {
       const l2 = el("div", "l2" + (s ? " session-meta" : ""));
       opts.line2(l2); t.append(l2);
@@ -1127,7 +1127,7 @@
     p.then(() => {
       if (route.v !== "session" || route.id !== sid || ERR.on) return;
       render(); if (saved) restore(saved);
-      const b = $("#topbar .errs"); if (b && !b.hidden && document.activeElement !== b && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) b.focus({ preventScroll: true });
+      const b = $("#topbar .errs"), shown = b && !b.getClientRects().length ? $("#more-btn") : b; /* on a phone line 2 is not drawn: focus goes to ⋯ */ if (b && shown && !b.hidden && document.activeElement !== shown && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) shown.focus({ preventScroll: true });
     });
   }
   // Keys while the mode is on: n and p (and Enter, Shift+Enter in the bar) step, Escape closes. Not while typing, and not
@@ -1168,9 +1168,14 @@
   // so a badge is not a tab stop: its label is read out, and the tooltip only adds the full value for a pointer or a tap.
   // Only the errors jump and the runs item are controls. The session's details live in the ⋯ menu.
   const metaSr = (label) => el("span", "sr-only", label + ": ");
+  // "Started 21:57 on <machine>" stays on one line: the machine name ellipsises (its tip, only while cut off, has the whole name).
+  const startedDivider = (sid) => { const d = el("div", "divider started"), name = MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine], line = el("span", "dv-text"), m = el("span", "dv-machine", name); m.dataset.tip = name; m.dataset.tipClipped = ""; line.append(el("span", "dv-lead", "Started " + clock(SESS[sid].start) + " on\u00a0"), m); d.append(line); return d; };
+  const turnsLabel = (s) => { const n = (TURNS[s.id] ?? []).filter(hasTurn).length; return n + (n === 1 ? " turn" : " turns"); };
+  // On phones line 2 leaves the bar; the state is then the small dot before the title. The dot names the state for a screen
+  // reader, and its tip (a tap on a phone) adds the turn count. Desktop hides it, since line 2 shows the state there.
+  const stateLead = (s) => { const lead = el("span", "l1-state"); lead.dataset.tip = spaced("Status: " + STATE[s.state] + " · " + turnsLabel(s)); lead.append(dot(s.state, false)); return lead; };
   const sessionLine = (s) => (l2) => {
-    const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
-    const turnsText = nT + (nT === 1 ? " turn" : " turns");
+    const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0, turnsText = turnsLabel(s);
     const st = el("span", "meta-item meta-state"); st.dataset.tip = spaced("Status: " + STATE[s.state] + " · " + turnsText); st.append(dot(s.state, false), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", turnsText));
     if (errors) {
       const sep = el("span", "state-sep errs-sep", "·"), j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); j.prepend(mark);
@@ -1213,8 +1218,10 @@
       if (filtered) filterItem.append(el("span", "menu-note", "On"));
       filterItem.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); const pop = $(".filters.pop"); if (!pop) return; filterOpen = filterWasOpen ? false : pop.hidden; pop.hidden = !filterOpen; if (filterOpen) { pop.style.right = Math.max(0, $("#topbar").getBoundingClientRect().right - btn.getBoundingClientRect().right) + "px"; pop.querySelector("input")?.focus(); } });
       m.append(findItem, filterItem);
-      const runs = $("#topbar .meta-runs"), kids = childSessions(s.id);
-      if (runs?.hidden && kids.length) { const item = el("button", "menu-runs"); item.type = "button"; item.setAttribute("role", "menuitem"); item.append(icon(I.stack, "icon"), el("span", null, "Runs · " + kids.length)); item.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); openRuns(s, runs); }); m.append(item); }
+      // Line 2 is off the phone bar, so what it held is reached here: the errors, the runs, and (in Session details) the rest.
+      const runs = $("#topbar .meta-runs"), kids = childSessions(s.id), errors = countOf(s, "errors") ?? 0;
+      if (errors) { const label = errors + (errors === 1 ? " error" : " errors"), item = el("button", "menu-errors"); item.type = "button"; item.setAttribute("role", "menuitem"); const mark = el("span", "dot err"); mark.setAttribute("aria-hidden", "true"); item.append(mark, el("span", null, label), el("span", "menu-note", "Step through")); item.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); openErrors(s.id); }); m.append(item); }
+      if (kids.length) { const item = el("button", "menu-runs"); item.type = "button"; item.setAttribute("role", "menuitem"); item.append(icon(I.stack, "icon"), el("span", null, "Runs · " + kids.length)); item.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); openRuns(s, runs); }); m.append(item); }
     }
     const details = el("button"); details.type = "button"; details.setAttribute("role", "menuitem"); details.append(icon(I.read, "icon"), el("span", null, "Session details")); details.addEventListener("click", (e) => { e.stopPropagation(); openSessionDetails(s); }); m.append(details);
     const copy = el("button"); copy.type = "button"; copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command"));
@@ -1233,13 +1240,16 @@
     title.id = "session-details-title"; title.append(el("span", null, "Session details"));
     close.type = "button"; close.setAttribute("aria-label", "Close session details"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
     const body = el("div", "vb"), list = el("div", "detail-list"), moved = s.movedFrom ? " (moved from " + (MACHINE[s.movedFrom] ?? s.movedFrom) + ")" : "";
+    const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0;
     const rows = [
+      ...(s.kind ? [["Kind", s.kind]] : []), ["Status", STATE[s.state] + " · " + turnsLabel(s)],
       ["Harness", HARNESS[s.harness] ?? s.harness], ["Model", s.model ?? s.modelId ?? "Unknown model"],
       ["Machine", (MACHINE[s.machine] ?? s.machine ?? "Unknown machine") + (hostOf(s) !== (MACHINE[s.machine] ?? s.machine) ? " · " + hostOf(s) : "") + moved],
     ];
     const directory = s.cwd ?? s.dir ?? s.directory;
     if (directory != null && directory !== "") rows.push(["Directory", directory]);
-    rows.push([s.worktree ? "Worktree" : "Branch", branchOf(s)]);
+    rows.push([s.worktree ? "Worktree" : "Branch", branchOf(s)], ["Tool calls", calls == null ? "—" : String(calls)]);
+    if (errors) rows.push(["Errors", String(errors)]);
     if (s.pid != null && s.pid !== "") rows.push(["Process id", String(s.pid)]);
     rows.push(["Session id", s.sessionId ?? s.id], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Last activity", clock(s.last)], ["Tokens in / out", tok(s.tokens?.[0] ?? 0) + " / " + tok(s.tokens?.[2] ?? 0)], ["Cached context", tok(s.tokens?.[1] ?? 0)]);
     for (const [label, value] of rows) { const row = el("div", "detail-row"); row.append(el("span", "detail-label", label), el("span", "detail-value", String(value))); list.append(row); }
@@ -1527,7 +1537,7 @@
     const keyed = (n, e) => { if (e.key) n.dataset.e = e.key; return n; };
     const range = turnMode ? TXM[sid] : null;
     if (range?.from > 0) box.append(pager(sid, "before", "Load earlier"));
-    else if (!find && turnMode) box.append(el("div", "divider", "Started " + clock(SESS[sid].start) + " on " + MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine]));
+    else if (!find && turnMode) box.append(startedDivider(sid));
     // Adjacent tool calls collapse into one summary line ("Ran 2 commands, read 1 file · 1 failed"),
     // expandable to the individual steps. A lone call stays a single line; while finding, matches show directly.
     let run = []; const maskedIn = new WeakSet();
@@ -2354,6 +2364,7 @@
     else if (dirty.size) morphTurns(box, transcript(route.id, { only: dirty }).querySelector(".turns"), dirty);
     const h1 = $("#page .ph h1"); if (h1) h1.textContent = s.name;
     const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.dataset.tip = s.name; }
+    const lead = $("#topbar .l1-state"); if (lead) lead.replaceWith(stateLead(s));
     const l2 = $("#topbar .l2"); if (l2) { l2.replaceChildren(); sessionLine(s)(l2); requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); }); }
     const fc = $("#topbar .fcount"); if (fc) { const n = find ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : 0; fc.textContent = find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""; }
     renderNav(); renderLanes(); ticker();

@@ -311,6 +311,9 @@ code { overflow-wrap: anywhere; }
 .tx > * { min-width: 0; }
 .divider { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--faint); text-align: center; }
 .divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); min-width: 16px; }
+.divider .dv-text { display: flex; flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+.divider .dv-lead { flex: none; }
+.divider .dv-machine { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .msg .body { line-height: 1.5; }
 .msg .body p { margin: 0 0 7px; } .msg .body p:last-child, .msg .body ul:last-child { margin-bottom: 0; }
 .msg .body ul { margin: 0 0 7px; padding-left: 20px; } .msg .body li + li { margin-top: 2px; }
@@ -535,6 +538,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2.session-meta .errs-sep { color: var(--faint); }
 /* fitSessionLine hides overflow items by setting the `hidden` attribute; these selectors must out-specify
    the display rules above so hiding actually takes effect. */
+.topbar .l1-state { display: none; }
 .topbar .l2.session-meta .meta-item[hidden], .topbar .l2.session-meta .meta-runs[hidden], .topbar .l2.session-meta .errs[hidden], .topbar .l2.session-meta .errs-sep[hidden], .topbar .l2.session-meta .meta-value[hidden] { display: none; }
 .topbar .l1 .crumb { padding: 8px 0; margin: -8px 0; }
 .topbar.searching { gap: 8px; }
@@ -680,6 +684,12 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .topbar > .ibtn { width: 44px; height: 44px; }
   .topbar .ttl { padding: 0 4px; }
   .topbar.detail { min-height: 56px; }
+  .topbar.session-bar .l2 { display: none; }
+  .topbar.session-bar .l1-state { display: inline-flex; flex: none; align-items: center; align-self: center; padding: 8px 2px; margin: -8px -2px; pointer-events: auto; }
+  .topbar.session-bar .l1 .crumb { position: relative; flex: none; align-self: center; width: 22px; min-width: 22px; max-width: 22px; overflow: hidden; color: transparent; text-decoration: none; }
+  .topbar.session-bar .l1 .crumb::before { content: ""; position: absolute; left: 50%; top: 50%; width: 7px; height: 7px; border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: translate(-30%, -50%) rotate(45deg); }
+  .topbar.session-bar .l1 .sep { display: none; }
+  .topbar.session-bar .l1 .crumb ~ .t { flex: 0 1 auto; max-width: none; }
   .lead { display: inline-grid; }
   .sidebar-head { display: contents; }
   /* Straight in the sidebar column now, so it must not take the grow rule above (same specificity, so this comes after it). */
@@ -1302,11 +1312,13 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("searching", !!(s && findOpen));
     if (s && findOpen) { searchBar(bar); appendWideToggle(bar); return; }
     const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); bar.append(m);
+    bar.classList.toggle("session-bar", !!s);
     const t = el("div", "ttl"), l1 = el("div", "l1");
     if (opts.lineage?.length) {
       if (phone.matches) { const parent = opts.lineage.at(-1), c = el("button", "crumb lineage-parent", parent.name); c.type = "button"; c.setAttribute("aria-label", "Open session path through " + parent.name); c.addEventListener("click", () => showLineageMenu(s.id, bar)); l1.append(c, el("span", "sep", "›")); }
       else { const path = opts.lineage; path.forEach((item, i) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); }); }
     } else if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
+    if (s) { const lead = el("span", "l1-state"), nT = (TURNS[s.id] ?? []).filter(hasTurn).length; lead.title = "Status: " + STATE[s.state] + " · " + nT + (nT === 1 ? " turn" : " turns"); lead.append(dot(s.state, false)); l1.append(lead); }
     const tt = el("span", "t", title); tt.title = title; l1.append(tt); t.append(l1);
     if (opts.line2) { const l2 = el("div", "l2" + (s ? " session-meta" : ""));
       opts.line2(l2); t.append(l2); if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); }); }
@@ -1616,7 +1628,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const turnMode = !opts.nested, entries = transcriptEntries(opts.entries ?? TX[sid] ?? [], sid);
     // On a session page the transcript is a list of turns, each with its own entries; a nested one is a plain list.
     const box = el("div", turnMode ? "turns" : "tx"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);
-    if (!find && turnMode) box.append(el("div", "divider", "Started " + clock(SESS[sid].start) + " on " + MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine]));
+    if (!find && turnMode) { const d = el("div", "divider started"), line = el("span", "dv-text"); line.append(el("span", "dv-lead", "Started " + clock(SESS[sid].start) + " on\u00a0"), el("span", "dv-machine", MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine])); d.append(line); box.append(d); }
     // Adjacent tool calls collapse into one summary line ("Ran 2 commands, read 1 file · 1 failed"),
     // expandable to the individual steps. A lone call stays a single line; while finding, matches show directly.
     let run = []; const maskedIn = new WeakSet();
