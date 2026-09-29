@@ -22,6 +22,9 @@
 //   - the toggle sits over the right end of its row's meta line, and only rows with children have one: no row has a left gutter.
 //   - the toggle's box is at least 44x44 at 390 px and at least 28x36 at 1280 px, and a collapsed parent's summary does not
 //     overlap it.
+//   - the header puts the logo first and the collapse toggle at the right end of the row (on a phone, the drawer's close button
+//     there instead), both at least 44x44; in the rail the toggle shows with the logo mark above it, and the keyboard reaches
+//     the toggle before the search field.
 //   - only the open session's row is current: its parent is not highlighted; a collapsed parent opens for the child's page
 //     without saving that, and its saved choice is unchanged after navigating away; a collapse made while the child is open
 //     stays collapsed through redraws; the open child is always listed; in the rail the ancestor keeps a ring, no highlight, and
@@ -916,6 +919,66 @@ export default async function sidebarCheck(browser) {
       await page.waitForSelector("#nav .nav-item");
       r.expect(ok(await order(page)), "nav: the 1280 sidebar (" + (dark ? "dark" : "light") + ") keeps the order");
       await page.screenshot({ path: path.join(ENV.out, "sidebar-nav-1280-" + (dark ? "dark" : "light") + ".png") });
+      await page.context().close();
+    }
+  }
+
+  // ---- The header: the logo first, the toggle (or the drawer's close button) at the right ---------------------------
+  const headBoxes = (page, control) => page.evaluate((control) => {
+    const box = (sel) => { const e = document.querySelector(sel); if (!e || !e.getClientRects().length) return null; const b = e.getBoundingClientRect(); return { left: Math.round(b.left * 10) / 10, right: Math.round(b.right * 10) / 10, top: Math.round(b.top * 10) / 10, bottom: Math.round(b.bottom * 10) / 10, w: Math.round(b.width * 10) / 10, h: Math.round(b.height * 10) / 10 }; };
+    const mark = document.querySelector(".brandrow .mark"), ctl = document.querySelector(control);
+    return { mark: box(".brandrow .mark"), name: box(".brandrow .brandname"), control: box(control), sidebar: box("#sidebar"), nav: box("#nav"), search: box(".side-search"), markFirst: !!(mark && ctl && (mark.compareDocumentPosition(ctl) & Node.DOCUMENT_POSITION_FOLLOWING)), label: ctl?.getAttribute("aria-label"), expanded: ctl?.getAttribute("aria-expanded") };
+  }, control);
+  for (const [size, tagSize, control] of [["desktop", "1280", "#rail-toggle"], ["phone", "390", "#drawer-close"]]) {
+    for (const dark of [false, true]) {
+      const tag = dark ? "dark" : "light", P = "header " + tagSize + " " + tag;
+      const page = await served(browser, { extras: true, size, dark });
+      await page.waitForSelector("#lanes .treeitem", { state: "attached" });
+      if (size === "phone") await openDrawer(page);
+      const h = await headBoxes(page, control);
+      R[P] = h;
+      r.expect(h.mark && h.control && h.mark.left < h.control.left && h.markFirst, P + ": the logo comes before the control: " + JSON.stringify(h));
+      r.expect(h.control && h.sidebar.right - h.control.right >= 0 && h.sidebar.right - h.control.right <= 16, P + ": the control is at the right end of the header, within 16px of the sidebar's edge: " + JSON.stringify(h));
+      r.expect(h.control && h.control.w >= 44 && h.control.h >= 44, P + ": the control is at least 44x44: " + JSON.stringify(h.control));
+      r.expect(h.mark && h.mark.left >= h.sidebar.left && h.name && h.name.right <= h.control.left, P + ": the logo and name fit left of the control: " + JSON.stringify(h));
+      r.expect(h.label === (size === "phone" ? "Close menu" : "Collapse sidebar") && (size === "phone" || h.expanded === "true"), P + ": label and state: " + h.label + " / " + h.expanded);
+      if (size === "desktop") {
+        // Keyboard order: the toggle, then the search field (the logo is not a link). Shift+Tab from search lands on the toggle with a focus ring.
+        await page.focus("#q"); await page.keyboard.press("Shift+Tab");
+        const ring = await page.evaluate(() => { const e = document.activeElement, c = getComputedStyle(e); return { id: e.id, visible: e.matches(":focus-visible"), outline: c.outlineStyle + " " + c.outlineWidth }; });
+        r.expect(ring.id === "rail-toggle" && ring.visible && ring.outline === "solid 2px", P + ": Shift+Tab from the search field reaches the toggle, with a focus ring: " + JSON.stringify(ring));
+        await page.keyboard.press("Tab");
+        r.expect(await page.evaluate(() => document.activeElement.id) === "q", P + ": Tab from the toggle reaches the search field");
+      }
+      await page.screenshot({ path: path.join(ENV.out, "sidebar-header-" + tagSize + "-" + tag + ".png") });
+      if (size === "desktop") {
+        // The rail: the toggle shows, the logo mark sits above it, and both fit the 64px column.
+        await page.click("#rail-toggle"); await page.waitForTimeout(300);
+        const rail = await headBoxes(page, "#rail-toggle");
+        R[P + " rail"] = rail;
+        r.expect(rail.control && rail.control.w >= 44 && rail.control.h >= 44 && rail.control.left >= rail.sidebar.left && rail.control.right <= rail.sidebar.right, P + " rail: the toggle shows at least 44x44 inside the rail: " + JSON.stringify(rail));
+        r.expect(rail.mark && rail.mark.bottom <= rail.control.top && rail.mark.left >= rail.sidebar.left && rail.mark.right <= rail.sidebar.right && rail.control.bottom <= rail.nav.top, P + " rail: the logo mark sits above the toggle, clear of the nav: " + JSON.stringify(rail));
+        r.expect(rail.label === "Expand sidebar" && rail.expanded === "false" && rail.name === null, P + " rail: label and state: " + rail.label + " / " + rail.expanded);
+        await page.screenshot({ path: path.join(ENV.out, "sidebar-header-" + tagSize + "-" + tag + "-rail.png") });
+        await page.click("#rail-toggle"); await page.waitForTimeout(300);
+        const back = await headBoxes(page, "#rail-toggle");
+        r.expect(back.label === "Collapse sidebar" && back.name && back.mark.left < back.control.left, P + ": the toggle expands the rail again");
+      } else {
+        r.expect(!(await headBoxes(page, "#rail-toggle")).control, P + ": the rail toggle stays hidden in the drawer");
+        // A short list must not let the brand row grow: it sits straight in the drawer's column on a phone, so a query that leaves one row
+        // keeps the logo at the top with the search field directly under it.
+        if (lone) {
+          await page.fill("#q", lone.name); await page.waitForTimeout(150);
+          const short = await headBoxes(page, control);
+          R[P + " short"] = short;
+          r.expect(short.mark && short.mark.top < 60 && short.control.bottom <= short.search.top && short.search.top - short.control.bottom <= 24 && short.nav.top >= short.search.bottom && short.nav.top - short.search.bottom <= 24, P + ": with a short list the brand row stays at the top, with the search and nav right under it: " + JSON.stringify(short));
+          await page.screenshot({ path: path.join(ENV.out, "sidebar-header-" + tagSize + "-" + tag + "-short.png") });
+        }
+        await page.click("#drawer-close"); await page.waitForTimeout(300);
+        r.expect(await page.evaluate(() => !document.body.classList.contains("drawer-open")), P + ": the close button closes the drawer");
+      }
+      r.expect(await overflow(page) === 0, P + ": no sideways overflow");
+      r.expect(page.errors.length === 0, P + ": page errors " + page.errors.join("; "));
       await page.context().close();
     }
   }

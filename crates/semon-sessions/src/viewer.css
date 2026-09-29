@@ -554,6 +554,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   body.drawer-open .scrim { opacity: 1; pointer-events: auto; }
   body.drawer-open { overflow: hidden; }
   .brandrow .close { display: inline-grid; }
+  .sidebar-head .brandrow .close { width: 44px; height: 44px; }
   /* iOS zooms on focus below 16px. Keep 16px for layout, draw it at 15px to match the phone's text size. */
   .side-search input, .find input { font-size: 16px; transform: scale(.9375); transform-origin: left center; width: calc(100% / .9375); }
   .side-search, .find { height: 42px; min-height: 42px; flex: none; }
@@ -597,9 +598,11 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .side-list { flex: 0 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 8px;
   background: linear-gradient(var(--side), var(--side)) 0 0 / 100% 1px no-repeat local, linear-gradient(var(--side), var(--side)) 0 100% / 100% 1px no-repeat local,
     linear-gradient(var(--line), var(--line)) 0 0 / 100% 1px no-repeat scroll, linear-gradient(var(--line), var(--line)) 0 100% / 100% 1px no-repeat scroll; }
-.sidebar-head { display: flex; align-items: center; gap: 2px; padding: 10px 12px 2px; }
+.sidebar-head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 4px 0; }
+/* Only the viewer's own header row grows and takes the tighter padding; the shell pages' `.brandrow` sits straight in the sidebar column and keeps the base rule. */
+.sidebar-head .brandrow { flex: 1 1 auto; min-width: 0; padding: 6px 8px 6px 18px; }
 .brandrow .brandname { min-width: 0; }
-.rail-toggle { display: inline-grid; }
+.rail-toggle { display: inline-grid; width: 44px; height: 44px; }
 .treeitem { min-width: 0; outline: none; }
 .treeitem:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 9px; }
 .tree-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; margin: 0 4px 0 8px; }
@@ -801,9 +804,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .app.rail { grid-template-columns: 64px minmax(0, 1fr); }
   .app.rail .sidebar { overflow-x: hidden; }
   .app.rail .sidebar-head { flex-direction: column; gap: 2px; padding: 10px 0 6px; }
-  .app.rail .brandrow { justify-content: center; padding: 7px 0; }
+  .app.rail .brandrow { flex: none; justify-content: center; padding: 7px 0; }
   .app.rail .brandrow .brandname, .app.rail .side-search, .app.rail .side-h, .app.rail .side-foot { display: none; }
-  .app.rail .rail-toggle { width: 40px; height: 40px; }
   .app.rail .nav-item { position: relative; width: 48px; height: 44px; margin: 2px auto; justify-content: center; padding: 0; }
   .app.rail .nav-item > span:not(.cnt) { display: none; }
   .app.rail .nav-item .cnt { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; overflow: hidden; border-radius: 50%; background: var(--faint); color: transparent; font-size: 0; }
@@ -819,6 +821,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 }
 @media (max-width: 760px) {
   .sidebar-head { display: contents; }
+  /* Straight in the sidebar column now, so it must not take the grow rule above (same specificity, so this comes after it). */
+  .sidebar-head .brandrow { flex: none; }
   .rail-toggle, .wide-toggle { display: none; }
   .topbar { padding: 6px 6px; gap: 2px; }
   .topbar > .ibtn, .topbar .errnav-bar > .ibtn { width: 44px; height: 44px; }
