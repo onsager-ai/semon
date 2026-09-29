@@ -75,6 +75,20 @@ mod tests {
     }
 
     #[test]
+    fn scrollbars_are_soft_in_the_base_stylesheet_that_embedding_pages_load() {
+        let viewer_css = include_str!("viewer.css");
+        for needle in [
+            "--scroll-thumb:",
+            "--scroll-thumb-hover:",
+            "scrollbar-width: thin",
+            "scrollbar-color: var(--scroll-thumb) transparent",
+            "::-webkit-scrollbar-thumb",
+        ] {
+            assert!(viewer_css.contains(needle), "viewer.css lacks `{needle}`");
+        }
+    }
+
+    #[test]
     fn shell_classes_do_not_collide_with_viewer_classes() {
         // Chrome classes the shell's contract deliberately shares with the viewer; everything else shell.css
         // defines must be its own name so cascading shell.css after viewer.css never inherits unrelated rules
