@@ -115,9 +115,10 @@ export default async function homeCheck(browser) {
     // Wide is set from a session's menu (it only ever widens a transcript); the rail from the sidebar. Both survive a reload.
     await goto(page, { v: "session", id: Object.keys(D.SESS)[0] }, D);
     await wide(page, true); await page.click("#rail-toggle");
-    await page.reload({ waitUntil: "load" }); await settled(page);
+    const wideSid = Object.keys(D.SESS)[0];
+    await page.reload({ waitUntil: "load" }); await settled(page); await goto(page, { v: "session", id: wideSid }, D);
     out.layout = await page.evaluate(() => ({ wide: document.querySelector("#page").classList.contains("wide-mode"), rail: document.querySelector(".app").classList.contains("rail"), wideStored: localStorage.getItem("semon.wide"), railStored: localStorage.getItem("semon.rail") }));
-    await wide(page, false); await page.click("#rail-toggle"); await page.reload({ waitUntil: "load" }); await settled(page);
+    await wide(page, false); await page.click("#rail-toggle"); await page.reload({ waitUntil: "load" }); await settled(page); await goto(page, { v: "session", id: wideSid }, D);
     out.layout.offReload = await page.evaluate(() => ({ wide: document.querySelector("#page").classList.contains("wide-mode"), rail: document.querySelector(".app").classList.contains("rail"), wideStored: localStorage.getItem("semon.wide"), railStored: localStorage.getItem("semon.rail") }));
     await page.screenshot({ path: path.join(ENV.out, "desk-home.png") });
     const longSid = Object.keys(D.TX).sort((a, b) => (D.TX[b]?.length ?? 0) - (D.TX[a]?.length ?? 0))[0];

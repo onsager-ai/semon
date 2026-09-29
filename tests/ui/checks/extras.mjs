@@ -44,7 +44,7 @@ export default async function (browser) {
     const servedAccount = await desktop.evaluate(async () => (await (await fetch("/api/model")).json()).account);
     const servedNav = await desktop.evaluate(async () => (await (await fetch("/api/model")).json()).nav);
     r.expect(servedAccount?.name === name && servedAccount.links?.map((link) => link.method).join(",") === "get,get,post" && servedNav?.machines === "/account/workspaces", "the embedding fixture serves account methods and nav model values");
-    r.expect(topbarAvatar.width === 32 && topbarAvatar.height === 32 && topbarAvatar.visible && topbarAvatar.right === 20, "desktop has a 32px avatar button at the top bar's right end: " + JSON.stringify(topbarAvatar));
+    r.expect(topbarAvatar.width === 32 && topbarAvatar.height === 32 && topbarAvatar.visible && topbarAvatar.right === 12, "desktop has a 32px avatar button at the top bar's right end: " + JSON.stringify(topbarAvatar));
     await desktop.locator("#topbar .account-avatar-button").click();
     const desktopMenu = await desktop.locator("#topbar .account-popover").evaluate((menu) => ({
       name: menu.querySelector(".account-name")?.textContent,

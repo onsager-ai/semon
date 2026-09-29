@@ -469,7 +469,7 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.sessionsList.reset > R.sessionsList.filtered.n, name + ": the Sessions list didn't widen when the filter was cleared: " + JSON.stringify(R.sessionsList));
 
     // ---- 7. harbor's process dies mid-call: the step stops running, though no line is written ----
-    await S.click('#topbar button[aria-label="Close search"]'); await S.waitForFunction(() => !document.querySelector("#find")); // find from step 5 would hide the call
+    await S.click('#topbar button[aria-label="Close find"]'); await S.waitForFunction(() => !document.querySelector("#find")); // find from step 5 would hide the call
     t0 = Date.now();
     harbor.append(harbor.tool(at(12, 46), "toolu-live5", "Bash", { command: "sleep 99 && echo gone" }));
     R.lastCall = await appear(S, t0, () => [...document.querySelectorAll(".step.live .sa")].some((x) => x.textContent.includes("sleep 99")));

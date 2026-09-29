@@ -183,7 +183,8 @@ export default async function barCheck(browser) {
       Object.assign(S, await page.evaluate(() => ({ count: document.querySelector(".fcount")?.textContent, hits: document.querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length, turns: document.querySelectorAll(".turns > .turn").length, focus: document.activeElement?.id, barH: document.querySelector("#topbar").offsetHeight })));
       S.countMatchesHits = S.count === S.hits + (S.hits === 1 ? " match" : " matches");
       // One choice at a time: Messages hides every step, Steps every message, and All brings both back.
-      const counts = () => page.evaluate(() => ({ msgs: document.querySelectorAll(".turns .msg").length, steps: document.querySelectorAll(".turns .step").length, pressed: [...document.querySelectorAll("#topbar .find-chips .chip[aria-pressed=true]")].map((c) => c.dataset.filter) }));
+      // A step is a row of its group, and a group is collapsed until opened: both count.
+      const counts = () => page.evaluate(() => ({ msgs: document.querySelectorAll(".turns .msg").length, steps: document.querySelectorAll(".turns .step, .turns .tsum").length, pressed: [...document.querySelectorAll("#topbar .find-chips .chip[aria-pressed=true]")].map((c) => c.dataset.filter) }));
       await page.fill("#find", ""); await page.waitForTimeout(150);
       const Fl = { all: await counts() };
       await page.click('.find-chips .chip[data-filter="messages"]'); await page.waitForTimeout(150); Fl.messages = await counts();

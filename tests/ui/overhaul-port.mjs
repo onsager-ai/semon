@@ -113,6 +113,11 @@ export function overhaulPortReference(D, html) {
   out = swapFunction(out, "costForSessions", COST_FUNCTION);
   // The served model gives a thought's seconds itself.
   out = swapFunction(out, "thoughtSeconds", "  function thoughtSeconds(entries, i, sid) { const secs = entries[i]?.secs; return Number.isFinite(secs) && secs >= 0 ? secs : null; }");
+  // Until the sidebar's port (PR 4), the viewer's sidebar is 296px wide and the mockup's 272px. The regions compare parts of the main
+  // column, so the reference takes the viewer's width; PR 4 removes this.
+  const styleEnd = out.lastIndexOf("</style>");
+  if (styleEnd < 0) throw new Error("overhaul mockup style block moved");
+  out = out.slice(0, styleEnd) + "@media (min-width: 761px) { .app:not(.rail) { grid-template-columns: 296px minmax(0, 1fr); } }\n" + out.slice(styleEnd);
   // Each of the mockup's histories is inside the served sessions' busy intervals already.
   const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
   if (!histories.test(out)) throw new Error("overhaul mockup analytics history block moved");
