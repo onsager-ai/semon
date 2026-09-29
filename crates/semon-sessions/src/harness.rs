@@ -76,7 +76,6 @@ mod tests {
 
     #[test]
     fn registry_definitions_and_icons_are_consistent() {
-        assert_eq!(HARNESSES.len(), 3);
         for definition in HARNESSES {
             assert_eq!(
                 harness(definition.id).map(|found| found.id),
@@ -101,7 +100,10 @@ mod tests {
             crate::inputs::InputRoot::Claude,
             crate::inputs::InputRoot::Codex,
         ] {
-            let id = input_root.as_str();
+            let id = match input_root {
+                crate::inputs::InputRoot::Claude => "claude",
+                crate::inputs::InputRoot::Codex => "codex",
+            };
             assert_eq!(crate::inputs::InputRoot::parse(id), Some(input_root));
             assert!(
                 harness(id).is_some(),
@@ -119,6 +121,7 @@ mod tests {
             .collect();
         assert_eq!(registry_lines.len(), 1);
         let line = registry_lines[0];
+        assert_eq!(line.matches(": { name: \"").count(), HARNESSES.len());
 
         for (index, definition) in HARNESSES.iter().enumerate() {
             let start_marker = format!("{}: {{", definition.id);
