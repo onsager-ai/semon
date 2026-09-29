@@ -2866,6 +2866,42 @@ mod tests {
         format!("{head}\"now\":0{rest}")
     }
 
+    /// `/api/tree` stamps each node with `last_activity_age_seconds`, whole
+    /// seconds between the node's last record and the moment of the build.
+    /// Two builds that straddle a wall-clock second boundary legitimately
+    /// differ there and nowhere else; zero the number, as [`without_now`]
+    /// does for the model. A body with no number at all is an error: it would
+    /// turn this into a silent no-op.
+    fn without_age(body: &[u8]) -> String {
+        const KEY: &str = "\"last_activity_age_seconds\":";
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        let mut out = String::new();
+        let mut rest = text.as_str();
+        let mut seen = 0;
+        while let Some((head, tail)) = rest.split_once(KEY) {
+            let tail = tail.trim_start();
+            let digits = tail.len() - tail.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            out.push_str(head);
+            out.push_str(KEY);
+            out.push(' ');
+            if digits > 0 {
+                out.push('0');
+                seen += 1;
+            } else {
+                // A node with no timestamp is `null`, and stays so.
+                assert!(
+                    tail.starts_with("null"),
+                    "age is neither a number nor null: {}",
+                    tail.chars().take(20).collect::<String>()
+                );
+            }
+            rest = &tail[digits..];
+        }
+        assert!(seen > 0, "no last_activity_age_seconds in {text}");
+        out.push_str(rest);
+        out
+    }
+
     #[test]
     fn one_machine_through_with_machines_is_todays_viewer_byte_for_byte() {
         let fixture = machine("laptop", "lane");
@@ -2891,6 +2927,8 @@ mod tests {
             );
             if path == "/api/model" {
                 assert_eq!(without_now(&a.body), without_now(&b.body));
+            } else if path == "/api/tree" {
+                assert_eq!(without_age(&a.body), without_age(&b.body), "{path}");
             } else {
                 assert_eq!(a.body, b.body, "{path}");
             }
