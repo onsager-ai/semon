@@ -69,10 +69,13 @@ code { overflow-wrap: anywhere; }
     linear-gradient(var(--line), var(--line)) 0 0 / 100% 1px no-repeat scroll, linear-gradient(var(--line), var(--line)) 0 100% / 100% 1px no-repeat scroll; }
 .main { overflow-y: auto; min-width: 0; position: relative; }
 .scrim { display: none; }
-.sidebar-head { display: flex; align-items: center; gap: 2px; padding: 10px 12px 2px; }
+.sidebar-head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 4px 0; }
+/* Only the viewer's own header row grows and takes the tighter padding; the shell pages' `.brandrow` sits straight in the sidebar column and keeps the base rule. */
+.sidebar-head .brandrow { flex: 1 1 auto; min-width: 0; padding: 6px 8px 6px 18px; }
 .brandrow { display: flex; align-items: center; gap: 8px; padding: 14px 16px 10px; font-weight: 600; font-size: 15px; }
 .mark { width: 16px; height: 16px; background: var(--ink); -webkit-mask: url(/mark.svg) center / contain no-repeat; mask: url(/mark.svg) center / contain no-repeat; flex: none; }
 .brandrow .close { display: none; margin-left: auto; }
+.sidebar-head .rail-toggle { width: 44px; height: 44px; }
 /* Search sits on the same grid as the nav rows below it: same side margin, padding, icon size, gap and height,
    so its icon and text line up with Home / Machines. */
 .side-search { margin: 0 8px 6px; height: 36px; display: flex; align-items: center; gap: 10px; background: var(--sunken); border-radius: 9px; padding: 0 10px; color: var(--muted); overflow: hidden; }
@@ -548,9 +551,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .app.rail { grid-template-columns: 64px minmax(0, 1fr); }
   .app.rail .sidebar { overflow-x: hidden; }
   .app.rail .sidebar-head { flex-direction: column; gap: 2px; padding: 10px 0 6px; }
-  .app.rail .brandrow { justify-content: center; padding: 7px 0; }
+  .app.rail .brandrow { flex: none; justify-content: center; padding: 7px 0; }
   .app.rail .brandrow .brandname, .app.rail .side-search, .app.rail .side-h, .app.rail .side-foot { display: none; }
-  .app.rail .rail-toggle { width: 40px; height: 40px; }
   .app.rail .nav-item { width: 48px; height: 44px; margin: 2px auto; justify-content: center; padding: 0; }
   .app.rail .nav-item > span:not(.cnt) { display: none; }
   .app.rail .nav-item .cnt { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; overflow: hidden; border-radius: 50%; background: var(--faint); color: transparent; font-size: 0; }
@@ -660,6 +662,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   body.drawer-open .scrim { opacity: 1; pointer-events: auto; }
   body.drawer-open { overflow: hidden; }
   .brandrow .close { display: inline-grid; }
+  .sidebar-head .brandrow .close { width: 44px; height: 44px; }
   /* iOS zooms on focus below 16px. Keep 16px for layout, draw it at 15px to match the phone's text size. */
   .side-search input, .find input { font-size: 16px; transform: scale(.9375); transform-origin: left center; width: calc(100% / .9375); }
   .side-search, .find { height: 42px; min-height: 42px; flex: none; }
@@ -672,6 +675,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .topbar.detail { min-height: 56px; }
   .lead { display: inline-grid; }
   .sidebar-head { display: contents; }
+  /* Straight in the sidebar column now, so it must not take the grow rule above (same specificity, so this comes after it). */
+  .sidebar-head .brandrow { flex: none; }
   .rail-toggle { display: none; }
   /* The bottom padding is the jump button's offset, height and a 16px gap, so the last content scrolls clear of it. */
   .page { padding: 2px 16px calc(72px + env(safe-area-inset-bottom, 0px)); gap: 16px; }
@@ -697,9 +702,10 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 
 <div class="app">
   <aside class="sidebar" id="sidebar" aria-label="Navigation">
-    <div class="sidebar-head"><button class="ibtn rail-toggle" id="rail-toggle" type="button" aria-label="Collapse sidebar" aria-expanded="true"></button>
+    <div class="sidebar-head">
     <div class="brandrow"><span class="mark" aria-hidden="true"></span><span class="brandname">Semon</span>
       <button class="ibtn close" id="drawer-close" type="button" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <button class="ibtn rail-toggle" id="rail-toggle" type="button" aria-label="Collapse sidebar" aria-expanded="true"></button>
     </div>
     <label class="side-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4"/></svg><input id="q" type="search" placeholder="Search" autocomplete="off"></label>
     <div id="nav"></div>
