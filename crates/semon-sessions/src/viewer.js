@@ -1129,7 +1129,7 @@
     const filtered = !(show.messages && show.tools && show.thinking);
     const tb = el("button", "ibtn" + (filtered ? " on" : "")); tb.id = "filter-btn"; tb.type = "button"; tb.setAttribute("aria-label", "Filter transcript"); tb.setAttribute("aria-expanded", String(filterOpen)); tb.append(icon(I.filter));
     tb.addEventListener("click", () => { $(".session-menu")?.remove(); closeAccountMenu(); $("#more-btn")?.setAttribute("aria-expanded", "false"); filterOpen = pop.hidden; pop.hidden = !filterOpen; tb.setAttribute("aria-expanded", String(filterOpen)); });
-    const more = el("button", "ibtn" + (phone.matches && filtered ? " on" : "")); more.id = "more-btn"; more.type = "button"; more.setAttribute("aria-label", "Session details and actions"); more.setAttribute("aria-expanded", "false"); more.append(icon(I.more)); more.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(s, more); });
+    const more = el("button", "ibtn" + (phone.matches && filtered ? " on" : "")); more.id = "more-btn"; more.type = "button"; more.setAttribute("aria-label", "Session details and actions"); more.setAttribute("aria-expanded", "false"); more.append(icon(I.more)); more.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(SESS[s.id] ?? s, more); });
     // On phones search and filter live in the ⋯ menu, and the filter hangs from that button.
     const place = () => { const anchor = phone.matches ? more : tb; pop.style.right = Math.max(0, bar.getBoundingClientRect().right - anchor.getBoundingClientRect().right) + "px"; };
     tb.addEventListener("click", place);
@@ -1414,14 +1414,14 @@
       if (errors) { const label = errors + (errors === 1 ? " error" : " errors"), item = el("button", "menu-errors"); item.type = "button"; item.setAttribute("role", "menuitem"); const mark = el("span", "dot err"); mark.setAttribute("aria-hidden", "true"); item.append(mark, el("span", null, label), el("span", "menu-note", "Step through")); item.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); openErrors(s.id); }); m.append(item); }
       if (kids.length) { const item = el("button", "menu-runs"); item.type = "button"; item.setAttribute("role", "menuitem"); item.append(icon(I.stack, "icon"), el("span", null, "Runs · " + kids.length)); item.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); openRuns(s, runs); }); m.append(item); }
     }
-    const details = el("button"); details.type = "button"; details.setAttribute("role", "menuitem"); details.append(icon(I.read, "icon"), el("span", null, "Session details")); details.addEventListener("click", (e) => { e.stopPropagation(); openSessionDetails(s); }); m.append(details);
+    const details = el("button"); details.type = "button"; details.setAttribute("role", "menuitem"); details.append(icon(I.read, "icon"), el("span", null, "Session details")); details.addEventListener("click", (e) => { e.stopPropagation(); openSessionDetails(SESS[s.id] ?? s); }); m.append(details);
     const copy = el("button"); copy.type = "button"; copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command"));
     const cmd = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + s.id;
     copy.addEventListener("click", () => { navigator.clipboard?.writeText(cmd).then(() => { copy.lastChild.textContent = "Copied"; }, () => { copy.lastChild.textContent = cmd; }); });
     m.append(copy);
     if (s.harness === "claude") { const a = el("button"); a.type = "button"; a.append(icon(I.ext, "icon"), el("span", null, "Open in claude.ai")); m.append(a); }
     const dl = el("dl");
-    for (const [k, v] of [["Model", s.model], ["Machine", MACHINE[s.machine] + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Tokens in / out", tok(s.tokens[0]) + " / " + tok(s.tokens[2])], ["Cached context", tok(s.tokens[1])], ["Session id", s.id]]) dl.append(el("dt", null, k), el("dd", "mono", v));
+    for (const [k, v] of [["Model", s.model], ["Machine", MACHINE[s.machine] + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Input + cache write", tok(s.tokens[0])], ["Output", tok(s.tokens[2])], ["Cache read", tok(s.tokens[1])], ["Session id", s.id]]) dl.append(el("dt", null, k), el("dd", "mono", v));
     m.append(dl); closeFilter(); $("#topbar").append(m); btn.setAttribute("aria-expanded", "true");
   }
   function openSessionDetails(s) {
@@ -1442,9 +1442,11 @@
     rows.push([s.worktree ? "Worktree" : "Branch", branchOf(s)], ["Tool calls", calls == null ? "—" : String(calls)]);
     if (errors) rows.push(["Errors", String(errors)]);
     if (s.pid != null && s.pid !== "") rows.push(["Process id", String(s.pid)]);
-    rows.push(["Session id", s.sessionId ?? s.id], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Last activity", clock(s.last)], ["Tokens in / out", tok(s.tokens?.[0] ?? 0) + " / " + tok(s.tokens?.[2] ?? 0)], ["Cached context", tok(s.tokens?.[1] ?? 0)]);
+    rows.push(["Session id", s.sessionId ?? s.id], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Last activity", clock(s.last)], ["Input + cache write", tok(s.tokens?.[0] ?? 0)], ["Output", tok(s.tokens?.[2] ?? 0)], ["Cache read", tok(s.tokens?.[1] ?? 0)]);
     for (const [label, value] of rows) { const row = el("div", "detail-row"); row.append(el("span", "detail-label", label), el("span", "detail-value", String(value))); list.append(row); }
-    const ownCost = costForSession(s.id), allCost = costForSession(s.id, true), hasRuns = childSessions(s.id).length > 0;
+    const hasRuns = childSessions(s.id).length > 0;
+    if (hasRuns) list.append(el("div", "tokens-own", "This session only; the table below includes its runs."));
+    const ownCost = costForSession(s.id), allCost = costForSession(s.id, true);
     const costRow = el("div", "detail-row cost-row");
     costRow.append(el("span", "detail-label", "API-equivalent cost"), el("span", "detail-value", hasRuns ? costText(ownCost) + " own · " + costText(allCost) + " incl. runs" : costText(ownCost)));
     list.append(costRow, costBreakdown(s.id, true));
