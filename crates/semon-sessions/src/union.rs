@@ -206,7 +206,9 @@ pub enum Refresh {
     /// fails leaves the last model served, with the error printed once;
     /// once the model was last checked 3 s ago and rebuilds still fail,
     /// each read refreshes itself instead and answers the error (500), as
-    /// [`Refresh::OnRead`] does, until a build works again. For servers;
+    /// [`Refresh::OnRead`] does, until a build works again. The model and
+    /// the V1 tree fail on their own: a tree that won't build never turns
+    /// `/api/model` into an error. For servers;
     /// `semon sessions --serve` uses it.
     Background,
 }

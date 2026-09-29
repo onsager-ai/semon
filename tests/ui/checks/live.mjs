@@ -275,13 +275,17 @@ async function scheme(browser, name, opts, r, protocol) {
     sub.append(sub.prompt(at(12, 43, 1), BRIEF), sub.text(at(12, 43, 20), "Live check: the flush change looks right."));
     await AN.evaluate(() => { document.querySelector(".analytics-metrics").dataset.liveProbe = "before-subagent"; });
     R.subagentUpdate = await appear(AN, t0, () => document.querySelector(".analytics-metrics")?.dataset.liveProbe !== "before-subagent");
-    r.expect(R.subagentUpdate != null, name + ": Analytics didn't redraw after the subagent appeared in the served model");
+    r.expect(R.subagentUpdate != null, name + ": Analytics didn't redraw after the subagent's lines were written");
     R.analyticsAfterSubagent = await analyticsState();
     r.expect(R.analyticsAfterSubagent.range === "30 d" && R.analyticsAfterSubagent.metrics === 8, name + ": Analytics changed after the subagent update: " + JSON.stringify(R.analyticsAfterSubagent));
-    // Within 4 s of the lines, as the relay and the question below: the server answers from its last built model and
-    // rebuilds in the background, so a model read at once can be up to a rebuild behind the subagent's own files.
-    const spawn = await (async () => { while (true) { const h = (await model(srv)).handoffs.find((x) => x.kind === "spawn" && x.to === "live-sub"); if (h || Date.now() - t0 > 4000) return h ?? null; await sleep(100); } })();
-    r.expect(!!spawn, name + ": the model has no spawn to live-sub");
+    // The server answers from its last built model and rebuilds in the background, so the redraw above can come from a
+    // model built before the subagent's files, and a model read at once can be a rebuild behind them. The spawn is in the
+    // served model within the server's bound (a rebuild at most a second after the last, one 250 ms check, and the
+    // build), taken here as 2.5 s from the lines; the relay and the question below are held to the 4 s rule.
+    const spawn = await (async () => { while (true) { const h = (await model(srv)).handoffs.find((x) => x.kind === "spawn" && x.to === "live-sub"); if (h || Date.now() - t0 > 4000) return h ?? null; await sleep(50); } })();
+    R.spawnMs = spawn ? Date.now() - t0 : null;
+    r.expect(!!spawn, name + ": the model has no spawn to live-sub within 4 s");
+    r.expect(R.spawnMs != null && R.spawnMs <= 2500, name + ": the spawn reached the served model after " + R.spawnMs + " ms, over the server's bound (2.5 s)");
     await sleep(Math.max(0, 4500 - (Date.now() - t0)));
     R.underSheet = await S.evaluate((id) => ({ open: document.querySelector("dialog.viewer")?.open === true, text: document.querySelector("dialog.viewer")?.textContent, card: !!document.querySelector('.hcard[data-h="' + id + '"]') }), spawn?.id ?? "");
     r.expect(R.underSheet.open && R.underSheet.text === sheet0, name + ": the View all sheet changed while open");

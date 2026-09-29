@@ -196,16 +196,56 @@ struct LiveState {
     closed: bool,
     /// The last read that answered from a snapshot.
     read_at: Option<Instant>,
-    /// When the shown models were last checked against the logs.
-    checked_at: Option<Instant>,
+    /// When the shown model, and the shown tree, were last checked
+    /// against the logs and found built ([`Kind`] indexes them).
+    checked_at: [Option<Instant>; 2],
     /// When the refresher next looks: [`CHECK_EVERY`] after the last
     /// check, and never before [`REBUILD_SPACING`] after the last rebuild.
     due: Option<Instant>,
-    /// The last background refresh's error, printed once; `None` after
-    /// a refresh that worked.
-    error: Option<String>,
+    /// Each kind's last refresh error, printed once; `None` after a
+    /// refresh of it that worked. A failing tree never fails the model.
+    error: [Option<String>; 2],
     /// [`IDLE_AFTER`], but for tests.
     idle_after: Duration,
+}
+
+/// What a machine builds from its logs, each refreshed and failing on its
+/// own: the model, and the V1 tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Model = 0,
+    Tree = 1,
+}
+
+impl Kind {
+    fn other(self) -> Self {
+        match self {
+            Kind::Model => Kind::Tree,
+            Kind::Tree => Kind::Model,
+        }
+    }
+}
+
+impl LiveState {
+    /// Notes how a refresh of `kind` that started at `started` went. Reads
+    /// go on answering from the last one built while it fails; its error
+    /// is printed once, not on every check.
+    fn record(&mut self, kind: Kind, started: Instant, result: &io::Result<()>) {
+        let at = kind as usize;
+        match result {
+            Ok(()) => {
+                self.checked_at[at] = Some(started);
+                self.error[at] = None;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if self.error[at].as_deref() != Some(message.as_str()) {
+                    eprintln!("semon sessions viewer: {message}");
+                }
+                self.error[at] = Some(message);
+            }
+        }
+    }
 }
 
 // An embedding server shares one core between threads and calls it from
@@ -542,9 +582,9 @@ pub fn serve(options: ServeOptions) -> io::Result<()> {
         thread::spawn(move || {
             let error = loop {
                 match server.recv() {
-                    // A request that panics fails alone (its connection
-                    // drops) and this thread serves on, rather than the
-                    // server losing a thread for good.
+                    // A request that panics fails alone (dropping it
+                    // answers an empty 500) and this thread serves on,
+                    // rather than the server losing a thread for good.
                     Ok(request) => {
                         let viewer = &viewer;
                         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -852,6 +892,10 @@ impl MachineView {
             return Ok(tree);
         }
         work.built_at = Some(Instant::now());
+        #[cfg(test)]
+        if self.hooks.tree_failing.load(Ordering::SeqCst) {
+            return Err(io::Error::other("a tree build failed on purpose"));
+        }
         let index = work
             .index
             .get_or_insert_with(|| read_index(&self.options.cache));
@@ -989,12 +1033,12 @@ impl MachineView {
             return self.fresh_model(model::now_ms());
         }
         if let Some(model) = self.shown_model()
-            && self.keep_fresh()
+            && self.keep_fresh(Kind::Model)
         {
             return Ok(model);
         }
-        self.refresh_first(true, false)?
-            .0
+        self.refresh_first(Kind::Model)?;
+        self.shown_model()
             .ok_or_else(|| io::Error::other("no model was built"))
     }
 
@@ -1004,30 +1048,49 @@ impl MachineView {
             return self.fresh_tree();
         }
         if let Some(tree) = self.shown_tree()
-            && self.keep_fresh()
+            && self.keep_fresh(Kind::Tree)
         {
             return Ok(tree);
         }
-        self.refresh_first(false, true)?
-            .1
+        self.refresh_first(Kind::Tree)?;
+        self.shown_tree()
             .ok_or_else(|| io::Error::other("no tree was built"))
     }
 
-    /// Notes a read, and says whether the shown models may answer it: a
-    /// refresher keeps them fresh, or they were checked in the last second
-    /// (and a refresher starts to keep them so).
-    fn keep_fresh(&self) -> bool {
+    /// Whether the model or the tree has been built, and so is kept fresh.
+    fn is_shown(&self, kind: Kind) -> bool {
+        let shown = read_lock(&self.shown);
+        match kind {
+            Kind::Model => shown.model.is_some(),
+            Kind::Tree => shown.tree.is_some(),
+        }
+    }
+
+    /// Rebuilds the model or the tree if its logs changed. The caller holds
+    /// `work`.
+    fn refresh_kind(&self, work: &mut Work, kind: Kind) -> io::Result<()> {
+        match kind {
+            Kind::Model => self.refresh_model_locked(work, model::now_ms()).map(drop),
+            Kind::Tree => self.refresh_tree_locked(work).map(drop),
+        }
+    }
+
+    /// Notes a read of the model or the tree, and says whether the shown
+    /// one may answer it: a refresher keeps it fresh, or it was checked in
+    /// the last second (and a refresher starts to keep it so).
+    fn keep_fresh(&self, kind: Kind) -> bool {
         let mut state = lock(&self.live.state);
         let now = Instant::now();
         state.read_at = Some(now);
         if state.closed {
             return true;
         }
-        let age = state.checked_at.map(|at| now.saturating_duration_since(at));
+        let at = kind as usize;
+        let age = state.checked_at[at].map(|at| now.saturating_duration_since(at));
         // Rebuilds that keep failing aren't hidden behind an ever older
-        // model: past FAILING_AFTER a read refreshes itself, and answers
-        // the error if the build still fails.
-        if state.error.is_some() && age.is_none_or(|age| age >= FAILING_AFTER) {
+        // one: past FAILING_AFTER a read refreshes itself, and answers the
+        // error if the build still fails.
+        if state.error[at].is_some() && age.is_none_or(|age| age >= FAILING_AFTER) {
             return false;
         }
         if state.running {
@@ -1040,40 +1103,30 @@ impl MachineView {
         fresh
     }
 
-    /// A read's own refresh, when nothing keeps the models fresh: of the
-    /// model and the tree it wants and of those already shown, which a
-    /// refresher then keeps fresh.
-    #[allow(clippy::type_complexity)]
-    fn refresh_first(
-        &self,
-        want_model: bool,
-        want_tree: bool,
-    ) -> io::Result<(Option<Arc<ModelCache>>, Option<Arc<TreeCache>>)> {
+    /// A read's own refresh of the kind it wants, when nothing keeps it
+    /// fresh, and of the other kind if that is shown, which a refresher
+    /// then keeps fresh. Only the wanted kind's error is the read's.
+    fn refresh_first(&self, kind: Kind) -> io::Result<()> {
         let mut work = lock(&self.work);
         let started = Instant::now();
-        let (shown_model, shown_tree) = {
-            let shown = read_lock(&self.shown);
-            (shown.model.is_some(), shown.tree.is_some())
-        };
-        let model = if want_model || shown_model {
-            Some(self.refresh_model_locked(&mut work, model::now_ms())?)
-        } else {
-            None
-        };
-        let tree = if want_tree || shown_tree {
-            Some(self.refresh_tree_locked(&mut work)?)
-        } else {
-            None
-        };
+        let wanted = self.refresh_kind(&mut work, kind);
+        let other = kind.other();
+        let others = self
+            .is_shown(other)
+            .then(|| self.refresh_kind(&mut work, other));
         let built_at = work.built_at;
         drop(work);
         let mut state = lock(&self.live.state);
-        state.checked_at = Some(started);
-        state.error = None;
-        state.due = Some(next_check(started, built_at));
-        state.read_at = Some(Instant::now());
-        self.start(&mut state);
-        Ok((model, tree))
+        if let Some(result) = &others {
+            state.record(other, started, result);
+        }
+        if wanted.is_ok() {
+            state.record(kind, started, &wanted);
+            state.due = Some(next_check(started, built_at));
+            state.read_at = Some(Instant::now());
+            self.start(&mut state);
+        }
+        wanted
     }
 
     /// Starts the refresher, unless one runs or the view is closed.
@@ -1091,7 +1144,8 @@ impl MachineView {
     }
 
     /// One background check: rebuilds what is shown if its logs changed,
-    /// never sooner than [`REBUILD_SPACING`] after the last rebuild.
+    /// never sooner than [`REBUILD_SPACING`] after the last rebuild. The
+    /// model and the tree are refreshed, and fail, each on its own.
     fn tick(&self) {
         let mut work = lock(&self.work);
         let started = Instant::now();
@@ -1102,37 +1156,17 @@ impl MachineView {
             lock(&self.live.state).due = Some(built + REBUILD_SPACING);
             return;
         }
-        let (want_model, want_tree) = {
-            let shown = read_lock(&self.shown);
-            (shown.model.is_some(), shown.tree.is_some())
-        };
-        let mut refreshed = Ok(());
-        if want_model {
-            refreshed = self
-                .refresh_model_locked(&mut work, model::now_ms())
-                .map(drop);
-        }
-        if want_tree && refreshed.is_ok() {
-            refreshed = self.refresh_tree_locked(&mut work).map(drop);
-        }
+        let results: Vec<_> = [Kind::Model, Kind::Tree]
+            .into_iter()
+            .filter(|kind| self.is_shown(*kind))
+            .map(|kind| (kind, self.refresh_kind(&mut work, kind)))
+            .collect();
         let built_at = work.built_at;
         drop(work);
         let mut state = lock(&self.live.state);
         state.due = Some(next_check(started, built_at));
-        match refreshed {
-            Ok(()) => {
-                state.checked_at = Some(started);
-                state.error = None;
-            }
-            // Reads go on answering from the last model built; the error
-            // is printed once, not every check.
-            Err(error) => {
-                let message = error.to_string();
-                if state.error.as_deref() != Some(message.as_str()) {
-                    eprintln!("semon sessions viewer: {message}");
-                }
-                state.error = Some(message);
-            }
+        for (kind, result) in &results {
+            state.record(*kind, started, result);
         }
     }
 
@@ -1261,7 +1295,7 @@ impl MachineView {
     /// ([`tx::errors`]), or 304 when the client's `ETag` or `?since=` version
     /// is still current. It names no page: `before`, `after` and `turn` are
     /// refused with it.
-    fn tx_errors(&mut self, query: &str, if_none_match: Option<&str>) -> io::Result<Routed> {
+    fn tx_errors(&self, query: &str, if_none_match: Option<&str>) -> io::Result<Routed> {
         let json = "application/json; charset=utf-8";
         if query_value(query, "errors") != Some("1") {
             return Err(invalid_input("errors"));
@@ -1278,8 +1312,8 @@ impl MachineView {
         let since = query_value(query, "since")
             .map(|value| decoded(value).ok_or_else(|| invalid_input("since")))
             .transpose()?;
-        self.refresh_model()?;
-        let built = &self.model.as_ref().expect("model loaded").built;
+        let cache = self.served_model()?;
+        let built = &cache.built;
         if !built.tx.contains_key(&sid) {
             return Err(io::ErrorKind::NotFound.into());
         }
@@ -1400,24 +1434,54 @@ impl MachineView {
     /// a new Codex file's first line read, without the `files` lock: it is
     /// held only to find which paths are new and to store the result.
     fn update_files(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        let (paths, new) = self.files_to_key(paths);
+        let keys = self.keys_of(&new);
+        self.store_files(paths, &new, keys);
+    }
+
+    /// The regular `.jsonl` files among `paths`, and those of them not yet
+    /// known: the ones this update keys.
+    fn files_to_key(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> (BTreeSet<PathBuf>, BTreeSet<PathBuf>) {
         let paths: BTreeSet<_> = paths
             .into_iter()
             .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl") && regular(path))
             .collect();
-        let new: Vec<PathBuf> = paths
+        let new = paths
             .difference(&lock(&self.files).known)
             .cloned()
             .collect();
-        let keys: Vec<_> = new
-            .into_iter()
-            .filter_map(|path| transcript_key(&self.options, &path).map(|key| (key, path)))
-            .collect();
+        (paths, new)
+    }
+
+    fn keys_of(&self, new: &BTreeSet<PathBuf>) -> Vec<((String, String), PathBuf)> {
+        new.iter()
+            .filter_map(|path| transcript_key(&self.options, path).map(|key| (key, path.clone())))
+            .collect()
+    }
+
+    /// Stores one update. Other updates may have stored in between, from
+    /// older or newer listings, so a path is known afterwards only if it
+    /// still was or this update looked at it (`looked`): a path no update
+    /// has keyed stays new, and the next one keys it.
+    fn store_files(
+        &self,
+        paths: BTreeSet<PathBuf>,
+        looked: &BTreeSet<PathBuf>,
+        keys: Vec<((String, String), PathBuf)>,
+    ) {
         let mut files = lock(&self.files);
         files.paths.retain(|_, path| paths.contains(path));
         for (key, path) in keys {
             files.paths.insert(key, path);
         }
-        files.known = paths;
+        let known = paths
+            .into_iter()
+            .filter(|path| files.known.contains(path) || looked.contains(path))
+            .collect();
+        files.known = known;
     }
 
     fn harness_offsets_cached(&self, path: &Path) -> io::Result<BTreeSet<u64>> {
@@ -2279,6 +2343,8 @@ mod tests {
         building: Mutex<Option<Hook>>,
         /// Builds fail while set.
         failing: AtomicBool,
+        /// V1 tree builds fail while set.
+        pub(super) tree_failing: AtomicBool,
     }
 
     type Hook = Arc<dyn Fn() + Send + Sync>;
@@ -3111,14 +3177,14 @@ mod tests {
     #[test]
     fn failed_steps_are_listed_where_the_badge_counts_them() {
         let fixture = faults_fixture();
-        let mut core = fixture.viewer();
-        let body = |core: &mut MachineView, query: &str| -> Value {
+        let core = fixture.viewer();
+        let body = |core: &MachineView, query: &str| -> Value {
             let reply = core.respond("GET", "/api/tx", query, None);
             assert_eq!(reply.status, 200, "{query}");
             serde_json::from_slice(&reply.body).unwrap()
         };
         let model = body_of(&core.respond("GET", "/api/model", "", None));
-        let list = body(&mut core, "sid=faults&errors=1");
+        let list = body(&core, "sid=faults&errors=1");
         assert_eq!(list["errors"], 5);
         assert_eq!(list["errors"], model["sessions"]["faults"]["errors"]);
         assert_eq!(list["truncated"], false);
@@ -3131,7 +3197,7 @@ mod tests {
             .collect();
         // Every failed step of the whole transcript, read page by page.
         let mut failed = Vec::new();
-        let mut page = body(&mut core, "sid=faults");
+        let mut page = body(&core, "sid=faults");
         assert_eq!(list["total"], page["total"]);
         loop {
             let entries = page["entries"].as_array().unwrap();
@@ -3145,7 +3211,7 @@ mod tests {
             if page["from"] == 0 {
                 break;
             }
-            page = body(&mut core, &format!("sid=faults&before={}", page["from"]));
+            page = body(&core, &format!("sid=faults&before={}", page["from"]));
         }
         assert_eq!(slots, failed);
         assert_eq!(slots.len(), 5);
@@ -3154,13 +3220,13 @@ mod tests {
             "the failures span pages: {slots:?}"
         );
         for slot in slots {
-            let after = body(&mut core, &format!("sid=faults&after={slot}"));
+            let after = body(&core, &format!("sid=faults&after={slot}"));
             let first = &after["entries"][0];
             assert_eq!(
                 (first["slot"].as_u64(), &first["ok"]),
                 (Some(slot), &json!(false))
             );
-            let before = body(&mut core, &format!("sid=faults&before={}", slot + 1));
+            let before = body(&core, &format!("sid=faults&before={}", slot + 1));
             let last = before["entries"].as_array().unwrap().last().unwrap();
             assert_eq!(
                 (last["slot"].as_u64(), &last["ok"]),
@@ -3168,17 +3234,17 @@ mod tests {
             );
         }
         // The one never answered is among them, as the badge counts it.
-        let unfinished = body(&mut core, "sid=faults&errors=1")["slots"][2]
+        let unfinished = body(&core, "sid=faults&errors=1")["slots"][2]
             .as_u64()
             .unwrap();
-        let page = body(&mut core, &format!("sid=faults&after={unfinished}"));
+        let page = body(&core, &format!("sid=faults&after={unfinished}"));
         assert_eq!(page["entries"][0]["unfinished"], true);
     }
 
     #[test]
     fn the_error_list_refuses_bad_requests_and_unknown_sessions() {
         let fixture = faults_fixture();
-        let mut core = fixture.viewer();
+        let core = fixture.viewer();
         for query in [
             "errors=1",
             "sid=faults&errors=0",
@@ -3215,7 +3281,7 @@ mod tests {
     #[test]
     fn the_error_list_is_304_until_the_model_moves() {
         let fixture = faults_fixture();
-        let mut core = fixture.viewer();
+        let core = fixture.viewer();
         let first = core.respond("GET", "/api/tx", "sid=faults&errors=1", None);
         assert_eq!(first.status, 200);
         let etag = first.etag.clone().unwrap();
@@ -3277,12 +3343,20 @@ mod tests {
     fn the_error_list_is_capped_and_says_so() {
         assert_eq!(tx::ERRORS_MAX, 10_000);
         let fixture = faults_fixture();
-        let mut core = fixture.viewer();
-        let whole: Value =
-            serde_json::from_str(&tx::errors(core.built().unwrap(), "faults").unwrap()).unwrap();
-        let capped: Value =
-            serde_json::from_str(&tx::errors_limited(core.built().unwrap(), "faults", 2).unwrap())
-                .unwrap();
+        let core = fixture.viewer();
+        let whole: Value = serde_json::from_str(
+            &tx::errors(&core.built(Reading::At(model::now_ms())).unwrap(), "faults").unwrap(),
+        )
+        .unwrap();
+        let capped: Value = serde_json::from_str(
+            &tx::errors_limited(
+                &core.built(Reading::At(model::now_ms())).unwrap(),
+                "faults",
+                2,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(capped["errors"], 5);
         assert_eq!(capped["truncated"], true);
         assert_eq!(
@@ -3290,12 +3364,19 @@ mod tests {
             whole["slots"].as_array().unwrap()[..2]
         );
         assert_eq!(whole["truncated"], false);
-        let exact: Value =
-            serde_json::from_str(&tx::errors_limited(core.built().unwrap(), "faults", 5).unwrap())
-                .unwrap();
+        let exact: Value = serde_json::from_str(
+            &tx::errors_limited(
+                &core.built(Reading::At(model::now_ms())).unwrap(),
+                "faults",
+                5,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(exact["truncated"], false);
         assert!(matches!(
-            tx::errors(core.built().unwrap(), "nobody").map_err(|error| error.kind()),
+            tx::errors(&core.built(Reading::At(model::now_ms())).unwrap(), "nobody")
+                .map_err(|error| error.kind()),
             Err(io::ErrorKind::NotFound)
         ));
     }
@@ -4974,5 +5055,69 @@ mod tests {
         assert_eq!(versions.len(), 1, "{versions:?}");
         assert!(!versions.contains(&v1));
         assert_eq!(view.hooks.builds(), 2);
+    }
+
+    /// Three lookups' updates of the transcript paths, interleaved (each
+    /// is a listing, then the new paths read without the lock, then a
+    /// store): an older listing's store between two newer ones never
+    /// leaves a new file known without its session, which would 404 it
+    /// until restart.
+    #[test]
+    fn interleaved_path_updates_never_lose_a_new_file() {
+        let fixture = lane_fixture();
+        let view = fixture.viewer();
+        let file = fixture.root.join("claude/projects/project/lane.jsonl");
+        // C listed before the file was there; B and A after it.
+        let (c_paths, c_new) = view.files_to_key(Vec::new());
+        let (b_paths, b_new) = view.files_to_key(vec![file.clone()]);
+        let b_keys = view.keys_of(&b_new);
+        view.store_files(b_paths, &b_new, b_keys);
+        // To A the file isn't new any more: B knows it.
+        let (a_paths, a_new) = view.files_to_key(vec![file.clone()]);
+        assert!(a_new.is_empty());
+        let a_keys = view.keys_of(&a_new);
+        let c_keys = view.keys_of(&c_new);
+        view.store_files(c_paths, &c_new, c_keys);
+        view.store_files(a_paths, &a_new, a_keys);
+        {
+            let files = lock(&view.files);
+            let key = ("claude".to_owned(), "lane".to_owned());
+            assert!(
+                files.paths.contains_key(&key) || !files.known.contains(&file),
+                "the file is known, but no session is"
+            );
+        }
+        assert_eq!(
+            view.transcript_path("claude", "lane").unwrap(),
+            Some(file),
+            "the next lookup finds it"
+        );
+    }
+
+    /// The model and the V1 tree fail on their own: a tree that won't
+    /// build answers the error on `/api/tree`, and `/api/model` goes on
+    /// serving a model that builds, past FAILING_AFTER too.
+    #[test]
+    fn a_failing_tree_leaves_the_model_served() {
+        let fixture = lane_fixture();
+        let (view, v1) = warm_background(&fixture);
+        assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
+        view.hooks.tree_failing.store(true, Ordering::SeqCst);
+        say(&fixture, "lane", 1, "while the tree fails");
+        eventually("the tree's error", || {
+            (view.respond("GET", "/api/tree", "", None).status == 500).then_some(())
+        });
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until {
+            let reply = view.respond("GET", "/api/model", &format!("since={v1}"), None);
+            assert_eq!(reply.status, 200, "the model with the new line");
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(serves(&view, "while the tree fails"));
+        view.hooks.tree_failing.store(false, Ordering::SeqCst);
+        eventually("the tree again", || {
+            (view.respond("GET", "/api/tree", "", None).status == 200).then_some(())
+        });
+        view.close();
     }
 }
