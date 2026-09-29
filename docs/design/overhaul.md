@@ -190,14 +190,14 @@ Evidence: the viewer on main (Viewer UI run 36523657501, `viewer-ui` artifact, m
 | Rail | Nav plus a glyph per session | Nav icons with attention dots |
 | Top bar | Title, icon-and-number line that is a button, 4 actions | Crumb up one level, title, a line of labels with tooltips (state, kind, model, failed steps, machine, branch, cost) that drop from the right to fit; two actions: Find, "…" |
 | Session menu | "…" dropdown with a detail list; a separate details dialog; a runs popover | One panel (anchored on desktop, bottom sheet on phone): actions, details, cost. Cost: one figure, this session and its runs, the harness's own figure, a quiet note if they differ, the runs with their cost, tokens by model folded |
-| Find and filter | A search bar, a filter popover, an errors link | One mode: the field and a row of chips (Messages, Steps, Thinking, Failed steps N) |
+| Find and filter | A search bar, a filter popover (three checkboxes), an errors link | One mode: the field, then one choice of All, Messages, Steps or Failed steps (with its count). Thoughts show under All only |
 | Transcript | Coloured cards, "Replied" rows, masked thoughts, cut summaries | Outlined incoming bubble under "Relay from X" or "Brief from X"; event rows with an icon, a sentence and the text; child cards with a hairline border and one action; turn foot only for a failure or a Trace link; masked thoughts hidden; summaries wrap |
 | Steps | Output first, head of the log | Command (or file, or input) first, then output; a failed command shows its last 12 lines; "View all N lines" |
 | Jump | Bottom right, 40 px | Centred at the transcript's foot, sticky, 44 px on phone; "N new" when new entries arrived |
 | Child session | Three rails, three links up, sibling pager | A normal session page: the brief is its first turn's incoming bubble; one link up (the crumb) plus the sender link in the header |
 | Home | Summary line; five lines and a Trace button per item | Sections only; each item: who and when, the text (3 lines), one context line; the row is the link |
 | Sessions | Four selects, search, group-by, flat list | Search with a filter button; active filters as chips; sessions you started, with their runs beneath (5, then more); empty state with a way out |
-| Analytics | Selects, range in the bar, repeated captions, thin tap bars | Range and filter in one row under the bar; one caption; deltas or "New"; phone buckets at least 44 px wide; allowance as meters |
+| Analytics | Selects, range in the bar, repeated captions, thin tap bars | Range and filter in one row under the bar; one caption, which also says when there is no earlier period to compare with (then the delta lines stay blank); phone buckets at least 44 px wide; allowance as meters |
 | Machines | Dot plus a repeating word | Dot and one line; a machine that stopped responding says so in red |
 | Trace | Rail of hops with chips and "Open in" links | Timeline from #51 (see below), then the handoffs; names in sentences are the links |
 | States | None | Empty (no sessions, no match, no analytics), error (a machine's logs can't be read), not found, and loading skeletons |

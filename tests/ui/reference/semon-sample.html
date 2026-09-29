@@ -163,8 +163,10 @@ code, .mono { font-family: var(--mono); font-size: .88em; font-variant-numeric: 
 .topbar .ttl { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
 .topbar .l1 { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-weight: 600; font-size: var(--fs-title); line-height: 22px; }
 .topbar .t { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.crumb { flex: 0 1 auto; min-width: 3em; max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-weight: 500; text-align: left; }
+.crumb { flex: 0 1 auto; min-width: 0; max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-weight: 500; text-align: left; }
 .crumb-sep { flex: none; color: var(--faint); font-weight: 400; }
+/* After a crumb the title keeps most of the line; the crumb ellipsizes first but never below 30%. */
+.topbar .l1 .crumb-sep ~ .t { max-width: 70%; }
 @media (hover: hover) { .crumb:hover { text-decoration: underline; text-underline-offset: 3px; } }
 .meta-line { display: flex; align-items: center; min-width: 0; overflow: hidden; white-space: nowrap; font-size: var(--fs-cap); line-height: var(--lh-cap); color: var(--muted); padding-left: 1px; }
 .meta-line .lab + .lab::before { content: "·"; margin: 0 5px; color: var(--faint); }
@@ -1229,7 +1231,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
       const children = sessionChildren(), rows = [];
       const walk = (id, depth) => { for (const c of children.get(id) ?? []) { rows.push([c, depth]); walk(c.id, depth + 1); } };
       walk(s.id, 0);
-      rows.forEach(([c, depth], i) => { const r = btn("run-row depth" + Math.min(depth, 1)); r.hidden = i >= CHILD_CAP; r.setAttribute("aria-label", "Open " + c.name + ", " + kindText(c) + ", " + STATE[c.state] + ", " + costText(costForSession(c.id))); const nm = el("span", "nm", c.name); nm.append(el("span", "kind", "·\u2009" + kindText(c))); r.append(dot(c.state), nm, el("span", "v", costText(costForSession(c.id))), icon(I.chev, "chev")); r.addEventListener("click", () => { pendingSessionOpen = c.id; dialog.close(); }); list.append(r); });
+      rows.forEach(([c, depth], i) => { const r = btn("run-row depth" + Math.min(depth, 1)); r.hidden = i >= CHILD_CAP; r.setAttribute("aria-label", "Open " + c.name + ", " + kindText(c) + ", " + STATE[c.state] + ", " + costText(costForSession(c.id))); const nm = el("span", "nm", c.name); nm.append(el("span", "kind", "· " + kindText(c))); r.append(dot(c.state), nm, el("span", "v", costText(costForSession(c.id))), icon(I.chev, "chev")); r.addEventListener("click", () => { pendingSessionOpen = c.id; dialog.close(); }); list.append(r); });
       if (rows.length > CHILD_CAP) { const m = btn("link", "Show " + (rows.length - CHILD_CAP) + " more"); m.addEventListener("click", () => { list.querySelectorAll(".run-row").forEach((r) => { r.hidden = false; }); m.remove(); }); list.append(m); }
       sec.append(list);
     }
@@ -1893,7 +1895,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
           if (!kids.length) { list.append(r); continue; }
           const wrap = el("div", "kids-wrap"), k = el("div", "kids"); wrap.append(r, k);
           const cap = treePrefs["list:" + s.id]?.more || query ? kids.length : CHILD_CAP;
-          kids.slice(0, cap).forEach((c) => { const cr = btn("nrow child"); cr.dataset.id = c.id; const nm = el("span", "nm", c.name); nm.append(el("span", "kind", "·\u2009" + kindText(c))); cr.append(dot(c.state), nm, el("span", "ag", ago(c.last))); cr.setAttribute("aria-label", c.name + ", " + STATE[c.state] + ", " + kindText(c)); cr.addEventListener("click", () => goSession(c.id)); k.append(cr); });
+          kids.slice(0, cap).forEach((c) => { const cr = btn("nrow child"); cr.dataset.id = c.id; const nm = el("span", "nm", c.name); nm.append(el("span", "kind", "· " + kindText(c))); cr.append(dot(c.state), nm, el("span", "ag", ago(c.last))); cr.setAttribute("aria-label", c.name + ", " + STATE[c.state] + ", " + kindText(c)); cr.addEventListener("click", () => goSession(c.id)); k.append(cr); });
           if (kids.length > cap) { const m = btn("tree-more", "Show " + (kids.length - cap) + " more"); m.addEventListener("click", () => { saveTreePref("list:" + s.id, { more: true }); draw(); }); k.append(m); }
           list.append(wrap);
         }
