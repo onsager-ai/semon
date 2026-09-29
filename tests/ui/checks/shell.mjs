@@ -146,6 +146,12 @@ export default async function shellCheck(browser) {
           results[key].linkButton = linkButton;
           r.expect(linkButton.line === "none", key + " a.btn is underlined: " + JSON.stringify(linkButton));
           r.expect(linkButton.color === linkButton.buttonColor, key + " a.btn colour differs from a button's: " + JSON.stringify(linkButton));
+          // The brand row is a direct child of the sidebar column here: it must not grow, so the nav sits right under it.
+          if (!mobile) {
+            const head = await page.evaluate(() => { const b = document.querySelector(".sidebar > .brandrow"), n = document.querySelector(".sidebar .nav-item"); if (!b || !n) return null; const x = b.getBoundingClientRect(), y = n.getBoundingClientRect(); return { brandTop: Math.round(x.top), brandBottom: Math.round(x.bottom), navTop: Math.round(y.top), gap: Math.round((y.top - x.bottom) * 10) / 10 }; });
+            results[key].brandToNav = head;
+            r.expect(!!head && head.gap >= 0 && head.gap <= 24 && head.brandBottom - head.brandTop <= 64, key + " the first nav item is not directly under the brand row: " + JSON.stringify(head));
+          }
         }
         r.expect(audit.scrollWidth <= audit.innerWidth, key + " document scrollWidth=" + audit.scrollWidth + " innerWidth=" + audit.innerWidth);
         r.expect(audit.right.length === 0, key + " elements past the right edge: " + JSON.stringify(audit.right));
