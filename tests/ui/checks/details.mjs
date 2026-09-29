@@ -60,7 +60,7 @@ export default async function detailsCheck(browser) {
       r.expect(m.valueLeft.every((x) => x === m.valueLeft[0]), tag + ": values do not start at one x: " + JSON.stringify(m.valueLeft));
       r.expect(m.breakdownVisible && !m.hidden && m.groups.length > 0, tag + ": the breakdown is not shown on open");
       r.expect(m.tipIcon, tag + ": the API-equivalent cost tip is not reachable from the sheet");
-      r.expect(m.fonts.row < m.detail && m.fonts.name <= m.fonts.row, tag + ": the breakdown is not quieter than the detail rows: " + JSON.stringify(m.fonts));
+      r.expect(m.fonts.row < m.fonts.detail && m.fonts.name <= m.fonts.row, tag + ": the breakdown is not quieter than the detail rows: " + JSON.stringify(m.fonts));
       for (const l of m.labels) r.expect(l.lines <= 1, tag + ": the label " + JSON.stringify(l.text) + " wraps onto " + l.lines + " lines");
       r.expect(!m.sideways && m.inView, tag + ": the sheet scrolls sideways or is off screen");
       for (const g of m.groups) {
