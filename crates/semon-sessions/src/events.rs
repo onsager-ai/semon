@@ -54,7 +54,9 @@ thread_local! {
 /// whole collected output (#52).
 /// v14: compaction and interrupt signals are indexed apart, as `signals` (PR 1 of the dropped-signals plan).
 /// v15: a prompt that attaches only images, and no text, is indexed.
-const CACHE_VERSION: u32 = 15;
+/// v16: run settings, hook runs and permission denials are indexed as `signals`
+/// (PR 2 of the dropped-signals plan).
+const CACHE_VERSION: u32 = 16;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,9 +178,14 @@ pub(crate) struct Signal {
     pub(crate) t: Option<i64>,
     /// `events.len()` when the signal was pushed: its place among the file's events.
     pub(crate) at: u32,
-    /// A short tag: the compaction trigger, the interrupt kind or reason.
+    /// A short tag: the compaction trigger, the interrupt kind or reason, a
+    /// run setting's value, a hook's `event:outcome`, or a denial's source.
+    /// Compact and interrupt tags are at most 32 bytes, the others at most
+    /// [`TAG_MAX`] characters.
     pub(crate) n: Option<String>,
-    /// A number the harness reported with it (tokens before a compaction).
+    /// A number the harness reported with it (tokens before a compaction), or,
+    /// for a denial or a blocking hook, the index in `events` of the tool call
+    /// it refused.
     pub(crate) v: Option<u64>,
 }
 
@@ -187,6 +194,210 @@ pub(crate) struct Signal {
 pub(crate) enum SignalKind {
     Compact,
     Interrupt,
+    /// A Codex turn's model, when it changes (`n` is the model id).
+    Model,
+    /// A Codex turn's reasoning effort, when it changes.
+    Effort,
+    /// A Codex turn's approval policy, when it changes.
+    Approval,
+    /// A Codex turn's sandbox policy, when it changes.
+    Sandbox,
+    /// A Claude Code permission mode, when it changes.
+    Permission,
+    /// A hook run: `n` is `event:outcome`.
+    Hook,
+    /// A refused tool call: `n` is `user`, `policy` or `declined`.
+    Denial,
+}
+
+impl SignalKind {
+    /// Every kind but compactions and interrupts only annotates the log, so a
+    /// compaction's dedupe looks past it.
+    fn annotates(self) -> bool {
+        !matches!(self, Self::Compact | Self::Interrupt)
+    }
+}
+
+/// The longest `n` a run-setting, hook or denial signal keeps, in characters.
+pub(crate) const TAG_MAX: usize = 64;
+
+/// A value fit to cache as a signal's `n`: enum-like text of letters, digits
+/// and `_ - . : / [ ] +` or a space, cut to [`TAG_MAX`] characters. Text with
+/// anything else in it (a newline, a quote, a sentence) is not kept at all.
+fn bounded(text: &str) -> Option<String> {
+    let safe = !text.is_empty()
+        && text.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'_' | b'-' | b'.' | b':' | b'/' | b'[' | b']' | b'+' | b' '
+                )
+        });
+    safe.then(|| text.chars().take(TAG_MAX).collect())
+}
+
+/// Pushes a signal whose tag is already bounded, without the compaction dedupe.
+fn note(summary: &mut FileIndex, k: SignalKind, o: u64, t: Option<i64>, n: String, v: Option<u64>) {
+    let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
+    summary.signals.push(Signal {
+        k,
+        o,
+        t,
+        at,
+        n: Some(n),
+        v,
+    });
+}
+
+/// Records a run setting when `value` is the first seen or differs from the
+/// last one recorded for `k`. A missing value changes nothing.
+fn setting(summary: &mut FileIndex, k: SignalKind, o: u64, t: Option<i64>, value: Option<&str>) {
+    let Some(value) = value.and_then(bounded) else {
+        return;
+    };
+    let last = summary
+        .signals
+        .iter()
+        .rev()
+        .find(|signal| signal.k == k)
+        .and_then(|signal| signal.n.as_deref());
+    if last != Some(value.as_str()) {
+        note(summary, k, o, t, value, None);
+    }
+}
+
+/// A policy as Codex writes it: a name, or an object naming its type or mode
+/// (a single-key object such as a granular policy names itself).
+fn policy_name(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(name) => Some(name),
+        Value::Object(map) => field(value, "type")
+            .or_else(|| field(value, "mode"))
+            .or_else(|| {
+                (map.len() == 1)
+                    .then(|| map.keys().next().map(String::as_str))
+                    .flatten()
+            }),
+        _ => None,
+    }
+}
+
+/// The index in `events` of the latest tool call with this id.
+fn call_index(summary: &FileIndex, id: &str) -> Option<u64> {
+    summary
+        .tool_ids
+        .get(id)
+        .and_then(|indices| indices.last())
+        .and_then(|index| u64::try_from(*index).ok())
+}
+
+/// A Codex `turn_context`: each setting is a signal only when it differs from
+/// the last one recorded, so the first turn records them all.
+fn codex_settings(summary: &mut FileIndex, payload: &Value, o: u64, t: Option<i64>) {
+    setting(summary, SignalKind::Model, o, t, field(payload, "model"));
+    let effort = field(payload, "effort").or_else(|| {
+        payload
+            .get("collaboration_mode")
+            .and_then(|mode| mode.get("settings"))
+            .and_then(|settings| field(settings, "reasoning_effort"))
+    });
+    setting(summary, SignalKind::Effort, o, t, effort);
+    let approval = payload.get("approval_policy").and_then(policy_name);
+    setting(summary, SignalKind::Approval, o, t, approval);
+    let sandbox = payload.get("sandbox_policy").and_then(policy_name);
+    setting(summary, SignalKind::Sandbox, o, t, sandbox);
+}
+
+/// A Codex command or patch whose approval was declined. One call ends as an
+/// event and as an item: it counts once.
+fn codex_declined(
+    summary: &mut FileIndex,
+    id: Option<&str>,
+    status: Option<&str>,
+    o: u64,
+    t: Option<i64>,
+) {
+    if !status.is_some_and(|status| status.eq_ignore_ascii_case("declined")) {
+        return;
+    }
+    let v = id.and_then(|id| call_index(summary, id));
+    let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
+    let seen = summary.signals.iter().rev().take(16).any(|signal| {
+        signal.k == SignalKind::Denial && signal.v == v && (v.is_some() || signal.at == at)
+    });
+    if !seen {
+        note(summary, SignalKind::Denial, o, t, "declined".to_owned(), v);
+    }
+}
+
+/// The source of a Claude Code tool refusal, from the harness's fixed
+/// wording. Only the start of the result is read, and none of it is kept.
+fn denial_source(content: Option<&Value>, result: Option<&Value>) -> Option<&'static str> {
+    let text = content.map(text_parts).unwrap_or_default();
+    let text = text.trim_start();
+    if text.starts_with("The user doesn't want to")
+        || result.and_then(Value::as_str) == Some("User rejected tool use")
+    {
+        Some("user")
+    } else if (text.starts_with("Permission to use ") && text.contains(" has been denied"))
+        || text.starts_with("Permission for this action has been denied")
+    {
+        Some("policy")
+    } else {
+        None
+    }
+}
+
+/// A hook run: `event:outcome`, never its output. A hook that blocked a tool
+/// call carries that call's index.
+fn hook(
+    summary: &mut FileIndex,
+    event: Option<&str>,
+    outcome: &str,
+    tool: Option<&str>,
+    o: u64,
+    t: Option<i64>,
+) {
+    let event: String = event
+        .and_then(bounded)
+        .unwrap_or_else(|| "unknown".to_owned())
+        .chars()
+        .take(TAG_MAX - 16)
+        .collect();
+    let v = tool
+        .filter(|_| outcome == "blocked")
+        .and_then(|id| call_index(summary, id));
+    note(
+        summary,
+        SignalKind::Hook,
+        o,
+        t,
+        format!("{event}:{outcome}"),
+        v,
+    );
+}
+
+/// A Claude Code hook attachment: what the hook did, by the harness's own type.
+fn claude_hook(summary: &mut FileIndex, attachment: &Value, o: u64, t: Option<i64>) {
+    let outcome = match field(attachment, "type") {
+        Some("hook_success") => "allowed",
+        Some("hook_blocking_error") => "blocked",
+        Some("hook_non_blocking_error") => "error",
+        Some("hook_additional_context") => "context",
+        Some("hook_cancelled") => "cancelled",
+        Some("hook_stopped_continuation") => "stopped",
+        _ => return,
+    };
+    let event = field(attachment, "hookEvent")
+        .or_else(|| field(attachment, "hookName").and_then(|name| name.split(':').next()));
+    hook(
+        summary,
+        event,
+        outcome,
+        field(attachment, "toolUseID"),
+        o,
+        t,
+    );
 }
 
 impl FileIndex {
@@ -1244,7 +1455,11 @@ fn signal(
         .map(str::to_owned);
     let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
     if k == SignalKind::Compact
-        && let Some(last) = summary.signals.last_mut()
+        && let Some(last) = summary
+            .signals
+            .iter_mut()
+            .rev()
+            .find(|signal| !signal.k.annotates())
         && last.k == SignalKind::Compact
         && last.at == at
     {
@@ -2270,6 +2485,16 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
             }
             return;
         }
+        Some("permission-mode") => {
+            setting(
+                summary,
+                SignalKind::Permission,
+                offset,
+                time,
+                field(record, "permissionMode"),
+            );
+            return;
+        }
         Some("custom-title") => {
             summary.title = field(record, "customTitle").map(str::to_owned);
             return;
@@ -2279,6 +2504,9 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
             return;
         }
         Some("attachment") => {
+            if let Some(attachment) = record.get("attachment") {
+                claude_hook(summary, attachment, offset, time);
+            }
             if let Some(attachment) = record.get("attachment")
                 && field(attachment, "type") == Some("queued_command")
             {
@@ -2316,6 +2544,21 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                 .and_then(|metadata| metadata.get("preTokens"))
                 .and_then(Value::as_u64),
         );
+    }
+    if role == Some("system") && field(record, "subtype") == Some("stop_hook_summary") {
+        let prevented = record.get("preventedContinuation").and_then(Value::as_bool) == Some(true);
+        let errors = record
+            .get("hookErrors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty());
+        let outcome = if prevented {
+            "blocked"
+        } else if errors {
+            "error"
+        } else {
+            "allowed"
+        };
+        hook(summary, Some("Stop"), outcome, None, offset, time);
     }
     let Some(message) = record.get("message") else {
         return;
@@ -2385,6 +2628,20 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                     Some("tool_result") => {
                         if let Some(id) = field(item, "tool_use_id") {
                             let error = item.get("is_error").and_then(Value::as_bool) == Some(true);
+                            if error
+                                && let Some(source) =
+                                    denial_source(item.get("content"), tool_result)
+                            {
+                                let call = call_index(summary, id);
+                                note(
+                                    summary,
+                                    SignalKind::Denial,
+                                    offset,
+                                    time,
+                                    source.to_owned(),
+                                    call,
+                                );
+                            }
                             resolve(summary, id, |name| {
                                 let (flags, msg_id) = result_flags(name, tool_result);
                                 Reply {
@@ -2544,6 +2801,15 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             if field(item, "type") == Some("ContextCompaction") {
                 signal(summary, SignalKind::Compact, offset, time, None, None);
             }
+            if matches!(field(item, "type"), Some("CommandExecution" | "FileChange")) {
+                codex_declined(
+                    summary,
+                    field(item, "id"),
+                    field(item, "status"),
+                    offset,
+                    time,
+                );
+            }
             let operation = matches!(field(item, "type"), Some("CommandExecution" | "FileChange"));
             let legacy_tool = field(item, "id").is_some_and(|id| non_code_mode_tool(summary, id));
             let open = open_code_mode_call(summary);
@@ -2642,6 +2908,21 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             if let Some(model) = field(payload, "model") {
                 summary.last_model = Some(model.to_owned());
             }
+            codex_settings(summary, payload, offset, time);
+        }
+        Some("event_msg")
+            if matches!(
+                field(payload, "type"),
+                Some("exec_command_end" | "patch_apply_end")
+            ) =>
+        {
+            codex_declined(
+                summary,
+                field(payload, "call_id"),
+                field(payload, "status"),
+                offset,
+                time,
+            );
         }
         Some("event_msg") if field(payload, "type") == Some("task_complete") => {
             close_code_mode(summary);
@@ -3156,6 +3437,430 @@ mod tests {
                 .collect::<Vec<_>>(),
             records.map(|(_, expected)| expected)
         );
+    }
+
+    fn turn_context(model: &str, effort: &str, approval: &str, sandbox: &str) -> Value {
+        serde_json::json!({
+            "timestamp":"2026-09-29T00:00:01Z",
+            "type":"turn_context",
+            "payload":{
+                "model":model,
+                "approval_policy":approval,
+                "sandbox_policy":{"type":sandbox,"network_access":false},
+                "collaboration_mode":{"mode":"default","settings":{"model":model,"reasoning_effort":effort}}
+            }
+        })
+    }
+
+    /// The `n` of each signal of kind `k`, in order.
+    fn signal_tags(index: &FileIndex, k: SignalKind) -> Vec<&str> {
+        index
+            .signals
+            .iter()
+            .filter(|signal| signal.k == k)
+            .map(|signal| signal.n.as_deref().unwrap_or(""))
+            .collect()
+    }
+
+    fn attachment(body: Value) -> Value {
+        serde_json::json!({"type":"attachment","timestamp":"2026-09-29T00:00:03Z","attachment":body})
+    }
+
+    fn refusal(id: &str, content: Value, is_error: bool, result: Value) -> Value {
+        serde_json::json!({"type":"user","timestamp":"2026-09-29T00:00:02Z","toolUseResult":result,
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":content,"is_error":is_error}]}})
+    }
+
+    #[test]
+    fn codex_turn_context_records_initial_settings_then_only_changes() {
+        let mut index = FileIndex::default();
+        codex(
+            &mut index,
+            &turn_context("gpt-a", "high", "on-request", "workspace-write"),
+            10,
+        );
+        assert_eq!(
+            index
+                .signals
+                .iter()
+                .map(|signal| (signal.k, signal.at, signal.o, signal.t.is_some()))
+                .collect::<Vec<_>>(),
+            [
+                (SignalKind::Model, 0, 10, true),
+                (SignalKind::Effort, 0, 10, true),
+                (SignalKind::Approval, 0, 10, true),
+                (SignalKind::Sandbox, 0, 10, true),
+            ]
+        );
+
+        codex(&mut index, &call("c1"), 20);
+        codex(
+            &mut index,
+            &turn_context("gpt-a", "high", "on-request", "workspace-write"),
+            30,
+        );
+        assert_eq!(index.signals.len(), 4, "nothing changed");
+
+        codex(
+            &mut index,
+            &turn_context("gpt-a", "medium", "on-request", "read-only"),
+            40,
+        );
+        assert_eq!(index.signals.len(), 6);
+        assert_eq!(signal_tags(&index, SignalKind::Model), ["gpt-a"]);
+        assert_eq!(signal_tags(&index, SignalKind::Effort), ["high", "medium"]);
+        assert_eq!(signal_tags(&index, SignalKind::Approval), ["on-request"]);
+        assert_eq!(
+            signal_tags(&index, SignalKind::Sandbox),
+            ["workspace-write", "read-only"]
+        );
+        let changed = &index.signals[4..];
+        assert!(
+            changed
+                .iter()
+                .all(|signal| signal.at == 1 && signal.o == 40)
+        );
+    }
+
+    #[test]
+    fn codex_turn_context_missing_values_change_nothing() {
+        let mut index = FileIndex::default();
+        codex(
+            &mut index,
+            &turn_context("gpt-a", "high", "never", "read-only"),
+            0,
+        );
+        codex(
+            &mut index,
+            &serde_json::json!({"type":"turn_context","payload":{"model":"gpt-a","effort":null}}),
+            1,
+        );
+        codex(
+            &mut index,
+            &serde_json::json!({"type":"turn_context","payload":{}}),
+            2,
+        );
+        assert_eq!(index.signals.len(), 4);
+    }
+
+    #[test]
+    fn codex_policies_name_their_type_mode_or_single_key() {
+        let mut index = FileIndex::default();
+        codex(
+            &mut index,
+            &serde_json::json!({"type":"turn_context","payload":{
+                "effort":"low",
+                "approval_policy":{"granular":{"rules":true}},
+                "sandbox_policy":{"mode":"danger-full-access"}
+            }}),
+            0,
+        );
+        assert_eq!(signal_tags(&index, SignalKind::Effort), ["low"]);
+        assert_eq!(signal_tags(&index, SignalKind::Approval), ["granular"]);
+        assert_eq!(
+            signal_tags(&index, SignalKind::Sandbox),
+            ["danger-full-access"]
+        );
+    }
+
+    #[test]
+    fn claude_permission_mode_records_the_first_value_and_each_change() {
+        let mode = |mode: &str| serde_json::json!({"type":"permission-mode","permissionMode":mode,"sessionId":"s"});
+        let mut index = FileIndex::default();
+        for (offset, record) in [
+            mode("default"),
+            mode("default"),
+            mode("acceptEdits"),
+            mode("acceptEdits"),
+            mode("default"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            claude(&mut index, record, offset as u64);
+        }
+
+        assert_eq!(
+            signal_tags(&index, SignalKind::Permission),
+            ["default", "acceptEdits", "default"]
+        );
+        assert_eq!(index.signals.len(), 3);
+        assert_eq!(
+            index
+                .signals
+                .iter()
+                .map(|signal| signal.o)
+                .collect::<Vec<_>>(),
+            [0, 2, 4]
+        );
+        assert!(index.events.is_empty());
+    }
+
+    #[test]
+    fn claude_hooks_record_event_and_outcome_and_the_tool_a_block_stopped() {
+        let mut index = FileIndex::default();
+        let records = [
+            claude_tool("toolu_1"),
+            attachment(
+                serde_json::json!({"type":"hook_blocking_error","hookEvent":"PreToolUse",
+                "hookName":"PreToolUse:Bash","toolUseID":"toolu_1",
+                "blockingError":{"blockingError":"SECRET-TEXT","command":"/x/secret.sh"}}),
+            ),
+            attachment(
+                serde_json::json!({"type":"hook_success","hookEvent":"PreToolUse",
+                "toolUseID":"toolu_1","stdout":"SECRET-TEXT","exitCode":0}),
+            ),
+            attachment(serde_json::json!({"type":"hook_additional_context",
+                "hookEvent":"UserPromptSubmit","content":["SECRET-TEXT"]})),
+            attachment(serde_json::json!({"type":"hook_non_blocking_error",
+                "hookName":"PostToolUse:Edit","stderr":"SECRET-TEXT"})),
+            attachment(serde_json::json!({"type":"hook_progress","hookEvent":"Stop"})),
+            serde_json::json!({"type":"system","subtype":"stop_hook_summary","hookCount":1,
+                "hookInfos":[{"command":"/x/secret.sh"}],"hookErrors":[],
+                "preventedContinuation":true,"stopReason":"SECRET-TEXT"}),
+            serde_json::json!({"type":"system","subtype":"stop_hook_summary","hookCount":1,
+                "hookErrors":[],"preventedContinuation":false}),
+        ];
+        for (offset, record) in records.iter().enumerate() {
+            claude(&mut index, record, offset as u64);
+        }
+
+        assert_eq!(
+            signal_tags(&index, SignalKind::Hook),
+            [
+                "PreToolUse:blocked",
+                "PreToolUse:allowed",
+                "UserPromptSubmit:context",
+                "PostToolUse:error",
+                "Stop:blocked",
+                "Stop:allowed",
+            ]
+        );
+        let linked = index
+            .signals
+            .iter()
+            .map(|signal| signal.v)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            linked,
+            [Some(0), None, None, None, None, None],
+            "only the blocking hook names the call it stopped"
+        );
+        assert_eq!(index.events.len(), 1, "hooks add no transcript events");
+        let text = format!("{:?}", index.signals);
+        assert!(!text.contains("SECRET") && !text.contains("secret.sh"));
+    }
+
+    #[test]
+    fn claude_denied_tools_link_to_their_call() {
+        let user =
+            "The user doesn't want to proceed with this tool use. The tool use was rejected.";
+        let mut index = FileIndex::default();
+        let records = [
+            claude_tool("toolu_a"),
+            refusal(
+                "toolu_a",
+                serde_json::json!(user),
+                true,
+                serde_json::json!("x"),
+            ),
+            claude_tool("toolu_b"),
+            refusal(
+                "toolu_b",
+                serde_json::json!([{"type":"text","text":"Permission to use Bash has been denied."}]),
+                true,
+                serde_json::json!("x"),
+            ),
+            claude_tool("toolu_c"),
+            // The same words on a result that did not fail are not a denial.
+            refusal("toolu_c", serde_json::json!(user), false, Value::Null),
+            claude_tool("toolu_d"),
+            refusal("toolu_d", serde_json::json!("exit 1"), true, Value::Null),
+            claude_tool("toolu_e"),
+            refusal(
+                "toolu_e",
+                serde_json::json!("blocked"),
+                true,
+                serde_json::json!("User rejected tool use"),
+            ),
+        ];
+        for (offset, record) in records.iter().enumerate() {
+            claude(&mut index, record, offset as u64);
+        }
+
+        let denials = index
+            .signals
+            .iter()
+            .filter(|signal| signal.k == SignalKind::Denial)
+            .map(|signal| (signal.n.as_deref(), signal.v))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            denials,
+            [
+                (Some("user"), Some(0)),
+                (Some("policy"), Some(1)),
+                (Some("user"), Some(4)),
+            ]
+        );
+        assert_eq!(index.events[0].id.as_deref(), Some("toolu_a"));
+        assert!(index.events[0].r.as_ref().is_some_and(|reply| reply.e));
+        assert!(!format!("{:?}", index.signals).contains("rejected"));
+    }
+
+    #[test]
+    fn codex_declined_approval_is_one_denial_linked_to_its_call() {
+        let mut index = FileIndex::default();
+        let records = [
+            call("c1"),
+            serde_json::json!({"type":"event_msg","payload":{"type":"exec_approval_request","call_id":"c1","command":["ls"]}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"exec_command_end","call_id":"c1","status":"declined"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"c1","status":"declined"}}}),
+            call("c2"),
+            serde_json::json!({"type":"event_msg","payload":{"type":"exec_command_end","call_id":"c2","status":"completed"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"gone","status":"declined"}}),
+        ];
+        for (offset, record) in records.iter().enumerate() {
+            codex(&mut index, record, offset as u64);
+        }
+
+        let denials = index
+            .signals
+            .iter()
+            .map(|signal| (signal.k, signal.n.as_deref(), signal.v, signal.o))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            denials,
+            [
+                (SignalKind::Denial, Some("declined"), Some(0), 2),
+                (SignalKind::Denial, Some("declined"), None, 6),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_signal_tags_are_bounded() {
+        assert_eq!(bounded(&"x".repeat(TAG_MAX + 1)).unwrap().len(), TAG_MAX);
+        assert_eq!(
+            bounded("claude-opus-5[1m]").as_deref(),
+            Some("claude-opus-5[1m]")
+        );
+        assert_eq!(bounded("bad\nvalue"), None);
+        assert_eq!(bounded("say \"hi\""), None);
+        assert_eq!(bounded(""), None);
+
+        let mut index = FileIndex::default();
+        let long = "m".repeat(200);
+        codex(
+            &mut index,
+            &turn_context(&long, &"e".repeat(200), &"a".repeat(200), &"s".repeat(200)),
+            0,
+        );
+        codex(
+            &mut index,
+            &turn_context("bad\nmodel", "high", "never", "read-only"),
+            1,
+        );
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"permission-mode","permissionMode":"p".repeat(200)}),
+            2,
+        );
+        claude(
+            &mut index,
+            &attachment(
+                serde_json::json!({"type":"hook_blocking_error","hookEvent":"E".repeat(200)}),
+            ),
+            3,
+        );
+        claude(
+            &mut index,
+            &attachment(serde_json::json!({"type":"hook_success","hookEvent":"with\nnewline"})),
+            4,
+        );
+
+        assert_eq!(signal_tags(&index, SignalKind::Model), [&long[..TAG_MAX]]);
+        assert_eq!(
+            signal_tags(&index, SignalKind::Permission),
+            [&"p".repeat(TAG_MAX)[..]]
+        );
+        let hooks = signal_tags(&index, SignalKind::Hook);
+        assert_eq!(hooks.len(), 2);
+        assert!(hooks[0].ends_with(":blocked"));
+        assert_eq!(hooks[1], "unknown:allowed");
+        for signal in &index.signals {
+            assert!(signal.n.as_deref().is_some_and(|n| n.len() <= TAG_MAX));
+        }
+    }
+
+    #[test]
+    fn run_signals_between_a_compaction_boundary_and_its_summary_still_make_one() {
+        let mut index = FileIndex::default();
+        let records = [
+            serde_json::json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":9}}),
+            serde_json::json!({"type":"permission-mode","permissionMode":"default"}),
+            attachment(serde_json::json!({"type":"hook_success","hookEvent":"SessionStart"})),
+            serde_json::json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":[]}}),
+        ];
+        for (offset, record) in records.iter().enumerate() {
+            claude(&mut index, record, offset as u64);
+        }
+
+        assert_eq!(signal_tags(&index, SignalKind::Compact).len(), 1);
+        assert_eq!(index.signals.len(), 3);
+    }
+
+    #[test]
+    fn run_signals_round_trip_through_the_index() {
+        let root = scratch("run-signals");
+        let v1 = root.join("index.json");
+        let log = root.join("session.jsonl");
+        write_lines(
+            &log,
+            &[
+                serde_json::json!({"type":"permission-mode","permissionMode":"acceptEdits"}),
+                claude_tool("toolu_1"),
+                attachment(
+                    serde_json::json!({"type":"hook_blocking_error","hookEvent":"PreToolUse","toolUseID":"toolu_1"}),
+                ),
+                refusal(
+                    "toolu_1",
+                    serde_json::json!("The user doesn't want to proceed with this tool use."),
+                    true,
+                    Value::Null,
+                ),
+            ],
+        );
+        let mut cache = EventCache::open(&v1);
+        let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(signal_tags(&index, SignalKind::Permission), ["acceptEdits"]);
+        assert_eq!(
+            signal_tags(&index, SignalKind::Hook),
+            ["PreToolUse:blocked"]
+        );
+        assert_eq!(signal_tags(&index, SignalKind::Denial), ["user"]);
+        assert_eq!(stored(&v1, &log), cold(&log));
+
+        let rollout = root.join("rollout.jsonl");
+        write_lines(
+            &rollout,
+            &[
+                turn_context("gpt-a", "high", "on-request", "workspace-write"),
+                call("c1"),
+                serde_json::json!({"type":"event_msg","payload":{"type":"exec_command_end","call_id":"c1","status":"declined"}}),
+            ],
+        );
+        let index = scan_file(&rollout, "codex", &mut cache, &mut false).unwrap();
+        assert_eq!(index.signals.len(), 5);
+        let mut fresh = EventCache::default();
+        let fresh_index = scan_file(&rollout, "codex", &mut fresh, &mut false).unwrap();
+        let reopened = EventCache::open(&v1);
+        let key = rollout.to_string_lossy();
+        let entry = reopened
+            .files
+            .get(key.as_ref())
+            .expect("the rollout is stored");
+        assert_eq!(format!("{:?}", entry.index), format!("{fresh_index:?}"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
