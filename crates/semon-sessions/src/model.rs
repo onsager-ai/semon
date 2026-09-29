@@ -80,6 +80,13 @@ pub(crate) struct Session {
     /// age from `activity[3]`.
     pub(crate) activity: Option<(String, String, i64, i64)>,
     pub(crate) busy: Vec<(i64, i64)>,
+    /// The transcript's tool calls, and those that failed or never
+    /// finished: the same numbers `/api/tx` reports, so a page needn't fetch
+    /// a transcript to count. Absent for a session with no transcript.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) calls: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) errors: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1356,6 +1363,8 @@ impl<'a> Builder<'a> {
             last: 0,
             activity: None,
             busy: Vec::new(),
+            calls: None,
+            errors: None,
         }
     }
 
@@ -4320,6 +4329,14 @@ pub(crate) fn build(
             )
         }));
         tx.insert(key, Transcript::from_slots(slots));
+    }
+    // Each session's totals come from its transcript index, built above from
+    // the same slots `/api/tx` counts.
+    for (key, session) in &mut sessions {
+        if let Some(transcript) = tx.get(key) {
+            session.calls = Some(transcript.calls);
+            session.errors = Some(transcript.errors);
+        }
     }
     let busy = BTreeMap::from([(machine.clone(), all_busy)]);
     let marks: BTreeMap<&str, String> = tx

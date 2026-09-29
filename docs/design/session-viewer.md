@@ -120,6 +120,7 @@ The model endpoint returns the mockup's globals verbatim in shape; other shapes 
 - **`GET /api/model`** returns:
   - `{version, now, machine, sessions (SESS), handoffs (H), turns, busy}`
   - `sessions` and `handoffs` use the mockup's exact field names: `name`, `harness`, `kind`, `lane`, `stub`, `state`, `model`, `tokens`, `repo`, `branch`, `start`, `last`, `activity`, `busy`; and `id`, `kind`, `ask`, `from`, `to`, `at`, `done`, `status`, `brief`, `result`, `answer`.
+  - Each session also carries `calls` and `errors`, its transcript's tool-call and failed-or-unfinished totals, the same numbers `/api/tx` reports. A page counts from the model and fetches no transcript for it. They are absent for a session with no transcript, and from a server that predates them.
   - Briefs and results are capped at 4 KB, as in the mockup data.
   - `turns` is the turn index: id, session, start handoff, end state, sent handoff ids, and the transcript offset of its first entry. The browser can no longer compute it from a full `TX`, because it no longer loads every transcript.
   - It carries an `ETag` and supports `?since=<version>` for live polling.

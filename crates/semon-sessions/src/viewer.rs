@@ -2471,6 +2471,40 @@ mod tests {
         assert!(get(&fixture, "/api/tx?sid=nobody").starts_with("HTTP/1.1 404"));
     }
 
+    /// The model's per-session `calls` and `errors` are the totals `/api/tx`
+    /// reports, so a page needn't fetch a transcript to count.
+    #[test]
+    fn the_models_counts_are_the_transcript_pages_totals() {
+        let fixture = Fixture::new();
+        fixture.write("proc/sys/kernel/hostname", "testbox\n");
+        fixture.claude(
+            "counted",
+            &[
+                json!({"type":"user","timestamp":"2026-09-24T00:00:00Z","sessionId":"counted","origin":{"kind":"human"},
+                    "message":{"role":"user","content":"run two"}}),
+                json!({"type":"assistant","timestamp":"2026-09-24T00:01:00Z","sessionId":"counted",
+                    "message":{"role":"assistant","content":[
+                        {"type":"tool_use","id":"good","name":"Bash","input":{"command":"true"}},
+                        {"type":"tool_use","id":"bad","name":"Bash","input":{"command":"false"}}]}}),
+                json!({"type":"user","timestamp":"2026-09-24T00:02:00Z","sessionId":"counted","toolUseResult":{},
+                    "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"good","content":"ok","is_error":false}]}}),
+                json!({"type":"user","timestamp":"2026-09-24T00:03:00Z","sessionId":"counted","toolUseResult":{},
+                    "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"bad","content":"exit 1","is_error":true}]}}),
+            ],
+        );
+        let body = |path: &str| -> Value {
+            let wire = get(&fixture, path);
+            serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap()
+        };
+        let model = body("/api/model");
+        let page = body("/api/tx?sid=counted");
+        assert_eq!(page["calls"], 2);
+        assert_eq!(page["errors"], 1);
+        let session = &model["sessions"]["counted"];
+        assert_eq!(session["calls"], page["calls"]);
+        assert_eq!(session["errors"], page["errors"]);
+    }
+
     /// The core answers without a transport: the same bodies, statuses and
     /// `ETag` the loopback server sends, GET only, and the headers it sends
     /// are the ones a server embedding the core is given.
