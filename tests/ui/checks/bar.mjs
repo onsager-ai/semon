@@ -238,7 +238,7 @@ export default async function barCheck(browser) {
     const pathNames = [];
     if (size === "phone") {
       await page.click(".topbar .lineage-parent"); await page.waitForSelector(".lineage-menu");
-      pathNames.push(...await page.locator(".lineage-menu [role=menuitem] span:last-child").allTextContents());
+      pathNames.push(...await page.locator(".lineage-menu [role=menuitem] span:first-child").allTextContents());
     } else pathNames.push(...await page.locator("#topbar .l1 .crumb").allTextContents(), await page.locator("#topbar .t").textContent());
     const expectedPath = []; let cursor = grandchild.id;
     while (cursor && D.SESS[cursor]) { expectedPath.unshift(D.SESS[cursor].name); cursor = parentOf(cursor); }
