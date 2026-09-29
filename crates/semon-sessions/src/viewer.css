@@ -76,7 +76,7 @@ code { overflow-wrap: anywhere; }
 .main { overflow-y: auto; min-width: 0; position: relative; }
 .scrim { display: none; }
 .brandrow { display: flex; align-items: center; gap: 8px; padding: 14px 16px 10px; font-weight: 600; font-size: 15px; }
-.mark { width: 20px; height: 20px; background: var(--ink); -webkit-mask: url(/mark.svg) center / contain no-repeat; mask: url(/mark.svg) center / contain no-repeat; flex: none; }
+.mark { width: 16px; height: 16px; background: var(--ink); -webkit-mask: url(/mark.svg) center / contain no-repeat; mask: url(/mark.svg) center / contain no-repeat; flex: none; }
 .brandrow .close { display: none; margin-left: auto; }
 /* Search sits on the same grid as the nav rows below it: same side margin, padding, icon size, gap and height,
    so its icon and text line up with Home / Machines. */
