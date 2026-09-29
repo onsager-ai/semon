@@ -49,12 +49,15 @@ fn same_origin_request(request: &Request, origin: &str) -> bool {
     })
 }
 
+/// Sends a reply with `headers`: a core reply's own (`ViewerReply::headers`),
+/// or [`SECURITY_HEADERS`] for this server's own answers.
 fn answer(
     request: Request,
     status: u16,
     content_type: &str,
     body: Vec<u8>,
     etag: Option<&str>,
+    headers: &[(&str, &str)],
     cookie: bool,
 ) {
     let mut response = Response::from_data(body).with_status_code(StatusCode(status));
@@ -62,7 +65,7 @@ fn answer(
     if let Some(etag) = etag {
         response.add_header(header("ETag", etag));
     }
-    for (name, value) in SECURITY_HEADERS {
+    for (name, value) in headers {
         response.add_header(header(name, value));
     }
     if cookie {
@@ -139,6 +142,7 @@ fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
             "text/plain; charset=utf-8",
             b"Forbidden".to_vec(),
             None,
+            &SECURITY_HEADERS,
             false,
         );
         return;
@@ -149,12 +153,14 @@ fn handle(core: &mut ViewerCore, request: Request, address: SocketAddr) {
     }
     let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
     let reply = core.respond("GET", path, query, if_none_match.as_deref());
+    let headers = reply.headers();
     answer(
         request,
         reply.status,
         reply.content_type,
         reply.body,
         reply.etag.as_deref(),
+        headers,
         query_token,
     );
 }

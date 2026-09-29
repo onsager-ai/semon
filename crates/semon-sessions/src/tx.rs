@@ -16,6 +16,7 @@ use std::{
 use serde_json::{Map, Value, json};
 
 use crate::{
+    attachments,
     events::{self, Reply, ScriptArg},
     field,
     model::{
@@ -32,8 +33,9 @@ pub(crate) const PAGE_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const PREVIEW_MAX: usize = 1536;
 /// "View all" reads up to this much of one call.
 pub(crate) const FULL_MAX: usize = 8 * 1024 * 1024;
-/// A source line longer than this is not read back.
-const LINE_MAX: u64 = FULL_MAX as u64 + 1024 * 1024;
+/// A source line longer than this is not read back for a page (but for a
+/// prompt's, see [`prompt_record`]).
+pub(crate) const LINE_MAX: u64 = FULL_MAX as u64 + 1024 * 1024;
 
 const SHELLS: [&str; 4] = ["Bash", "shell", "exec_command", "local_shell"];
 const EDITS: [&str; 5] = ["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch"];
@@ -1333,9 +1335,20 @@ fn render(
     let file = slot.file.and_then(|file| built.files.get(file));
     let mut record = || file.and_then(|file| lines.get(&file.path, slot.offset));
     let entry = match &slot.kind {
+        // Your message is drawn from the model's ask, with the images its
+        // line attaches.
+        SlotKind::H(id) if model::is_ask(id) => {
+            let record = prompt_record(record(), file, slot.offset);
+            with_images(json!({"k": "h", "id": id}), record.as_deref(), slot.offset)
+        }
         SlotKind::H(id) => json!({"k": "h", "id": id}),
         SlotKind::U => {
-            json!({"k": "u", "text": cap(&record().and_then(|record| prompt_text(&record)).unwrap_or_default(), MSG_MAX)})
+            let record = prompt_record(record(), file, slot.offset);
+            with_images(
+                json!({"k": "u", "text": cap(&record.as_deref().and_then(prompt_text).unwrap_or_default(), MSG_MAX)}),
+                record.as_deref(),
+                slot.offset,
+            )
         }
         SlotKind::A => {
             json!({"k": "a", "text": cap(&record().and_then(|record| model::assistant_text(&record, slot.block as usize)).unwrap_or_default(), MSG_MAX)})
@@ -1424,6 +1437,32 @@ fn render(
         ),
     };
     Some(entry)
+}
+
+/// A prompt's line as a page reads it or, when it is longer than a page reads
+/// of one line ([`LINE_MAX`]), as the model reads it: its images can make it
+/// that long, and its text and images still show.
+fn prompt_record(
+    read: Option<Rc<Value>>,
+    file: Option<&SlotFile>,
+    offset: u64,
+) -> Option<Rc<Value>> {
+    read.or_else(|| model::read_line(&file?.path, offset).map(Rc::new))
+}
+
+/// `entry` with `img`: the images its prompt's line (at `offset`) attaches,
+/// by reference ([`attachments::refs`], each with the line's offset `o`),
+/// when there are any. Their bytes are served one at a time by
+/// `/api/attachment?sid=&o=&b=`, never here.
+fn with_images(mut entry: Value, record: Option<&Value>, offset: u64) -> Value {
+    let mut refs = record.map(attachments::refs).unwrap_or_default();
+    if !refs.is_empty() {
+        for image in &mut refs {
+            image["o"] = json!(offset);
+        }
+        entry["img"] = Value::Array(refs);
+    }
+    entry
 }
 
 fn thought_secs(slots: &[Slot], index: usize) -> Option<i64> {

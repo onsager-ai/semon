@@ -29,7 +29,8 @@
 //    element inside a rendered `.md` block — it stays escaped text (the synthetic pass also checks the literal text
 //    is present: scriptText).
 //  - document-wide, on every screen visited, on both fixtures: exactly one <script> element (the page's own
-//    /viewer.js) and zero <img>/<iframe> anywhere in the document, not only inside `.md` — this is the check the
+//    /viewer.js) and zero <img>/<iframe> anywhere in the document (but an attached image's own thumbnail, on
+//    /api/attachment), not only inside `.md` — this is the check the
 //    extras fixture's XSS-named lane (an `<img…>` session name, rendered outside any `.md` block: in the sidebar,
 //    the crumb, the top bar) is for.
 //  - htmlWrites === 0: the renderer never uses `innerHTML`, `outerHTML` or `insertAdjacentHTML` (instrumented from
@@ -90,8 +91,9 @@ async function runPass(page, D, tag, scheme) {
   const over = () => overflow(page);
   // Document-wide element census, on every screen: exactly one <script> (the page's own /viewer.js) and zero
   // <img>/<iframe> anywhere in the document — not scoped to `.md`, so a name or brief that carries an XSS payload
-  // (the extras fixture's `<img…>`-named lane) is caught wherever it's rendered, not only inside a markdown block.
-  const domCheck = () => page.evaluate(() => ({ scripts: document.querySelectorAll("script").length, imgs: document.querySelectorAll("img").length, iframes: document.querySelectorAll("iframe").length }));
+  // (the extras fixture's `<img…>`-named lane) is caught wherever it's rendered, not only inside a markdown block. The one
+  // <img> the viewer makes, an attached image's thumbnail or sheet with its src on /api/attachment and no handler, isn't counted.
+  const domCheck = () => page.evaluate(() => ({ scripts: document.querySelectorAll("script").length, imgs: [...document.querySelectorAll("img")].filter((x) => !(x.matches("button.attach > img.attach-img, dialog.image-viewer img.attach-full") && /^\/api\/attachment\?sid=[^&]*&o=\d+&b=\d+&v=[0-9a-f]{16}$/.test(x.getAttribute("src") ?? "") && ![...x.attributes].some((a) => /^on/i.test(a.name)))).length, iframes: document.querySelectorAll("iframe").length }));
   const runScan = () => page.evaluate(() => { const PAT = { tableRow: /^\|.*\|$/, fence: /```/, heading: /^#{1,6} /, bold: /\*\*/ }; const c = { tableRow: 0, fence: 0, heading: 0, bold: 0 }, ex = [];
     for (const blk of document.querySelectorAll(".md p, .md li, .md th, .md td, .md .mh")) { const x = blk.cloneNode(true); x.querySelectorAll("code, pre, ul, ol").forEach((n) => n.remove()); const t = x.textContent.trim();
       for (const k in PAT) if (PAT[k].test(t)) { c[k]++; if (ex.length < 4) ex.push(k + ": " + t.slice(0, 70)); } }

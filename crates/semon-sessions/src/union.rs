@@ -264,8 +264,9 @@ impl Refresh {
 /// live refresh behind them, and no listener, token or Host check of its own.
 /// It lets another server embed the viewer: that server owns the socket and
 /// decides who may ask, then hands each request to [`ViewerCore::respond`]
-/// and sends back the [`ViewerReply`] with
-/// [`SECURITY_HEADERS`](crate::SECURITY_HEADERS).
+/// and sends back the [`ViewerReply`] with its headers
+/// ([`ViewerReply::headers`]: [`SECURITY_HEADERS`](crate::SECURITY_HEADERS),
+/// or an attachment's image's own).
 ///
 /// A core reads one machine's homes ([`ViewerCore::new`]) or several
 /// ([`ViewerCore::with_machines`]). A call does blocking file I/O, and the
@@ -1103,7 +1104,7 @@ impl ViewerCore {
         }
         let answer = match path {
             "/api/model" => self.model(&views, extras, query, if_none_match),
-            "/api/tx" => self.by_session(&views, path, query, if_none_match),
+            "/api/tx" | "/api/attachment" => self.by_session(&views, path, query, if_none_match),
             "/api/entry" if query_value(query, "as").is_some() => {
                 self.by_session(&views, path, query, if_none_match)
             }
@@ -1263,7 +1264,8 @@ impl ViewerCore {
         })
     }
 
-    /// `/api/tx` and `/api/entry?sid=…`: the machine that owns the session.
+    /// `/api/tx`, `/api/attachment` and `/api/entry?sid=…`: the machine that
+    /// owns the session.
     fn by_session(
         &self,
         views: &Views,
