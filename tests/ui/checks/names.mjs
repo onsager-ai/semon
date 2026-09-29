@@ -9,7 +9,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { ENV, served, data, reporter, goto, overflow } from "../lib.mjs";
 
-const ALLOWED = new Set(["Claude Code", "Claude", "Codex"]);
+// A Codex session started directly is a "Codex run" in the model, so its top bar says so; every other place says "Codex".
+const ALLOWED = new Set(["Claude Code", "Claude", "Codex", "Codex run"]);
 const OUT = path.join(ENV.out, "names");
 fs.mkdirSync(OUT, { recursive: true });
 
