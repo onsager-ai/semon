@@ -97,6 +97,12 @@ export default async function sidebarCheck(browser) {
     r.expect(g.groups.every((x) => x.lefts.length === 1), "phone: names in a group start at different x: " + JSON.stringify(g.groups));
     r.expect(g.groups.every((x) => x.ends.length === 1), "phone: times in a group end at different x: " + JSON.stringify(g.groups));
 
+    // The meta line carries the harness name and, on parents, the toggle's reserved width: the host gives way first, so the
+    // fixture's short repo names are never cut.
+    const cut = await page.evaluate(() => [...document.querySelectorAll("#lanes .srow-meta .repo-short")].filter((e) => e.getClientRects().length && e.scrollWidth > e.clientWidth + 1).map((e) => e.textContent + " " + e.clientWidth + "/" + e.scrollWidth));
+    R.phoneRepoCut = cut;
+    r.expect(cut.length === 0, "phone: repo names are cut on the meta line: " + cut.join(", "));
+
     await page.click('#lanes .tree-more[aria-label*="Fan-out"]');
     const revealed = await groupOf(page, fan.id);
     R.phoneRevealed = revealed;

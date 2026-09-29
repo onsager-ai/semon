@@ -724,6 +724,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .menu button, .filters.pop label { min-height: 44px; }
   .tree-toggle { width: 44px; height: 44px; }
   .tree-row.has-toggle .srow-meta { padding-right: 44px; }
+  .srow-meta .host { max-width: 10ch; flex-shrink: 3; }
   .tree-toggle svg { width: 20px; height: 20px; }
   .tree-row { margin-inline: 4px; }
   .tree-more { min-height: 44px; margin-inline: 4px; }
