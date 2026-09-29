@@ -446,6 +446,12 @@ export default async function shellCheck(browser) {
           // A viewport screenshot, not fullPage: the drawer and scrim are fixed-position, so only the viewport shows
           // them where the user actually sees them.
           await page.screenshot({ path: path.join(output, key + "-drawer.png"), fullPage: false });
+          // A popover opened from the drawer (an account menu, say): Esc closes it and leaves the drawer open.
+          await page.evaluate(() => document.getElementById("drawer-popover").showPopover());
+          await page.keyboard.press("Escape");
+          const afterPopoverEscape = await page.evaluate(() => ({ popover: document.getElementById("drawer-popover").matches(":popover-open"), drawer: document.body.classList.contains("drawer-open") }));
+          results[key].popoverEscape = afterPopoverEscape;
+          r.expect(!afterPopoverEscape.popover && afterPopoverEscape.drawer, key + " Escape with a popover open should close only the popover: " + JSON.stringify(afterPopoverEscape));
           await page.keyboard.press("Escape");
           const closedSidebarRect = await stableRect(page, "#sidebar");
           const drawerAfterEscape = await page.evaluate(() => ({

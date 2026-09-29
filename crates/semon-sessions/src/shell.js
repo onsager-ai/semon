@@ -21,8 +21,11 @@
   lead?.addEventListener("click", openDrawer);
   drawerClose?.addEventListener("click", () => closeDrawer());
   scrim?.addEventListener("click", () => closeDrawer());
+  // Esc closes an open popover first (the browser does that after this listener), and the drawer only when none is open, so
+  // a menu opened from the drawer closes on its own. A browser without popovers has none open.
+  const popoverOpen = () => { try { return !!document.querySelector(":popover-open"); } catch { return false; } };
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeDrawer();
+    if (event.key === "Escape" && !popoverOpen()) closeDrawer();
   });
 
   let touchStart = null;
