@@ -1810,7 +1810,7 @@
     const asked = fetch("/api/analytics?" + key, { credentials: "same-origin", headers: kept?.etag ? { "If-None-Match": kept.etag } : {} })
       .then((r) => {
         if (r.status === 304) return false;
-        if (r.status === 403) { ended(); return false; }
+        if (r.status === 403) { ended(403); return false; }
         if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status });
         const etag = r.headers.get("ETag");
         return r.json().then((data) => {
