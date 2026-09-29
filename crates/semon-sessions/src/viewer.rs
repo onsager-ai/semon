@@ -315,11 +315,12 @@ pub const SECURITY_HEADERS: [(&str, &str); 5] = [
 ];
 
 /// Headers for an attachment's image from `/api/attachment`: its URL names
-/// its content (`v`), so the browser keeps it, for this viewer alone; opened
-/// on its own, the image is a document that may load nothing, run nothing
-/// and be framed by nothing.
+/// its content (`v`), so the browser may keep it, for this viewer alone, but
+/// only for a day: a screenshot is content, and redacting the logs doesn't
+/// clear a copy already fetched. Opened on its own, the image is a document
+/// that may load nothing, run nothing and be framed by nothing.
 pub(crate) const ATTACHMENT_HEADERS: [(&str, &str); 5] = [
-    ("Cache-Control", "private, max-age=31536000, immutable"),
+    ("Cache-Control", "private, max-age=86400"),
     (
         "Content-Security-Policy",
         "default-src 'none'; style-src 'unsafe-inline'; sandbox",
@@ -1501,7 +1502,7 @@ impl MachineView {
     /// `/api/attachment?sid=&o=&b=&v=`: one image a prompt of session `sid`
     /// attaches, as `/api/tx` names it (its line's offset `o`, its block
     /// `b`, the version of its content `v`), decoded, sent as its exact
-    /// type. Its URL names its content, so it may be cached for good; a line
+    /// type. Its URL names its content, so it may be cached (for a day); a line
     /// rewritten under the same offset no longer matches `v`, and is a 404
     /// until the page reads its new URL. The offset must be one of the
     /// session's own prompts in the model (a message of yours, or a prompt
@@ -3663,7 +3664,7 @@ mod tests {
             .status,
             405
         );
-        // On the wire: the exact type, nosniff, cached for good, a CSP of its own; nothing else is cached.
+        // On the wire: the exact type, nosniff, cached privately for a day, a CSP of its own; nothing else is cached.
         let wire = get(
             &fixture,
             &format!("/api/attachment?{}", url("pics", at[0], 0, &png)),
@@ -3672,7 +3673,7 @@ mod tests {
         for header in [
             "Content-Type: image/png",
             "X-Content-Type-Options: nosniff",
-            "Cache-Control: private, max-age=31536000, immutable",
+            "Cache-Control: private, max-age=86400",
             "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox",
             "X-Frame-Options: DENY",
             "Referrer-Policy: no-referrer",

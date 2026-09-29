@@ -1,7 +1,7 @@
 // Images a prompt attaches, on the extras fixture's `attach` lane (fixture.mjs), at 390 and 1280 px, light and dark:
 //   - /api/tx names each image (its line's offset and block, type, size, content version, width and height) and holds none
 //     of its bytes, and no "[Image #1]" placeholder or "[image]" text; /api/attachment serves one as image/png with nosniff,
-//     an immutable private cache and a CSP of its own, and refuses a block that isn't an image, another session's offset, a
+//     a private one-day cache and a CSP of its own, and refuses a block that isn't an image, another session's offset, a
 //     version that isn't the content's and the masked image;
 //   - the transcript shows a thumbnail for each image (loaded, at most 200×160, its shape kept, alt "Attached image N (PNG,
 //     …)") in your messages, the queued one, the image-only one and a prompt that isn't yours, and a quiet "Image not
@@ -68,7 +68,7 @@ export default async function attachCheck(browser) {
     r.expect(api.images.length === 5 && refs.filter((i) => !i.na).length === 4 && refs.filter((i) => i.na).length === 1, "/api/tx names 4 servable images and 1 unavailable in 5 prompts: " + JSON.stringify(api.images));
     r.expect(refs.every((i) => i.na || (i.type === "image/png" && i.size > 0 && Number.isInteger(i.o) && Number.isInteger(i.b) && /^[0-9a-f]{16}$/.test(i.v) && [[180, 390], [320, 140]].some(([w, h]) => i.w === w && i.h === h))), "each image reference has its offset, block, type, size, version and the PNG's own width and height: " + JSON.stringify(refs));
     r.expect(!api.bytesInPage && !api.placeholders, "/api/tx holds no image bytes and no placeholder text");
-    r.expect(api.ok?.status === 200 && api.ok.type === "image/png" && api.ok.nosniff === "nosniff" && /immutable/.test(api.ok.cache ?? "") && /private/.test(api.ok.cache ?? "") && /default-src 'none'/.test(api.ok.csp ?? "") && api.ok.bytes === api.size, "/api/attachment serves the PNG with its headers: " + JSON.stringify(api.ok));
+    r.expect(api.ok?.status === 200 && api.ok.type === "image/png" && api.ok.nosniff === "nosniff" && api.ok.cache === "private, max-age=86400" && /private/.test(api.ok.cache ?? "") && /default-src 'none'/.test(api.ok.csp ?? "") && api.ok.bytes === api.size, "/api/attachment serves the PNG with its headers: " + JSON.stringify(api.ok));
     r.expect([api.textBlock, api.otherSession, api.otherVersion, api.masked].every((x) => x?.status === 404), "/api/attachment refuses a text block, another session, another version and the masked image: " + JSON.stringify([api.textBlock?.status, api.otherSession?.status, api.otherVersion?.status, api.masked?.status]));
     r.expect(page.errors.length === 0, "api: page errors " + page.errors.join(" | "));
     await page.context().close();
@@ -152,7 +152,7 @@ export default async function attachCheck(browser) {
       return { status: res.status, type: res.headers.get("content-type"), nosniff: res.headers.get("x-content-type-options"), cache: res.headers.get("cache-control"), csp: res.headers.get("content-security-policy") };
     }, SID);
     R.embedding = got;
-    r.expect(got?.status === 200 && got.type === "image/png" && got.nosniff === "nosniff" && /immutable/.test(got.cache ?? "") && /default-src 'none'/.test(got.csp ?? ""), "the embedding fixture serves the image with its own headers: " + JSON.stringify(got));
+    r.expect(got?.status === 200 && got.type === "image/png" && got.nosniff === "nosniff" && got.cache === "private, max-age=86400" && /default-src 'none'/.test(got.csp ?? ""), "the embedding fixture serves the image with its own headers: " + JSON.stringify(got));
     await page.context().close();
   }
   return r.done();
