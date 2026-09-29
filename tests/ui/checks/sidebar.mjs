@@ -26,6 +26,10 @@
 //     without saving that, and its saved choice is unchanged after navigating away; a collapse made while the child is open
 //     stays collapsed through redraws; the open child is always listed; in the rail the ancestor keeps a ring, no highlight, and
 //     aria-current="true".
+//   - the sidebar as a whole never scrolls: the header, search and nav keep their boxes while "Recent" scrolls on its own, and
+//     "All sessions ›" stays fully inside the screen at 390 and 1280 whether the list overflows or not. A short list leaves
+//     the footer right after its last row; a row focused by keyboard scrolls into the list, never under the footer; the rail
+//     still toggles and shows no footer.
 //   - screenshots of the sidebar (and of the sheet, and of the sticky list) at 390 and 1280, light and dark, go to out/sidebar-*.png.
 import path from "node:path";
 import { ENV, served, goto, data, reporter, overflow, settled } from "../lib.mjs";
@@ -135,6 +139,20 @@ const servedPatched = async (browser, opts, kidIds) => {
   await page.reload({ waitUntil: "load" }); await settled(page);
   return page;
 };
+// The sidebar's boxes and the list's scroll state, in one read.
+const sideGeometry = (page) => page.evaluate(() => {
+  const r4 = (e) => { if (!e) return null; const b = e.getBoundingClientRect(); return [b.left, b.top, b.width, b.height].map((n) => Math.round(n * 10) / 10); };
+  const sb = document.querySelector("#sidebar"), list = document.querySelector("#side-list"), all = document.querySelector("#all-sessions");
+  const rows = [...document.querySelectorAll("#lanes .srow")].filter((e) => e.getClientRects().length);
+  const last = rows.at(-1)?.getBoundingClientRect(), a = all?.getBoundingClientRect(), l = list.getBoundingClientRect();
+  return {
+    brand: r4(document.querySelector(".brandrow")), search: r4(document.querySelector(".side-search")), nav: r4(document.querySelector("#nav")),
+    sidebarTop: sb.scrollTop, listTop: Math.round(list.scrollTop), overflowing: list.scrollHeight > list.clientHeight + 1, atEnd: list.scrollTop + list.clientHeight >= list.scrollHeight - 1,
+    footShown: !!all && all.getClientRects().length > 0, footTop: a ? Math.round(a.top * 10) / 10 : null, footBottom: a ? Math.round(a.bottom * 10) / 10 : null,
+    listBottom: Math.round(l.bottom * 10) / 10, lastRowBottom: last ? Math.round(last.bottom * 10) / 10 : null, vh: innerHeight,
+  };
+});
+const scrollList = (page, where) => page.evaluate((where) => { const l = document.querySelector("#side-list"); l.scrollTop = where === "end" ? l.scrollHeight : where === "mid" ? (l.scrollHeight - l.clientHeight) / 2 : 0; }, where);
 
 // The contrast ratio of each visible element's text against what is behind it (its ancestors' backgrounds, composited).
 const contrast = (page, selector, pseudo) => page.evaluate(({ selector, pseudo }) => {
@@ -171,8 +189,9 @@ const sheetOf = (page) => page.evaluate(() => {
   };
 });
 
+// Sticky rows stick to the top of the sidebar's one scroller, #side-list (the header, search and nav sit above it).
 const stickyBox = (page, id) => page.evaluate((id) => {
-  const sb = document.querySelector("#sidebar"), item = [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id), row = item?.querySelector(":scope > .tree-row");
+  const sb = document.querySelector("#side-list"), item = [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id), row = item?.querySelector(":scope > .tree-row");
   if (!row) return null;
   const s = sb.getBoundingClientRect(), r = row.getBoundingClientRect(), f = row.querySelector(".tree-fewer")?.getBoundingClientRect();
   return { top: Math.round((r.top - s.top) * 10) / 10, bottom: Math.round((r.bottom - s.top) * 10) / 10, scrollTop: Math.round(sb.scrollTop), max: Math.round(sb.scrollHeight - sb.clientHeight), stuck: row.classList.contains("stuck"), fewerVisible: !!f && f.top >= s.top - 0.5 && f.bottom <= s.bottom + 0.5, viewport: Math.round(s.height) };
@@ -192,7 +211,7 @@ const servedModel = async (browser, opts, patch) => {
   await page.reload({ waitUntil: "load" }); await settled(page);
   return { page, state };
 };
-const scrollSidebar = async (page, y) => { await page.evaluate((y) => { document.querySelector("#sidebar").scrollTop = y; }, y); await page.waitForTimeout(80); };
+const scrollSidebar = async (page, y) => { await page.evaluate((y) => { document.querySelector("#side-list").scrollTop = y; }, y); await page.waitForTimeout(80); };
 
 export default async function sidebarCheck(browser) {
   const D = await data({ extras: true });
@@ -472,13 +491,13 @@ export default async function sidebarCheck(browser) {
 
     // Navigating to a row that sits under the sticky row scrolls it clear of that row.
     const target = swarmFull[2];
-    await page.evaluate((id) => { const sb = document.querySelector("#sidebar"), row = sb.querySelector('.srow[data-id="' + CSS.escape(id) + '"]'); sb.scrollTop += row.getBoundingClientRect().top - sb.getBoundingClientRect().top - 4; }, target);
+    await page.evaluate((id) => { const sb = document.querySelector("#side-list"), row = sb.querySelector('.srow[data-id="' + CSS.escape(id) + '"]'); sb.scrollTop += row.getBoundingClientRect().top - sb.getBoundingClientRect().top - 4; }, target);
     await page.waitForTimeout(80);
     await page.evaluate((id) => document.querySelector('#lanes .srow[data-id="' + CSS.escape(id) + '"]').click(), target);
     await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, name(target));
     await page.waitForTimeout(150);
     const cleared2 = await page.evaluate(() => {
-      const sb = document.querySelector("#sidebar").getBoundingClientRect(), cur = document.querySelector('#lanes .srow[aria-current="page"]')?.getBoundingClientRect(), st = document.querySelector("#lanes .tree-row.stuck")?.getBoundingClientRect();
+      const sb = document.querySelector("#side-list").getBoundingClientRect(), cur = document.querySelector('#lanes .srow[aria-current="page"]')?.getBoundingClientRect(), st = document.querySelector("#lanes .tree-row.stuck")?.getBoundingClientRect();
       return cur && st ? { curTop: Math.round(cur.top - sb.top), curBottom: Math.round(cur.bottom - sb.top), stickyBottom: Math.round(st.bottom - sb.top), viewport: Math.round(sb.height) } : null;
     });
     R.desktopReveal = cleared2;
@@ -645,7 +664,7 @@ export default async function sidebarCheck(browser) {
 
       if (!dark) {
         // A live update while Swarm's whole list is open: it stays open, reorders, takes the new child, and keeps focus on "Show fewer".
-        await page.evaluate(() => { document.querySelector("#sidebar").scrollTop = 0; });
+        await page.evaluate(() => { document.querySelector("#side-list").scrollTop = 0; });
         await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
         await page.waitForTimeout(150);
         state.edit = finishSwarm;
@@ -713,6 +732,64 @@ export default async function sidebarCheck(browser) {
       await page.keyboard.press("Escape");
       await page.waitForFunction(() => !document.querySelector("dialog.kids-sheet"));
       r.expect(await page.evaluate(() => document.body.classList.contains("drawer-open")), "nested phone: Esc leaves the drawer open");
+      await page.context().close();
+    }
+  }
+
+  // ---- The list scrolls, the rest of the sidebar and "All sessions" stay put -------------------------------------------
+  // A lane with no spawned sessions and no parent gives a query that leaves one row, so the list is short.
+  const spawned = new Set(D.H.filter((h) => h.kind === "spawn").flatMap((h) => [h.from, h.to]));
+  const lone = Object.values(D.SESS).find((s) => s.lane && !spawned.has(s.id));
+  for (const [size, tagSize] of [["phone", "390"], ["desktop", "1280"]]) {
+    for (const dark of [false, true]) {
+      const tag = dark ? "dark" : "light", P = size + " " + tag;
+      const page = await served(browser, { extras: true, size, dark });
+      await page.waitForSelector("#lanes .treeitem", { state: "attached" });
+      if (size === "phone") await openDrawer(page);
+      const top = await sideGeometry(page);
+      r.expect(top.overflowing, P + ": the fixture's list must overflow or this proves nothing: " + JSON.stringify(top));
+      r.expect(top.sidebarTop === 0 && top.listTop === 0 && top.footShown && top.footTop >= 0 && top.footBottom <= top.vh, P + ": at rest 'All sessions' is inside the screen: " + JSON.stringify(top));
+      r.expect(top.footTop >= top.listBottom - 0.5, P + ": 'All sessions' sits below the list, not over it: " + JSON.stringify(top));
+      await page.screenshot({ path: path.join(ENV.out, "sidebar-scroll-" + tagSize + "-" + tag + "-top.png") });
+      for (const where of ["mid", "end"]) {
+        await scrollList(page, where);
+        const g = await sideGeometry(page);
+        R["scroll" + P + where] = g;
+        r.expect(g.listTop > 0, P + ": the list scrolled to " + where + ": " + JSON.stringify(g));
+        r.expect(g.sidebarTop === 0, P + ": the sidebar itself did not scroll (" + where + "): scrollTop " + g.sidebarTop);
+        r.expect(JSON.stringify([g.brand, g.search, g.nav]) === JSON.stringify([top.brand, top.search, top.nav]), P + ": header, search and nav kept their boxes (" + where + "): " + JSON.stringify([g.brand, g.search, g.nav]) + " vs " + JSON.stringify([top.brand, top.search, top.nav]));
+        r.expect(g.footShown && g.footTop >= 0 && g.footBottom <= g.vh && g.footTop === top.footTop, P + ": 'All sessions' stays fully on screen and does not move (" + where + "): " + JSON.stringify(g));
+        if (where === "mid") await page.screenshot({ path: path.join(ENV.out, "sidebar-scroll-" + tagSize + "-" + tag + "-mid.png") });
+      }
+      r.expect((await sideGeometry(page)).atEnd, P + ": the list reaches its end");
+      // Keyboard focus scrolls the row into the list, never under the footer.
+      await scrollList(page, "top");
+      await page.evaluate(() => [...document.querySelectorAll("#lanes .srow")].filter((e) => e.getClientRects().length).at(-1).focus());
+      const focused = await page.evaluate(() => { const f = document.activeElement.getBoundingClientRect(), l = document.querySelector("#side-list").getBoundingClientRect(), a = document.querySelector("#all-sessions").getBoundingClientRect(); return { top: Math.round(f.top), bottom: Math.round(f.bottom), listTop: Math.round(l.top), listBottom: Math.round(l.bottom), footTop: Math.round(a.top), sidebar: document.querySelector("#sidebar").scrollTop }; });
+      R["focus" + P] = focused;
+      r.expect(focused.bottom <= focused.listBottom && focused.bottom <= focused.footTop && focused.top >= focused.listTop && focused.sidebar === 0, P + ": the last row, focused, sits inside the list and above the footer: " + JSON.stringify(focused));
+      r.expect(await overflow(page) === 0, P + ": no sideways overflow");
+      // A short list: the footer follows the last row.
+      if (lone) {
+        await page.fill("#q", lone.name); await page.waitForTimeout(150);
+        const g = await sideGeometry(page);
+        R["short" + P] = g;
+        r.expect(!g.overflowing && g.lastRowBottom !== null, P + ": a query for '" + lone.name + "' leaves a short list: " + JSON.stringify(g));
+        r.expect(g.footTop - g.lastRowBottom >= 0 && g.footTop - g.lastRowBottom <= 16, P + ": a short list leaves 'All sessions' right after its last row: gap " + (g.footTop - g.lastRowBottom));
+        if (!dark) await page.screenshot({ path: path.join(ENV.out, "sidebar-scroll-" + tagSize + "-" + tag + "-short.png") });
+      } else r.expect(false, "the extras fixture has no lone lane for the short-list check");
+      // The rail: still toggles, no footer, no sidebar scroll.
+      if (size === "desktop" && !dark) {
+        await page.fill("#q", ""); await page.waitForTimeout(100);
+        await page.click("#rail-toggle"); await page.waitForTimeout(300);
+        const g = await sideGeometry(page);
+        R.railScroll = g;
+        r.expect(await page.evaluate(() => document.querySelector(".app").classList.contains("rail")), "rail: the toggle still collapses the sidebar");
+        r.expect(!g.footShown && g.sidebarTop === 0, "rail: no 'All sessions' footer and the sidebar does not scroll: " + JSON.stringify(g));
+        await page.click("#rail-toggle"); await page.waitForTimeout(300);
+        r.expect(!(await page.evaluate(() => document.querySelector(".app").classList.contains("rail"))) && (await sideGeometry(page)).footShown, "rail: the toggle expands it again and the footer returns");
+      }
+      r.expect(page.errors.length === 0, P + ": page errors " + page.errors.join("; "));
       await page.context().close();
     }
   }
