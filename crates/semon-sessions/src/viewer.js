@@ -1317,7 +1317,9 @@
     const d = el("dialog", "viewer runs-sheet"); d.setAttribute("aria-label", "Runs under " + s.name); const head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose");
     title.append(el("span", null, "Runs · " + children.length + " · API-equivalent cost")); close.type = "button"; close.setAttribute("aria-label", "Close runs"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
     const body = el("div", "vb"), tree = el("div", "runs-tree"); appendRunsTree(s, tree, d); body.append(tree); d.append(head, body); document.body.append(d); d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
-    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } });
+    d.addEventListener("close", () => { const leaving = !!pendingSessionOpen; d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } }
+      /* Opened from the ⋯ menu, whose item is gone and whose anchor is not drawn on a phone: focus returns to ⋯, not the page. */
+      if (!leaving && (!document.activeElement || document.activeElement === document.body)) $("#more-btn")?.focus({ preventScroll: true }); });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
   }
   document.addEventListener("click", (e) => {

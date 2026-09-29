@@ -403,6 +403,35 @@ export default async function tooltipCheck(browser) {
     });
   }
 
+  // ---- The Started line's machine name: its tip is the whole name, and shows only while the name is cut off ----
+  {
+    const tag = "started line phone", page = await served(browser, { size: "phone" });
+    await guard(r, tag, page, async () => {
+      const name = ".turns > .divider.started .dv-machine";
+      let found = false;
+      for (const s of Object.values(D.SESS)) { await goto(page, { v: "session", id: s.id }, D); await page.waitForTimeout(120); if (await page.locator(name).count()) { found = true; break; } }
+      r.expect(found, tag + ": no session showed a Started line");
+      if (!found) return;
+      await page.locator(name).scrollIntoViewIfNeeded(); await page.waitForTimeout(150);
+      const facts = () => page.evaluate((sel) => { const n = document.querySelector(sel); return { text: n.textContent, tip: n.dataset.tip, cut: n.scrollWidth > n.clientWidth }; }, name);
+      const fit = await facts();
+      r.expect(!fit.cut && !!fit.tip && fit.tip === fit.text, tag + ": the name as drawn is cut off, or its tip is not the whole name " + JSON.stringify(fit));
+      await page.touchscreen.tap(...centre(await box(page, name))); await page.waitForTimeout(150);
+      r.expect(!(await state(page)).open, tag + ": a name that fits showed a tip");
+      // The same line with a long name (the fixture's are short): cut off, and now the tip is the whole name.
+      const LONG = "marvin-HP-EliteBook-X-G2i-14-inch-Notebook-Next-Gen-AI-PC";
+      await page.evaluate(({ sel, long }) => { const n = document.querySelector(sel); n.textContent = long; n.dataset.tip = long; }, { sel: name, long: LONG });
+      await page.waitForTimeout(100);
+      const cut = await facts();
+      r.expect(cut.cut && cut.tip === LONG, tag + ": the long name is not cut off " + JSON.stringify(cut));
+      await page.touchscreen.tap(...centre(await box(page, name))); await page.waitForTimeout(150);
+      const shown = await state(page);
+      r.expect(shown.open && shown.text === LONG, tag + ": tapping the cut-off name did not show the whole name " + JSON.stringify(shown.text));
+      results[tag] = { fit: fit.text, cutShows: shown.open };
+      r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join("; "));
+    });
+  }
+
   // ---- No title attribute on any rendered screen ----
   const found = {};
   for (const size of ["desktop", "phone"]) {

@@ -158,6 +158,8 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     await sleep(400);
     const after = await state(page); R.after = { top: after.top, badge: after.badge, groups: after.groups, current: after.current, label: after.label };
     r.expect(after.label === null && after.badge !== null, tag + "Escape did not bring the bar back: " + JSON.stringify(R.after));
+    // On a phone line 2 is not drawn, so the errors item lives in ⋯ and focus comes back there.
+    if (opts.size === "phone") { R.after.focusId = after.focusId; r.expect(after.focusId === "more-btn", tag + "after Escape on a phone, focus is on " + after.focusId + ", not ⋯"); }
     r.expect(Math.abs(after.top - before.top) <= 2, tag + "the scroll position moved by " + (after.top - before.top) + " px after Escape");
     // A group the late calls made at the end is new, and closed.
     r.expect(after.groups.length >= before.groups.length && after.groups.every((x, i) => x === (before.groups[i] ?? false)), tag + "what was open before is not what is open after: " + JSON.stringify({ before: before.groups, after: after.groups }));
