@@ -255,13 +255,13 @@ export default async function barCheck(browser) {
     await page.context().close();
   }
 
-  // Child-session path, sibling navigation, return rows and nested Runs views.
+  // Child-session path, no sibling navigation, return rows and nested Runs views.
   const childAssertions = [];
   const parentKids = Object.values(D.SESS).filter((s) => parentOf(s.id) === "harbor").sort((a, b) => D.H.find((h) => h.kind === "spawn" && h.to === a.id).at - D.H.find((h) => h.kind === "spawn" && h.to === b.id).at);
   const grandchild = Object.values(D.SESS).find((s) => parentOf(s.id) && parentOf(parentOf(s.id)) === "harbor");
   const failedChild = parentKids.find((s) => s.state === "err" || D.H.some((h) => h.kind === "spawn" && h.to === s.id && h.status === "err"));
   r.expect(!!grandchild, "fixture has no grandchild session for the lineage and nested Runs checks");
-  r.expect(parentKids.length >= 3 && parentKids.length % 2 === 1, "fixture needs a middle sibling with previous and next child sessions: " + parentKids.map((s) => s.id).join(", "));
+  r.expect(parentKids.length >= 3, "fixture needs a middle child session that has siblings on both sides: " + parentKids.map((s) => s.id).join(", "));
   r.expect(!!failedChild, "fixture has no failed child session for the return-row check");
   if (grandchild && parentKids.length >= 3 && failedChild) for (const size of ["phone", "desktop"]) {
     const page = await served(browser, { size }); await goto(page, { v: "session", id: grandchild.id }, D);
@@ -295,12 +295,7 @@ export default async function barCheck(browser) {
 
     const middleIndex = Math.floor(parentKids.length / 2), middle = parentKids[middleIndex];
     await goto(page, { v: "session", id: middle.id }, D);
-    const siblingSelector = size === "phone" ? ".child-intro .sibling-nav" : "#topbar .sibling-nav";
-    const siblingNav = await page.evaluate((selector) => { const nav = document.querySelector(selector); return { present: !!nav, prev: nav?.querySelector('[aria-label^="Previous sibling"]')?.disabled === false, next: nav?.querySelector('[aria-label^="Next sibling"]')?.disabled === false, count: nav?.querySelector(".sibling-count")?.textContent }; }, siblingSelector);
-    await page.locator(siblingSelector + ' [aria-label^="Previous sibling"]').click(); await afterTitle(page, parentKids[middleIndex - 1].name);
-    const prevId = await page.evaluate(() => history.state?.id);
-    await goto(page, { v: "session", id: middle.id }, D); await page.locator(siblingSelector + ' [aria-label^="Next sibling"]').click(); await afterTitle(page, parentKids[middleIndex + 1].name);
-    const nextId = await page.evaluate(() => history.state?.id);
+    const siblingNav = await page.evaluate(() => ({ nav: document.querySelectorAll(".sibling-nav, .sibling-count").length, buttons: [...document.querySelectorAll("button")].filter((b) => /^(Previous|Next) sibling/.test(b.getAttribute("aria-label") ?? "")).length, count: /\b\d+ of \d+\b/.test(document.querySelector("#topbar")?.textContent ?? "") }));
 
     await goto(page, { v: "session", id: "harbor" }, D);
     const runsButton = page.locator("#topbar .meta-runs"), runsVisible = await runsButton.isVisible(); let runsViaMenu = false;
@@ -310,7 +305,7 @@ export default async function barCheck(browser) {
     if (runsVisible || runsViaMenu) await page.waitForSelector(runsSelector);
     const runs = runsVisible || runsViaMenu ? await page.evaluate((selector) => { const box = document.querySelector(selector); return { open: !!box, rows: box?.querySelectorAll(".runs-row").length ?? 0, nested: box?.querySelectorAll(".runs-group .runs-row").length ?? 0, costs: box?.querySelectorAll(".run-cost").length ?? 0, apiLabel: box?.textContent.includes("API-equivalent cost") ?? false }; }, runsSelector) : { open: false, rows: 0, nested: 0, costs: 0, apiLabel: false };
     const expectedRuns = Object.values(D.SESS).filter((s) => { let p = parentOf(s.id); while (p && p !== "harbor") p = parentOf(p); return p === "harbor"; }).length;
-    childAssertions.push({ size, introActions, pathNames, expectedPath, pathOk, briefCard, openedParent, returnRow, returnParent, siblingNav, prevId, nextId, expectedPrev: parentKids[middleIndex - 1].id, expectedNext: parentKids[middleIndex + 1].id, runs, runsViaMenu, expectedRuns });
+    childAssertions.push({ size, introActions, pathNames, expectedPath, pathOk, briefCard, openedParent, returnRow, returnParent, siblingNav, runs, runsViaMenu, expectedRuns });
     await page.context().close();
   }
 
@@ -321,10 +316,10 @@ export default async function barCheck(browser) {
     r.expect(child.briefCard.transcript && parseFloat(child.briefCard.transcript.rail) === 0 && parseFloat(child.briefCard.transcript.pad) === 0, child.size + ": a child session's transcript still carries a left rail or the padding for one: " + JSON.stringify(child.briefCard.transcript));
     r.expect(child.introActions && (!child.introActions.sameLine || child.introActions.gap >= 12) && (child.size !== "phone" || Math.min(child.introActions.moreH, child.introActions.openH) >= 44), child.size + ": the intro's Show more and Open in buttons touch or are under the phone tap size: " + JSON.stringify(child.introActions));
     r.expect(child.returnRow.text?.toLowerCase().includes("failed") && child.returnRow.openParent?.includes("Open in") && child.returnParent.id === parentOf(failedChild.id) && child.returnParent.handoff, child.size + ": failed child return row did not reopen its parent handoff: " + JSON.stringify({ row: child.returnRow, parent: child.returnParent }));
-    r.expect(child.siblingNav.present && child.siblingNav.prev && child.siblingNav.next && child.prevId === child.expectedPrev && child.nextId === child.expectedNext, child.size + ": previous/next sibling controls did not open adjacent runs: " + JSON.stringify(child));
+    r.expect(child.siblingNav.nav === 0 && child.siblingNav.buttons === 0 && !child.siblingNav.count, child.size + ": a child session still shows previous/next sibling controls or an \"N of M\" count: " + JSON.stringify(child.siblingNav));
     r.expect(child.runs.open && child.runs.rows === child.expectedRuns && child.runs.nested > 0 && child.runs.costs === child.expectedRuns && child.runs.apiLabel, child.size + ": Runs view did not list the full nested tree and its API-equivalent costs: " + JSON.stringify(child.runs));
   }
-  r.expect(childAssertions.length === 2, "lineage, sibling, brief/return and Runs checks did not run on phone and desktop: " + childAssertions.length);
+  r.expect(childAssertions.length === 2, "lineage, no-sibling-nav, brief/return and Runs checks did not run on phone and desktop: " + childAssertions.length);
 
   // Masked thinking (Claude redacts it, leaving only a duration) draws nothing. Injected through the served /api/tx path:
   // a readable thought, two timed masked thoughts, another readable thought and two untimed masked thoughts. Only the two
