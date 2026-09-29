@@ -748,14 +748,17 @@ fn model_json_matches_the_golden_file() {
     model["now"] = json!(0);
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/model.json");
     let update = std::env::var_os("SEMON_UPDATE_GOLDEN").is_some();
-    // This fixture covers the compatibility model surface. Cost output is
-    // asserted by focused synthetic tests and stays out of this baseline.
+    // This fixture covers the compatibility model surface. Cost output and
+    // the transcript totals are asserted by focused synthetic tests and stay
+    // out of this baseline.
     if let Some(sessions) = model["sessions"].as_object_mut() {
         for session in sessions.values_mut() {
             if let Some(session) = session.as_object_mut() {
                 session.shift_remove("cost");
                 session.shift_remove("reported_runs");
                 session.shift_remove("cost_check");
+                session.shift_remove("calls");
+                session.shift_remove("errors");
             }
         }
     }

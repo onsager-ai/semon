@@ -23,6 +23,9 @@
 //     the drawer stays
 //     open (phone);
 //   - Analytics keeps its selected range and eight figures while live model updates redraw the page;
+//   - a session page deep-linked to a middle turn (not loaded to its end) shows the model's tool-call count in its meta line, and
+//     follows it as the session makes more calls;
+//   - Analytics makes no /api/tx request: its tool-call counts come from the model, equal to each session's /api/tx totals;
 //   - steps opened inside child work that was then closed are still open when it opens again after a redraw;
 //   - no poll overlaps another (the page's own count of /api/model and /api/tx requests in flight never exceeds 1), and
 //     an update asks only for transcripts that grew: none for another session's lines, exactly one when one child grew;
@@ -123,7 +126,7 @@ async function open(browser, srv, where, scheme, before = null) {
   page.setDefaultTimeout(8000);
   await page.route(/.*/, (r) => (r.request().url().startsWith(srv.base + "/") ? r.continue() : r.abort()));
   await before?.(page); // routes added here run before the one above
-  await page.goto(srv.base + where + "?t=" + srv.token, { waitUntil: "load" });
+  await page.goto(srv.base + where + (where.includes("?") ? "&" : "?") + "t=" + srv.token, { waitUntil: "load" });
   await settled(page);
   if (where.startsWith("/s/")) await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']"));
   return page;
@@ -436,9 +439,9 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.overflow.ended === 0, name + ": overflow with the note=" + R.overflow.ended);
     await AN.screenshot({ path: path.join(ENV.out, "live-" + name + "-ended.png") });
 
-    // One poll at a time everywhere. Analytics also asks for its sessions' counts beside the poll, at most four at once.
+    // One poll at a time everywhere.
     R.inFlight = {}; R.pollsInFlight = {}; for (const [k, p] of [["harbor", S], ["analytics", AN], ["home", Hm], ["sessions", SP]]) { R.inFlight[k] = await p.evaluate(() => window.__live.max); R.pollsInFlight[k] = await p.evaluate(() => window.__live.models); }
-    for (const [k, v] of Object.entries(R.inFlight)) r.expect(v <= (k === "analytics" ? 5 : 1), name + ": " + k + " had " + v + " requests in flight at once");
+    for (const [k, v] of Object.entries(R.inFlight)) r.expect(v <= 1, name + ": " + k + " had " + v + " requests in flight at once");
     for (const [k, v] of Object.entries(R.pollsInFlight)) r.expect(v <= 1, name + ": " + k + " had " + v + " polls in flight at once");
     R.errors = pages.flatMap((p) => p.errors);
     r.expect(R.errors.length === 0, name + ": page errors: " + R.errors.join(" | "));
@@ -450,44 +453,76 @@ async function scheme(browser, name, opts, r, protocol) {
   return R;
 }
 
-// Analytics fills its tool-call counts in from /api/tx, one page a session. Here one session's page answers 500 and the others
-// answer 300 ms late: Analytics still draws at once (eight figures, counts still coming), asks for at most four pages at a time
-// (more than one), counts every other session, marks the failed one, and a later live update still applies.
+// Analytics reads its tool-call and error counts from the model, so it never asks /api/tx for a transcript. Here it opens
+// with no /api/tx request at all, through a live update that adds a call; the model's per-session `calls` and `errors` equal
+// what each session's /api/tx page reports; and the Tool calls figure is the sum of them for the sessions it counts.
 async function analyticsCounts(browser, r) {
   const R = { name: "analytics-counts" }, dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-live-counts-")), now = write(dir);
   const srv = await serve(dir, now + 10 * 60000), L = logs(dir), atlas = L.lane("atlas"), pages = [];
   const scheme = { size: "desktop", dark: false };
   const tool = (page) => page.locator(".analytics-metric").filter({ hasText: "Tool calls" });
   const total = async (page) => Number((await tool(page).locator(".value").textContent()).replace(/,/g, ""));
-  const ready = (page) => page.waitForFunction(() => document.querySelector(".analytics-metrics")?.dataset.counts === "ready");
+  const tx = async (sid) => { const q = await fetch(srv.base + "/api/tx?sid=" + encodeURIComponent(sid) + "&t=" + srv.token); if (!q.ok) throw new Error("/api/tx " + sid + " " + q.status); return q.json(); };
+  // What the counts must be, from the model and each session's own /api/tx page: the sessions started in the last 7 days.
+  const expected = async () => {
+    const m = await model(srv), rows = [];
+    for (const [id, s] of Object.entries(m.sessions)) { if (s.stub) continue; const p = await tx(id); rows.push({ id, start: s.start, model: { calls: s.calls, errors: s.errors }, page: { calls: p.calls, errors: p.errors } }); }
+    return { rows, sum: rows.filter((x) => x.start >= m.now - 7 * 86400000 && x.start < m.now).reduce((n, x) => n + x.page.calls, 0) };
+  };
   try {
-    const control = await open(browser, srv, "/analytics", scheme); pages.push(control);
-    await ready(control);
-    R.control = await total(control);
-    let live = 0; R.peak = 0; R.failedAsked = 0;
-    const page = await open(browser, srv, "/analytics", scheme, (p) => p.route((u) => u.pathname === "/api/tx", async (route) => {
-      if (new URL(route.request().url()).searchParams.get("sid") === "harbor") { R.failedAsked++; return route.fulfill({ status: 500, contentType: "text/plain", body: "boom" }); }
-      live++; R.peak = Math.max(R.peak, live); await sleep(300); live--; return route.fallback();
-    }));
-    pages.push(page);
-    R.early = await page.evaluate(() => ({ metrics: document.querySelectorAll(".analytics-metric").length, charts: document.querySelectorAll(".analytics-chart svg").length, counts: document.querySelector(".analytics-metrics")?.dataset.counts }));
-    r.expect(R.early.metrics === 8 && R.early.charts === 2 && R.early.counts === "loading", "analytics-counts: Analytics didn't draw before its counts arrived: " + JSON.stringify(R.early));
-    await ready(page);
-    R.failed = await total(page);
-    R.note = await tool(page).locator(".note").textContent();
-    r.expect(R.failed > 0 && R.failed < R.control, "analytics-counts: with one session's page failing, the others must still be counted: " + JSON.stringify({ control: R.control, failed: R.failed }));
-    r.expect(R.note.includes("— for 1 session"), "analytics-counts: the failed session isn't marked: " + R.note);
-    r.expect(R.failedAsked >= 1 && R.peak >= 2 && R.peak <= 4, "analytics-counts: expected between 2 and 4 count requests at once, got " + R.peak);
-    // A later update: atlas makes one more tool call. The update applies, the figure follows, and Analytics keeps polling.
+    const page = await open(browser, srv, "/analytics", scheme); pages.push(page);
+    await page.waitForFunction(() => document.querySelectorAll(".analytics-metric").length === 8);
+    R.metrics = 8; R.first = await total(page);
+    R.want = await expected();
+    r.expect(R.want.rows.length > 0 && R.want.rows.every((x) => Number.isInteger(x.model.calls) && Number.isInteger(x.model.errors)), "analytics-counts: a session in the model has no counts: " + JSON.stringify(R.want.rows));
+    r.expect(R.want.rows.every((x) => x.model.calls === x.page.calls && x.model.errors === x.page.errors), "analytics-counts: the model's counts differ from /api/tx: " + JSON.stringify(R.want.rows.filter((x) => x.model.calls !== x.page.calls || x.model.errors !== x.page.errors)));
+    r.expect(R.first > 0 && R.first === R.want.sum, "analytics-counts: the Tool calls figure is " + R.first + ", not the sessions' " + R.want.sum);
+    // A later update: atlas makes one more tool call. The update applies and the figure follows, with still no /api/tx request.
     await page.evaluate(() => { document.querySelector(".analytics-metrics").dataset.liveProbe = "before"; });
     const updates = page.updates; let t0 = Date.now();
     atlas.append(atlas.tool(at(12, 42), "toolu-counts1", "Bash", { command: "true" }), atlas.result(at(12, 42, 5), "toolu-counts1", "ok"));
     R.redrawn = await appear(page, t0, () => document.querySelector(".analytics-metrics")?.dataset.liveProbe !== "before", null, 6000);
-    r.expect(R.redrawn != null && page.updates > updates, "analytics-counts: a live update after a failed count did not redraw Analytics");
-    R.grew = await appear(page, t0, (was) => { const v = document.querySelector(".analytics-metric:nth-child(5) .value")?.textContent; return document.querySelector(".analytics-metrics")?.dataset.counts === "ready" && Number((v ?? "").replace(/,/g, "")) === was + 1; }, R.failed, 8000);
+    r.expect(R.redrawn != null && page.updates > updates, "analytics-counts: a live update did not redraw Analytics");
+    R.grew = await appear(page, t0, (was) => { const v = document.querySelector(".analytics-metric:nth-child(5) .value")?.textContent; return Number((v ?? "").replace(/,/g, "")) === was + 1; }, R.first, 8000);
     r.expect(R.grew != null, "analytics-counts: the new tool call never reached the Tool calls figure: " + await tool(page).locator(".value").textContent());
+    R.later = await expected();
+    r.expect(await total(page) === R.later.sum, "analytics-counts: after the update the figure is " + await total(page) + ", not the sessions' " + R.later.sum);
+    R.txRequests = page.txs.slice();
+    r.expect(R.txRequests.length === 0, "analytics-counts: Analytics asked for /api/tx: " + R.txRequests.join(" "));
     R.errors = pages.flatMap((p) => p.errors);
     r.expect(R.errors.length === 0, "analytics-counts: page errors: " + R.errors.join(" | "));
+  } finally {
+    for (const p of pages) await p.context().close();
+    srv.proc.kill("SIGTERM");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return R;
+}
+
+// A transcript loaded only part of the way (a deep link to a middle turn) isn't tailed, so the totals it was fetched with go
+// stale. The meta line's tool-call count follows the model there: it is the model's before, and grows with the session.
+async function middleCounts(browser, r) {
+  const R = { name: "middle-counts" }, dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-live-middle-")), now = write(dir, { extras: true });
+  const srv = await serve(dir, now + 10 * 60000), L = logs(dir), backlog = L.lane("backlog"), pages = [];
+  const count = (page) => page.evaluate(() => { const n = document.querySelector(".meta-tools .meta-value"); return n ? Number(n.textContent.replace(/,/g, "")) : null; });
+  try {
+    const m0 = await model(srv), turn = m0.turns.filter((t) => t.sid === "backlog")[1];
+    r.expect(!!turn && m0.sessions.backlog.calls > 200, "middle-counts: the backlog fixture is not long enough: " + JSON.stringify({ turn: turn?.id, calls: m0.sessions.backlog?.calls }));
+    const page = await open(browser, srv, "/s/claude/backlog?turn=" + encodeURIComponent(turn.id), { size: "desktop", dark: false }); pages.push(page);
+    await page.waitForFunction((id) => !!document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]'), turn.id);
+    R.later = await page.evaluate(() => [...document.querySelectorAll("#page button.more")].some((b) => b.textContent === "Load later"));
+    r.expect(R.later, "middle-counts: the deep link did not stop short of the end (no Load later)");
+    R.before = await count(page);
+    r.expect(R.before === m0.sessions.backlog.calls, "middle-counts: the meta line shows " + R.before + " tool calls, the model " + m0.sessions.backlog.calls);
+    const t0 = Date.now();
+    for (let i = 0; i < 3; i++) backlog.append(backlog.tool(at(12, 43 + i), "toolu-mid" + i, "Bash", { command: "true" }), backlog.result(at(12, 43 + i, 5), "toolu-mid" + i, "ok"));
+    R.grew = await appear(page, t0, (want) => Number(document.querySelector(".meta-tools .meta-value")?.textContent.replace(/,/g, "")) === want, R.before + 3, 8000);
+    R.after = await count(page);
+    r.expect(R.grew != null, "middle-counts: the meta line stayed at " + R.after + " after the session made 3 more calls (model " + (await model(srv)).sessions.backlog.calls + ")");
+    R.stillMiddle = await page.evaluate(() => [...document.querySelectorAll("#page button.more")].some((b) => b.textContent === "Load later"));
+    r.expect(R.stillMiddle, "middle-counts: the page reached the end, so it isn't a middle page any more");
+    R.errors = pages.flatMap((p) => p.errors);
+    r.expect(R.errors.length === 0, "middle-counts: page errors: " + R.errors.join(" | "));
   } finally {
     for (const p of pages) await p.context().close();
     srv.proc.kill("SIGTERM");
@@ -505,6 +540,8 @@ export default async function liveCheck(browser) {
   }
   try { out.analyticsCounts = await analyticsCounts(browser, r); }
   catch (e) { r.expect(false, "analytics-counts: threw " + (e?.stack ?? e)); }
+  try { out.middleCounts = await middleCounts(browser, r); }
+  catch (e) { r.expect(false, "middle-counts: threw " + (e?.stack ?? e)); }
   r.results = out;
   return r.done();
 }
