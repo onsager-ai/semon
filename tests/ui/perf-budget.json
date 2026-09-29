@@ -6,14 +6,14 @@
     "session-open@1280": { "requests": 10, "transferBytes": 736905, "decodedBytes": 733765, "txRequests": 2, "txDecodedBytes": 161780, "blockingMs": 19, "longestTaskMs": 74, "firstEntryMs": 269 },
     "session-older@1280": { "requests": 18, "transferBytes": 1557533, "decodedBytes": 1552685, "txRequests": 16, "txDecodedBytes": 1552685, "blockingMs": 675, "longestTaskMs": 203 },
     "analytics-7d@1280": { "requests": 8, "transferBytes": 439718, "decodedBytes": 437253, "txRequests": 0, "txDecodedBytes": 0, "blockingMs": 7, "longestTaskMs": 62 },
-    "analytics-30d@1280": { "requests": 0, "transferBytes": 0, "decodedBytes": 0, "txRequests": 0, "txDecodedBytes": 0, "blockingMs": 0, "longestTaskMs": 0 },
+    "analytics-30d@1280": { "requests": 3, "transferBytes": 11044, "decodedBytes": 10673, "txRequests": 0, "txDecodedBytes": 0, "blockingMs": 0, "longestTaskMs": 0 },
     "live@1280": { "requests": 24, "transferBytes": 419081, "decodedBytes": 414771, "txRequests": 7, "txDecodedBytes": 4548, "blockingMs": 0, "longestTaskMs": 0, "requestsPerUpdate": 4, "transferBytesPerUpdate": 69847, "txRequestsPerUpdate": 2, "txDecodedBytesPerUpdate": 758 },
     "home-idle@390": { "requests": 14, "transferBytes": 439718, "decodedBytes": 437253, "txRequests": 0, "txDecodedBytes": 0, "blockingMs": 15, "longestTaskMs": 70 },
     "sessions@390": { "requests": 8, "transferBytes": 439718, "decodedBytes": 437253, "txRequests": 0, "txDecodedBytes": 0, "blockingMs": 108, "longestTaskMs": 149 },
     "session-open@390": { "requests": 10, "transferBytes": 736905, "decodedBytes": 733765, "txRequests": 2, "txDecodedBytes": 161780, "blockingMs": 326, "longestTaskMs": 296, "firstEntryMs": 631 },
     "session-older@390": { "requests": 20, "transferBytes": 1557533, "decodedBytes": 1552685, "txRequests": 16, "txDecodedBytes": 1552685, "blockingMs": 5612, "longestTaskMs": 1054 },
     "analytics-7d@390": { "requests": 8, "transferBytes": 439718, "decodedBytes": 437253, "txRequests": 0, "txDecodedBytes": 0, "blockingMs": 178, "longestTaskMs": 222 },
-    "analytics-30d@390": { "requests": 0, "transferBytes": 0, "decodedBytes": 0, "txRequests": 0, "txDecodedBytes": 0, "blockingMs": 32, "longestTaskMs": 87 },
+    "analytics-30d@390": { "requests": 3, "transferBytes": 11044, "decodedBytes": 10673, "txRequests": 0, "txDecodedBytes": 0, "blockingMs": 32, "longestTaskMs": 87 },
     "live@390": { "requests": 24, "transferBytes": 419081, "decodedBytes": 414771, "txRequests": 7, "txDecodedBytes": 4548, "blockingMs": 149, "longestTaskMs": 95, "requestsPerUpdate": 4, "transferBytesPerUpdate": 69847, "txRequestsPerUpdate": 2, "txDecodedBytesPerUpdate": 758 }
   }
 }
