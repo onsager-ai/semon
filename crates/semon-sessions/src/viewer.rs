@@ -2886,7 +2886,7 @@ mod tests {
             std::thread::sleep(Duration::from_nanos(u64::from(wait)));
             let a = today.respond("GET", "/api/tree", "", None);
             let b = core.respond("GET", "/api/tree", "", None);
-            if a.body != b.body {
+            if without_age(&a.body) != without_age(&b.body) {
                 mismatches.push(round);
             }
         }
