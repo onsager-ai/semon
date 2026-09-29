@@ -56,6 +56,41 @@ Live Claude statuses observed so far are `busy`, `idle`, and `shell`; any other 
 
 JSON output has `schema_version: 1` and a `roots` array of nested nodes. Every node has `id`, `harness`, `kind`, `label`, `state`, `pid`, `models`, `cwd`, `branch`, `first_activity`, `last_activity`, `last_activity_age_seconds`, `tokens`, `malformed_lines`, `open_tools`, `claude_link`, `via_tool`, `unlinked`, and `children`. Nullable fields use `null`, `tokens` contains `input`, `cached_input`, `output`, `reasoning_output`, and `total`, and each tool has `id` and `name`. Timestamps are RFC 3339 strings from source records. `malformed_lines` counts complete lines that are not JSON objects; they are skipped, and text output shows `malformed:N` when the count is nonzero. The view includes metadata only; it never prints prompts, transcript text, tool inputs, or tool outputs.
 
+## Receive pushes from your other machines
+
+`semon receive` is a receiver for `semon push`, for one person with several machines, and the [mirror protocol](docs/mirror-protocol.md)'s reference implementation (`semon_push::mirror::Receiver`). Each machine pushes with its own token, and its copy lands in `DIR/machines/NAME/`: `claude/` and `codex/` hold the input files at their paths under each home, and `facts.json` holds the machine's facts. A token decides the machine, so one machine's token can't write another's files.
+
+On the machine that receives, make a token per machine. It is printed once, and `DIR/tokens` (0600, in a 0700 directory) keeps only its SHA-256 and the name. A name is 1 to 63 of `a-z`, `0-9` and `-`. A missing `DIR` is created 0700; an existing `DIR`, or `DIR/tokens`, that its group or others can use is refused with the `chmod` that fixes it, and never changed.
+
+```sh
+(umask 077; semon receive token add laptop --dir ~/semon-mirror > laptop.token)
+semon receive token list --dir ~/semon-mirror
+semon receive --dir ~/semon-mirror            # listens on 127.0.0.1:8735
+```
+
+Put the token on that machine in a 0600 file, and point `semon push` at the receiver. The simplest route keeps the receiver on loopback and forwards a port over SSH, since plain `http` to a loopback address is allowed:
+
+```sh
+ssh -N -L 8735:127.0.0.1:8735 receiving-host &
+semon push --to http://127.0.0.1:8735 --token-file ~/.config/semon/laptop.token --watch
+```
+
+`semon receive token revoke laptop --dir ~/semon-mirror` removes a token. A running receiver re-reads `DIR/tokens` when the file changes, so the next request with that token gets 401 without a restart. If the file stops parsing, or its mode is loosened, no token is accepted until it is fixed.
+
+The receiver listens on `127.0.0.1:8735` unless `--listen ADDR` says otherwise. A non-loopback address is refused unless `--tls-cert PEM --tls-key PEM` are given and `DIR/tokens` holds at least one token; plain HTTP off loopback is always refused. These are `semon-relay receive`'s rules. Semon never opens a port or obtains a certificate: the address, the firewall, DNS and the certificate stay your choices. `semon push` checks a certificate against the standard web roots only, so a TLS receiver needs a certificate that chains to them; otherwise use the SSH route above.
+
+Its limits:
+
+- A request body is at most 6 MiB (one append's 4 MiB of file bytes, as base64, plus the JSON around it). A larger declared body gets 413 before any of it is read. A body needs a `Content-Length`: without one, or chunked, it gets 411.
+- The token is checked (401) before the body is read.
+- At most 32 connections at once. A connection that hasn't yet passed the token check also counts against its address (an IPv6 one by its /64), which may have 4 such; once a request on it is authenticated it counts only toward the 32, so machines behind one address (an SSH tunnel, a NAT) each keep their `--watch` connection. One more over either limit is closed as soon as it is accepted.
+- Every read and write, the TLS handshake's included, runs against a deadline, so trickling bytes doesn't stretch it. The first request's head must be in within 10 s of the connection being accepted, a later one's within 10 s of its first byte, and a body within 120 s. A kept-alive connection closes after 30 s idle, and no single read or write waits more than 30 s.
+- Each machine's copy holds at most 20 GiB (`--max-bytes SIZE`, as in `500G`), counted by a walk of `DIR/machines/` at start and then by each write. A push that would pass it gets 507, and `semon push` reports the failure and stops that pass. To recover, raise `--max-bytes` and restart the receiver. Deleting copies under `DIR` doesn't lower the count until a restart, and the machine sends deleted copies again anyway.
+- Paths are checked with `semon_sessions::is_input_path`. The receiver creates its directories itself and refuses a request whose path meets a symbolic link.
+- Each file has one writer at a time. A 200 is answered only once the bytes are synced to disk. An append that fails partway is cut back off before the 500, so the copy is as it was. A replace is a rename, so the copy is the old one or the new one; if only the directory sync after the rename fails, the answer is 500 with the new copy in place. A replace's temporary files left by a crash are removed when the receiver starts.
+
+To see the received machines, serve `DIR` with `semon sessions --serve --machines DIR` ([See all your machines](#see-all-your-machines)).
+
 ## See all your machines
 
 `semon push` sends a machine's session logs, and `semon receive` writes each machine it receives under one directory, `DIR/machines/<name>/`: that machine's `claude/` and `codex/` input files, and its `facts.json`. `semon sessions --serve --machines DIR` shows every one of them in one viewer, next to this machine's own sessions:

@@ -2,6 +2,8 @@
 
 `semon push` keeps a copy of this machine's session logs on another server, a *receiver*, and sends it the machine's facts, so the receiver can build the same session model with `semon-sessions` (`Options::facts`) as `semon sessions --model-json` builds here. This document is the whole contract: any server that implements it can receive a push.
 
+`semon receive` is the reference receiver (`semon_push::mirror::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<name>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and 507 (the machine's copy would pass its size cap); a client treats either as a failure.
+
 ## What is sent
 
 - **The input set:** exactly the files the model builder reads, listed by `semon_sessions::inputs` and checked by `semon_sessions::is_input_path`. Nothing else under the agent homes is read. `*.key` files never are.

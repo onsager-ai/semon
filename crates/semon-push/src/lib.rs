@@ -8,6 +8,10 @@
 //!   waits until it is complete.
 //! - Where each file stands is kept in a private state file, so an
 //!   interrupted push resumes.
+//!
+//! The receiving side is here too, as the protocol's reference
+//! implementation: [`mirror::Receiver`] over a directory, its tokens
+//! ([`tokens`]) and `semon receive`'s listener ([`serve`]).
 
 use std::{
     collections::BTreeMap,
@@ -21,7 +25,10 @@ use std::{
 use semon_sessions::{Facts, FactsSource, Input, Options};
 use serde::{Deserialize, Serialize};
 
+pub mod mirror;
 pub mod redact;
+pub mod serve;
+pub mod tokens;
 pub mod wire;
 
 use wire::{Append, CHUNK_BYTES, HEAD_BYTES, Length, base64_encode, head_sha256, sha256_hex};
@@ -713,9 +720,13 @@ fn complete_lines(path: &Path, from: u64, chunk: usize) -> Result<(Vec<u8>, u64)
     Ok((data, from + end as u64))
 }
 
-/// Writes `bytes` to `path` with mode 0600, in a 0700 directory, atomically.
+/// Writes `bytes` to `path` with mode 0600, atomically. A missing directory
+/// is created 0700; an existing one's mode is left alone.
 pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty() && !parent.exists())
+    {
         fs::create_dir_all(parent)?;
         #[cfg(unix)]
         {
