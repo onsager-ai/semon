@@ -19,7 +19,10 @@
 //   - a menu the server provides wins over the embedding page's; an invalid one from the server leaves the embedding page's;
 //   - on a phone the open menu floats above its row at the drawer's foot: inside the screen, above the row, the nav's boxes
 //     unmoved, 44 px rows, Sign out in a section of its own, no row repeating a nav row's label; a tap outside it, Esc and the
-//     back gesture each close it and leave the drawer open on the same page, and a tap outside it does not reach the drawer.
+//     back gesture each close it and leave the drawer open on the same page, and a tap outside it does not reach the drawer;
+//     focus goes to its first row on open and back to its button on close; a live update while it is open leaves it open
+//     (and is drawn once it closes); swiping the drawer shut closes it and leaves no history entry behind; and Back from a
+//     page one of its items opened lands on this page with the menu closed, not on a dead entry for the menu.
 // Screenshots of the open menu, at 1280 and 390 in light and dark, are written to out/embed/.
 import fs from "node:fs";
 import path from "node:path";
@@ -240,13 +243,16 @@ export default async function embedCheck(browser) {
   // On a phone the menu floats above its row and never moves the drawer; outside, Esc and back close it.
   for (const dark of [false, true]) {
     const tag = "390" + (dark ? "-dark" : "");
-    const page = await open(browser, { embed: { account: account() }, size: "phone", dark });
+    const live = { mode: "pass" };
+    const page = await open(browser, { embed: { account: account() }, size: "phone", dark, state: live });
     await page.locator("#lead-btn").click(); await page.waitForTimeout(350);
     const navBoxes = () => page.evaluate(() => [...document.querySelectorAll("#nav .nav-item")].map((n) => { const b = n.getBoundingClientRect(); return [b.left, b.top, b.width, b.height].map((x) => Math.round(x * 10) / 10); }).join(" "));
     const state = () => page.evaluate(() => ({ open: !!document.querySelector("#account-drawer .account-popover"), drawer: document.body.classList.contains("drawer-open"), path: location.pathname, sheet: !!history.state?.sheet }));
     const openIt = async () => { await page.locator("#account-drawer .account-trigger").click(); await page.waitForSelector("#account-drawer .account-popover"); };
     const before = await navBoxes(), path0 = (await state()).path;
     await openIt();
+    const focusIn = await page.evaluate(() => document.querySelector("#account-drawer .account-popover").contains(document.activeElement) && document.activeElement.classList.contains("account-menu-row"));
+    r.expect(focusIn, "opening the phone menu focuses its first row (" + tag + ")");
     const facts = await page.evaluate(() => {
       const menu = document.querySelector("#account-drawer .account-popover"), trigger = document.querySelector("#account-drawer .account-trigger");
       const m = menu.getBoundingClientRect(), t = trigger.getBoundingClientRect();
@@ -276,9 +282,40 @@ export default async function embedCheck(browser) {
     await openIt(); await page.keyboard.press("Escape"); await page.waitForTimeout(250);
     const escaped = await state();
     r.expect(!escaped.open && escaped.drawer && escaped.path === path0 && !escaped.sheet, "Esc closes the phone menu and leaves the drawer open (" + tag + "): " + JSON.stringify(escaped));
+    r.expect(await page.evaluate(() => document.activeElement === document.querySelector("#account-drawer .account-trigger")), "closing the phone menu returns focus to its button (" + tag + ")");
+    // A live update while the menu is open leaves it open (the same element, under the finger), and is drawn once it closes.
+    await openIt();
+    await page.evaluate(() => { document.querySelector("#account-drawer .account-popover").dataset.probe = "kept"; });
+    const seen = (await events(page, "semon:polled")).length;
+    live.mode = "full"; await refresh(page);
+    const updated = await nextPolled(page, seen); live.mode = "pass";
+    await page.waitForTimeout(200);
+    const during = await page.evaluate(() => document.querySelector("#account-drawer .account-popover")?.dataset.probe ?? null);
+    R["phoneMenuLive " + tag] = { updated: updated?.detail, during };
+    r.expect(updated?.detail?.ok === true && during === "kept", "a live update leaves the open phone menu as it was (" + tag + "): " + JSON.stringify(R["phoneMenuLive " + tag]));
+    await page.keyboard.press("Escape"); await page.waitForTimeout(250);
+    const afterLive = await state();
+    r.expect(!afterLive.open && afterLive.drawer && !afterLive.sheet, "the phone menu closes after a live update, with no entry left (" + tag + "): " + JSON.stringify(afterLive));
+    // Swiping the drawer shut closes the menu and takes its history entry.
+    await openIt();
+    await page.evaluate(() => {
+      const on = document.querySelector("#account-drawer .account-backdrop"), at = (x) => new Touch({ identifier: 1, target: on, clientX: x, clientY: 300 });
+      on.dispatchEvent(new TouchEvent("touchstart", { touches: [at(250)], bubbles: true }));
+      on.dispatchEvent(new TouchEvent("touchmove", { touches: [at(150)], bubbles: true }));
+    });
+    await page.waitForTimeout(350);
+    const swiped = await state();
+    r.expect(!swiped.open && !swiped.drawer && swiped.path === path0 && !swiped.sheet, "swiping the drawer shut closes the phone menu with no entry left (" + tag + "): " + JSON.stringify(swiped));
+    await page.locator("#lead-btn").click(); await page.waitForTimeout(350);
     await openIt(); await page.evaluate(() => history.back()); await page.waitForTimeout(300);
     const backed = await state();
     r.expect(!backed.open && backed.drawer && backed.path === path0, "back closes the phone menu and stays on the page (" + tag + "): " + JSON.stringify(backed));
+    // Leaving from an item: Back from the page it opened lands here with the menu closed, not on an entry for the menu.
+    await openIt();
+    await Promise.all([page.waitForURL((url) => url.pathname === "/embed/profile"), page.locator('#account-drawer .account-popover a[href="/embed/profile"]').click()]);
+    await page.goBack({ waitUntil: "load" }); await page.waitForTimeout(300);
+    const returned = await state();
+    r.expect(returned.path === path0 && !returned.sheet && !returned.open, "Back from a page a menu item opened lands on this page, menu closed (" + tag + "): " + JSON.stringify(returned));
     r.expect(page.errors.length === 0, "page errors (phone menu " + tag + "): " + page.errors.join("; "));
     await page.context().close();
   }

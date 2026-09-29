@@ -470,6 +470,8 @@
   let accountOpen = false;
   // The phone's account menu adds a history entry, so the back gesture closes it.
   let accountSheet = false;
+  // What to do once the account menu's history entry has been stepped back over (leaving the page from one of its items).
+  let afterPop = null;
   try { history.scrollRestoration = "manual"; } catch {}
   let show = { messages: true, tools: true, thinking: true }; let find = ""; let findOpen = false; let filterOpen = false;
   const currentScroll = () => phone.matches ? window.scrollY : $("#main").scrollTop;
@@ -539,7 +541,7 @@
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
-    closeAccountMenu();
+    closeAccountMenu(true);
     dropErrors(true); // (first: it drops a range the error stepper moved, and that is not kept)
     // The session left is kept for opening it again; weighing it waits until the frame the click drew has been painted.
     if (route.v === "session" && (r.v !== "session" || r.id !== route.id) && TX[route.id] && TXM[route.id]) { const sid = route.id, entries = TX[sid], meta = { ...TXM[sid] }; requestAnimationFrame(() => setTimeout(() => cacheTx(sid, entries, meta), 0)); }
@@ -576,8 +578,8 @@
     if (p) { if (r.v === "session") paintPending(r); p.then(done, (err) => failLoad(r, err)); } else done();
   }
   window.addEventListener("popstate", (e) => {
-    if (skipPop) { skipPop = false; if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close a sheet before opening its session
-    if (accountSheet) { accountSheet = false; closeAccountMenu(); return; } // back gesture closes the phone's account menu
+    if (skipPop) { skipPop = false; if (afterPop) { const leave = afterPop; afterPop = null; leave(); return; } if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close a sheet before opening its session
+    if (accountSheet) { accountSheet = false; closeAccountMenu(true); return; } // back gesture closes the phone's account menu
     if (viewerEl) { const d = viewerEl; viewerEl = null; d.close(); return; } // back gesture closes the viewer, page stays
     if (e.state?.v) go(e.state, true); });
   const goSession = (id, turn) => go(turn ? { v: "session", id, turn } : { v: "session", id });
@@ -647,16 +649,30 @@
     }
     return menu;
   }
-  // `byUser`: the person closed it (the backdrop, Esc, the row again), so its history entry goes too. A navigation or a redraw
-  // that closes it leaves the entry, since stepping back then would undo the navigation.
-  function closeAccountMenu(byUser) {
+  // Every close takes the phone menu's history entry with it, so no Back press is spent on a menu that is gone. Only a
+  // navigation (`go`) and the back gesture itself (`keepEntry`) leave it: stepping back then would undo the navigation, or the
+  // entry is already gone. Focus that was in the menu (or fell to the page when it closed) returns to the menu's button, and an
+  // update that waited for the menu to close is drawn.
+  function closeAccountMenu(keepEntry) {
+    const menu = $(".account-popover"), trigger = $('.account-trigger[aria-expanded="true"]'), active = document.activeElement;
+    const refocus = !!menu && (menu.contains(active) || !active || active === document.body);
     document.querySelectorAll(".account-popover, .account-backdrop").forEach((node) => node.remove());
     document.querySelectorAll(".account-trigger").forEach((button) => button.setAttribute("aria-expanded", "false"));
     accountOpen = false;
-    if (accountSheet) { accountSheet = false; if (byUser && history.state?.sheet) { skipPop = true; history.back(); } }
+    if (accountSheet) { accountSheet = false; if (!keepEntry && history.state?.sheet) { skipPop = true; history.back(); } }
+    if (refocus && trigger?.isConnected) trigger.focus({ focusVisible: false });
+    if (LIVE.pending) setTimeout(() => { if (LIVE.pending && !viewerEl && !accountOpen) refresh(); }, 0);
   }
+  // Leaving the page from a phone menu item steps back over the menu's entry first, so Back from the next page lands on this
+  // one, not on a menu that is no longer there.
+  function leaveAccountSheet(go) {
+    accountSheet = false;
+    if (history.state?.sheet) { skipPop = true; afterPop = go; history.back(); } else go();
+  }
+  // A page brought back from the back-forward cache comes back as it was left, menu and all: close it (its entry is gone).
+  window.addEventListener("pageshow", (e) => { if (e.persisted && accountOpen) { accountSheet = false; closeAccountMenu(true); } });
   function toggleAccountMenu(widget, trigger, compact) {
-    if (accountOpen) { closeAccountMenu(true); return; }
+    if (accountOpen) { closeAccountMenu(); return; }
     closeAccountMenu(); closeFilter(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false");
     const menu = accountPopover();
     if (compact) {
@@ -666,11 +682,14 @@
       widget.style.setProperty("--account-left", at.left + "px");
       widget.style.setProperty("--account-width", at.width + "px");
       widget.style.setProperty("--account-bottom", Math.max(0, innerHeight - at.top + 6) + "px");
-      const backdrop = el("div", "account-backdrop"); backdrop.addEventListener("click", (e) => { e.stopPropagation(); closeAccountMenu(true); });
-      widget.insertBefore(backdrop, trigger); widget.insertBefore(menu, trigger);
+      const backdrop = el("div", "account-backdrop"); backdrop.addEventListener("click", (e) => { e.stopPropagation(); closeAccountMenu(); });
+      widget.insertBefore(backdrop, trigger); trigger.after(menu);
+      menu.addEventListener("click", (e) => { const a = e.target.closest?.("a[href]"); if (!a || !accountSheet) return; e.preventDefault(); leaveAccountSheet(() => location.assign(a.href)); });
+      menu.addEventListener("submit", (e) => { if (!accountSheet) return; e.preventDefault(); const form = e.target; leaveAccountSheet(() => form.submit()); });
       try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); accountSheet = true; } catch {}
     } else widget.append(menu);
     accountOpen = true; trigger.setAttribute("aria-expanded", "true");
+    menu.querySelector(".account-menu-row")?.focus({ focusVisible: false });
   }
   function accountWidget(compact) {
     if (!ACCOUNT) return null;
@@ -1878,7 +1897,7 @@
     clearTimeout(AN.timer); AN.timer = null;
     return fetchAnalytics().then((changed) => {
       if (changed && route.v === "analytics" && rendered === route) {
-        if (viewerEl) LIVE.pending = true; // drawn when the sheet closes
+        if (viewerEl || accountOpen) LIVE.pending = true; // drawn when the sheet or the account menu closes
         else { const st = capture(); render(); restore(st); }
       }
       scheduleAnalytics();
@@ -2101,7 +2120,7 @@
   function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); closeAccountMenu(); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); }
   $("#drawer-close").addEventListener("click", () => closeDrawer());
   $("#scrim").addEventListener("click", () => closeDrawer());
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(true); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
   let sx = null;
   sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
   sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });
@@ -2239,7 +2258,7 @@
   // Draws the new model on the screen shown, unless a navigation is still loading (it draws when done), the sheet is open
   // (it draws when the sheet closes), or what the screen shows left the model (it stays as it was).
   function refresh(dirty) {
-    if (viewerEl) { LIVE.pending = true; return; } // drawn whole when the sheet closes
+    if (viewerEl || accountOpen) { LIVE.pending = true; return; } // drawn whole when the sheet or the account menu closes
     LIVE.pending = false; const r = route;
     if (rendered !== r || (r.v === "session" && !SESS[r.id]) || (r.v === "trace" && !SESS[r.sid]) || (r.v === "machine" && !MACHINE[r.id])) return;
     const st = capture(); $("#page").style.paddingBottom = "";

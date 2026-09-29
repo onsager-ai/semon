@@ -13,6 +13,8 @@
 
   function closeDrawer(restoreFocus = true) {
     if (!document.body.classList.contains("drawer-open")) return;
+    // A popover opened from the drawer (its account menu) goes with it, or it would float over the page on its own.
+    try { sidebar?.querySelectorAll(":popover-open").forEach((popover) => popover.hidePopover()); } catch { /* no popovers here */ }
     document.body.classList.remove("drawer-open");
     lead?.setAttribute("aria-expanded", "false");
     if (restoreFocus) lead?.focus();

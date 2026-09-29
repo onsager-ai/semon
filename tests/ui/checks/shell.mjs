@@ -463,6 +463,18 @@ export default async function shellCheck(browser) {
           r.expect(drawerOpen, key + " menu button did not open the drawer");
           r.expect(!drawerAfterEscape.open && drawerAfterEscape.focus === "lead-btn" && drawerAfterEscape.expanded === "false", key + " Escape did not close the drawer and restore focus: " + JSON.stringify(drawerAfterEscape));
           r.expect(!!closedSidebarRect && closedSidebarRect.right <= 0.5, key + " sidebar was not fully off screen after closing: " + JSON.stringify(closedSidebarRect));
+          // Swiping the drawer shut with a popover open from it closes the popover too, so it doesn't float over the page.
+          await page.click("#lead-btn"); await stableRect(page, "#sidebar");
+          await page.evaluate(() => document.getElementById("drawer-popover").showPopover());
+          await page.evaluate(() => {
+            const side = document.getElementById("sidebar"), at = (x) => new Touch({ identifier: 1, target: side, clientX: x, clientY: 300 });
+            side.dispatchEvent(new TouchEvent("touchstart", { touches: [at(250)], bubbles: true }));
+            side.dispatchEvent(new TouchEvent("touchmove", { touches: [at(150)], bubbles: true }));
+          });
+          const afterSwipe = await page.evaluate(() => ({ popover: document.getElementById("drawer-popover").matches(":popover-open"), drawer: document.body.classList.contains("drawer-open") }));
+          results[key].popoverSwipe = afterSwipe;
+          r.expect(!afterSwipe.popover && !afterSwipe.drawer, key + " swiping the drawer shut should close its popover too: " + JSON.stringify(afterSwipe));
+          await stableRect(page, "#sidebar");
 
           await page.click('#remove-form button[type="submit"]');
           await page.waitForFunction(() => document.querySelector("#remove-sheet")?.open === true);
