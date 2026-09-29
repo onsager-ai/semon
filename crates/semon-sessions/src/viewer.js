@@ -220,7 +220,10 @@
 
   // ---- Loading: the model from /api/model, transcripts a page at a time from /api/tx --------------------------
   const TXM = {}; // per session: the loaded range of its transcript { from, to, total } and its totals { calls, errors }
-  const ANALYTICS_COUNTS = {}; // aggregate tool calls and errors from /api/tx, binned at each session's start
+  // A session's tool calls and errors: its loaded transcript's totals, else the model's (`calls` and `errors` on each session,
+  // absent from an older server or cache: null, shown as "—"). Nothing fetches a transcript only to count it.
+  const countOf = (s, key) => TXM[s.id]?.[key] ?? s[key] ?? null;
+  const callsText = (calls) => (calls == null ? "—" : calls) + (calls === 1 ? " tool call" : " tool calls");
   let serverNow = 0, fetchedAt = 0;
   let TOK = {}; // per session: its transcript's growth mark in the model; a loaded transcript is tailed only when it moved
   const enc = encodeURIComponent;
@@ -301,39 +304,10 @@
   }
   // What a route needs before it can draw: a session's page (the one holding a deep-linked turn), and its child work.
   function load(r) {
-    if (r.v === "analytics") { loadAnalyticsCounts(); return null; }
     if (r.v !== "session" || !SESS[r.id]) return null;
     const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
     if (TX[r.id] && !deep) return kids(r.id);
     return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "").then(() => kids(r.id));
-  }
-  // Analytics draws at once; each session's tool-call and error counts fill in as their /api/tx pages arrive, at most four
-  // requests at a time. A page that fails leaves that session without counts (shown as "—"), never fails an update, and is
-  // asked for again at the next update. /api/tx has no count-only form or limit, so the whole last page is fetched.
-  const COUNT_QUEUE = [], COUNT_QUEUED = new Set(); let countWorkers = 0, countsTimer = null;
-  function paintCounts() {
-    if (countsTimer) return;
-    countsTimer = setTimeout(() => { countsTimer = null; if (route.v === "analytics") refresh(null); }, 150);
-  }
-  function countWorker() {
-    const id = COUNT_QUEUE.shift();
-    if (id == null) { countWorkers--; paintCounts(); return; }
-    const mark = TOK[id];
-    if (!SESS[id]) { COUNT_QUEUED.delete(id); countWorker(); return; }
-    api("/api/tx?sid=" + enc(id)).then(
-      (page) => { ANALYTICS_COUNTS[id] = { calls: page.calls ?? 0, errors: page.errors ?? 0, mark }; },
-      () => { ANALYTICS_COUNTS[id] = { failed: true }; },
-    ).then(() => {
-      const c = ANALYTICS_COUNTS[id]; // the model moved on while this page was in flight: ask again
-      if (SESS[id] && c && !c.failed && c.mark !== TOK[id]) COUNT_QUEUE.push(id); else COUNT_QUEUED.delete(id);
-      paintCounts(); countWorker();
-    });
-  }
-  function loadAnalyticsCounts() {
-    const live = new Set(Object.keys(SESS));
-    for (const id of Object.keys(ANALYTICS_COUNTS)) if (!live.has(id)) delete ANALYTICS_COUNTS[id];
-    for (const id of live) if (!SESS[id].stub && ANALYTICS_COUNTS[id]?.mark !== TOK[id] && !COUNT_QUEUED.has(id)) { COUNT_QUEUED.add(id); COUNT_QUEUE.push(id); }
-    while (countWorkers < 4 && COUNT_QUEUE.length) { countWorkers++; countWorker(); }
   }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
   function pager(sid, where, label) {
@@ -760,7 +734,7 @@
   }
   // A session's compact metadata line: state, model, machine, branch, tools, runs, tokens and API-equivalent cost.
   const sessionLine = (s) => (l2) => {
-    const es = TX[s.id] ?? [], m = TXM[s.id], calls = m ? m.calls : es.filter((e) => e.k === "tool").length, errors = m ? m.errors : es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
+    const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
     const st = el("span", "meta-item meta-state"); st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", nT + (nT === 1 ? " turn" : " turns")));
     if (errors) { const j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")); j.type = "button"; j.setAttribute("aria-label", j.textContent + ": jump to the first failed step");
       j.addEventListener("click", (ev) => { ev.stopPropagation(); stopOpeningEndPin(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
@@ -769,7 +743,7 @@
     const model = el("span", "meta-item meta-model"); model.append(harnessName(s.harness), el("span", "meta-value", shortModel(s.model))); model.title = s.model ?? "Unknown model";
     const machine = el("span", "meta-item meta-machine"); machine.append(icon(I.machine), el("span", "meta-value", shortHost(s))); machine.title = hostOf(s);
     const branch = el("span", "meta-item meta-branch"); branch.append(icon(I.branch), el("span", "meta-value", branchOf(s))); branch.title = branchOf(s);
-    const tools = el("span", "meta-item meta-tools"); tools.append(icon(I.wrench), el("span", "meta-value", String(calls))); tools.setAttribute("aria-label", calls + (calls === 1 ? " tool call" : " tool calls"));
+    const tools = el("span", "meta-item meta-tools"); tools.append(icon(I.wrench), el("span", "meta-value", calls == null ? "—" : String(calls))); tools.setAttribute("aria-label", callsText(calls));
     const kids = childSessions(s.id), allKids = descendantsOf(s.id, sessionChildren());
     let runs = null;
     if (kids.length) { runs = el("button", "meta-item meta-runs"); runs.type = "button"; runs.setAttribute("aria-label", kids.length + (kids.length === 1 ? " child session" : " child sessions") + (allKids.some((x) => x.state === "work") ? ", work in progress" : "") + ": open runs"); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); if (allKids.some((x) => x.state === "work")) runs.append(dot("work")); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
@@ -868,8 +842,8 @@
     const row = el("button", "runs-row"); row.type = "button"; row.style.paddingLeft = Math.min(depth, 3) * 14 + "px";
     const name = el("span", "run-name"); name.append(dot(s.state), childKindChip(s), el("span", null, s.name));
     const cost = costForSession(s.id); row.append(name, el("span", "run-cost", costText(cost)));
-    const counted = TXM[s.id]?.calls ?? ANALYTICS_COUNTS[s.id]?.calls, calls = counted ?? (ANALYTICS_COUNTS[s.id]?.failed ? null : (TX[s.id] ?? []).filter((e) => e.k === "tool").length), origin = originHandoff(s.id), meta = el("span", "run-meta");
-    meta.append(el("span", null, STATE[s.state]), el("span", null, dur(s.start, s.state === "work" ? null : s.last)), el("span", null, calls == null ? "— tool calls" : calls + (calls === 1 ? " tool call" : " tool calls"))); row.append(meta);
+    const origin = originHandoff(s.id), meta = el("span", "run-meta");
+    meta.append(el("span", null, STATE[s.state]), el("span", null, dur(s.start, s.state === "work" ? null : s.last)), el("span", null, callsText(countOf(s, "calls")))); row.append(meta);
     if (origin?.brief) row.append(el("span", "run-brief", oneLine(origin.brief)));
     const missing = costMissing(cost); if (missing.length) row.append(el("span", "no-price", "no price for " + missing.join(", ")));
     row.setAttribute("aria-label", [s.name, s.kind, STATE[s.state], dur(s.start, s.state === "work" ? null : s.last), origin?.brief ? oneLine(origin.brief) : "", "API-equivalent cost " + costText(cost)].filter(Boolean).join(" · "));
@@ -1286,9 +1260,9 @@
     const parentLink = el("button", "intro-open", "Open in " + parent.name); parentLink.type = "button"; parentLink.addEventListener("click", () => openParentAtHandoff(h)); block.append(brief, more, parentLink); return block;
   }
   function childReturnBlock(s, h) {
-    const block = el("div", "child-return"), calls = TXM[s.id]?.calls ?? (TX[s.id] ?? []).filter((e) => e.k === "tool").length, finished = s.state === "done" || s.state === "err" || h.status === "done" || h.status === "err";
+    const block = el("div", "child-return"), finished = s.state === "done" || s.state === "err" || h.status === "done" || h.status === "err";
     const status = finished ? (s.state === "err" || h.status === "err" ? "err" : "done") : "work";
-    const text = finished ? (status === "err" ? "Failed" : "Done") : "Working · " + calls + (calls === 1 ? " tool call" : " tool calls") + " · " + dur(s.start, null);
+    const text = finished ? (status === "err" ? "Failed" : "Done") : "Working · " + callsText(countOf(s, "calls")) + " · " + dur(s.start, null);
     const state = el("span", "stat " + status); state.append(status === "work" ? el("span", "spin") : dot(status), el("span", null, finished ? "Returned to " + nameOf(h.from) + " · " + text + " · " + dur(s.start, s.last) : text)); block.append(state);
     if (finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
     return block;
@@ -1303,7 +1277,7 @@
     if (child) { c.append(childKindChip(child)); const ln = el("span", "ln", child.name); ln.append(el("span", "verb", " · " + (child.kind ?? HARNESS[child.harness]))); c.append(ln); }
     else { c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln); }
     const shownState = child?.state ?? h.status, sw = el("span", "stat " + shownState); sw.append(shownState === "work" ? el("span", "spin") : dot(shownState === "done" ? "done" : shownState), child ? STATE[shownState] : statWord(h)); c.append(sw);
-    if (child) { const calls = TXM[child.id]?.calls ?? (TX[child.id] ?? []).filter((e) => e.k === "tool").length, meta = el("div", "child-meta"); meta.append(el("span", null, dur(child.start, child.state === "work" ? null : child.last)), el("span", null, calls + (calls === 1 ? " tool call" : " tool calls"))); c.append(meta); }
+    if (child) { const meta = el("div", "child-meta"); meta.append(el("span", null, dur(child.start, child.state === "work" ? null : child.last)), el("span", null, callsText(countOf(child, "calls")))); c.append(meta); }
     const br = markdown(h.brief, "brief"); c.append(br);
     // Long messages open in place; the rest of the card still goes to the other session.
     const more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
@@ -1353,14 +1327,14 @@
   const busyOf = (s) => { const iv = (s.busy ?? []).map(([a, b]) => [a, b]); if (s.state === "work" && iv.length) iv.at(-1)[1] = Math.max(iv.at(-1)[1], NOW); return iv; };
 
   // Analytics is computed from the served model's sessions, busy intervals, turn index and handoffs.
-  // The tx endpoint gives per-session aggregate tool counts, so (as in the approved mockup) those calls are attributed to session start.
+  // The model gives per-session aggregate tool counts, so (as in the approved mockup) those calls are attributed to session start.
   const DAY_MS = 86400000;
   const rangeMs = (days) => days * DAY_MS;
   const inRange = (t, from, to) => Number.isFinite(t) && t >= from && t < to;
   function analyticsSessions() {
     return Object.values(SESS).map((s) => {
-      const startedAt = Number(s.start) || 0, calls = ANALYTICS_COUNTS[s.id]?.calls ?? TXM[s.id]?.calls ?? 0;
-      const errors = ANALYTICS_COUNTS[s.id]?.errors ?? TXM[s.id]?.errors ?? 0;
+      const startedAt = Number(s.start) || 0, calls = s.calls ?? TXM[s.id]?.calls ?? 0;
+      const errors = s.errors ?? TXM[s.id]?.errors ?? 0;
       const turns = (TURNS[s.id] ?? []).filter(hasTurn);
       return { s, id: s.id, startedAt, busy: busyOf(s),
         turnEvents: turns.map((t) => Number.isFinite(t.at) ? t.at : Number.isFinite(t.start?.at) ? t.start.at : startedAt),
@@ -1542,10 +1516,9 @@
     const costNote = now.apiCost == null || previous.apiCost == null ? el("div", "note", "no price for " + [...new Set([...now.costUnknown, ...previous.costUnknown])].join(", ")) : deltaNote(now.apiCost, previous.apiCost, asMoney);
     addMetric(analyticsRange === 1 ? "Cost today (UTC)" : "Cost, last " + analyticsRange + " UTC days", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, analyticsRange === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + analyticsRange + " UTC days count, today so far, compared with the " + analyticsRange + " whole UTC days before.", true);
     addMetric("Sessions started", countText(now.started), deltaNote(now.started, previous.started, countText)); addMetric("Turns", countText(now.turns), deltaNote(now.turns, previous.turns, countText));
-    const toolNote = deltaNote(now.tools, previous.tools, countText), loading = COUNT_QUEUED.size, unavailable = all.filter((r) => ANALYTICS_COUNTS[r.id]?.failed && TXM[r.id]?.calls == null).length;
-    metrics.dataset.counts = loading ? "loading" : "ready";
+    const toolNote = deltaNote(now.tools, previous.tools, countText), unavailable = all.filter((r) => !r.s.stub && countOf(r.s, "calls") == null).length;
     if (unavailable) toolNote.append(" · — for " + unavailable + (unavailable === 1 ? " session" : " sessions"));
-    addMetric("Tool calls", countText(now.tools), toolNote, countText(now.errors) + " failed (" + pct(now.errors, now.tools) + ") · previous " + rangeName() + ": " + countText(previous.errors) + " failed (" + pct(previous.errors, previous.tools) + ")" + (loading ? " · still counting" : ""));
+    addMetric("Tool calls", countText(now.tools), toolNote, countText(now.errors) + " failed (" + pct(now.errors, now.tools) + ") · previous " + rangeName() + ": " + countText(previous.errors) + " failed (" + pct(previous.errors, previous.tools) + ")");
     const peak = peakBusy(all, from, to), peakBefore = peakBusy(all, from - rangeMs(analyticsRange), from);
     addMetric("Peak concurrency", countText(peak), deltaNote(peak, peakBefore, countText), "The most sessions busy at the same moment.");
     addMetric("Waited on you", timeText(now.waitsMs), deltaNote(now.waitsMs, previous.waitsMs, timeText), "Median wait " + timeText(now.medianWaitMs) + " · previous " + rangeName() + ": " + timeText(previous.medianWaitMs));
@@ -1657,9 +1630,8 @@
     const view = viewed(), grown = new Set(), cuts = new Map();
     let full = Object.values(SESS).some((x) => names.has(x.id) && names.get(x.id) !== x.name); // a new name shows in every turn
     for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
-    // Only transcripts whose mark in the model moved are asked for, one at a time. Analytics' counts load beside the update.
+    // Only transcripts whose mark in the model moved are asked for, one at a time.
     let chain = Promise.resolve();
-    if (route.v === "analytics") loadAnalyticsCounts();
     // A mark with fewer entries or bytes than the one loaded means the file was cut or rewritten: load it again.
     const shrank = (a, b) => { const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number); return s1 < s0 || b1 < b0; };
     for (const sid of view) if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));

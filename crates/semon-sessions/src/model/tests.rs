@@ -1716,16 +1716,50 @@ fn a_subagent_message_to_a_sibling_names_its_sender_agent() {
     assert_eq!(receiver[1].start.as_deref(), Some(relay.id.as_str()));
 }
 
+#[test]
+fn a_session_carries_its_transcripts_tool_call_and_error_counts() {
+    let home = Home::new();
+    home.top(
+        "counted",
+        &[
+            human("counted", ts(17, 0), "run two"),
+            assistant(
+                "counted",
+                ts(17, 1),
+                vec![
+                    tool("good", "Bash", json!({"command":"true"})),
+                    tool("bad", "Bash", json!({"command":"false"})),
+                ],
+            ),
+            result("counted", ts(17, 2), "good", "ok", false, json!({})),
+            result("counted", ts(17, 3), "bad", "exit 1", true, json!({})),
+            assistant("counted", ts(17, 4), vec![text("done")]),
+        ],
+    );
+    let built = home.build();
+    let session = &built.sessions["counted"];
+    // The same totals `/api/tx` reports, from the same transcript index.
+    let transcript = &built.tx["counted"];
+    assert_eq!((transcript.calls, transcript.errors), (2, 1));
+    assert_eq!((session.calls, session.errors), (Some(2), Some(1)));
+    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    assert_eq!(model["sessions"]["counted"]["calls"], 2);
+    assert_eq!(model["sessions"]["counted"]["errors"], 1);
+}
+
 fn golden(name: &str, built: &Built) {
     let mut expected_shape: Value = serde_json::from_str(&built.json(NOW)).unwrap();
-    // These snapshots cover the legacy model surface. The cost additions
-    // have focused synthetic assertions below and stay out of old fixtures.
+    // These snapshots cover the legacy model surface. The cost additions and
+    // the transcript totals (`calls`, `errors`) have focused synthetic
+    // assertions below and stay out of old fixtures.
     if let Some(sessions) = expected_shape["sessions"].as_object_mut() {
         for session in sessions.values_mut() {
             if let Some(session) = session.as_object_mut() {
                 session.shift_remove("cost");
                 session.shift_remove("reported_runs");
                 session.shift_remove("cost_check");
+                session.shift_remove("calls");
+                session.shift_remove("errors");
             }
         }
     }
