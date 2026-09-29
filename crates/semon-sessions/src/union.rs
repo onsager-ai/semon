@@ -25,6 +25,7 @@ use crate::{
     Options,
     model::{self, Built, MODEL_API, fnv},
     received::{Listing, ReceivedMachines},
+    refresh::RefreshPool,
     viewer::{
         MachineView, Reading, ViewerReply, decoded, has_session_page, has_trace_page, lock,
         percent_encode, query_value, read_lock, write_lock,
@@ -185,32 +186,77 @@ impl AccountMenu {
 
 /// When a [`ViewerCore`] brings each machine's model up to date with its
 /// logs.
+///
+/// Outside [`Refresh::OnRead`], a read answers from the last model built,
+/// at once, and machines are checked (and rebuilt when their logs changed)
+/// off the request path by a [`RefreshPool`]'s few threads, shared by every
+/// machine and core that uses the pool: the queue holds each machine once
+/// at most. A machine is rebuilt at most once a second, so the changes of
+/// one second are one rebuild, and it is checked only while it is read: 30 s
+/// after its last read it goes idle. A read waits for a build only when it
+/// must refresh first: its machine has no model yet, or went idle (see each
+/// mode), or its queued check is over a second late because every worker of
+/// the pool is busy. While the pool keeps up, an answer is at most about
+/// 1 s plus one build behind the logs; when it falls behind, the reads that
+/// find their checks overdue refresh themselves, so an answer is still
+/// never further behind than that, but those reads wait for their builds.
+///
+/// A background rebuild that fails leaves the last model served, with the
+/// error printed once; 3 s after rebuilds started failing, each read
+/// refreshes itself instead and answers the error (500), as
+/// [`Refresh::OnRead`] does, until a build works again. The model and the V1
+/// tree fail on their own: a tree that won't build never turns `/api/model`
+/// into an error.
+///
+/// [`RefreshPool`]: crate::RefreshPool
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Refresh {
     /// Before each read: every answer reflects the logs as they are. A read
     /// that finds a log changed rebuilds before it answers (185–303 ms for
     /// 519 files); reads that find nothing changed answer at once, side by
-    /// side. For one-shot and tool callers. The default.
+    /// side. No thread is used. For one-shot and tool callers. The default.
     #[default]
     OnRead,
-    /// In the background: a read answers from the last model built, at
-    /// once, and never waits for a rebuild. While reads keep coming, a
-    /// thread per machine looks for changed logs every 250 ms (a stat pass)
-    /// and rebuilds only when they changed, at most once a second, so the
-    /// changes of one second are one rebuild. An answer is at most about
-    /// 1 s plus one build behind the logs. The thread stops 30 s after the
-    /// last read. A read waits for a build only when its machine has no
-    /// model yet, or has one last checked over a second ago with no thread
-    /// to check it (the first read after 30 s without one): it refreshes
-    /// first, as the very first read builds. A background rebuild that
-    /// fails leaves the last model served, with the error printed once;
-    /// once the model was last checked 3 s ago and rebuilds still fail,
-    /// each read refreshes itself instead and answers the error (500), as
-    /// [`Refresh::OnRead`] does, until a build works again. The model and
-    /// the V1 tree fail on their own: a tree that won't build never turns
-    /// `/api/model` into an error. For servers;
-    /// `semon sessions --serve` uses it.
+    /// In the background, by watching the files: while a machine is read,
+    /// the pool checks it every 250 ms (a stat pass over its logs) and
+    /// rebuilds when they changed. For a server whose logs change on disk
+    /// with no one to say so; `semon sessions --serve` uses it. The first
+    /// read after the machine went idle refreshes first, since its logs
+    /// may have changed unseen.
     Background,
+    /// In the background, when the embedding server says a machine's logs
+    /// changed ([`ViewerCore::invalidate`]): no stat pass every 250 ms, only
+    /// a rebuild once invalidated, as soon as the one-second spacing
+    /// allows. However many invalidations come in that second, they are one
+    /// rebuild, and one that comes while a rebuild runs is one more after
+    /// it. As a safety net for a writer that doesn't invalidate, a machine
+    /// that is read is still checked every 30 s. The first read after the
+    /// machine went idle refreshes first only if it was invalidated
+    /// meanwhile; otherwise it answers at once, and the machine is checked
+    /// at its next safety check (at once if none is queued), so a writer
+    /// that doesn't invalidate is seen within 30 s. For servers that
+    /// receive the logs themselves.
+    OnInvalidate,
+}
+
+impl Refresh {
+    /// The mode as a view stores it.
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            Refresh::OnRead => 0,
+            Refresh::Background => 1,
+            Refresh::OnInvalidate => 2,
+        }
+    }
+
+    pub(crate) fn from_code(code: u8) -> Self {
+        match code {
+            1 => Refresh::Background,
+            2 => Refresh::OnInvalidate,
+            _ => Refresh::OnRead,
+        }
+    }
 }
 
 /// The session viewer without a transport: the pages, assets and API routes
@@ -230,9 +276,12 @@ pub enum Refresh {
 /// and call it from as many threads at once as there are requests. Each
 /// answer comes from one snapshot of each machine's model, cloned (an
 /// `Arc`) under a lock held for nothing else, and its `ETag` is that
-/// snapshot's version. With [`Refresh::Background`]
-/// ([`ViewerCore::set_refresh`]) no read waits for a rebuild; see
-/// [`Refresh`] for how far behind the logs an answer can be. The setters
+/// snapshot's version. With [`Refresh::Background`] or
+/// [`Refresh::OnInvalidate`] ([`ViewerCore::set_refresh`]) no read waits
+/// for a rebuild while the refresh pool keeps up; see [`Refresh`] for how
+/// far behind the logs an answer can be. An embedding server that receives
+/// logs uses [`Refresh::OnInvalidate`] and calls [`ViewerCore::invalidate`]
+/// once a machine's new logs are written. The setters
 /// take `&mut self`: configure the core before sharing it. What differs per
 /// request (an account menu, say) is passed with the call, as [`Extras`] to
 /// [`ViewerCore::respond_with`], so the shared core holds no per-request
@@ -245,6 +294,8 @@ pub struct ViewerCore {
     /// doesn't pass its own ([`ViewerCore::respond_with`]).
     extras: Extras,
     refresh: Refresh,
+    /// The pool that checks this core's machines in the background.
+    pool: Arc<RefreshPool>,
     open: Gate,
     /// Views [`ViewerCore::follow`] stopped serving, which
     /// [`ViewerCore::close`] still waits out: a rebuild of one may run on.
@@ -346,6 +397,11 @@ impl Gate {
         }
         state.1 += 1;
         Some(Entered(self))
+    }
+
+    /// Whether [`Gate::close`] was called.
+    fn is_closed(&self) -> bool {
+        lock(&self.state).0
     }
 
     /// No call starts again; waits for those in progress.
@@ -749,6 +805,7 @@ impl ViewerCore {
             received: None,
             extras: Extras::default(),
             refresh: Refresh::OnRead,
+            pool: RefreshPool::shared(),
             open: Gate::default(),
             retired: Mutex::default(),
         }
@@ -786,7 +843,8 @@ impl ViewerCore {
     /// A view of a machine, in this core's refresh mode.
     fn view(&self, options: Options) -> Arc<MachineView> {
         let view = MachineView::new(options);
-        view.set_background(self.refresh == Refresh::Background);
+        view.set_pool(self.pool.clone());
+        view.set_refresh(self.refresh);
         view
     }
 
@@ -899,8 +957,44 @@ impl ViewerCore {
     pub fn set_refresh(&mut self, refresh: Refresh) {
         self.refresh = refresh;
         for (_, view) in self.views().iter() {
-            view.set_background(refresh == Refresh::Background);
+            view.set_refresh(refresh);
         }
+    }
+
+    /// Sets the pool whose threads check this core's machines in the
+    /// background: [`RefreshPool::shared`] unless set. Give every core of
+    /// a process the same pool to bound its refresh threads to that pool's
+    /// size; the shared one does that already.
+    pub fn set_refresh_pool(&mut self, pool: Arc<RefreshPool>) {
+        for (_, view) in self.views().iter() {
+            view.set_pool(pool.clone());
+        }
+        self.pool = pool;
+    }
+
+    /// Tells the core that the logs of the machine served under `machine`
+    /// changed: the key given to [`ViewerCore::with_machines`], a received
+    /// machine's directory name, or `""` for [`ViewerCore::new`]'s one.
+    /// Call it once the new data is written where the machine's
+    /// [`Options`] read it. In [`Refresh::OnInvalidate`] that machine is
+    /// then rebuilt in the background, as soon as its one-second spacing
+    /// allows, however many calls come in that second; in
+    /// [`Refresh::Background`] it is checked sooner than its next 250 ms
+    /// check; refreshed on read, nothing needs it. It never blocks on a
+    /// build or touches a file, so it can be called from an async task.
+    /// Returns whether a machine is served under that key: false once the
+    /// core is closed, and for a received machine that is new since the
+    /// last request, which is read in full when it is.
+    pub fn invalidate(&self, machine: &str) -> bool {
+        if self.open.is_closed() {
+            return false;
+        }
+        let views = self.views();
+        let Some((_, view)) = views.iter().find(|(key, _)| key == machine) else {
+            return false;
+        };
+        view.invalidate();
+        true
     }
 
     /// Stops the core for good, and returns once it no longer reads or

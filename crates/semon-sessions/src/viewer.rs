@@ -7,7 +7,7 @@ use std::{
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
         TryLockError, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
     thread,
     time::{Duration, Instant, UNIX_EPOCH},
@@ -25,7 +25,9 @@ use crate::{
     events::EventCache,
     field, file_list, is_agent_output,
     model::{self, Built, Texts},
-    proc_start, read_index, save_index, tx,
+    proc_start, read_index,
+    refresh::{Key, RefreshPool},
+    save_index, tx,
     union::{Refresh, ViewerCore},
     user_text,
 };
@@ -79,17 +81,25 @@ struct ChildLink {
     label: Option<String>,
 }
 
-/// How often a machine's background refresher looks for changed logs: a
-/// stat pass over the files and directories its models were built from.
+/// How often a machine in [`Refresh::Background`] is checked for changed
+/// logs: a stat pass over the files and directories its models were built
+/// from.
 const CHECK_EVERY: Duration = Duration::from_millis(250);
+/// How often a machine in [`Refresh::OnInvalidate`] is checked all the
+/// same, in case a writer changed its logs without invalidating it.
+pub(crate) const SAFETY_EVERY: Duration = Duration::from_secs(30);
 /// The least time from the start of one rebuild of a machine's models to
 /// the start of the next: changes within it are one rebuild.
 pub(crate) const REBUILD_SPACING: Duration = Duration::from_secs(1);
-/// A refresher stops after this long without a read.
+/// A queued check this late means the refresh pool has fallen behind: a
+/// read of that machine refreshes it itself before it answers.
+pub(crate) const OVERDUE_AFTER: Duration = REBUILD_SPACING;
+/// A machine is no longer checked after this long without a read, and a
+/// refresh pool's thread stops after this long with nothing to run.
 pub(crate) const IDLE_AFTER: Duration = Duration::from_secs(30);
 /// While background rebuilds fail, reads answer from the last model built
-/// until it was last checked this long ago; then each read refreshes
-/// itself, and answers the error (500) for as long as the build fails.
+/// until they have failed this long; then each read refreshes itself, and
+/// answers the error (500) for as long as the build fails.
 pub(crate) const FAILING_AFTER: Duration = Duration::from_secs(3);
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -124,26 +134,27 @@ pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 ///   `ETag` is the snapshot's version.
 /// - `work` holds what a rebuild changes (the index, the event cache, the
 ///   texts, when each was saved). A rebuild holds it from its stat pass to
-///   its swap, so one machine rebuilds once at a time. In
-///   [`Refresh::Background`] a read takes it only when there is no model
-///   checked in the last second and no refresher to keep it so (the first
-///   read, and the first after [`IDLE_AFTER`] without one), or when
-///   background rebuilds have failed for [`FAILING_AFTER`].
+///   its swap, so one machine rebuilds once at a time. Outside
+///   [`Refresh::OnRead`] a read takes it only when it must refresh first
+///   (see [`MachineView::keep_fresh`]): there is no model yet, the view
+///   went idle, its queued check is [`OVERDUE_AFTER`] late, or background
+///   rebuilds have failed for [`FAILING_AFTER`].
 /// - `files` holds the transcript paths and Codex harness offsets the V1
 ///   routes look up, held for a lookup or an insert, never for a file read.
-/// - `live` is the refresher's state, held for a few field reads.
+/// - `live` is the view's refresh state, held for a few field reads, and
+///   around it the refresh pool's queue lock for an insert or a removal.
 ///
-/// Locks are only ever taken in the order work, files, shown, live.
+/// Locks are only ever taken in the order work, files, shown, live, and
+/// the refresh pool's last of all.
 pub(crate) struct MachineView {
     options: Options,
-    /// Reads answer from snapshots a background refresher keeps up to
-    /// date ([`Refresh::Background`]), instead of refreshing first.
-    background: AtomicBool,
+    /// Its [`Refresh`] mode ([`Refresh::code`]).
+    mode: AtomicU8,
     work: Mutex<Work>,
     shown: RwLock<Shown>,
     files: Mutex<Files>,
-    live: Arc<Live>,
-    /// This view, for its refresher: a thread never keeps a view alive.
+    live: Live,
+    /// This view, for its pool's queue: an entry never keeps a view alive.
     me: Weak<MachineView>,
     #[cfg(test)]
     hooks: tests::Hooks,
@@ -178,35 +189,50 @@ struct Files {
     harness: BTreeMap<PathBuf, ((u64, u64), BTreeSet<u64>)>,
 }
 
-/// A machine's background refresher, shared with its thread.
-#[derive(Default)]
+/// A machine's background refresh: its place in the pool, and what its
+/// checks found.
 struct Live {
     state: Mutex<LiveState>,
-    /// Signalled when the refresher stops, or should wake up.
+    /// Signalled when a check of it ends.
     changed: Condvar,
 }
 
-#[derive(Default)]
+/// Where a view's background check is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    /// Not queued: the view is idle, closed, or refreshed on read.
+    Idle,
+    /// Queued in its pool once, under this key, due at its instant.
+    Queued(Key),
+    /// A worker is checking it; the worker queues the next check.
+    Running,
+}
+
 struct LiveState {
-    /// A refresher thread is running.
-    running: bool,
-    /// Which refresher is the running one: each start counts one up.
-    generation: u64,
-    /// No refresher starts again, and a running one stops.
+    /// The pool whose workers check this view.
+    pool: Arc<RefreshPool>,
+    slot: Slot,
+    /// Never queued again, and a queued check is dropped.
     closed: bool,
+    /// Its logs changed since the last check began, as the embedding
+    /// server said ([`MachineView::invalidate`]).
+    invalidated: bool,
     /// The last read that answered from a snapshot.
     read_at: Option<Instant>,
     /// When the shown model, and the shown tree, were last checked
     /// against the logs and found built ([`Kind`] indexes them).
     checked_at: [Option<Instant>; 2],
-    /// When the refresher next looks: [`CHECK_EVERY`] after the last
-    /// check, and never before [`REBUILD_SPACING`] after the last rebuild.
-    due: Option<Instant>,
+    /// When the last rebuild of either started, as of the last check.
+    built_at: Option<Instant>,
     /// Each kind's last refresh error, printed once; `None` after a
     /// refresh of it that worked. A failing tree never fails the model.
     error: [Option<String>; 2],
+    /// When each kind's refreshes started failing, while they fail.
+    failing_since: [Option<Instant>; 2],
     /// [`IDLE_AFTER`], but for tests.
     idle_after: Duration,
+    /// [`SAFETY_EVERY`], but for tests.
+    safety_every: Duration,
 }
 
 /// What a machine builds from its logs, each refreshed and failing on its
@@ -227,6 +253,12 @@ impl Kind {
 }
 
 impl LiveState {
+    /// Read in the last [`IDLE_AFTER`]: a view kept checked.
+    fn active(&self) -> bool {
+        self.read_at
+            .is_some_and(|read| read.elapsed() < self.idle_after)
+    }
+
     /// Notes how a refresh of `kind` that started at `started` went. Reads
     /// go on answering from the last one built while it fails; its error
     /// is printed once, not on every check.
@@ -236,6 +268,7 @@ impl LiveState {
             Ok(()) => {
                 self.checked_at[at] = Some(started);
                 self.error[at] = None;
+                self.failing_since[at] = None;
             }
             Err(error) => {
                 let message = error.to_string();
@@ -243,6 +276,7 @@ impl LiveState {
                     eprintln!("semon sessions viewer: {message}");
                 }
                 self.error[at] = Some(message);
+                self.failing_since[at] = self.failing_since[at].or(Some(started));
             }
         }
     }
@@ -574,8 +608,8 @@ pub fn serve(options: ServeOptions) -> io::Result<()> {
     let server = Arc::new(server);
     println!("http://127.0.0.1:{port}/?t={}", viewer.token);
     // A few requests at once, so a long transcript page doesn't hold up a
-    // poll. recv blocks; between requests only each machine's refresher
-    // runs, and it stops IDLE_AFTER the last read.
+    // poll. recv blocks; between requests only the refresh pool runs, and
+    // it checks a machine only until IDLE_AFTER its last read.
     let (done, stopped) = std::sync::mpsc::channel();
     for _ in 0..SERVE_THREADS {
         let (server, viewer, done) = (server.clone(), viewer.clone(), done.clone());
@@ -778,85 +812,42 @@ fn transcript_key(options: &Options, path: &Path) -> Option<(String, String)> {
     (!id.is_empty()).then(|| (harness.to_owned(), id))
 }
 
-/// When a background refresher next looks, after a check that started at
-/// `started` and a last rebuild that started at `built_at`.
+/// When a background check is next due, after one that started at
+/// `started` and a last rebuild that started at `built_at`: [`CHECK_EVERY`]
+/// after it, and never before [`REBUILD_SPACING`] after that rebuild.
 fn next_check(started: Instant, built_at: Option<Instant>) -> Instant {
     let next = started + CHECK_EVERY;
     built_at.map_or(next, |built| next.max(built + REBUILD_SPACING))
 }
 
-/// A machine's background refresher: it looks for changed logs every
-/// [`CHECK_EVERY`] and rebuilds what is shown when they changed, at most
-/// once every [`REBUILD_SPACING`]. It stops after [`IDLE_AFTER`] without a
-/// read, when its view is closed, or when its view is dropped.
-fn refresher(live: Arc<Live>, view: Weak<MachineView>, generation: u64) {
-    /// Marks the refresher stopped however it ends, a panic included, so
-    /// the next read starts another instead of trusting one that is gone;
-    /// never a later refresher, started once this one said it stopped.
-    struct Stopped(Arc<Live>, u64);
-    impl Drop for Stopped {
-        fn drop(&mut self) {
-            let mut state = lock(&self.0.state);
-            if state.generation == self.1 {
-                state.running = false;
-            }
-            self.0.changed.notify_all();
-        }
-    }
-    let stopped = Stopped(live, generation);
-    let live = &stopped.0;
-    loop {
-        {
-            let mut state = lock(&live.state);
-            loop {
-                let idle_after = state.idle_after;
-                let idle = state
-                    .read_at
-                    .is_none_or(|read| read.elapsed() >= idle_after);
-                if state.closed || idle {
-                    // Under the same lock a read tests `running` under.
-                    state.running = false;
-                    drop(state);
-                    return;
-                }
-                let wait = state.due.map_or(Duration::ZERO, |due| {
-                    due.saturating_duration_since(Instant::now())
-                });
-                if wait.is_zero() {
-                    break;
-                }
-                state = live
-                    .changed
-                    .wait_timeout(state, wait)
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .0;
-            }
-        }
-        let Some(view) = view.upgrade() else {
-            return;
-        };
-        view.tick();
-    }
-}
-
 impl MachineView {
     /// A view over the agent homes, `/proc` and cache that `options` name,
-    /// refreshed before each read until [`MachineView::set_background`].
-    /// Nothing is read until the first request.
+    /// refreshed before each read until [`MachineView::set_refresh`], and
+    /// checked in the background by [`RefreshPool::shared`] until
+    /// [`MachineView::set_pool`]. Nothing is read until the first request.
     pub(crate) fn new(options: Options) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             options,
-            background: AtomicBool::new(false),
+            mode: AtomicU8::new(Refresh::OnRead.code()),
             work: Mutex::default(),
             shown: RwLock::default(),
             files: Mutex::default(),
-            live: Arc::new(Live {
+            live: Live {
                 state: Mutex::new(LiveState {
+                    pool: RefreshPool::shared(),
+                    slot: Slot::Idle,
+                    closed: false,
+                    invalidated: false,
+                    read_at: None,
+                    checked_at: [None; 2],
+                    built_at: None,
+                    error: [None, None],
+                    failing_since: [None; 2],
                     idle_after: IDLE_AFTER,
-                    ..LiveState::default()
+                    safety_every: SAFETY_EVERY,
                 }),
                 changed: Condvar::new(),
-            }),
+            },
             me: me.clone(),
             #[cfg(test)]
             hooks: tests::Hooks::default(),
@@ -868,10 +859,34 @@ impl MachineView {
         &self.options
     }
 
-    /// Whether reads answer from snapshots a background refresher keeps
-    /// fresh ([`Refresh::Background`]) rather than refreshing first.
-    pub(crate) fn set_background(&self, background: bool) {
-        self.background.store(background, Ordering::Relaxed);
+    /// When reads are brought up to date with the logs: see [`Refresh`].
+    pub(crate) fn set_refresh(&self, refresh: Refresh) {
+        self.mode.store(refresh.code(), Ordering::Relaxed);
+    }
+
+    fn refresh(&self) -> Refresh {
+        Refresh::from_code(self.mode.load(Ordering::Relaxed))
+    }
+
+    /// The pool whose workers check this view in the background. A check
+    /// queued in the one before moves to it.
+    pub(crate) fn set_pool(&self, pool: Arc<RefreshPool>) {
+        let mut state = lock(&self.live.state);
+        if let Slot::Queued(key) = state.slot {
+            state.pool.remove(key);
+            state.slot = Slot::Idle;
+            state.pool = pool;
+            self.queue(&mut state, key.0, true);
+        } else {
+            state.pool = pool;
+        }
+    }
+
+    /// Whether a snapshot's logs changed since it was built: a stat pass.
+    fn changed(&self, snapshot: &Snapshot) -> bool {
+        #[cfg(test)]
+        self.hooks.stats.fetch_add(1, Ordering::SeqCst);
+        snapshot.changed(&self.options)
     }
 
     fn shown_model(&self) -> Option<Arc<ModelCache>> {
@@ -886,7 +901,7 @@ impl MachineView {
     /// caller holds `work`.
     fn refresh_tree_locked(&self, work: &mut Work) -> io::Result<Arc<TreeCache>> {
         if let Some(tree) = self.shown_tree()
-            && !tree.snapshot.changed(&self.options)
+            && !self.changed(&tree.snapshot)
         {
             self.persist_if_due(work)?;
             return Ok(tree);
@@ -938,7 +953,7 @@ impl MachineView {
     /// holds `work`.
     fn refresh_model_locked(&self, work: &mut Work, now: i64) -> io::Result<Arc<ModelCache>> {
         if let Some(model) = self.shown_model()
-            && !model.snapshot.changed(&self.options)
+            && !self.changed(&model.snapshot)
         {
             self.persist_events_if_due(work)?;
             return Ok(model);
@@ -1000,7 +1015,7 @@ impl MachineView {
         // but for cloning the `Arc`. Concurrent reads don't wait on each
         // other, only on a rebuild of a change they found.
         if let Some(model) = self.shown_model()
-            && !model.snapshot.changed(&self.options)
+            && !self.changed(&model.snapshot)
         {
             if let Some(mut work) = try_lock(&self.work) {
                 self.persist_events_if_due(&mut work)?;
@@ -1013,7 +1028,7 @@ impl MachineView {
     /// The V1 tree, rebuilt first if anything changed.
     fn fresh_tree(&self) -> io::Result<Arc<TreeCache>> {
         if let Some(tree) = self.shown_tree()
-            && !tree.snapshot.changed(&self.options)
+            && !self.changed(&tree.snapshot)
         {
             if let Some(mut work) = try_lock(&self.work) {
                 self.persist_if_due(&mut work)?;
@@ -1024,16 +1039,16 @@ impl MachineView {
     }
 
     /// The model a request answers from. Refreshed on read, it is
-    /// [`MachineView::fresh_model`]. In the background mode it is the last
-    /// one built, at once; only when there is none, or none was checked in
-    /// the last second and no refresher runs to check it, is it refreshed
+    /// [`MachineView::fresh_model`]. Otherwise it is the last one built, at
+    /// once, unless [`MachineView::keep_fresh`] says this read refreshes
     /// first.
     fn served_model(&self) -> io::Result<Arc<ModelCache>> {
-        if !self.background.load(Ordering::Relaxed) {
+        let refresh = self.refresh();
+        if refresh == Refresh::OnRead {
             return self.fresh_model(model::now_ms());
         }
         if let Some(model) = self.shown_model()
-            && self.keep_fresh(Kind::Model)
+            && self.keep_fresh(Kind::Model, refresh)
         {
             return Ok(model);
         }
@@ -1044,11 +1059,12 @@ impl MachineView {
 
     /// The V1 tree a request answers from, as [`MachineView::served_model`].
     fn served_tree(&self) -> io::Result<Arc<TreeCache>> {
-        if !self.background.load(Ordering::Relaxed) {
+        let refresh = self.refresh();
+        if refresh == Refresh::OnRead {
             return self.fresh_tree();
         }
         if let Some(tree) = self.shown_tree()
-            && self.keep_fresh(Kind::Tree)
+            && self.keep_fresh(Kind::Tree, refresh)
         {
             return Ok(tree);
         }
@@ -1076,9 +1092,18 @@ impl MachineView {
     }
 
     /// Notes a read of the model or the tree, and says whether the shown
-    /// one may answer it: a refresher keeps it fresh, or it was checked in
-    /// the last second (and a refresher starts to keep it so).
-    fn keep_fresh(&self, kind: Kind) -> bool {
+    /// one may answer it (true), or the read refreshes first (false):
+    /// - a closed view answers from what it has;
+    /// - once rebuilds have failed for [`FAILING_AFTER`], a read refreshes
+    ///   itself, and answers the error while the build still fails;
+    /// - a view a worker is checking answers, and so does one whose queued
+    ///   check is less than [`OVERDUE_AFTER`] late. Later than that, the
+    ///   pool has fallen behind, and the read refreshes the view itself;
+    /// - a view not queued (idle) answers in [`Refresh::Background`] only
+    ///   if it was checked in the last second, and in
+    ///   [`Refresh::OnInvalidate`] unless it was invalidated meanwhile.
+    ///   Either way, one that answers is queued for a check at once.
+    fn keep_fresh(&self, kind: Kind, refresh: Refresh) -> bool {
         let mut state = lock(&self.live.state);
         let now = Instant::now();
         state.read_at = Some(now);
@@ -1086,28 +1111,41 @@ impl MachineView {
             return true;
         }
         let at = kind as usize;
-        let age = state.checked_at[at].map(|at| now.saturating_duration_since(at));
         // Rebuilds that keep failing aren't hidden behind an ever older
-        // one: past FAILING_AFTER a read refreshes itself, and answers the
-        // error if the build still fails.
-        if state.error[at].is_some() && age.is_none_or(|age| age >= FAILING_AFTER) {
+        // one: FAILING_AFTER into the failures a read refreshes itself,
+        // and answers the error if the build still fails.
+        if state.error[at].is_some()
+            && state.failing_since[at]
+                .is_none_or(|since| now.saturating_duration_since(since) >= FAILING_AFTER)
+        {
             return false;
         }
-        if state.running {
-            return true;
+        let age = state.checked_at[at].map(|at| now.saturating_duration_since(at));
+        match state.slot {
+            Slot::Running => true,
+            Slot::Queued(key) => now < key.0 + OVERDUE_AFTER,
+            Slot::Idle => {
+                let fresh = match refresh {
+                    Refresh::OnInvalidate => !state.invalidated,
+                    _ => age.is_some_and(|age| age < REBUILD_SPACING),
+                };
+                if fresh {
+                    self.queue(&mut state, now, false);
+                }
+                fresh
+            }
         }
-        let fresh = age.is_some_and(|age| age < REBUILD_SPACING);
-        if fresh {
-            self.start(&mut state);
-        }
-        fresh
     }
 
-    /// A read's own refresh of the kind it wants, when nothing keeps it
-    /// fresh, and of the other kind if that is shown, which a refresher
-    /// then keeps fresh. Only the wanted kind's error is the read's.
+    /// A read's own refresh of the kind it wants, and of the other kind if
+    /// that is shown, after which the view's next background check is
+    /// queued. Only the wanted kind's error is the read's.
     fn refresh_first(&self, kind: Kind) -> io::Result<()> {
+        #[cfg(test)]
+        self.hooks.refreshes_first.fetch_add(1, Ordering::SeqCst);
         let mut work = lock(&self.work);
+        // Logs invalidated before this refresh starts, it sees.
+        let invalidated = std::mem::take(&mut lock(&self.live.state).invalidated);
         let started = Instant::now();
         let wanted = self.refresh_kind(&mut work, kind);
         let other = kind.other();
@@ -1117,35 +1155,126 @@ impl MachineView {
         let built_at = work.built_at;
         drop(work);
         let mut state = lock(&self.live.state);
+        state.built_at = built_at;
         if let Some(result) = &others {
             state.record(other, started, result);
         }
         if wanted.is_ok() {
             state.record(kind, started, &wanted);
-            state.due = Some(next_check(started, built_at));
             state.read_at = Some(Instant::now());
-            self.start(&mut state);
+            let failing = others.as_ref().is_some_and(Result::is_err);
+            let due = self.next_due(&state, started, built_at, failing);
+            self.queue(&mut state, due, true);
+        } else {
+            state.invalidated |= invalidated;
         }
         wanted
     }
 
-    /// Starts the refresher, unless one runs or the view is closed.
-    fn start(&self, state: &mut LiveState) {
-        if state.running || state.closed {
+    /// When this view's next background check is due, after one that
+    /// started at `started`: [`next_check`] in [`Refresh::Background`]. In
+    /// [`Refresh::OnInvalidate`] the same if it was invalidated meanwhile
+    /// or a rebuild failed, and [`SAFETY_EVERY`] later otherwise.
+    fn next_due(
+        &self,
+        state: &LiveState,
+        started: Instant,
+        built_at: Option<Instant>,
+        failing: bool,
+    ) -> Instant {
+        if self.refresh() == Refresh::OnInvalidate && !state.invalidated && !failing {
+            started + state.safety_every
+        } else {
+            next_check(started, built_at)
+        }
+    }
+
+    /// Queues this view's next check at `at` in its pool: moved there if
+    /// `exact`, and otherwise only ever earlier. A view is queued once at
+    /// most, and never while a worker checks it (the worker queues the
+    /// next), once it is closed, or while it is refreshed on read.
+    fn queue(&self, state: &mut LiveState, at: Instant, exact: bool) {
+        self.queue_by(state, at, exact, false);
+    }
+
+    /// [`MachineView::queue`], from the worker that just checked this view
+    /// when `by_worker`: that worker is free again at once, so it never
+    /// counts as a busy one the pool must start another thread for.
+    fn queue_by(&self, state: &mut LiveState, at: Instant, exact: bool, by_worker: bool) {
+        if state.closed || self.refresh() == Refresh::OnRead {
             return;
         }
-        state.generation += 1;
-        let (live, view, generation) = (self.live.clone(), self.me.clone(), state.generation);
-        let spawned = thread::Builder::new()
-            .name("semon-refresh".into())
-            .spawn(move || refresher(live, view, generation));
-        // Without a thread, a read refreshes itself once a second is up.
-        state.running = spawned.is_ok();
+        let replacing = match state.slot {
+            Slot::Running => return,
+            Slot::Queued(key) if !exact && key.0 <= at => return,
+            Slot::Queued(key) => Some(key),
+            Slot::Idle => None,
+        };
+        state.slot = Slot::Queued(state.pool.queue(replacing, at, self.me.clone(), by_worker));
+    }
+
+    /// The embedding server's word that this machine's logs changed. Its
+    /// next check is queued as soon as [`REBUILD_SPACING`] after the last
+    /// rebuild allows, however often this is called until then: the calls
+    /// of one second are one rebuild. A view no one read in the last
+    /// [`IDLE_AFTER`] isn't rebuilt for it (its next read refreshes first),
+    /// but a check it still has queued is moved up, so that read never
+    /// answers from before the change for long. Refreshed on read, it
+    /// changes nothing.
+    pub(crate) fn invalidate(&self) {
+        if self.refresh() == Refresh::OnRead {
+            return;
+        }
+        let mut state = lock(&self.live.state);
+        if state.closed {
+            return;
+        }
+        state.invalidated = true;
+        if state.active() || matches!(state.slot, Slot::Queued(_)) {
+            let now = Instant::now();
+            let at = state
+                .built_at
+                .map_or(now, |built| now.max(built + REBUILD_SPACING));
+            self.queue(&mut state, at, false);
+        }
+    }
+
+    /// Runs this view's queued check `key`, on one of its pool's workers.
+    /// An entry the view no longer holds (moved or dropped since the worker
+    /// took it) is skipped, and so is a view that is closed or went idle.
+    pub(crate) fn run_queued(&self, key: Key) {
+        {
+            let mut state = lock(&self.live.state);
+            if state.slot != Slot::Queued(key) {
+                return;
+            }
+            if state.closed || !state.active() || self.refresh() == Refresh::OnRead {
+                state.slot = Slot::Idle;
+                return;
+            }
+            state.slot = Slot::Running;
+        }
+        /// A check that panics leaves the last model served and the next
+        /// check queued, as a failed rebuild does; its worker is replaced.
+        struct Checking<'a>(&'a MachineView);
+        impl Drop for Checking<'_> {
+            fn drop(&mut self) {
+                if thread::panicking() {
+                    let view = self.0;
+                    let mut state = lock(&view.live.state);
+                    view.checked(&mut state, Instant::now() + REBUILD_SPACING);
+                }
+            }
+        }
+        let checking = Checking(self);
+        self.tick();
+        drop(checking);
     }
 
     /// One background check: rebuilds what is shown if its logs changed,
-    /// never sooner than [`REBUILD_SPACING`] after the last rebuild. The
-    /// model and the tree are refreshed, and fail, each on its own.
+    /// never sooner than [`REBUILD_SPACING`] after the last rebuild, and
+    /// queues the next. The model and the tree are refreshed, and fail,
+    /// each on its own.
     fn tick(&self) {
         let mut work = lock(&self.work);
         let started = Instant::now();
@@ -1153,9 +1282,13 @@ impl MachineView {
             && started < built + REBUILD_SPACING
         {
             drop(work);
-            lock(&self.live.state).due = Some(built + REBUILD_SPACING);
+            let mut state = lock(&self.live.state);
+            state.built_at = Some(built);
+            self.checked(&mut state, built + REBUILD_SPACING);
             return;
         }
+        // Logs invalidated before this check starts, it sees.
+        lock(&self.live.state).invalidated = false;
         let results: Vec<_> = [Kind::Model, Kind::Tree]
             .into_iter()
             .filter(|kind| self.is_shown(*kind))
@@ -1164,28 +1297,48 @@ impl MachineView {
         let built_at = work.built_at;
         drop(work);
         let mut state = lock(&self.live.state);
-        state.due = Some(next_check(started, built_at));
+        state.built_at = built_at;
         for (kind, result) in &results {
             state.record(*kind, started, result);
         }
+        let failing = results.iter().any(|(_, result)| result.is_err());
+        let due = self.next_due(&state, started, built_at, failing);
+        self.checked(&mut state, due);
     }
 
-    /// Stops the refresher at its next wake, without waiting: the view is
-    /// no longer served. [`MachineView::close`] still waits it out.
-    pub(crate) fn retire(&self) {
-        lock(&self.live.state).closed = true;
+    /// A worker's check of this view ends: the next is queued at `due`
+    /// while the view is read, and [`MachineView::close`] is told.
+    fn checked(&self, state: &mut LiveState, due: Instant) {
+        state.slot = Slot::Idle;
+        if state.active() {
+            self.queue_by(state, due, true, true);
+        }
         self.live.changed.notify_all();
     }
 
-    /// Stops the refresher and waits out a rebuild in progress; none
-    /// starts again. The caller makes sure no read is in progress or
-    /// starts after, as [`ViewerCore::close`] does: a read would still
-    /// build a model it has none of.
+    /// No check of this view is queued again, and a queued one is dropped.
+    fn stop(state: &mut LiveState) {
+        state.closed = true;
+        if let Slot::Queued(key) = state.slot {
+            state.pool.remove(key);
+            state.slot = Slot::Idle;
+        }
+    }
+
+    /// Stops this view's background checks without waiting: it is no
+    /// longer served. [`MachineView::close`] still waits out one running.
+    pub(crate) fn retire(&self) {
+        Self::stop(&mut lock(&self.live.state));
+    }
+
+    /// Stops this view's background checks and waits out a check or a
+    /// rebuild in progress; none starts again. The caller makes sure no
+    /// read is in progress or starts after, as [`ViewerCore::close`] does:
+    /// a read would still build a model it has none of.
     pub(crate) fn close(&self) {
         let mut state = lock(&self.live.state);
-        state.closed = true;
-        self.live.changed.notify_all();
-        while state.running {
+        Self::stop(&mut state);
+        while state.slot == Slot::Running {
             state = self
                 .live
                 .changed
@@ -1600,6 +1753,21 @@ impl MachineView {
             .ok_or_else(|| invalid_input("entry is not expandable"))?;
         let (text, truncated) = truncate(&source, EXPAND_BYTES);
         Ok(serde_json::json!({"text":text,"truncated":truncated}).to_string())
+    }
+}
+
+impl Drop for MachineView {
+    /// Its queued check leaves the pool with it: a pool's queue holds only
+    /// views that are alive.
+    fn drop(&mut self) {
+        let state = self
+            .live
+            .state
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Slot::Queued(key) = state.slot {
+            state.pool.remove(key);
+        }
     }
 }
 
@@ -2320,7 +2488,7 @@ mod tests {
         io::{Read, Write},
         net::TcpStream,
         sync::{
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
             mpsc,
         },
         thread,
@@ -2334,11 +2502,15 @@ mod tests {
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     /// A view's test hooks, seen from any thread (a background rebuild runs
-    /// on its refresher's).
+    /// on a refresh pool's).
     #[derive(Default)]
     pub(super) struct Hooks {
         /// How many times the model was built.
         builds: AtomicU64,
+        /// How many stat passes were taken over its logs.
+        pub(super) stats: AtomicU64,
+        /// How many times a read refreshed it itself (outside OnRead).
+        pub(super) refreshes_first: AtomicU64,
         /// Runs in each build, after the files are stamped.
         building: Mutex<Option<Hook>>,
         /// Builds fail while set.
@@ -2448,8 +2620,12 @@ mod tests {
             )
         }
 
+        /// A view with a refresh pool of its own, so that tests running
+        /// side by side don't share workers unless they mean to.
         fn viewer(&self) -> Arc<MachineView> {
-            MachineView::new(self.options.clone())
+            let view = MachineView::new(self.options.clone());
+            view.set_pool(RefreshPool::new(2));
+            view
         }
     }
 
@@ -4762,7 +4938,7 @@ mod tests {
     fn a_read_during_a_rebuild_answers_from_the_last_model_at_once() {
         let fixture = lane_fixture();
         let view = fixture.viewer();
-        view.set_background(true);
+        view.set_refresh(Refresh::Background);
         let first = view.respond("GET", "/api/model", "", None);
         assert_eq!(first.status, 200);
         let v1 = version_of(&first);
@@ -4801,7 +4977,7 @@ mod tests {
     fn changes_within_a_second_are_one_rebuild_and_none_without_a_change() {
         let fixture = lane_fixture();
         let view = fixture.viewer();
-        view.set_background(true);
+        view.set_refresh(Refresh::Background);
         let v1 = version_of(&view.respond("GET", "/api/model", "", None));
         assert_eq!(view.hooks.builds(), 1);
         let idle = |version: &str| {
@@ -4927,14 +5103,29 @@ mod tests {
     /// looked for over a second: past the spacing after that first build.
     fn warm_background(fixture: &Fixture) -> (Arc<MachineView>, String) {
         let view = fixture.viewer();
-        view.set_background(true);
+        view.set_refresh(Refresh::Background);
+        let version = warm(&view);
+        (view, version)
+    }
+
+    /// A view over `fixture` in `refresh`, checked by `pool`'s workers.
+    fn pooled(fixture: &Fixture, refresh: Refresh, pool: &Arc<RefreshPool>) -> Arc<MachineView> {
+        let view = MachineView::new(fixture.options.clone());
+        view.set_pool(pool.clone());
+        view.set_refresh(refresh);
+        view
+    }
+
+    /// Builds `view`'s first model and reads it for over a second, past
+    /// the spacing after that first build; the model's version.
+    fn warm(view: &MachineView) -> String {
         let version = version_of(&view.respond("GET", "/api/model", "", None));
         let until = Instant::now() + REBUILD_SPACING + Duration::from_millis(200);
         while Instant::now() < until {
             view.respond("GET", "/api/model", &format!("since={version}"), None);
             thread::sleep(Duration::from_millis(50));
         }
-        (view, version)
+        version
     }
 
     fn serves(view: &MachineView, text: &str) -> bool {
@@ -4963,38 +5154,40 @@ mod tests {
         view.close();
     }
 
-    /// After IDLE_AFTER without a read the refresher stops; the next read,
-    /// its model last checked over a second ago, refreshes before it
-    /// answers and starts a refresher again.
+    /// After IDLE_AFTER without a read the view is no longer checked; the
+    /// next read, its model last checked over a second ago, refreshes
+    /// before it answers and queues the view's checks again.
     #[test]
     fn after_an_idle_spell_the_first_read_refreshes_first() {
         let fixture = lane_fixture();
         let view = fixture.viewer();
-        view.set_background(true);
+        view.set_refresh(Refresh::Background);
         lock(&view.live.state).idle_after = Duration::from_millis(300);
         let v1 = version_of(&view.respond("GET", "/api/model", "", None));
-        let running = || lock(&view.live.state).running;
+        let running = || lock(&view.live.state).slot != Slot::Idle;
         assert!(running());
-        eventually("the refresher stops when idle", || {
-            (!running()).then_some(())
-        });
+        eventually("the checks stop when idle", || (!running()).then_some(()));
         thread::sleep(REBUILD_SPACING + Duration::from_millis(100));
         say(&fixture, "lane", 1, "written while idle");
         assert!(
             serves(&view, "written while idle"),
             "the first read after an idle spell answered from the old model"
         );
-        assert!(running(), "the read started a refresher again");
+        assert!(running(), "the read queued the view's checks again");
         assert_ne!(version_of(&view.respond("GET", "/api/model", "", None)), v1);
         view.close();
     }
 
-    /// A refresher that panics mid-build is marked stopped (the model it
-    /// had stays served), and the next reads get the change all the same.
+    /// A check that panics mid-build ends its worker, and the pool starts
+    /// another in its place: the view's last model stays served, its next
+    /// check is queued, and the new worker (no read) rebuilds it.
     #[test]
-    fn a_refresher_that_panics_is_replaced() {
+    fn a_worker_that_panics_is_replaced() {
         let fixture = lane_fixture();
-        let (view, v1) = warm_background(&fixture);
+        let pool = RefreshPool::new(1);
+        let view = pooled(&fixture, Refresh::Background, &pool);
+        let v1 = warm(&view);
+        let started = pool.peak_and_started().1;
         let armed = Arc::new(AtomicBool::new(true));
         let trigger = armed.clone();
         *lock(&view.hooks.building) = Some(Arc::new(move || {
@@ -5003,15 +5196,360 @@ mod tests {
             }
         }));
         say(&fixture, "lane", 1, "after the panic");
-        eventually("the panic, and the refresher stopped", || {
-            (!armed.load(Ordering::SeqCst) && !lock(&view.live.state).running).then_some(())
+        eventually("the panic, and a worker in its place", || {
+            (!armed.load(Ordering::SeqCst) && pool.peak_and_started().1 > started).then_some(())
         });
         let during = view.respond("GET", "/api/model", &format!("since={v1}"), None);
         assert!(matches!(during.status, 200 | 304), "{}", during.status);
-        eventually("the line, after the panic", || {
-            serves(&view, "after the panic").then_some(())
+        // No read from here until the new worker has rebuilt it.
+        let builds = view.hooks.builds();
+        eventually("a rebuild by the new worker", || {
+            (view.hooks.builds() > builds).then_some(())
         });
+        assert!(serves(&view, "after the panic"));
+        assert!(pool.threads() <= 1);
+        assert_eq!(
+            pool.peak_and_started().0,
+            1,
+            "never more threads than its size"
+        );
         view.close();
+    }
+
+    /// Fifty views read at once are checked by the pool's three threads,
+    /// never more, and each is queued once at most. With no read after the
+    /// first, each is rebuilt by the pool alone (a read can't do it for
+    /// them), and serves the new line.
+    #[test]
+    fn fifty_views_are_checked_by_the_pools_threads_alone() {
+        let fixture = lane_fixture();
+        let pool = RefreshPool::new(3);
+        let views: Vec<_> = (0..50)
+            .map(|_| {
+                let view = pooled(&fixture, Refresh::Background, &pool);
+                assert_eq!(view.respond("GET", "/api/model", "", None).status, 200);
+                view
+            })
+            .collect();
+        let builds: Vec<_> = views.iter().map(|view| view.hooks.builds()).collect();
+        say(&fixture, "lane", 1, "seen by fifty views");
+        eventually("a rebuild of every view, with no read", || {
+            assert!(pool.threads() <= 3, "{} threads", pool.threads());
+            assert!(pool.queued() <= views.len());
+            for view in &views {
+                assert!(pool.entries_for(view) <= 1);
+            }
+            views
+                .iter()
+                .zip(&builds)
+                .all(|(view, builds)| view.hooks.builds() > *builds)
+                .then_some(())
+        });
+        for view in &views {
+            assert!(serves(view, "seen by fifty views"));
+        }
+        let (peak, _) = pool.peak_and_started();
+        assert!((1..=3).contains(&peak), "{peak} threads at once");
+        for view in &views {
+            view.close();
+        }
+        assert_eq!(pool.queued(), 0);
+    }
+
+    /// A burst of due checks is spread over the pool's workers. With a pool
+    /// of two and two views invalidated at once, the first one's build
+    /// held, the other is rebuilt by the other worker with no read in
+    /// between: first with one thread waiting (the pool grows), then with
+    /// both waiting on the views' 30 s safety checks (the wake reaches the
+    /// second).
+    #[test]
+    fn a_burst_of_due_checks_uses_every_worker() {
+        let (held_logs, free_logs) = (lane_fixture(), lane_fixture());
+        let pool = RefreshPool::new(2);
+        let held = pooled(&held_logs, Refresh::OnInvalidate, &pool);
+        let free = pooled(&free_logs, Refresh::OnInvalidate, &pool);
+        warm(&held);
+        warm(&free);
+        for round in 1..=2 {
+            eventually("every worker waiting", || {
+                (pool.threads() == round && pool.waiting() == round).then_some(())
+            });
+            let (starts, release) = held.hooks.hold();
+            let builds = free.hooks.builds();
+            let reads = free.hooks.refreshes_first.load(Ordering::SeqCst);
+            say(&held_logs, "lane", round, "held");
+            say(&free_logs, "lane", round, "free");
+            let invalidated = Instant::now();
+            held.invalidate();
+            free.invalidate();
+            starts
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a worker rebuilds the held view");
+            eventually("the free view, rebuilt by the other worker", || {
+                (free.hooks.builds() > builds).then_some(())
+            });
+            let took = invalidated.elapsed();
+            assert!(
+                took < Duration::from_millis(900),
+                "round {round}: rebuilt {took:?} after its invalidation"
+            );
+            assert_eq!(
+                free.hooks.refreshes_first.load(Ordering::SeqCst),
+                reads,
+                "a read rebuilt it"
+            );
+            drop(release);
+            eventually("the held view's check done", || {
+                (lock(&held.live.state).slot != Slot::Running).then_some(())
+            });
+            // Past the spacing, so the next round's checks are due at once.
+            thread::sleep(REBUILD_SPACING + CHECK_EVERY);
+        }
+        assert_eq!(pool.peak_and_started().0, 2);
+        held.close();
+        free.close();
+    }
+
+    /// A view is queued once however often it is read or invalidated
+    /// while its check waits (here behind a build that holds the pool's
+    /// only worker).
+    #[test]
+    fn a_view_is_never_queued_twice() {
+        let (blocker, lane) = (lane_fixture(), lane_fixture());
+        let pool = RefreshPool::new(1);
+        let busy = pooled(&blocker, Refresh::Background, &pool);
+        warm(&busy);
+        let pushed = pooled(&lane, Refresh::OnInvalidate, &pool);
+        let watched = pooled(&lane, Refresh::Background, &pool);
+        for view in [&pushed, &watched] {
+            assert_eq!(view.respond("GET", "/api/model", "", None).status, 200);
+        }
+        let (starts, release) = busy.hooks.hold();
+        say(&blocker, "lane", 1, "holds the only worker");
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the only worker rebuilds the blocker");
+        for _ in 0..100 {
+            pushed.invalidate();
+            for view in [&pushed, &watched] {
+                view.respond("GET", "/api/model", "", None);
+            }
+        }
+        assert_eq!(pool.entries_for(&pushed), 1);
+        assert_eq!(pool.entries_for(&watched), 1);
+        assert_eq!(pool.entries_for(&busy), 0, "running, not queued");
+        assert_eq!(pool.queued(), 2);
+        drop(release);
+        for view in [&busy, &pushed, &watched] {
+            view.close();
+        }
+    }
+
+    /// Invalidated twenty times in half a second, a view rebuilds at most
+    /// twice (one rebuild at once, one a second after it for what came
+    /// meanwhile) and serves the last line; with no more invalidations it
+    /// rebuilds no more.
+    #[test]
+    fn twenty_invalidations_in_a_second_are_at_most_two_rebuilds() {
+        let fixture = lane_fixture();
+        let pool = RefreshPool::new(2);
+        let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
+        warm(&view);
+        let before = view.hooks.builds();
+        for number in 0..20 {
+            say(&fixture, "lane", number, &format!("line {number}"));
+            view.invalidate();
+            thread::sleep(Duration::from_millis(25));
+        }
+        eventually("the last line", || {
+            serves(&view, "\"line 19\"").then_some(())
+        });
+        let rebuilds = view.hooks.builds() - before;
+        assert!(
+            (1..=2).contains(&rebuilds),
+            "{rebuilds} rebuilds for twenty invalidations"
+        );
+        thread::sleep(REBUILD_SPACING + CHECK_EVERY);
+        view.respond("GET", "/api/model", "", None);
+        assert_eq!(view.hooks.builds() - before, rebuilds, "none without one");
+        view.close();
+    }
+
+    /// Refreshed on invalidation, a view read for over a second takes no
+    /// stat pass until it is invalidated (a background one takes several);
+    /// then it takes one, and serves the change.
+    #[test]
+    fn on_invalidate_takes_no_stat_pass_until_invalidated() {
+        let fixture = lane_fixture();
+        let pool = RefreshPool::new(2);
+        let pushed = pooled(&fixture, Refresh::OnInvalidate, &pool);
+        let watched = pooled(&fixture, Refresh::Background, &pool);
+        let versions = [warm(&pushed), warm(&watched)];
+        fn stats(view: &MachineView) -> u64 {
+            view.hooks.stats.load(Ordering::SeqCst)
+        }
+        let (quiet, busy) = (stats(&pushed), stats(&watched));
+        let until = Instant::now() + REBUILD_SPACING + Duration::from_millis(500);
+        while Instant::now() < until {
+            for (view, version) in [&pushed, &watched].into_iter().zip(&versions) {
+                let reply = view.respond("GET", "/api/model", &format!("since={version}"), None);
+                assert_eq!(reply.status, 304);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(stats(&pushed), quiet, "a stat pass with no invalidation");
+        assert!(stats(&watched) > busy, "the background view never looked");
+        say(&fixture, "lane", 1, "announced");
+        pushed.invalidate();
+        eventually("the announced line", || {
+            serves(&pushed, "announced").then_some(())
+        });
+        assert!(stats(&pushed) > quiet);
+        pushed.close();
+        watched.close();
+    }
+
+    /// Refreshed on invalidation, a view that is read is still checked
+    /// every SAFETY_EVERY (half a second here), so a change nobody
+    /// announced is served all the same.
+    #[test]
+    fn on_invalidate_still_catches_a_change_nobody_announced() {
+        let fixture = lane_fixture();
+        let pool = RefreshPool::new(2);
+        let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
+        let safety = Duration::from_millis(500);
+        lock(&view.live.state).safety_every = safety;
+        warm(&view);
+        let builds = view.hooks.builds();
+        let written = Instant::now();
+        say(&fixture, "lane", 1, "never announced");
+        eventually("the unannounced line", || {
+            serves(&view, "never announced").then_some(())
+        });
+        let took = written.elapsed();
+        let bound = safety + CHECK_EVERY + Duration::from_millis(750);
+        assert!(took < bound, "served after {took:?}, over {bound:?}");
+        assert_eq!(view.hooks.builds(), builds + 1);
+        view.close();
+    }
+
+    /// When the pool falls behind (its only worker held by another view's
+    /// build), a read answers from the last model at once until its view's
+    /// check is OVERDUE_AFTER late, then refreshes the view itself: the
+    /// line is still served within the staleness bound, and the pool never
+    /// starts a thread past its size for it.
+    #[test]
+    fn a_pool_that_falls_behind_leaves_reads_to_refresh_themselves() {
+        let (blocker, lane) = (lane_fixture(), lane_fixture());
+        let pool = RefreshPool::new(1);
+        let busy = pooled(&blocker, Refresh::Background, &pool);
+        let view = pooled(&lane, Refresh::Background, &pool);
+        warm(&busy);
+        warm(&view);
+        let inline = view.hooks.refreshes_first.load(Ordering::SeqCst);
+        let (starts, release) = busy.hooks.hold();
+        say(&blocker, "lane", 1, "holds the only worker");
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the only worker rebuilds the blocker");
+        let written = Instant::now();
+        say(&lane, "lane", 1, "while the pool is busy");
+        let asked = Instant::now();
+        assert!(
+            !serves(&view, "while the pool is busy"),
+            "served before its check came due"
+        );
+        assert!(
+            asked.elapsed() < Duration::from_millis(500),
+            "a read waited"
+        );
+        eventually("the line, refreshed by a read", || {
+            serves(&view, "while the pool is busy").then_some(())
+        });
+        let took = written.elapsed();
+        let bound = REBUILD_SPACING + CHECK_EVERY + Duration::from_millis(750);
+        assert!(took < bound, "served after {took:?}, over {bound:?}");
+        assert!(
+            view.hooks.refreshes_first.load(Ordering::SeqCst) > inline,
+            "not a read's own refresh"
+        );
+        assert_eq!(pool.threads(), 1);
+        assert_eq!(pool.peak_and_started().0, 1);
+        drop(release);
+        busy.close();
+        view.close();
+    }
+
+    /// Closing a view drops its queued check at once, and waits out a
+    /// check in flight: here one view's check waits behind another's held
+    /// build on the pool's only worker.
+    #[test]
+    fn close_drops_a_queued_check_and_waits_out_a_running_one() {
+        let (busy_logs, queued_logs) = (lane_fixture(), lane_fixture());
+        let pool = RefreshPool::new(1);
+        let busy = pooled(&busy_logs, Refresh::Background, &pool);
+        let queued = pooled(&queued_logs, Refresh::Background, &pool);
+        warm(&busy);
+        warm(&queued);
+        let (starts, release) = busy.hooks.hold();
+        say(&busy_logs, "lane", 1, "in flight");
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the only worker rebuilds the busy view");
+        assert_eq!(pool.entries_for(&queued), 1, "queued behind it");
+        let closing = Instant::now();
+        queued.close();
+        assert!(
+            closing.elapsed() < Duration::from_millis(500),
+            "close waited for a queued check"
+        );
+        assert_eq!(pool.entries_for(&queued), 0);
+        let builds = queued.hooks.builds();
+        say(&queued_logs, "lane", 1, "after close");
+        let (closed, done) = mpsc::channel();
+        let closer = {
+            let busy = busy.clone();
+            thread::spawn(move || {
+                busy.close();
+                let _ = closed.send(());
+            })
+        };
+        assert!(
+            done.recv_timeout(Duration::from_millis(300)).is_err(),
+            "close returned during a check in flight"
+        );
+        drop(release);
+        done.recv_timeout(Duration::from_secs(10))
+            .expect("close returns once the check ends");
+        closer.join().expect("close panicked");
+        assert_eq!(pool.queued(), 0);
+        thread::sleep(REBUILD_SPACING + CHECK_EVERY);
+        assert_eq!(queued.hooks.builds(), builds, "a closed view was rebuilt");
+    }
+
+    /// An embedding server's core in OnInvalidate: `invalidate` names a
+    /// machine by its key, and that machine's change is served.
+    #[test]
+    fn a_core_invalidates_a_machine_by_its_key() {
+        let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
+        let mut core = ViewerCore::with_machines(vec![
+            ("a".into(), alpha.options.clone()),
+            ("b".into(), bravo.options.clone()),
+        ]);
+        core.set_refresh(Refresh::OnInvalidate);
+        core.set_refresh_pool(RefreshPool::new(1));
+        assert_eq!(core.respond("GET", "/api/model", "", None).status, 200);
+        assert!(!core.invalidate("c"), "no machine is served as c");
+        say(&alpha, "lane-a", 1, "pushed to alpha");
+        assert!(core.invalidate("a"));
+        eventually("alpha's pushed line", || {
+            let page = core.respond("GET", "/api/tx", "sid=lane-a", None);
+            String::from_utf8_lossy(&page.body)
+                .contains("pushed to alpha")
+                .then_some(())
+        });
+        core.close();
+        assert!(!core.invalidate("a"), "a closed core invalidates nothing");
     }
 
     /// Background builds that keep failing aren't hidden forever behind
