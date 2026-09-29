@@ -200,6 +200,10 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .tok-line span:not(:first-child) { text-align: right; color: var(--ink-2); }
 .no-price { color: var(--muted); font-size: var(--fs-cap); }
 .run-row .kind { margin-left: 6px; color: var(--muted); font-weight: 400; }
+/* The Sessions page's search field, until that page is ported. */
+.find { display: flex; align-items: center; height: 38px; background: var(--sunken); border-radius: 9px; padding: 0 10px; overflow: hidden; }
+.find input { border: 0; outline: none; background: transparent; width: 100%; min-width: 0; padding: 0; font-size: var(--fs-ui); }
+.find > svg { width: 18px; height: 18px; flex: none; margin-right: 8px; color: var(--muted); }
 .link { display: inline-flex; align-items: center; gap: 4px; min-height: var(--tap); border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-size: var(--fs-sm); text-align: left; }
 @media (hover: hover) { .link:hover { text-decoration: underline; text-underline-offset: 3px; } }
 .run-row .chev, .disclose .chev { width: 16px; height: 16px; color: var(--faint); transition: transform .15s; }
@@ -244,7 +248,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
    so its icon and text line up with Home / Machines. */
 .side-search { margin: 0 8px 6px; height: 36px; display: flex; align-items: center; gap: 10px; background: var(--sunken); border-radius: 9px; padding: 0 10px; color: var(--muted); overflow: hidden; }
 .side-search input { border: 0; outline: none; background: transparent; width: 100%; min-width: 0; padding: 0; font-size: var(--fs-ui); color: var(--ink); }
-.side-search input::placeholder { color: var(--muted); }
+.side-search input::placeholder, .find input::placeholder { color: var(--muted); }
 .side-search svg { width: 18px; height: 18px; flex: none; }
 .nav-item { width: calc(100% - 16px); margin: 1px 8px; display: flex; align-items: center; gap: 10px; border: 0; background: none; padding: 8px 10px; border-radius: 9px; text-align: left; font-weight: 500; color: var(--ink-2); }
 @media (hover: hover) { .nav-item:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); } }
@@ -665,8 +669,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .brandrow .close { display: inline-grid; }
   .sidebar-head .brandrow .close { width: 44px; height: 44px; }
   /* iOS zooms on focus below 16px. Keep 16px for layout, draw it at 15px to match the phone's text size. */
-  .side-search input { font-size: 16px; transform: scale(.9375); transform-origin: left center; width: calc(100% / .9375); }
-  .side-search { height: 42px; min-height: 42px; flex: none; }
+  .side-search input, .find input { font-size: 16px; transform: scale(.9375); transform-origin: left center; width: calc(100% / .9375); }
+  .side-search, .find { height: 42px; min-height: 42px; flex: none; }
   .nav-item { padding-block: 10px; }
   .srow { padding-block: 8px; }
   .groupby button { padding: 6px 8px; }
