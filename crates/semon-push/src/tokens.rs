@@ -135,7 +135,7 @@ fn loose_mode(path: &Path, meta: &fs::Metadata, wanted: u32) -> Result<(), Strin
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             return Err(format!(
-                "{} is mode {mode:03o}; only its owner may use it (chmod {wanted:o} {})",
+                "{} is mode {mode:03o}; it must be 0{wanted:o} (chmod {wanted:o} {})",
                 path.display(),
                 path.display()
             ));
