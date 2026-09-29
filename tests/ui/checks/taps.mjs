@@ -36,8 +36,12 @@ function measure({ selector, min }) {
     const style = getComputedStyle(e);
     if (style.visibility === "hidden" || style.display === "none") continue;
     if ((e.type === "checkbox" || e.type === "radio") && e.closest("label")) continue;
-    const box = e.getBoundingClientRect();
-    if (!box.width || !box.height) continue;
+    const rect = e.getBoundingClientRect();
+    if (!rect.width || !rect.height) continue;
+    // A control may reach past its drawn box with an absolutely positioned ::before (the segmented controls, #117): the
+    // finger's target is that reach, so it is measured, not the drawn 24 px.
+    const before = getComputedStyle(e, "::before"), reach = (k) => (before.position === "absolute" && before.content !== "none" ? Math.max(0, -parseFloat(before[k]) || 0) : 0);
+    const box = { left: rect.left - reach("left"), right: rect.right + reach("right"), width: rect.width + reach("left") + reach("right"), height: rect.height + reach("top") + reach("bottom") };
     // Off screen sideways: the closed drawer, or a carousel: not something a finger can reach yet.
     if (box.right <= 0 || box.left >= vw) continue;
     let allowed = null;
