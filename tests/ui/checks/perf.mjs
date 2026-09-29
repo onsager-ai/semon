@@ -158,7 +158,7 @@ async function checkLongSessionOpenEnd(page) {
   // The tail of the page sits clear of where the button floats. The button is sticky at the foot of the viewport and hides once the
   // reader is within 80 px of the end, so the case that matters is the first place it shows: 90 px from the end. A 36 px button is
   // appended as the very last thing in the transcript (cancelling the section's grid gap), the page is scrolled to that place, and
-  // the button's box and the tail's are read there. The floating button can still cover content mid-scroll: what is guaranteed is
+  // the button's box and the tail's are read there (the tail is then at or below the viewport's foot, so clear of the button). The floating button can still cover content mid-scroll: what is guaranteed is
   // that it never sits over the tail.
   const tail = await page.evaluate(async () => {
     const button = document.querySelector("#jump-bottom"), wrap = button.closest(".jump-wrap"), section = document.querySelector("#page section[aria-label='Transcript']");
@@ -188,7 +188,7 @@ async function checkLongSessionOpenEnd(page) {
     centring,
     tail,
     returnedGap,
-    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && tail.hiddenAtEnd && tail.shownThere && !tail.overlaps && tail.probeBottom - tail.buttonTop >= 12 && returnedGap <= 1,
+    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && tail.hiddenAtEnd && tail.shownThere && !tail.overlaps && (tail.probeBottom <= 0 || tail.probeBottom - tail.buttonTop >= 12) && returnedGap <= 1,
   };
 }
 

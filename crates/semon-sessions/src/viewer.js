@@ -388,7 +388,8 @@
       const m = TXM[sid], box = phone.matches ? document.documentElement : $("#main"), h0 = box.scrollHeight; b.disabled = true;
       // What is on screen stays where it is: the first turn in view is found again after the redraw and put back at its old top, at once
       // and again after the frame in which measured parts (clamped text, its "Show more") have settled.
-      const seen = where === "before" ? [...document.querySelectorAll("#page .turns > .turn")].find((t) => t.getBoundingClientRect().bottom > edge() + 1) : null;
+      // (Not the first turn on the page: an earlier page can continue it, growing it from inside.)
+      const seen = where === "before" ? [...document.querySelectorAll("#page .turns > .turn")].slice(1).find((t) => t.getBoundingClientRect().bottom > edge() + 1) : null;
       const anchor = seen ? { id: seen.dataset.turn, top: seen.getBoundingClientRect().top } : null;
       fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where).then(() => {
         render();
