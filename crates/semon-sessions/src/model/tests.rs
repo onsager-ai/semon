@@ -2592,3 +2592,210 @@ fn the_repo_cache_is_bounded() {
     );
     assert!(texts.repos.len() <= REPO_CACHE_MAX);
 }
+
+/// What `/api/analytics?range=7d` answers over this model, as the served
+/// build computes it: from the activity kept before the model is trimmed.
+fn week(built: &Built) -> Value {
+    let rows = crate::analytics::rows([("testbox", &built.activity)]);
+    let request = crate::analytics::Request::parse("range=7d").unwrap();
+    crate::analytics::answer(&rows, &request, NOW, "v1")
+}
+
+const MINUTE: i64 = 60_000;
+
+/// A question answered four minutes after it was asked is four minutes
+/// waited on you, whether the answer picked an option or was declined, and
+/// a session that never asked contributes nothing.
+#[test]
+fn an_answered_question_is_time_waited_on_you() {
+    let home = Home::new();
+    let ask = |id: &str, minute: i64| {
+        assistant(
+            "asker",
+            ts(10, minute),
+            vec![tool(
+                id,
+                "AskUserQuestion",
+                json!({"questions":[question(&format!("Ship {id}?"), &["Yes", "No"], false)]}),
+            )],
+        )
+    };
+    home.top(
+        "asker",
+        &[
+            human("asker", ts(10, 0), "Ask me things"),
+            ask("first", 1),
+            result(
+                "asker",
+                ts(10, 5),
+                "first",
+                "",
+                false,
+                json!({"answers":{"Ship first?":"Yes"}}),
+            ),
+            ask("second", 10),
+            result(
+                "asker",
+                ts(10, 11),
+                "second",
+                "User declined",
+                true,
+                json!("User declined to answer questions"),
+            ),
+        ],
+    );
+    home.top(
+        "plain",
+        &[
+            human("plain", ts(10, 0), "Just work"),
+            assistant("plain", ts(10, 3), vec![text("Done.")]),
+        ],
+    );
+    let built = home.build();
+    let week = week(&built);
+    // Four minutes, then one: a wait ends at its answer, or its decline.
+    assert_eq!(week["current"]["wait_ms"], 5 * MINUTE);
+    assert_eq!(week["current"]["median_wait_ms"], (4 * MINUTE + MINUTE) / 2);
+    assert_eq!(week["current"]["longest_wait_ms"], 4 * MINUTE);
+    assert_eq!(
+        week["top"]["waited"],
+        json!([{ "sid": "asker", "ms": 5 * MINUTE }])
+    );
+    // Nothing waits now, and the earlier week had no waits.
+    assert!(week["longest_current_wait"].is_null());
+    assert_eq!(week["previous"]["wait_ms"], 0);
+    // A session with no question waited on no one.
+    let waited: Vec<&str> = week["top"]["waited"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["sid"].as_str().unwrap())
+        .collect();
+    assert!(!waited.contains(&"plain"));
+}
+
+/// An open question has waited since it was asked, and is the longest
+/// current wait; another session's answered one is not current.
+#[test]
+fn an_unanswered_question_is_the_longest_current_wait() {
+    let home = Home::new();
+    home.top(
+        "asking",
+        &[
+            human("asking", ts(11, 0), "ask me"),
+            assistant(
+                "asking",
+                ts(11, 1),
+                vec![tool(
+                    "open-q",
+                    "AskUserQuestion",
+                    json!({"questions":[question("Now?", &["Yes"], false)]}),
+                )],
+            ),
+        ],
+    );
+    home.live(41, "asking", "idle", json!({}));
+    home.top(
+        "answered",
+        &[
+            human("answered", ts(11, 0), "ask me"),
+            assistant(
+                "answered",
+                ts(11, 2),
+                vec![tool(
+                    "done-q",
+                    "AskUserQuestion",
+                    json!({"questions":[question("Then?", &["Yes"], false)]}),
+                )],
+            ),
+            result(
+                "answered",
+                ts(11, 4),
+                "done-q",
+                "",
+                false,
+                json!({"answers":{"Then?":"Yes"}}),
+            ),
+        ],
+    );
+    let built = home.build();
+    assert_eq!(built.sessions["asking"].state, "wait");
+    let open = NOW - at(11, 1);
+    let week = week(&built);
+    assert_eq!(
+        week["longest_current_wait"],
+        json!({ "sid": "asking", "ms": open })
+    );
+    assert_eq!(week["current"]["wait_ms"], open + 2 * MINUTE);
+    assert_eq!(week["current"]["longest_wait_ms"], open);
+    assert_eq!(
+        week["top"]["waited"],
+        json!([
+            { "sid": "asking", "ms": open },
+            { "sid": "answered", "ms": 2 * MINUTE },
+        ])
+    );
+}
+
+/// A Codex question waits from the call until the answer in its output, or,
+/// when the output only acknowledges it, until your next message; one still
+/// unanswered in a live run is a current wait.
+#[cfg(unix)]
+#[test]
+fn a_codex_question_is_time_waited_on_you() {
+    let home = Home::new();
+    let ask = |hour: i64, minute: i64, id: &str, title: &str| {
+        codex_line(
+            ts(hour, minute),
+            "response_item",
+            json!({"type":"function_call","name":"request_user_input_async","call_id":id,
+                "arguments":format!("{{\"questions\":[{{\"title\":\"{title}\"}}]}}")}),
+        )
+    };
+    let reply = |hour: i64, minute: i64, id: &str, output: &str| {
+        codex_line(
+            ts(hour, minute),
+            "response_item",
+            json!({"type":"function_call_output","call_id":id,"output":output}),
+        )
+    };
+    home.codex(
+        "cx-answered",
+        json!({}),
+        &[
+            codex_user(ts(12, 0), "Go"),
+            ask(12, 1, "acked", "Which one?"),
+            reply(12, 1, "acked", "{\"accepted\":true}"),
+            codex_user(ts(12, 7), "The first"),
+            ask(12, 10, "answered", "Really?"),
+            reply(12, 12, "answered", "{\"accepted\":true,\"answer\":\"yes\"}"),
+        ],
+    );
+    home.codex(
+        "cx-open",
+        json!({}),
+        &[
+            codex_user(ts(13, 0), "Go"),
+            ask(13, 1, "open", "Still there?"),
+            reply(13, 1, "open", "{\"accepted\":true}"),
+        ],
+    );
+    hold_lock(&home, "cx-open");
+    let built = home.build();
+    assert_eq!(by_brief(&built, "Which one?").status, "done");
+    assert_eq!(by_brief(&built, "Still there?").status, "wait");
+    let open = NOW - at(13, 1);
+    let week = week(&built);
+    assert_eq!(
+        week["top"]["waited"],
+        json!([
+            { "sid": "cx-open", "ms": open },
+            { "sid": "cx-answered", "ms": 8 * MINUTE },
+        ])
+    );
+    assert_eq!(week["current"]["wait_ms"], open + 8 * MINUTE);
+    assert_eq!(
+        week["longest_current_wait"],
+        json!({ "sid": "cx-open", "ms": open })
+    );
+}
