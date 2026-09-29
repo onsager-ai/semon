@@ -65,7 +65,7 @@ dialog.sheet > .btn-row { margin-top: 20px; }
 
 /* The hero gives a first-run page a calm, centered starting point. */
 .hero { display: grid; justify-items: center; gap: 12px; padding: 28px 0; text-align: center; }
-.hero .mark { width: 34px; height: 34px; border-radius: 10px; }
+.hero .mark { width: 32px; height: 32px; }
 .hero h1, .hero h2 { margin: 0; font: 400 26px/1.2 var(--serif); }
 .hero p { max-width: 50ch; margin: 0; color: var(--muted); }
 .hero .btn-row { justify-content: center; margin-top: 4px; }
@@ -85,7 +85,7 @@ dialog.sheet > .btn-row { margin-top: 20px; }
 
 /* Sign-in pages use a narrow column without the navigation shell. */
 .signin { display: flex; flex-direction: column; justify-content: center; gap: 18px; width: min(100%, 380px); min-height: 100vh; margin: 0 auto; padding: 40px 24px; }
-.signin > .mark { width: 28px; height: 28px; border-radius: 8px; }
+.signin > .mark { width: 28px; height: 28px; }
 .signin h1 { margin: 0; font: 400 26px/1.2 var(--serif); }
 .signin p { margin: 0; color: var(--muted); }
 .signin form { display: grid; gap: 14px; }
