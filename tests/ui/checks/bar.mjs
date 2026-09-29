@@ -95,14 +95,15 @@ export default async function barCheck(browser) {
   for (const mode of ["phone-light", "phone-dark", "desktop"]) {
     const phone = mode !== "desktop", dark = mode === "phone-dark";
     const page = await served(browser, { size: phone ? "phone" : "desktop", dark });
-    const over = () => overflow(page);
+    const over = () => overflow(page), stateWord = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed", new: "New result", read: "Read result" };
     const barCheckOnce = () => page.evaluate(async () => {
       const main = document.querySelector("#main"), phone = matchMedia("(max-width: 760px)").matches;
       if (phone) window.scrollTo(0, document.documentElement.scrollHeight); else main.scrollTop = main.scrollHeight;
       await new Promise((r) => setTimeout(r, 120));
       const bar = document.querySelector("#topbar"), br = bar.getBoundingClientRect(), vw = document.documentElement.clientWidth;
       const scrolled = phone ? scrollY : main.scrollTop;
-      const l2 = bar.querySelector(".l2"), rest = l2?.querySelector(".rest"), sessionMeta = !!l2?.classList.contains("session-meta");
+      // On a phone a session's line 2 is not drawn (its state is the dot before the title); it stays in the page, undisplayed.
+      const l2 = bar.querySelector(".l2"), l2Shown = !!l2 && getComputedStyle(l2).display !== "none", rest = l2?.querySelector(".rest"), sessionMeta = l2Shown && !!l2.classList.contains("session-meta");
       // A segmented control's buttons are drawn 24px tall on purpose; their tap target is the ::before box, so that is what counts here.
       const segmentHit = (x) => { if (!x.closest(".analytics-range")) return null; const p = getComputedStyle(x, "::before"), h = x.getBoundingClientRect().height, top = parseFloat(p.top), bottom = parseFloat(p.bottom); return Number.isFinite(top) && Number.isFinite(bottom) ? h - top - bottom : h; };
       const ctl = [...bar.querySelectorAll("button, input, [role=link]")].filter((x) => x.offsetParent || getComputedStyle(x).position === "absolute").map((x) => [x.className || x.tagName, segmentHit(x) ?? x.getBoundingClientRect().height]);
@@ -119,12 +120,23 @@ export default async function barCheck(browser) {
       }
       const side = [...bar.querySelectorAll("*")].filter((x) => { const r = x.getBoundingClientRect(); return r.width && (r.right > vw + 0.5 || r.left < -0.5) && !x.closest(".rest"); }).length + (bar.scrollWidth > bar.clientWidth + 1 ? 1 : 0);
       const out = { pinned: Math.abs(br.top) < 0.5 && br.height > 30 && br.bottom > 0 && getComputedStyle(bar).visibility !== "hidden", scrolled: scrolled > 0, barH: Math.round(br.height), small: small.map(([c, h]) => c + ":" + Math.round(h)), side,
+        phoneBar: phone && bar.classList.contains("session-bar") ? (() => {
+          const btn = bar.querySelector("#lead-btn"), more = bar.querySelector("#more-btn"), l1 = bar.querySelector(".l1"), title = l1.querySelector(".t"), lead = l1.querySelector(".l1-state"), dotEl = lead?.querySelector(".dot"), crumb = l1.querySelector(".crumb"), sep = l1.querySelector(".sep");
+          const inside = (n) => { const r = n.getBoundingClientRect(); return r.top >= br.top - 0.5 && r.bottom <= br.bottom + 0.5; }, dr = dotEl?.getBoundingClientRect(), tr = title.getBoundingClientRect(), cr = crumb?.getBoundingClientRect();
+          // What the bar was before: the same page with the phone rules off (line 2 drawn), for the report and as a floor on the gain.
+          bar.classList.remove("session-bar"); const oldH = bar.getBoundingClientRect().height; bar.classList.add("session-bar");
+          return { h: br.height, oldH, l2Displayed: l2Shown, oneRow: [btn, more, title].every((n) => n && inside(n)) && Math.max(btn.getBoundingClientRect().top, more.getBoundingClientRect().top, tr.top) < Math.min(btn.getBoundingClientRect().bottom, more.getBoundingClientRect().bottom, tr.bottom),
+            dot: !!dotEl, dotState: dotEl ? [...dotEl.classList].find((c) => c !== "dot") : null, dotName: dotEl?.getAttribute("aria-label") ?? null, dotVisible: !!dr && dr.width > 0, dotBeforeTitle: !!dr && dr.right <= tr.left + 0.5, dotAfterCrumb: !cr || (!!dr && dr.left >= cr.right - 0.5),
+            tip: /^Status: .*\d+ turns?$/.test(lead?.dataset.tip ?? ""), crumbW: cr ? Math.round(cr.width) : null, crumbH: cr ? Math.round(cr.height) : null, leadW: lead ? Math.round(lead.getBoundingClientRect().width) : null, leadH: lead ? Math.round(lead.getBoundingClientRect().height) : null, leadOverlapsCrumb: !!cr && !!lead && lead.getBoundingClientRect().left < cr.right - 0.5, sepShown: !!sep && getComputedStyle(sep).display !== "none", titleW: Math.round(tr.width), titleText: title.textContent };
+        })() : null,
+        deskLead: !phone && bar.classList.contains("session-bar") ? getComputedStyle(bar.querySelector(".l1-state")).display : null,
         line2Targets, metaFacts, line2Hidden: { errors: !!errorsTarget?.hidden, runs: !!runsTarget?.hidden },
-        l2: l2 ? { h: Math.round(l2.getBoundingClientRect().height), oneLine: l2.scrollHeight <= l2.clientHeight + 1, sessionMeta, metaOrder: [...l2.querySelectorAll(":scope > .meta-item")].map((x) => [...x.classList].find((c) => c.startsWith("meta-") && c !== "meta-item")), ellipsis: rest ? getComputedStyle(rest).textOverflow === "ellipsis" : null, overflows: l2.scrollWidth > l2.clientWidth + 1 } : null };
+        l2: l2Shown ? { h: Math.round(l2.getBoundingClientRect().height), oneLine: l2.scrollHeight <= l2.clientHeight + 1, sessionMeta, metaOrder: [...l2.querySelectorAll(":scope > .meta-item")].map((x) => [...x.classList].find((c) => c.startsWith("meta-") && c !== "meta-item")), ellipsis: rest ? getComputedStyle(rest).textOverflow === "ellipsis" : null, overflows: l2.scrollWidth > l2.clientWidth + 1 } : null };
       if (phone) window.scrollTo(0, 0); else main.scrollTop = 0; return out;
     });
-    const R = { mode, pages: 0, notPinned: [], l2Pages: 0, l2NotOneLine: [], l2Overflowing: 0, l2NoEllipsis: 0, metaOrderFailures: [], metaDotFailures: [], sessionMetaPages: 0, sideways: 0, smallControls: [], line2TargetFailures: [], overflowScreens: 0 };
-    const measure = async (name, expectedMeta = null) => { const c = await barCheckOnce(); R.pages++; if (!c.pinned) R.notPinned.push(name + (c.scrolled ? "" : "(no scroll)")); if (c.l2) { R.l2Pages++; if (!c.l2.oneLine) R.l2NotOneLine.push(name + ":" + c.l2.h); if (c.l2.overflows) R.l2Overflowing++; if (c.l2.ellipsis === false) R.l2NoEllipsis++; if (c.l2.sessionMeta) { R.sessionMetaPages++; const want = ["meta-kind", "meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", "meta-runs", "meta-tokens", "meta-cost"], got = c.l2.metaOrder, required = [...(expectedMeta?.kind ? ["meta-kind"] : []), "meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", ...(expectedMeta?.runs ? ["meta-runs"] : []), "meta-tokens", "meta-cost"], ordered = got.every((x) => want.includes(x)) && got.every((x, i) => i === 0 || want.indexOf(got[i - 1]) < want.indexOf(x)); if (!ordered || required.some((x) => !got.includes(x))) R.metaOrderFailures.push(name + ":" + JSON.stringify(got)); const sizes = { errors: phone ? 40 : 28, runs: phone ? 44 : 30 }, needed = { errors: !!expectedMeta?.errors, runs: !!expectedMeta?.runs }; for (const key of Object.keys(sizes)) { const h = c.line2Targets[key]; if (needed[key] && h == null) R.line2TargetFailures.push(name + ": missing expected line-2 " + key + " target"); else if (h != null && !c.line2Hidden[key] && Math.abs(h - sizes[key]) > 1) R.line2TargetFailures.push(name + " " + key + ":" + h + "px, expected " + sizes[key] + "px"); else if (key === "runs" && needed.runs && c.line2Hidden.runs && !phone) R.line2TargetFailures.push(name + ": runs are hidden outside the phone menu"); } } } const mf = c.metaFacts; if (mf) { if (!mf.dot || !mf.dotInside || (mf.dotFirst && mf.ringRoom < 5.5) || Math.abs(mf.firstOffTitle) > 1) R.metaDotFailures.push(name + ": " + JSON.stringify({ first: mf.dotFirst, ringRoom: mf.ringRoom, inside: mf.dotInside, offTitle: mf.firstOffTitle })); if (mf.errsColor != null && mf.errsColor !== mf.toolsColor) R.metaDotFailures.push(name + ": errors are " + mf.errsColor + " where the other items are " + mf.toolsColor); if (mf.runsDot) R.metaDotFailures.push(name + ": the runs item has a state dot"); if (mf.hit) R.metaDotFailures.push(name + ": a whole-line .meta-hit button is back"); if (mf.errsWeight != null && mf.errsWeight > mf.toolsWeight) R.metaDotFailures.push(name + ": errors weigh " + mf.errsWeight + " over the other items' " + mf.toolsWeight); if (mf.buttons.some((b) => !/\b(errs|meta-runs)\b/.test(b))) R.metaDotFailures.push(name + ": a meta item other than errors and runs is a button: " + JSON.stringify(mf.buttons)); } R.sideways += c.side; if (c.small.length) R.smallControls.push(name + " " + c.small.join(",")); if (await over()) R.overflowScreens++; return c; };
+    const R = { mode, pages: 0, notPinned: [], l2Pages: 0, l2NotOneLine: [], l2Overflowing: 0, l2NoEllipsis: 0, metaOrderFailures: [], metaDotFailures: [], sessionMetaPages: 0, phoneBars: 0, phoneBarFailures: [], phoneBarMaxH: 0, phoneBarOldH: null, phoneBarTitleW: [], deskLeadShown: 0, startedLine: null, sideways: 0, smallControls: [], line2TargetFailures: [], overflowScreens: 0 };
+    const measure = async (name, expectedMeta = null) => { const c = await barCheckOnce(); R.pages++; if (c.deskLead != null && c.deskLead !== "none") R.deskLeadShown++;
+      if (c.phoneBar) { const b = c.phoneBar; R.phoneBars++; R.phoneBarMaxH = Math.max(R.phoneBarMaxH, b.h); R.phoneBarOldH = Math.min(R.phoneBarOldH ?? Infinity, b.oldH); R.phoneBarTitleW.push(b.titleW); const bad = []; if (b.h > 57.5) bad.push("height " + b.h); if (b.oldH < b.h + 10) bad.push("no shorter than before: " + b.oldH + " -> " + b.h); if (!b.oneRow) bad.push("not one row"); if (b.l2Displayed) bad.push("line 2 is displayed"); if (!b.dot || !b.dotVisible) bad.push("no state dot"); if (!b.dotName || stateWord[b.dotState] !== b.dotName) bad.push("dot name " + b.dotName + " for " + b.dotState); if (!b.dotBeforeTitle || !b.dotAfterCrumb) bad.push("dot not between the crumb and the title"); if (!b.tip) bad.push("dot tip"); if (b.crumbW != null && (b.crumbW < 44 || b.crumbW > 48 || b.sepShown)) bad.push("crumb is " + b.crumbW + " px wide (44 to 48) or shows its separator " + b.sepShown); if (b.crumbH != null && b.crumbH < 35.5) bad.push("crumb tap height " + b.crumbH); if (b.leadW < 32 || b.leadH < 32 || b.leadOverlapsCrumb) bad.push("state dot tap area " + b.leadW + "x" + b.leadH + (b.leadOverlapsCrumb ? ", overlapping the crumb" : "")); if (bad.length) R.phoneBarFailures.push(name + ": " + bad.join(", ")); } if (!c.pinned) R.notPinned.push(name + (c.scrolled ? "" : "(no scroll)")); if (c.l2) { R.l2Pages++; if (!c.l2.oneLine) R.l2NotOneLine.push(name + ":" + c.l2.h); if (c.l2.overflows) R.l2Overflowing++; if (c.l2.ellipsis === false) R.l2NoEllipsis++; if (c.l2.sessionMeta) { R.sessionMetaPages++; const want = ["meta-kind", "meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", "meta-runs", "meta-tokens", "meta-cost"], got = c.l2.metaOrder, required = [...(expectedMeta?.kind ? ["meta-kind"] : []), "meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", ...(expectedMeta?.runs ? ["meta-runs"] : []), "meta-tokens", "meta-cost"], ordered = got.every((x) => want.includes(x)) && got.every((x, i) => i === 0 || want.indexOf(got[i - 1]) < want.indexOf(x)); if (!ordered || required.some((x) => !got.includes(x))) R.metaOrderFailures.push(name + ":" + JSON.stringify(got)); const sizes = { errors: phone ? 40 : 28, runs: phone ? 44 : 30 }, needed = { errors: !!expectedMeta?.errors, runs: !!expectedMeta?.runs }; for (const key of Object.keys(sizes)) { const h = c.line2Targets[key]; if (needed[key] && h == null) R.line2TargetFailures.push(name + ": missing expected line-2 " + key + " target"); else if (h != null && !c.line2Hidden[key] && Math.abs(h - sizes[key]) > 1) R.line2TargetFailures.push(name + " " + key + ":" + h + "px, expected " + sizes[key] + "px"); else if (key === "runs" && needed.runs && c.line2Hidden.runs && !phone) R.line2TargetFailures.push(name + ": runs are hidden outside the phone menu"); } } } const mf = c.metaFacts; if (mf) { if (!mf.dot || !mf.dotInside || (mf.dotFirst && mf.ringRoom < 5.5) || Math.abs(mf.firstOffTitle) > 1) R.metaDotFailures.push(name + ": " + JSON.stringify({ first: mf.dotFirst, ringRoom: mf.ringRoom, inside: mf.dotInside, offTitle: mf.firstOffTitle })); if (mf.errsColor != null && mf.errsColor !== mf.toolsColor) R.metaDotFailures.push(name + ": errors are " + mf.errsColor + " where the other items are " + mf.toolsColor); if (mf.runsDot) R.metaDotFailures.push(name + ": the runs item has a state dot"); if (mf.hit) R.metaDotFailures.push(name + ": a whole-line .meta-hit button is back"); if (mf.errsWeight != null && mf.errsWeight > mf.toolsWeight) R.metaDotFailures.push(name + ": errors weigh " + mf.errsWeight + " over the other items' " + mf.toolsWeight); if (mf.buttons.some((b) => !/\b(errs|meta-runs)\b/.test(b))) R.metaDotFailures.push(name + ": a meta item other than errors and runs is a button: " + JSON.stringify(mf.buttons)); } R.sideways += c.side; if (c.small.length) R.smallControls.push(name + " " + c.small.join(",")); if (await over()) R.overflowScreens++; return c; };
     const sids = Object.keys(D.SESS), traceTurns = [];
     const F = { youTurns: 0, youWithHeader: 0, msgTimes: 0, relayHeaders: 0, gapMarkersBetweenTurns: 0, gapMarkersInsideTurns: 0, tables: 0, tsum: 0, tsumFallback: [], tsumLowercasedUnknown: 0 };
     for (const sid of sids) {
@@ -142,6 +154,20 @@ export default async function barCheck(browser) {
     for (const m of Object.keys(D.MACHINE ?? {})) { await goto(page, { v: "machine", id: m }, D); await measure("machine " + m); }
     for (const v of ["home", "sessions", "machines"]) { await goto(page, { v }, D); await measure(v); }
     R.traces = traceTurns.length;
+    // The "Started … on <machine>" line is one line on a phone even when the machine name is long: the name (set here to a long
+    // one, since the fixture's are short) ellipsises, its full name stays in the tip, and nothing scrolls sideways.
+    if (phone) {
+      for (const sid of sids) {
+        await goto(page, { v: "session", id: sid }, D);
+        if (!(await page.locator(".turns > .divider.started").count())) continue;
+        const real = await page.evaluate(() => document.querySelector(".turns > .divider.started .dv-machine").dataset.tip);
+        const LONG = "marvin-HP-EliteBook-X-G2i-14-inch-Notebook-Next-Gen-AI-PC";
+        await page.evaluate((name) => { document.querySelector(".turns > .divider.started .dv-machine").textContent = name; }, LONG);
+        const f = await page.evaluate(() => { const d = document.querySelector(".turns > .divider.started"), lead = d.querySelector(".dv-lead"), m = d.querySelector(".dv-machine"), dr = d.getBoundingClientRect(), vw = document.documentElement.clientWidth; return { h: Math.round(dr.height * 10) / 10, leadH: Math.round(lead.getBoundingClientRect().height * 10) / 10, cut: m.scrollWidth > m.clientWidth, ellipsis: getComputedStyle(m).textOverflow === "ellipsis", inside: dr.left >= -0.5 && dr.right <= vw + 0.5, sideways: document.documentElement.scrollWidth > vw, text: d.textContent }; });
+        R.startedLine = { sid, real, ...f, sidewaysOverflow: await overflow(page) };
+        break;
+      }
+    }
     R.smallControls = R.smallControls.slice(0, 6);
     const out = { ...R };
     if (mode !== "phone-dark") {
@@ -225,8 +251,11 @@ export default async function barCheck(browser) {
       // The errors segment opens errors mode on the first failed step: marked, in view, not expanded; no menu.
       const errSid = sids.find((s) => (D.TX[s] ?? []).some((e) => e.k === "tool" && e.ok === false));
       r.expect(!!errSid, "no session with a failed tool call to test the errors-segment jump on");
-      if (errSid) { await goto(page, { v: "session", id: errSid }, D); const badge = await page.evaluate(() => document.querySelector(".topbar .errs").textContent.replace(/\u2009/g, " ").trim()); await page.click(".topbar .errs"); await page.waitForTimeout(700);
-        out.errsJump = { session: D.SESS[errSid].name, badge, ...(await page.evaluate(() => { const e = document.querySelector("#page .step.err-current"), r = e?.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect(); return { label: document.querySelector("#topbar .errnav-count")?.textContent ?? null, marked: !!e?.classList.contains("err"), expanded: e?.querySelector("button")?.getAttribute("aria-expanded") ?? null, inView: !!r && r.top >= bar.bottom - 1 && r.top < innerHeight, menu: !!document.querySelector(".menu") }; })) };
+      if (errSid) { await goto(page, { v: "session", id: errSid }, D); const badge = await page.evaluate(() => document.querySelector(".topbar .errs").textContent.replace(/\u2009/g, " ").trim()); let menuLabel = null;
+        // On a phone line 2 is off the bar, so the errors are stepped through from the ⋯ menu.
+        if (phone) { await page.click("#more-btn"); menuLabel = await page.evaluate(() => document.querySelector(".session-menu .menu-errors > span:not(.dot):not(.menu-note)")?.textContent ?? null); await page.click(".session-menu .menu-errors"); } else await page.click(".topbar .errs");
+        await page.waitForTimeout(700);
+        out.errsJump = { session: D.SESS[errSid].name, badge, menuLabel, ...(await page.evaluate(() => { const e = document.querySelector("#page .step.err-current"), r = e?.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect(); return { label: document.querySelector("#topbar .errnav-count")?.textContent ?? null, marked: !!e?.classList.contains("err"), expanded: e?.querySelector("button")?.getAttribute("aria-expanded") ?? null, inView: !!r && r.top >= bar.bottom - 1 && r.top < innerHeight, menu: !!document.querySelector(".menu") }; })) };
         await page.keyboard.press("Escape"); await page.waitForTimeout(300); out.errsJump.closed = await page.evaluate(() => !!document.querySelector(".topbar .errs") && !document.querySelector("#topbar .errnav-count")); }
       // Deep links land the turn fully below the bar.
       const landed = () => page.evaluate(() => { const st = history.state, t = [...document.querySelectorAll(".turn")].find((x) => x.dataset.turn === st?.turn), bar = document.querySelector("#topbar").getBoundingClientRect(); if (!t) return { found: false }; const r = t.getBoundingClientRect(); return { found: true, turn: st.turn, top: Math.round(r.top), barBottom: Math.round(bar.bottom), barTop: Math.round(bar.top), belowBar: r.top >= bar.bottom - 0.5 && r.top < innerHeight - 40, flash: t.classList.contains("flash") }; });
@@ -322,8 +351,11 @@ export default async function barCheck(browser) {
     const runsSelector = size === "phone" ? "dialog.runs-sheet" : ".runs-popover";
     if (runsVisible || runsViaMenu) await page.waitForSelector(runsSelector);
     const runs = runsVisible || runsViaMenu ? await page.evaluate((selector) => { const box = document.querySelector(selector); return { open: !!box, rows: box?.querySelectorAll(".runs-row").length ?? 0, nested: box?.querySelectorAll(".runs-group .runs-row").length ?? 0, costs: box?.querySelectorAll(".run-cost").length ?? 0, apiLabel: box?.textContent.includes("API-equivalent cost") ?? false }; }, runsSelector) : { open: false, rows: 0, nested: 0, costs: 0, apiLabel: false };
+    // A Runs sheet opened from the ⋯ menu hands focus back to ⋯ when it closes (the menu item is gone, and line 2's runs item is not drawn).
+    let runsFocus = null;
+    if (runsViaMenu) { await page.click("dialog.runs-sheet .vclose"); await page.waitForFunction(() => !document.querySelector("dialog.runs-sheet")); await page.waitForTimeout(100); runsFocus = await page.evaluate(() => document.activeElement?.id ?? document.activeElement?.tagName ?? null); }
     const expectedRuns = Object.values(D.SESS).filter((s) => { let p = parentOf(s.id); while (p && p !== "harbor") p = parentOf(p); return p === "harbor"; }).length;
-    childAssertions.push({ size, introActions, pathNames, expectedPath, pathOk, briefCard, openedParent, returnRow, returnParent, siblingNav, runs, runsViaMenu, expectedRuns });
+    childAssertions.push({ size, introActions, pathNames, expectedPath, pathOk, briefCard, openedParent, returnRow, returnParent, siblingNav, runs, runsViaMenu, runsFocus, expectedRuns });
     await page.context().close();
   }
 
@@ -337,6 +369,7 @@ export default async function barCheck(browser) {
     r.expect(child.siblingNav.nav === 0 && child.siblingNav.buttons === 0 && !child.siblingNav.count, child.size + ": a child session still shows previous/next sibling controls or an \"N of M\" count: " + JSON.stringify(child.siblingNav));
     r.expect(child.runs.open && child.runs.rows === child.expectedRuns && child.runs.nested > 0 && child.runs.costs === child.expectedRuns && child.runs.apiLabel, child.size + ": Runs view did not list the full nested tree and its API-equivalent costs: " + JSON.stringify(child.runs));
   }
+  for (const child of childAssertions) if (child.size === "phone") r.expect(child.runsViaMenu === true && child.runsFocus === "more-btn", "phone: closing the Runs sheet opened from ⋯ left focus on " + child.runsFocus + " (via menu " + child.runsViaMenu + "), not ⋯");
   r.expect(childAssertions.length === 2, "lineage, no-sibling-nav, brief/return and Runs checks did not run on phone and desktop: " + childAssertions.length);
 
   // Thinking shows inline. Readable thinking is drawn in full, with no control to open (no button, nothing hidden), under a
@@ -500,7 +533,17 @@ export default async function barCheck(browser) {
     r.expect(m.l2NotOneLine.length === 0, m.mode + ": l2 not one line: " + JSON.stringify(m.l2NotOneLine));
     r.expect(m.l2NoEllipsis === 0, m.mode + ": l2 missing ellipsis count=" + m.l2NoEllipsis);
     r.expect(m.l2Overflowing === 0, m.mode + ": l2 content overflow count=" + m.l2Overflowing);
-    r.expect(m.sessionMetaPages > 0 && m.metaOrderFailures.length === 0, m.mode + ": session line 2 order=" + JSON.stringify(m.metaOrderFailures));
+    if (m.mode !== "desktop") {
+      r.expect(m.phoneBars > 0 && m.phoneBarFailures.length === 0, m.mode + ": the phone session bar is not one row of menu, dot and title, and ⋯ (max height " + m.phoneBarMaxH + "px, at most 57: the 56 px tap row and the 1px divider): " + JSON.stringify(m.phoneBarFailures.slice(0, 6)));
+      const sl = m.startedLine;
+      r.expect(!!sl, m.mode + ": no session showed a Started line to check");
+      if (sl) {
+        r.expect(sl.h <= sl.leadH + 1, m.mode + ": the Started line wraps with a long machine name: " + JSON.stringify(sl));
+        r.expect(sl.cut && sl.ellipsis && sl.inside && !sl.sideways && sl.sidewaysOverflow === 0, m.mode + ": the long machine name is not ellipsised inside the screen: " + JSON.stringify(sl));
+        r.expect(!!sl.real && sl.real !== "" && sl.text.startsWith("Started "), m.mode + ": the machine name's full tip is missing: " + JSON.stringify(sl));
+      }
+    } else r.expect(m.phoneBars === 0 && m.deskLeadShown === 0, m.mode + ": the phone session bar's state dot shows on desktop (or the phone bar rules apply): " + m.phoneBars + "/" + m.deskLeadShown);
+    r.expect((m.mode === "desktop" || m.sessionMetaPages === 0) && (m.mode !== "desktop" || m.sessionMetaPages > 0) && m.metaOrderFailures.length === 0, m.mode + ": session line 2 order=" + JSON.stringify(m.metaOrderFailures));
     r.expect(m.metaDotFailures.length === 0, m.mode + ": session line 2 facts (whole state dot on the title edge, no run dot, no whole-line button, quiet errors, only errors and runs are buttons): " + JSON.stringify(m.metaDotFailures.slice(0, 6)));
     r.expect(m.overflowScreens === 0, m.mode + ": overflowScreens=" + m.overflowScreens);
     // Gap markers: this fixture's own data has none (X.gapMarkers is always 0 here — every fixture available to this
@@ -534,14 +577,16 @@ export default async function barCheck(browser) {
         r.expect(!!n && m.errsJump.label === "Error 1 of " + n, m.mode + ": errors mode does not read Error 1 of the segment's count: " + JSON.stringify(m.errsJump));
         r.expect(m.errsJump.marked && m.errsJump.expanded === "false", m.mode + ": errors mode did not mark the failed step, or expanded it: " + JSON.stringify(m.errsJump));
         r.expect(m.errsJump.closed === true, m.mode + ": Escape did not leave errors mode");
+        if (m.mode !== "desktop") r.expect(m.errsJump.menuLabel === m.errsJump.badge, m.mode + ": the ⋯ menu's errors item does not read the error count: " + JSON.stringify({ menu: m.errsJump.menuLabel, badge: m.errsJump.badge }));
         r.expect(m.errsJump.inView === true, m.mode + ": errors-jump step not in view");
         r.expect(m.errsJump.menu === false, m.mode + ": errors-jump left a menu open");
       }
-      r.expect(!!m.inertBadges && m.inertBadges.items >= 4 && m.inertBadges.clicked >= 1 && m.inertBadges.overlaid === 0 && m.inertBadges.titled && !m.inertBadges.dialog && !m.inertBadges.menu && !m.inertBadges.moved, m.mode + ": a plain line-2 badge lost its tooltip or acted on click: " + JSON.stringify(m.inertBadges));
+      r.expect(!!m.inertBadges && m.inertBadges.items >= 4 && (m.mode.startsWith("phone") ? m.inertBadges.clicked === 0 : m.inertBadges.clicked >= 1) && m.inertBadges.overlaid === 0 && m.inertBadges.titled && !m.inertBadges.dialog && !m.inertBadges.menu && !m.inertBadges.moved, m.mode + ": a plain line-2 badge lost its tooltip or acted on click: " + JSON.stringify(m.inertBadges));
       r.expect(!!m.details, m.mode + ": the Session details test never ran");
       if (m.details) {
         r.expect(m.details.open === true && m.details.inView === true, m.mode + ": Session details did not open visibly from the ⋯ menu: " + JSON.stringify(m.details));
         r.expect(m.details.labels.includes("Model") && m.details.labels.includes("Machine") && (m.details.labels.includes("Branch") || m.details.labels.includes("Worktree")) && m.details.labels.includes("Started") && m.details.labels.includes("Duration") && m.details.labels.includes("Tokens in / out") && m.details.labels.includes("Cached context") && m.details.hasSessionId, m.mode + ": Session details omitted a menu fact: " + JSON.stringify(m.details.labels));
+        { const facts = D.SESS[m.details.session], want = ["Status", "Tool calls", ...(facts?.kind ? ["Kind"] : [])], missing = want.filter((x) => !m.details.labels.includes(x)); r.expect(missing.length === 0, m.mode + ": Session details omits what the phone bar's line 2 held: " + JSON.stringify({ missing, labels: m.details.labels })); }
         r.expect(m.details.escFocus?.closed === true && m.details.escFocus?.focus === "more-btn", m.mode + ": Escape on Session details did not return focus to the ⋯ button: " + JSON.stringify(m.details.escFocus));
         r.expect(m.details.hasCost === true && m.details.costPlain === true && m.details.costBreakdown === true && m.details.closed === true, m.mode + ": Session details omitted the API-equivalent cost breakdown, hid it behind a tap, or did not close: " + JSON.stringify(m.details));
         const detailFacts = D.SESS[m.details.session], reports = detailFacts?.reported_runs ?? [], costChecks = detailFacts?.cost_check ?? [];

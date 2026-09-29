@@ -329,6 +329,10 @@ code { overflow-wrap: anywhere; }
 .tx > * { min-width: 0; }
 .divider { display: flex; align-items: center; gap: 10px; font-size: var(--fs-cap); color: var(--muted); text-align: center; }
 .divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); min-width: 16px; }
+/* "Started 21:57 on <machine>" is never more than one line: a long machine name ellipsises, and its tip has the whole name. */
+.divider .dv-text { display: flex; flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+.divider .dv-lead { flex: none; }
+.divider .dv-machine { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Opening a session: the old page is held dimmed and inert, then (after 150 ms, in viewer.js) a skeleton of turn-shaped
    placeholders stands in for the transcript until it arrives. Only tokens for colour; the shimmer is off under reduced motion. */
 .page.loading { opacity: .55; pointer-events: none; transition: opacity .15s ease; }
@@ -582,6 +586,16 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .groupby button { padding: 6px 8px; }
   .topbar { top: env(safe-area-inset-top, 0px); padding: 6px 10px; min-height: 50px; }
   .topbar.detail { min-height: 56px; }
+  /* A session's bar is one row on a phone: the menu button, the title behind its small state dot, then ⋯. Line 2 (kind, state,
+     turns, errors, model, machine, branch, tools, runs, tokens, cost) leaves the bar: the errors and the runs are in the ⋯ menu,
+     the rest in Session details. The parent crumb shrinks to a back chevron (a 44 px target like the buttons beside it), so the title gets the room. The dot is a 32 px
+     tap target that abuts the chevron's box and overlaps nothing. */
+  .topbar.session-bar .l2 { display: none; }
+  .topbar.session-bar .l1-state { display: inline-flex; flex: none; align-items: center; align-self: center; padding: 12px; margin: -12px -6px; pointer-events: auto; }
+  .topbar.session-bar .l1 .crumb { position: relative; flex: none; align-self: center; width: 44px; min-width: 44px; max-width: 44px; overflow: hidden; color: transparent; text-decoration: none; }
+  .topbar.session-bar .l1 .crumb::before { content: ""; position: absolute; left: 50%; top: 50%; width: 7px; height: 7px; border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: translate(-30%, -50%) rotate(45deg); }
+  .topbar.session-bar .l1 .sep { display: none; }
+  .topbar.session-bar .l1 .crumb ~ .t { flex: 0 1 auto; max-width: none; }
   .lead { display: inline-grid; }
   /* The bottom padding is the jump button's offset, height and a 16px gap, so the last content scrolls clear of it. */
   .page { padding: 2px 16px calc(72px + env(safe-area-inset-bottom, 0px)); gap: 16px; }
@@ -704,6 +718,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; margin: 0 -4px; border: 0; border-radius: 6px; background: none; padding: 0 4px; font: inherit; font-weight: 400; color: var(--muted); text-decoration: none; pointer-events: auto; cursor: pointer; }
 .topbar .l2.session-meta .errs-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--err); }
 .topbar .l2.session-meta .errs-sep { color: var(--faint); }
+.topbar .l1-state { display: none; }
+.menu .menu-errors .dot { margin: 0 5px; }
 .topbar .l2.session-meta .meta-item[hidden], .topbar .l2.session-meta .meta-runs[hidden], .topbar .l2.session-meta .errs[hidden], .topbar .l2.session-meta .errs-sep[hidden], .topbar .l2.session-meta .meta-value[hidden] { display: none; }
 .wide-toggle { margin-left: auto; }
 .menu .menu-note { margin-left: auto; color: var(--accent); font-size: var(--fs-sm); }

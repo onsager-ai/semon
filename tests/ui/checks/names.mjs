@@ -58,7 +58,9 @@ export default async function namesCheck(browser) {
       const top = await measure(page, "#topbar");
       // A session's top bar always shows its harness. If the line fitter dropped the label, nothing was audited, so fail.
       // A child's own top bar keeps its kind chip first, so its model label may be dropped there.
-      if (s !== kinded || s === claude || s === codex) r.expect(top.length > 0, tag + ": the top bar of " + s.name + " (" + s.harness + ") shows no harness label, so none was audited");
+      // On a phone the session bar is one row with no line 2, so it holds no harness label (Session details has it).
+      if (size === "phone") r.expect(top.length === 0, tag + ": the phone session bar of " + s.name + " still shows a harness label");
+      else if (s !== kinded || s === claude || s === codex) r.expect(top.length > 0, tag + ": the top bar of " + s.name + " (" + s.harness + ") shows no harness label, so none was audited");
       if (top.length) audit("topbar-" + s.harness, top);
       if (s === kinded) {
         // A child's kind chip in the top bar is neutral: no tinted fill, and the neutral ink.
