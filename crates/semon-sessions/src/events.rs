@@ -221,9 +221,21 @@ impl SignalKind {
 /// The longest `n` a run-setting, hook or denial signal keeps, in characters.
 pub(crate) const TAG_MAX: usize = 64;
 
+/// Eight hex digits of the SHA-256 of `text`: a stable short name that tells
+/// two long values, or two runs, apart without keeping either.
+fn short_hash(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// A value fit to cache as a signal's `n`: enum-like text of letters, digits
-/// and `_ - . : / [ ] +` or a space, cut to [`TAG_MAX`] characters. Text with
-/// anything else in it (a newline, a quote, a sentence) is not kept at all.
+/// and `_ - . : / [ ] +` or a space, at most [`TAG_MAX`] characters. Text with
+/// anything else in it (a newline, a quote, a sentence) is not kept at all. A
+/// longer value is cut and ends in `#` and a hash of the whole value, so two
+/// values that share a long prefix stay different.
 fn bounded(text: &str) -> Option<String> {
     let safe = !text.is_empty()
         && text.bytes().all(|byte| {
@@ -233,7 +245,15 @@ fn bounded(text: &str) -> Option<String> {
                     b'_' | b'-' | b'.' | b':' | b'/' | b'[' | b']' | b'+' | b' '
                 )
         });
-    safe.then(|| text.chars().take(TAG_MAX).collect())
+    if !safe {
+        return None;
+    }
+    // The text is ASCII, so bytes and characters agree.
+    Some(if text.len() > TAG_MAX {
+        format!("{}#{}", &text[..TAG_MAX - 9], short_hash(text))
+    } else {
+        text.to_owned()
+    })
 }
 
 /// Pushes a signal whose tag is already bounded, without the compaction dedupe.
@@ -330,15 +350,63 @@ fn codex_declined(
     }
 }
 
-/// The source of a Claude Code tool refusal, from the harness's fixed
-/// wording. Only the start of the result is read, and none of it is kept.
-fn denial_source(content: Option<&Value>, result: Option<&Value>) -> Option<&'static str> {
-    let text = content.map(text_parts).unwrap_or_default();
-    let text = text.trim_start();
+/// How much of a tool result's text is read to tell a refusal: the harness's
+/// fixed wording is at the start.
+const DENIAL_PREFIX: usize = 160;
+
+/// The start of a tool result's text, borrowed: the whole result is never
+/// copied.
+fn text_prefix(content: Option<&Value>) -> &str {
+    let text = match content {
+        Some(Value::String(text)) => text.as_str(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .find_map(|part| field(part, "text"))
+            .unwrap_or(""),
+        _ => "",
+    }
+    .trim_start();
+    let end = text
+        .char_indices()
+        .nth(DENIAL_PREFIX)
+        .map_or(text.len(), |(end, _)| end);
+    &text[..end]
+}
+
+/// The source of a Claude Code tool refusal: `user`, `policy` or `classifier`.
+/// The record's own `toolDenialKind` decides when it is there; otherwise the
+/// harness's fixed wording at the start of the result does. None of the text
+/// is kept.
+fn denial_source(
+    kind: Option<&str>,
+    content: Option<&Value>,
+    result: Option<&Value>,
+) -> Option<&'static str> {
+    if let Some(kind) = kind {
+        let kind = kind
+            .chars()
+            .take(32)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        return Some(if kind.contains("classif") {
+            "classifier"
+        } else if kind.contains("user") || kind.contains("reject") {
+            "user"
+        } else {
+            "policy"
+        });
+    }
+    let text = text_prefix(content);
     if text.starts_with("The user doesn't want to")
         || result.and_then(Value::as_str) == Some("User rejected tool use")
     {
         Some("user")
+    } else if text.starts_with("Permission for this action was denied") {
+        Some(if text.contains("classifier") {
+            "classifier"
+        } else {
+            "policy"
+        })
     } else if (text.starts_with("Permission to use ") && text.contains(" has been denied"))
         || text.starts_with("Permission for this action has been denied")
     {
@@ -348,8 +416,29 @@ fn denial_source(content: Option<&Value>, result: Option<&Value>) -> Option<&'st
     }
 }
 
-/// A hook run: `event:outcome`, never its output. A hook that blocked a tool
-/// call carries that call's index.
+/// How much a hook outcome says, so one run logged twice keeps the strongest.
+fn outcome_rank(outcome: &str) -> u8 {
+    match outcome {
+        "blocked" => 5,
+        "error" => 4,
+        "stopped" => 3,
+        "cancelled" => 2,
+        "context" => 1,
+        _ => 0,
+    }
+}
+
+/// How far back a hook run looks for its other log line: the lines of one run
+/// are adjacent.
+const HOOK_LOOKBACK: usize = 32;
+
+/// A hook run that did something: `event:outcome`, with `#` and a hash of its
+/// `toolUseID` when the harness gave one, never its output. A hook that
+/// blocked a tool call carries that call's index. A plain success is not a
+/// signal, which bounds the list to the runs that mattered. One run is logged
+/// on more than one line (a blocking Stop hook and its summary, a success and
+/// its added context, sharing a `toolUseID`): the lines fold into one signal
+/// with the strongest outcome.
 fn hook(
     summary: &mut FileIndex,
     event: Option<&str>,
@@ -358,21 +447,54 @@ fn hook(
     o: u64,
     t: Option<i64>,
 ) {
+    if outcome == "allowed" {
+        return;
+    }
     let event: String = event
         .and_then(bounded)
         .unwrap_or_else(|| "unknown".to_owned())
         .chars()
-        .take(TAG_MAX - 16)
+        .take(TAG_MAX - 24)
         .collect();
     let v = tool
         .filter(|_| outcome == "blocked")
         .and_then(|id| call_index(summary, id));
+    let key = tool.map(|id| format!("#{}", short_hash(id)));
+    if let Some(key) = &key {
+        let head = format!("{event}:");
+        let same = summary
+            .signals
+            .iter_mut()
+            .rev()
+            .take(HOOK_LOOKBACK)
+            .find(|signal| {
+                signal.k == SignalKind::Hook
+                    && signal
+                        .n
+                        .as_deref()
+                        .is_some_and(|n| n.starts_with(&head) && n.ends_with(key.as_str()))
+            });
+        if let Some(signal) = same {
+            let earlier = signal
+                .n
+                .as_deref()
+                .and_then(|n| n.strip_prefix(&head))
+                .and_then(|n| n.strip_suffix(key.as_str()))
+                .unwrap_or("");
+            if outcome_rank(outcome) > outcome_rank(earlier) {
+                signal.n = Some(format!("{head}{outcome}{key}"));
+                signal.v = signal.v.or(v);
+            }
+            return;
+        }
+    }
+    let key = key.unwrap_or_default();
     note(
         summary,
         SignalKind::Hook,
         o,
         t,
-        format!("{event}:{outcome}"),
+        format!("{event}:{outcome}{key}"),
         v,
     );
 }
@@ -2558,7 +2680,14 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
         } else {
             "allowed"
         };
-        hook(summary, Some("Stop"), outcome, None, offset, time);
+        hook(
+            summary,
+            Some("Stop"),
+            outcome,
+            field(record, "toolUseID"),
+            offset,
+            time,
+        );
     }
     let Some(message) = record.get("message") else {
         return;
@@ -2628,9 +2757,10 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                     Some("tool_result") => {
                         if let Some(id) = field(item, "tool_use_id") {
                             let error = item.get("is_error").and_then(Value::as_bool) == Some(true);
-                            if error
+                            let kind = field(record, "toolDenialKind");
+                            if (error || kind.is_some())
                                 && let Some(source) =
-                                    denial_source(item.get("content"), tool_result)
+                                    denial_source(kind, item.get("content"), tool_result)
                             {
                                 let call = call_index(summary, id);
                                 note(
@@ -3625,15 +3755,15 @@ mod tests {
             claude(&mut index, record, offset as u64);
         }
 
+        // A plain success and a Stop summary that blocked nothing are not
+        // signals; a run with a `toolUseID` carries its hash.
         assert_eq!(
             signal_tags(&index, SignalKind::Hook),
             [
-                "PreToolUse:blocked",
-                "PreToolUse:allowed",
-                "UserPromptSubmit:context",
-                "PostToolUse:error",
-                "Stop:blocked",
-                "Stop:allowed",
+                format!("PreToolUse:blocked#{}", short_hash("toolu_1")),
+                "UserPromptSubmit:context".to_owned(),
+                "PostToolUse:error".to_owned(),
+                "Stop:blocked".to_owned(),
             ]
         );
         let linked = index
@@ -3643,12 +3773,87 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             linked,
-            [Some(0), None, None, None, None, None],
+            [Some(0), None, None, None],
             "only the blocking hook names the call it stopped"
         );
         assert_eq!(index.events.len(), 1, "hooks add no transcript events");
         let text = format!("{:?}", index.signals);
         assert!(!text.contains("SECRET") && !text.contains("secret.sh"));
+    }
+
+    #[test]
+    fn one_hook_run_logged_twice_is_one_signal_with_the_strongest_outcome() {
+        let stop_summary = |id: &str| {
+            serde_json::json!({"type":"system","subtype":"stop_hook_summary","hookCount":1,
+                "hookErrors":["e"],"preventedContinuation":false,"toolUseID":id})
+        };
+        let mut index = FileIndex::default();
+        let records = [
+            // A blocking Stop hook and its summary share a `toolUseID`.
+            attachment(
+                serde_json::json!({"type":"hook_blocking_error","hookEvent":"Stop","toolUseID":"u-1"}),
+            ),
+            stop_summary("u-1"),
+            // A PostToolUse success then its added context.
+            attachment(
+                serde_json::json!({"type":"hook_success","hookEvent":"PostToolUse","toolUseID":"toolu_2"}),
+            ),
+            attachment(
+                serde_json::json!({"type":"hook_additional_context","hookEvent":"PostToolUse","toolUseID":"toolu_2","content":[]}),
+            ),
+            // The stronger line first: the weaker one adds nothing.
+            attachment(
+                serde_json::json!({"type":"hook_non_blocking_error","hookEvent":"PostToolUse","toolUseID":"toolu_3"}),
+            ),
+            attachment(
+                serde_json::json!({"type":"hook_additional_context","hookEvent":"PostToolUse","toolUseID":"toolu_3","content":[]}),
+            ),
+            // The weaker line first: the stronger one replaces it.
+            attachment(
+                serde_json::json!({"type":"hook_additional_context","hookEvent":"PostToolUse","toolUseID":"toolu_5","content":[]}),
+            ),
+            attachment(
+                serde_json::json!({"type":"hook_non_blocking_error","hookEvent":"PostToolUse","toolUseID":"toolu_5"}),
+            ),
+            // Another run of the same event is its own signal.
+            attachment(
+                serde_json::json!({"type":"hook_additional_context","hookEvent":"PostToolUse","toolUseID":"toolu_4","content":[]}),
+            ),
+            // The same id under another event is not the same run.
+            attachment(
+                serde_json::json!({"type":"hook_additional_context","hookEvent":"PreToolUse","toolUseID":"toolu_4","content":[]}),
+            ),
+        ];
+        for (offset, record) in records.iter().enumerate() {
+            claude(&mut index, record, offset as u64);
+        }
+
+        assert_eq!(
+            signal_tags(&index, SignalKind::Hook),
+            [
+                format!("Stop:blocked#{}", short_hash("u-1")),
+                format!("PostToolUse:context#{}", short_hash("toolu_2")),
+                format!("PostToolUse:error#{}", short_hash("toolu_3")),
+                format!("PostToolUse:error#{}", short_hash("toolu_5")),
+                format!("PostToolUse:context#{}", short_hash("toolu_4")),
+                format!("PreToolUse:context#{}", short_hash("toolu_4")),
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_successful_hooks_are_not_signals() {
+        let mut index = FileIndex::default();
+        for offset in 0..200 {
+            claude(
+                &mut index,
+                &attachment(
+                    serde_json::json!({"type":"hook_success","hookEvent":"Stop","toolUseID":format!("u-{offset}")}),
+                ),
+                offset,
+            );
+        }
+        assert!(index.signals.is_empty());
     }
 
     #[test]
@@ -3683,6 +3888,41 @@ mod tests {
                 true,
                 serde_json::json!("User rejected tool use"),
             ),
+            // A classifier denial by wording alone, as the harness words it.
+            claude_tool("toolu_f"),
+            refusal(
+                "toolu_f",
+                serde_json::json!(
+                    "Permission for this action was denied by the Claude Code auto mode classifier. Reason: made up for the test"
+                ),
+                true,
+                serde_json::json!("Error: made up for the test"),
+            ),
+            // The record's own kind decides, whatever the wording.
+            claude_tool("toolu_g"),
+            {
+                let mut record = refusal(
+                    "toolu_g",
+                    serde_json::json!("some other words"),
+                    true,
+                    Value::Null,
+                );
+                record["toolDenialKind"] = serde_json::json!("classifier");
+                record
+            },
+            claude_tool("toolu_h"),
+            {
+                let mut record = refusal(
+                    "toolu_h",
+                    serde_json::json!(
+                        "Permission for this action was denied by the Claude Code auto mode classifier."
+                    ),
+                    true,
+                    Value::Null,
+                );
+                record["toolDenialKind"] = serde_json::json!("user");
+                record
+            },
         ];
         for (offset, record) in records.iter().enumerate() {
             claude(&mut index, record, offset as u64);
@@ -3700,6 +3940,9 @@ mod tests {
                 (Some("user"), Some(0)),
                 (Some("policy"), Some(1)),
                 (Some("user"), Some(4)),
+                (Some("classifier"), Some(5)),
+                (Some("classifier"), Some(6)),
+                (Some("user"), Some(7)),
             ]
         );
         assert_eq!(index.events[0].id.as_deref(), Some("toolu_a"));
@@ -3740,6 +3983,14 @@ mod tests {
     #[test]
     fn run_signal_tags_are_bounded() {
         assert_eq!(bounded(&"x".repeat(TAG_MAX + 1)).unwrap().len(), TAG_MAX);
+        // Values that differ only after the cut stay different.
+        let (a, b) = (
+            format!("{}1", "x".repeat(80)),
+            format!("{}2", "x".repeat(80)),
+        );
+        assert_ne!(bounded(&a), bounded(&b));
+        assert!(bounded(&a).unwrap().ends_with(&short_hash(&a)));
+        assert_eq!(bounded(&"y".repeat(TAG_MAX)).unwrap(), "y".repeat(TAG_MAX));
         assert_eq!(
             bounded("claude-opus-5[1m]").as_deref(),
             Some("claude-opus-5[1m]")
@@ -3778,15 +4029,15 @@ mod tests {
             4,
         );
 
-        assert_eq!(signal_tags(&index, SignalKind::Model), [&long[..TAG_MAX]]);
-        assert_eq!(
-            signal_tags(&index, SignalKind::Permission),
-            [&"p".repeat(TAG_MAX)[..]]
-        );
+        let model = signal_tags(&index, SignalKind::Model);
+        assert_eq!(model, [bounded(&long).unwrap().as_str()]);
+        assert!(model[0].starts_with(&"m".repeat(TAG_MAX - 9)));
+        let permission = signal_tags(&index, SignalKind::Permission);
+        assert_eq!(permission.len(), 1);
+        assert_eq!(permission[0].len(), TAG_MAX);
         let hooks = signal_tags(&index, SignalKind::Hook);
-        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks.len(), 1);
         assert!(hooks[0].ends_with(":blocked"));
-        assert_eq!(hooks[1], "unknown:allowed");
         for signal in &index.signals {
             assert!(signal.n.as_deref().is_some_and(|n| n.len() <= TAG_MAX));
         }
@@ -3798,7 +4049,9 @@ mod tests {
         let records = [
             serde_json::json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":9}}),
             serde_json::json!({"type":"permission-mode","permissionMode":"default"}),
-            attachment(serde_json::json!({"type":"hook_success","hookEvent":"SessionStart"})),
+            attachment(
+                serde_json::json!({"type":"hook_additional_context","hookEvent":"SessionStart","content":[]}),
+            ),
             serde_json::json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":[]}}),
         ];
         for (offset, record) in records.iter().enumerate() {
@@ -3835,7 +4088,7 @@ mod tests {
         assert_eq!(signal_tags(&index, SignalKind::Permission), ["acceptEdits"]);
         assert_eq!(
             signal_tags(&index, SignalKind::Hook),
-            ["PreToolUse:blocked"]
+            [format!("PreToolUse:blocked#{}", short_hash("toolu_1"))]
         );
         assert_eq!(signal_tags(&index, SignalKind::Denial), ["user"]);
         assert_eq!(stored(&v1, &log), cold(&log));
