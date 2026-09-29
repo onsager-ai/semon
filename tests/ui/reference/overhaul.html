@@ -174,6 +174,11 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .meta-line .lab.state { color: var(--ink-2); }
 .meta-line .lab.state.wait { color: var(--wait); } .meta-line .lab.state.err { color: var(--err); }
 .meta-line .lab[hidden] { display: none; }
+/* A label that leads somewhere looks like the others. Its hit area is padded to the tap size inside the line, whose own box grows by the same amount (the margins cancel it), and only the buttons take clicks. */
+.meta-line { padding-top: 10px; padding-bottom: 10px; margin: -10px 0; pointer-events: none; }
+.lab-btn { pointer-events: auto; border: 0; background: none; padding: 10px 0; margin: -10px 0; cursor: pointer; }
+@media (hover: hover) { .lab-btn:hover { text-decoration: underline; text-underline-offset: 3px; } }
+@media (max-width: 760px) { .meta-line { padding-top: 14px; padding-bottom: 14px; margin: -14px 0; } .lab-btn { padding: 14px 0; margin: -14px 0; } }
 .topbar .lead { display: none; }
 .topbar .find-row { flex: 1 1 auto; display: flex; align-items: center; gap: 4px; min-width: 0; }
 .topbar .find-row .search { flex: 1 1 auto; }
@@ -1089,16 +1094,20 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const order = labs.filter((n) => !n.classList.contains("state")).sort((a, b) => Number(b.dataset.drop ?? 0) - Number(a.dataset.drop ?? 0));
     for (const n of order) { if (fits()) break; n.hidden = true; }
   }
-  const lab = (text, tip, drop, cls) => { const x = el("span", "lab" + (cls ? " " + cls : ""), text); if (tip) x.title = tip; x.dataset.drop = String(drop); return x; };
+  // A label is information; one that leads somewhere (`act`) is a button that looks the same, with its hit area padded to the tap size.
+  const lab = (text, tip, drop, cls, act) => { const x = el(act ? "button" : "span", "lab" + (act ? " lab-btn" : "") + (cls ? " " + cls : ""), text); if (tip) { x.dataset.tip = tip; if (act) x.setAttribute("aria-label", tip); } if (act) { x.type = "button"; x.addEventListener("click", act); } x.dataset.drop = String(drop); return x; };
   const sessionLine = (s) => (l2) => {
     const es = TX[s.id] ?? [], failed = es.filter((e) => e.k === "tool" && e.ok === false).length;
     const st = el("span", "lab state " + s.state); st.append(dot(s.state), el("span", null, STATE[s.state])); l2.append(st);
     l2.append(lab(kindText(s), s.kind ? s.kind + " · " + HARNESS[s.harness] : null, 2));
     l2.append(lab(shortModel(s.model), "Model: " + s.modelId, 3));
-    if (failed) l2.append(lab(failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ". Find › Failed steps lists them.", 4));
+    // Failed steps and runs are the two labels that lead somewhere, so they are the last two the fitter drops.
+    const runs = descendantsOf(s.id, sessionChildren());
+    if (failed) l2.append(lab(failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ": step through them", 0, "lab-errs", () => { findOpen = true; show = { messages: false, tools: false, thinking: false, failures: true }; render(); }));
+    if (runs.length) l2.append(lab(runs.length + (runs.length === 1 ? " run" : " runs"), runs.length + (runs.length === 1 ? " run" : " runs") + " under this session: open the list with their cost", 1, "lab-runs", () => openSessionMenu(s, $("#more-btn"), ".runs")));
     l2.append(lab(MACHINE[s.machine], "Machine: " + MACHINE[s.machine] + " · " + hostOf(s), 5));
     if (s.branch) l2.append(lab(s.branch, "Branch: " + s.branch, 6));
-    const kids = descendantsOf(s.id, sessionChildren()), cost = costForSession(s.id, kids.length > 0);
+    const kids = runs, cost = costForSession(s.id, kids.length > 0);
     l2.append(lab(costText(cost), "API-equivalent cost" + (kids.length ? ", with " + kids.length + (kids.length === 1 ? " run" : " runs") : "") + ". Details in the session menu.", 7));
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
@@ -1183,7 +1192,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   }
 
   // The session menu: actions, then details, then cost. It is the one place for all three.
-  function openSessionMenu(s, anchor) {
+  function openSessionMenu(s, anchor, scrollTo) {
     const kids = descendantsOf(s.id, sessionChildren());
     const { d, body, show } = panel(s.name, { cls: "anchored session-menu", label: "Session menu for " + s.name, sub: [STATE[s.state], kindText(s), shortModel(s.model)].join(" · "), onClose: () => anchor?.setAttribute("aria-expanded", "false") });
     const acts = el("div", "menu-list"); acts.setAttribute("role", "menu");
@@ -1198,7 +1207,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     for (const [k, v, mono] of rows) { if (v == null || v === "") continue; dl.append(el("dt", null, k), el("dd", mono ? "mono" : null, v)); }
     det.append(dl); body.append(det, costSection(s, kids, d));
     if (anchor) anchor.setAttribute("aria-expanded", "true");
-    show(); return d;
+    show(); if (scrollTo) body.querySelector(scrollTo)?.scrollIntoView({ block: "nearest" }); return d;
   }
   const TOKEN_KINDS = [["input", "Input"], ["output", "Output"], ["cacheWrite", "Cache write"], ["cacheRead", "Cache read"]];
   const asMoney = (usd) => "$" + usd.toFixed(2);

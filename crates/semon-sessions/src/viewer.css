@@ -148,6 +148,11 @@ code { overflow-wrap: anywhere; }
 .meta-line .lab.state { color: var(--ink-2); }
 .meta-line .lab.state.wait { color: var(--wait); } .meta-line .lab.state.err { color: var(--err); }
 .meta-line .lab[hidden] { display: none; }
+/* A label that leads somewhere looks like the others. Its hit area is padded to the tap size inside the line, whose own box grows by the same amount (the margins cancel it), and only the buttons take clicks. */
+.meta-line { padding-top: 10px; padding-bottom: 10px; margin: -10px 0; pointer-events: none; }
+.lab-btn { pointer-events: auto; border: 0; background: none; padding: 10px 0; margin: -10px 0; cursor: pointer; }
+@media (hover: hover) { .lab-btn:hover { text-decoration: underline; text-underline-offset: 3px; } }
+@media (max-width: 760px) { .meta-line { padding-top: 14px; padding-bottom: 14px; margin: -14px 0; } .lab-btn { padding: 14px 0; margin: -14px 0; } }
 .topbar .lead { display: none; }
 .topbar .find-row { flex: 1 1 auto; display: flex; align-items: center; gap: 4px; min-width: 0; }
 .topbar .find-row .search { flex: 1 1 auto; }
