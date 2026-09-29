@@ -613,6 +613,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .child-intro .brief { max-height: 5.8em; margin-top: 3px; overflow: hidden; color: var(--ink-2); font: 15px/1.45 var(--serif); }
 .child-intro .brief.open { max-height: none; }
 .child-intro .more { min-height: 36px; border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: 13px; }
+.child-intro .intro-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0 16px; }
 .child-intro .intro-open { min-height: 40px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; text-align: left; }
 .child-return { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 13px; }
 .child-return .stat { flex: none; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
@@ -677,7 +678,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .topbar .analytics-range button { min-width: 38px; min-height: 44px; padding: 0 5px; }
   .analytics-measure button, .topbar .l2.session-meta .meta-runs { min-height: 44px; }
   .sibling-nav .ibtn { width: 44px; height: 44px; }
-  .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-return button, .child-work .cw-toggle, .lineage-menu button { min-height: 44px; }
+  .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-intro .more, .child-return button, .child-work .cw-toggle, .lineage-menu button { min-height: 44px; }
   dialog.viewer.analytics-slice, dialog.viewer.runs-sheet { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
   .analytics-slice .vh, .runs-sheet .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); } .analytics-slice .vb, .runs-sheet .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
   .analytics-slice .vclose, .runs-sheet .vclose { width: 44px; height: 44px; }

@@ -478,6 +478,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .child-intro .brief { max-height: 5.8em; margin-top: 3px; overflow: hidden; color: var(--ink-2); font: 15px/1.45 var(--serif); }
 .child-intro .brief.open { max-height: none; }
 .child-intro .more { min-height: 36px; border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: 13px; }
+.child-intro .intro-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0 16px; }
 .child-intro .intro-open { min-height: 40px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; text-align: left; }
 .child-return { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 13px; }
 .child-return .stat { flex: none; }
@@ -631,7 +632,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .topbar .l2.session-meta { min-height: 44px; }
   .topbar .l2.session-meta .meta-runs { min-height: 44px; }
   .sibling-nav .ibtn { width: 44px; height: 44px; }
-  .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-return button, .child-work .cw-toggle { min-height: 44px; }
+  .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-intro .more, .child-return button, .child-work .cw-toggle { min-height: 44px; }
   .lineage-menu button { min-height: 44px; }
   .analytics-measure button { min-height: 44px; }
   dialog.viewer.analytics-slice { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
@@ -1564,7 +1565,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const brief = markdown(h.brief, "brief"), more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
     more.addEventListener("click", () => { const expanded = brief.classList.toggle("open"); more.textContent = expanded ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(expanded)); });
     new ResizeObserver(() => { if (brief.classList.contains("open") || !brief.clientHeight) return; const clipped = brief.scrollHeight > brief.clientHeight + 1; more.hidden = !clipped; brief.classList.toggle("clipped", clipped); }).observe(brief);
-    const parentLink = el("button", "intro-open", "Open in " + parent.name); parentLink.type = "button"; parentLink.addEventListener("click", () => openParentAtHandoff(h)); block.append(brief, more, parentLink); return block;
+    const parentLink = el("button", "intro-open", "Open in " + parent.name); parentLink.type = "button"; parentLink.addEventListener("click", () => openParentAtHandoff(h)); const actions = el("div", "intro-actions"); actions.append(more, parentLink); block.append(brief, actions); return block;
   }
   function childReturnBlock(s, h) {
     const block = el("div", "child-return"), calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, finished = s.state === "done" || s.state === "err" || h.status === "done" || h.status === "err";

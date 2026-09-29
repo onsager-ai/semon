@@ -48,6 +48,11 @@
         "wait": 2000
       },
       {
+        "name": "child-intro-long",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.hcard[data-h=\"h2\"]').click(); setTimeout(function () { var b = document.querySelector('.child-intro .brief'); b.textContent = b.textContent + ' ' + b.textContent + ' ' + b.textContent + ' ' + b.textContent; }, 300);",
+        "wait": 2500
+      },
+      {
         "name": "grandchild-session",
         "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.hcard[data-h=\"h3\"]').click(); document.querySelector('.hcard[data-h=\"h19\"]').click();",
         "wait": 2000
