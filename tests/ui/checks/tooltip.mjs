@@ -260,7 +260,8 @@ export default async function tooltipCheck(browser) {
       rec.items = items.map((x) => x.cls.replace(/^lab ?/, "") || x.tag + ":" + x.tip.slice(0, 20));
       r.expect(items.length >= (size === "desktop" ? 4 : 1), tag + ": only " + items.length + " tipped items in the session line: " + JSON.stringify(rec.items));
       const at = (i) => box(page, '#topbar [data-probe="' + i + '"]');
-      const reach = await Promise.all(items.slice(0, 3).map((x) => at(x.i)));
+      // (on a phone a tap runs a control, so only the static labels are used for the tap behaviour; a phone bar may hold none)
+      const reach = await Promise.all(items.filter((x) => size === "desktop" || x.tag === "SPAN").slice(0, 3).map((x) => at(x.i)));
       if (reach.length >= 2) await behaviour(page, tag, r, rec, { first: reach[0], second: reach[1] });
       // Every visible tipped item in the bar and the sidebar stays inside the margin and off its target.
       const spots = await page.evaluate(() => { const list = [...document.querySelectorAll("#topbar [data-tip], #sidebar [data-tip]")].filter((n) => { const b = n.getBoundingClientRect(); return n.getClientRects().length && b.width > 0 && b.left >= 0 && b.right <= innerWidth && b.top >= 0 && b.bottom <= innerHeight && (() => { const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return !!hit && (n === hit || n.contains(hit)); })() && (!n.hasAttribute("data-tip-clipped") || n.scrollWidth > n.clientWidth + 1); }); return list.slice(0, 40).map((n, i) => { n.dataset.spot = String(i); return { i, tip: n.dataset.tip, clipped: n.hasAttribute("data-tip-clipped") }; }); });
