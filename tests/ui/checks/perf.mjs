@@ -152,16 +152,20 @@ async function checkLongSessionOpenEnd(page) {
     const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
     return sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 1;
   }, null, { timeout: 10_000 });
-  // With the button shown, the last thing in the transcript sits clear of it: measured at the end, where the button is
-  // hidden, by showing it for one synchronous read. The floating button can still cover content mid-scroll; it is only
-  // guaranteed never to sit over the tail of the page.
-  await page.waitForTimeout(200);
-  const tail = await page.evaluate(() => {
-    const button = document.querySelector(".jump-bottom"), wasHidden = button.hidden; button.hidden = false; const b = button.getBoundingClientRect(); button.hidden = wasHidden;
-    const live = [...document.querySelectorAll("#page button, #page a[href], #page [role=link]")].map((x) => ({ x, r: x.getBoundingClientRect() })).filter(({ x, r }) => r.width > 0 && r.height > 0 && x.offsetParent !== null && r.top < innerHeight);
-    const last = live.sort((p, q) => q.r.bottom - p.r.bottom)[0];
-    const overlaps = !!last && last.r.left < b.right && last.r.right > b.left && last.r.top < b.bottom && last.r.bottom > b.top;
-    return { hiddenAtEnd: wasHidden, last: last ? (last.x.className || last.x.tagName) : null, clear: last ? Math.round(innerHeight - last.r.bottom) : null, buttonTop: Math.round(innerHeight - b.top), overlaps };
+  // The tail of the page sits clear of where the button floats. A 36 px button is appended as the very last thing in the
+  // transcript (cancelling the section's grid gap) and the page is scrolled to its end, where the jump button is hidden; the
+  // button is shown for one synchronous read to get its box. The floating button can still cover content mid-scroll: what is
+  // guaranteed is that it never sits over the tail.
+  const tail = await page.evaluate(async () => {
+    const button = document.querySelector(".jump-bottom"), section = document.querySelector("#page section[aria-label='Transcript']");
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    const probe = document.createElement("button"); probe.className = "tail-probe"; probe.textContent = "View all";
+    probe.style.cssText = "display:block;width:100%;height:36px;margin-top:-" + getComputedStyle(section).rowGap;
+    section.append(probe); sc.scrollTop = sc.scrollHeight;
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const wasHidden = button.hidden; button.hidden = false; const b = button.getBoundingClientRect(); button.hidden = wasHidden;
+    const r = probe.getBoundingClientRect(); probe.remove();
+    return { hiddenAtEnd: wasHidden, probeBottom: Math.round(innerHeight - r.bottom), buttonTop: Math.round(innerHeight - b.top), overlaps: r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top };
   });
   const returnedGap = await page.evaluate(() => {
     const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
@@ -178,7 +182,7 @@ async function checkLongSessionOpenEnd(page) {
     centring,
     tail,
     returnedGap,
-    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && !!tail.last && !tail.overlaps && returnedGap <= 1,
+    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && tail.hiddenAtEnd && !tail.overlaps && tail.probeBottom - tail.buttonTop >= 12 && returnedGap <= 1,
   };
 }
 
