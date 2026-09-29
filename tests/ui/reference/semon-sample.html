@@ -523,7 +523,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .wide-toggle { margin-left: auto; }
 .cost-info { display: inline-grid; place-items: center; width: 18px; height: 18px; margin-left: 4px; border: 0; border-radius: 50%; background: none; color: var(--faint); vertical-align: middle; }
 .cost-info svg { width: 15px; height: 15px; }
-.jump-bottom { position: fixed; right: 16px; bottom: 16px; z-index: 15; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 20px; background: var(--ground); padding: 0 10px; color: var(--ink-2); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 12%, transparent); }
+.jump-bottom { position: fixed; left: var(--jump-x, 50%); transform: translateX(-50%); bottom: 16px; z-index: 15; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 20px; background: var(--ground); padding: 0 10px; color: var(--ink-2); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 12%, transparent); }
 .jump-bottom svg { width: 18px; height: 18px; flex: none; }
 .jump-bottom .new-count { font-size: 12.5px; font-weight: 500; white-space: nowrap; }
 @media (hover: hover) { .jump-bottom:hover { background: var(--sunken); } }
@@ -681,7 +681,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .tree-row { margin-inline: 4px; }
   .tree-more { min-height: 44px; margin-inline: 4px; }
   .srow { min-height: 44px; }
-  .jump-bottom { right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  .jump-bottom { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 }
 </style>
 
@@ -1344,6 +1344,9 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   $("#main").addEventListener("scroll", syncBarLine, { passive: true });
   const jumpButton = el("button", "jump-bottom"); jumpButton.type = "button"; jumpButton.id = "jump-bottom"; jumpButton.setAttribute("aria-label", "Jump to bottom of transcript"); jumpButton.hidden = true; jumpButton.append(icon(I.down)); document.body.append(jumpButton);
   let pendingNew = 0, jumpSid = null;
+  // Centred over the transcript column (#page), not the viewport: the sidebar or rail takes the left, and #main has its own scrollbar.
+  const placeJump = () => { const r = $("#page").getBoundingClientRect(); if (r.width) jumpButton.style.setProperty("--jump-x", r.left + r.width / 2 + "px"); };
+  { const ro = new ResizeObserver(placeJump); ro.observe($("#page")); ro.observe($("#main")); }
   function scrollMetrics() {
     if (phone.matches) return { top: window.scrollY, height: document.documentElement.scrollHeight, viewport: window.innerHeight, gap: Math.max(0, document.documentElement.scrollHeight - window.innerHeight - window.scrollY) };
     const m = $("#main"); return { top: m.scrollTop, height: m.scrollHeight, viewport: m.clientHeight, gap: Math.max(0, m.scrollHeight - m.clientHeight - m.scrollTop) };
@@ -1353,7 +1356,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   function syncJump() {
     if (route.v !== "session") { jumpSid = null; pendingNew = 0; jumpButton.hidden = true; return; }
     if (jumpSid !== route.id) { jumpSid = route.id; pendingNew = 0; }
-    const { gap } = scrollMetrics(); if (gap <= 80) pendingNew = 0;
+    const { gap } = scrollMetrics(); if (gap <= 80) pendingNew = 0; else placeJump();
     jumpButton.hidden = gap <= 80;
     jumpButton.classList.toggle("has-new", pendingNew > 0);
     jumpButton.replaceChildren();

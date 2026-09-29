@@ -131,6 +131,22 @@ async function checkLongSessionOpenEnd(page) {
       overlapsComposer: overlaps(rect, composer),
     };
   });
+  // The button sits over the middle of the transcript column, not the viewport: measured as delivered, and on a desktop
+  // page again in wide mode and in rail mode, where the column moves.
+  const centred = async (mode) => page.evaluate((mode) => {
+    const button = document.querySelector(".jump-bottom"), column = document.querySelector("#page section[aria-label='Transcript']");
+    if (!button || button.hidden || !column) return { mode, visible: false, dx: null };
+    const b = button.getBoundingClientRect(), c = column.getBoundingClientRect();
+    return { mode, visible: true, dx: Math.round((b.left + b.width / 2 - (c.left + c.width / 2)) * 100) / 100, button: Math.round(b.left + b.width / 2), column: Math.round(c.left + c.width / 2), viewport: innerWidth };
+  }, mode);
+  const centring = [await centred("default")];
+  if (!await page.evaluate(() => matchMedia("(max-width: 760px)").matches)) {
+    for (const [mode, toggle] of [["wide", ".wide-toggle"], ["rail", "#rail-toggle"]]) {
+      await page.locator(toggle).click(); await page.waitForTimeout(300);
+      centring.push(await centred(mode));
+      await page.locator(toggle).click(); await page.waitForTimeout(300);
+    }
+  }
   await page.locator(".jump-bottom").click();
   await page.waitForFunction(() => {
     const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
@@ -148,8 +164,9 @@ async function checkLongSessionOpenEnd(page) {
     jumpInsideViewport: raised.inside,
     overlapsBar: raised.overlapsBar,
     overlapsComposer: raised.overlapsComposer,
+    centring,
     returnedGap,
-    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && returnedGap <= 1,
+    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && returnedGap <= 1,
   };
 }
 
