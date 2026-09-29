@@ -364,6 +364,20 @@ function ratchet(row, p) {
 // Served against served: the same viewer built over the same data, compared with itself. SEMON_REF_BASE/SEMON_REF_TOKEN name the
 // second server (the pushed-data step compares the received copy with the machine's own). No mockup and no ratchet is involved.
 const REF_BASE = (process.env.SEMON_REF_BASE ?? "").replace(/\/$/, ""), REF_TOKEN = process.env.SEMON_REF_TOKEN ?? "";
+// Regions: parts of a screen that are already ported (the top bar, an open menu), compared with the overhaul and enforced, while the
+// rest of the screen is still pending. reference-map.json lists each region's selector, the screens it applies to (a name ending in
+// "-" covers every screen with that prefix) and, for a panel, the button that opens it. A region is compared after the screen's
+// full-page comparison, on the same two pages.
+const REGIONS = MAP.regions ?? [];
+const regionsOf = (name) => REGIONS.filter((r) => r.screens.some((x) => (x.endsWith("-") ? name.startsWith(x) : name === x)));
+async function regionShot(page, region) {
+  if (region.open) { await page.click(region.open); await page.waitForTimeout(200); }
+  const target = page.locator(region.selector).first();
+  await target.waitFor({ state: "visible", timeout: 3000 });
+  const png = PNG.sync.read(await target.screenshot({ animations: "disabled", caret: "hide" }));
+  if (region.open) { await page.keyboard.press("Escape"); await page.waitForTimeout(150); }
+  return png;
+}
 // Both pictures and the diff of an enforced mismatch. A pending screen differs by design until its port PR, so only the diff is kept,
 // with the pictures for the screens that show the most (Home, the lists, one session, one trace).
 const SHOWN = ["home", "sessions", "machines", "analytics", "session-harbor", "session-h-codex", "drawer"];
@@ -382,7 +396,7 @@ function saveMismatch(row, name, scheme, p) {
   if (referenceOf("drawer") === undefined) throw new Error("reference-map.json has no entry for: drawer");
   const skipped = Object.entries(MAP.screens).filter(([, ref]) => ref === null).map(([name]) => name);
   const browser = await launch();
-  const results = [], errors = [];
+  const results = [], errors = [], regions = [];
   for (const [size, dark] of SCHEMES) {
     const scheme = size + "-" + (dark ? "dark" : "light");
     const page = await served(browser, { size, dark });
@@ -401,6 +415,15 @@ function saveMismatch(row, name, scheme, p) {
       const row = { scheme, screen: s.name, reference: ref, port: { pixels: p.pixels, ratio: p.ratio, size: p.size, enforced, pass: !enforced || (p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size) } };
       if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; row.port.pass = false; } }
       saveMismatch(row, s.name, scheme, p);
+      for (const region of regionsOf(s.name)) {
+        const name = s.name + "#" + region.name, rrow = { scheme, screen: name, reference: "overhaul", port: { enforced: true, pass: false } };
+        try {
+          const q = compare(await regionShot(page, region), await regionShot(port, region));
+          rrow.port = { pixels: q.pixels, ratio: q.ratio, size: q.size, enforced: true, pass: q.pixels <= MAX_RATIO * q.diff.width * q.diff.height && !q.size };
+          saveMismatch(rrow, name.replace("#", "-"), scheme, q);
+        } catch (e) { rrow.error = String(e.message ?? e).split("\n")[0]; }
+        regions.push(rrow);
+      }
       if (s.sample && !other) {
         await nav(orig, s.sample, D, true); const c = await shot(orig, size);
         const q = compare(a, c);
@@ -433,19 +456,21 @@ function saveMismatch(row, name, scheme, p) {
     for (const p of ports.values()) await p.context().close();
   }
   await browser.close();
-  const failed = results.filter((r) => !r.port.pass), pending = results.filter((r) => !r.port.enforced);
+  const failed = [...results, ...regions].filter((r) => !r.port.pass), pending = results.filter((r) => !r.port.enforced);
   // The current baselines, for a PR that moves them: written every run, never read back.
   fs.writeFileSync(path.join(ENV.out, "pixel-baseline." + SECTION + ".json"), J({ [SECTION]: Object.fromEntries(Object.entries(CURRENT).sort(([a], [b]) => (a < b ? -1 : 1))) }, null, 1) + "\n");
   const pct = (x) => (x * 100).toFixed(3) + "%";
   const md = ["| Screen | Scheme | vs port reference | vs sample mockup |", "|---|---|---|---|",
     ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.enforced ? (r.port.pass ? "✓ " : "✗ ") : r.port.ratchet ? "✗ ratchet (" + r.port.ratchet + ") · " : "pending · ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
-  fs.writeFileSync(path.join(ENV.out, "pixels.json"), J({ threshold: THRESHOLD, maxRatio: MAX_RATIO, results, errors }, null, 1));
+  const regionMd = regions.length ? "\n\n| Region | Scheme | vs overhaul |\n|---|---|---|\n" + regions.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.error ? "✗ " + r.error : (r.port.pass ? "✓ " : "✗ ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "")) + " |").join("\n") : "";
+  fs.writeFileSync(path.join(ENV.out, "pixels.json"), J({ threshold: THRESHOLD, maxRatio: MAX_RATIO, results, regions, errors }, null, 1));
   const note = skipped.length ? "\nNot compared (unmapped in reference-map.json, not drawn by the viewer yet): " + skipped.join(", ") + "\n" : "";
-  fs.writeFileSync(path.join(ENV.out, "pixels.md"), md + "\n" + note);
-  console.log(md);
+  fs.writeFileSync(path.join(ENV.out, "pixels.md"), md + regionMd + "\n" + note);
+  console.log(md + regionMd);
+  console.log("regions: " + regions.length + ", failing: " + regions.filter((r) => !r.port.pass).length);
   console.log("screens: " + results.length + ", port mismatches: " + failed.length + ", page errors: " + errors.length + (pending.length ? ", pending (reported, not enforced): " + pending.length : ""));
   if (skipped.length) console.log("unmapped, not compared: " + skipped.join(", "));
   for (const e of errors) console.log("  page error: " + e);
-  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Pixel comparison\n\n" + md + "\n" + note);
+  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Pixel comparison\n\n" + md + regionMd + "\n" + note);
   process.exit(failed.length || errors.length ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(2); });

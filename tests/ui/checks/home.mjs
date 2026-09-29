@@ -20,7 +20,7 @@
 //  - a machine page's "up" link goes back to Machines (backTo === "Machines"), and every machine page carries no
 //    sideways overflow.
 import path from "node:path";
-import { ENV, served, data, reporter, overflow, settled } from "../lib.mjs";
+import { ENV, served, data, reporter, overflow, settled, goto, wide } from "../lib.mjs";
 
 // The title is in the bar as soon as a session is clicked; the page is ready once it is no longer aria-busy.
 const afterTitle = (page, text) => page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t && !document.querySelector("#page").hasAttribute("aria-busy"), text);
@@ -112,10 +112,12 @@ export default async function homeCheck(browser) {
   // Desktop, light: two reference screenshots.
   {
     const page = await served(browser, { size: "desktop", dark: false });
-    await page.click(".wide-toggle"); await page.click("#rail-toggle");
+    // Wide is set from a session's menu (it only ever widens a transcript); the rail from the sidebar. Both survive a reload.
+    await goto(page, { v: "session", id: Object.keys(D.SESS)[0] }, D);
+    await wide(page, true); await page.click("#rail-toggle");
     await page.reload({ waitUntil: "load" }); await settled(page);
     out.layout = await page.evaluate(() => ({ wide: document.querySelector("#page").classList.contains("wide-mode"), rail: document.querySelector(".app").classList.contains("rail"), wideStored: localStorage.getItem("semon.wide"), railStored: localStorage.getItem("semon.rail") }));
-    await page.click(".wide-toggle"); await page.click("#rail-toggle"); await page.reload({ waitUntil: "load" }); await settled(page);
+    await wide(page, false); await page.click("#rail-toggle"); await page.reload({ waitUntil: "load" }); await settled(page);
     out.layout.offReload = await page.evaluate(() => ({ wide: document.querySelector("#page").classList.contains("wide-mode"), rail: document.querySelector(".app").classList.contains("rail"), wideStored: localStorage.getItem("semon.wide"), railStored: localStorage.getItem("semon.rail") }));
     await page.screenshot({ path: path.join(ENV.out, "desk-home.png") });
     const longSid = Object.keys(D.TX).sort((a, b) => (D.TX[b]?.length ?? 0) - (D.TX[a]?.length ?? 0))[0];

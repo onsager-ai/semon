@@ -10,11 +10,11 @@
 //
 // Assertions:
 //  - no page errors, in any mode.
-//  - the bar stays pinned at the top after scrolling (notPinned is empty), is never sideways (sideways === 0), and
-//    controls are at least 36px, except line 2 which uses the approved 30px desktop / 44px phone hit area and the
-//    inline error link which uses 28px desktop / 40px phone.
-//  - line 2 fits in one row; session metadata is ordered state/model/machine/branch/tools/tokens, while other detail
-//    pages keep their ellipsized summary.
+//  - the bar stays pinned at the top after scrolling (notPinned is empty), is never sideways (sideways === 0), and every
+//    control is at least the tap size (36px, 44px on a phone).
+//  - a session's second line is one line of plain labels: the state first with its dot, then kind, model, failed steps, machine,
+//    branch and cost in that order (the fitter drops from the end), none of them a control; the bar's only actions are Find and
+//    the ⋯ menu. Other detail pages keep their summary in the same line.
 //  - zero overflow screens.
 //  - gap markers: this fixture's data has none at all (neither the sample nor the extras fixture produces a gap
 //    marker), so rendered counts are asserted directly against the literal 0, not against a same-data expectation
@@ -23,13 +23,14 @@
 //    the extras fixture instead (harbor's markdown message there has a genuine table): extras.tables > 0. With no
 //    unknown tool name in this fixture (expected.fallbackTools is empty), no turn summary falls back to a
 //    lowercased tool name (tsumLowercasedUnknown === 0).
-//  - search: on phones, Find and Filter live in ⋯; the match count agrees with the hits and closing search restores line 2.
-//  - the filter dropdown opens without moving the transcript underneath it (contentMoved === false), narrows and
-//    is undone, and closes both by its own button and by an outside tap; unchecking "tools" actually hides every
-//    step (toolsOff.steps === 0), not just a `turns <= of` comparison that can't fail.
-//  - the errors segment opens errors mode: "Error 1 of N" (N the segment's count), the first failed step marked, in view
-//    and not expanded, with no menu open; Escape leaves it — and a session with a failed step must actually be found,
-//    or this fails instead of silently not running (checks/errnav.mjs covers the mode itself).
+//  - find and filter are one mode: Find takes over the bar, the match count agrees with the hits, and chips (All, Messages,
+//    Steps) choose one at a time: Messages hides every step, Steps every message, and All restores the transcript. The
+//    Failed steps chip opens errors mode: "Error 1 of N" (N the chip's count), the first failed step marked, in view and not
+//    expanded, with no menu open; Escape leaves it — and a session with a failed step must actually be found, or this fails
+//    instead of silently not running (checks/errnav.mjs covers the mode itself).
+//  - the ⋯ menu is one panel (a phone's bottom sheet, a desktop's anchored panel): actions (copy the resume command, open in
+//    claude.ai, the wide switch on desktop), details, and cost (one figure, this session and its runs, the harness's own figure,
+//    a quiet note when the estimate differs, the runs list five at a time, tokens by model folded). Escape returns focus to ⋯.
 //  - deep links land the target turn below the bar; a relay header's sender link opens the sender's turn — both
 //    must actually be found (a trace child node, a Home item, a relay header), not silently skipped.
 //  - the sidebar shows the 8 most recent top-level tree rows with nested children; the Sessions page keeps all session rows,
@@ -103,44 +104,41 @@ export default async function barCheck(browser) {
       await new Promise((r) => setTimeout(r, 120));
       const bar = document.querySelector("#topbar"), br = bar.getBoundingClientRect(), vw = document.documentElement.clientWidth;
       const scrolled = phone ? scrollY : main.scrollTop;
-      // On a phone a session's line 2 is not drawn (its state is the dot before the title); it stays in the page, undisplayed.
-      const l2 = bar.querySelector(".l2"), l2Shown = !!l2 && getComputedStyle(l2).display !== "none", rest = l2?.querySelector(".rest"), sessionMeta = l2Shown && !!l2.classList.contains("session-meta");
+      const l2 = bar.querySelector(".meta-line"), sessionMeta = !!l2?.querySelector(".lab.state") && !!bar.querySelector("#more-btn");
       // A segmented control's buttons are drawn 24px tall on purpose; their tap target is the ::before box, so that is what counts here.
       const segmentHit = (x) => { if (!x.closest(".analytics-range")) return null; const p = getComputedStyle(x, "::before"), h = x.getBoundingClientRect().height, top = parseFloat(p.top), bottom = parseFloat(p.bottom); return Number.isFinite(top) && Number.isFinite(bottom) ? h - top - bottom : h; };
-      const ctl = [...bar.querySelectorAll("button, input, [role=link]")].filter((x) => x.offsetParent || getComputedStyle(x).position === "absolute").map((x) => [x.className || x.tagName, segmentHit(x) ?? x.getBoundingClientRect().height]);
-      const small = ctl.filter(([c, h]) => h < 35.5 && !String(c).split(/\s+/).some((x) => x === "errs" || x === "meta-runs"));
-      const errorsTarget = bar.querySelector(".l2.session-meta .errs"), runsTarget = bar.querySelector(".l2.session-meta .meta-runs");
-      const line2Targets = { errors: errorsTarget ? Math.round(errorsTarget.getBoundingClientRect().height) : null, runs: runsTarget ? Math.round(runsTarget.getBoundingClientRect().height) : null };
-      // The session line: the state dot is whole and on the title's left edge, no run dot, no whole-line button, quiet errors.
+      // Every control in the bar is at least the tap size (36 px, 44 on a phone). A crumb is link text with a padded hit area.
+      const tap = phone ? 44 : 36;
+      const ctl = [...bar.querySelectorAll("button, input, [role=link]")].filter((x) => x.offsetParent || getComputedStyle(x).position === "absolute").map((x) => [x.className || x.tagName, segmentHit(x) ?? x.getBoundingClientRect().height, x.classList.contains("crumb")]);
+      const small = ctl.filter(([, h, crumb]) => h < tap - 0.5 && !(crumb && !phone));
+      // Labels are information: none is a control, the state is first and holds its dot, and the rest keep their order.
       let metaFacts = null;
       if (sessionMeta) {
-        const dot = l2.querySelector(".meta-state > .dot"), dr = dot?.getBoundingClientRect(), lr = l2.getBoundingClientRect(), tr = bar.querySelector(".l1").getBoundingClientRect(), first = l2.firstElementChild?.getBoundingClientRect(), dotFirst = !!l2.firstElementChild?.classList.contains("meta-state"), errs = l2.querySelector(".errs"), tools = l2.querySelector(".meta-tools");
-        metaFacts = { dot: !!dot, dotFirst, ringRoom: dr && dotFirst ? Math.round((dr.left - lr.left) * 10) / 10 : null, dotInside: dr ? dr.left >= 0 && dr.left >= lr.left && dr.right <= lr.right && dr.top >= lr.top - 0.5 && dr.bottom <= lr.bottom + 0.5 : null, firstOffTitle: first ? Math.round((first.left - tr.left) * 10) / 10 : null,
-          runsDot: !!l2.querySelector(".meta-runs .dot"), hit: bar.querySelectorAll(".meta-hit").length, errsWeight: errs ? Number(getComputedStyle(errs).fontWeight) : null, toolsWeight: tools ? Number(getComputedStyle(tools).fontWeight) : null, errsColor: errs ? getComputedStyle(errs).color : null, toolsColor: tools ? getComputedStyle(tools).color : null,
-          buttons: [...l2.querySelectorAll("button")].map((b) => b.className) };
+        const labs = [...l2.querySelectorAll(":scope > .lab")].filter((x) => !x.hidden), first = labs[0];
+        const drops = labs.slice(1).map((x) => Number(x.dataset.drop));
+        metaFacts = { first: first?.classList.contains("state") ?? false, dot: !!first?.querySelector(".dot"), drops, inOrder: drops.every((d, i) => i === 0 || drops[i - 1] < d), buttons: l2.querySelectorAll("button, a, input").length, actions: [...bar.querySelectorAll(":scope > .ibtn:not(.lead)")].map((b) => b.id), text: labs.map((x) => x.textContent) };
       }
-      const side = [...bar.querySelectorAll("*")].filter((x) => { const r = x.getBoundingClientRect(); return r.width && (r.right > vw + 0.5 || r.left < -0.5) && !x.closest(".rest"); }).length + (bar.scrollWidth > bar.clientWidth + 1 ? 1 : 0);
-      const out = { pinned: Math.abs(br.top) < 0.5 && br.height > 30 && br.bottom > 0 && getComputedStyle(bar).visibility !== "hidden", scrolled: scrolled > 0, barH: Math.round(br.height), small: small.map(([c, h]) => c + ":" + Math.round(h)), side,
-        phoneBar: phone && bar.classList.contains("session-bar") ? (() => {
-          const btn = bar.querySelector("#lead-btn"), more = bar.querySelector("#more-btn"), l1 = bar.querySelector(".l1"), title = l1.querySelector(".t"), lead = l1.querySelector(".l1-state"), dotEl = lead?.querySelector(".dot"), sep = l1.querySelector(".sep");
-          const inside = (n) => { const r = n.getBoundingClientRect(); return r.top >= br.top - 0.5 && r.bottom <= br.bottom + 0.5; }, dr = dotEl?.getBoundingClientRect(), tr = title.getBoundingClientRect(), normalGap = parseFloat(getComputedStyle(bar).columnGap) + parseFloat(getComputedStyle(l1.parentElement).paddingLeft), titleGap = tr.left - btn.getBoundingClientRect().right;
-          // What the bar was before: the same page with the phone rules off (line 2 drawn), for the report and as a floor on the gain.
-          bar.classList.remove("session-bar"); const oldH = bar.getBoundingClientRect().height; bar.classList.add("session-bar");
-          return { h: br.height, oldH, l2Displayed: l2Shown, oneRow: [btn, more, title].every((n) => n && inside(n)) && Math.max(btn.getBoundingClientRect().top, more.getBoundingClientRect().top, tr.top) < Math.min(btn.getBoundingClientRect().bottom, more.getBoundingClientRect().bottom, tr.bottom),
-            lead: !!lead, dot: !!dotEl, dotState: dotEl ? [...dotEl.classList].find((c) => c !== "dot") : null, dotName: dotEl?.getAttribute("aria-label") ?? null, dotVisible: !!dr && dr.width > 0, dotBeforeTitle: !!dr && dr.right <= tr.left + 0.5,
-            tip: /^Status: .*\d+ turns?$/.test(lead?.dataset.tip ?? ""), crumb: !!l1.querySelector(".crumb"), lineageParent: !!l1.querySelector(".lineage-parent"), leadW: lead ? Math.round(lead.getBoundingClientRect().width) : null, leadH: lead ? Math.round(lead.getBoundingClientRect().height) : null, sepVisible: !!sep && getComputedStyle(sep).display !== "none" && getComputedStyle(sep).visibility !== "hidden" && sep.getBoundingClientRect().width > 0 && sep.getBoundingClientRect().height > 0, titleGapError: Number.isFinite(normalGap) ? Math.abs(titleGap - normalGap) : null, titleW: Math.round(tr.width), titleText: title.textContent };
-        })() : null,
-        deskLead: !phone && bar.classList.contains("session-bar") ? getComputedStyle(bar.querySelector(".l1-state")).display : null,
-        line2Targets, metaFacts, line2Hidden: { errors: !!errorsTarget?.hidden, runs: !!runsTarget?.hidden },
-        l2: l2Shown ? { h: Math.round(l2.getBoundingClientRect().height), oneLine: l2.scrollHeight <= l2.clientHeight + 1, sessionMeta, metaOrder: [...l2.querySelectorAll(":scope > .meta-item")].map((x) => [...x.classList].find((c) => c.startsWith("meta-") && c !== "meta-item")), ellipsis: rest ? getComputedStyle(rest).textOverflow === "ellipsis" : null, overflows: l2.scrollWidth > l2.clientWidth + 1 } : null };
+      const side = [...bar.querySelectorAll("*")].filter((x) => { const r = x.getBoundingClientRect(); return r.width && (r.right > vw + 0.5 || r.left < -0.5) && !x.closest(".meta-line"); }).length + (bar.scrollWidth > bar.clientWidth + 1 ? 1 : 0);
+      const out = { pinned: Math.abs(br.top) < 0.5 && br.height > 30 && br.bottom > 0 && getComputedStyle(bar).visibility !== "hidden", scrolled: scrolled > 0, barH: Math.round(br.height), small: small.map(([c, h]) => c + ":" + Math.round(h)), side, metaFacts,
+        l2: l2 ? { h: Math.round(l2.getBoundingClientRect().height), oneLine: l2.scrollHeight <= l2.clientHeight + 1, sessionMeta, overflows: l2.scrollWidth > l2.clientWidth + 1 } : null };
       if (phone) window.scrollTo(0, 0); else main.scrollTop = 0; return out;
     });
-    const R = { mode, pages: 0, notPinned: [], l2Pages: 0, l2NotOneLine: [], l2Overflowing: 0, l2NoEllipsis: 0, metaOrderFailures: [], metaDotFailures: [], sessionMetaPages: 0, phoneBars: 0, phoneTopLevelBars: 0, phoneChildBars: 0, phoneBarFailures: [], phoneBarMaxH: 0, phoneBarOldH: null, phoneBarTitleW: [], deskLeadShown: 0, startedLine: null, sideways: 0, smallControls: [], line2TargetFailures: [], overflowScreens: 0 };
-    const measure = async (name, expectedMeta = null) => { const c = await barCheckOnce(); R.pages++; if (c.deskLead != null && c.deskLead !== "none") R.deskLeadShown++;
-      if (c.phoneBar) { const b = c.phoneBar; R.phoneBars++; R.phoneBarMaxH = Math.max(R.phoneBarMaxH, b.h); R.phoneBarOldH = Math.min(R.phoneBarOldH ?? Infinity, b.oldH); R.phoneBarTitleW.push(b.titleW); const bad = []; if (b.h > 57.5) bad.push("height " + b.h); if (b.oldH < b.h + 10) bad.push("no shorter than before: " + b.oldH + " -> " + b.h); if (!b.oneRow) bad.push("not one row"); if (b.l2Displayed) bad.push("line 2 is displayed");
-        if (expectedMeta?.child) { R.phoneChildBars++; if (b.lead || b.dot) bad.push("child bar still has a state lead"); if (b.lineageParent) bad.push("child bar still has the lineage chevron"); if (b.titleGapError == null || b.titleGapError > 8) bad.push("title is not within 8 px of the normal gap after the menu button: " + b.titleGapError); }
-        else { R.phoneTopLevelBars++; if (!b.lead || !b.dot || !b.dotVisible) bad.push("top-level bar has no state dot"); if (!b.dotName || stateWord[b.dotState] !== b.dotName) bad.push("dot name " + b.dotName + " for " + b.dotState); if (!b.dotBeforeTitle) bad.push("dot is not before the title"); if (!b.tip) bad.push("dot tip"); if (b.crumb) bad.push("top-level bar has a crumb"); if (b.sepVisible) bad.push("top-level bar has a visible separator"); if (b.leadW < 32 || b.leadH < 32) bad.push("state dot tap area " + b.leadW + "x" + b.leadH); }
-        if (bad.length) R.phoneBarFailures.push(name + ": " + bad.join(", ")); } if (!c.pinned) R.notPinned.push(name + (c.scrolled ? "" : "(no scroll)")); if (c.l2) { R.l2Pages++; if (!c.l2.oneLine) R.l2NotOneLine.push(name + ":" + c.l2.h); if (c.l2.overflows) R.l2Overflowing++; if (c.l2.ellipsis === false) R.l2NoEllipsis++; if (c.l2.sessionMeta) { R.sessionMetaPages++; const want = ["meta-kind", "meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", "meta-runs", "meta-tokens", "meta-cost"], got = c.l2.metaOrder, required = [...(expectedMeta?.kind ? ["meta-kind"] : []), "meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", ...(expectedMeta?.runs ? ["meta-runs"] : []), "meta-tokens", "meta-cost"], ordered = got.every((x) => want.includes(x)) && got.every((x, i) => i === 0 || want.indexOf(got[i - 1]) < want.indexOf(x)); if (!ordered || required.some((x) => !got.includes(x))) R.metaOrderFailures.push(name + ":" + JSON.stringify(got)); const sizes = { errors: phone ? 40 : 28, runs: phone ? 44 : 30 }, needed = { errors: !!expectedMeta?.errors, runs: !!expectedMeta?.runs }; for (const key of Object.keys(sizes)) { const h = c.line2Targets[key]; if (needed[key] && h == null) R.line2TargetFailures.push(name + ": missing expected line-2 " + key + " target"); else if (h != null && !c.line2Hidden[key] && Math.abs(h - sizes[key]) > 1) R.line2TargetFailures.push(name + " " + key + ":" + h + "px, expected " + sizes[key] + "px"); else if (key === "runs" && needed.runs && c.line2Hidden.runs && !phone) R.line2TargetFailures.push(name + ": runs are hidden outside the phone menu"); } } } const mf = c.metaFacts; if (mf) { if (!mf.dot || !mf.dotInside || (mf.dotFirst && mf.ringRoom < 5.5) || Math.abs(mf.firstOffTitle) > 1) R.metaDotFailures.push(name + ": " + JSON.stringify({ first: mf.dotFirst, ringRoom: mf.ringRoom, inside: mf.dotInside, offTitle: mf.firstOffTitle })); if (mf.errsColor != null && mf.errsColor !== mf.toolsColor) R.metaDotFailures.push(name + ": errors are " + mf.errsColor + " where the other items are " + mf.toolsColor); if (mf.runsDot) R.metaDotFailures.push(name + ": the runs item has a state dot"); if (mf.hit) R.metaDotFailures.push(name + ": a whole-line .meta-hit button is back"); if (mf.errsWeight != null && mf.errsWeight > mf.toolsWeight) R.metaDotFailures.push(name + ": errors weigh " + mf.errsWeight + " over the other items' " + mf.toolsWeight); if (mf.buttons.some((b) => !/\b(errs|meta-runs)\b/.test(b))) R.metaDotFailures.push(name + ": a meta item other than errors and runs is a button: " + JSON.stringify(mf.buttons)); } R.sideways += c.side; if (c.small.length) R.smallControls.push(name + " " + c.small.join(",")); if (await over()) R.overflowScreens++; return c; };
+    const R = { mode, pages: 0, notPinned: [], l2Pages: 0, l2NotOneLine: [], l2Overflowing: 0, metaFailures: [], sessionMetaPages: 0, sideways: 0, smallControls: [], overflowScreens: 0 };
+    const measure = async (name) => {
+      const c = await barCheckOnce(); R.pages++;
+      if (!c.pinned) R.notPinned.push(name + (c.scrolled ? "" : "(no scroll)"));
+      if (c.l2) { R.l2Pages++; if (!c.l2.oneLine) R.l2NotOneLine.push(name + ":" + c.l2.h); if (c.l2.overflows) R.l2Overflowing++; if (c.l2.sessionMeta) R.sessionMetaPages++; }
+      const mf = c.metaFacts;
+      if (mf) {
+        if (!mf.first || !mf.dot) R.metaFailures.push(name + ": the state is not the first label with its dot: " + JSON.stringify(mf.text));
+        if (!mf.inOrder) R.metaFailures.push(name + ": labels are out of order: " + JSON.stringify(mf.drops));
+        if (mf.buttons) R.metaFailures.push(name + ": " + mf.buttons + " control(s) inside the label line");
+        if (mf.actions.join() !== "find-btn,more-btn") R.metaFailures.push(name + ": a session bar's actions are " + JSON.stringify(mf.actions) + ", not Find and the menu");
+      }
+      R.sideways += c.side; if (c.small.length) R.smallControls.push(name + " " + c.small.join(","));
+      if (await over()) R.overflowScreens++;
+      return c;
+    };
     const sids = Object.keys(D.SESS), traceTurns = [];
     const inspectStateDot = (state) => page.evaluate((state) => {
       const dot = [...document.querySelectorAll(".dot." + state)].find((x) => {
@@ -186,7 +184,7 @@ export default async function barCheck(browser) {
       info.trace.forEach((t) => traceTurns.push([sid, t]));
       F.youTurns += info.you.length; F.youWithHeader += info.you.filter(Boolean).length; F.msgTimes += info.times; F.relayHeaders += info.relays; F.gapMarkersBetweenTurns += info.gapOut; F.gapMarkersInsideTurns += info.gapIn; F.tables += info.tables; F.tsum += info.tsum.length;
       for (const t of info.tsum) { if (/ \d+ steps?\b/.test(t)) F.tsumFallback.push(t); if (/(^|, )[a-z]+[a-z0-9_]* \d+ steps?/.test(t) && !/^(ran|read|edited|wrote|patched|searched)/i.test(t)) F.tsumLowercasedUnknown++; }
-      await measure("session " + D.SESS[sid].name.slice(0, 16), { kind: !!D.SESS[sid].kind, runs: childrenOf(sid).length > 0, errors: (D.TX[sid] ?? []).some((e) => e.k === "tool" && e.ok === false), child: !!parentOf(sid) });
+      await measure("session " + D.SESS[sid].name.slice(0, 16));
     }
     for (const [sid, t] of traceTurns) { await goto(page, { v: "trace", sid, turn: t }, D); const c = await measure("trace " + t); if (!c.l2) R.traceWithoutL2 = (R.traceWithoutL2 ?? 0) + 1; }
     for (const m of Object.keys(D.MACHINE ?? {})) { await goto(page, { v: "machine", id: m }, D); await measure("machine " + m); }
@@ -209,103 +207,64 @@ export default async function barCheck(browser) {
     R.smallControls = R.smallControls.slice(0, 6);
     const out = { ...R };
     if (mode !== "phone-dark") {
-      // Search, filter and details on the busiest session.
+      // Find and filter are one mode on the busiest session: the field, its match count and four chips.
       const busy = sids.sort((a, b) => (D.TX[b]?.length ?? 0) - (D.TX[a]?.length ?? 0))[0];
       await goto(page, { v: "session", id: busy }, D);
       const word = await page.evaluate(() => { const t = document.querySelector(".msg.assistant")?.textContent ?? ""; return (t.match(/[A-Za-z]{6,}/) ?? ["the"])[0].toLowerCase(); });
       const turnsBefore = await page.evaluate(() => document.querySelectorAll(".turns > .turn").length);
-      let phoneMenu = null;
-      if (phone) { await page.click("#more-btn"); phoneMenu = await page.evaluate(() => [...document.querySelectorAll(".menu [role=menuitem]")].map((x) => x.textContent.trim())); await page.locator(".menu [role=menuitem]").filter({ hasText: "Find in transcript" }).click(); }
-      else await page.click('.topbar [aria-label="Find in transcript"]');
-      await page.waitForTimeout(100);
-      const S = { session: D.SESS[busy].name, word, turnsBefore, phoneMenu, searching: await page.evaluate(() => document.querySelector("#topbar").classList.contains("searching") && document.activeElement?.id === "find") };
+      await page.click("#find-btn"); await page.waitForTimeout(100);
+      const S = { session: D.SESS[busy].name, word, turnsBefore, searching: await page.evaluate(() => !!document.querySelector("#topbar .find-row") && document.activeElement?.id === "find"), chips: await page.evaluate(() => [...document.querySelectorAll("#topbar .find-chips .chip")].map((c) => c.dataset.filter + ":" + c.getAttribute("aria-pressed"))) };
       await page.keyboard.type(word, { delay: 10 }); await page.waitForTimeout(200);
       Object.assign(S, await page.evaluate(() => ({ count: document.querySelector(".fcount")?.textContent, hits: document.querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length, turns: document.querySelectorAll(".turns > .turn").length, focus: document.activeElement?.id, barH: document.querySelector("#topbar").offsetHeight })));
       S.countMatchesHits = S.count === S.hits + (S.hits === 1 ? " match" : " matches");
-      await page.click('.topbar [aria-label="Close search"]'); await page.waitForTimeout(150);
-      Object.assign(S, await page.evaluate(() => ({ restored: !document.querySelector("#topbar").classList.contains("searching") && !!document.querySelector(".topbar .l2"), turnsAfter: document.querySelectorAll(".turns > .turn").length })));
-      await page.keyboard.press("Escape");
-      out.search = S;
-      // Filter: a dropdown under its button; the content does not move while it opens, changes a toggle, and closes.
-      await page.evaluate(() => window.scrollTo(0, 0)); await page.evaluate(() => { document.querySelector("#main").scrollTop = 0; });
-      const firstTop = () => page.evaluate(() => Math.round(document.querySelector(".turns").getBoundingClientRect().top));
-      const openFilter = async () => { if (phone) { await page.click("#more-btn"); await page.locator(".menu [role=menuitem]").filter({ hasText: "Filter transcript" }).click(); } else await page.click("#filter-btn"); };
-      const Fl = { before: await firstTop() };
-      await openFilter(); await page.waitForTimeout(100);
-      Object.assign(Fl, await page.evaluate((phone) => { const pop = document.querySelector(".filters.pop"), r = pop.getBoundingClientRect(), bt = document.querySelector(phone ? "#more-btn" : "#filter-btn").getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect(); return { open: !pop.hidden, belowBar: r.top >= bar.bottom - 1, anchoredRight: Math.abs(r.right - bt.right) < 24, inView: r.left >= 0 && r.right <= innerWidth, labels: [...pop.querySelectorAll("label")].map((l) => Math.round(l.getBoundingClientRect().height)) }; }, phone));
-      Fl.whileOpen = await firstTop();
-      const turnsAll = await page.evaluate(() => document.querySelectorAll(".turns > .turn").length);
-      await page.click("#f-tools"); await page.waitForTimeout(150);
-      Fl.toolsOff = { stillOpen: await page.evaluate(() => !document.querySelector(".filters.pop").hidden), turns: await page.evaluate(() => document.querySelectorAll(".turns > .turn").length), of: turnsAll, steps: await page.evaluate(() => document.querySelectorAll(".turns .step").length), btnMarked: await page.evaluate((phone) => document.querySelector(phone ? "#more-btn" : "#filter-btn").classList.contains("on"), phone) };
-      await page.click("#f-tools"); await page.waitForTimeout(150);
-      await openFilter(); await page.waitForTimeout(100); Fl.closedByButton = await page.evaluate(() => document.querySelector(".filters.pop").hidden);
-      const vp = phone ? { width: 390, height: 844 } : { width: 1280, height: 860 };
-      await openFilter(); await page.waitForTimeout(100); await page.mouse.click(phone ? 6 : 306, vp.height - 40); await page.waitForTimeout(150); Fl.closedByOutside = await page.evaluate(() => document.querySelector(".filters.pop")?.hidden ?? true);
-      Fl.after = await firstTop(); Fl.contentMoved = Fl.before !== Fl.whileOpen || Fl.before !== Fl.after;
+      // One choice at a time: Messages hides every step, Steps every message, and All brings both back.
+      const counts = () => page.evaluate(() => ({ msgs: document.querySelectorAll(".turns .msg").length, steps: document.querySelectorAll(".turns .step").length, pressed: [...document.querySelectorAll("#topbar .find-chips .chip[aria-pressed=true]")].map((c) => c.dataset.filter) }));
+      await page.fill("#find", ""); await page.waitForTimeout(150);
+      const Fl = { all: await counts() };
+      await page.click('.find-chips .chip[data-filter="messages"]'); await page.waitForTimeout(150); Fl.messages = await counts();
+      await page.click('.find-chips .chip[data-filter="steps"]'); await page.waitForTimeout(150); Fl.steps = await counts();
+      await page.click('.find-chips .chip[data-filter="all"]'); await page.waitForTimeout(150); Fl.restored = await counts();
       out.filter = Fl;
-      // Line 2 opens the Session details sheet/dialog with its API-equivalent cost breakdown.
+      await page.click('.topbar [aria-label="Close find"]'); await page.waitForTimeout(150);
+      Object.assign(S, await page.evaluate(() => ({ restored: !document.querySelector("#topbar .find-row") && !!document.querySelector("#topbar .meta-line"), turnsAfter: document.querySelectorAll(".turns > .turn").length })));
+      out.search = S;
+      // The session menu: actions, then details, then cost, in one panel.
       const detailsSid = Object.values(D.SESS).find((s) => s.reported_runs?.length)?.id ?? busy;
-      if (detailsSid !== busy) await goto(page, { v: "session", id: detailsSid }, D);
+      await goto(page, { v: "session", id: detailsSid }, D);
       await page.evaluate(() => { window.scrollTo(0, 400); document.querySelector("#main").scrollTop = 400; }); await page.waitForTimeout(100);
-      // Clicking a plain meta item (a badge with a data-tip tooltip) does nothing: no dialog, no menu, no navigation.
-      // Real pointer clicks at each badge's centre (the state badge's dot, since its row also holds the errors button), so an
-      // overlay under a badge is caught: the badge must be the element under the pointer, and the click must do nothing.
-      const badges = await page.evaluate(() => [...document.querySelectorAll("#topbar .l2.session-meta .meta-item:not(button)")].map((item) => { const t = item.querySelector(":scope > .dot") ?? item, r = t.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return { shown: r.width > 0 && item.getClientRects().length > 0, x, y, titled: !!item.dataset.tip, underPointer: r.width > 0 && item.contains(document.elementFromPoint(x, y)) }; }));
-      const before = await page.evaluate(() => ({ depth: history.length, route: JSON.stringify(history.state) }));
-      for (const b of badges) if (b.shown) await page.mouse.click(b.x, b.y);
-      await page.waitForTimeout(120);
-      const inert = await page.evaluate((before) => ({ dialog: !!document.querySelector("dialog[open]"), menu: !!document.querySelector(".menu"), moved: history.length !== before.depth || JSON.stringify(history.state) !== before.route }), before);
-      Object.assign(inert, { items: badges.length, clicked: badges.filter((b) => b.shown).length, titled: badges.every((b) => b.titled), overlaid: badges.filter((b) => b.shown && !b.underPointer).length });
-      out.inertBadges = inert;
-      // Details are reached from the ⋯ menu (PR B of the top-bar work redesigns them).
-      await page.click("#more-btn");
-      const menuBefore = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.id }));
-      await page.keyboard.press("/");
-      const menuAfter = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.id, open: !!document.querySelector(".session-menu") }));
-      out.menuSlash = menuAfter;
-      r.expect(menuAfter.open && JSON.stringify(menuAfter.route) === JSON.stringify(menuBefore.route) && menuAfter.path === menuBefore.path && menuAfter.focus === menuBefore.focus, mode + ": / navigated or moved focus while the session menu was open: " + JSON.stringify(menuAfter));
-      await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click(); await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
-      const dialogBefore = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.className }));
-      await page.keyboard.press("/");
-      const dialogAfter = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.className, open: !!document.querySelector("dialog.session-details[open]") }));
-      out.dialogSlash = dialogAfter;
-      r.expect(dialogAfter.open && JSON.stringify(dialogAfter.route) === JSON.stringify(dialogBefore.route) && dialogAfter.path === dialogBefore.path && dialogAfter.focus === dialogBefore.focus, mode + ": / navigated or moved focus behind Session details: " + JSON.stringify(dialogAfter));
+      await page.click("#more-btn"); await page.waitForFunction(() => document.querySelector("dialog.session-menu")?.open === true);
       out.details = await page.evaluate((phone) => {
-        const d = document.querySelector("dialog.session-details"), r = d.getBoundingClientRect(), labels = [...d.querySelectorAll(".detail-label")].map((x) => x.textContent), cost = d.querySelector(".cost-row");
-        const normalize = (text) => text.replace(/\s+/g, " ").trim();
-        const breakdown = d.querySelector(".cost-breakdown"), breakdownText = normalize(breakdown?.textContent ?? "");
-        const breakdownModels = [...(breakdown?.querySelectorAll(".cost-model") ?? [])].map((group) => ({
-          model: group.querySelector(".cost-model-name")?.textContent,
-          labels: [...group.querySelectorAll(".cost-line span:first-child")].map((x) => normalize(x.textContent)),
-        }));
-        // Shown with no tap; kinds that used nothing and cost nothing are left out, so only the two every model uses are required.
-        const kinds = ["Input", "Output"];
+        const d = document.querySelector("dialog.session-menu"), r = d.getBoundingClientRect(), text = (x) => x.textContent.replace(/\s+/g, " ").trim();
+        const cost = d.querySelector(".cost");
         return {
           open: d.open, inView: r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth,
-          phoneSheet: phone ? r.bottom >= innerHeight - 1 && r.width >= innerWidth - 1 : null,
-          desktopDialog: phone ? null : r.width <= 680, labels,
-          hasCost: labels.includes("API-equivalent cost"), costPlain: cost?.tagName === "DIV" && !cost.hasAttribute("aria-expanded"),
-          costBreakdown: !!breakdown && !breakdown.hidden && breakdownModels.length > 0 && kinds.every((kind) => breakdownModels.some((group) => group.labels.includes(kind))),
-          breakdownModels, breakdownText, hasSessionId: labels.includes("Session id"), hasDirectory: labels.includes("Directory"),
-          hasPid: labels.includes("Process id"), reported: d.querySelector(".reported-cost")?.textContent ?? null,
-          costWarning: d.querySelector(".cost-warning")?.textContent ?? null,
+          phoneSheet: phone ? r.bottom >= innerHeight - 1 && r.width >= innerWidth - 1 : null, desktopPanel: phone ? null : r.width <= 420,
+          title: text(d.querySelector(".panel-t")), sub: text(d.querySelector(".panel-sub")),
+          actions: [...d.querySelectorAll(".menu-list .menu-item")].map(text), wideSwitch: !!d.querySelector('[role="menuitemcheckbox"]'),
+          labels: [...d.querySelectorAll(".panel-sec:not(.cost) dl.kv dt")].map(text),
+          costBig: text(cost.querySelector(".cost-big")), costCap: text(cost.querySelector(".cost-cap")), costRows: [...cost.querySelectorAll("dl.kv dt")].map(text), notes: [...cost.querySelectorAll(".cost-note")].map(text),
+          runRows: cost.querySelectorAll(".run-row").length, runRowsShown: [...cost.querySelectorAll(".run-row")].filter((x) => !x.hidden).length, runsMore: cost.querySelector(".runs .link")?.textContent ?? null,
+          tokensHidden: cost.querySelector(".tokens")?.hidden ?? null,
         };
       }, phone);
       out.details.session = detailsSid;
-      await page.click(".session-details .vclose"); await page.waitForTimeout(100); out.details.closed = await page.evaluate(() => !document.querySelector("dialog.session-details"));
-      // Opened from the menu and dismissed with Escape, focus goes back to the ⋯ button, not the document body.
-      await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click(); await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
+      await page.click("dialog.session-menu .runs .link").catch(() => {}); await page.waitForTimeout(80);
+      out.details.runRowsAfterMore = await page.evaluate(() => [...document.querySelectorAll("dialog.session-menu .run-row")].filter((x) => !x.hidden).length);
+      await page.click("dialog.session-menu .disclose"); await page.waitForTimeout(80);
+      out.details.tokens = await page.evaluate(() => { const t = document.querySelector("dialog.session-menu .tokens"); return { shown: t && !t.hidden, models: [...t.querySelectorAll(".tok-model")].map((x) => x.textContent), kinds: [...new Set([...t.querySelectorAll(".tok-line span:first-child")].map((x) => x.textContent))], expanded: document.querySelector("dialog.session-menu .disclose").getAttribute("aria-expanded") }; });
+      // Escape closes it and puts focus back on the ⋯ button, not on the document body.
       await page.keyboard.press("Escape"); await page.waitForTimeout(150);
-      out.details.escFocus = await page.evaluate(() => ({ closed: !document.querySelector("dialog.session-details"), focus: document.activeElement?.id ?? document.activeElement?.tagName }));
-      // The errors segment opens errors mode on the first failed step: marked, in view, not expanded; no menu.
+      out.details.escFocus = await page.evaluate(() => ({ closed: !document.querySelector("dialog.session-menu"), focus: document.activeElement?.id ?? document.activeElement?.tagName }));
+      // The Failed steps chip opens errors mode on the first failed step: marked, in view, not expanded; no menu.
       const errSid = sids.find((s) => (D.TX[s] ?? []).some((e) => e.k === "tool" && e.ok === false));
-      r.expect(!!errSid, "no session with a failed tool call to test the errors-segment jump on");
-      if (errSid) { await goto(page, { v: "session", id: errSid }, D); const badge = await page.evaluate(() => document.querySelector(".topbar .errs").textContent.replace(/\u2009/g, " ").trim()); let menuLabel = null;
-        // On a phone line 2 is off the bar, so the errors are stepped through from the ⋯ menu.
-        if (phone) { await page.click("#more-btn"); menuLabel = await page.evaluate(() => document.querySelector(".session-menu .menu-errors > span:not(.dot):not(.menu-note)")?.textContent ?? null); await page.click(".session-menu .menu-errors"); } else await page.click(".topbar .errs");
-        await page.waitForTimeout(700);
-        out.errsJump = { session: D.SESS[errSid].name, badge, menuLabel, ...(await page.evaluate(() => { const e = document.querySelector("#page .step.err-current"), r = e?.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect(); return { label: document.querySelector("#topbar .errnav-count")?.textContent ?? null, marked: !!e?.classList.contains("err"), expanded: e?.querySelector("button")?.getAttribute("aria-expanded") ?? null, inView: !!r && r.top >= bar.bottom - 1 && r.top < innerHeight, menu: !!document.querySelector(".menu") }; })) };
-        await page.keyboard.press("Escape"); await page.waitForTimeout(300); out.errsJump.closed = await page.evaluate(() => !!document.querySelector(".topbar .errs") && !document.querySelector("#topbar .errnav-count")); }
+      r.expect(!!errSid, "no session with a failed tool call to test the Failed steps chip on");
+      if (errSid) {
+        await goto(page, { v: "session", id: errSid }, D); await page.click("#find-btn");
+        const badge = await page.evaluate(() => (document.querySelector('.find-chips .chip[data-filter="failures"] .n')?.textContent ?? "") + " errors");
+        await page.click('.find-chips .chip[data-filter="failures"]'); await page.waitForTimeout(700);
+        out.errsJump = { session: D.SESS[errSid].name, badge, ...(await page.evaluate(() => { const e = document.querySelector("#page .step.err-current"), r = e?.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect(); return { label: document.querySelector("#topbar .errnav-count")?.textContent ?? null, marked: !!e?.classList.contains("err"), expanded: e?.querySelector("button")?.getAttribute("aria-expanded") ?? null, inView: !!r && r.top >= bar.bottom - 1 && r.top < innerHeight, menu: !!document.querySelector("dialog[open]") }; })) };
+        await page.keyboard.press("Escape"); await page.waitForTimeout(300); out.errsJump.closed = await page.evaluate(() => !!document.querySelector("#topbar .meta-line") && !document.querySelector("#topbar .errnav-count"));
+      }
       // Deep links land the turn fully below the bar.
       const landed = () => page.evaluate(() => { const st = history.state, t = [...document.querySelectorAll(".turn")].find((x) => x.dataset.turn === st?.turn), bar = document.querySelector("#topbar").getBoundingClientRect(); if (!t) return { found: false }; const r = t.getBoundingClientRect(); return { found: true, turn: st.turn, top: Math.round(r.top), barBottom: Math.round(bar.bottom), barTop: Math.round(bar.top), belowBar: r.top >= bar.bottom - 0.5 && r.top < innerHeight - 40, flash: t.classList.contains("flash") }; });
       const DL = {};
@@ -353,46 +312,12 @@ export default async function barCheck(browser) {
   r.expect(!!failedChild, "fixture has no failed child session for the return-row check");
   if (grandchild && parentKids.length >= 3 && failedChild) for (const size of ["phone", "desktop"]) {
     const page = await served(browser, { size }); await goto(page, { v: "session", id: grandchild.id }, D);
-    const pathNames = [], expectedPath = []; let cursor = grandchild.id;
-    while (cursor && D.SESS[cursor]) { expectedPath.unshift(D.SESS[cursor].name); cursor = parentOf(cursor); }
-    const expectedAncestors = expectedPath.slice(0, -1);
-    let childBar = null, pathStatus = null, pathMenuFacts = null, menuTall = null, tappedUp = null, pathOk = false;
-    if (size === "phone") {
-      childBar = await page.evaluate(() => {
-        const bar = document.querySelector("#topbar"), lead = bar.querySelector(".l1-state"), title = bar.querySelector(".t"), menuButton = bar.querySelector("#lead-btn"), ttl = title.parentElement.parentElement;
-        const normalGap = parseFloat(getComputedStyle(bar).columnGap) + parseFloat(getComputedStyle(ttl).paddingLeft);
-        return { lineageParent: !!bar.querySelector(".lineage-parent"), stateLead: !!lead, titleGapError: Math.abs(title.getBoundingClientRect().left - menuButton.getBoundingClientRect().right - normalGap) };
-      });
-      const capture = async (name, withMenu) => {
-        const height = await page.evaluate((open) => { const box = document.querySelector(open ? ".session-menu" : "#topbar").getBoundingClientRect(); return Math.max(1, Math.min(innerHeight, Math.ceil(box.bottom + 8))); }, withMenu);
-        await page.screenshot({ path: path.join(ENV.out, name), clip: { x: 0, y: 0, width: 390, height } });
-      };
-      for (const scheme of ["light", "dark"]) { await page.emulateMedia({ colorScheme: scheme }); await page.waitForTimeout(120); await capture("childbar-390-" + scheme + ".png", false); }
-      await page.emulateMedia({ colorScheme: "light" });
-      await page.click("#more-btn"); await page.waitForSelector(".session-menu .menu-path-item");
-      pathMenuFacts = await page.evaluate(() => {
-        const menu = document.querySelector(".session-menu"), status = menu.querySelector(".menu-status"), group = menu.querySelector(".menu-path-group"), heading = group?.querySelector(".menu-section-heading"), labelId = group?.getAttribute("aria-labelledby"), statusDot = status?.querySelector(".dot"), items = [...menu.querySelectorAll(".menu-path-item")].map((item) => {
-          const name = item.querySelector(".menu-path-name"), slot = item.querySelector(".menu-path-chevron"), rect = item.getBoundingClientRect(), style = getComputedStyle(name);
-          return { name: name.textContent.trim(), nameLeft: name.getBoundingClientRect().left, label: item.getAttribute("aria-label"), role: item.getAttribute("role"), harness: item.querySelector(".hname")?.textContent.trim(), slot: !!slot, blank: slot?.classList.contains("blank") ?? false, slotAriaHidden: slot?.getAttribute("aria-hidden") === "true", chevron: !!slot && !slot.classList.contains("blank"), height: rect.height, whiteSpace: style.whiteSpace, overflow: style.overflow, textOverflow: style.textOverflow };
-        });
-        const statusText = status?.lastElementChild, statusStyle = statusText && getComputedStyle(statusText);
-        return { status: status?.textContent.replace(/\u2009/g, " ").replace(/\s+/g, " ").trim() ?? null, statusRole: status?.getAttribute("role") ?? null, statusIsMenuItem: !!status?.matches('[role="menuitem"]'), statusDot: statusDot?.getAttribute("aria-label") ?? null, statusDotHidden: statusDot?.getAttribute("aria-hidden") === "true", statusWhiteSpace: statusStyle?.whiteSpace ?? null, statusOverflow: statusStyle?.overflow ?? null, statusTextOverflow: statusStyle?.textOverflow ?? null, groupRole: group?.getAttribute("role") ?? null, groupLabelledBy: !!labelId && document.getElementById(labelId) === heading && heading?.textContent.trim() === "Session path", headingRole: heading?.getAttribute("role") ?? null, menuRows: [...menu.querySelectorAll('button[role="menuitem"]')].map((row) => ({ height: row.getBoundingClientRect().height, oneLine: row.scrollHeight <= row.clientHeight + 1 })), order: [...menu.children].slice(0, 4).map((item) => item.className), items, separator: !!menu.querySelector('.menu-separator[role="separator"]') };
-      });
-      pathStatus = pathMenuFacts.status;
-      pathNames.push(...pathMenuFacts.items.map((item) => item.name));
-      pathMenuFacts.sideways = await overflow(page);
-      await page.setViewportSize({ width: 390, height: 500 }); await page.waitForTimeout(120);
-      menuTall = await page.evaluate(() => { const menu = document.querySelector(".session-menu"), rect = menu.getBoundingClientRect(); return { bottom: rect.bottom, viewport: innerHeight, clientHeight: menu.clientHeight, scrollHeight: menu.scrollHeight, overflowY: getComputedStyle(menu).overflowY }; });
-      for (const scheme of ["light", "dark"]) { await page.emulateMedia({ colorScheme: scheme }); await page.waitForTimeout(120); await capture("childbar-menu-390-" + scheme + ".png", true); await page.screenshot({ path: path.join(ENV.out, "childmenu-390-" + scheme + ".png") }); }
-      await page.emulateMedia({ colorScheme: "light" });
-      pathOk = pathNames.length === expectedAncestors.length && expectedAncestors.every((name, i) => pathNames[i] === name);
-      const parent = D.SESS[parentOf(grandchild.id)];
-      await page.locator(".session-menu .menu-path-item[aria-label]").click(); await afterTitle(page, parent.name); await page.waitForTimeout(120);
-      tappedUp = await page.evaluate(() => ({ title: document.querySelector("#topbar .t")?.textContent ?? null, expanded: document.querySelector("#more-btn")?.getAttribute("aria-expanded") ?? null }));
-    } else {
-      pathNames.push(...await page.locator("#topbar .l1 .crumb").allTextContents(), await page.locator("#topbar .t").textContent());
-      pathOk = expectedPath.every((name) => pathNames.some((got) => got.trim() === name));
-    }
+    // The bar names one step up: the parent as a crumb, then this session. The crumb opens the parent.
+    const pathNames = [(await page.locator("#topbar .crumb").allTextContents()).join("|"), await page.locator("#topbar .t").textContent()].map((x) => x.trim());
+    const expectedPath = [D.SESS[parentOf(grandchild.id)].name, grandchild.name];
+    const pathOk = pathNames[0] === expectedPath[0] && pathNames[1] === expectedPath[1];
+    await page.click("#topbar .crumb"); await afterTitle(page, expectedPath[0]);
+    const crumbOpens = await page.evaluate(() => history.state?.id);
 
     await goto(page, { v: "session", id: grandchild.id }, D);
     const origin = D.H.find((h) => h.kind === "spawn" && h.to === grandchild.id);
@@ -422,43 +347,25 @@ export default async function barCheck(browser) {
     await page.emulateMedia({ colorScheme: "light" });
     const siblingNav = await page.evaluate(() => ({ nav: document.querySelectorAll(".sibling-nav, .sibling-count").length, buttons: [...document.querySelectorAll("button")].filter((b) => /^(Previous|Next) sibling/.test(b.getAttribute("aria-label") ?? "")).length, count: /\b\d+ of \d+\b/.test(document.querySelector("#topbar")?.textContent ?? "") }));
 
+    // Runs and their cost are a list in the session menu's cost section: every descendant, five shown, the rest behind "Show N more".
     await goto(page, { v: "session", id: "harbor" }, D);
-    const runsButton = page.locator("#topbar .meta-runs"), runsVisible = await runsButton.isVisible(); let runsViaMenu = false;
-    if (runsVisible) await runsButton.click();
-    else if (size === "phone") { await page.click("#more-btn"); runsViaMenu = await page.locator(".session-menu .menu-runs").isVisible(); if (runsViaMenu) await page.locator(".session-menu .menu-runs").click(); }
-    const runsSelector = size === "phone" ? "dialog.runs-sheet" : ".runs-popover";
-    if (runsVisible || runsViaMenu) await page.waitForSelector(runsSelector);
-    const runs = runsVisible || runsViaMenu ? await page.evaluate((selector) => { const box = document.querySelector(selector); return { open: !!box, rows: box?.querySelectorAll(".runs-row").length ?? 0, nested: box?.querySelectorAll(".runs-group .runs-row").length ?? 0, costs: box?.querySelectorAll(".run-cost").length ?? 0, apiLabel: box?.textContent.includes("API-equivalent cost") ?? false }; }, runsSelector) : { open: false, rows: 0, nested: 0, costs: 0, apiLabel: false };
-    // A Runs sheet opened from the ⋯ menu hands focus back to ⋯ when it closes (the menu item is gone, and line 2's runs item is not drawn).
-    let runsFocus = null;
-    if (runsViaMenu) { await page.click("dialog.runs-sheet .vclose"); await page.waitForFunction(() => !document.querySelector("dialog.runs-sheet")); await page.waitForTimeout(100); runsFocus = await page.evaluate(() => document.activeElement?.id ?? document.activeElement?.tagName ?? null); }
+    await page.click("#more-btn"); await page.waitForFunction(() => document.querySelector("dialog.session-menu")?.open === true);
+    const runs = await page.evaluate(() => { const box = document.querySelector("dialog.session-menu .runs"); return { open: !!box, rows: box?.querySelectorAll(".run-row").length ?? 0, shown: [...(box?.querySelectorAll(".run-row") ?? [])].filter((x) => !x.hidden).length, nested: box?.querySelectorAll(".run-row.depth1").length ?? 0, costs: box?.querySelectorAll(".run-row .v").length ?? 0, apiLabel: document.querySelector("dialog.session-menu .cost")?.textContent.includes("API rates") ?? false }; });
+    await page.keyboard.press("Escape");
     const expectedRuns = Object.values(D.SESS).filter((s) => { let p = parentOf(s.id); while (p && p !== "harbor") p = parentOf(p); return p === "harbor"; }).length;
-    childAssertions.push({ size, introActions, pathNames, expectedPath, expectedAncestors, pathOk, childBar, pathStatus, pathMenuFacts, menuTall, tappedUp, briefCard, openedParent, returnRow, returnParent, siblingNav, runs, runsViaMenu, runsFocus, expectedRuns });
+    childAssertions.push({ size, introActions, pathNames, expectedPath, pathOk, crumbOpens, briefCard, openedParent, returnRow, returnParent, siblingNav, runs, expectedRuns });
     await page.context().close();
   }
 
   for (const child of childAssertions) {
-    r.expect(child.pathOk === true, child.size + (child.size === "phone" ? ": Session path does not list ancestors in root-first order" : ": lineage breadcrumbs do not show the full parent path") + ": " + JSON.stringify({ expected: child.size === "phone" ? child.expectedAncestors : child.expectedPath, got: child.pathNames }));
-    if (child.size === "phone") {
-      const expectedState = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed", new: "New result", read: "Read result" }[grandchild.state];
-      r.expect(child.expectedAncestors.length === 2, "phone: the Session path fixture does not have two ancestors: " + JSON.stringify(child.expectedAncestors));
-      r.expect(child.childBar && !child.childBar.lineageParent && !child.childBar.stateLead && child.childBar.titleGapError <= 8, "phone: child bar still has a lineage chevron or state dot, or its title is not beside the menu button: " + JSON.stringify(child.childBar));
-      r.expect(child.pathStatus?.startsWith(expectedState + " · ") && / · \d+ turns?$/.test(child.pathStatus), "phone: child menu status line does not show the current state and turn count: " + JSON.stringify(child.pathStatus));
-      const pathItems = child.pathMenuFacts?.items ?? [];
-      r.expect(child.pathMenuFacts?.statusRole === "presentation" && !child.pathMenuFacts.statusIsMenuItem && child.pathMenuFacts.statusDot === expectedState && child.pathMenuFacts.statusDotHidden === true && child.pathMenuFacts.statusWhiteSpace === "nowrap" && child.pathMenuFacts.statusOverflow === "hidden" && child.pathMenuFacts.statusTextOverflow === "ellipsis" && child.pathMenuFacts.order.join() === "menu-status,menu-path-group,menu-separator," && child.pathMenuFacts.separator && child.pathMenuFacts.menuRows.every((row) => row.height >= 44 && row.oneLine) && pathItems.length === child.expectedAncestors.length && pathItems.every((item, i) => item.role === "menuitem" && item.harness && item.slot && item.height >= 44 && item.height <= 46 && item.whiteSpace === "nowrap" && item.overflow === "hidden" && item.textOverflow === "ellipsis" && item.chevron === (i === pathItems.length - 1) && item.blank === (i !== pathItems.length - 1) && (item.chevron || item.slotAriaHidden)) && pathItems.at(-1)?.label === "Up to " + D.SESS[parentOf(grandchild.id)].name && child.pathMenuFacts.sideways === 0, "phone: Session path rows lost their labels, ellipsis, tap size, separator, or screen fit: " + JSON.stringify(child.pathMenuFacts));
-      const nameLefts = pathItems.map((item) => item.nameLeft).filter(Number.isFinite);
-      r.expect(nameLefts.length === pathItems.length && Math.max(...nameLefts) - Math.min(...nameLefts) <= 1, "phone: Session path names do not share a left edge within 1 px: " + JSON.stringify(nameLefts));
-      r.expect(child.pathMenuFacts?.groupRole === "group" && child.pathMenuFacts.groupLabelledBy === true && child.pathMenuFacts.headingRole == null, "phone: Session path group is not labelled by its heading: " + JSON.stringify(child.pathMenuFacts));
-      r.expect(child.menuTall?.bottom <= child.menuTall?.viewport + 0.5 && (child.menuTall.scrollHeight <= child.menuTall.clientHeight + 1 || child.menuTall.overflowY === "auto"), "phone at 390x500: ⋯ menu left the viewport or cannot scroll its overflow: " + JSON.stringify(child.menuTall));
-      r.expect(child.tappedUp?.title === D.SESS[parentOf(grandchild.id)].name && child.tappedUp?.expanded === "false", "phone: Up to parent did not close ⋯ and land on the parent: " + JSON.stringify(child.tappedUp));
-    }
+    r.expect(child.pathOk === true && child.crumbOpens === parentOf(grandchild.id), child.size + ": the bar did not show the parent as a crumb before the title, or the crumb did not open the parent: " + JSON.stringify({ expected: child.expectedPath, got: child.pathNames, opens: child.crumbOpens }));
     r.expect(child.briefCard.visible && child.briefCard.includesBrief && child.briefCard.openInParent?.includes("Open in") && child.openedParent.id === parentOf(grandchild.id) && child.openedParent.handoff, child.size + ": child brief or Open in parent handoff link failed: " + JSON.stringify({ brief: child.briefCard, opened: child.openedParent }));
     r.expect(child.briefCard.bars.length > 0 && child.briefCard.bars.every((w) => parseFloat(w) === 0), child.size + ": the child intro still has a left bar: " + JSON.stringify(child.briefCard.bars));
     r.expect(child.briefCard.transcript && parseFloat(child.briefCard.transcript.rail) === 0 && parseFloat(child.briefCard.transcript.pad) === 0, child.size + ": a child session's transcript still carries a left rail or the padding for one: " + JSON.stringify(child.briefCard.transcript));
     r.expect(child.introActions && (!child.introActions.sameLine || child.introActions.gap >= 12) && (child.size !== "phone" || Math.min(child.introActions.moreH, child.introActions.openH) >= 44), child.size + ": the intro's Show more and Open in buttons touch or are under the phone tap size: " + JSON.stringify(child.introActions));
     r.expect(child.returnRow.text?.toLowerCase().includes("failed") && child.returnRow.openParent?.includes("Open in") && child.returnParent.id === parentOf(failedChild.id) && child.returnParent.handoff, child.size + ": failed child return row did not reopen its parent handoff: " + JSON.stringify({ row: child.returnRow, parent: child.returnParent }));
     r.expect(child.siblingNav.nav === 0 && child.siblingNav.buttons === 0 && !child.siblingNav.count, child.size + ": a child session still shows previous/next sibling controls or an \"N of M\" count: " + JSON.stringify(child.siblingNav));
-    r.expect(child.runs.open && child.runs.rows === child.expectedRuns && child.runs.nested > 0 && child.runs.costs === child.expectedRuns && child.runs.apiLabel, child.size + ": Runs view did not list the full nested tree and its API-equivalent costs: " + JSON.stringify(child.runs));
+    r.expect(child.runs.open && child.runs.rows === child.expectedRuns && child.runs.shown === Math.min(5, child.expectedRuns) && child.runs.nested > 0 && child.runs.costs === child.expectedRuns && child.runs.apiLabel, child.size + ": the menu's runs list did not hold every descendant with its cost, five shown: " + JSON.stringify(child.runs));
   }
   for (const child of childAssertions) if (child.size === "phone") r.expect(child.runsViaMenu === true && child.runsFocus === "more-btn", "phone: closing the Runs sheet opened from ⋯ left focus on " + child.runsFocus + " (via menu " + child.runsViaMenu + "), not ⋯");
   r.expect(childAssertions.length === 2, "lineage, no-sibling-nav, brief/return and Runs checks did not run on phone and desktop: " + childAssertions.length);
@@ -619,23 +526,10 @@ export default async function barCheck(browser) {
     r.expect(m.errors.length === 0, m.mode + ": page errors: " + m.errors.join(" | "));
     r.expect(m.notPinned.length === 0, m.mode + ": bar not pinned: " + JSON.stringify(m.notPinned));
     r.expect(m.sideways === 0, m.mode + ": bar sideways=" + m.sideways);
-    r.expect(m.smallControls.length === 0, m.mode + ": controls under 36px: " + JSON.stringify(m.smallControls));
-    r.expect(m.line2TargetFailures.length === 0, m.mode + ": approved line-2 target sizes differ: " + JSON.stringify(m.line2TargetFailures));
-    r.expect(m.l2NotOneLine.length === 0, m.mode + ": l2 not one line: " + JSON.stringify(m.l2NotOneLine));
-    r.expect(m.l2NoEllipsis === 0, m.mode + ": l2 missing ellipsis count=" + m.l2NoEllipsis);
-    r.expect(m.l2Overflowing === 0, m.mode + ": l2 content overflow count=" + m.l2Overflowing);
-    if (m.mode !== "desktop") {
-      r.expect(m.phoneBars > 0 && m.phoneTopLevelBars > 0 && m.phoneChildBars > 0 && m.phoneBarFailures.length === 0, m.mode + ": the phone session bar or child title placement is incorrect (max height " + m.phoneBarMaxH + "px, at most 57: the 56 px tap row and the 1px divider): " + JSON.stringify({ topLevel: m.phoneTopLevelBars, child: m.phoneChildBars, failures: m.phoneBarFailures.slice(0, 6) }));
-      const sl = m.startedLine;
-      r.expect(!!sl, m.mode + ": no session showed a Started line to check");
-      if (sl) {
-        r.expect(sl.h <= sl.leadH + 1, m.mode + ": the Started line wraps with a long machine name: " + JSON.stringify(sl));
-        r.expect(sl.cut && sl.ellipsis && sl.inside && !sl.sideways && sl.sidewaysOverflow === 0, m.mode + ": the long machine name is not ellipsised inside the screen: " + JSON.stringify(sl));
-        r.expect(!!sl.real && sl.real !== "" && sl.text.startsWith("Started "), m.mode + ": the machine name's full tip is missing: " + JSON.stringify(sl));
-      }
-    } else r.expect(m.phoneBars === 0 && m.deskLeadShown === 0, m.mode + ": the phone session bar's state dot shows on desktop (or the phone bar rules apply): " + m.phoneBars + "/" + m.deskLeadShown);
-    r.expect((m.mode === "desktop" || m.sessionMetaPages === 0) && (m.mode !== "desktop" || m.sessionMetaPages > 0) && m.metaOrderFailures.length === 0, m.mode + ": session line 2 order=" + JSON.stringify(m.metaOrderFailures));
-    r.expect(m.metaDotFailures.length === 0, m.mode + ": session line 2 facts (whole state dot on the title edge, no run dot, no whole-line button, quiet errors, only errors and runs are buttons): " + JSON.stringify(m.metaDotFailures.slice(0, 6)));
+    r.expect(m.smallControls.length === 0, m.mode + ": bar controls under the tap size (36px, 44px on a phone): " + JSON.stringify(m.smallControls));
+    r.expect(m.l2NotOneLine.length === 0, m.mode + ": the label line is not one line: " + JSON.stringify(m.l2NotOneLine));
+    r.expect(m.l2Overflowing === 0, m.mode + ": the label line overflows: count=" + m.l2Overflowing);
+    r.expect(m.sessionMetaPages > 0 && m.metaFailures.length === 0, m.mode + ": session label line (state first with its dot, labels in order, none a control, Find and the menu only): " + JSON.stringify(m.metaFailures.slice(0, 6)));
     r.expect(m.overflowScreens === 0, m.mode + ": overflowScreens=" + m.overflowScreens);
     // Gap markers: this fixture's own data has none (X.gapMarkers is always 0 here — every fixture available to this
     // suite is gap-free, per the extras fixture's own description), so there is no source of a positive count to
@@ -648,19 +542,17 @@ export default async function barCheck(browser) {
     // Search, filter, details, deep links, the relay-header link and the Sessions page are only exercised once
     // (mode !== "phone-dark", matching the original mockup script) — not on the phone-dark pass.
     if (m.mode !== "phone-dark") {
-      r.expect(!!m.search, m.mode + ": the search test never ran");
+      r.expect(!!m.search, m.mode + ": the find test never ran");
       if (m.search) {
-        r.expect(m.search.countMatchesHits === true, m.mode + ": search count/hits mismatch: " + JSON.stringify(m.search));
-        r.expect(m.search.restored === true, m.mode + ": closing search did not restore the summary line");
-        if (m.mode.startsWith("phone")) r.expect(m.search.phoneMenu?.includes("Find in transcript") && m.search.phoneMenu?.includes("Filter transcript"), m.mode + ": Find and Filter were missing from the phone ⋯ menu: " + JSON.stringify(m.search.phoneMenu));
+        r.expect(m.search.searching === true && m.search.chips.slice(0, 3).join() === "all:true,messages:false,steps:false", m.mode + ": find did not open with the field focused and the All chip chosen: " + JSON.stringify({ searching: m.search.searching, chips: m.search.chips }));
+        r.expect(m.search.countMatchesHits === true, m.mode + ": find count/hits mismatch: " + JSON.stringify(m.search));
+        r.expect(m.search.restored === true, m.mode + ": closing find did not restore the label line");
       }
-      r.expect(!!m.filter, m.mode + ": the filter test never ran");
+      r.expect(!!m.filter, m.mode + ": the chips test never ran");
       if (m.filter) {
-        r.expect(m.filter.contentMoved === false, m.mode + ": filter dropdown moved the transcript");
-        r.expect(m.filter.closedByButton === true && m.filter.closedByOutside === true, m.mode + ": filter did not close: " + JSON.stringify(m.filter));
-        // A real check, not just turns <= of (always true): the tools-off filter must hide every step, whether or
-        // not that also drops a whole turn.
-        r.expect(m.filter.toolsOff.steps === 0, m.mode + ": tools-off filter left steps visible: " + m.filter.toolsOff.steps);
+        r.expect(m.filter.messages.steps === 0 && m.filter.messages.msgs > 0 && m.filter.messages.pressed.join() === "messages", m.mode + ": the Messages chip left steps visible: " + JSON.stringify(m.filter.messages));
+        r.expect(m.filter.steps.msgs === 0 && m.filter.steps.steps > 0 && m.filter.steps.pressed.join() === "steps", m.mode + ": the Steps chip left messages visible: " + JSON.stringify(m.filter.steps));
+        r.expect(m.filter.restored.msgs === m.filter.all.msgs && m.filter.restored.steps === m.filter.all.steps && m.filter.restored.pressed.join() === "all", m.mode + ": the All chip did not restore the transcript: " + JSON.stringify(m.filter));
       }
       r.expect(!!m.errsJump, m.mode + ": no session with a failed tool call was found for the errors-jump test");
       if (m.errsJump) {
@@ -672,23 +564,25 @@ export default async function barCheck(browser) {
         r.expect(m.errsJump.inView === true, m.mode + ": errors-jump step not in view");
         r.expect(m.errsJump.menu === false, m.mode + ": errors-jump left a menu open");
       }
-      r.expect(!!m.inertBadges && m.inertBadges.items >= 4 && (m.mode.startsWith("phone") ? m.inertBadges.clicked === 0 : m.inertBadges.clicked >= 1) && m.inertBadges.overlaid === 0 && m.inertBadges.titled && !m.inertBadges.dialog && !m.inertBadges.menu && !m.inertBadges.moved, m.mode + ": a plain line-2 badge lost its tooltip or acted on click: " + JSON.stringify(m.inertBadges));
-      r.expect(!!m.details, m.mode + ": the Session details test never ran");
+
+      r.expect(!!m.details, m.mode + ": the session menu test never ran");
       if (m.details) {
-        r.expect(m.details.open === true && m.details.inView === true, m.mode + ": Session details did not open visibly from the ⋯ menu: " + JSON.stringify(m.details));
-        r.expect(m.details.labels.includes("Model") && m.details.labels.includes("Machine") && (m.details.labels.includes("Branch") || m.details.labels.includes("Worktree")) && m.details.labels.includes("Started") && m.details.labels.includes("Duration") && m.details.labels.includes("Input + cache write") && m.details.labels.includes("Output") && m.details.labels.includes("Cache read") && m.details.hasSessionId, m.mode + ": Session details omitted a menu fact: " + JSON.stringify(m.details.labels));
-        { const facts = D.SESS[m.details.session], want = ["Status", "Tool calls", ...(facts?.kind ? ["Kind"] : [])], missing = want.filter((x) => !m.details.labels.includes(x)); r.expect(missing.length === 0, m.mode + ": Session details omits what the phone bar's line 2 held: " + JSON.stringify({ missing, labels: m.details.labels })); }
-        r.expect(m.details.escFocus?.closed === true && m.details.escFocus?.focus === "more-btn", m.mode + ": Escape on Session details did not return focus to the ⋯ button: " + JSON.stringify(m.details.escFocus));
-        r.expect(m.details.hasCost === true && m.details.costPlain === true && m.details.costBreakdown === true && m.details.closed === true, m.mode + ": Session details omitted the API-equivalent cost breakdown, hid it behind a tap, or did not close: " + JSON.stringify(m.details));
-        const detailFacts = D.SESS[m.details.session], reports = detailFacts?.reported_runs ?? [], costChecks = detailFacts?.cost_check ?? [];
-        r.expect(reports.length > 0, m.mode + ": the fixture did not expose a reported Claude Code run for Session details");
-        if (reports.length) r.expect(m.details.reported?.startsWith("Claude Code reported $") === true && m.details.reported.includes(reports.length === 1 ? "for its last run" : "for its last " + reports.length + " runs"), m.mode + ": reported Claude Code run cost was not shown in details: " + JSON.stringify(m.details.reported));
-        if (costChecks.some((check) => check.ok === false)) r.expect(/^Differs from Claude Code's figure by \d+%$/.test(m.details.costWarning ?? ""), m.mode + ": the unaccepted Claude Code cost comparison was not shown: " + JSON.stringify(m.details.costWarning));
-        if (m.mode.startsWith("phone")) r.expect(m.details.phoneSheet === true, m.mode + ": details did not use the phone bottom sheet");
-        else r.expect(m.details.desktopDialog === true, m.mode + ": details did not use the desktop dialog");
-        const busyFacts = D.SESS[m.details.session];
-        if (busyFacts?.cwd != null && busyFacts.cwd !== "") r.expect(m.details.hasDirectory, m.mode + ": details omitted the directory present in the served model");
-        if (busyFacts?.pid != null && busyFacts.pid !== "") r.expect(m.details.hasPid, m.mode + ": details omitted the pid present in the served model");
+        const d = m.details, facts = D.SESS[d.session];
+        r.expect(d.open === true && d.inView === true, m.mode + ": the session menu did not open visibly from the ⋯ button: " + JSON.stringify(d));
+        r.expect(m.mode.startsWith("phone") ? d.phoneSheet === true : d.desktopPanel === true, m.mode + ": the session menu is not the phone's bottom sheet / the desktop's anchored panel: " + JSON.stringify({ phoneSheet: d.phoneSheet, desktopPanel: d.desktopPanel }));
+        r.expect(d.title === facts.name && /^Working|^Needs you|^Idle|^Done|^Failed/.test(d.sub), m.mode + ": the menu's header is not the session's name and its state: " + JSON.stringify({ title: d.title, sub: d.sub }));
+        r.expect(d.actions.some((a) => a.startsWith("Copy resume command")) && (facts.harness !== "claude" || d.actions.some((a) => a.startsWith("Open in claude.ai"))) && d.wideSwitch === !m.mode.startsWith("phone"), m.mode + ": the menu's actions are wrong (copy, open in claude.ai for Claude, and the wide switch on desktop only): " + JSON.stringify({ actions: d.actions, wide: d.wideSwitch }));
+        r.expect(["Harness", "Model", "Machine", "Started", "Duration", "Session id"].every((k) => d.labels.includes(k)) && (d.labels.includes("Branch") || d.labels.includes("Worktree")), m.mode + ": the menu omitted a detail: " + JSON.stringify(d.labels));
+        if (facts.cwd) r.expect(d.labels.includes("Directory"), m.mode + ": the menu omitted the directory the model has");
+        if (facts.pid != null && facts.pid !== "") r.expect(d.labels.includes("Process id"), m.mode + ": the menu omitted the process id the model has");
+        r.expect(/^\$|^—$/.test(d.costBig) && d.costCap.startsWith("this session"), m.mode + ": the menu's cost figure or caption is wrong: " + JSON.stringify({ big: d.costBig, cap: d.costCap }));
+        const reports = facts.reported_runs ?? [], costChecks = facts.cost_check ?? [];
+        r.expect(reports.length > 0, m.mode + ": the fixture did not expose a reported Claude Code run");
+        if (reports.length) r.expect(d.costRows.includes("Claude Code's own figure"), m.mode + ": the harness's own figure was not a row of the cost section: " + JSON.stringify(d.costRows));
+        if (costChecks.some((check) => check.ok === false)) r.expect(d.notes.some((n) => /^Semon's estimate for that run is \d+% (above|below) Claude Code's figure/.test(n)), m.mode + ": the difference from the harness's figure was not a quiet note: " + JSON.stringify(d.notes));
+        if (childrenOf(d.session).length) r.expect(d.costRows.includes("This session") && d.runRows > 0 && d.runRowsShown === Math.min(5, d.runRows) && (d.runRows <= 5 || (d.runsMore?.startsWith("Show") && d.runRowsAfterMore === d.runRows)), m.mode + ": the runs list is not five rows and Show more: " + JSON.stringify({ rows: d.runRows, shown: d.runRowsShown, more: d.runsMore, after: d.runRowsAfterMore }));
+        r.expect(d.tokensHidden === true && d.tokens.shown === true && d.tokens.expanded === "true" && d.tokens.models.length > 0 && ["Input", "Output", "Cache write", "Cache read"].every((k) => d.tokens.kinds.includes(k)), m.mode + ": Tokens by model did not fold and unfold with a line per kind: " + JSON.stringify({ hidden: d.tokensHidden, tokens: d.tokens }));
+        r.expect(d.escFocus?.closed === true && d.escFocus?.focus === "more-btn", m.mode + ": Escape on the session menu did not close it and return focus to the ⋯ button: " + JSON.stringify(d.escFocus));
       }
       r.expect(!!m.deepLinks?.fromTrace, m.mode + ": no fromTrace deep link was tried (no trace child node found)");
       r.expect(!!m.deepLinks?.fromHome, m.mode + ": no fromHome deep link was tried (no Home item found)");
