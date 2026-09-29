@@ -9,9 +9,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{self, BufRead, BufReader, Seek, SeekFrom},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::UNIX_EPOCH,
 };
 
@@ -20,8 +23,11 @@ use std::os::unix::fs::MetadataExt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{Tokens, attachments, field};
+
+mod store;
 
 #[cfg(test)]
 thread_local! {
@@ -29,8 +35,9 @@ thread_local! {
     pub(crate) static CACHE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// The event cache sits beside V1's metadata cache and has its own version,
-/// so `semon sessions`, `--watch` and `--json` never load or rewrite it.
+/// The parser's version: what the fold functions derive from a line. The
+/// index store keeps it and empties its derived tables when it differs, so
+/// every file is read again.
 /// v3: every assistant text is its own event (v2 collapsed adjacent ones).
 /// v4: thinking blocks and Codex harness text are indexed apart, as `extras`.
 /// v5: completed Codex items carry their exact code-mode call parent, if known.
@@ -70,7 +77,7 @@ impl ModelTokens {
 /// A Claude assistant message's token report. `tokens` preserves the legacy
 /// triple's input/cache-read accounting; `model_tokens` keeps cache writes
 /// separate for the model JSON.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MessageUsage {
     pub(crate) model: Option<String>,
     pub(crate) tokens: Tokens,
@@ -79,7 +86,7 @@ pub(crate) struct MessageUsage {
 }
 
 /// Per-message facts used only for price calculation.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct BillingUsage {
     pub(crate) input: u64,
     pub(crate) output: u64,
@@ -96,7 +103,7 @@ pub(crate) struct BillingUsage {
 
 /// One Codex cumulative `token_count` event converted to the delta since the
 /// preceding event in its file.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CodexUsageEvent {
     pub(crate) model: String,
     pub(crate) tokens: ModelTokens,
@@ -236,50 +243,182 @@ impl FileIndex {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+/// A file as last stat'ed: its identity, size and modified time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stat {
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
+    pub(crate) size: u64,
+    pub(crate) modified_ns: u128,
+}
+
+impl Stat {
+    fn of(path: &Path) -> io::Result<Self> {
+        let metadata = fs::metadata(path)?;
+        let modified_ns = metadata
+            .modified()?
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        #[cfg(unix)]
+        let (dev, ino) = (metadata.dev(), metadata.ino());
+        #[cfg(not(unix))]
+        let (dev, ino) = (0, 0);
+        Ok(Self {
+            dev,
+            ino,
+            size: metadata.len(),
+            modified_ns,
+        })
+    }
+}
+
+/// How many bytes each of a ledger's hashes covers: the first 4 KiB, as
+/// the mirror protocol's `head_sha256` does, and the 4 KiB before the
+/// offset.
+const WINDOW: u64 = 4096;
+
+/// What the index records about a file it has read: the stat it was read
+/// at, the offset its complete lines end at, and SHA-256 hashes of the
+/// first [`WINDOW`] bytes and of the [`WINDOW`] bytes before that offset
+/// (each shorter when the offset is).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Ledger {
+    pub(crate) stat: Stat,
+    pub(crate) offset: u64,
+    pub(crate) head: [u8; 32],
+    pub(crate) tail: [u8; 32],
+}
+
+impl Ledger {
+    /// The file still holds what was read, so reading resumes at the
+    /// offset: the same identity, at least as long, and both hashed windows
+    /// unchanged. That covers a file that grew and one only touched; any
+    /// other change (a rewrite, a truncation, a new inode) rereads it.
+    fn resumes(&self, stat: &Stat, file: &fs::File) -> bool {
+        self.stat.dev == stat.dev
+            && self.stat.ino == stat.ino
+            && self.offset <= stat.size
+            && window_hashes(file, self.offset)
+                .is_ok_and(|(head, tail)| head == self.head && tail == self.tail)
+    }
+}
+
+/// The hashes a [`Ledger`] keeps for `offset`: two reads of at most
+/// [`WINDOW`] bytes.
+fn window_hashes(mut file: &fs::File, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
+    let width = offset.min(WINDOW);
+    let mut hash = |start: u64| -> io::Result<[u8; 32]> {
+        let mut bytes = vec![0; width as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut bytes)?;
+        Ok(Sha256::digest(&bytes).into())
+    };
+    Ok((hash(0)?, hash(offset - width)?))
+}
+
+/// Why a store call failed.
+#[derive(Debug)]
+pub(crate) enum StoreError {
+    /// Another process held the store past its wait: this change stays in
+    /// memory and is written with the file's next one.
+    Busy(String),
+    /// A row didn't decode: its file is read from the log again.
+    Data(String),
+    /// The store can't be used any more: the rest of the run is in memory.
+    Failed(String),
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy(message) | Self::Data(message) | Self::Failed(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
+/// What a store write did.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Written,
+    /// The ledger row wasn't the one the change was based on: another
+    /// process moved the file on first. Nothing was written.
+    Conflict,
+    /// Another version of Semon rebuilt the store for its own parser or
+    /// schema. Nothing was written.
+    Stale,
+}
+
+/// Everything a store holds, as read when it opens.
+#[derive(Default)]
+pub(crate) struct Loaded {
+    pub(crate) files: Vec<(String, Ledger, FileIndex)>,
+    pub(crate) reported_runs: Vec<crate::facts::ReportedRunSnapshot>,
+    pub(crate) stamp: Option<ReportedFileStamp>,
+}
+
+/// Where the event index persists between runs: the narrow interface the
+/// cache needs, so the storage behind it (SQLite today) stays in one place.
+///
+/// Every write is atomic, and every file's write is conditional on the
+/// ledger row it was based on, so two processes sharing one store never
+/// apply the same lines twice.
+pub(crate) trait IndexStore: Send {
+    /// Where the store is, for messages.
+    fn describe(&self) -> String;
+
+    /// `path`'s ledger as committed now.
+    fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError>;
+
+    /// `path`'s committed ledger and index, read together.
+    fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError>;
+
+    /// Commits `path`'s new ledger and index if its ledger is still
+    /// `expected`. `base` is the index `expected` recorded and `index` grew
+    /// from, when it did; the store then writes only what differs from it.
+    /// Without it the file's rows are replaced.
+    fn commit_file(
+        &mut self,
+        path: &str,
+        expected: Option<&Ledger>,
+        base: Option<&FileIndex>,
+        ledger: &Ledger,
+        index: &FileIndex,
+    ) -> Result<Outcome, StoreError>;
+
+    /// Drops the rows of files that are gone, or whose rows don't decode.
+    fn remove_files(&mut self, paths: &[String]) -> Result<Outcome, StoreError>;
+
+    /// Saves reported runs and the `~/.claude.json` stamp they were read at,
+    /// and returns every reported run the store holds (other processes may
+    /// have added some). `None` when the store is stale.
+    fn save_runs(
+        &mut self,
+        runs: &[crate::facts::ReportedRunSnapshot],
+        stamp: &ReportedFileStamp,
+    ) -> Result<Option<Vec<crate::facts::ReportedRunSnapshot>>, StoreError>;
+}
+
+/// One file's index in memory, and the ledger it was read at.
 struct CachedFile {
-    dev: u64,
-    ino: u64,
-    offset: u64,
-    size: u64,
-    modified_ns: u128,
-    #[serde(with = "shared")]
+    ledger: Ledger,
     index: Arc<FileIndex>,
 }
 
-/// Serializes an `Arc` as its value: unchanged files are shared between the
-/// cache and the model instead of copied on every build.
-mod shared {
-    use std::sync::Arc;
-
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub(super) fn serialize<T: Serialize, S: Serializer>(
-        value: &Arc<T>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        value.as_ref().serialize(serializer)
-    }
-
-    pub(super) fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Arc<T>, D::Error> {
-        T::deserialize(deserializer).map(Arc::new)
-    }
-}
-
-#[derive(Default, Serialize, Deserialize)]
+/// The event index: every file's [`FileIndex`] in memory, written through
+/// to an [`IndexStore`] file by file when one could be opened.
+#[derive(Default)]
 pub(crate) struct EventCache {
-    version: u32,
     files: BTreeMap<String, CachedFile>,
-    #[serde(default)]
     reported_runs: BTreeMap<String, BTreeMap<i64, crate::facts::ReportedRunSnapshot>>,
-    #[serde(default)]
     claude_json_stamp: Option<ReportedFileStamp>,
+    store: Option<Box<dyn IndexStore>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct ReportedFileStamp {
+pub(crate) struct ReportedFileStamp {
     dev: u64,
     ino: u64,
     size: u64,
@@ -308,28 +447,120 @@ struct LastProjectRun {
     last_model_usage: Option<BTreeMap<String, crate::facts::ReportedModelUsage>>,
 }
 
+/// Says once per process that the index runs in memory, and why.
+fn warn_unavailable(what: &str, error: &dyn std::fmt::Display) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "semon: the session index {what} is unavailable ({error}); the index is kept in memory for this run"
+        );
+    }
+}
+
+/// Says once per process that a change waits for its file's next one.
+fn warn_busy(what: &str, error: &dyn std::fmt::Display) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "semon: the session index {what} is busy ({error}); a change is kept in memory until its file changes again"
+        );
+    }
+}
+
+/// Where a file's unchanged index comes from.
+enum Base {
+    Found(Arc<FileIndex>),
+    /// The store moved on between two reads: look again.
+    Moved,
+    /// Its rows can't be read: read the file from its start.
+    Unreadable,
+}
+
 impl EventCache {
+    /// The store beside V1's metadata cache: `sessions-index.json` gives
+    /// `sessions-index.sqlite3`. `semon sessions`, `--watch` and `--json`
+    /// never open it.
     pub(crate) fn path(v1_cache: &Path) -> PathBuf {
-        v1_cache.with_extension("events.json")
+        v1_cache.with_extension("sqlite3")
     }
 
-    pub(crate) fn read(path: &Path) -> Self {
+    /// Opens the index beside `v1_cache` and reads all of it. When the
+    /// store can't be opened, the index lives in memory for this run, and
+    /// that is said once.
+    pub(crate) fn open(v1_cache: &Path) -> Self {
         #[cfg(test)]
         CACHE_READS.with(|reads| reads.set(reads.get() + 1));
-        fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())
-            .filter(|cache| cache.version == CACHE_VERSION)
-            .unwrap_or_else(|| Self {
-                version: CACHE_VERSION,
-                files: BTreeMap::new(),
-                reported_runs: BTreeMap::new(),
-                claude_json_stamp: None,
-            })
+        let path = Self::path(v1_cache);
+        match store::open(&path) {
+            Ok((store, loaded)) => {
+                let mut cache = Self::from_loaded(loaded);
+                cache.store = Some(store);
+                cache
+            }
+            Err(error) => {
+                warn_unavailable(&path.display().to_string(), &error);
+                Self::default()
+            }
+        }
     }
 
-    pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
-        crate::save_json(path, self)
+    fn from_loaded(loaded: Loaded) -> Self {
+        let Loaded {
+            files,
+            reported_runs,
+            stamp,
+        } = loaded;
+        let mut cache = Self {
+            files: files
+                .into_iter()
+                .map(|(path, ledger, index)| {
+                    (
+                        path,
+                        CachedFile {
+                            ledger,
+                            index: Arc::new(index),
+                        },
+                    )
+                })
+                .collect(),
+            claude_json_stamp: stamp,
+            ..Self::default()
+        };
+        cache.set_reported_runs(reported_runs);
+        cache
+    }
+
+    fn set_reported_runs(&mut self, runs: Vec<crate::facts::ReportedRunSnapshot>) {
+        self.reported_runs.clear();
+        for run in runs {
+            self.reported_runs
+                .entry(run.last_session_id.clone())
+                .or_default()
+                .insert(run.last_start_time, run);
+        }
+    }
+
+    /// Stops writing to the store for the rest of the run, and says so once.
+    fn lose_store(&mut self, error: &dyn std::fmt::Display) {
+        if let Some(store) = self.store.take() {
+            warn_unavailable(&store.describe(), error);
+        }
+    }
+
+    /// Handles a failed store call: a busy store keeps this change in
+    /// memory; any other failure ends the store's use for this run.
+    fn store_failed(&mut self, error: &StoreError) {
+        match error {
+            StoreError::Busy(_) => {
+                let what = self
+                    .store
+                    .as_ref()
+                    .map(|store| store.describe())
+                    .unwrap_or_default();
+                warn_busy(&what, error);
+            }
+            StoreError::Data(_) | StoreError::Failed(_) => self.lose_store(error),
+        }
     }
 
     pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
@@ -371,8 +602,9 @@ impl EventCache {
         let Ok(root) = serde_json::from_reader::<_, ClaudeJson>(file) else {
             return;
         };
-        self.claude_json_stamp = Some(stamp);
+        self.claude_json_stamp = Some(stamp.clone());
         *dirty = true;
+        let mut read = Vec::new();
         for project in root.projects.into_values() {
             let (Some(session_id), Some(start)) =
                 (project.last_session_id, project.last_start_time)
@@ -391,18 +623,115 @@ impl EventCache {
                 last_model_usage: project.last_model_usage.unwrap_or_default(),
                 capture_at,
             };
+            read.push(snapshot.clone());
             self.reported_runs
                 .entry(session_id)
                 .or_default()
                 .insert(start, snapshot);
         }
+        let saved = self
+            .store
+            .as_mut()
+            .map(|store| store.save_runs(&read, &stamp));
+        match saved {
+            Some(Ok(Some(all))) => self.set_reported_runs(all),
+            Some(Ok(None)) => self.lose_store(&"another version of semon rebuilt it"),
+            Some(Err(error)) => self.store_failed(&error),
+            None => {}
+        }
     }
 
-    /// Drops files that are gone, so the cache doesn't grow without bound.
+    /// Drops files that are gone, so the index doesn't grow without bound.
     pub(crate) fn retain(&mut self, seen: &BTreeSet<String>, dirty: &mut bool) {
-        let before = self.files.len();
-        self.files.retain(|path, _| seen.contains(path));
-        *dirty |= self.files.len() != before;
+        let gone: Vec<String> = self
+            .files
+            .keys()
+            .filter(|path| !seen.contains(*path))
+            .cloned()
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        for path in &gone {
+            self.files.remove(path);
+        }
+        *dirty = true;
+        let removed = self.store.as_mut().map(|store| store.remove_files(&gone));
+        match removed {
+            Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
+            Some(Err(error)) => self.store_failed(&error),
+            Some(Ok(Outcome::Written | Outcome::Conflict)) | None => {}
+        }
+    }
+
+    /// What the index last recorded for `path`: the store's ledger, which
+    /// another process may have moved on, or this process's without one.
+    fn recorded(&mut self, path: &str) -> Option<Ledger> {
+        let stored = self.store.as_ref().map(|store| store.ledger(path));
+        match stored {
+            Some(Ok(ledger)) => return ledger,
+            Some(Err(StoreError::Data(_))) => {
+                // A ledger row that doesn't decode is dropped, and the file
+                // read again from its start.
+                let removed = self
+                    .store
+                    .as_mut()
+                    .map(|store| store.remove_files(&[path.to_owned()]));
+                match removed {
+                    Some(Ok(Outcome::Stale)) => {
+                        self.lose_store(&"another version of semon rebuilt it");
+                    }
+                    Some(Err(error)) => self.store_failed(&error),
+                    Some(Ok(Outcome::Written | Outcome::Conflict)) | None => return None,
+                }
+            }
+            Some(Err(error)) => self.store_failed(&error),
+            None => {}
+        }
+        self.files.get(path).map(|entry| entry.ledger.clone())
+    }
+
+    /// The index `ledger` recorded for `path`: this process's when it is at
+    /// that ledger, else the store's.
+    fn base(&mut self, path: &str, ledger: &Ledger) -> Base {
+        if let Some(entry) = self.files.get(path)
+            && entry.ledger == *ledger
+        {
+            return Base::Found(Arc::clone(&entry.index));
+        }
+        let loaded = self.store.as_ref().map(|store| store.load_file(path));
+        match loaded {
+            Some(Ok(Some((stored, index)))) if stored == *ledger => Base::Found(Arc::new(index)),
+            Some(Ok(_)) => Base::Moved,
+            Some(Err(StoreError::Data(_))) | None => Base::Unreadable,
+            Some(Err(error)) => {
+                self.store_failed(&error);
+                Base::Unreadable
+            }
+        }
+    }
+
+    /// Writes a file's change through to the store. `true` when another
+    /// process moved the file on first, so the change must be redone.
+    fn commit(
+        &mut self,
+        path: &str,
+        expected: Option<&Ledger>,
+        base: Option<&FileIndex>,
+        ledger: &Ledger,
+        index: &FileIndex,
+    ) -> bool {
+        let committed = self
+            .store
+            .as_mut()
+            .map(|store| store.commit_file(path, expected, base, ledger, index));
+        match committed {
+            Some(Ok(Outcome::Conflict)) => return true,
+            Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
+            Some(Err(error)) => self.store_failed(&error),
+            Some(Ok(Outcome::Written)) | None => {}
+        }
+        false
     }
 }
 
@@ -410,54 +739,119 @@ impl EventCache {
 thread_local! {
     /// Lines parsed by [`scan_file`] on this thread: a warm build parses none.
     pub(crate) static PARSED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// What [`scan_file`] did with each file on this thread: `unchanged`,
+    /// `append`, `replace` or `conflict`.
+    pub(crate) static LEDGER: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Runs once, after a file is parsed and before its change commits.
+    pub(crate) static BEFORE_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Indexes one file, resuming from the cached byte offset when the file only
-/// grew, and sharing the cached index when it didn't change at all.
+fn trace(_what: &'static str) {
+    #[cfg(test)]
+    LEDGER.with(|ledger| ledger.borrow_mut().push(_what));
+}
+
+/// How often a file's change is redone when other processes keep moving it
+/// on first; past that it stays in memory until the file changes again.
+const COMMIT_ATTEMPTS: usize = 3;
+
+/// Indexes one file: shares the recorded index when the file didn't change,
+/// resumes from the recorded offset when it only grew (or was only
+/// touched), and reads it from the start otherwise. The change commits to
+/// the store only if no other process recorded the file meanwhile; if one
+/// did, it is redone from what that process recorded.
 pub(crate) fn scan_file(
     path: &Path,
     harness: &str,
     cache: &mut EventCache,
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
-    let metadata = fs::metadata(path)?;
-    let modified_ns = metadata
-        .modified()?
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    #[cfg(unix)]
-    let (dev, ino) = (metadata.dev(), metadata.ino());
-    #[cfg(not(unix))]
-    let (dev, ino) = (0, 0);
     let key = path.to_string_lossy().into_owned();
-    let mut index = FileIndex::default();
-    let mut offset = 0;
-    if let Some(entry) = cache.files.get(&key) {
-        if entry.dev == dev
-            && entry.ino == ino
-            && entry.size == metadata.len()
-            && entry.modified_ns == modified_ns
-        {
-            return Ok(Arc::clone(&entry.index));
-        }
-        if entry.dev == dev
-            && entry.ino == ino
-            && entry.offset <= metadata.len()
-            && (metadata.len() > entry.size || entry.modified_ns == modified_ns)
-        {
-            offset = entry.offset;
-        }
-    }
-    if let Some(entry) = cache.files.remove(&key)
-        && offset > 0
+    if let Some(entry) = cache.files.get(&key)
+        && entry.ledger.stat == Stat::of(path)?
     {
-        index = Arc::unwrap_or_clone(entry.index);
+        trace("unchanged");
+        return Ok(Arc::clone(&entry.index));
     }
     *dirty = true;
-    let mut file = fs::File::open(path)?;
-    file.seek(SeekFrom::Start(offset))?;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let last = attempt >= COMMIT_ATTEMPTS;
+        // Stat'ed before reading: a line that lands during the read makes
+        // the next check see a change.
+        let stat = Stat::of(path)?;
+        let file = fs::File::open(path)?;
+        let recorded = cache.recorded(&key);
+        let mut base = None;
+        if let Some(ledger) = &recorded
+            && (ledger.stat == stat || ledger.resumes(&stat, &file))
+        {
+            match cache.base(&key, ledger) {
+                Base::Found(index) => base = Some(index),
+                Base::Moved if !last => continue,
+                Base::Moved | Base::Unreadable => {}
+            }
+            // Another process already read it as it is now.
+            if ledger.stat == stat
+                && let Some(index) = &base
+            {
+                trace("unchanged");
+                cache.files.insert(
+                    key,
+                    CachedFile {
+                        ledger: ledger.clone(),
+                        index: Arc::clone(index),
+                    },
+                );
+                return Ok(Arc::clone(index));
+            }
+        }
+        let from = match (&recorded, &base) {
+            (Some(ledger), Some(_)) => ledger.offset,
+            _ => 0,
+        };
+        trace(if base.is_some() { "append" } else { "replace" });
+        let mut index = base.as_deref().cloned().unwrap_or_default();
+        let offset = parse(&file, from, harness, &mut index)?;
+        let (head, tail) = window_hashes(&file, offset)?;
+        let ledger = Ledger {
+            stat,
+            offset,
+            head,
+            tail,
+        };
+        #[cfg(test)]
+        {
+            if let Some(hook) = BEFORE_COMMIT.with(|hook| hook.borrow_mut().take()) {
+                hook();
+            }
+        }
+        if cache.commit(&key, recorded.as_ref(), base.as_deref(), &ledger, &index) && !last {
+            trace("conflict");
+            continue;
+        }
+        let index = Arc::new(index);
+        cache.files.insert(
+            key,
+            CachedFile {
+                ledger,
+                index: Arc::clone(&index),
+            },
+        );
+        return Ok(index);
+    }
+}
+
+/// Folds the complete lines of `file` from `from` into `index`, and returns
+/// the offset they end at. A last line without its newline is left for the
+/// next read.
+fn parse(file: &fs::File, from: u64, harness: &str, index: &mut FileIndex) -> io::Result<u64> {
     let mut reader = BufReader::new(file);
+    reader.seek(SeekFrom::Start(from))?;
+    let mut offset = from;
     let mut line = Vec::new();
     loop {
         line.clear();
@@ -472,27 +866,15 @@ pub(crate) fn scan_file(
         match serde_json::from_slice::<Value>(&line) {
             Ok(record) if record.is_object() => {
                 if harness == "claude" {
-                    claude(&mut index, &record, line_offset);
+                    claude(index, &record, line_offset);
                 } else {
-                    codex(&mut index, &record, line_offset);
+                    codex(index, &record, line_offset);
                 }
             }
-            _ => gap(&mut index, line_offset),
+            _ => gap(index, line_offset),
         }
     }
-    let index = Arc::new(index);
-    cache.files.insert(
-        key,
-        CachedFile {
-            dev,
-            ino,
-            offset,
-            size: metadata.len(),
-            modified_ns,
-            index: Arc::clone(&index),
-        },
-    );
-    Ok(index)
+    Ok(offset)
 }
 
 /// Busy clustering: consecutive line timestamps no more than this far apart
@@ -2679,71 +3061,26 @@ mod tests {
     }
 
     #[test]
-    fn signals_round_trip_through_the_cache_and_v13_is_stale() {
-        let root = std::env::temp_dir().join(format!(
-            "semon-signals-cache-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let index = FileIndex {
-            signals: vec![Signal {
-                k: SignalKind::Compact,
-                o: 42,
-                t: Some(1_790_208_000_123),
-                at: 2,
-                n: Some("auto".to_owned()),
-                v: Some(155000),
-            }],
-            ..FileIndex::default()
-        };
-        let mut cache = EventCache {
-            version: CACHE_VERSION,
-            files: BTreeMap::from([(
-                "session.jsonl".to_owned(),
-                CachedFile {
-                    dev: 1,
-                    ino: 2,
-                    offset: 3,
-                    size: 3,
-                    modified_ns: 4,
-                    index: Arc::new(index.clone()),
-                },
-            )]),
-            ..EventCache::default()
-        };
-        let path = root.join("events.json");
-        cache.save(&path).unwrap();
-        let reopened = EventCache::read(&path);
-        let cached_index = &reopened.files.get("session.jsonl").unwrap().index;
-        let serialized_index = serde_json::to_value(&index).unwrap();
-        assert_eq!(serialized_index["signals"][0]["k"], "compact");
-        assert_eq!(
-            serialized_index,
-            serde_json::to_value(cached_index.as_ref()).unwrap()
+    fn signals_round_trip_through_the_index() {
+        let root = scratch("signals");
+        let v1 = root.join("index.json");
+        let log = root.join("session.jsonl");
+        write_lines(
+            &log,
+            &[
+                serde_json::json!({
+                    "type":"system",
+                    "subtype":"compact_boundary",
+                    "compactMetadata":{"trigger":"auto","preTokens":155000}
+                }),
+                said("m1", &["after the compaction"]),
+            ],
         );
-
-        let stale_path = root.join("stale.events.json");
-        cache.version = 13;
-        cache.save(&stale_path).unwrap();
-        let stale = EventCache::read(&stale_path);
-        assert_eq!(stale.version, CACHE_VERSION);
-        assert!(stale.files.is_empty());
-        assert!(!stale.files.contains_key("session.jsonl"));
-
-        let current_path = root.join("current.events.json");
-        cache.version = CACHE_VERSION;
-        cache.save(&current_path).unwrap();
-        let current = EventCache::read(&current_path);
-        assert_eq!(current.version, CACHE_VERSION);
-        let retained_index = &current.files.get("session.jsonl").unwrap().index;
-        assert_eq!(
-            serde_json::to_value(retained_index.as_ref()).unwrap(),
-            serialized_index
-        );
+        let mut cache = EventCache::open(&v1);
+        let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(index.signals.len(), 1);
+        assert_eq!(index.signals[0].n.as_deref(), Some("auto"));
+        assert_eq!(stored(&v1, &log), cold(&log));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2831,17 +3168,9 @@ mod tests {
 
     #[test]
     fn claude_state_reader_keeps_allowlisted_snapshots_across_overwrites() {
-        let root = std::env::temp_dir().join(format!(
-            "semon-reported-runs-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let root = scratch("reported-runs");
         let claude_json = root.join(".claude.json");
-        let cache_path = EventCache::path(&root.join("index.json"));
+        let v1 = root.join("index.json");
         let secrets = ["fixture-secret@example.invalid", "fixture-account-uuid"];
         let first = serde_json::json!({
             "oauthAccount":{"emailAddress":secrets[0],"accountUuid":secrets[1]},
@@ -2858,27 +3187,28 @@ mod tests {
             "unlistedRootSecret":"unlisted-root-value"
         });
         fs::write(&claude_json, first.to_string()).unwrap();
-        let mut cache = EventCache::read(&cache_path);
+        let mut cache = EventCache::open(&v1);
         let mut dirty = false;
         cache.refresh_reported_runs(&claude_json, 2000, &mut dirty);
         assert!(dirty);
-        cache.save(&cache_path).unwrap();
-        cache = EventCache::read(&cache_path);
+        drop(cache);
+        let mut cache = EventCache::open(&v1);
         assert_eq!(cache.reported_runs().count(), 1);
-        let serialized = serde_json::to_string(&cache).unwrap();
+        let bytes = store_text(&v1);
         for secret in secrets.into_iter().chain([
             "unlisted-project-value",
             "unlisted-model-value",
             "unlisted-root-value",
             "/private/project/path",
         ]) {
-            assert!(!serialized.contains(secret));
+            assert!(!bytes.contains(secret));
         }
         let snapshot = cache.reported_runs().next().unwrap();
         assert_eq!(
             snapshot.last_model_usage["claude-opus-5[1m]"].thinking_tokens,
             3
         );
+        assert_eq!(snapshot.last_cost, Some(1.25));
 
         let second = serde_json::json!({
             "projects":{"/private/project/path":{
@@ -2891,29 +3221,26 @@ mod tests {
         fs::write(&claude_json, second.to_string()).unwrap();
         cache.refresh_reported_runs(&claude_json, 5000, &mut dirty);
         assert_eq!(cache.reported_runs().count(), 2);
-        cache.save(&cache_path).unwrap();
-        let reopened = EventCache::read(&cache_path);
+        drop(cache);
+        let reopened = EventCache::open(&v1);
         let ids: BTreeSet<_> = reopened
             .reported_runs()
             .map(|snapshot| snapshot.last_session_id.as_str())
             .collect();
         assert_eq!(ids, ["run-one", "run-two"].into_iter().collect());
-        let serialized = serde_json::to_string(&reopened).unwrap();
-        assert!(!serialized.contains(secrets[0]));
-        assert!(!serialized.contains(secrets[1]));
+        // The stamp is kept too: an unchanged file isn't read again.
+        assert!(reopened.claude_json_stamp.is_some());
+        let bytes = store_text(&v1);
+        assert!(!bytes.contains(secrets[0]));
+        assert!(!bytes.contains(secrets[1]));
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn missing_or_unreadable_claude_state_is_an_empty_input() {
-        let root = std::env::temp_dir().join(format!(
-            "semon-reported-runs-missing-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let cache_path = EventCache::path(&root.join("index.json"));
-        let mut cache = EventCache::read(&cache_path);
+        let root = scratch("reported-runs-missing");
+        let mut cache = EventCache::open(&root.join("index.json"));
         let mut dirty = false;
         cache.refresh_reported_runs(&root.join("missing.json"), 1000, &mut dirty);
         assert!(cache.reported_runs().next().is_none());
@@ -3172,5 +3499,377 @@ mod tests {
             output(json!({"wall_time_seconds": 1.0, "session_id": "x".repeat(65), "output": ""}));
         assert_eq!(yielded_session(Some(&long)), None);
         assert_eq!(yielded_session(Some(&json!("done"))), None);
+    }
+
+    // ---- The persisted index ------------------------------------------------------------
+
+    /// A new directory under the system temp dir.
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "semon-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write_lines(path: &Path, lines: &[Value]) {
+        let mut text = String::new();
+        for line in lines {
+            text.push_str(&line.to_string());
+            text.push('\n');
+        }
+        fs::write(path, text).unwrap();
+    }
+
+    fn append_lines(path: &Path, lines: &[Value]) {
+        use std::io::Write;
+        let mut text = String::new();
+        for line in lines {
+            text.push_str(&line.to_string());
+            text.push('\n');
+        }
+        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+    }
+
+    /// Sets `path`'s modified time to a fixed second, so every step of a
+    /// test has a stat of its own whatever the clock's granularity.
+    fn touch(path: &Path, second: u64) {
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_790_000_000 + second))
+            .unwrap();
+    }
+
+    fn claude_tool(id: &str) -> Value {
+        serde_json::json!({"type":"assistant","uuid":format!("u-{id}"),"timestamp":"2026-09-29T00:00:01Z",
+            "message":{"id":format!("m-{id}"),"role":"assistant","model":"claude-test",
+                "content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":"ls"}}],
+                "usage":{"input_tokens":5,"output_tokens":3}}})
+    }
+
+    fn claude_result(id: &str) -> Value {
+        serde_json::json!({"type":"user","uuid":format!("r-{id}"),"timestamp":"2026-09-29T00:00:02Z",
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"ok"}]}})
+    }
+
+    /// What a cold, in-memory read of `path` indexes: the oracle every
+    /// persisted index must equal.
+    fn cold(path: &Path) -> String {
+        let mut cache = EventCache::default();
+        let index = scan_file(path, "claude", &mut cache, &mut false).unwrap();
+        format!("{index:?}")
+    }
+
+    /// What the store beside `v1` holds for `path`, as a new process reads it.
+    fn stored(v1: &Path, path: &Path) -> String {
+        let cache = EventCache::open(v1);
+        assert!(cache.store.is_some(), "the store opens");
+        let key = path.to_string_lossy();
+        let entry = cache.files.get(key.as_ref()).expect("the file is stored");
+        format!("{:?}", entry.index)
+    }
+
+    /// The store's bytes and its WAL's, as text: a value stored in any row
+    /// shows here.
+    fn store_text(v1: &Path) -> String {
+        let path = EventCache::path(v1);
+        let mut text = String::from_utf8_lossy(&fs::read(&path).unwrap()).into_owned();
+        let mut wal = path.into_os_string();
+        wal.push("-wal");
+        if let Ok(bytes) = fs::read(wal) {
+            text.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        text
+    }
+
+    fn ledger_trace() -> Vec<&'static str> {
+        LEDGER.with(|ledger| std::mem::take(&mut *ledger.borrow_mut()))
+    }
+
+    fn parsed() -> u64 {
+        PARSED.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_ledger_hashes_at_most_4_kib_at_each_end() {
+        let root = scratch("windows");
+        let path = root.join("big.jsonl");
+        let bytes: Vec<u8> = (0..10_000u32).map(|n| (n % 251) as u8).collect();
+        fs::write(&path, &bytes).unwrap();
+        let file = fs::File::open(&path).unwrap();
+        let digest = |bytes: &[u8]| -> [u8; 32] { Sha256::digest(bytes).into() };
+        // Past 4 KiB: the first 4 KiB, and the 4 KiB before the offset.
+        let (head, tail) = window_hashes(&file, 9_000).unwrap();
+        assert_eq!(head, digest(&bytes[..4096]));
+        assert_eq!(tail, digest(&bytes[9_000 - 4096..9_000]));
+        // Within the first 4 KiB both cover everything before the offset.
+        let (head, tail) = window_hashes(&file, 100).unwrap();
+        assert_eq!(head, digest(&bytes[..100]));
+        assert_eq!(tail, head);
+        let (head, tail) = window_hashes(&file, 0).unwrap();
+        assert_eq!((head, tail), (digest(&[]), digest(&[])));
+        // An offset past the end is an error, never a short hash.
+        assert!(window_hashes(&file, 20_000).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_ledger_skips_appends_or_replaces() {
+        let root = scratch("ledger");
+        let v1 = root.join("index.json");
+        let log = root.join("session.jsonl");
+        write_lines(&log, &[said("m1", &["aa"]), claude_tool("t1")]);
+        touch(&log, 1);
+        let mut cache = EventCache::open(&v1);
+        let scan = |cache: &mut EventCache| scan_file(&log, "claude", cache, &mut false).unwrap();
+        ledger_trace();
+
+        // Nothing recorded yet: read whole.
+        scan(&mut cache);
+        assert_eq!(ledger_trace(), ["replace"]);
+        assert_eq!(stored(&v1, &log), cold(&log));
+
+        // Unchanged: shared, nothing read, in this process or a new one.
+        ledger_trace();
+        let before = parsed();
+        scan(&mut cache);
+        scan(&mut EventCache::open(&v1));
+        assert_eq!(ledger_trace(), ["unchanged", "unchanged"]);
+        assert_eq!(parsed(), before);
+
+        // Grown: only the appended lines are read, and the tool result
+        // resolves the earlier call's row in place.
+        append_lines(&log, &[claude_result("t1"), said("m2", &["bb"])]);
+        touch(&log, 2);
+        let before = parsed();
+        let index = scan(&mut cache);
+        assert_eq!(ledger_trace(), ["append"]);
+        assert_eq!(parsed(), before + 2);
+        assert!(
+            index
+                .events
+                .iter()
+                .any(|event| event.k == Kind::Tool && event.r.is_some())
+        );
+        assert_eq!(stored(&v1, &log), cold(&log));
+
+        // Touched only: the same bytes and a new modified time resume at the
+        // offset and read nothing.
+        ledger_trace();
+        touch(&log, 3);
+        let before = parsed();
+        scan(&mut cache);
+        assert_eq!(ledger_trace(), ["append"]);
+        assert_eq!(parsed(), before);
+        assert_eq!(stored(&v1, &log), cold(&log));
+
+        // Rewritten in place at the same size: the head hash differs.
+        ledger_trace();
+        let text = fs::read_to_string(&log).unwrap();
+        let rewritten = text.replace("\"aa\"", "\"zz\"");
+        assert_eq!(rewritten.len(), text.len());
+        fs::write(&log, rewritten).unwrap();
+        touch(&log, 4);
+        scan(&mut cache);
+        assert_eq!(ledger_trace(), ["replace"]);
+        assert_eq!(stored(&v1, &log), cold(&log));
+
+        // Truncated: shorter than the offset.
+        ledger_trace();
+        write_lines(&log, &[said("m1", &["aa"])]);
+        touch(&log, 5);
+        scan(&mut cache);
+        assert_eq!(ledger_trace(), ["replace"]);
+        assert_eq!(stored(&v1, &log), cold(&log));
+
+        // Rotated: another file renamed over the path, a new inode.
+        ledger_trace();
+        let next = root.join("next.jsonl");
+        write_lines(
+            &next,
+            &[said("m9", &["rotated"]), said("m10", &["and longer"])],
+        );
+        fs::rename(&next, &log).unwrap();
+        touch(&log, 6);
+        let index = scan(&mut cache);
+        assert_eq!(ledger_trace(), ["replace"]);
+        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(stored(&v1, &log), cold(&log));
+
+        // Gone: its rows go with it.
+        fs::remove_file(&log).unwrap();
+        cache.retain(&BTreeSet::new(), &mut false);
+        assert_eq!(EventCache::open(&v1).paths().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_change_another_process_committed_first_is_redone_from_its_rows() {
+        let root = scratch("conflict");
+        let v1 = root.join("index.json");
+        let log = root.join("session.jsonl");
+        write_lines(&log, &[said("m1", &["aa"]), claude_tool("t1")]);
+        touch(&log, 1);
+        let mut first = EventCache::open(&v1);
+        scan_file(&log, "claude", &mut first, &mut false).unwrap();
+        append_lines(&log, &[claude_result("t1")]);
+        touch(&log, 2);
+        // Between this process's read and its commit, another process reads
+        // a later line too and commits first.
+        let (other_v1, other_log) = (v1.clone(), log.clone());
+        BEFORE_COMMIT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                append_lines(&other_log, &[said("m2", &["bb"])]);
+                touch(&other_log, 3);
+                let mut second = EventCache::open(&other_v1);
+                scan_file(&other_log, "claude", &mut second, &mut false).unwrap();
+            }));
+        });
+        ledger_trace();
+        let index = scan_file(&log, "claude", &mut first, &mut false).unwrap();
+        // The first commit is refused, and the retry finds the other
+        // process's rows already current: nothing is written twice.
+        assert_eq!(
+            ledger_trace(),
+            ["append", "append", "conflict", "unchanged"]
+        );
+        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(stored(&v1, &log), cold(&log));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn two_processes_indexing_at_once_end_equal_to_a_cold_read() {
+        let root = scratch("writers");
+        let v1 = root.join("index.json");
+        let logs: Vec<PathBuf> = (0..3)
+            .map(|n| {
+                let log = root.join(format!("s{n}.jsonl"));
+                write_lines(&log, &[said(&format!("m{n}"), &["start"])]);
+                log
+            })
+            .collect();
+        drop(EventCache::open(&v1));
+        let writers: Vec<_> = (0..2)
+            .map(|writer| {
+                let (v1, logs) = (v1.clone(), logs.clone());
+                std::thread::spawn(move || {
+                    let mut cache = EventCache::open(&v1);
+                    assert!(cache.store.is_some());
+                    for round in 0..20 {
+                        let id = format!("t{writer}-{round}");
+                        append_lines(
+                            &logs[writer],
+                            &[said(&format!("m-{id}"), &["line"]), claude_tool(&id)],
+                        );
+                        append_lines(&logs[writer], &[claude_result(&id)]);
+                        for log in &logs {
+                            scan_file(log, "claude", &mut cache, &mut false).unwrap();
+                        }
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        // A change that lost every retry stays in memory until its file
+        // changes again; a new process catches the store up by resuming from
+        // its rows, so any row written twice or lost shows below.
+        let mut last = EventCache::open(&v1);
+        for log in &logs {
+            scan_file(log, "claude", &mut last, &mut false).unwrap();
+        }
+        for log in &logs {
+            assert_eq!(stored(&v1, log), cold(log));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_damaged_store_is_set_aside_and_rebuilt() {
+        let root = scratch("damaged");
+        let v1 = root.join("index.json");
+        let garbage = vec![b'x'; 8192];
+        fs::write(EventCache::path(&v1), &garbage).unwrap();
+        let log = root.join("session.jsonl");
+        write_lines(&log, &[said("m1", &["aa"])]);
+        let mut cache = EventCache::open(&v1);
+        assert!(
+            cache.store.is_some(),
+            "a new store replaces the damaged one"
+        );
+        assert_eq!(
+            fs::read(root.join("index.sqlite3.corrupt")).unwrap(),
+            garbage
+        );
+        scan_file(&log, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(stored(&v1, &log), cold(&log));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_store_and_its_wal_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let root = scratch("private");
+        let state = root.join("state/semon");
+        let v1 = state.join("index.json");
+        let log = root.join("session.jsonl");
+        write_lines(&log, &[said("m1", &["aa"])]);
+        let mut cache = EventCache::open(&v1);
+        scan_file(&log, "claude", &mut cache, &mut false).unwrap();
+        let path = EventCache::path(&v1);
+        assert_eq!(mode(&state), 0o700);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.clone().into_os_string();
+            file.push(suffix);
+            assert_eq!(mode(Path::new(&file)), 0o600, "{suffix}");
+        }
+        drop(cache);
+        // Loosened by something else: tightened when opened.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let cache = EventCache::open(&v1);
+        assert!(cache.store.is_some());
+        assert_eq!(mode(&path), 0o600);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_directory_falls_back_to_memory() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("read-only");
+        let state = root.join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o500)).unwrap();
+        let restore = || fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        if fs::write(state.join("probe"), b"").is_ok() {
+            // A privileged user writes anyway: nothing to test here.
+            restore();
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let v1 = state.join("index.json");
+        let log = root.join("session.jsonl");
+        write_lines(&log, &[said("m1", &["aa"]), claude_tool("t1")]);
+        let mut cache = EventCache::open(&v1);
+        assert!(cache.store.is_none(), "no store in a read-only directory");
+        let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(format!("{index:?}"), cold(&log));
+        append_lines(&log, &[claude_result("t1")]);
+        ledger_trace();
+        let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(ledger_trace(), ["append"], "in memory, it still resumes");
+        assert_eq!(format!("{index:?}"), cold(&log));
+        assert!(!EventCache::path(&v1).exists());
+        restore();
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -167,8 +167,6 @@ struct Work {
     index_dirty: bool,
     last_save: Option<Instant>,
     events: Option<EventCache>,
-    events_dirty: bool,
-    events_saved: Option<Instant>,
     texts: Texts,
     /// When the last rebuild of either model started.
     built_at: Option<Instant>,
@@ -976,14 +974,17 @@ impl MachineView {
         if let Some(model) = self.shown_model()
             && !self.changed(&model.snapshot)
         {
-            self.persist_events_if_due(work)?;
             return Ok(model);
         }
         work.built_at = Some(Instant::now());
-        let path = EventCache::path(&self.options.cache);
-        let cache = work.events.get_or_insert_with(|| EventCache::read(&path));
+        let cache = work
+            .events
+            .get_or_insert_with(|| EventCache::open(&self.options.cache));
+        // The index commits each file's change as it reads it: nothing is
+        // left to save.
+        let mut dirty = false;
         if self.options.facts.is_none() {
-            cache.refresh_reported_runs(&self.options.claude_json, now, &mut work.events_dirty);
+            cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty);
         }
         // The files are stamped before the build reads them: a line that
         // lands while it runs is then a change the next check sees, never
@@ -992,13 +993,7 @@ impl MachineView {
         let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
         #[cfg(test)]
         self.hooks.building()?;
-        let built = model::build(
-            &self.options,
-            cache,
-            &mut work.events_dirty,
-            &mut work.texts,
-            now,
-        )?;
+        let built = model::build(&self.options, cache, &mut dirty, &mut work.texts, now)?;
         if self.options.facts.is_none() {
             snapshot.pids = built
                 .pids
@@ -1011,23 +1006,7 @@ impl MachineView {
             snapshot,
         });
         write_lock(&self.shown).model = Some(model.clone());
-        self.persist_events_if_due(work)?;
         Ok(model)
-    }
-
-    /// The event cache is saved at most every 30 s, like V1's index.
-    fn persist_events_if_due(&self, work: &mut Work) -> io::Result<()> {
-        if work.events_dirty
-            && work
-                .events_saved
-                .is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
-            && let Some(cache) = &work.events
-        {
-            cache.save(&EventCache::path(&self.options.cache))?;
-            work.events_dirty = false;
-            work.events_saved = Some(Instant::now());
-        }
-        Ok(())
     }
 
     /// The model, rebuilt at `now` first if its logs or facts changed.
@@ -1038,9 +1017,6 @@ impl MachineView {
         if let Some(model) = self.shown_model()
             && !self.changed(&model.snapshot)
         {
-            if let Some(mut work) = try_lock(&self.work) {
-                self.persist_events_if_due(&mut work)?;
-            }
             return Ok(model);
         }
         self.refresh_model_locked(&mut lock(&self.work), now)
