@@ -364,6 +364,7 @@ export default async function barCheck(browser) {
       body.entries.push({ k: "think", text: "", secs: 4, turn: "bt-bare-turn" }, { k: "think", text: "", secs: 5, turn: "bt-masked-then-reply" }, { k: "a", text: "Reply after a masked thought" });
       await route.fulfill({ response, json: body });
     });
+    await page.reload({ waitUntil: "load" }); // served() loaded the model before these routes existed
     await goto(page, { v: "session", id: "principal" }, D);
     await page.waitForSelector('section.turn[data-turn="bt-masked-then-reply"]', { timeout: 8000 }).catch(() => {});
     bareTurns = await page.evaluate(() => {
