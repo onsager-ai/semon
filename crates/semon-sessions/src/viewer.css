@@ -675,7 +675,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
    queries are supported a hairline shows under it while it is stuck. A row that "Show fewer" pins (`.stuck`, below) keeps its own rules.
    Focus and scrolling into view stop below the pinned row (the row is about 50px tall), which the tree's own stuck row sets more exactly. */
 :where(#lanes) > .treeitem[aria-expanded="true"] > .tree-row { position: sticky; top: 0; z-index: 3; background: var(--side); }
-:where(#lanes) > .treeitem[aria-expanded="true"] > .tree-row:not(.stuck) { box-shadow: -8px 0 0 var(--side), 4px 0 0 var(--side); }
+:where(#lanes) > .treeitem[aria-expanded="true"] > .tree-row:not(.stuck) { box-shadow: -8px 0 0 var(--side), 4px 0 0 var(--side); clip-path: inset(1px -8px 0 -8px); /* the list's own top hairline (its background) stays visible above the pinned row */ }
 .side-list:has(#lanes > .treeitem[aria-expanded="true"]) { scroll-padding-top: 58px; }
 @supports (container-type: scroll-state) {
   :where(#lanes) > .treeitem[aria-expanded="true"] > .tree-row:not(.stuck) { container-type: scroll-state; }
