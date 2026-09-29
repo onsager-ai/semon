@@ -351,14 +351,16 @@ export default async function barCheck(browser) {
   if (D.SESS.principal) {
     const page = await served(browser, { size: "phone" });
     await page.route("**/api/model*", async (route) => {
-      const response = await route.fetch(), body = await response.json();
+      const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response }); // a 304 has no body
+      const body = await response.json();
       const base = body.turns.filter((t) => t.sid === "principal").at(-1);
       for (const id of ["bt-bare-turn", "bt-masked-then-reply"]) body.turns.push({ id, sid: "principal", at: base?.at ?? 0, start: null, u: false, text: "", sent: [], end: null });
       await route.fulfill({ response, json: body });
     });
     await page.route("**/api/tx*", async (route) => {
       const u = new URL(route.request().url()); if (u.searchParams.get("sid") !== "principal") return route.continue();
-      const response = await route.fetch(), body = await response.json();
+      const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response });
+      const body = await response.json();
       body.entries.push({ k: "think", text: "", secs: 4, turn: "bt-bare-turn" }, { k: "think", text: "", secs: 5, turn: "bt-masked-then-reply" }, { k: "a", text: "Reply after a masked thought" });
       await route.fulfill({ response, json: body });
     });
