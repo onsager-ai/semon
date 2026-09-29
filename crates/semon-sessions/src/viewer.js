@@ -452,7 +452,8 @@
   // placeholders stands in for the old page, so fast switches don't flash it. `navAbort` cancels the transcript request of a
   // navigation the reader has left; a response that still arrives late is dropped because its route is no longer the current one.
   const SKELETON_MS = 150;
-  let navAbort = null, skeletonTimer = null;
+  // The sidebar's list was drawn for this route under this model version: the render that follows draws it only if either changed.
+  let navAbort = null, skeletonTimer = null, lanesFor = null;
   // The turn shapes the skeleton cycles through: a bubble (yours), text lines, a step row. Widths are classes, sk-w1..sk-w5, in percent.
   const SKELETON_TURNS = [["bubble", [1, 3, 5], "step"], [null, [1, 2, 4], "step"], ["bubble", [2, 1, 3], null], [null, [1, 1, 5], "step"]];
   function skeleton(turns = 6) {
@@ -470,6 +471,7 @@
     const s = SESS[r.id], page = $("#page"), hadFocus = $("#sidebar").contains(document.activeElement);
     renderNav(); renderLanes(); renderTopbar(s.name, null, { session: s, lineage: lineageOf(r.id).slice(0, -1), line2: sessionLine(s) });
     document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px"); syncBarLine();
+    lanesFor = { r, version: LIVE.version };
     if (hadFocus) $("#lanes .srow[data-id='" + CSS.escape(r.id) + "']")?.focus({ preventScroll: true });
     page.setAttribute("aria-busy", "true"); page.inert = true; page.classList.add("loading");
     clearTimeout(skeletonTimer);
@@ -1716,7 +1718,8 @@
     else if (r.v === "session") { const s = SESS[r.id], lineage = lineageOf(r.id).slice(0, -1); renderSession(page, r.id); renderTopbar(s.name, null, { session: s, lineage, line2: sessionLine(s) }); }
     if (r.v === "session" && errOn(r.id)) markError(false);
     document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px");
-    syncLayoutPrefs(); syncBarLine(); renderNav(); renderLanes(); renderDrawerAccount(); syncJump();
+    const lanesKept = lanesFor && lanesFor.r === r && lanesFor.version === LIVE.version; lanesFor = null;
+    syncLayoutPrefs(); syncBarLine(); renderNav(); if (!lanesKept) renderLanes(); renderDrawerAccount(); syncJump();
   }
 
   // Analytics uses epoch milliseconds from the served model. While a session is still working, extend its last
