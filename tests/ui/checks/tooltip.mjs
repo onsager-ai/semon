@@ -246,9 +246,13 @@ export default async function tooltipCheck(browser) {
       rec.items = items.map((x) => x.cls.replace(/^lab ?/, "") || x.tag + ":" + x.tip.slice(0, 20));
       r.expect(items.length >= (size === "desktop" ? 4 : 1), tag + ": only " + items.length + " tipped items in the session line: " + JSON.stringify(rec.items));
       const at = (i) => box(page, '#topbar [data-probe="' + i + '"]');
-      // (on a phone a tap runs a control, so only the static labels are used for the tap behaviour; a phone bar may hold none)
-      const reach = await Promise.all(items.filter((x) => size === "desktop" || x.tag === "SPAN").slice(0, 3).map((x) => at(x.i)));
-      if (reach.length >= 2) await behaviour(page, tag, r, rec, { first: reach[0], second: reach[1] });
+      // The hover behaviour (delay, a neighbour at once, a gap) is measured on two of the line's labels on a desktop. A phone's bar holds one
+      // static tipped item (its state dot: a tap on a phone runs a control, so buttons are no use for the tap behaviour), so there the same
+      // behaviours are measured on the gallery's phone elements (the "gallery phone-*" passes above, built for that purpose) and this bar's own
+      // part is the touch test below, which must find its dot: no skip.
+      const reach = await Promise.all(items.slice(0, 3).map((x) => at(x.i)));
+      if (size === "desktop") { r.expect(reach.length >= 2, tag + ": the line holds fewer than two tipped labels to measure the hover behaviour on"); if (reach.length >= 2) await behaviour(page, tag, r, rec, { first: reach[0], second: reach[1] }); }
+      else r.expect(items.some((x) => x.tag === "SPAN"), tag + ": the phone bar holds no static tipped item (the state dot) to tap");
       // Every visible tipped item in the bar and the sidebar stays inside the margin and off its target.
       const spots = await page.evaluate(() => { const list = [...document.querySelectorAll("#topbar [data-tip], #sidebar [data-tip]")].filter((n) => { const b = n.getBoundingClientRect(); return n.getClientRects().length && b.width > 0 && b.left >= 0 && b.right <= innerWidth && b.top >= 0 && b.bottom <= innerHeight && (() => { const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return !!hit && (n === hit || n.contains(hit)); })() && (!n.hasAttribute("data-tip-clipped") || n.scrollWidth > n.clientWidth + 1); }); return list.slice(0, 40).map((n, i) => { n.dataset.spot = String(i); return { i, tip: n.dataset.tip, clipped: n.hasAttribute("data-tip-clipped") }; }); });
       let checked = 0;
@@ -278,6 +282,7 @@ export default async function tooltipCheck(browser) {
       if (size === "phone") {
         // Touch: a static label toggles its tip; elsewhere closes it; a control runs and shows none.
         const stat = page.locator("#topbar .l1-state[data-tip], #topbar .meta-line > span.lab[data-tip]:not([hidden])");
+        r.expect(await stat.count() > 0, tag + ": the phone bar's state dot was not found for the touch test");
         if (await stat.count()) {
           const state0 = await box(page, await stat.first().evaluate((n) => { n.dataset.probe = "touch"; return '#topbar [data-probe="touch"]'; })), blank = [4, 400];
           await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
@@ -363,8 +368,11 @@ export default async function tooltipCheck(browser) {
       // Esc closes the tip, and a rebuild under the resting pointer does not bring it back, even when the pointer moves on
       // the spot or is put back on it.
       await away(page); await page.waitForTimeout(450);
+      // The spot is the line's first static tipped label: the Model label, whose tip took the place of main's Tokens badge (this bar has no such badge).
+      const spotTip = await page.evaluate(() => document.querySelector("#topbar .meta-line > span.lab[data-tip]").dataset.tip);
+      r.expect(/^Model: \S/.test(spotTip), tag + ": the spot's tip is not the Model label's: " + JSON.stringify(spotTip));
       const spot = await box(page, "#topbar .meta-line > span.lab[data-tip]"), [px, py] = centre(spot);
-      r.expect((await hover(page, spot, 1500)) != null, tag + ": a label never showed a tooltip before Esc");
+      r.expect((await hover(page, spot, 1500)) != null && (await state(page)).text === spotTip, tag + ": the label never showed its own tip before Esc");
       await page.keyboard.press("Escape"); await page.waitForTimeout(100);
       r.expect(!(await state(page)).open, tag + ": Esc did not close the tooltip");
       await page.mouse.move(px + 2, py + 1); // a nudge inside the badge
@@ -379,7 +387,7 @@ export default async function tooltipCheck(browser) {
       // The positive control: off the badge and back on it, the tip shows again.
       await away(page); await page.waitForTimeout(450);
       const again = await hover(page, spot, 1500);
-      r.expect(again != null && ((await state(page)).text ?? "").length > 0, tag + ": the tooltip did not show again after the pointer left and returned");
+      r.expect(again != null && (await state(page)).text === spotTip, tag + ": the tooltip did not show the same tip again (" + JSON.stringify(spotTip) + ") after the pointer left and returned");
       r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join("; "));
     });
   }

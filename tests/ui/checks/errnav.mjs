@@ -55,7 +55,12 @@ function faults(dir, now) {
 
 // Errors mode is entered from Find: its "Failed steps" chip (the meta line's "N failed" is a label, not a control).
 // From the bar's own line: the "N failed" label (a control that looks like the others), or on a phone, where the line is not drawn, the ⋯ menu's item.
-const enterFromLine = async (page, opts) => { if (opts.size === "phone") { await page.click("#more-btn"); await page.click("dialog.session-menu .menu-errors"); } else await page.click("#topbar .lab-errs"); };
+// Returns the count the control itself claims ("N failed"), which the mode's "Error 1 of N" must then repeat.
+const enterFromLine = async (page, opts) => {
+  const claim = (sel) => page.evaluate((q) => Number(/\d+/.exec(document.querySelector(q)?.textContent ?? "")?.[0] ?? NaN), sel);
+  if (opts.size === "phone") { await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu .menu-errors"); const n = await claim("dialog.session-menu .menu-errors"); await page.click("dialog.session-menu .menu-errors"); return n; }
+  const n = await claim("#topbar .lab-errs"); await page.click("#topbar .lab-errs"); return n;
+};
 const enter = (page) => page.click('.find-chips .chip[data-filter="failures"]');
 
 // What the page shows of the mode and the transcript.
@@ -180,9 +185,10 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     r.expect(!R.back.mode && !R.back.pagers.includes("Load later") && R.back.end, tag + "after leaving errors mode by navigation, the session did not open at its end: " + JSON.stringify(R.back));
     // Entered from the bar's line (its "N failed" label, or ⋯'s item on a phone) instead of Find: it says the model's count, Escape leaves it,
     // and focus is on what entered it (the label, or ⋯ where the phone's bar draws no line).
-    await enterFromLine(page, opts);
-    const viaLine = await appear(page, Date.now(), (want) => new RegExp("^" + want + " \\d+$").test(document.querySelector("#topbar .errnav-count")?.textContent ?? ""), "Error 1 of", 6000); // (late calls made the count grow since Find's)
-    r.expect(viaLine != null, tag + "the line's failed control did not open errors mode at Error 1 of N (N was " + N + "): " + JSON.stringify(await page.evaluate(() => ({ bar: document.querySelector("#topbar")?.textContent.slice(0, 120), errs: !!document.querySelector("#topbar .lab-errs"), menu: !!document.querySelector("dialog.session-menu[open]") }))));
+    const claimed = await enterFromLine(page, opts); // (late calls made the count grow since Find's, so it is the control's own claim that is repeated)
+    r.expect(Number.isInteger(claimed) && claimed >= N, tag + "the line's failed control claims " + claimed + " failed steps, fewer than the " + N + " seen before");
+    const viaLine = await appear(page, Date.now(), (want) => document.querySelector("#topbar .errnav-count")?.textContent === want, "Error 1 of " + claimed, 6000);
+    r.expect(viaLine != null, tag + "the line's failed control did not open errors mode at Error 1 of " + claimed + ": " + JSON.stringify(await page.evaluate(() => ({ bar: document.querySelector("#topbar")?.textContent.slice(0, 120), errs: !!document.querySelector("#topbar .lab-errs"), menu: !!document.querySelector("dialog.session-menu[open]") }))));
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => !!document.querySelector("#topbar .meta-line"), null, { timeout: 6000 }).catch(() => {});
     await sleep(400);

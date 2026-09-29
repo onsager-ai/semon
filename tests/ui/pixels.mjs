@@ -422,7 +422,15 @@ function saveMismatch(row, name, scheme, p) {
       for (const region of regionsOf(s.name)) {
         const name = s.name + "#" + region.name, rrow = { scheme, screen: name, reference: "overhaul", port: { enforced: true, pass: false } };
         const except = region.except?.[scheme + "|" + s.name];
-        if (except) { rrow.port = { pixels: 0, ratio: 0, enforced: true, pass: true, skipped: except }; regions.push(rrow); continue; } // a named, reasoned exception
+        if (except) {
+          // A named, reasoned exception, held only while its cause holds: the served page scrolls and the mockup's does not (a sticky bar is drawn in its
+          // own layer only when the page scrolls). Once that is no longer so, the exception fails until it is removed from reference-map.json.
+          const scrolls = (pg) => pg.evaluate(() => { const el = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main"); return el.scrollHeight > el.clientHeight + 1; });
+          const [servedScrolls, portScrolls] = [await scrolls(page), await scrolls(port)];
+          if (servedScrolls && !portScrolls) rrow.port = { pixels: 0, ratio: 0, enforced: true, pass: true, skipped: except };
+          else { rrow.error = "the exception's cause is gone (served scrolls: " + servedScrolls + ", the mockup's: " + portScrolls + "): remove " + scheme + "|" + s.name + " from reference-map.json"; }
+          regions.push(rrow); continue;
+        }
         try {
           const q = compare(await regionShot(page, region), await regionShot(port, region));
           rrow.port = { pixels: q.pixels, ratio: q.ratio, size: q.size, enforced: true, pass: q.pixels <= MAX_RATIO * q.diff.width * q.diff.height && !q.size };
