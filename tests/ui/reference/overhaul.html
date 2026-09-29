@@ -1194,8 +1194,8 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const a1 = el("section", "panel-sec"); a1.append(acts); body.append(a1);
     const det = el("section", "panel-sec"); det.append(el("h3", null, "Details"));
     const dl = el("dl", "kv");
-    const rows = [["Harness", HARNESS[s.harness]], ["Model", s.modelId, true], ["Machine", MACHINE[s.machine] + " · " + hostOf(s) + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Directory", dirOf(s), true], [s.worktree ? "Worktree" : "Branch", branchOf(s), true], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Process id", pidOf(s), true], ["Session id", sessionIdOf(s), true]];
-    for (const [k, v, mono] of rows) dl.append(el("dt", null, k), el("dd", mono ? "mono" : null, v));
+    const rows = [["Harness", HARNESS[s.harness]], ["Model", s.modelId, true], ["Machine", MACHINE[s.machine] + (hostOf(s) !== MACHINE[s.machine] ? " · " + hostOf(s) : "") + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Directory", dirOf(s), true], [s.worktree ? "Worktree" : "Branch", branchOf(s), true], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Process id", pidOf(s), true], ["Session id", sessionIdOf(s), true]];
+    for (const [k, v, mono] of rows) { if (v == null || v === "") continue; dl.append(el("dt", null, k), el("dd", mono ? "mono" : null, v)); }
     det.append(dl); body.append(det, costSection(s, kids, d));
     if (anchor) anchor.setAttribute("aria-expanded", "true");
     show(); return d;

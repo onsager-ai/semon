@@ -12,7 +12,7 @@ const OUT = path.join(ENV.out, "names");
 fs.mkdirSync(OUT, { recursive: true });
 
 // Reads every visible label in `root`: its text, whether it holds a graphic, its lines, and its contrast ratio.
-const measure = (page, root) => page.evaluate((rootSelector) => {
+const measure = (page, root, label = ".hname") => page.evaluate(([rootSelector, labelSelector]) => {
   const canvas = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
   const token = (name) => { const probe = document.createElement("span"); probe.style.color = "var(--" + name + ")"; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; };
   const muted = token("muted"), ink2 = token("ink-2");
@@ -21,12 +21,12 @@ const measure = (page, root) => page.evaluate((rootSelector) => {
   const backdrop = (node) => { const layers = []; for (let e = node; e; e = e.parentElement) layers.push(rgba(getComputedStyle(e).backgroundColor)); let c = rgba(getComputedStyle(document.documentElement).getPropertyValue("--ground") || "#fff"); if (c[3] < 1) c = [255, 255, 255, 1]; for (const layer of layers.reverse()) c = over(layer, c); return c; };
   const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
   const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
-  return [...document.querySelectorAll(rootSelector + " .hname")].filter((n) => n.getClientRects().length).map((n) => {
+  return [...document.querySelectorAll(rootSelector + " " + labelSelector)].filter((n) => n.getClientRects().length).map((n) => {
     const cs = getComputedStyle(n), box = n.getBoundingClientRect(), lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.2;
     const fg = rgba(cs.color), bg = backdrop(n.parentElement);
     return { text: n.textContent, harness: [...n.classList].find((c) => c.startsWith("h-")), graphics: n.querySelectorAll("svg,img").length + n.children.length, tag: n.tagName, lines: Math.round(box.height / lh), fontSize: parseFloat(cs.fontSize), weight: cs.fontWeight, ratio: Math.round(ratio(fg, bg) * 100) / 100, color: cs.color, muted: n.closest('.lineage-menu button[aria-current="page"]') ? ink2 : muted, current: !!n.closest('.lineage-menu button[aria-current="page"]') };
   });
-}, root);
+}, [root, label]);
 
 export default async function namesCheck(browser) {
   const D = await data(), r = reporter("names"), results = {};
@@ -47,7 +47,7 @@ export default async function namesCheck(browser) {
         r.expect(l.ratio >= 4.5, tag + " " + where + ": " + l.text + " has contrast " + l.ratio + ", under 4.5");
         r.expect(l.color === l.muted, tag + " " + where + ": " + l.text + " is painted " + l.color + ", not the neutral " + (l.current ? "--ink-2 (the lineage menu's current row sits on --sunken, where --muted is under AA)" : "--muted") + " " + l.muted);
         if (seen[l.text] !== undefined) seen[l.text]++;
-        r.expect((l.harness === "h-codex") === (l.text === "Codex"), tag + " " + where + ": " + l.text + " carries " + l.harness);
+        if (l.harness) r.expect((l.harness === "h-codex") === (l.text === "Codex"), tag + " " + where + ": " + l.text + " carries " + l.harness);
       }
     };
     const shot = (name) => page.screenshot({ path: path.join(OUT, "names-" + tag + "-" + name + ".png") });
@@ -55,7 +55,8 @@ export default async function namesCheck(browser) {
     for (const s of [claude, codex, ...(kinded ? [kinded] : [])]) {
       await goto(page, { v: "session", id: s.id }, D);
       await page.waitForTimeout(200);
-      const top = await measure(page, "#topbar");
+      // A session bar names its harness in the kind label of its meta line: plain text, no glyph.
+      const top = await measure(page, "#topbar", '.meta-line .lab[data-drop="2"]');
       // A session's top bar always shows its harness. If the line fitter dropped the label, nothing was audited, so fail.
       // A child's own top bar keeps its kind chip first, so its model label may be dropped there.
       // On a phone the session bar is one row with no line 2, so it holds no harness label (Session details has it).

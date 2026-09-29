@@ -105,6 +105,10 @@ export function overhaulPortReference(D, html) {
   let out = html.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + html.slice(end);
   for (const [prefix, next] of CLOCKS) out = swapLine(out, prefix, next);
   out = swapLine(out, "  const HOST = ", "  const HOST = " + J(D.MACHINE) + ";");
+  // The session menu lists what the log gives: a directory and a process id only when there is one.
+  out = swapLine(out, "  const dirOf = ", "  const dirOf = (s) => s.cwd ?? s.dir ?? s.directory ?? null;");
+  out = swapLine(out, "  const pidOf = ", "  const pidOf = (s) => s.pid ?? null;");
+  out = swapLine(out, "  const sessionIdOf = ", "  const sessionIdOf = (s) => s.sessionId ?? s.id;");
   out = swapLine(out, "  const costText = ", '  const costText = (cost) => cost.unknown.length || cost.usd == null ? "—" : asMoney(cost.usd);');
   out = swapFunction(out, "costForSessions", COST_FUNCTION);
   // The served model gives a thought's seconds itself.

@@ -473,7 +473,8 @@
   // What to do once the account menu's history entry has been stepped back over (leaving the page from one of its items).
   let afterPop = null;
   try { history.scrollRestoration = "manual"; } catch {}
-  let show = { messages: true, tools: true, thinking: true }; let find = ""; let findOpen = false; let filterOpen = false;
+  const SHOW_ALL = { messages: true, tools: true, thinking: true };
+  let show = { ...SHOW_ALL }; let find = ""; let findOpen = false;
   const currentScroll = () => phone.matches ? window.scrollY : $("#main").scrollTop;
   const restoreScroll = (top) => { if (phone.matches) window.scrollTo(0, top); else $("#main").scrollTop = top; };
   const saveHistoryScroll = () => { try { if (history.state?.v) history.replaceState({ ...history.state, scrollTop: currentScroll() }, ""); } catch {} };
@@ -545,7 +546,7 @@
     dropErrors(true); // (first: it drops a range the error stepper moved, and that is not kept)
     // The session left is kept for opening it again; weighing it waits until the frame the click drew has been painted.
     if (route.v === "session" && (r.v !== "session" || r.id !== route.id) && TX[route.id] && TXM[route.id]) { const sid = route.id, entries = TX[sid], meta = { ...TXM[sid] }; requestAnimationFrame(() => setTimeout(() => cacheTx(sid, entries, meta), 0)); }
-    route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
+    route = r; find = ""; findOpen = false; closeDrawer(true); clearNewEntries();
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     const done = () => {
       if (route !== r) return;
@@ -673,7 +674,7 @@
   window.addEventListener("pageshow", (e) => { if (e.persisted && accountOpen) { accountSheet = false; closeAccountMenu(true); } });
   function toggleAccountMenu(widget, trigger, compact) {
     if (accountOpen) { closeAccountMenu(); return; }
-    closeAccountMenu(); closeFilter(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false");
+    closeAccountMenu();
     const menu = accountPopover();
     if (compact) {
       // On a phone it floats just above its row, as wide as the row, over a clear backdrop that takes the tap outside it, so it
@@ -941,52 +942,32 @@
   }
 
   // ---- Top bar ---------------------------------------------------------------------------------------
-  // Always visible, the same on every page: the menu toggle (phones), the title, and the page's actions. A list page
-  // (Home, Sessions, Machines) shows its name. A detail page (a session, a trace, a machine) shows two lines: its name
-  // after a crumb up a level, then a one-line summary that ellipsizes. On a session, search takes over the bar and the
-  // filter drops down from it; the ⋯ menu holds the session's details.
+  // The same on every page: the menu button (phones), the title, and at most two actions. A detail page adds a crumb up a
+  // level and a second line of labels. Labels are information, never a control: their full values are in the tooltip and in
+  // the session menu. On a session, Find takes over the bar and the filters sit under it as chips.
+  const btn = (cls, text, label) => { const b = el("button", cls, text); b.type = "button"; if (label) b.setAttribute("aria-label", label); return b; };
+  const kindText = (s) => s.kind ?? HARNESS[s.harness];
+  const modelIdOf = (s) => Object.keys(s.tokens_by_model ?? {})[0] ?? s.model;
   function renderTopbar(title, crumb, opts = {}) {
     closeAccountMenu(); // the bar is redrawn from scratch, the desktop menu with it: close it properly, not by detaching it
     const bar = $("#topbar"), s = opts.session; clearBox(bar, route); bar.classList.remove("scrolled");
     // What the bar holds is added through `put`, so the range control on Analytics (a persistent control) stays where it is.
     const put = placer(bar), sink = { append: put };
-    bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("session-bar", !!s); bar.classList.toggle("searching", !!(s && (findOpen || errOn(s.id))));
-    if (s && errOn(s.id)) { errorsBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
-    if (s && findOpen) { searchBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
-    const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); put(m);
+    const account = (into) => { const a = accountWidget(false); if (a) (into ? into.append(a) : put(a)); };
+    if (s && errOn(s.id)) { errorsBar(sink); account(); put.done(); return; }
+    if (s && findOpen) { findBar(sink, s, account); put.done(); return; }
+    const m = btn("ibtn lead", null, "Open navigation"); m.id = "lead-btn"; m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); put(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
-    if (opts.lineage?.length) {
-      if (phone.matches) { const parent = opts.lineage.at(-1), c = el("button", "crumb lineage-parent", parent.name); c.type = "button"; c.setAttribute("aria-label", "Open session path through " + parent.name); c.addEventListener("click", () => showLineageMenu(s.id, bar)); l1.append(c, el("span", "sep", "›")); }
-      else opts.lineage.forEach((item) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); });
-    } else if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
-    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; if (s) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
-    if (opts.line2) {
-      const l2 = el("div", "l2" + (s ? " session-meta" : ""));
-      opts.line2(l2); t.append(l2);
-      if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); });
-    }
+    if (opts.lineage?.length) { const parent = opts.lineage.at(-1), c = btn("crumb", parent.name, "Up to " + parent.name); c.addEventListener("click", () => goSession(parent.id)); l1.append(c, el("span", "crumb-sep", "›")); }
+    else if (crumb) { const c = btn("crumb", crumb.label, "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "crumb-sep", "›")); }
+    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; l1.append(tt); t.append(l1);
+    if (opts.line2) { const l2 = el("div", "meta-line"); opts.line2(l2); t.append(l2); if (s) requestAnimationFrame(() => { if (l2.isConnected) fitMeta(l2); }); }
     put(t);
-    if (opts.analytics) { put(rangeControl(bar)); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
-    if (!s) { appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
-    const fb = el("button", "ibtn"); fb.type = "button"; fb.setAttribute("aria-label", "Find in transcript"); fb.append(icon(I.search));
-    fb.addEventListener("click", () => { findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
-    const pop = el("div", "filters pop"); pop.hidden = !filterOpen;
-    for (const [key, label] of [["messages", "Messages"], ["tools", "Tool steps"], ["thinking", "Thinking"]]) { const l = el("label"); const cb = el("input"); cb.type = "checkbox"; cb.checked = show[key]; cb.id = "f-" + key; cb.addEventListener("change", () => { show[key] = cb.checked; render(); }); l.append(cb, label); pop.append(l); }
-    const filtered = !(show.messages && show.tools && show.thinking);
-    const tb = el("button", "ibtn" + (filtered ? " on" : "")); tb.id = "filter-btn"; tb.type = "button"; tb.setAttribute("aria-label", "Filter transcript"); tb.setAttribute("aria-expanded", String(filterOpen)); tb.append(icon(I.filter));
-    tb.addEventListener("click", () => { $(".session-menu")?.remove(); closeAccountMenu(); $("#more-btn")?.setAttribute("aria-expanded", "false"); filterOpen = pop.hidden; pop.hidden = !filterOpen; tb.setAttribute("aria-expanded", String(filterOpen)); });
-    const more = el("button", "ibtn" + (phone.matches && filtered ? " on" : "")); more.id = "more-btn"; more.type = "button"; more.setAttribute("aria-label", "Session details and actions"); more.setAttribute("aria-expanded", "false"); more.append(icon(I.more)); more.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(s, more); });
-    // On phones search and filter live in the ⋯ menu, and the filter hangs from that button.
-    const place = () => { const anchor = phone.matches ? more : tb; pop.style.right = Math.max(0, bar.getBoundingClientRect().right - anchor.getBoundingClientRect().right) + "px"; };
-    tb.addEventListener("click", place);
-    if (phone.matches) put(more, pop); else put(fb, tb, more, pop);
-    appendWideToggle(sink); if (filterOpen) place();
-    const account = accountWidget(false); if (account) put(account);
-    put.done();
-  }
-  function appendWideToggle(bar) {
-    const b = el("button", "ibtn wide-toggle"); b.type = "button"; b.setAttribute("aria-label", "Wide reading mode"); b.setAttribute("aria-pressed", String(wideMode)); b.dataset.tip = "Wide reading mode"; b.append(icon(I.wide));
-    b.addEventListener("click", () => setWideMode(!wideMode)); bar.append(b);
+    if (opts.analytics) { put(rangeControl(bar)); account(); put.done(); return; }
+    if (!s) { account(); put.done(); return; }
+    const fb = btn("ibtn", null, "Find and filter"); fb.id = "find-btn"; fb.append(icon(I.search)); fb.addEventListener("click", () => { findOpen = true; render(); $("#find")?.focus(); });
+    const mb = btn("ibtn", null, "Session menu: details, cost and actions"); mb.id = "more-btn"; mb.setAttribute("aria-haspopup", "dialog"); mb.setAttribute("aria-expanded", "false"); mb.append(icon(I.more)); mb.addEventListener("click", () => openSessionMenu(s, mb));
+    put(fb, mb); account(); put.done();
   }
   // The Analytics range control, a persistent control of the bar: each redraw keeps it and only sets which button is pressed.
   function rangeControl(bar) {
@@ -1006,57 +987,6 @@
     while (id && SESS[id] && !seen.has(id)) { seen.add(id); path.push(SESS[id]); id = parentOf(id); }
     return path.reverse();
   }
-  function showLineageMenu(sid, bar) {
-    bar.querySelector(".lineage-menu")?.remove(); const path = lineageOf(sid), menu = el("div", "lineage-menu"); menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", "Session path");
-    path.forEach((s, i) => { const b = el("button"); b.type = "button"; b.setAttribute("role", "menuitem"); if (i === path.length - 1) b.setAttribute("aria-current", "page"); b.append(el("span", null, s.name), harnessName(s.harness)); b.addEventListener("click", () => { menu.remove(); goSession(s.id); }); menu.append(b); });
-    bar.append(menu); const close = (e) => { if (!menu.contains(e.target) && !e.target.closest?.(".lineage-parent")) { menu.remove(); document.removeEventListener("click", close); } }; setTimeout(() => document.addEventListener("click", close), 0);
-  }
-  // Kind and state are the two items line 2 always keeps. Everything else drops from the right in append order
-  // (model, machine, branch, tools, runs, tokens, cost); errors, the kind word, turn count, then state word give way last.
-  function fitSessionLine(l2) {
-    const keep = new Set(["meta-kind", "meta-state"]), droppable = [...l2.children].filter((n) => (n.classList.contains("meta-item") || n.classList.contains("meta-runs")) && ![...n.classList].some((c) => keep.has(c)));
-    droppable.forEach((n) => { n.hidden = false; });
-    const errs = l2.querySelector(".errs"), errsSep = l2.querySelector(".errs-sep"); if (errs) errs.hidden = false; if (errsSep) errsSep.hidden = false;
-    const kindValue = l2.querySelector(".meta-kind .meta-value"); if (kindValue) kindValue.hidden = false;
-    const stateValues = [...l2.querySelectorAll(".meta-state .meta-value")], sep = l2.querySelector(".meta-state .state-sep"); stateValues.forEach((n) => { n.hidden = false; }); if (sep) sep.hidden = false;
-    const fits = () => l2.scrollWidth <= l2.clientWidth + 1;
-    for (let i = droppable.length - 1; i >= 0 && !fits(); i--) droppable[i].hidden = true;
-    if (!fits() && errs) { errs.hidden = true; if (errsSep) errsSep.hidden = true; }
-    if (!fits() && kindValue) kindValue.hidden = true;
-    if (!fits() && stateValues[1]) { stateValues[1].hidden = true; if (sep) sep.hidden = true; }
-    if (!fits() && stateValues[0]) stateValues[0].hidden = true;
-  }
-  function closeFilter() { if (!filterOpen) return; filterOpen = false; const p = $(".filters.pop"); if (p) p.hidden = true; $("#filter-btn")?.setAttribute("aria-expanded", "false"); }
-  // Search takes over the bar: back, the field, and how many entries match. Back (or Escape) restores the bar.
-  function searchBar(bar) {
-    const back = el("button", "ibtn"); back.type = "button"; back.setAttribute("aria-label", "Close search"); back.append(icon(I.back)); back.addEventListener("click", () => { findOpen = false; find = ""; render(); });
-    const fr = el("label", "find"); const fi = el("input"); fi.id = "find"; fi.type = "search"; fi.placeholder = "Find in transcript"; fi.setAttribute("aria-label", "Find in transcript"); fi.value = find; fr.append(fi);
-    fi.addEventListener("input", () => { find = fi.value.toLowerCase(); const pos = fi.selectionStart; render(); const a = $("#find"); a?.focus(); a?.setSelectionRange(pos, pos); });
-    fi.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); back.click(); } });
-    const n = find ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : 0;
-    const c = el("span", "fcount", find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""); c.setAttribute("aria-live", "polite");
-    bar.append(back, fr, c);
-  }
-  // ---- Errors mode: "N errors" steps through the session's failed steps ---------------------------------------------------------
-  // The bar reads "Error k of N" with previous and next, and a close button (Escape). /api/tx?errors=1 says where every failed
-  // step is (its slot), so a step on a page not loaded yet is reachable: a page next to the loaded range is added to it, one
-  // further away replaces it with the page around the step. Each step is scrolled to the middle and marked, never opened;
-  // its tool group opens so it shows. Closing puts back the pages, what was open and the scroll position from before. The
-  // mode is its own controller, apart from find, so the two can become one mode later.
-  const ERR = { on: false, sid: null, slots: [], listed: false, count: 0, version: null, k: -1, slot: null, saved: null, range: null, tools: true, chain: Promise.resolve(), gen: 0 };
-  const ERR_NEAR = 400, ERR_AROUND = 40; // slots: a page (at most 200 entries) or two away is added; 40 entries of context above
-  const errLive = el("div", "sr-only"); errLive.setAttribute("role", "status"); errLive.setAttribute("aria-live", "polite"); document.body.append(errLive);
-  const errText = () => ERR.k < 0 ? (ERR.count ? "Finding errors…" : "No errors") : "Error " + (ERR.k + 1) + " of " + ERR.count;
-  const errOn = (sid) => ERR.on && ERR.sid === sid;
-  function errorsBar(bar) {
-    const close = el("button", "ibtn"); close.type = "button"; close.id = "err-close"; close.setAttribute("aria-label", "Close errors"); close.append(icon(I.x)); close.addEventListener("click", () => closeErrors());
-    const pill = el("div", "find errnav"), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); pill.append(mark, el("span", "errnav-count", errText()));
-    const prev = el("button", "ibtn errnav-btn"); prev.type = "button"; prev.id = "err-prev"; prev.setAttribute("aria-label", "Previous error"); prev.append(icon(I.up)); prev.addEventListener("click", () => stepErrors(-1));
-    const next = el("button", "ibtn errnav-btn"); next.type = "button"; next.id = "err-next"; next.setAttribute("aria-label", "Next error"); next.append(icon(I.dn)); next.addEventListener("click", () => stepErrors(1));
-    prev.disabled = next.disabled = ERR.listed && !ERR.slots.length;
-    const group = el("div", "errnav-bar"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Failed steps"); group.append(close, pill, prev, next);
-    bar.append(group);
-  }
   // The label and buttons in place, so focus stays where it is.
   function errLabel(announce) {
     const t = $("#topbar .errnav-count"); if (t) t.textContent = errText();
@@ -1072,7 +1002,7 @@
   const keepFocus = (fn) => { const id = document.activeElement?.id; fn(); const n = id && document.getElementById(id); if (n && n !== document.activeElement) n.focus({ preventScroll: true }); };
   function openErrors(sid) {
     if (ERR.on || route.v !== "session" || route.id !== sid || !TXM[sid]) return;
-    stopOpeningEndPin(); closeFilter(); $(".session-menu")?.remove();
+    stopOpeningEndPin();
     Object.assign(ERR, { on: true, sid, slots: [], listed: false, count: countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: show.tools, gen: ERR.gen + 1 });
     if (!show.tools) { show.tools = true; render(); } else drawSessionBar();
     document.getElementById("err-next")?.focus({ preventScroll: true }); errLabel(true);
@@ -1200,41 +1130,51 @@
     const kindText = s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"); if (meta) c.dataset.tip = "Kind: " + kindText;
     c.append(el("span", meta ? "meta-value" : null, kindText)); return c;
   }
-  // A session's compact metadata line: state, model, machine, branch, tools, runs, tokens and API-equivalent cost.
-  // Every item is a static badge: a tooltip (data-tip) for the pointer and hidden text ("Tool calls: ") for a screen reader,
-  // so a badge is not a tab stop: its label is read out, and the tooltip only adds the full value for a pointer or a tap.
-  // Only the errors jump and the runs item are controls. The session's details live in the ⋯ menu.
-  const metaSr = (label) => el("span", "sr-only", label + ": ");
+  // Labels drop from the end, least important first, until the line fits. State always stays.
+  function fitMeta(l2) {
+    const labs = [...l2.querySelectorAll(".lab")]; labs.forEach((n) => { n.hidden = false; });
+    const fits = () => l2.scrollWidth <= l2.clientWidth + 1;
+    const order = labs.filter((n) => !n.classList.contains("state")).sort((a, b) => Number(b.dataset.drop ?? 0) - Number(a.dataset.drop ?? 0));
+    for (const n of order) { if (fits()) break; n.hidden = true; }
+  }
+  const lab = (text, tip, drop, cls) => { const x = el("span", "lab" + (cls ? " " + cls : ""), text); if (tip) x.title = tip; x.dataset.drop = String(drop); return x; };
+  // A session's line: its state, then kind, model, failed steps, machine, branch and API-equivalent cost, each a plain label.
+  const sessionLine = (s) => (l2) => {
+    const failed = countOf(s, "errors") ?? 0;
+    const st = el("span", "lab state " + s.state); st.append(dot(s.state), el("span", null, STATE[s.state])); l2.append(st);
+    l2.append(lab(kindText(s), s.kind ? s.kind + " · " + HARNESS[s.harness] : null, 2));
+    l2.append(lab(shortModel(s.model), "Model: " + modelIdOf(s), 3));
+    if (failed) l2.append(lab(failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ". Find › Failed steps lists them.", 4));
+    l2.append(lab(MACHINE[s.machine], "Machine: " + MACHINE[s.machine] + " · " + hostOf(s), 5));
+    if (s.branch) l2.append(lab(s.branch, "Branch: " + s.branch, 6));
+    const kids = descendantsOf(s.id, sessionChildren()), cost = kids.length ? costForSessions([s, ...kids]) : costForSession(s.id);
+    l2.append(lab(costText(cost), "API-equivalent cost" + (kids.length ? ", with " + kids.length + (kids.length === 1 ? " run" : " runs") : "") + ". Details in the session menu.", 7));
   // "Started 21:57 on <machine>" stays on one line: the machine name ellipsises (its tip, only while cut off, has the whole name).
   const startedDivider = (sid) => { const d = el("div", "divider started"), name = MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine], line = el("span", "dv-text"), m = el("span", "dv-machine", name); m.dataset.tip = name; m.dataset.tipClipped = ""; line.append(el("span", "dv-lead", "Started " + clock(SESS[sid].start) + " on\u00a0"), m); d.append(line); return d; };
-  const turnsLabel = (s) => { const n = (TURNS[s.id] ?? []).filter(hasTurn).length; return n + (n === 1 ? " turn" : " turns"); };
-  // On phones line 2 leaves the bar; the state is then the small dot before the title. The dot names the state for a screen
-  // reader, and its tip (a tap on a phone) adds the turn count. Desktop hides it, since line 2 shows the state there.
-  const stateLead = (s) => { const lead = el("span", "l1-state"); lead.dataset.tip = spaced("Status: " + STATE[s.state] + " · " + turnsLabel(s)); lead.append(dot(s.state, false)); return lead; };
-  const sessionLine = (s) => (l2) => {
-    const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0, turnsText = turnsLabel(s);
-    const st = el("span", "meta-item meta-state"); st.dataset.tip = spaced("Status: " + STATE[s.state] + " · " + turnsText); st.append(dot(s.state, false), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", turnsText));
-    if (errors) {
-      const sep = el("span", "state-sep errs-sep", "·"), j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); j.prepend(mark);
-      const stepTip = j.textContent + ": step through the failed steps"; j.type = "button"; j.dataset.tip = stepTip; j.setAttribute("aria-label", stepTip);
-      j.addEventListener("click", (ev) => { ev.stopPropagation(); openErrors(s.id); });
-      st.append(sep, j); }
-    const kind = s.kind ? childKindChip(s, true) : null;
-    const model = el("span", "meta-item meta-model"); model.append(metaSr("Model"), harnessName(s.harness), el("span", "meta-value", shortModel(s.model))); model.dataset.tip = "Model: " + (s.model ?? "Unknown model");
-    const machine = el("span", "meta-item meta-machine"); machine.append(metaSr("Machine"), icon(I.machine), el("span", "meta-value", shortHost(s))); machine.dataset.tip = "Machine: " + hostOf(s);
-    const branch = el("span", "meta-item meta-branch"); branch.append(metaSr(s.worktree ? "Worktree" : "Branch"), icon(I.branch), el("span", "meta-value", branchOf(s))); branch.dataset.tip = (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s);
-    const tools = el("span", "meta-item meta-tools"); tools.append(metaSr("Tool calls"), icon(I.wrench), el("span", "meta-value", calls == null ? "—" : String(calls))); tools.dataset.tip = "Tool calls: " + (calls ?? "—");
-    const kids = childSessions(s.id), allKids = descendantsOf(s.id, sessionChildren());
-    let runs = null;
-    if (kids.length) { const working = allKids.filter((x) => x.state === "work").length; runs = el("button", "meta-item meta-runs"); const runsTip = kids.length + (kids.length === 1 ? " child session" : " child sessions") + (working ? ", work in progress" : "") + ": open runs"; runs.type = "button"; runs.dataset.tip = runsTip; runs.setAttribute("aria-label", runsTip); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
-    const totalTokens = usageTotal(s);
-    const tokens = el("span", "meta-item meta-tokens"); tokens.append(metaSr("Tokens"), icon(I.tokens), el("span", "meta-value", tok(totalTokens / 1e6))); tokens.dataset.tip = "Tokens: " + totalTokens.toLocaleString();
-    const parentCost = kids.length ? costForSessions([s, ...allKids]) : costForSession(s.id), missing = costMissing(parentCost), costItem = el("span", "meta-item meta-cost"); costItem.append(metaSr("API-equivalent cost"), icon(I.coin), el("span", "meta-value", (kids.length ? "incl. runs " : "") + (costText(parentCost) === "—" ? "—" : shortMoney(parentCost.usd)))); costItem.dataset.tip = "API-equivalent cost" + (kids.length ? ", including runs" : "") + ": " + costText(parentCost) + ". " + COST_TIP + (missing.length ? " no price for " + missing.join(", ") : "");
-    l2.append(...(kind ? [kind] : []), st, model, machine, branch, tools, ...(runs ? [runs] : []), tokens, costItem);
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
-    const st = el("span", "stat " + (!up ? "err" : w ? "work" : "idle")); st.append(dot(!up ? "err" : w ? "work" : "idle", false), !up ? "Not responding" : w ? "Up" : "Idle"); l2.append(st, el("span", "sep", " · "));
-    l2.append(el("span", "rest", up ? w + " working · " + here.length + (here.length === 1 ? " session" : " sessions") : movedOff(m).length ? "Semon moved its sessions to other machines" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, here.length + (here.length === 1 ? " session" : " sessions")].filter(Boolean).join(" · "))); };
+    const st = el("span", "lab state " + (up ? "done" : "err")); st.append(dot(up ? (w ? "work" : "idle") : "err"), el("span", null, up ? "Up" : "Not responding")); l2.append(st);
+    const sessions = here.length + (here.length === 1 ? " session" : " sessions");
+    l2.append(lab(up ? w + " working · " + sessions : movedOff(m).length ? movedOff(m).length + " moved off" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, sessions].filter(Boolean).join(" · "), null, 1)); };
+  // Find and filter: one mode. Search takes over the bar and the filters sit under it as chips, one choice at a time.
+  function findBar(bar, s, account) {
+    const row = el("div", "find-row");
+    const back = btn("ibtn", null, "Close find"); back.append(icon(I.back)); back.addEventListener("click", () => { findOpen = false; find = ""; show = { ...SHOW_ALL }; render(); });
+    const fr = el("label", "search"); const fi = el("input"); fi.id = "find"; fi.type = "search"; fi.placeholder = "Find in " + s.name; fi.setAttribute("aria-label", "Find in transcript"); fi.value = find; fr.append(icon(I.search), fi);
+    fi.addEventListener("input", () => { find = fi.value.toLowerCase(); const pos = fi.selectionStart; render(); const a = $("#find"); a?.focus(); a?.setSelectionRange(pos, pos); });
+    fi.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); back.click(); } });
+    const n = find || !show.messages || !show.tools || !show.thinking ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : null;
+    const c = el("span", "fcount", n == null ? "" : n ? n + (n === 1 ? " match" : " matches") : "No matches"); c.setAttribute("aria-live", "polite");
+    row.append(back, fr, c); account(row); bar.append(row);
+    const chips = el("div", "find-chips"); chips.setAttribute("role", "group"); chips.setAttribute("aria-label", "Show");
+    const failed = countOf(s, "errors") ?? 0;
+    // One choice at a time: everything, only messages, or only steps. "Failed steps" is not a filter: it steps through them (errors mode).
+    const MODES = { all: { ...SHOW_ALL }, messages: { messages: true, tools: false, thinking: false }, steps: { messages: false, tools: true, thinking: false } };
+    const mode = show.messages && show.tools ? "all" : show.messages ? "messages" : "steps";
+    const chip = (key, label, count) => { const b = btn("chip"); b.dataset.filter = key; b.setAttribute("aria-pressed", String(mode === key)); b.append(el("span", null, label)); if (count != null) b.append(el("span", "n", String(count))); b.addEventListener("click", () => { if (key === "failures") { findOpen = false; find = ""; show = { ...SHOW_ALL }; openErrors(s.id); return; } show = { ...MODES[key] }; render(); }); chips.append(b); };
+    chip("all", "All"); chip("messages", "Messages"); chip("steps", "Steps"); if (failed) chip("failures", "Failed steps", failed);
+    bar.append(chips);
+  }
   // One observer for the current page title; the previous page's is disconnected so it can't flip the new bar.
   let titleObs = null;
   function observeTitle() { syncBarLine(); }
@@ -1242,128 +1182,76 @@
   function syncBarLine() { const y = phone.matches ? window.scrollY : $("#main").scrollTop; $("#topbar").classList.toggle("scrolled", y > 4); }
   window.addEventListener("scroll", syncBarLine, { passive: true });
   $("#main").addEventListener("scroll", syncBarLine, { passive: true });
-  window.addEventListener("resize", () => { const l2 = $("#topbar .l2.session-meta"); if (l2) fitSessionLine(l2); syncLayoutPrefs(); syncJump(); }, { passive: true });
-  function toggleMenu(s, btn) {
-    const ex = $(".session-menu"); if (ex) { ex.remove(); btn.setAttribute("aria-expanded", "false"); return; }
-    const filterWasOpen = phone.matches && filterOpen;
-    closeAccountMenu();
-    const m = el("div", "menu session-menu"); m.setAttribute("role", "menu");
-    if (phone.matches) {
-      const findItem = el("button"); findItem.type = "button"; findItem.setAttribute("role", "menuitem"); findItem.append(icon(I.search, "icon"), el("span", null, "Find in transcript"));
-      findItem.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
-      const filtered = !(show.messages && show.tools && show.thinking), filterItem = el("button"); filterItem.type = "button"; filterItem.setAttribute("role", "menuitem"); filterItem.append(icon(I.filter, "icon"), el("span", null, "Filter transcript"));
-      if (filtered) filterItem.append(el("span", "menu-note", "On"));
-      filterItem.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); const pop = $(".filters.pop"); if (!pop) return; filterOpen = filterWasOpen ? false : pop.hidden; pop.hidden = !filterOpen; if (filterOpen) { pop.style.right = Math.max(0, $("#topbar").getBoundingClientRect().right - btn.getBoundingClientRect().right) + "px"; pop.querySelector("input")?.focus(); } });
-      m.append(findItem, filterItem);
-      // Line 2 is off the phone bar, so what it held is reached here: the errors, the runs, and (in Session details) the rest.
-      const runs = $("#topbar .meta-runs"), kids = childSessions(s.id), errors = countOf(s, "errors") ?? 0;
-      if (errors) { const label = errors + (errors === 1 ? " error" : " errors"), item = el("button", "menu-errors"); item.type = "button"; item.setAttribute("role", "menuitem"); const mark = el("span", "dot err"); mark.setAttribute("aria-hidden", "true"); item.append(mark, el("span", null, label), el("span", "menu-note", "Step through")); item.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); openErrors(s.id); }); m.append(item); }
-      if (kids.length) { const item = el("button", "menu-runs"); item.type = "button"; item.setAttribute("role", "menuitem"); item.append(icon(I.stack, "icon"), el("span", null, "Runs · " + kids.length)); item.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); openRuns(s, runs); }); m.append(item); }
-    }
-    const details = el("button"); details.type = "button"; details.setAttribute("role", "menuitem"); details.append(icon(I.read, "icon"), el("span", null, "Session details")); details.addEventListener("click", (e) => { e.stopPropagation(); openSessionDetails(s); }); m.append(details);
-    const copy = el("button"); copy.type = "button"; copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command"));
-    const cmd = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + s.id;
-    copy.addEventListener("click", () => { navigator.clipboard?.writeText(cmd).then(() => { copy.lastChild.textContent = "Copied"; }, () => { copy.lastChild.textContent = cmd; }); });
-    m.append(copy);
-    if (s.harness === "claude") { const a = el("button"); a.type = "button"; a.append(icon(I.ext, "icon"), el("span", null, "Open in claude.ai")); m.append(a); }
-    const dl = el("dl");
-    for (const [k, v] of [["Model", s.model], ["Machine", MACHINE[s.machine] + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Tokens in / out", tok(s.tokens[0]) + " / " + tok(s.tokens[2])], ["Cached context", tok(s.tokens[1])], ["Session id", s.id]]) dl.append(el("dt", null, k), el("dd", "mono", v));
-    m.append(dl); closeFilter(); $("#topbar").append(m); btn.setAttribute("aria-expanded", "true");
-  }
-  function openSessionDetails(s) {
-    $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeAccountMenu(); closeFilter();
-    const d = el("dialog", "session-details"); d.setAttribute("aria-labelledby", "session-details-title");
-    const head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose");
-    title.id = "session-details-title"; title.append(el("span", null, "Session details"));
-    close.type = "button"; close.setAttribute("aria-label", "Close session details"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
-    const body = el("div", "vb"), list = el("div", "detail-list"), moved = s.movedFrom ? " (moved from " + (MACHINE[s.movedFrom] ?? s.movedFrom) + ")" : "";
-    const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0;
-    const rows = [
-      ...(s.kind ? [["Kind", s.kind]] : []), ["Status", STATE[s.state] + " · " + turnsLabel(s)],
-      ["Harness", HARNESS[s.harness] ?? s.harness], ["Model", s.model ?? s.modelId ?? "Unknown model"],
-      ["Machine", (MACHINE[s.machine] ?? s.machine ?? "Unknown machine") + (hostOf(s) !== (MACHINE[s.machine] ?? s.machine) ? " · " + hostOf(s) : "") + moved],
-    ];
-    const directory = s.cwd ?? s.dir ?? s.directory;
-    if (directory != null && directory !== "") rows.push(["Directory", directory]);
-    rows.push([s.worktree ? "Worktree" : "Branch", branchOf(s)], ["Tool calls", calls == null ? "—" : String(calls)]);
-    if (errors) rows.push(["Errors", String(errors)]);
-    if (s.pid != null && s.pid !== "") rows.push(["Process id", String(s.pid)]);
-    rows.push(["Session id", s.sessionId ?? s.id], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Last activity", clock(s.last)], ["Tokens in / out", tok(s.tokens?.[0] ?? 0) + " / " + tok(s.tokens?.[2] ?? 0)], ["Cached context", tok(s.tokens?.[1] ?? 0)]);
-    for (const [label, value] of rows) { const row = el("div", "detail-row"); row.append(el("span", "detail-label", label), el("span", "detail-value", String(value))); list.append(row); }
-    const ownCost = costForSession(s.id), allCost = costForSession(s.id, true), hasRuns = childSessions(s.id).length > 0;
-    const costRow = el("div", "detail-row cost-row");
-    costRow.append(el("span", "detail-label", "API-equivalent cost"), el("span", "detail-value", hasRuns ? costText(ownCost) + " own · " + costText(allCost) + " incl. runs" : costText(ownCost)));
-    list.append(costRow, costBreakdown(s.id, true));
-    const missing = costMissing(allCost); if (missing.length) list.append(el("div", "no-price", "no price for " + missing.join(", ")));
-    const reports = s.reported_runs ?? [], reported = reports.filter((run) => Number.isFinite(run.cost_usd));
-    if (reports.length) {
-      const reportedUsd = reported.reduce((sum, run) => sum + run.cost_usd, 0), phrase = reported.length === 1 ? "its last run" : "its last " + reported.length + " runs";
-      list.append(el("div", "reported-cost", reported.length ? "Claude Code reported " + asMoney(reportedUsd) + " for " + phrase : "Claude Code reported a run without a cost figure."));
-    }
-    const mismatch = [...(s.cost_check ?? [])].reverse().find((check) => check.ok === false && Number.isFinite(check.computed_usd) && Number.isFinite(check.reported_usd));
-    if (mismatch) { const diff = Math.abs(mismatch.computed_usd - mismatch.reported_usd), pct = mismatch.reported_usd === 0 ? (diff === 0 ? 0 : 100) : Math.round(diff / Math.abs(mismatch.reported_usd) * 100); list.append(el("div", "cost-warning", "Differs from Claude Code's figure by " + pct + "%")); }
-    body.append(list); d.append(head, body); document.body.append(d);
+  window.addEventListener("resize", () => { const l2 = $("#topbar .meta-line"); if (l2 && route.v === "session") fitMeta(l2); syncLayoutPrefs(); syncJump(); }, { passive: true });
+
+  // ---- Panels: one builder for the sheets and menus opened from the top bar --------------------------------------------
+  // A phone gets a bottom sheet; a desktop a dialog, or for the session menu a panel that hangs from its button. Each is a
+  // history entry, so back closes it without leaving the page, and a live update waits until it closes.
+  function panel(title, opts = {}) {
+    const d = el("dialog", "panel" + (opts.cls ? " " + opts.cls : "")); d.setAttribute("aria-label", opts.label ?? title);
+    const head = el("div", "panel-h"); head.append(el("div", "panel-t", title)); if (opts.sub) head.append(el("div", "panel-sub", opts.sub));
+    const close = btn("ibtn", null, "Close"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(close);
+    const body = el("div", "panel-b"); body.tabIndex = -1; d.append(head, body); document.body.append(d);
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
-    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); $("#more-btn")?.focus(); });
-    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
-    try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
+    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("panel-open"); opts.onClose?.(); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } if (LIVE.pending) refresh(); });
+    const open = () => { viewerEl = d; document.documentElement.classList.add("panel-open"); d.showModal(); body.focus({ preventScroll: true }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} };
+    return { d, body, show: open };
   }
-  // 739,682 reads "740k" and 12,422,228 "12.4M"; the exact figure is the cell's tooltip.
-  const compactCount = (n) => { if (n < 1e3) return String(n); if (n < 1e4) return +(n / 1e3).toFixed(1) + "k"; const k = Math.round(n / 1e3); return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M"; };
-  // The tokens and cost of a session, always shown: one table per model, a row for each kind of token that was used or billed.
-  function costBreakdown(sid, includeRuns) {
-    const cost = costForSession(sid, includeRuns), box = el("div", "cost-breakdown"), head = el("div", "cost-breakdown-head");
-    head.append(el("span", null, includeRuns && childSessions(sid).length ? "Tokens and API-equivalent cost · incl. runs" : "Tokens and API-equivalent cost"), costInfoTip()); box.append(head);
-    let shown = 0;
-    for (const [modelId, model] of Object.entries(cost.by_model)) {
-      const priced = model.usd != null && !costMissing(cost).includes(modelId), rows = [];
-      for (const [key, label] of TOKEN_KINDS) {
-        const tokens = Number(model.tokens?.[key]) || 0, amount = Number(model.usd_by_kind?.[key]) || 0;
-        if (tokens === 0 && (!priced || amount < 0.005)) continue;
-        const row = el("div", "cost-line"), count = el("span", "cost-amount", tokens ? compactCount(tokens) : "");
-        if (tokens) { count.dataset.tip = tokens.toLocaleString() + " tokens"; count.append(el("span", "sr-only", " (" + tokens.toLocaleString() + ")")); }
-        row.append(el("span", "cost-kind", label), count, el("span", "cost-value", priced ? asMoney(amount) : "—")); rows.push(row);
-      }
-      if (!rows.length && priced) continue;
-      const group = el("section", "cost-model"), top = el("div", "cost-model-head");
-      top.append(el("span", "cost-model-name", modelId), el("span", null, "Tokens"), el("span", null, "Cost")); group.append(top, ...rows);
-      if (!priced) group.append(el("div", "no-price", "no price for " + modelId));
-      box.append(group); shown++;
+
+  // The session menu: actions, then details, then cost. It is the one place for all three.
+  const RUNS_CAP = 5;
+  function openSessionMenu(s, anchor) {
+    const kids = descendantsOf(s.id, sessionChildren());
+    const { d, body, show: open } = panel(s.name, { cls: "anchored session-menu", label: "Session menu for " + s.name, sub: [STATE[s.state], kindText(s), shortModel(s.model)].join(" · "), onClose: () => { anchor?.setAttribute("aria-expanded", "false"); anchor?.focus({ focusVisible: false }); } });
+    const acts = el("div", "menu-list"); acts.setAttribute("role", "menu");
+    const cmd = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + (s.sessionId ?? s.id);
+    const copy = btn("menu-item"); copy.setAttribute("role", "menuitem"); copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command")); copy.addEventListener("click", () => { navigator.clipboard?.writeText(cmd).then(() => { copy.children[1].textContent = "Copied"; }, () => { copy.children[1].textContent = cmd; }); }); acts.append(copy);
+    if (s.harness === "claude") { const a = btn("menu-item"); a.setAttribute("role", "menuitem"); a.append(icon(I.ext, "icon"), el("span", null, "Open in claude.ai")); acts.append(a); }
+    if (!phone.matches) { const w = btn("menu-item"); w.setAttribute("role", "menuitemcheckbox"); w.setAttribute("aria-checked", String(wideMode)); w.append(icon(I.wide, "icon"), el("span", null, "Wide transcript"), el("span", "switch")); w.addEventListener("click", () => { setWideMode(!wideMode); w.setAttribute("aria-checked", String(wideMode)); }); acts.append(w); }
+    const a1 = el("section", "panel-sec"); a1.append(acts); body.append(a1);
+    const det = el("section", "panel-sec"); det.append(el("h3", null, "Details"));
+    const dl = el("dl", "kv"), machine = MACHINE[s.machine] ?? s.machine ?? "Unknown machine";
+    const rows = [["Harness", HARNESS[s.harness]], ["Model", modelIdOf(s), true], ["Machine", machine + (hostOf(s) !== machine ? " · " + hostOf(s) : "") + (s.movedFrom ? " (moved from " + (MACHINE[s.movedFrom] ?? s.movedFrom) + ")" : "")], ["Directory", s.cwd ?? s.dir ?? s.directory, true], [s.worktree ? "Worktree" : "Branch", branchOf(s), true], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Process id", s.pid, true], ["Session id", s.sessionId ?? s.id, true]];
+    for (const [k, v, mono] of rows) { if (v == null || v === "") continue; dl.append(el("dt", null, k), el("dd", mono ? "mono" : null, String(v))); }
+    det.append(dl); body.append(det, costSection(s, kids, d));
+    anchor?.setAttribute("aria-expanded", "true");
+    open(); return d;
+  }
+  const MENU_KINDS = [["Input", ["input"]], ["Output", ["output"]], ["Cache write", ["cache_write_5m", "cache_write_1h"]], ["Cache read", ["cache_read"]]];
+  const COST_NOTE = "What these tokens would cost at API rates. Subscriptions aren't billed this way.";
+  function costSection(s, kids, dialog) {
+    const sec = el("section", "panel-sec cost"); sec.append(el("h3", null, "Cost"));
+    const own = costForSession(s.id), all = costForSession(s.id, true);
+    const fig = el("div", "cost-fig"); fig.append(el("span", "cost-big", costText(kids.length ? all : own)), el("span", "cost-cap", kids.length ? "this session and its " + kids.length + (kids.length === 1 ? " run" : " runs") : "this session"));
+    const missing = costMissing(all);
+    sec.append(fig, el("p", "cost-note", COST_NOTE + (missing.length ? " No price for " + missing.join(", ") + "." : "")));
+    const dl = el("dl", "kv");
+    if (kids.length) dl.append(el("dt", null, "This session"), el("dd", null, costText(own)), el("dt", null, kids.length === 1 ? "Its run" : "Its " + kids.length + " runs"), el("dd", null, costText(costForSessions(kids))));
+    const reports = s.reported_runs ?? [], reported = reports.filter((r) => Number.isFinite(r.cost_usd));
+    if (reports.length) dl.append(el("dt", null, HARNESS[s.harness] + "'s own figure"), el("dd", null, reported.length ? asMoney(reported.reduce((n, r) => n + r.cost_usd, 0)) + (reported.length === 1 ? ", last run" : ", last " + reported.length + " runs") : "not reported"));
+    if (dl.childElementCount) sec.append(dl);
+    const mismatch = [...(s.cost_check ?? [])].reverse().find((c) => c.ok === false && Number.isFinite(c.computed_usd) && Number.isFinite(c.reported_usd));
+    if (mismatch) { const pct = mismatch.reported_usd === 0 ? 100 : Math.round(Math.abs(mismatch.computed_usd - mismatch.reported_usd) / Math.abs(mismatch.reported_usd) * 100); sec.append(el("p", "cost-note", "Semon's estimate for that run is " + pct + "% " + (mismatch.computed_usd > mismatch.reported_usd ? "above" : "below") + " " + HARNESS[s.harness] + "'s figure: API rates differ from what a plan is charged.")); }
+    if (kids.length) {
+      const list = el("div", "runs"); list.setAttribute("aria-label", "Runs and their cost");
+      const children = sessionChildren(), rows = [];
+      const walk = (id, depth) => { for (const c of [...(children.get(id) ?? [])].sort((a, b) => b.last - a.last)) { rows.push([c, depth]); walk(c.id, depth + 1); } };
+      walk(s.id, 0);
+      rows.forEach(([c, depth], i) => { const r = btn("run-row depth" + Math.min(depth, 1)); r.hidden = i >= RUNS_CAP; r.setAttribute("aria-label", "Open " + c.name + ", " + kindText(c) + ", " + STATE[c.state] + ", " + costText(costForSession(c.id))); const nm = el("span", "nm", c.name); nm.append(el("span", "kind", "· " + kindText(c))); r.append(dot(c.state), nm, el("span", "v", costText(costForSession(c.id))), icon(I.chev, "chev")); r.addEventListener("click", () => { pendingSessionOpen = c.id; dialog.close(); }); list.append(r); });
+      if (rows.length > RUNS_CAP) { const m = btn("link", "Show " + (rows.length - RUNS_CAP) + " more"); m.addEventListener("click", () => { list.querySelectorAll(".run-row").forEach((r) => { r.hidden = false; }); m.remove(); }); list.append(m); }
+      sec.append(list);
     }
-    if (!shown) box.append(el("p", "empty", "No token usage recorded.")); return box;
-  }
-  function runRow(s, depth, sheet) {
-    const row = el("button", "runs-row"); row.type = "button"; row.style.paddingLeft = Math.min(depth, 3) * 14 + "px";
-    const name = el("span", "run-name"); name.append(dot(s.state), childKindChip(s), el("span", null, s.name));
-    const cost = costForSession(s.id); row.append(name, el("span", "run-cost", costText(cost)));
-    const origin = originHandoff(s.id), meta = el("span", "run-meta");
-    meta.append(el("span", null, STATE[s.state]), el("span", null, dur(s.start, s.state === "work" ? null : s.last)), el("span", null, callsText(countOf(s, "calls")))); row.append(meta);
-    if (origin?.brief) row.append(el("span", "run-brief", oneLine(origin.brief)));
-    const missing = costMissing(cost); if (missing.length) row.append(el("span", "no-price", "no price for " + missing.join(", ")));
-    row.setAttribute("aria-label", [s.name, s.kind, STATE[s.state], dur(s.start, s.state === "work" ? null : s.last), origin?.brief ? oneLine(origin.brief) : "", "API-equivalent cost " + costText(cost)].filter(Boolean).join(" · "));
-    row.addEventListener("click", () => { if (sheet) { pendingSessionOpen = s.id; sheet.close(); } else { $(".runs-popover")?.remove(); goSession(s.id); } }); return row;
-  }
-  function appendRunsTree(parent, box, sheet, seen = new Set([parent.id]), tree = sessionChildren()) {
-    const children = [...(tree.get(parent.id) ?? [])].sort((a, b) => b.last - a.last);
-    for (const child of children) { if (seen.has(child.id)) continue; seen.add(child.id); box.append(runRow(child, 0, sheet)); const nested = tree.get(child.id) ?? []; if (nested.length) { const group = el("div", "runs-group"); appendRunsTree(child, group, sheet, seen, tree); box.append(group); } }
-  }
-  function openRuns(s, anchor) {
-    $(".runs-popover")?.remove(); if (viewerEl) return; const children = sessionChildren().get(s.id) ?? []; if (!children.length) return;
-    if (!phone.matches) { const pop = el("div", "runs-popover"); pop.setAttribute("role", "dialog"); pop.setAttribute("aria-label", "Runs under " + s.name); pop.append(el("h2", null, "Runs · " + children.length + " · API-equivalent cost")); const tree = el("div", "runs-tree"); appendRunsTree(s, tree, false); pop.append(tree); $("#topbar").append(pop);
-      const close = (e) => { if (!pop.contains(e.target) && e.target !== anchor) { pop.remove(); document.removeEventListener("click", close); } }; setTimeout(() => document.addEventListener("click", close), 0); return; }
-    const d = el("dialog", "viewer runs-sheet"); d.setAttribute("aria-label", "Runs under " + s.name); const head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose");
-    title.append(el("span", null, "Runs · " + children.length + " · API-equivalent cost")); close.type = "button"; close.setAttribute("aria-label", "Close runs"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
-    const body = el("div", "vb"), tree = el("div", "runs-tree"); appendRunsTree(s, tree, d); body.append(tree); d.append(head, body); document.body.append(d); d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
-    d.addEventListener("close", () => { const leaving = !!pendingSessionOpen; d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } }
-      /* Opened from the ⋯ menu, whose item is gone and whose anchor is not drawn on a phone: focus returns to ⋯, not the page. */
-      if (!leaving && (!document.activeElement || document.activeElement === document.body)) $("#more-btn")?.focus({ preventScroll: true }); });
-    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
+    const t = btn("disclose"); t.setAttribute("aria-expanded", "false"); t.append(el("span", null, "Tokens by model"), icon(I.chev, "chev"));
+    const tb = el("div", "tokens"); tb.hidden = true;
+    for (const [modelId, model] of Object.entries(all.by_model ?? {})) {
+      const priced = model.usd != null && !missing.includes(modelId); tb.append(el("div", "tok-model", modelId));
+      for (const [label, keys] of MENU_KINDS) { const tokens = keys.reduce((n, k) => n + (Number(model.tokens?.[k]) || 0), 0), amount = keys.reduce((n, k) => n + (Number(model.usd_by_kind?.[k]) || 0), 0), r = el("div", "tok-line"); r.append(el("span", null, label), el("span", null, tokens.toLocaleString()), el("span", null, priced ? asMoney(amount) : "—")); tb.append(r); }
+    }
+    t.addEventListener("click", () => { tb.hidden = !tb.hidden; t.setAttribute("aria-expanded", String(!tb.hidden)); });
+    sec.append(t, tb); return sec;
   }
   document.addEventListener("click", (e) => {
-    const account = $(".account-popover"); if (account && !account.parentElement.contains(e.target)) closeAccountMenu();
-    const m = $(".session-menu"); if (m && !m.contains(e.target)) { m.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); }
-    // A checkbox in the filter re-renders the bar, so its (now detached) target still sits inside the old popover.
-    if (filterOpen && !e.target.closest?.(".filters, #filter-btn")) closeFilter(); });
+    const account = $(".account-popover"); if (account && !account.parentElement.contains(e.target)) closeAccountMenu(); });
 
   // ---- Home: what needs you, then what is running ------------------------------------------------------
   const secHead = (title, n) => { const s = el("div", "sec-h", title); s.append(el("span", "n", String(n))); return s; };
@@ -1892,7 +1780,7 @@
     else if (r.v === "sessions") { renderSessions(page); renderTopbar("Sessions"); }
     else if (r.v === "machines") { renderMachines(page); renderTopbar("Machines"); }
     else if (r.v === "machine") { renderMachine(page, r.id); renderTopbar(MACHINE[r.id], { label: "Machines", go: () => go({ v: "machines" }) }, { line2: machineLine(r.id) }); }
-    else if (r.v === "trace") { const sum = renderTrace(page, r.turn) ?? ""; renderTopbar("Trace", { label: SESS[r.sid].name, go: () => goSession(r.sid, r.turn) }, { line2: (l2) => l2.append(el("span", "rest", sum)) }); }
+    else if (r.v === "trace") { const sum = renderTrace(page, r.turn) ?? ""; renderTopbar("Trace", { label: SESS[r.sid].name, go: () => goSession(r.sid, r.turn) }, sum ? { line2: (l2) => l2.append(lab(sum, null, 0)) } : {}); }
     else if (r.v === "session") { const s = SESS[r.id], lineage = lineageOf(r.id).slice(0, -1); renderSession(page, r.id); renderTopbar(s.name, null, { session: s, lineage, line2: sessionLine(s) }); }
     if (r.v === "session" && errOn(r.id)) markError(false);
     document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px");
@@ -2180,7 +2068,7 @@
   function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); closeAccountMenu(); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); }
   $("#drawer-close").addEventListener("click", () => closeDrawer());
   $("#scrim").addEventListener("click", () => closeDrawer());
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
   let sx = null;
   sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
   sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });
@@ -2192,7 +2080,7 @@
     if (!phone.matches && viewerEl?.classList.contains("kids-sheet")) viewerEl.close(); // a sheet is a phone's: a wide screen opens the list in the tree
     if (route.v === "session" || route.v === "analytics") { const top = currentScroll(); render(); restoreScroll(top); }
     else renderLanes();
-    const l2 = $("#topbar .l2"); if (l2?.classList.contains("session-meta")) fitSessionLine(l2); syncJump();
+    const l2 = $("#topbar .meta-line"); if (l2 && route.v === "session") fitMeta(l2); syncJump();
   });
 
   // ---- Live updates (deliberate difference 3) --------------------------------------------------------------------------------
@@ -2451,8 +2339,7 @@
     else if (dirty.size) morphTurns(box, transcript(route.id, { only: dirty }).querySelector(".turns"), dirty);
     const h1 = $("#page .ph h1"); if (h1) h1.textContent = s.name;
     const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.dataset.tip = s.name; }
-    const lead = $("#topbar .l1-state"); if (lead) lead.replaceWith(stateLead(s));
-    const l2 = $("#topbar .l2"); if (l2) { l2.replaceChildren(); sessionLine(s)(l2); requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); }); }
+    const l2 = $("#topbar .meta-line"); if (l2) { l2.replaceChildren(); sessionLine(s)(l2); requestAnimationFrame(() => { if (l2.isConnected) fitMeta(l2); }); }
     const fc = $("#topbar .fcount"); if (fc) { const n = find ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : 0; fc.textContent = find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""; }
     renderNav(); renderLanes(); ticker();
     let n = 0; for (const k of keys()) if (!before.has(k)) n++;

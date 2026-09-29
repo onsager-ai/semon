@@ -16,5 +16,29 @@
     "empty": null,
     "error": null,
     "not-found": null
-  }
+  },
+  "regions": [
+    {
+      "name": "topbar",
+      "selector": "#topbar",
+      "screens": [
+        "home",
+        "sessions",
+        "machines",
+        "machine-",
+        "session-",
+        "trace-"
+      ]
+    },
+    {
+      "name": "menu",
+      "selector": "dialog.panel",
+      "open": "#more-btn",
+      "screens": [
+        "session-harbor",
+        "session-atlas-ingest",
+        "session-deps"
+      ]
+    }
+  ]
 }

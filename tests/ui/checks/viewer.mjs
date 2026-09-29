@@ -30,7 +30,7 @@
 //  - the desktop dialog: at least one "View all" is visible on the sample's first expanded step, the dialog is not
 //    sideways-clipped off the 1280px viewport, and a backdrop click closes it (closedByBackdrop === true).
 import path from "node:path";
-import { ENV, served, data, goto, reporter } from "../lib.mjs";
+import { ENV, served, data, goto, reporter, wide } from "../lib.mjs";
 
 export default async function viewerCheck(browser) {
   const D = await data();
@@ -138,7 +138,7 @@ export default async function viewerCheck(browser) {
     R.measure[key] = { session: found };
     if (found) {
       R.measure[key].off = await measure();
-      await page.click(".wide-toggle"); await page.waitForTimeout(150);
+      await wide(page, true); await page.waitForTimeout(150);
       R.measure[key].on = await measure();
       await page.screenshot({ path: path.join(ENV.out, "wide-session-" + key + ".png") });
     }
