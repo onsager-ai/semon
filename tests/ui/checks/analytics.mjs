@@ -1,10 +1,10 @@
 // Analytics: range, eight headline figures, stacked column charts, slice drill-in, breakdown filtering, cost measure,
 // phone width and the served Codex allowance. This replaces the retired Timeline check.
-import { served, data, reporter, overflow, goto } from "../lib.mjs";
+import { served, data, reporter, overflow, goto, settled } from "../lib.mjs";
 
 export default async function analyticsCheck(browser) {
   const D = await data(), r = reporter("analytics"), modes = [];
-  const expectedLabels = ["Agent-hours", "API-equivalent cost", "Sessions started", "Turns", "Tool calls", "Peak concurrency", "Waited on you", "Longest current wait"];
+  const expectedLabels = ["Agent-hours", "Cost · UTC days", "Sessions started", "Turns", "Tool calls", "Peak concurrency", "Waited on you", "Longest current wait"];
   const expectedHarborIds = Object.values(D.SESS).filter((s) => s.repo === "harbor").map((s) => s.id).sort();
   r.expect(!!D.SESS.deps?.rate_limits, "the fixture must serve Codex rate limits for the allowance panel");
 
@@ -19,14 +19,15 @@ export default async function analyticsCheck(browser) {
     record.labels = await page.evaluate(() => [...document.querySelectorAll(".analytics-metric .label")].map((x) => x.textContent.trim()));
     record.figures = await page.locator(".analytics-metric").count();
     record.longestCurrentWait = await page.locator('.analytics-metric').filter({ hasText: "Longest current wait" }).locator(".value").textContent();
-    const costFrom = D.NOW - 7 * 86400000, missingModels = new Set(); let expectedUsd = 0;
+    // Cost is served per UTC day: 7 d counts only the whole UTC days fully inside the range.
+    const DAY = 86400000, costFrom = Math.ceil((D.NOW - 7 * DAY) / DAY) * DAY, costTo = Math.floor(D.NOW / DAY) * DAY, missingModels = new Set(); let expectedUsd = 0;
     for (const session of Object.values(D.SESS)) {
-      const days = Object.entries(session.cost?.by_day ?? {}).filter(([day]) => { const start = Date.parse(day + "T00:00:00.000Z"); return start < D.NOW && start + 86400000 > costFrom; });
+      const days = Object.entries(session.cost?.by_day ?? {}).filter(([day]) => { const start = Date.parse(day + "T00:00:00.000Z"); return start >= costFrom && start + DAY <= costTo; });
       for (const [, amount] of days) expectedUsd += Number(amount) || 0;
       if (days.length) for (const model of session.cost?.unpriced_models ?? []) missingModels.add(model);
     }
     record.costExpected = missingModels.size ? "—" : "$" + expectedUsd.toFixed(2);
-    record.costHeadline = await page.locator('.analytics-metric').filter({ hasText: "API-equivalent cost" }).locator(".value").textContent();
+    record.costHeadline = await page.locator('.analytics-metric').filter({ hasText: "Cost · UTC days" }).locator(".value").textContent();
     record.charts = await page.evaluate(() => [...document.querySelectorAll(".analytics-chart svg")].map((svg) => ({ label: svg.getAttribute("aria-label"), columns: [...svg.querySelectorAll("rect.cost-claude, rect.cost-codex")].map((x) => ({ width: Number(x.getAttribute("width")), height: Number(x.getAttribute("height")) })).filter((x) => x.width > 0 && x.height > 0).length })));
     record.allowance = await page.evaluate(() => ({ heading: [...document.querySelectorAll(".analytics-panel h2")].find((x) => x.textContent === "Codex allowance")?.textContent, windows: [...document.querySelectorAll(".allowance-window .window-name")].map((x) => x.textContent.trim()), used: [...document.querySelectorAll(".allowance-window .window-used")].map((x) => x.textContent.trim()) }));
     record.sideways = size === "phone" ? await overflow(page) : 0;
@@ -50,12 +51,40 @@ export default async function analyticsCheck(browser) {
     await page.context().close();
   }
 
+  // A session whose cost falls on two UTC days around the 24 h window (yesterday $10, today $3): the 24 h headline is
+  // today's UTC day alone, the previous period is yesterday's, and there is no hourly cost series.
+  const fx = await served(browser, { size: "desktop", path: "/analytics" });
+  const isoDay = (t) => new Date(t).toISOString().slice(0, 10);
+  await fx.route(/\/api\/model(\?|$)/, async (route) => {
+    const res = await route.fetch();
+    if (res.status() !== 200) return route.fulfill({ response: res });
+    const m = await res.json(), sessions = Object.values(m.sessions).filter((x) => x.cost);
+    for (const x of sessions) { x.cost.by_day = {}; x.cost.unpriced_models = []; }
+    sessions[0].cost.by_day = { [isoDay(m.now - 86400000)]: 10, [isoDay(m.now)]: 3 };
+    return route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(m) });
+  });
+  await fx.reload({ waitUntil: "load" });
+  await settled(fx);
+  const figure = (label) => fx.locator(".analytics-metric").filter({ hasText: label });
+  const costTwoDays = {};
+  await fx.click('#topbar .analytics-range button:has-text("24 h")');
+  costTwoDays.day = { label: (await fx.locator(".analytics-metric .label").allTextContents()).map((x) => x.trim()).find((x) => x.startsWith("Cost")), value: await figure("Cost today (UTC)").locator(".value").textContent(), note: await figure("Cost today (UTC)").locator(".note").textContent(),
+    charts: await fx.locator(".analytics-chart svg").count(), costChart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .analytics-chart").count() };
+  await fx.click('#topbar .analytics-range button:has-text("7 d")');
+  costTwoDays.week = { value: await figure("Cost · UTC days").locator(".value").textContent(), chart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .panel-sub").textContent() };
+  costTwoDays.errors = fx.errors;
+  await fx.context().close();
+  r.expect(costTwoDays.day.label === "Cost today (UTC)" && costTwoDays.day.value === "$3.00" && costTwoDays.day.note.includes("−$7.00"), "24 h cost headline must be the one UTC day ($3.00 against yesterday's $10.00), not the $13.00 sum: " + JSON.stringify(costTwoDays.day));
+  r.expect(costTwoDays.day.charts === 1 && costTwoDays.day.costChart === 0, "the 24 h range must draw no hourly cost series: " + JSON.stringify(costTwoDays.day));
+  r.expect(costTwoDays.week.value === "$10.00" && costTwoDays.week.chart.includes("whole UTC days"), "7 d must count only the whole UTC day inside the range ($10.00): " + JSON.stringify(costTwoDays.week));
+  r.expect(costTwoDays.errors.length === 0, "cost fixture: page errors: " + costTwoDays.errors.join(" | "));
+
   const legacy = await served(browser, { size: "desktop", path: "/timeline" });
   const oldRoute = await legacy.evaluate(() => ({ state: history.state?.v, path: location.pathname, title: document.querySelector("#topbar .t")?.textContent }));
   const legacyErrors = legacy.errors;
   await legacy.context().close();
 
-  r.results = { modes, oldRoute };
+  r.results = { modes, oldRoute, costTwoDays };
   for (const m of modes) {
     r.expect(m.errors.length === 0, m.mode + ": page errors: " + m.errors.join(" | "));
     r.expect(m.range.labels.join(",") === "24 h,7 d,30 d" && m.range30.selected === "30 d" && m.range30.heading?.includes("Last 30 days"), m.mode + ": Analytics range control did not change the selected range: " + JSON.stringify({ before: m.range, after: m.range30 }));
