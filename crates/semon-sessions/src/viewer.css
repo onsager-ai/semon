@@ -495,7 +495,11 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .hcard.start > svg, .hcard.start > .ln, .hcard.start > .stat { display: none; }
 .hcard.start > .brief, .hcard.start > .more, .hcard.start > .result { grid-column: 1 / -1; }
 .hcard.child-card { --h: var(--claude); grid-template-columns: minmax(0, 1fr) auto; gap: 5px 10px; border-left-width: 3px; border-radius: 0; background: none; padding: 10px 0 10px 12px; }
-.hcard.child-card .ln, .hcard.child-card .brief, .hcard.child-card .more, .hcard.child-card .result, .hcard.child-card .child-kind, .hcard.child-card .child-actions, .hcard.child-card .child-work { grid-column: 1 / -1; }
+.hcard.child-card .child-head, .hcard.child-card .brief, .hcard.child-card .more, .hcard.child-card .result, .hcard.child-card .child-actions, .hcard.child-card .child-work { grid-column: 1 / -1; }
+/* The kind badge and the title share the first row; a long title wraps beside the badge, never under it. */
+.child-head { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.child-head .child-kind { flex: none; height: calc(var(--fs-ui) * 1.4); white-space: nowrap; }
+.child-head .ln { flex: 1 1 0; min-width: 0; line-height: 1.4; }
 .hcard.child-card .ln { font-size: var(--fs-ui); font-weight: 600; color: var(--ink); }
 .hcard.child-card .brief { max-height: 5.8em; }
 /* Open, the card's brief grows to fit: this rule is as specific as the clamp above and the open rule earlier in the file, and would lose to it. */
