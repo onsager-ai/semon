@@ -21,7 +21,7 @@ use std::os::unix::fs::MetadataExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Tokens, field};
+use crate::{Tokens, attachments, field};
 
 #[cfg(test)]
 thread_local! {
@@ -46,7 +46,8 @@ thread_local! {
 /// v13: a plain Codex call links its `CommandExecution` item, which holds the
 /// whole collected output (#52).
 /// v14: compaction and interrupt signals are indexed apart, as `signals` (PR 1 of the dropped-signals plan).
-const CACHE_VERSION: u32 = 14;
+/// v15: a prompt that attaches only images, and no text, is indexed.
+const CACHE_VERSION: u32 = 15;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1011,10 +1012,12 @@ fn peer_event(origin: &Value, offset: u64, time: Option<i64>) -> Event {
 }
 
 /// Classifies one user-side prompt (a user record's text or a queued
-/// command's prompt) into events.
+/// command's prompt) into events. `images`: the prompt attaches an image,
+/// so it is one even without text.
 fn prompt_events(
     summary: &mut FileIndex,
     text: &str,
+    images: bool,
     origin: Option<&Value>,
     meta: bool,
     offset: u64,
@@ -1030,7 +1033,7 @@ fn prompt_events(
         }
         Some("human") => {
             let text = strip_reminders(text);
-            if !meta && !text.is_empty() && !is_compact_command(&text) {
+            if !meta && (images || !text.is_empty()) && !is_compact_command(&text) {
                 push(
                     summary,
                     Event {
@@ -1111,7 +1114,7 @@ fn prompt_events(
         );
         return;
     }
-    if text.is_empty() || text.starts_with('<') || text.starts_with('/') {
+    if (text.is_empty() && !images) || text.starts_with('<') || text.starts_with('/') {
         return;
     }
     push(
@@ -1800,11 +1803,13 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                 && field(attachment, "type") == Some("queued_command")
             {
                 let text = attachment.get("prompt").map(text_parts).unwrap_or_default();
+                let images = attachments::parts(record).is_some_and(attachments::has_image);
                 let meta = attachment.get("isMeta").and_then(Value::as_bool) == Some(true)
                     || record.get("isMeta").and_then(Value::as_bool) == Some(true);
                 prompt_events(
                     summary,
                     &text,
+                    images,
                     attachment.get("origin").filter(|origin| origin.is_object()),
                     meta,
                     offset,
@@ -1919,12 +1924,15 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
         }
         _ => {}
     }
-    if role == Some("user") && !texts.is_empty() {
+    let images =
+        role == Some("user") && attachments::parts(record).is_some_and(attachments::has_image);
+    if role == Some("user") && (images || !texts.is_empty()) {
         let text = texts.join("\n");
         let meta = record.get("isMeta").and_then(Value::as_bool) == Some(true);
         prompt_events(
             summary,
             &text,
+            images,
             record.get("origin").filter(|origin| origin.is_object()),
             meta,
             offset,
@@ -2196,7 +2204,9 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                                     ..Event::default()
                                 },
                             );
-                        } else if !text.trim().is_empty() {
+                        } else if !text.trim().is_empty()
+                            || attachments::parts(record).is_some_and(attachments::has_image)
+                        {
                             push(
                                 summary,
                                 Event {
@@ -2725,10 +2735,10 @@ mod tests {
         assert!(!stale.files.contains_key("session.jsonl"));
 
         let current_path = root.join("current.events.json");
-        cache.version = 14;
+        cache.version = CACHE_VERSION;
         cache.save(&current_path).unwrap();
         let current = EventCache::read(&current_path);
-        assert_eq!(current.version, 14);
+        assert_eq!(current.version, CACHE_VERSION);
         let retained_index = &current.files.get("session.jsonl").unwrap().index;
         assert_eq!(
             serde_json::to_value(retained_index.as_ref()).unwrap(),

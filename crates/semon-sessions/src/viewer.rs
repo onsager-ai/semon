@@ -300,8 +300,10 @@ struct Viewer {
 
 /// Headers the viewer sends on every response, whatever its status. A server
 /// embedding [`ViewerCore`] sends them too: the page relies on this CSP (no
-/// inline script or style), and nothing it serves may be cached or framed.
-pub const SECURITY_HEADERS: [(&str, &str); 4] = [
+/// inline script or style), nothing it serves may be cached or framed, and
+/// every body is exactly the type it is sent as. An attachment's image is
+/// the one exception, as [`ViewerReply::headers`] says.
+pub const SECURITY_HEADERS: [(&str, &str); 5] = [
     ("Cache-Control", "no-store"),
     (
         "Content-Security-Policy",
@@ -309,6 +311,23 @@ pub const SECURITY_HEADERS: [(&str, &str); 4] = [
     ),
     ("X-Frame-Options", "DENY"),
     ("Referrer-Policy", "no-referrer"),
+    ("X-Content-Type-Options", "nosniff"),
+];
+
+/// Headers for an attachment's image from `/api/attachment`: its URL names
+/// its content (`v`), so the browser may keep it, for this viewer alone, but
+/// only for a day: a screenshot is content, and redacting the logs doesn't
+/// clear a copy already fetched. Opened on its own, the image is a document
+/// that may load nothing, run nothing and be framed by nothing.
+pub(crate) const ATTACHMENT_HEADERS: [(&str, &str); 5] = [
+    ("Cache-Control", "private, max-age=86400"),
+    (
+        "Content-Security-Policy",
+        "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    ),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "no-referrer"),
+    ("X-Content-Type-Options", "nosniff"),
 ];
 
 /// One answer from [`ViewerCore::respond`]: the status, the body's content
@@ -319,6 +338,22 @@ pub struct ViewerReply {
     pub content_type: &'static str,
     pub body: Vec<u8>,
     pub etag: Option<String>,
+}
+
+impl ViewerReply {
+    /// The headers to send with this reply besides `Content-Type` and
+    /// `ETag`: [`SECURITY_HEADERS`], except for an attachment's image (a 200
+    /// whose type is one of the four image types `/api/attachment` serves,
+    /// which nothing else is sent as), which may be cached and gets a CSP of
+    /// its own. A server that sends [`SECURITY_HEADERS`] on every reply
+    /// instead still serves images correctly, only never from the cache.
+    pub fn headers(&self) -> &'static [(&'static str, &'static str)] {
+        if self.status == 200 && crate::attachments::is_served_type(self.content_type) {
+            &ATTACHMENT_HEADERS
+        } else {
+            &SECURITY_HEADERS
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -649,20 +684,14 @@ fn header(name: &str, value: &str) -> Header {
     Header::from_bytes(name, value).expect("static HTTP header")
 }
 
-fn respond(
-    request: Request,
-    status: u16,
-    content_type: &str,
-    body: Vec<u8>,
-    cookie: Option<&str>,
-    etag: Option<&str>,
-) {
-    let mut response = Response::from_data(body).with_status_code(StatusCode(status));
-    if let Some(etag) = etag {
+fn respond(request: Request, reply: ViewerReply, cookie: Option<&str>) {
+    let headers = reply.headers();
+    let mut response = Response::from_data(reply.body).with_status_code(StatusCode(reply.status));
+    if let Some(etag) = reply.etag.as_deref() {
         response.add_header(header("ETag", etag));
     }
-    response.add_header(header("Content-Type", content_type));
-    for (name, value) in SECURITY_HEADERS {
+    response.add_header(header("Content-Type", reply.content_type));
+    for (name, value) in headers {
         response.add_header(header(name, value));
     }
     if let Some(token) = cookie {
@@ -745,28 +774,20 @@ impl Viewer {
         let url = request.url().to_owned();
         let (path, query) = url.split_once('?').unwrap_or((&url, ""));
         let Some(set_cookie) = authorized(&request, query, &self.token, self.port) else {
-            respond(
-                request,
-                403,
-                "text/plain; charset=utf-8",
-                b"Forbidden".to_vec(),
-                None,
-                None,
-            );
+            let forbidden = ViewerReply {
+                status: 403,
+                content_type: "text/plain; charset=utf-8",
+                body: b"Forbidden".to_vec(),
+                etag: None,
+            };
+            respond(request, forbidden, None);
             return;
         };
         let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
         let reply = self
             .core
             .respond("GET", path, query, if_none_match.as_deref());
-        respond(
-            request,
-            reply.status,
-            reply.content_type,
-            reply.body,
-            set_cookie.then_some(&self.token),
-            reply.etag.as_deref(),
-        );
+        respond(request, reply, set_cookie.then_some(&self.token));
     }
 }
 
@@ -1478,6 +1499,72 @@ impl MachineView {
         Ok((200, json, tx::errors(built, &sid)?.into_bytes(), Some(etag)))
     }
 
+    /// `/api/attachment?sid=&o=&b=&v=`: one image a prompt of session `sid`
+    /// attaches, as `/api/tx` names it (its line's offset `o`, its block
+    /// `b`, the version of its content `v`), decoded, sent as its exact
+    /// type. Its URL names its content, so it may be cached (for a day); a line
+    /// rewritten under the same offset no longer matches `v`, and is a 404
+    /// until the page reads its new URL. The offset must be one of the
+    /// session's own prompts in the model (a message of yours, or a prompt
+    /// shown as one); the line is read back from that prompt's file, and the
+    /// block must be an image [`crate::attachments::image`] serves: one of
+    /// the four raster types (never SVG), whose bytes start with that type's
+    /// signature, inline as valid base64, at most
+    /// [`crate::attachments::IMAGE_MAX`] decoded. Anything else is 404, a
+    /// malformed request 400.
+    fn attachment(&self, query: &str) -> io::Result<(u16, &'static str, Vec<u8>)> {
+        let sid = query_value(query, "sid")
+            .and_then(decoded)
+            .ok_or_else(|| invalid_input("sid"))?;
+        let number = |key: &str| {
+            query_value(query, key)
+                .filter(|value| {
+                    (1..=20).contains(&value.len())
+                        && value.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| invalid_input(key))
+        };
+        let offset = number("o")?;
+        let block = usize::try_from(number("b")?).map_err(|_| invalid_input("b"))?;
+        let version = query_value(query, "v")
+            .filter(|value| {
+                value.len() == 16
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .and_then(|value| u64::from_str_radix(value, 16).ok())
+            .ok_or_else(|| invalid_input("v"))?;
+        let cache = self.served_model()?;
+        let built = &cache.built;
+        let transcript = built.tx.get(&sid).ok_or(io::ErrorKind::NotFound)?;
+        let mut paths: Vec<&Path> = Vec::new();
+        for slot in &transcript.slots {
+            let prompt = match &slot.kind {
+                model::SlotKind::U => true,
+                model::SlotKind::H(id) => model::is_ask(id),
+                _ => false,
+            };
+            if !prompt || slot.offset != offset {
+                continue;
+            }
+            if let Some(file) = slot.file.and_then(|file| built.files.get(file))
+                && !paths.contains(&file.path.as_path())
+            {
+                paths.push(&file.path);
+            }
+        }
+        for path in paths {
+            if let Some((media, bytes)) = model::read_line(path, offset)
+                .and_then(|record| crate::attachments::image(&record, block, version))
+            {
+                return Ok((200, media, bytes));
+            }
+        }
+        Err(io::ErrorKind::NotFound.into())
+    }
+
     /// Whether a page URL names something in the model: `/machines/<id>`,
     /// `/s/<harness>/<id>` and `/trace/<harness>/<id>/<turn>`.
     fn page_exists(&self, path: &str) -> io::Result<bool> {
@@ -1537,6 +1624,7 @@ impl MachineView {
             "/api/transcript" => Ok((200, json, serde_json::to_vec(&self.transcript(query)?)?)),
             "/api/tx" => Ok((200, json, self.tx(query)?.into_bytes())),
             "/api/entry" => Ok((200, json, self.expand(query)?.into_bytes())),
+            "/api/attachment" => self.attachment(query),
             _ if path.starts_with("/fonts/") => {
                 let name = path["/fonts/".len()..]
                     .strip_suffix(".woff2")
@@ -3071,11 +3159,12 @@ mod tests {
         );
     }
 
-    const HEADERS: [&str; 4] = [
+    const HEADERS: [&str; 5] = [
         "Cache-Control: no-store",
         "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'",
         "X-Frame-Options: DENY",
         "Referrer-Policy: no-referrer",
+        "X-Content-Type-Options: nosniff",
     ];
 
     fn get(fixture: &Fixture, path: &str) -> String {
@@ -3340,6 +3429,399 @@ mod tests {
             assert!(get(&fixture, query).starts_with("HTTP/1.1 400"), "{query}");
         }
         assert!(get(&fixture, "/api/tx?sid=nobody").starts_with("HTTP/1.1 404"));
+    }
+
+    // ---- Attachments: images a prompt attaches, named by /api/tx and served by /api/attachment ----
+
+    /// A PNG, JPEG, GIF and WebP (VP8X) as far as their headers: 1×1, 3×2
+    /// (its frame header after an APP0 segment), 2×3 and 4×5.
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x02\0\0\0";
+    const JPEG: &[u8] =
+        b"\xFF\xD8\xFF\xE0\0\x10JFIF\0\x01\x01\0\0\x01\0\x01\0\0\xFF\xC0\0\x11\x08\0\x02\0\x03\x03";
+    const GIF: &[u8] = b"GIF89a\x02\0\x03\0\0\0\0";
+    const WEBP: &[u8] = b"RIFF\x16\0\0\0WEBPVP8X\x0a\0\0\0\x10\0\0\0\x03\0\0\x04\0\0";
+    const SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>";
+
+    fn b64(bytes: &[u8]) -> String {
+        crate::attachments::tests::encode(bytes)
+    }
+
+    /// The `v` a URL names for base64 `data`.
+    fn v(data: &str) -> String {
+        crate::attachments::tests::version_of(data)
+    }
+
+    fn image_block(media: &str, data: String) -> Value {
+        json!({"type":"image","source":{"type":"base64","media_type":media,"data":data}})
+    }
+
+    /// Each line's byte offset in a file the fixture wrote.
+    fn offsets(path: &Path) -> Vec<u64> {
+        let text = fs::read(path).unwrap();
+        let mut out = vec![0];
+        for (at, byte) in text.iter().enumerate() {
+            if *byte == b'\n' && at + 1 < text.len() {
+                out.push(at as u64 + 1);
+            }
+        }
+        out
+    }
+
+    /// `pics`: your message with an image and its `[Image #1]` placeholder,
+    /// a reply, a queued command with a JPEG, a message that is only an
+    /// image, a message whose images can't be served, a tool result with an
+    /// image beside it (not a prompt), and a message with a GIF and a WebP.
+    /// `other`: a second lane.
+    fn images_fixture() -> (Fixture, Vec<u64>) {
+        let fixture = Fixture::new();
+        fixture.write("proc/sys/kernel/hostname", "testbox\n");
+        let user = |second: u32, content: Value| {
+            json!({"type":"user","timestamp":format!("2026-09-24T00:00:{second:02}Z"),"sessionId":"pics",
+                "origin":{"kind":"human"},"message":{"role":"user","content":content}})
+        };
+        let path = fixture.claude(
+            "pics",
+            &[
+                user(0, json!([image_block("image/png", b64(PNG)), {"type":"text","text":"[Image #1] The top bar is bloated"}])),
+                json!({"type":"assistant","timestamp":"2026-09-24T00:00:01Z","sessionId":"pics",
+                    "message":{"role":"assistant","content":[{"type":"text","text":"Looking."}]}}),
+                json!({"type":"attachment","timestamp":"2026-09-24T00:00:02Z","sessionId":"pics",
+                    "attachment":{"type":"queued_command","origin":{"kind":"human"},
+                        "prompt":[image_block("image/jpeg", b64(JPEG)), {"type":"text","text":"and this one"}]}}),
+                user(3, json!([image_block("image/png", b64(PNG))])),
+                user(4, json!([
+                    image_block("image/svg+xml", b64(SVG)),
+                    image_block("image/png", b64(SVG)),
+                    image_block("text/html", b64(PNG)),
+                    image_block("image/png", format!("{}*AAA", &b64(PNG)[..8])),
+                    {"type":"image","source":{"type":"url","url":"https://example.com/a.png"}},
+                    {"type":"text","text":"bad ones"},
+                ])),
+                json!({"type":"assistant","timestamp":"2026-09-24T00:00:05Z","sessionId":"pics",
+                    "message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/tmp/a.png"}}]}}),
+                json!({"type":"user","timestamp":"2026-09-24T00:00:06Z","sessionId":"pics",
+                    "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"read"}, image_block("image/png", b64(PNG))]}}),
+                user(7, json!([image_block("image/gif", b64(GIF)), image_block("image/webp", b64(WEBP)), {"type":"text","text":"a gif and a webp"}])),
+            ],
+        );
+        fixture.claude(
+            "other",
+            &[json!({"type":"user","timestamp":"2026-09-24T00:00:00Z","sessionId":"other","origin":{"kind":"human"},
+                "message":{"role":"user","content":"hello"}})],
+        );
+        let lines = offsets(&path);
+        (fixture, lines)
+    }
+
+    fn tx_entries(core: &MachineView, sid: &str) -> (String, Vec<Value>) {
+        let reply = core.respond("GET", "/api/tx", &format!("sid={sid}"), None);
+        assert_eq!(reply.status, 200);
+        let body = String::from_utf8(reply.body).unwrap();
+        let page: Value = serde_json::from_str(&body).unwrap();
+        (body, page["entries"].as_array().unwrap().clone())
+    }
+
+    /// A servable image's reference, as `/api/tx` names it.
+    fn served_ref(o: u64, b: usize, media: &str, bytes: &[u8], size: (u32, u32)) -> Value {
+        json!({"b":b,"type":media,"size":bytes.len(),"v":v(&b64(bytes)),"w":size.0,"h":size.1,"o":o})
+    }
+
+    #[test]
+    fn a_prompts_images_are_named_by_reference_never_inlined() {
+        let (fixture, at) = images_fixture();
+        let core = fixture.viewer();
+        let (body, entries) = tx_entries(&core, "pics");
+        // No bytes, no placeholder, no "[image]" text in the page.
+        for bytes in [PNG, JPEG, GIF, WEBP] {
+            assert!(!body.contains(&b64(bytes)[..12]), "{body}");
+        }
+        assert!(
+            !body.contains("[Image #") && !body.contains("[image]"),
+            "{body}"
+        );
+        let images: Vec<&Value> = entries
+            .iter()
+            .filter_map(|entry| entry.get("img"))
+            .collect();
+        assert_eq!(
+            images,
+            [
+                &json!([served_ref(at[0], 0, "image/png", PNG, (1, 1))]),
+                &json!([served_ref(at[2], 0, "image/jpeg", JPEG, (3, 2))]),
+                &json!([served_ref(at[3], 0, "image/png", PNG, (1, 1))]),
+                &json!(
+                    (0..5)
+                        .map(|b| json!({"b":b,"na":true,"o":at[4]}))
+                        .collect::<Vec<_>>()
+                ),
+                &json!([
+                    served_ref(at[7], 0, "image/gif", GIF, (2, 3)),
+                    served_ref(at[7], 1, "image/webp", WEBP, (4, 5))
+                ]),
+            ],
+            "{entries:?}"
+        );
+        // Every entry with images is your message; its text is the model's, without the placeholder.
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        let briefs: Vec<&str> = model["handoffs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|handoff| handoff["kind"] == "ask" && handoff["to"] == "pics")
+            .map(|handoff| handoff["brief"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            briefs,
+            [
+                "The top bar is bloated",
+                "and this one",
+                "",
+                "bad ones",
+                "a gif and a webp"
+            ]
+        );
+        for entry in entries.iter().filter(|entry| entry.get("img").is_some()) {
+            assert_eq!(entry["k"], "h", "{entry}");
+        }
+    }
+
+    #[test]
+    fn an_attachment_is_served_only_as_an_indexed_prompts_image() {
+        let (fixture, at) = images_fixture();
+        let core = fixture.viewer();
+        let fetch = |query: &str| core.respond("GET", "/api/attachment", query, None);
+        let url = |sid: &str, o: u64, b: usize, data: &str| {
+            format!("sid={sid}&o={o}&b={b}&v={}", v(data))
+        };
+        for (o, b, media, bytes) in [
+            (at[0], 0, "image/png", PNG),
+            (at[2], 0, "image/jpeg", JPEG),
+            (at[3], 0, "image/png", PNG),
+            (at[7], 0, "image/gif", GIF),
+            (at[7], 1, "image/webp", WEBP),
+        ] {
+            let reply = fetch(&url("pics", o, b, &b64(bytes)));
+            assert_eq!(
+                (reply.status, reply.content_type, reply.body.as_slice()),
+                (200, media, bytes),
+                "{media}"
+            );
+            assert_eq!(reply.headers(), ATTACHMENT_HEADERS.as_slice());
+        }
+        let png = b64(PNG);
+        let refused = [
+            // Another session, or none: the offset must be one of this session's prompts.
+            url("other", at[0], 0, &png),
+            url("nobody", at[0], 0, &png),
+            // A line that is no prompt (the reply, the tool result beside its image), or no line.
+            url("pics", at[1], 0, &png),
+            url("pics", at[6], 1, &png),
+            url("pics", at[0] + 1, 0, &png),
+            // A block that is text, or past the end.
+            url("pics", at[0], 1, &png),
+            url("pics", at[0], 99, &png),
+            // Content other than the URL names: another image's version.
+            url("pics", at[0], 0, &b64(JPEG)),
+            // SVG, an SVG declared as PNG, a type that isn't an image, malformed base64, a URL.
+            url("pics", at[4], 0, &b64(SVG)),
+            url("pics", at[4], 1, &b64(SVG)),
+            url("pics", at[4], 2, &png),
+            url("pics", at[4], 3, &format!("{}*AAA", &png[..8])),
+            url("pics", at[4], 4, ""),
+        ];
+        for query in &refused {
+            let reply = fetch(query);
+            assert_eq!(reply.status, 404, "{query}");
+            assert_eq!(reply.content_type, "text/plain; charset=utf-8", "{query}");
+            assert_eq!(reply.headers(), SECURITY_HEADERS.as_slice(), "{query}");
+        }
+        let good = v(&png);
+        for query in [
+            format!("o=0&b=0&v={good}"),
+            format!("sid=pics&b=0&v={good}"),
+            format!("sid=pics&o={}&v={good}", at[0]),
+            format!("sid=pics&o={}&b=0", at[0]),
+            format!("sid=pics&o=x&b=0&v={good}"),
+            format!("sid=pics&o=-1&b=0&v={good}"),
+            format!("sid=pics&o=+0&b=0&v={good}"),
+            format!("sid=pics&o=0&b=1e2&v={good}"),
+            format!("sid=pics&o=0&b=&v={good}"),
+            format!("sid=pics&o=99999999999999999999999&b=0&v={good}"),
+            format!("sid=pics&o=0&b=0&v={}", good.to_uppercase()),
+            format!("sid=pics&o=0&b=0&v={}", &good[..15]),
+            format!("sid=pics&o=0&b=0&v={good}0"),
+            "sid=pics&o=0&b=0&v=zzzzzzzzzzzzzzzz".into(),
+        ] {
+            assert_eq!(fetch(&query).status, 400, "{query}");
+        }
+        assert_eq!(
+            core.respond(
+                "POST",
+                "/api/attachment",
+                &url("pics", at[0], 0, &png),
+                None
+            )
+            .status,
+            405
+        );
+        // On the wire: the exact type, nosniff, cached privately for a day, a CSP of its own; nothing else is cached.
+        let wire = get(
+            &fixture,
+            &format!("/api/attachment?{}", url("pics", at[0], 0, &png)),
+        );
+        assert!(wire.starts_with("HTTP/1.1 200"), "{wire}");
+        for header in [
+            "Content-Type: image/png",
+            "X-Content-Type-Options: nosniff",
+            "Cache-Control: private, max-age=86400",
+            "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            "X-Frame-Options: DENY",
+            "Referrer-Policy: no-referrer",
+        ] {
+            assert!(wire.contains(header), "missing {header}");
+        }
+        assert!(!wire.contains("no-store"));
+        let missing = get(
+            &fixture,
+            &format!("/api/attachment?{}", url("pics", at[4], 0, &b64(SVG))),
+        );
+        assert!(missing.starts_with("HTTP/1.1 404"));
+        for header in HEADERS {
+            assert!(missing.contains(header), "missing {header}");
+        }
+        // The token guards it as it guards the rest.
+        assert!(
+            http(
+                &fixture,
+                &format!(
+                    "GET /api/attachment?{} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n",
+                    url("pics", at[0], 0, &png)
+                )
+            )
+            .starts_with("HTTP/1.1 403")
+        );
+    }
+
+    /// A line whose image changed under the same offset (a file replaced,
+    /// or rewritten by redaction) is a new URL: the old one is refused.
+    #[test]
+    fn a_rewritten_line_is_a_new_url() {
+        let fixture = Fixture::new();
+        fixture.write("proc/sys/kernel/hostname", "testbox\n");
+        let line = |bytes: &[u8]| {
+            json!({"type":"user","timestamp":"2026-09-24T00:00:00Z","sessionId":"swap","origin":{"kind":"human"},
+                "message":{"role":"user","content":[image_block("image/gif", b64(bytes))]}})
+        };
+        let other: &[u8] = b"GIF89a\x07\0\x03\0\0\0\0";
+        fixture.claude("swap", &[line(GIF)]);
+        let core = fixture.viewer();
+        let old = format!("sid=swap&o=0&b=0&v={}", v(&b64(GIF)));
+        assert_eq!(
+            core.respond("GET", "/api/attachment", &old, None).status,
+            200
+        );
+        let path = fixture.claude("swap", &[line(other)]);
+        assert_eq!(offsets(&path), [0]);
+        let (_, entries) = tx_entries(&core, "swap");
+        let image = &entries.iter().find_map(|entry| entry.get("img")).unwrap()[0];
+        assert_eq!(image["v"], v(&b64(other)));
+        assert_eq!(image["w"], 7);
+        assert_eq!(
+            core.respond("GET", "/api/attachment", &old, None).status,
+            404
+        );
+        let new = format!("sid=swap&o=0&b=0&v={}", v(&b64(other)));
+        assert_eq!(
+            core.respond("GET", "/api/attachment", &new, None).body,
+            other
+        );
+    }
+
+    /// At the cap, an image is served; a byte over, it isn't. Both lines are
+    /// longer than a page reads of one line, and are still named.
+    #[test]
+    fn an_image_at_the_cap_is_served_and_one_over_it_is_not() {
+        let fixture = Fixture::new();
+        fixture.write("proc/sys/kernel/hostname", "testbox\n");
+        let cap = crate::attachments::IMAGE_MAX;
+        let mut exact = PNG.to_vec();
+        exact.resize(cap, 0);
+        let mut over = exact.clone();
+        over.push(0);
+        let (exact, over) = (b64(&exact), b64(&over));
+        let line = |second: u32, data: &str| {
+            json!({"type":"user","timestamp":format!("2026-09-24T00:00:{second:02}Z"),"sessionId":"big","origin":{"kind":"human"},
+                "message":{"role":"user","content":[image_block("image/png", data.to_owned()), {"type":"text","text":"large"}]}})
+        };
+        let path = fixture.claude("big", &[line(0, &exact), line(1, &over)]);
+        let at = offsets(&path);
+        assert!(at[1] > tx::LINE_MAX);
+        let core = fixture.viewer();
+        let (_, entries) = tx_entries(&core, "big");
+        let images: Vec<&Value> = entries
+            .iter()
+            .filter_map(|entry| entry.get("img"))
+            .collect();
+        assert_eq!(
+            images,
+            [
+                &json!([{"b":0,"type":"image/png","size":cap,"v":v(&exact),"w":1,"h":1,"o":0}]),
+                &json!([{"b":0,"na":true,"o":at[1]}]),
+            ]
+        );
+        let served = core.respond(
+            "GET",
+            "/api/attachment",
+            &format!("sid=big&o=0&b=0&v={}", v(&exact)),
+            None,
+        );
+        assert_eq!((served.status, served.body.len()), (200, cap));
+        let refused = format!("sid=big&o={}&b=0&v={}", at[1], v(&over));
+        assert_eq!(
+            core.respond("GET", "/api/attachment", &refused, None)
+                .status,
+            404
+        );
+    }
+
+    #[test]
+    fn a_codex_prompts_images_are_its_data_urls() {
+        let fixture = Fixture::new();
+        fixture.write("proc/sys/kernel/hostname", "testbox\n");
+        let path = fixture.codex(
+            "cdx",
+            &[json!({"type":"response_item","timestamp":"2026-09-24T00:00:01Z","payload":{"type":"message","role":"user","content":[
+                {"type":"input_text","text":"<image name=[Image #1]>"},
+                {"type":"input_image","image_url":format!("data:image/png;base64,{}", b64(PNG))},
+                {"type":"input_text","text":"</image>"},
+                {"type":"input_image","image_url":"/home/me/shot.png"},
+                {"type":"input_text","text":"why is this red"},
+            ]}})],
+        );
+        let at = offsets(&path);
+        let core = fixture.viewer();
+        let (body, entries) = tx_entries(&core, "cdx");
+        assert!(
+            !body.contains("<image") && !body.contains("[Image #"),
+            "{body}"
+        );
+        let prompt = entries.iter().find(|entry| entry["k"] == "u").unwrap();
+        assert_eq!(prompt["text"], "why is this red");
+        assert_eq!(
+            prompt["img"],
+            json!([served_ref(at[1], 1, "image/png", PNG, (1, 1)), {"b":3,"na":true,"o":at[1]}])
+        );
+        let query = format!("sid=cdx&o={}&b=1&v={}", at[1], v(&b64(PNG)));
+        let reply = core.respond("GET", "/api/attachment", &query, None);
+        assert_eq!(
+            (reply.status, reply.content_type, reply.body.as_slice()),
+            (200, "image/png", PNG)
+        );
+        let local = format!("sid=cdx&o={}&b=3&v={}", at[1], v("/home/me/shot.png"));
+        assert_eq!(
+            core.respond("GET", "/api/attachment", &local, None).status,
+            404
+        );
     }
 
     /// The model's per-session `calls` and `errors` are the totals `/api/tx`

@@ -1613,7 +1613,7 @@
         box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key }); continue;
       }
       flush();
-      if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg user"), e); m.append(markdown(e.text)); tx.append(m); }
+      if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg user"), e); userBody(m, e, e.text); tx.append(m); }
       else if (e.k === "a") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg assistant"), e); m.append(markdown(e.text)); tx.append(m); }
       else if (e.k === "think") {
         if (isPendingThought(e)) { const pending = keyed(el("div", "think-pending"), e); pending.append(el("span", "spin"), el("span", null, "Thinking…")); tx.append(pending); }
@@ -1629,7 +1629,7 @@
       else if (e.k === "h") {
         const h = H.find((x) => x.id === e.id); if (!hit(h.brief + " " + (h.result ?? ""))) continue;
         // Your own ask is simply your message.
-        if (h.kind === "ask") { if (!show.messages) continue; const m = keyed(el("div", "msg user"), e); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
+        if (h.kind === "ask") { if (!show.messages) continue; const m = keyed(el("div", "msg user"), e); userBody(m, e, h.brief); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
         if (h.kind === "toyou" && h.ask === "result") {
           const marker = el("div", "result-marker " + (SEEN_RESULTS.has(h.id) ? "read" : "new"));
           marker.append(icon(I.result), el("span", "word", statWord(h)), el("span", "tm", clock(h.at)));
@@ -1693,6 +1693,53 @@
     d.append(head, body); document.body.append(d);
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); }); // a tap on the backdrop (wide screens)
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); });
+    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
+    try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
+  }
+
+  // Images a prompt attached: thumbnails above its text, each opening the image whole in the viewer sheet. The page never holds
+  // their bytes: /api/tx names each image by its line, block and content version, /api/attachment serves it, and the <img> is
+  // made here with its src set to that URL. Its box is sized from the width and height /api/tx read from the image's header
+  // (at most 200×160, its shape kept), so nothing moves when it loads; one whose size isn't known gets a fixed box. An image the
+  // logs don't hold (a path, a redacted copy) is a quiet chip, and so is one that fails to load.
+  const THUMB_W = 200, THUMB_H = 160;
+  const IMAGE_KIND = { "image/png": "PNG", "image/jpeg": "JPEG", "image/gif": "GIF", "image/webp": "WebP" };
+  const sizeText = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " bytes";
+  const imageGone = () => el("span", "attach-na", "Image not available");
+  function userBody(m, e, text) {
+    if (e.img?.length) {
+      const row = el("div", "attach-row");
+      e.img.forEach((a, i) => {
+        if (a.na) { row.append(imageGone()); return; }
+        const label = "Attached image " + (i + 1) + " (" + (IMAGE_KIND[a.type] ?? "image") + ", " + sizeText(a.size) + ")";
+        const url = "/api/attachment?sid=" + enc(e.sid) + "&o=" + enc(a.o) + "&b=" + enc(a.b) + "&v=" + enc(a.v);
+        const b = el("button", "attach"), img = document.createElement("img");
+        b.type = "button"; b.setAttribute("aria-haspopup", "dialog");
+        img.className = "attach-img"; img.alt = label; img.loading = "lazy"; img.decoding = "async";
+        if (a.w > 0 && a.h > 0) { const k = Math.min(1, THUMB_W / a.w, THUMB_H / a.h); img.width = Math.max(1, Math.round(a.w * k)); img.height = Math.max(1, Math.round(a.h * k)); }
+        else img.classList.add("unsized");
+        img.src = url;
+        img.addEventListener("error", () => b.replaceWith(imageGone()), { once: true });
+        b.append(img); b.addEventListener("click", () => openImage(url, label, b)); row.append(b);
+      });
+      m.append(row);
+      if (!text) return;
+    }
+    m.append(markdown(text));
+  }
+  function openImage(url, label, from) {
+    const d = el("dialog", "viewer image-viewer"); d.setAttribute("aria-label", label);
+    const head = el("div", "vh"), t = el("div", "vt"), close = el("button", "vclose");
+    t.append(el("span", null, label)); close.type = "button"; close.setAttribute("aria-label", "Close"); close.append(icon(I.x)); close.addEventListener("click", () => d.close());
+    head.append(t, close);
+    const body = el("div", "vb"), img = document.createElement("img");
+    img.className = "attach-full"; img.alt = label; img.decoding = "async"; img.src = url;
+    img.addEventListener("error", () => img.replaceWith(el("p", "vnote", "Image not available.")), { once: true });
+    body.append(img); d.append(head, body); document.body.append(d);
+    d.addEventListener("click", (ev) => { if (ev.target === d || ev.target === body) d.close(); }); // a tap beside the image
+    // Focus goes back to the thumbnail that opened it, or to the same image's thumbnail when a live update redrew the page.
+    const back = () => (from.isConnected ? from : [...document.querySelectorAll("button.attach")].find((x) => x.querySelector("img")?.getAttribute("src") === url))?.focus();
+    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); back(); });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
     try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
   }

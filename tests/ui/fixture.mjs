@@ -9,7 +9,7 @@
 //
 // --extras writes the sample plus what only the served viewer has to handle, for the check scripts (never for the pixel
 // comparison or the gap check): what the mockup's markdown check page (mkmd.js) added (one message in harbor using every
-// markdown construct, and an answered two-part question from ledger); a harbor step whose command is longer than its
+// markdown construct, and an answered two-part question from ledger); a lane whose prompts attach images (attach); a harbor step whose command is longer than its
 // summary; a yielded Codex command with a poll that sends input; a Codex call with no exit status in deps; a `backlog` lane of 460 entries (paging); and a lane whose key, name,
 // branch, messages, tools, relay, question, answer and subagent all carry an injection payload (XSS).
 //
@@ -17,6 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
+import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -43,6 +44,21 @@ const iso = (t) => new Date(t).toISOString();
 
 // mkmd.js's message, verbatim.
 export const MARKDOWN = ["## A heading with `code`", "Plain line with **bold**, *italic*, ~~gone~~, a [safe link](https://example.com/a), a [bad link](javascript:alert(1)), and https://example.org/x.", "Literal tags stay text: <script>alert(1)</script> and <b>not bold</b>.", "", "1. First step", "2. Second step", "   - nested bullet", "   - another", "3. Third step", "", "* star bullet", "", "> A quoted line", "> and another", "", "---", "", "```rust", "fn a_very_long_function_name_that_needs_horizontal_scrolling(argument_one: u32, argument_two: u32) -> u32 { argument_one + argument_two }", "```", "", "| Col A | Col B |", "|---|---|", "| `x` | cut off…", "", "```", "an unclosed fence at the end…"].join("\n");
+
+// A PNG drawn here, for the attachment checks: `w`×`h` pixels of horizontal bands, one [r, g, b] each, top to bottom.
+const CRC = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+export function png(w, h, bands) {
+  const crc = (buf) => { let c = 0xffffffff; for (const b of buf) c = CRC[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const head = Buffer.alloc(4), tail = Buffer.alloc(4), body = Buffer.concat([Buffer.from(type, "ascii"), data]); head.writeUInt32BE(data.length); tail.writeUInt32BE(crc(body)); return Buffer.concat([head, body, tail]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2; // 8-bit RGB
+  const stride = w * 3 + 1, rows = Buffer.alloc(stride * h);
+  for (let y = 0; y < h; y++) { const [r, g, b] = bands[Math.floor((y * bands.length) / h)]; for (let x = 0; x < w; x++) rows.set([r, g, b], y * stride + 1 + x * 3); }
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
+}
+// A tall phone screenshot (a dark bar over a light page with a bubble) and a wide one, as Claude's image blocks.
+export const TALL_PNG = png(180, 390, [[32, 36, 34], [32, 36, 34], [244, 245, 243], [244, 245, 243], [218, 226, 240], [244, 245, 243], [244, 245, 243], [244, 245, 243], [60, 64, 62]]);
+export const WIDE_PNG = png(320, 140, [[46, 94, 170], [90, 150, 210], [200, 222, 240], [90, 150, 210]]);
+const imageBlock = (bytes) => ({ type: "image", source: { type: "base64", media_type: "image/png", data: bytes.toString("base64") } });
 
 // The injection payload, and one without a slash for what becomes a file name (a session key).
 export const XSS = '<img src=x onerror="window.__xss=1"><script>window.__xss=2</script><iframe src="javascript:window.__xss=3"></iframe>';
@@ -80,6 +96,8 @@ export function write(out, { extras = false } = {}) {
       filler: (t) => base(t, "system", { subtype: "turn_duration" }),
       ask: (t, text) => base(t, "user", { origin: { kind: "human" }, message: { role: "user", content: text } }),
       prompt: (t, text) => base(t, "user", { message: { role: "user", content: text } }),
+      // Your message sent while the session worked: Claude Code logs it as a queued command.
+      queued: (t, prompt) => base(t, "attachment", { attachment: { type: "queued_command", prompt, origin: { kind: "human" } } }),
       peer: (t, from, name, msg, body) => base(t, "user", { origin: { kind: "peer", from: "uds:/run/user/1000/cc-socks/" + from + ".sock", name, msg_id: msg, body }, message: { role: "user", content: body } }),
       text: (t, text) => said(t, [{ type: "text", text }]),
       think: (t, text) => said(t, [{ type: "thinking", thinking: text, signature: "sig" }]),
@@ -530,6 +548,24 @@ export function write(out, { extras = false } = {}) {
       c.text(ms(T(8, 53)), "Found it on the web.");
       c.tokens(ms(T(8, 54)), { webSearches: 4 });
       c.save(); live("web-search", "idle", "Web search");
+    }
+    // attach: your messages with images, which the viewer once drew as "[image]": one with a screenshot and Claude Code's
+    // "[Image #1]" placeholder, one queued while it worked (logged as a queued command), one that is only an image, and one whose
+    // image a redacted copy of the logs masked (not available); then a prompt that isn't yours with an image, drawn as a message.
+    {
+      const c = claude("attach", { cwd: role("attach"), model: "opus-5.5", tokens: [0, 0, 0] });
+      c.title(ms(T(8, 52)), "Attachments");
+      c.ask(ms(T(8, 52)), [imageBlock(TALL_PNG), { type: "text", text: "[Image #1] The top bar is bloated by the info on mobile" }]);
+      c.text(ms(T(8, 53)), "Moving the counts into the details menu.");
+      c.queued(ms(T(8, 54)), [imageBlock(WIDE_PNG), { type: "text", text: "And on the wide screen too" }]);
+      c.text(ms(T(8, 54), 30), "Same fix applies there.");
+      c.ask(ms(T(8, 55)), [imageBlock(TALL_PNG)]);
+      c.text(ms(T(8, 55), 30), "That one is the details menu.");
+      c.ask(ms(T(8, 56)), [{ type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo" + "*".repeat(40) } }, { type: "text", text: "This copy was redacted" }]);
+      c.text(ms(T(8, 56), 30), "I can't see that image.");
+      c.prompt(ms(T(8, 57)), [imageBlock(WIDE_PNG), { type: "text", text: "A brief with a picture" }]);
+      c.text(ms(T(8, 58)), "Noted.");
+      c.save();
     }
     // archive: a session five days before the sample's day, in its own repository. The model's 24 h window leaves it out;
     // Analytics' 7 d and 30 d count it (#102): an hour of work, one turn, no tool calls, and a cost on its day.
