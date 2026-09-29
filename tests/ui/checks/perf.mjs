@@ -113,7 +113,7 @@ async function checkLongSessionOpenEnd(page) {
   });
   const main = await page.locator("#main").boundingBox();
   await page.mouse.move(main ? main.x + Math.min(main.width / 2, 200) : 195, 300);
-  await page.mouse.wheel(0, await page.evaluate(() => innerHeight * 2));
+  await page.mouse.wheel(0, await page.evaluate(() => -innerHeight * 2));
   await page.waitForFunction(() => {
     const button = document.querySelector(".jump-bottom"), rect = button?.getBoundingClientRect();
     return !!button && !button.hidden && !!rect && rect.width >= 40 && rect.height >= 40;

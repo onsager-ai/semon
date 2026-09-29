@@ -733,7 +733,7 @@
     const es = TX[s.id] ?? [], m = TXM[s.id], calls = m ? m.calls : es.filter((e) => e.k === "tool").length, errors = m ? m.errors : es.filter((e) => e.k === "tool" && e.ok === false).length, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
     const st = el("span", "meta-item meta-state"); st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", nT + (nT === 1 ? " turn" : " turns")));
     if (errors) { const j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")); j.type = "button"; j.setAttribute("aria-label", j.textContent + ": jump to the first failed step");
-      j.addEventListener("click", (ev) => { ev.stopPropagation(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
+      j.addEventListener("click", (ev) => { ev.stopPropagation(); stopOpeningEndPin(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
       st.append(j); }
     const kind = s.kind ? childKindChip(s, true) : null;
     const model = el("span", "meta-item meta-model"); model.append(harnessMark(s.harness), el("span", "meta-value", shortModel(s.model))); model.title = s.model ?? "Unknown model";

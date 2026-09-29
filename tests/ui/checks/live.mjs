@@ -163,6 +163,9 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.opened.steps >= 3 && R.opened.groups >= 1 && R.opened.childWork >= 2, name + ": harbor didn't open steps, a group and child work to watch: " + JSON.stringify(R.opened));
     const live0 = await S.evaluate(() => document.querySelector('.step.live[data-live="harbor"]')?.dataset.e ?? null);
     r.expect(!!live0, name + ": harbor shows no running step");
+    const mainBox = await S.locator("#main").boundingBox();
+    await S.mouse.move(mainBox ? mainBox.x + Math.min(mainBox.width / 2, 200) : 195, mainBox ? mainBox.y + Math.min(mainBox.height / 2, 200) : 300);
+    await S.mouse.wheel(0, -1000); // Reader input yields the temporary open-at-end pin before we place a precise anchor.
     R.room = await S.evaluate(() => { const s = window.__sc(); s.scrollTop = Math.round((s.scrollHeight - s.clientHeight) * 0.4); return window.__left(); });
     r.expect(R.room > 200, name + ": harbor isn't long enough to scroll up from its end: " + R.room);
     await sleep(150);
