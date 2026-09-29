@@ -16,7 +16,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    sync::{Arc, Condvar, Mutex, PoisonError, RwLock},
+    sync::{Arc, Condvar, Mutex, PoisonError, RwLock, Weak},
 };
 
 use serde_json::{Map, Value, json};
@@ -202,8 +202,12 @@ pub enum Refresh {
     /// last read. A read waits for a build only when its machine has no
     /// model yet, or has one last checked over a second ago with no thread
     /// to check it (the first read after 30 s without one): it refreshes
-    /// first, as the very first read builds. For servers; `semon sessions
-    /// --serve` uses it.
+    /// first, as the very first read builds. A background rebuild that
+    /// fails leaves the last model served, with the error printed once;
+    /// once the model was last checked 3 s ago and rebuilds still fail,
+    /// each read refreshes itself instead and answers the error (500), as
+    /// [`Refresh::OnRead`] does, until a build works again. For servers;
+    /// `semon sessions --serve` uses it.
     Background,
 }
 
@@ -227,16 +231,71 @@ pub enum Refresh {
 /// snapshot's version. With [`Refresh::Background`]
 /// ([`ViewerCore::set_refresh`]) no read waits for a rebuild; see
 /// [`Refresh`] for how far behind the logs an answer can be. The setters
-/// take `&mut self`: configure the core before sharing it.
+/// take `&mut self`: configure the core before sharing it. What differs per
+/// request (an account menu, say) is passed with the call, as [`Extras`] to
+/// [`ViewerCore::respond_with`], so the shared core holds no per-request
+/// state and needs no lock.
 /// [`ViewerCore::close`] stops it before the files it reads are removed.
 pub struct ViewerCore {
     views: RwLock<Arc<Views>>,
     received: Option<Received>,
+    /// What [`ViewerCore::respond`] serves in the model when a call
+    /// doesn't pass its own ([`ViewerCore::respond_with`]).
+    extras: Extras,
+    refresh: Refresh,
+    open: Gate,
+    /// Views [`ViewerCore::follow`] stopped serving, which
+    /// [`ViewerCore::close`] still waits out: a rebuild of one may run on.
+    retired: Mutex<Vec<Weak<MachineView>>>,
+}
+
+/// The embedding server's own values in `/api/model`, which can differ per
+/// request: the Machines page's management link (`admin`), the account menu
+/// (`account`) and the Machines navigation destination (`nav`). None of them
+/// changes the model version or its `ETag`. Pass them with each call to
+/// [`ViewerCore::respond_with`], so a core shared between requests holds no
+/// per-request state; [`ViewerCore::set_admin_link`] and its siblings set
+/// the ones [`ViewerCore::respond`] uses.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Extras {
     admin: Option<AdminLink>,
     account: Option<AccountMenu>,
     nav_machines: Option<String>,
-    refresh: Refresh,
-    open: Gate,
+}
+
+impl Extras {
+    /// Sets, or clears, the link the Machines page shows to the embedding
+    /// server's machine-management page, served as `admin`.
+    pub fn set_admin_link(&mut self, link: Option<AdminLink>) {
+        self.admin = link;
+    }
+
+    /// Sets, or clears, the account menu, served as `account`.
+    pub fn set_account(&mut self, account: Option<AccountMenu>) {
+        self.account = account;
+    }
+
+    /// Sets the destination for the Machines navigation entry, served as
+    /// `nav`. `item` must be `"machines"`, and `href` must be a same-origin
+    /// path. Returns false and leaves the current value unchanged for an
+    /// unknown item or path.
+    pub fn set_nav_override(&mut self, item: &str, href: &str) -> bool {
+        if item != "machines" || !valid_href(href) {
+            return false;
+        }
+        self.nav_machines = Some(href.to_owned());
+        true
+    }
+
+    /// `body`, a model's JSON object, with these values at its front.
+    fn apply(&self, body: &[u8]) -> Vec<u8> {
+        with_model_extras(
+            body,
+            self.admin.as_ref(),
+            self.account.as_ref(),
+            self.nav_machines.as_deref(),
+        )
+    }
 }
 
 /// The machines a core serves, each with its key, in order.
@@ -686,11 +745,10 @@ impl ViewerCore {
                     .collect(),
             )),
             received: None,
-            admin: None,
-            account: None,
-            nav_machines: None,
+            extras: Extras::default(),
             refresh: Refresh::OnRead,
             open: Gate::default(),
+            retired: Mutex::default(),
         }
     }
 
@@ -796,6 +854,7 @@ impl ViewerCore {
         }
         let mut old: BTreeMap<String, Arc<MachineView>> = views[fixed..].iter().cloned().collect();
         let mut next: Views = views[..fixed].to_vec();
+        let mut gone = Vec::new();
         for (name, seen) in &listing {
             let Some(seen) = seen else {
                 continue;
@@ -808,12 +867,24 @@ impl ViewerCore {
                 {
                     view
                 }
-                _ => self.view(options),
+                replaced => {
+                    gone.extend(replaced);
+                    self.view(options)
+                }
             };
             next.push((name.clone(), view));
         }
+        gone.extend(old.into_values());
         *write_lock(&self.views) = Arc::new(next);
         following.seen = Some(listing);
+        // A machine no longer served stops refreshing; a rebuild of it may
+        // still run, and `close` waits for it.
+        let mut retired = lock(&self.retired);
+        retired.retain(|view| view.strong_count() > 0);
+        for view in gone {
+            view.retire();
+            retired.push(Arc::downgrade(&view));
+        }
     }
 
     /// How many machines this core serves.
@@ -842,40 +913,65 @@ impl ViewerCore {
         for (_, view) in self.views().iter() {
             view.close();
         }
+        // A view still alive after it stopped being served is alive
+        // because its last rebuild runs: wait for that too.
+        let retired: Vec<_> = lock(&self.retired)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for view in retired {
+            view.close();
+        }
     }
 
     /// Sets, or clears, the link the Machines page shows to the embedding
-    /// server's machine-management page. It is served in the model as
-    /// `admin`, so it can differ per request.
+    /// server's machine-management page, served in the model as `admin` by
+    /// [`ViewerCore::respond`]. A value that differs per request goes in
+    /// the [`Extras`] passed to [`ViewerCore::respond_with`] instead.
     pub fn set_admin_link(&mut self, link: Option<AdminLink>) {
-        self.admin = link;
+        self.extras.set_admin_link(link);
     }
 
-    /// Sets, or clears, the account menu served in `/api/model` as `account`.
-    /// It can differ per request and is not included in the model version or
-    /// its `ETag`.
+    /// Sets, or clears, the account menu served in `/api/model` as `account`
+    /// by [`ViewerCore::respond`]. It is not included in the model version
+    /// or its `ETag`. A menu that differs per request goes in the
+    /// [`Extras`] passed to [`ViewerCore::respond_with`] instead.
     pub fn set_account(&mut self, account: Option<AccountMenu>) {
-        self.account = account;
+        self.extras.set_account(account);
     }
 
-    /// Sets the destination for the Machines navigation entry. `item` must
-    /// be `"machines"`, and `href` must be a same-origin path. Returns false
-    /// and leaves the current value unchanged for an unknown item or path.
+    /// Sets the destination for the Machines navigation entry that
+    /// [`ViewerCore::respond`] serves; see [`Extras::set_nav_override`].
     pub fn set_nav_override(&mut self, item: &str, href: &str) -> bool {
-        if item != "machines" || !valid_href(href) {
-            return false;
-        }
-        self.nav_machines = Some(href.to_owned());
-        true
+        self.extras.set_nav_override(item, href)
+    }
+
+    /// The [`Extras`] [`ViewerCore::respond`] serves: those its setters set.
+    pub fn extras(&self) -> &Extras {
+        &self.extras
     }
 
     /// Answers one request: `path` and `query` split at the `?`, still
     /// percent-encoded, and the request's `If-None-Match`. Only GET is
     /// answered (405 otherwise); every URL the viewer uses is a GET. The
     /// caller authenticates first: the core serves whoever it is handed.
-    /// Any number of threads may call it at once.
+    /// Any number of threads may call it at once. The model carries the
+    /// [`Extras`] the core's setters set.
     pub fn respond(
         &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        if_none_match: Option<&str>,
+    ) -> ViewerReply {
+        self.respond_with(&self.extras, method, path, query, if_none_match)
+    }
+
+    /// [`ViewerCore::respond`], with this request's own [`Extras`] in the
+    /// model instead of the core's.
+    pub fn respond_with(
+        &self,
+        extras: &Extras,
         method: &str,
         path: &str,
         query: &str,
@@ -896,17 +992,12 @@ impl ViewerCore {
         if views.len() == 1 && !(self.received.is_some() && path == "/api/tree") {
             let mut reply = views[0].1.respond(method, path, query, if_none_match);
             if path == "/api/model" && reply.status == 200 {
-                reply.body = with_model_extras(
-                    &reply.body,
-                    self.admin.as_ref(),
-                    self.account.as_ref(),
-                    self.nav_machines.as_deref(),
-                );
+                reply.body = extras.apply(&reply.body);
             }
             return reply;
         }
         let answer = match path {
-            "/api/model" => self.model(&views, query, if_none_match),
+            "/api/model" => self.model(&views, extras, query, if_none_match),
             "/api/tx" => self.by_session(&views, path, query, if_none_match),
             "/api/entry" if query_value(query, "as").is_some() => {
                 self.by_session(&views, path, query, if_none_match)
@@ -963,6 +1054,7 @@ impl ViewerCore {
     fn model(
         &self,
         views: &Views,
+        extras: &Extras,
         query: &str,
         if_none_match: Option<&str>,
     ) -> io::Result<ViewerReply> {
@@ -985,12 +1077,7 @@ impl ViewerCore {
                 Ok(ViewerReply {
                     status: 200,
                     content_type: json,
-                    body: with_model_extras(
-                        &body,
-                        self.admin.as_ref(),
-                        self.account.as_ref(),
-                        self.nav_machines.as_deref(),
-                    ),
+                    body: extras.apply(&body),
                     etag: Some(etag),
                 })
             }
@@ -1405,6 +1492,9 @@ mod tests {
             assert!(!core.set_nav_override("machines", href), "{href:?}");
         }
         assert!(core.set_nav_override("machines", "/account/workspaces"));
-        assert_eq!(core.nav_machines.as_deref(), Some("/account/workspaces"));
+        assert_eq!(
+            core.extras().nav_machines.as_deref(),
+            Some("/account/workspaces")
+        );
     }
 }

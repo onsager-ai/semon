@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
-        Weak,
+        TryLockError, Weak,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -87,9 +87,22 @@ const CHECK_EVERY: Duration = Duration::from_millis(250);
 pub(crate) const REBUILD_SPACING: Duration = Duration::from_secs(1);
 /// A refresher stops after this long without a read.
 pub(crate) const IDLE_AFTER: Duration = Duration::from_secs(30);
+/// While background rebuilds fail, reads answer from the last model built
+/// until it was last checked this long ago; then each read refreshes
+/// itself, and answers the error (500) for as long as the build fails.
+pub(crate) const FAILING_AFTER: Duration = Duration::from_secs(3);
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The lock if it is free, poisoned or not.
+fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
 }
 
 pub(crate) fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
@@ -113,8 +126,9 @@ pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 ///   texts, when each was saved). A rebuild holds it from its stat pass to
 ///   its swap, so one machine rebuilds once at a time. In
 ///   [`Refresh::Background`] a read takes it only when there is no model
-///   checked in the last second and no refresher to keep it so: the first
-///   read, and the first after [`IDLE_AFTER`] without one.
+///   checked in the last second and no refresher to keep it so (the first
+///   read, and the first after [`IDLE_AFTER`] without one), or when
+///   background rebuilds have failed for [`FAILING_AFTER`].
 /// - `files` holds the transcript paths and Codex harness offsets the V1
 ///   routes look up, held for a lookup or an insert, never for a file read.
 /// - `live` is the refresher's state, held for a few field reads.
@@ -187,8 +201,11 @@ struct LiveState {
     /// When the refresher next looks: [`CHECK_EVERY`] after the last
     /// check, and never before [`REBUILD_SPACING`] after the last rebuild.
     due: Option<Instant>,
-    /// The last error a background refresh printed, printed once.
+    /// The last background refresh's error, printed once; `None` after
+    /// a refresh that worked.
     error: Option<String>,
+    /// [`IDLE_AFTER`], but for tests.
+    idle_after: Duration,
 }
 
 // An embedding server shares one core between threads and calls it from
@@ -525,7 +542,19 @@ pub fn serve(options: ServeOptions) -> io::Result<()> {
         thread::spawn(move || {
             let error = loop {
                 match server.recv() {
-                    Ok(request) => viewer.handle(request),
+                    // A request that panics fails alone (its connection
+                    // drops) and this thread serves on, rather than the
+                    // server losing a thread for good.
+                    Ok(request) => {
+                        let viewer = &viewer;
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                            viewer.handle(request)
+                        }))
+                        .is_err()
+                        {
+                            eprintln!("semon sessions viewer: a request panicked");
+                        }
+                    }
                     Err(error) => break error,
                 }
             };
@@ -676,50 +705,37 @@ pub(crate) enum Reading {
     At(i64),
 }
 
-impl Files {
-    /// Brings the transcript paths in line with `paths`, keeping the
-    /// `.jsonl` files that are regular files.
-    fn update(&mut self, options: &Options, paths: impl IntoIterator<Item = PathBuf>) {
-        let paths: BTreeSet<_> = paths
-            .into_iter()
-            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl") && regular(path))
-            .collect();
-        self.paths.retain(|_, path| paths.contains(path));
-        self.known.retain(|path| paths.contains(path));
-        for path in paths.difference(&self.known) {
-            let harness = if path.starts_with(options.claude_home.join("projects")) {
-                "claude"
-            } else {
-                "codex"
-            };
-            let id = if harness == "claude" {
-                let stem = path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or_default();
-                if path
-                    .parent()
-                    .and_then(Path::file_name)
-                    .is_some_and(|name| name == "subagents")
-                {
-                    stem.strip_prefix("agent-").unwrap_or(stem).to_owned()
-                } else {
-                    stem.to_owned()
-                }
-            } else {
-                codex_meta(path)
-                    .ok()
-                    .flatten()
-                    .and_then(|meta| field(&meta, "id").map(str::to_owned))
-                    .or_else(|| codex_id_from_filename(path))
-                    .unwrap_or_default()
-            };
-            if !id.is_empty() {
-                self.paths.insert((harness.into(), id), path.clone());
-            }
+/// The session a transcript file holds, as the V1 routes name it: the
+/// harness, and the id (a Codex file's is read from its first line).
+fn transcript_key(options: &Options, path: &Path) -> Option<(String, String)> {
+    let harness = if path.starts_with(options.claude_home.join("projects")) {
+        "claude"
+    } else {
+        "codex"
+    };
+    let id = if harness == "claude" {
+        let stem = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "subagents")
+        {
+            stem.strip_prefix("agent-").unwrap_or(stem).to_owned()
+        } else {
+            stem.to_owned()
         }
-        self.known = paths;
-    }
+    } else {
+        codex_meta(path)
+            .ok()
+            .flatten()
+            .and_then(|meta| field(&meta, "id").map(str::to_owned))
+            .or_else(|| codex_id_from_filename(path))
+            .unwrap_or_default()
+    };
+    (!id.is_empty()).then(|| (harness.to_owned(), id))
 }
 
 /// When a background refresher next looks, after a check that started at
@@ -753,9 +769,10 @@ fn refresher(live: Arc<Live>, view: Weak<MachineView>, generation: u64) {
         {
             let mut state = lock(&live.state);
             loop {
+                let idle_after = state.idle_after;
                 let idle = state
                     .read_at
-                    .is_none_or(|read| read.elapsed() >= IDLE_AFTER);
+                    .is_none_or(|read| read.elapsed() >= idle_after);
                 if state.closed || idle {
                     // Under the same lock a read tests `running` under.
                     state.running = false;
@@ -793,7 +810,13 @@ impl MachineView {
             work: Mutex::default(),
             shown: RwLock::default(),
             files: Mutex::default(),
-            live: Arc::default(),
+            live: Arc::new(Live {
+                state: Mutex::new(LiveState {
+                    idle_after: IDLE_AFTER,
+                    ..LiveState::default()
+                }),
+                changed: Condvar::new(),
+            }),
             me: me.clone(),
             #[cfg(test)]
             hooks: tests::Hooks::default(),
@@ -840,7 +863,7 @@ impl MachineView {
             .iter()
             .filter_map(|(path, value)| value.is_some().then_some(path.clone()))
             .collect::<Vec<_>>();
-        lock(&self.files).update(&self.options, paths);
+        self.update_files(paths);
         let tree = Arc::new(TreeCache {
             roots,
             json,
@@ -888,7 +911,7 @@ impl MachineView {
         // changes its directory's stamp.)
         let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
         #[cfg(test)]
-        self.hooks.building();
+        self.hooks.building()?;
         let built = model::build(
             &self.options,
             cache,
@@ -935,7 +958,7 @@ impl MachineView {
         if let Some(model) = self.shown_model()
             && !model.snapshot.changed(&self.options)
         {
-            if let Ok(mut work) = self.work.try_lock() {
+            if let Some(mut work) = try_lock(&self.work) {
                 self.persist_events_if_due(&mut work)?;
             }
             return Ok(model);
@@ -948,7 +971,7 @@ impl MachineView {
         if let Some(tree) = self.shown_tree()
             && !tree.snapshot.changed(&self.options)
         {
-            if let Ok(mut work) = self.work.try_lock() {
+            if let Some(mut work) = try_lock(&self.work) {
                 self.persist_if_due(&mut work)?;
             }
             return Ok(tree);
@@ -997,12 +1020,20 @@ impl MachineView {
         let mut state = lock(&self.live.state);
         let now = Instant::now();
         state.read_at = Some(now);
-        if state.running || state.closed {
+        if state.closed {
             return true;
         }
-        let fresh = state
-            .checked_at
-            .is_some_and(|at| now.saturating_duration_since(at) < REBUILD_SPACING);
+        let age = state.checked_at.map(|at| now.saturating_duration_since(at));
+        // Rebuilds that keep failing aren't hidden behind an ever older
+        // model: past FAILING_AFTER a read refreshes itself, and answers
+        // the error if the build still fails.
+        if state.error.is_some() && age.is_none_or(|age| age >= FAILING_AFTER) {
+            return false;
+        }
+        if state.running {
+            return true;
+        }
+        let fresh = age.is_some_and(|age| age < REBUILD_SPACING);
         if fresh {
             self.start(&mut state);
         }
@@ -1038,6 +1069,7 @@ impl MachineView {
         drop(work);
         let mut state = lock(&self.live.state);
         state.checked_at = Some(started);
+        state.error = None;
         state.due = Some(next_check(started, built_at));
         state.read_at = Some(Instant::now());
         self.start(&mut state);
@@ -1102,6 +1134,13 @@ impl MachineView {
                 state.error = Some(message);
             }
         }
+    }
+
+    /// Stops the refresher at its next wake, without waiting: the view is
+    /// no longer served. [`MachineView::close`] still waits it out.
+    pub(crate) fn retire(&self) {
+        lock(&self.live.state).closed = true;
+        self.live.changed.notify_all();
     }
 
     /// Stops the refresher and waits out a rebuild in progress; none
@@ -1352,9 +1391,33 @@ impl MachineView {
             &mut paths,
             "jsonl",
         )?;
+        self.update_files(paths);
+        Ok(lock(&self.files).paths.get(&key).cloned())
+    }
+
+    /// Brings the transcript paths in line with `paths`, keeping the
+    /// `.jsonl` files that are regular files. The files are looked at, and
+    /// a new Codex file's first line read, without the `files` lock: it is
+    /// held only to find which paths are new and to store the result.
+    fn update_files(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        let paths: BTreeSet<_> = paths
+            .into_iter()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl") && regular(path))
+            .collect();
+        let new: Vec<PathBuf> = paths
+            .difference(&lock(&self.files).known)
+            .cloned()
+            .collect();
+        let keys: Vec<_> = new
+            .into_iter()
+            .filter_map(|path| transcript_key(&self.options, &path).map(|key| (key, path)))
+            .collect();
         let mut files = lock(&self.files);
-        files.update(&self.options, paths);
-        Ok(files.paths.get(&key).cloned())
+        files.paths.retain(|_, path| paths.contains(path));
+        for (key, path) in keys {
+            files.paths.insert(key, path);
+        }
+        files.known = paths;
     }
 
     fn harness_offsets_cached(&self, path: &Path) -> io::Result<BTreeSet<u64>> {
@@ -2214,17 +2277,23 @@ mod tests {
         builds: AtomicU64,
         /// Runs in each build, after the files are stamped.
         building: Mutex<Option<Hook>>,
+        /// Builds fail while set.
+        failing: AtomicBool,
     }
 
     type Hook = Arc<dyn Fn() + Send + Sync>;
 
     impl Hooks {
-        pub(super) fn building(&self) {
+        pub(super) fn building(&self) -> io::Result<()> {
             self.builds.fetch_add(1, Ordering::SeqCst);
             let hook = lock(&self.building).clone();
             if let Some(hook) = hook {
                 hook();
             }
+            if self.failing.load(Ordering::SeqCst) {
+                return Err(io::Error::other("a build failed on purpose"));
+            }
+            Ok(())
         }
 
         fn builds(&self) -> u64 {
@@ -3677,6 +3746,10 @@ mod tests {
         let today = fixture.viewer();
         let mut core =
             ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);
+        // `--serve`'s mode answers the same bytes.
+        let mut background =
+            ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);
+        background.set_refresh(Refresh::Background);
         for (path, query) in [
             ("/api/model", ""),
             ("/api/tx", "sid=lane"),
@@ -3686,23 +3759,26 @@ mod tests {
             ("/machines/laptop", ""),
             ("/viewer.js", ""),
         ] {
-            let (a, b) = (
-                today.respond("GET", path, query, None),
+            let a = today.respond("GET", path, query, None);
+            for b in [
                 core.respond("GET", path, query, None),
-            );
-            assert_eq!(
-                (a.status, a.content_type, a.etag.clone()),
-                (b.status, b.content_type, b.etag.clone()),
-                "{path}"
-            );
-            if path == "/api/model" {
-                assert_eq!(without_now(&a.body), without_now(&b.body));
-            } else if path == "/api/tree" {
-                assert_eq!(without_age(&a.body), without_age(&b.body), "{path}");
-            } else {
-                assert_eq!(a.body, b.body, "{path}");
+                background.respond("GET", path, query, None),
+            ] {
+                assert_eq!(
+                    (a.status, a.content_type, a.etag.clone()),
+                    (b.status, b.content_type, b.etag.clone()),
+                    "{path}"
+                );
+                if path == "/api/model" {
+                    assert_eq!(without_now(&a.body), without_now(&b.body));
+                } else if path == "/api/tree" {
+                    assert_eq!(without_age(&a.body), without_age(&b.body), "{path}");
+                } else {
+                    assert_eq!(a.body, b.body, "{path}");
+                }
             }
         }
+        background.close();
         // No admin link unless the embedder sets one, and then first.
         assert!(
             !String::from_utf8_lossy(&core.respond("GET", "/api/model", "", None).body)
@@ -3798,6 +3874,24 @@ mod tests {
         assert_eq!(unchanged.status, 304);
         assert!(unchanged.body.is_empty());
         assert_eq!(unchanged.etag.as_deref(), Some(etag.as_str()));
+
+        // Per request, without touching the shared core: its own extras.
+        let mut extras = crate::Extras::default();
+        extras.set_account(Some(menu("Per request")));
+        let own = core.respond_with(&extras, "GET", "/api/model", "", None);
+        let own_model = body_of(&own);
+        assert_eq!(own_model["account"]["name"], "Per request");
+        assert!(own_model.get("nav").is_none());
+        assert_eq!(own_model["version"], version);
+        assert_eq!(own.etag.as_deref(), Some(etag.as_str()));
+        let shared = body_of(&core.respond("GET", "/api/model", "", None));
+        assert_eq!(shared["account"]["name"], "Another account");
+        assert_eq!(core.extras().clone(), {
+            let mut set = crate::Extras::default();
+            set.set_account(Some(menu("Another account")));
+            assert!(set.set_nav_override("machines", "/account/workspaces"));
+            set
+        });
     }
 
     #[test]
@@ -4730,5 +4824,155 @@ mod tests {
         // Closed: no call reads a file again.
         core.close();
         assert_eq!(core.respond("GET", "/api/model", "", None).status, 404);
+    }
+
+    /// A background view whose first model is built and whose refresher has
+    /// looked for over a second: past the spacing after that first build.
+    fn warm_background(fixture: &Fixture) -> (Arc<MachineView>, String) {
+        let view = fixture.viewer();
+        view.set_background(true);
+        let version = version_of(&view.respond("GET", "/api/model", "", None));
+        let until = Instant::now() + REBUILD_SPACING + Duration::from_millis(200);
+        while Instant::now() < until {
+            view.respond("GET", "/api/model", &format!("since={version}"), None);
+            thread::sleep(Duration::from_millis(50));
+        }
+        (view, version)
+    }
+
+    fn serves(view: &MachineView, text: &str) -> bool {
+        let page = view.respond("GET", "/api/tx", "sid=lane", None);
+        String::from_utf8_lossy(&page.body).contains(text)
+    }
+
+    /// The documented bound: a line is served within the rebuild spacing
+    /// and one check of when it lands, plus a build (given 750 ms here),
+    /// even when it lands just after a rebuild.
+    #[test]
+    fn a_change_is_served_within_the_staleness_bound() {
+        let fixture = lane_fixture();
+        let (view, _) = warm_background(&fixture);
+        let bound = REBUILD_SPACING + CHECK_EVERY + Duration::from_millis(750);
+        for (second, text) in [(1, "first of two"), (2, "right after a rebuild")] {
+            let written = Instant::now();
+            say(&fixture, "lane", second, text);
+            eventually(text, || serves(&view, text).then_some(()));
+            let took = written.elapsed();
+            assert!(
+                took < bound,
+                "{text}: served after {took:?}, over {bound:?}"
+            );
+        }
+        view.close();
+    }
+
+    /// After IDLE_AFTER without a read the refresher stops; the next read,
+    /// its model last checked over a second ago, refreshes before it
+    /// answers and starts a refresher again.
+    #[test]
+    fn after_an_idle_spell_the_first_read_refreshes_first() {
+        let fixture = lane_fixture();
+        let view = fixture.viewer();
+        view.set_background(true);
+        lock(&view.live.state).idle_after = Duration::from_millis(300);
+        let v1 = version_of(&view.respond("GET", "/api/model", "", None));
+        let running = || lock(&view.live.state).running;
+        assert!(running());
+        eventually("the refresher stops when idle", || {
+            (!running()).then_some(())
+        });
+        thread::sleep(REBUILD_SPACING + Duration::from_millis(100));
+        say(&fixture, "lane", 1, "written while idle");
+        assert!(
+            serves(&view, "written while idle"),
+            "the first read after an idle spell answered from the old model"
+        );
+        assert!(running(), "the read started a refresher again");
+        assert_ne!(version_of(&view.respond("GET", "/api/model", "", None)), v1);
+        view.close();
+    }
+
+    /// A refresher that panics mid-build is marked stopped (the model it
+    /// had stays served), and the next reads get the change all the same.
+    #[test]
+    fn a_refresher_that_panics_is_replaced() {
+        let fixture = lane_fixture();
+        let (view, v1) = warm_background(&fixture);
+        let armed = Arc::new(AtomicBool::new(true));
+        let trigger = armed.clone();
+        *lock(&view.hooks.building) = Some(Arc::new(move || {
+            if trigger.swap(false, Ordering::SeqCst) {
+                panic!("a rebuild panicked on purpose");
+            }
+        }));
+        say(&fixture, "lane", 1, "after the panic");
+        eventually("the panic, and the refresher stopped", || {
+            (!armed.load(Ordering::SeqCst) && !lock(&view.live.state).running).then_some(())
+        });
+        let during = view.respond("GET", "/api/model", &format!("since={v1}"), None);
+        assert!(matches!(during.status, 200 | 304), "{}", during.status);
+        eventually("the line, after the panic", || {
+            serves(&view, "after the panic").then_some(())
+        });
+        view.close();
+    }
+
+    /// Background builds that keep failing aren't hidden forever behind
+    /// the last model: past FAILING_AFTER each read tries itself and
+    /// answers the error, and the model comes back once builds work.
+    #[test]
+    fn background_builds_that_keep_failing_answer_the_error() {
+        let fixture = lane_fixture();
+        let (view, v1) = warm_background(&fixture);
+        view.hooks.failing.store(true, Ordering::SeqCst);
+        say(&fixture, "lane", 1, "while builds fail");
+        let first = view.respond("GET", "/api/model", &format!("since={v1}"), None);
+        assert_eq!(first.status, 304, "at first the last model answers");
+        let failed = Instant::now();
+        eventually("the error", || {
+            (view.respond("GET", "/api/model", "", None).status == 500).then_some(())
+        });
+        assert!(failed.elapsed() >= FAILING_AFTER - REBUILD_SPACING - CHECK_EVERY);
+        view.hooks.failing.store(false, Ordering::SeqCst);
+        eventually("the model again", || {
+            (view
+                .respond("GET", "/api/model", &format!("since={v1}"), None)
+                .status
+                == 200)
+                .then_some(())
+        });
+        assert!(serves(&view, "while builds fail"));
+        view.close();
+    }
+
+    /// Refreshed on read, the reads that find one change share its one
+    /// rebuild: the others wait for it, then answer the same new model.
+    #[test]
+    fn on_read_the_reads_that_find_a_change_share_one_rebuild() {
+        let fixture = lane_fixture();
+        let view = fixture.viewer();
+        let v1 = version_of(&view.respond("GET", "/api/model", "", None));
+        assert_eq!(view.hooks.builds(), 1);
+        let (starts, release) = view.hooks.hold();
+        say(&fixture, "lane", 1, "one change");
+        let readers: Vec<_> = (0..8)
+            .map(|_| {
+                let view = view.clone();
+                thread::spawn(move || version_of(&view.respond("GET", "/api/model", "", None)))
+            })
+            .collect();
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a read rebuilds");
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(view.hooks.builds(), 2, "eight reads, one rebuild");
+        drop(release);
+        let versions: BTreeSet<String> = readers
+            .into_iter()
+            .map(|reader| reader.join().expect("a reader failed"))
+            .collect();
+        assert_eq!(versions.len(), 1, "{versions:?}");
+        assert!(!versions.contains(&v1));
+        assert_eq!(view.hooks.builds(), 2);
     }
 }

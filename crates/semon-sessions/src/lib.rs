@@ -34,7 +34,7 @@ pub use model::{MODEL_API, model_json, model_json_at};
 pub use query::{DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools};
 pub use received::{ReceivedMachines, is_machine_name};
 pub use union::{
-    AccountLink, AccountMenu, AccountWorkspace, AdminLink, LinkMethod, Refresh, ViewerCore,
+    AccountLink, AccountMenu, AccountWorkspace, AdminLink, Extras, LinkMethod, Refresh, ViewerCore,
 };
 pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve};
 
