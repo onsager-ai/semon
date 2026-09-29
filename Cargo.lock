@@ -1856,6 +1856,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "reqwest",
+ "rustls 0.23.43",
  "semon-sessions",
  "serde",
  "serde_json",

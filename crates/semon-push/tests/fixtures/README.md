@@ -1,0 +1,3 @@
+`test-cert.pem` and `test-key.pem` are a throwaway, test-only self-signed certificate and private key for `127.0.0.1`/`localhost`, used by `tests/receive.rs` to exercise `semon receive`'s TLS listener. They protect nothing and must never be used for real.
+
+Made with: `openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -sha256 -nodes -days 36500 -keyout test-key.pem -out test-cert.pem -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' -addext 'basicConstraints=critical,CA:FALSE' -addext 'keyUsage=critical,digitalSignature' -addext 'extendedKeyUsage=serverAuth'`
