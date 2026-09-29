@@ -13,6 +13,8 @@
 
   function closeDrawer(restoreFocus = true) {
     if (!document.body.classList.contains("drawer-open")) return;
+    // A popover opened from the drawer (its account menu) goes with it, or it would float over the page on its own.
+    try { sidebar?.querySelectorAll(":popover-open").forEach((popover) => popover.hidePopover()); } catch { /* no popovers here */ }
     document.body.classList.remove("drawer-open");
     lead?.setAttribute("aria-expanded", "false");
     if (restoreFocus) lead?.focus();
@@ -21,8 +23,11 @@
   lead?.addEventListener("click", openDrawer);
   drawerClose?.addEventListener("click", () => closeDrawer());
   scrim?.addEventListener("click", () => closeDrawer());
+  // Esc closes an open popover first (the browser does that after this listener), and the drawer only when none is open, so
+  // a menu opened from the drawer closes on its own. A browser without popovers has none open.
+  const popoverOpen = () => { try { return !!document.querySelector(":popover-open"); } catch { return false; } };
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeDrawer();
+    if (event.key === "Escape" && !popoverOpen()) closeDrawer();
   });
 
   let touchStart = null;
