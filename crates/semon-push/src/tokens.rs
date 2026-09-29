@@ -45,7 +45,8 @@ pub fn add_token(dir: &Path, name: &str) -> Result<String, String> {
             "{name:?} is not a machine name: use 1 to 63 of a-z, 0-9 and -"
         ));
     }
-    let mut entries = read_entries(&tokens_path(dir))?;
+    prepare_private_dir(dir, true)?;
+    let mut entries = read_checked(&tokens_path(dir))?;
     if entries.iter().any(|entry| entry.name == name) {
         return Err(format!(
             "{name} already has a token; revoke it first (semon receive token revoke {name} --dir {})",
@@ -68,7 +69,8 @@ pub fn add_token(dir: &Path, name: &str) -> Result<String, String> {
 
 /// Removes machine `name`'s token.
 pub fn revoke_token(dir: &Path, name: &str) -> Result<(), String> {
-    let mut entries = read_entries(&tokens_path(dir))?;
+    prepare_private_dir(dir, false)?;
+    let mut entries = read_checked(&tokens_path(dir))?;
     let before = entries.len();
     entries.retain(|entry| entry.name != name);
     if entries.len() == before {
@@ -82,7 +84,8 @@ pub fn revoke_token(dir: &Path, name: &str) -> Result<(), String> {
 
 /// The machines that have a token, in the file's order.
 pub fn token_names(dir: &Path) -> Result<Vec<String>, String> {
-    Ok(read_entries(&tokens_path(dir))?
+    prepare_private_dir(dir, false)?;
+    Ok(read_checked(&tokens_path(dir))?
         .into_iter()
         .map(|entry| entry.name)
         .collect())
@@ -91,25 +94,66 @@ pub fn token_names(dir: &Path) -> Result<Vec<String>, String> {
 /// Refuses a token file anyone but its owner can read or write.
 pub fn check_tokens_mode(dir: &Path) -> Result<(), String> {
     let path = tokens_path(dir);
-    let meta = match fs::metadata(&path) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("{}: {error}", path.display())),
-    };
+    match fs::metadata(&path) {
+        Ok(meta) => loose_mode(&path, &meta, 0o600),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+/// Checks the receiver's directory: an existing one must be a directory
+/// that only its owner can use; a missing one is created 0700 when
+/// `create`. An existing directory's mode is never changed.
+pub fn prepare_private_dir(dir: &Path, create: bool) -> Result<(), String> {
+    let failed = |error: io::Error| format!("{}: {error}", dir.display());
+    match fs::metadata(dir) {
+        Ok(meta) if !meta.is_dir() => Err(format!("{} is not a directory", dir.display())),
+        Ok(meta) => loose_mode(dir, &meta, 0o700),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
+            if let Some(parent) = dir.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                fs::create_dir_all(parent).map_err(failed)?;
+            }
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(dir).map_err(failed)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(failed(error)),
+    }
+}
+
+/// Refuses `path` when its group or others have any access; the message
+/// names the chmod (to `wanted`) that fixes it.
+fn loose_mode(path: &Path, meta: &fs::Metadata, wanted: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             return Err(format!(
-                "{} is mode {mode:03o}; the token file must be 0600 (chmod 600 it)",
+                "{} is mode {mode:03o}; only its owner may use it (chmod {wanted:o} {})",
+                path.display(),
                 path.display()
             ));
         }
     }
     #[cfg(not(unix))]
-    let _ = meta;
+    let _ = (path, meta, wanted);
     Ok(())
+}
+
+/// The token file's entries, refused when its mode is loose.
+fn read_checked(path: &Path) -> Result<Vec<Entry>, String> {
+    match fs::metadata(path) {
+        Ok(meta) => loose_mode(path, &meta, 0o600)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    }
+    read_entries(path)
 }
 
 /// What the token file looked like when it was last read.
@@ -119,6 +163,9 @@ struct Stamp {
     modified: Option<std::time::SystemTime>,
     #[cfg(unix)]
     inode: (u64, u64),
+    /// A chmod changes only this.
+    #[cfg(unix)]
+    mode: u32,
 }
 
 impl Stamp {
@@ -130,6 +177,11 @@ impl Stamp {
             inode: {
                 use std::os::unix::fs::MetadataExt;
                 (meta.dev(), meta.ino())
+            },
+            #[cfg(unix)]
+            mode: {
+                use std::os::unix::fs::PermissionsExt;
+                meta.permissions().mode()
             },
         }
     }
@@ -151,7 +203,7 @@ impl Tokens {
     pub fn open(dir: &Path) -> Result<Self, String> {
         let path = tokens_path(dir);
         let stamp = fs::metadata(&path).ok().map(|meta| Stamp::of(&meta));
-        let entries = read_entries(&path)?;
+        let entries = read_checked(&path)?;
         Ok(Self {
             path,
             loaded: Mutex::new(Loaded { stamp, entries }),
@@ -194,15 +246,17 @@ impl Tokens {
         self.machine(token.trim())
     }
 
-    /// The entries, read again first when the file changed since. A file
-    /// that can't be read or parsed then holds no tokens until it changes
-    /// again, so a broken edit locks everyone out rather than in.
+    /// The entries, read again first when the file changed since (its
+    /// length, time, inode or mode). A file that can't be read or parsed,
+    /// or that others can read, then holds no tokens until it changes
+    /// again, so a broken edit locks everyone out rather than in. That is
+    /// logged once per change.
     fn refresh(&self) -> std::sync::MutexGuard<'_, Loaded> {
         let mut loaded = self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
         let stamp = fs::metadata(&self.path).ok().map(|meta| Stamp::of(&meta));
         if stamp != loaded.stamp {
             loaded.stamp = stamp;
-            loaded.entries = match read_entries(&self.path) {
+            loaded.entries = match read_checked(&self.path) {
                 Ok(entries) => entries,
                 Err(error) => {
                     eprintln!("semon receive: {error}; no token is accepted until it is fixed");
@@ -359,6 +413,41 @@ mod tests {
         fs::write(tokens_path(&dir), "laptop not-hex\n").unwrap();
         assert_eq!(tokens.machine(&token), None);
         assert!(Tokens::open(&dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_loose_directory_is_refused_and_never_chmodded() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("loose");
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = add_token(&dir, "laptop").unwrap_err();
+        assert!(error.contains("chmod 700"), "{error}");
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "an existing directory's mode is left alone"
+        );
+        assert!(prepare_private_dir(&dir, true).is_err());
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        add_token(&dir, "laptop").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_token_file_loosened_while_running_accepts_nobody() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("loosened");
+        let token = add_token(&dir, "laptop").unwrap();
+        let tokens = Tokens::open(&dir).unwrap();
+        assert_eq!(tokens.machine(&token).as_deref(), Some("laptop"));
+        fs::set_permissions(tokens_path(&dir), fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(tokens.machine(&token), None);
+        fs::set_permissions(tokens_path(&dir), fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(tokens.machine(&token).as_deref(), Some("laptop"));
         let _ = fs::remove_dir_all(&dir);
     }
 

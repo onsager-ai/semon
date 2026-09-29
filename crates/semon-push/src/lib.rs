@@ -720,9 +720,13 @@ fn complete_lines(path: &Path, from: u64, chunk: usize) -> Result<(Vec<u8>, u64)
     Ok((data, from + end as u64))
 }
 
-/// Writes `bytes` to `path` with mode 0600, in a 0700 directory, atomically.
+/// Writes `bytes` to `path` with mode 0600, atomically. A missing directory
+/// is created 0700; an existing one's mode is left alone.
 pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty() && !parent.exists())
+    {
         fs::create_dir_all(parent)?;
         #[cfg(unix)]
         {
