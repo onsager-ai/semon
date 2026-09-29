@@ -1360,8 +1360,8 @@ pub(crate) fn yield_json(output: Option<&Value>) -> Option<Value> {
                 .filter_map(|part| field(part, "text"))
                 .collect();
             match texts.as_slice() {
-                [header, body] if header.trim_start().starts_with("Script completed") => body,
-                [body] => body,
+                [header, body] if header.trim_start().starts_with("Script completed") => *body,
+                [body] => *body,
                 _ => return None,
             }
         }
