@@ -1244,12 +1244,10 @@
     rows.push(["Session id", s.sessionId ?? s.id], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Last activity", clock(s.last)], ["Tokens in / out", tok(s.tokens?.[0] ?? 0) + " / " + tok(s.tokens?.[2] ?? 0)], ["Cached context", tok(s.tokens?.[1] ?? 0)]);
     for (const [label, value] of rows) { const row = el("div", "detail-row"); row.append(el("span", "detail-label", label), el("span", "detail-value", String(value))); list.append(row); }
     const ownCost = costForSession(s.id), allCost = costForSession(s.id, true), hasRuns = childSessions(s.id).length > 0;
-    const costRow = el("button", "detail-row cost-row"); costRow.type = "button"; costRow.setAttribute("aria-expanded", "false");
-    const costLabel = el("span", "detail-label", "API-equivalent cost"); costLabel.append(costInfoTip());
-    costRow.append(costLabel, el("span", "detail-value", hasRuns ? costText(ownCost) + " own · " + costText(allCost) + " incl. runs" : costText(ownCost)));
-    const breakdown = costBreakdown(s.id, true); breakdown.hidden = true;
-    costRow.addEventListener("click", () => { breakdown.hidden = !breakdown.hidden; costRow.setAttribute("aria-expanded", String(!breakdown.hidden)); });
-    list.append(costRow); const missing = costMissing(allCost); if (missing.length) list.append(el("div", "no-price", "no price for " + missing.join(", ")));
+    const costRow = el("div", "detail-row cost-row");
+    costRow.append(el("span", "detail-label", "API-equivalent cost"), el("span", "detail-value", hasRuns ? costText(ownCost) + " own · " + costText(allCost) + " incl. runs" : costText(ownCost)));
+    list.append(costRow, costBreakdown(s.id, true));
+    const missing = costMissing(allCost); if (missing.length) list.append(el("div", "no-price", "no price for " + missing.join(", ")));
     const reports = s.reported_runs ?? [], reported = reports.filter((run) => Number.isFinite(run.cost_usd));
     if (reports.length) {
       const reportedUsd = reported.reduce((sum, run) => sum + run.cost_usd, 0), phrase = reported.length === 1 ? "its last run" : "its last " + reported.length + " runs";
@@ -1257,25 +1255,35 @@
     }
     const mismatch = [...(s.cost_check ?? [])].reverse().find((check) => check.ok === false && Number.isFinite(check.computed_usd) && Number.isFinite(check.reported_usd));
     if (mismatch) { const diff = Math.abs(mismatch.computed_usd - mismatch.reported_usd), pct = mismatch.reported_usd === 0 ? (diff === 0 ? 0 : 100) : Math.round(diff / Math.abs(mismatch.reported_usd) * 100); list.append(el("div", "cost-warning", "Differs from Claude Code's figure by " + pct + "%")); }
-    list.append(breakdown);
     body.append(list); d.append(head, body); document.body.append(d);
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); $("#more-btn")?.focus(); });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
     try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
   }
+  // 739,682 reads "740k" and 12,422,228 "12.4M"; the exact figure is the cell's tooltip.
+  const compactCount = (n) => { if (n < 1e3) return String(n); if (n < 1e4) return +(n / 1e3).toFixed(1) + "k"; const k = Math.round(n / 1e3); return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M"; };
+  // The tokens and cost of a session, always shown: one table per model, a row for each kind of token that was used or billed.
   function costBreakdown(sid, includeRuns) {
-    const cost = costForSession(sid, includeRuns), box = el("div", "cost-breakdown");
-    box.append(el("div", "cost-breakdown-head", includeRuns && childSessions(sid).length ? "Tokens and API-equivalent cost · incl. runs" : "Tokens and API-equivalent cost"));
+    const cost = costForSession(sid, includeRuns), box = el("div", "cost-breakdown"), head = el("div", "cost-breakdown-head");
+    head.append(el("span", null, includeRuns && childSessions(sid).length ? "Tokens and API-equivalent cost · incl. runs" : "Tokens and API-equivalent cost"), costInfoTip()); box.append(head);
+    let shown = 0;
     for (const [modelId, model] of Object.entries(cost.by_model)) {
-      const group = el("section", "cost-model"), priced = model.usd != null && !costMissing(cost).includes(modelId); group.append(el("div", "cost-model-name", modelId));
+      const priced = model.usd != null && !costMissing(cost).includes(modelId), rows = [];
       for (const [key, label] of TOKEN_KINDS) {
-        const tokens = model.tokens?.[key], amount = Number(model.usd_by_kind?.[key]) || 0, row = el("div", "cost-line"); row.append(el("span", null, label), el("span", "cost-amount", tokens == null ? "" : tokens.toLocaleString() + " tokens"), el("span", "cost-value", priced ? asMoney(amount) : "—")); group.append(row);
+        const tokens = Number(model.tokens?.[key]) || 0, amount = Number(model.usd_by_kind?.[key]) || 0;
+        if (tokens === 0 && (!priced || amount < 0.005)) continue;
+        const row = el("div", "cost-line"), count = el("span", "cost-amount", tokens ? compactCount(tokens) : "");
+        if (tokens) { count.dataset.tip = tokens.toLocaleString() + " tokens"; count.append(el("span", "sr-only", " (" + tokens.toLocaleString() + ")")); }
+        row.append(el("span", "cost-kind", label), count, el("span", "cost-value", priced ? asMoney(amount) : "—")); rows.push(row);
       }
+      if (!rows.length && priced) continue;
+      const group = el("section", "cost-model"), top = el("div", "cost-model-head");
+      top.append(el("span", "cost-model-name", modelId), el("span", null, "Tokens"), el("span", null, "Cost")); group.append(top, ...rows);
       if (!priced) group.append(el("div", "no-price", "no price for " + modelId));
-      box.append(group);
+      box.append(group); shown++;
     }
-    if (!Object.keys(cost.by_model).length) box.append(el("p", "empty", "No token usage recorded.")); return box;
+    if (!shown) box.append(el("p", "empty", "No token usage recorded.")); return box;
   }
   function runRow(s, depth, sheet) {
     const row = el("button", "runs-row"); row.type = "button"; row.style.paddingLeft = Math.min(depth, 3) * 14 + "px";

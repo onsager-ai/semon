@@ -195,19 +195,19 @@ export default async function barCheck(browser) {
       await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click(); await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
       out.details = await page.evaluate((phone) => {
         const d = document.querySelector("dialog.session-details"), r = d.getBoundingClientRect(), labels = [...d.querySelectorAll(".detail-label")].map((x) => x.textContent), cost = d.querySelector(".cost-row");
-        cost?.click();
         const normalize = (text) => text.replace(/\s+/g, " ").trim();
         const breakdown = d.querySelector(".cost-breakdown"), breakdownText = normalize(breakdown?.textContent ?? "");
         const breakdownModels = [...(breakdown?.querySelectorAll(".cost-model") ?? [])].map((group) => ({
           model: group.querySelector(".cost-model-name")?.textContent,
           labels: [...group.querySelectorAll(".cost-line span:first-child")].map((x) => normalize(x.textContent)),
         }));
-        const kinds = ["Input", "Output", "Cache read", "Cache write · 5m", "Cache write · 1h", "Web search"];
+        // Shown with no tap; kinds that used nothing and cost nothing are left out, so only the two every model uses are required.
+        const kinds = ["Input", "Output"];
         return {
           open: d.open, inView: r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth,
           phoneSheet: phone ? r.bottom >= innerHeight - 1 && r.width >= innerWidth - 1 : null,
           desktopDialog: phone ? null : r.width <= 680, labels,
-          hasCost: labels.includes("API-equivalent cost"), costExpanded: cost?.getAttribute("aria-expanded") === "true",
+          hasCost: labels.includes("API-equivalent cost"), costPlain: cost?.tagName === "DIV" && !cost.hasAttribute("aria-expanded"),
           costBreakdown: !!breakdown && !breakdown.hidden && breakdownModels.length > 0 && kinds.every((kind) => breakdownModels.some((group) => group.labels.includes(kind))),
           breakdownModels, breakdownText, hasSessionId: labels.includes("Session id"), hasDirectory: labels.includes("Directory"),
           hasPid: labels.includes("Process id"), reported: d.querySelector(".reported-cost")?.textContent ?? null,
@@ -541,7 +541,7 @@ export default async function barCheck(browser) {
         r.expect(m.details.open === true && m.details.inView === true, m.mode + ": Session details did not open visibly from the ⋯ menu: " + JSON.stringify(m.details));
         r.expect(m.details.labels.includes("Model") && m.details.labels.includes("Machine") && (m.details.labels.includes("Branch") || m.details.labels.includes("Worktree")) && m.details.labels.includes("Started") && m.details.labels.includes("Duration") && m.details.labels.includes("Tokens in / out") && m.details.labels.includes("Cached context") && m.details.hasSessionId, m.mode + ": Session details omitted a menu fact: " + JSON.stringify(m.details.labels));
         r.expect(m.details.escFocus?.closed === true && m.details.escFocus?.focus === "more-btn", m.mode + ": Escape on Session details did not return focus to the ⋯ button: " + JSON.stringify(m.details.escFocus));
-        r.expect(m.details.hasCost === true && m.details.costExpanded === true && m.details.costBreakdown === true && m.details.closed === true, m.mode + ": Session details omitted or failed to expand the API-equivalent cost breakdown, or did not close: " + JSON.stringify(m.details));
+        r.expect(m.details.hasCost === true && m.details.costPlain === true && m.details.costBreakdown === true && m.details.closed === true, m.mode + ": Session details omitted the API-equivalent cost breakdown, hid it behind a tap, or did not close: " + JSON.stringify(m.details));
         const detailFacts = D.SESS[m.details.session], reports = detailFacts?.reported_runs ?? [], costChecks = detailFacts?.cost_check ?? [];
         r.expect(reports.length > 0, m.mode + ": the fixture did not expose a reported Claude Code run for Session details");
         if (reports.length) r.expect(m.details.reported?.startsWith("Claude Code reported $") === true && m.details.reported.includes(reports.length === 1 ? "for its last run" : "for its last " + reports.length + " runs"), m.mode + ": reported Claude Code run cost was not shown in details: " + JSON.stringify(m.details.reported));
