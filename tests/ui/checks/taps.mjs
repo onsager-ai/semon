@@ -201,7 +201,7 @@ export default async function tapsCheck(browser) {
   for (const p of problems) r.expect(false, p);
   // The check is not vacuous: it reached the screens it names, and measured the controls those screens are made of.
   r.expect(screens > 60, "measured only " + screens + " screens");
-  for (const must of ["tracebtn", "nav-item", "srow", "session-details", "vclose", "jump-bottom", "analytics-range", "analytics-measure", "viewscript", "account-trigger"]) {
+  for (const must of ["tracebtn", "nav-item", "srow", "cost-breakdown-head", "vclose", "jump-bottom", "analytics-range", "analytics-measure", "viewscript", "account-trigger"]) {
     r.expect(Object.keys(bySignature).some((sig) => sig.includes("." + must)), "no ." + must + " was measured: its screen was not reached");
   }
   return r.done();
