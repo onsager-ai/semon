@@ -45,7 +45,8 @@ thread_local! {
 /// v12: thinking extras and the thinking filters follow the viewer rewrite (#38).
 /// v13: a plain Codex call links its `CommandExecution` item, which holds the
 /// whole collected output (#52).
-const CACHE_VERSION: u32 = 13;
+/// v14: compaction and interrupt signals are indexed apart, as `signals` (PR 1 of the dropped-signals plan).
+const CACHE_VERSION: u32 = 14;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +127,9 @@ pub(crate) struct FileIndex {
     /// turns split.
     #[serde(default)]
     pub(crate) extras: Vec<Event>,
+    /// Harness signals indexed for analysis, never shown in the transcript.
+    #[serde(default)]
+    pub(crate) signals: Vec<Signal>,
     /// Tool calls still waiting for a result: call id -> event index.
     #[serde(default)]
     pub(crate) pending: BTreeMap<String, usize>,
@@ -172,6 +176,34 @@ pub(crate) struct FileIndex {
     codex_usage_events: Vec<CodexUsageEvent>,
     #[serde(default)]
     pub(crate) rate_limits: Option<RateLimits>,
+}
+
+/// A harness signal that isn't a transcript event: indexed for analysis only,
+/// never shown in the transcript. Content-free like the rest of the cache:
+/// `n` holds only a short enum-like tag, never log text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Signal {
+    pub(crate) k: SignalKind,
+    /// Byte offset of the line.
+    pub(crate) o: u64,
+    /// Timestamp (same unit and source as `Event::t`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) t: Option<i64>,
+    /// `events.len()` when the signal was pushed: its place among the file's events.
+    pub(crate) at: u32,
+    /// A short tag: the compaction trigger, the interrupt kind or reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) n: Option<String>,
+    /// A number the harness reported with it (tokens before a compaction).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) v: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SignalKind {
+    Compact,
+    Interrupt,
 }
 
 impl FileIndex {
@@ -710,6 +742,45 @@ fn push(summary: &mut FileIndex, event: Event) {
     summary.events.push(event);
 }
 
+/// Compaction dedupe has two limits: an interrupt between lines of one
+/// compaction counts it twice, while two compactions with no event between
+/// them (such as `/compact` twice in a row) fold into one.
+fn signal(
+    summary: &mut FileIndex,
+    k: SignalKind,
+    o: u64,
+    t: Option<i64>,
+    n: Option<&str>,
+    v: Option<u64>,
+) {
+    let n = n
+        .filter(|tag| {
+            tag.len() <= 32
+                && tag
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b' '))
+        })
+        .map(str::to_owned);
+    let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
+    if k == SignalKind::Compact
+        && let Some(last) = summary.signals.last_mut()
+        && last.k == SignalKind::Compact
+        && last.at == at
+    {
+        if last.n.is_none() {
+            last.n = n;
+        }
+        if last.v.is_none() {
+            last.v = v;
+        }
+        if last.t.is_none() {
+            last.t = t;
+        }
+        return;
+    }
+    summary.signals.push(Signal { k, o, t, at, n, v });
+}
+
 /// Adds a transcript-only marker. The viewer groups consecutive thinking
 /// entries, retaining each time so a masked run can show its measured length.
 fn extra(summary: &mut FileIndex, event: Event) {
@@ -1024,11 +1095,23 @@ fn prompt_events(
         return;
     }
     let text = strip_reminders(text);
-    if text.is_empty()
-        || text.starts_with('<')
-        || text.starts_with('/')
-        || text.starts_with("[Request interrupted")
-    {
+    if text.starts_with("[Request interrupted") {
+        let kind = if text.starts_with("[Request interrupted by user for tool use") {
+            "tool"
+        } else {
+            "user"
+        };
+        signal(
+            summary,
+            SignalKind::Interrupt,
+            offset,
+            time,
+            Some(kind),
+            None,
+        );
+        return;
+    }
+    if text.is_empty() || text.starts_with('<') || text.starts_with('/') {
         return;
     }
     push(
@@ -1736,6 +1819,19 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
         summary.entrypoint = field(record, "entrypoint").map(str::to_owned);
     }
     let role = field(record, "type");
+    if role == Some("system") && field(record, "subtype") == Some("compact_boundary") {
+        let metadata = record.get("compactMetadata");
+        signal(
+            summary,
+            SignalKind::Compact,
+            offset,
+            time,
+            metadata.and_then(|metadata| field(metadata, "trigger")),
+            metadata
+                .and_then(|metadata| metadata.get("preTokens"))
+                .and_then(Value::as_u64),
+        );
+    }
     let Some(message) = record.get("message") else {
         return;
     };
@@ -1745,6 +1841,7 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
         summary.last_model = Some(model.to_owned());
     }
     if record.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
+        signal(summary, SignalKind::Compact, offset, time, None, None);
         return;
     }
     let tool_result = record.get("toolUseResult");
@@ -1895,6 +1992,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
     activity(summary, time);
     let payload = &record["payload"];
     match field(record, "type") {
+        Some("compacted") => signal(summary, SignalKind::Compact, offset, time, None, None),
         Some("session_meta") => {
             summary.entrypoint = field(payload, "originator").map(str::to_owned);
             summary.cwd = field(payload, "cwd").map(str::to_owned);
@@ -1948,10 +2046,16 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                 }
             }
         }
+        Some("event_msg") if field(payload, "type") == Some("context_compacted") => {
+            signal(summary, SignalKind::Compact, offset, time, None, None);
+        }
         // A finished command's structured exit code, and the completed
         // operations emitted by code-mode `exec`.
         Some("event_msg") if field(payload, "type") == Some("item_completed") => {
             let item = &payload["item"];
+            if field(item, "type") == Some("ContextCompaction") {
+                signal(summary, SignalKind::Compact, offset, time, None, None);
+            }
             let operation = matches!(field(item, "type"), Some("CommandExecution" | "FileChange"));
             let legacy_tool = field(item, "id").is_some_and(|id| non_code_mode_tool(summary, id));
             let open = open_code_mode_call(summary);
@@ -2056,6 +2160,14 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             summary.failed = payload.get("error").is_some_and(|error| !error.is_null());
         }
         Some("event_msg") if field(payload, "type") == Some("turn_aborted") => {
+            signal(
+                summary,
+                SignalKind::Interrupt,
+                offset,
+                time,
+                field(payload, "reason"),
+                None,
+            );
             close_code_mode(summary);
         }
         Some("response_item") => match field(payload, "type") {
@@ -2361,6 +2473,268 @@ mod tests {
             .map(|text| serde_json::json!({"type":"text","text":text}))
             .collect();
         serde_json::json!({"type":"assistant","uuid":format!("u-{id}"),"message":{"id":id,"role":"assistant","content":content}})
+    }
+
+    #[test]
+    fn claude_compact_boundary_and_summary_make_one_signal() {
+        let records = [
+            serde_json::json!({
+                "type":"system",
+                "subtype":"compact_boundary",
+                "compactMetadata":{"trigger":"auto","preTokens":155000}
+            }),
+            serde_json::json!({
+                "type":"user",
+                "isCompactSummary":true,
+                "message":{"role":"user","content":[{"type":"text","text":"summary"}]}
+            }),
+        ];
+        let mut index = FileIndex::default();
+        for (offset, record) in records.iter().enumerate() {
+            claude(&mut index, record, offset as u64);
+        }
+
+        assert_eq!(index.signals.len(), 1);
+        assert_eq!(index.signals[0].k, SignalKind::Compact);
+        assert_eq!(index.signals[0].o, 0);
+        assert_eq!(index.signals[0].at, 0);
+        assert_eq!(index.signals[0].n.as_deref(), Some("auto"));
+        assert_eq!(index.signals[0].v, Some(155000));
+        assert!(index.events.is_empty());
+    }
+
+    #[test]
+    fn claude_compact_summary_from_old_logs_makes_a_signal() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({
+                "type":"user",
+                "isCompactSummary":true,
+                "message":{"role":"user","content":[{"type":"text","text":"summary"}]}
+            }),
+            12,
+        );
+
+        assert_eq!(index.signals.len(), 1);
+        assert_eq!(index.signals[0].k, SignalKind::Compact);
+        assert_eq!(index.signals[0].o, 12);
+        assert_eq!(index.signals[0].n, None);
+        assert_eq!(index.signals[0].v, None);
+    }
+
+    #[test]
+    fn claude_compactions_separated_by_a_prompt_make_two_signals() {
+        let records = [
+            serde_json::json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":155000}}),
+            serde_json::json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":[]}}),
+            serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"continue"}]}}),
+            serde_json::json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":140000}}),
+            serde_json::json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":[]}}),
+        ];
+        let mut index = FileIndex::default();
+        for (offset, record) in records.iter().enumerate() {
+            claude(&mut index, record, offset as u64);
+        }
+
+        assert_eq!(index.signals.len(), 2);
+        assert_eq!(
+            index
+                .signals
+                .iter()
+                .map(|signal| signal.at)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert_eq!(index.signals[0].n.as_deref(), Some("auto"));
+        assert_eq!(index.signals[1].n.as_deref(), Some("manual"));
+    }
+
+    #[test]
+    fn claude_interrupts_are_signals_without_user_events() {
+        for (text, expected) in [
+            ("[Request interrupted by user]", "user"),
+            ("[Request interrupted by user for tool use]", "tool"),
+        ] {
+            let mut index = FileIndex::default();
+            claude(
+                &mut index,
+                &serde_json::json!({
+                    "type":"user",
+                    "message":{"role":"user","content":[{"type":"text","text":"keep this prompt"}]}
+                }),
+                10,
+            );
+            let events_before_interrupt = index.events.clone();
+            claude(
+                &mut index,
+                &serde_json::json!({
+                    "type":"user",
+                    "message":{"role":"user","content":[{"type":"text","text":text}]}
+                }),
+                20,
+            );
+
+            assert_eq!(index.events, events_before_interrupt);
+            assert_eq!(index.signals.len(), 1);
+            assert_eq!(index.signals[0].k, SignalKind::Interrupt);
+            assert_eq!(index.signals[0].o, 20);
+            assert_eq!(index.signals[0].n.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn codex_compaction_records_dedupe_and_context_compaction_items_index() {
+        let records = [
+            serde_json::json!({"type":"compacted"}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"context_compacted"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"ContextCompaction"}}}),
+        ];
+        let mut index = FileIndex::default();
+        for (offset, record) in records.iter().enumerate() {
+            codex(&mut index, record, offset as u64);
+        }
+
+        assert_eq!(index.signals.len(), 1);
+        assert_eq!(index.signals[0].k, SignalKind::Compact);
+        assert_eq!(index.signals[0].at, 0);
+        assert!(index.events.is_empty());
+    }
+
+    fn assert_one_codex_compact(record: Value) {
+        let mut index = FileIndex::default();
+        codex(&mut index, &record, 0);
+
+        assert_eq!(index.signals.len(), 1);
+        assert_eq!(index.signals[0].k, SignalKind::Compact);
+    }
+
+    #[test]
+    fn lone_codex_compacted_record_indexes_one_compact_signal() {
+        assert_one_codex_compact(serde_json::json!({"type":"compacted"}));
+    }
+
+    #[test]
+    fn lone_codex_context_compacted_event_indexes_one_compact_signal() {
+        assert_one_codex_compact(
+            serde_json::json!({"type":"event_msg","payload":{"type":"context_compacted"}}),
+        );
+    }
+
+    #[test]
+    fn lone_codex_context_compaction_item_indexes_one_compact_signal() {
+        assert_one_codex_compact(serde_json::json!({
+            "type":"event_msg",
+            "payload":{"type":"item_completed","item":{"type":"ContextCompaction"}}
+        }));
+    }
+
+    #[test]
+    fn codex_turn_aborts_keep_only_safe_reason_tags() {
+        let long_reason = "x".repeat(33);
+        let records = [
+            (
+                serde_json::json!({"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}),
+                Some("interrupted"),
+            ),
+            (
+                serde_json::json!({"type":"event_msg","payload":{"type":"turn_aborted","reason":"bad\nreason"}}),
+                None,
+            ),
+            (
+                serde_json::json!({"type":"event_msg","payload":{"type":"turn_aborted","reason":long_reason}}),
+                None,
+            ),
+        ];
+        let mut index = FileIndex::default();
+        for (offset, (record, _)) in records.iter().enumerate() {
+            codex(&mut index, record, offset as u64);
+        }
+
+        assert_eq!(index.signals.len(), 3);
+        assert!(
+            index
+                .signals
+                .iter()
+                .all(|signal| signal.k == SignalKind::Interrupt)
+        );
+        assert_eq!(
+            index
+                .signals
+                .iter()
+                .map(|signal| signal.n.as_deref())
+                .collect::<Vec<_>>(),
+            records.map(|(_, expected)| expected)
+        );
+    }
+
+    #[test]
+    fn signals_round_trip_through_the_cache_and_v13_is_stale() {
+        let root = std::env::temp_dir().join(format!(
+            "semon-signals-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let index = FileIndex {
+            signals: vec![Signal {
+                k: SignalKind::Compact,
+                o: 42,
+                t: Some(1_790_208_000_123),
+                at: 2,
+                n: Some("auto".to_owned()),
+                v: Some(155000),
+            }],
+            ..FileIndex::default()
+        };
+        let mut cache = EventCache {
+            version: CACHE_VERSION,
+            files: BTreeMap::from([(
+                "session.jsonl".to_owned(),
+                CachedFile {
+                    dev: 1,
+                    ino: 2,
+                    offset: 3,
+                    size: 3,
+                    modified_ns: 4,
+                    index: Arc::new(index.clone()),
+                },
+            )]),
+            ..EventCache::default()
+        };
+        let path = root.join("events.json");
+        cache.save(&path).unwrap();
+        let reopened = EventCache::read(&path);
+        let cached_index = &reopened.files.get("session.jsonl").unwrap().index;
+        let serialized_index = serde_json::to_value(&index).unwrap();
+        assert_eq!(serialized_index["signals"][0]["k"], "compact");
+        assert_eq!(
+            serialized_index,
+            serde_json::to_value(cached_index.as_ref()).unwrap()
+        );
+
+        let stale_path = root.join("stale.events.json");
+        cache.version = 13;
+        cache.save(&stale_path).unwrap();
+        let stale = EventCache::read(&stale_path);
+        assert_eq!(stale.version, CACHE_VERSION);
+        assert!(stale.files.is_empty());
+        assert!(!stale.files.contains_key("session.jsonl"));
+
+        let current_path = root.join("current.events.json");
+        cache.version = 14;
+        cache.save(&current_path).unwrap();
+        let current = EventCache::read(&current_path);
+        assert_eq!(current.version, 14);
+        let retained_index = &current.files.get("session.jsonl").unwrap().index;
+        assert_eq!(
+            serde_json::to_value(retained_index.as_ref()).unwrap(),
+            serialized_index
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
