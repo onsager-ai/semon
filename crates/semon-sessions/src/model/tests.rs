@@ -1918,6 +1918,89 @@ fn hold_lock(home: &Home, id: &str) {
     );
 }
 
+/// A yielded command started in turn 1 and polled in turn 3 is running
+/// while its session works: it is live, no error, and turn 1 doesn't end on
+/// an unfinished step.
+#[cfg(unix)]
+#[test]
+fn a_command_polled_in_a_later_turn_runs_in_the_turn_that_started_it() {
+    let home = Home::new();
+    let script = |id: &str, script: &str| {
+        codex_line(
+            ts(1, 0),
+            "response_item",
+            json!({"type":"custom_tool_call","call_id":id,"name":"exec","input":script}),
+        )
+    };
+    let yielded = |time: String, id: &str| {
+        let result = json!({"wall_time_seconds":1.0,"session_id":4242,"output":"listening\n"});
+        codex_line(
+            time,
+            "response_item",
+            json!({"type":"custom_tool_call_output","call_id":id,"output":[
+                {"type":"input_text","text":"Script completed\nWall time 1.0 seconds\nOutput:\n"},
+                {"type":"input_text","text":result.to_string()},
+            ]}),
+        )
+    };
+    let mut start = script(
+        "start",
+        "const r = await tools.exec_command({cmd:\"serve\",yield_time_ms:1000});\ntext(JSON.stringify(r));",
+    );
+    start["timestamp"] = json!(ts(1, 1));
+    let mut poll = script(
+        "poll",
+        "const r = await tools.write_stdin({session_id:4242,chars:\"\",yield_time_ms:30000});\ntext(JSON.stringify(r));",
+    );
+    poll["timestamp"] = json!(ts(3, 1));
+    home.codex(
+        "serving",
+        json!({}),
+        &[
+            codex_user(ts(1, 0), "Start the server"),
+            start,
+            yielded(ts(1, 2), "start"),
+            codex_user(ts(2, 0), "Anything else?"),
+            codex_reply(ts(2, 1), "No."),
+            codex_user(ts(3, 0), "Check on it"),
+            poll,
+        ],
+    );
+    hold_lock(&home, "serving");
+    let built = home.build();
+    assert_eq!(built.sessions["serving"].state, "work");
+    let tx = &built.tx["serving"];
+    let shown: Vec<Shown> = tx
+        .slots
+        .iter()
+        .filter_map(|slot| match &slot.kind {
+            SlotKind::Yielded { shown, .. } => Some(*shown),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown, [Shown::Live]);
+    assert_eq!(tx.errors, 0);
+    let turns = turns_of(&built, "serving");
+    assert_eq!(turns.len(), 3);
+    assert_eq!((turns[0].end.st, turns[0].end.why), ("idle", "no_reply"));
+    assert_eq!(turns[2].end.why, "working");
+
+    // Its process gone, the same step is unfinished, and turn 1 ends on it.
+    home.write("proc/locks", "");
+    let built = home.build();
+    assert_ne!(built.sessions["serving"].state, "work");
+    let tx = &built.tx["serving"];
+    assert!(tx.slots.iter().any(|slot| matches!(
+        slot.kind,
+        SlotKind::Yielded {
+            shown: Shown::Unfinished,
+            ..
+        }
+    )));
+    assert_eq!(tx.errors, 1);
+    assert_eq!(turns_of(&built, "serving")[0].end.why, "unfinished_step");
+}
+
 #[cfg(unix)]
 #[test]
 fn same_name_codex_spawns_stay_unplaced_and_questions_wait_only_while_unanswered() {
