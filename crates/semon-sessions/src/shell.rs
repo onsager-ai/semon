@@ -24,6 +24,9 @@ pub const JS: &str = include_str!("shell.js");
 /// serve this at that path (as `image/svg+xml`).
 pub const MARK_SVG: &str = include_str!("mark.svg");
 
+/// Embedding pages serve each unmodified icon at its path as `image/svg+xml`.
+pub const HARNESS_ICONS: &[(&str, &str)] = crate::HARNESS_ICONS;
+
 /// The mark as a favicon: its fill follows the browser's light or dark scheme. Serve it at `/favicon.svg` and link it
 /// with `<link rel="icon" href="/favicon.svg" type="image/svg+xml">`.
 pub const FAVICON_SVG: &str = include_str!("favicon.svg");

@@ -718,7 +718,9 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   const T = (h, m) => h * 60 + m; const ST = (h, m, s = 0) => (T(h, m) * 60 + s) * 1000; const NOW = T(12, 40);
   const MACHINE = { laptop: "laptop", studio: "mac-studio", buildbox: "buildbox", cloud: "claude.ai cloud" };
   const MACHINE_UP = { laptop: true, studio: true, buildbox: false, cloud: true };
-  const HARNESS = { claude: "Claude Code", codex: "Codex" };
+  const HARNESSES = { claude: { name: "Claude Code", short: "Claude", icon: { light: "/harness/claude-code.svg", dark: "/harness/claude-code.svg" } }, codex: { name: "Codex", short: "Codex", icon: { light: "/harness/codex-black.svg", dark: "/harness/codex.svg" } }, opencode: { name: "OpenCode", short: "OpenCode", icon: { light: "/harness/opencode-light.svg", dark: "/harness/opencode-dark.svg" } } };
+  const HARNESS = Object.fromEntries(Object.entries(HARNESSES).map(([id, h]) => [id, h.name]));
+  const HARNESS_SHORT = Object.fromEntries(Object.entries(HARNESSES).map(([id, h]) => [id, h.short]));
 
   // Sessions. lane = a top-level session you work with directly (named lanes and direct runs).
   const SESS = {
@@ -874,7 +876,6 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
   // A harness is named in plain text, never drawn: no logo and no vendor colour. "short" gives "Claude" where the line is tight.
   // The harness is named in plain muted text (.hname); the word itself tells Claude and Codex apart, so its hue is not used here.
-  const HARNESS_SHORT = { claude: "Claude", codex: "Codex" };
   const harnessName = (harness, short = false) => { const name = el("span", "hname h-" + harness, (short ? HARNESS_SHORT : HARNESS)[harness] ?? harness); name.title = HARNESS[harness] ?? harness; return name; };
   function childKindChip(s, meta = false) {
     const c = el("span", (meta ? "meta-item meta-kind" : "child-kind")); c.style.setProperty("--h", "var(--" + s.harness + ")");

@@ -16,7 +16,10 @@
   let ADMIN = null;
   let ACCOUNT = null;
   let NAV_MACHINES = null;
-  const HARNESS = { claude: "Claude Code", codex: "Codex" };
+  // The harnesses Semon can name. Mirrors crates/semon-sessions/src/harness.rs (a Rust test keeps them equal). Icons identify the source only; the artwork is served unmodified.
+  const HARNESSES = { claude: { name: "Claude Code", short: "Claude", icon: { light: "/harness/claude-code.svg", dark: "/harness/claude-code.svg" } }, codex: { name: "Codex", short: "Codex", icon: { light: "/harness/codex-black.svg", dark: "/harness/codex.svg" } }, opencode: { name: "OpenCode", short: "OpenCode", icon: { light: "/harness/opencode-light.svg", dark: "/harness/opencode-dark.svg" } } };
+  const HARNESS = Object.fromEntries(Object.entries(HARNESSES).map(([id, h]) => [id, h.name]));
+  const HARNESS_SHORT = Object.fromEntries(Object.entries(HARNESSES).map(([id, h]) => [id, h.short]));
   const SESS = {};
   const H = [];
   const TX = {};
@@ -62,7 +65,6 @@
   const shortModel = (model) => String(model ?? "Unknown model").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
   // A harness is named in plain text, never drawn: no logo and no vendor colour. "short" gives "Claude" where the line is tight.
   // The harness is named in plain muted text (.hname); the word itself tells Claude and Codex apart, so its hue is not used here.
-  const HARNESS_SHORT = { claude: "Claude", codex: "Codex" };
   const harnessName = (harness, short = false) => { const name = el("span", "hname h-" + harness, (short ? HARNESS_SHORT : HARNESS)[harness] ?? harness); name.title = HARNESS[harness] ?? harness; return name; };
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
   const parentOf = (sid) => SESS[sid]?.parent ?? H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
