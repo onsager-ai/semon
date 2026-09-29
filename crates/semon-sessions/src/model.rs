@@ -1182,6 +1182,7 @@ fn scan(
         });
     }
     cache.retain(&seen, dirty);
+    cache.end_scan();
     // Metadata of files that are gone is dropped with them.
     texts.metas.retain(|path, _| {
         let file = if path.extension().is_some_and(|ext| ext == "json") {

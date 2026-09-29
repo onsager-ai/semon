@@ -371,7 +371,8 @@ impl SqliteStore {
                 Unopened::Other(error.to_string())
             }
         };
-        create_private(path).map_err(|error| Unopened::Other(error.to_string()))?;
+        create_private(path, &crate::state_dir())
+            .map_err(|error| Unopened::Other(error.to_string()))?;
         // Never through a symlink: the path is checked above, and SQLite
         // refuses one too.
         let mut connection = Connection::open_with_flags(
@@ -496,7 +497,7 @@ impl SqliteStore {
     }
 
     /// Drops files' rows: with a ledger, only if the row is still at it (or
-    /// doesn't decode); without one, whatever is there.
+    /// doesn't decode); without one, only if it still doesn't decode.
     fn remove(&mut self, files: &[(String, Option<Ledger>)]) -> rusqlite::Result<Outcome> {
         let transaction = self
             .connection
@@ -505,14 +506,12 @@ impl SqliteStore {
             return Ok(Outcome::Stale);
         }
         for (path, expected) in files {
-            if let Some(expected) = expected {
-                match ledger_row(&transaction, path) {
-                    Ok(Some((_, found))) if found == *expected => {}
-                    // Moved on by another process, or already gone.
-                    Ok(_) => continue,
-                    Err(error) if is_data_error(&error) => {}
-                    Err(error) => return Err(error),
-                }
+            match (ledger_row(&transaction, path), expected) {
+                (Ok(Some((_, found))), Some(expected)) if found == *expected => {}
+                // Moved on by another process, rewritten, or already gone.
+                (Ok(_), _) => continue,
+                (Err(error), _) if is_data_error(&error) => {}
+                (Err(error), _) => return Err(error),
             }
             // By path, never decoding the row: an undecodable one goes too.
             for table in ["events", "signals", "usage", "codex_usage"] {
@@ -593,14 +592,45 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// `O_NOFOLLOW`, which `std` doesn't name: the file is never created or
+/// opened through a symlink. Its value differs by platform (0 where unknown,
+/// and the check before the open still refuses one).
+#[cfg(unix)]
+const O_NOFOLLOW: i32 = if cfg!(any(target_os = "macos", target_os = "ios")) {
+    0x0100
+} else if cfg!(target_os = "linux") {
+    if cfg!(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    )) {
+        0o100_000
+    } else {
+        0o400_000
+    }
+} else {
+    0
+};
+
+/// The one existing directory opening the store may tighten to `0700`:
+/// Semon's state directory (`semon_state`) when the store is directly in
+/// it, or a `.semon` directory the store is directly in. Nothing else and
+/// nothing above either, so a store placed in a user's own tree (an
+/// absolute `--cache` in a checkout named `semon`) never changes its modes.
+fn tightened(path: &Path, semon_state: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    (parent == semon_state || parent.file_name().is_some_and(|name| name == ".semon"))
+        .then(|| parent.to_owned())
+}
+
 /// Creates the store file owner-only (`0600`) when missing, so it is never
 /// readable by others, not even briefly; SQLite creates `-wal` and `-shm`
 /// with the main file's mode. A store left looser by anything else is
-/// tightened. Missing directories are created `0700`, and Semon's own state
-/// directory (the nearest one named `semon` or `.semon`) is tightened to
-/// `0700` when this user owns it; no other directory is touched. A symlink
-/// at the store's path is refused.
-fn create_private(path: &Path) -> io::Result<()> {
+/// tightened. Missing directories are created `0700`; an existing one is
+/// tightened only as [`tightened`] allows, and only when this user owns it.
+/// A symlink at the store's path is refused.
+fn create_private(path: &Path, semon_state: &Path) -> io::Result<()> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -617,7 +647,7 @@ fn create_private(path: &Path) -> io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
-    options.mode(0o600);
+    options.mode(0o600).custom_flags(O_NOFOLLOW);
     let file = options.open(path)?;
     #[cfg(unix)]
     {
@@ -635,21 +665,20 @@ fn create_private(path: &Path) -> io::Result<()> {
             }
         }
         let owner = file.metadata()?.uid();
-        let state = path.ancestors().skip(1).find(|dir| {
-            dir.file_name()
-                .is_some_and(|name| name == "semon" || name == ".semon")
-        });
-        if let Some(state) = state
-            && let Ok(metadata) = fs::symlink_metadata(state)
+        if let Some(state) = tightened(path, semon_state)
+            && let Ok(metadata) = fs::symlink_metadata(&state)
             && metadata.is_dir()
             && metadata.uid() == owner
             && metadata.permissions().mode() & 0o077 != 0
         {
-            fs::set_permissions(state, fs::Permissions::from_mode(0o700))?;
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
         }
     }
     #[cfg(not(unix))]
-    drop(file);
+    {
+        let _ = semon_state;
+        drop(file);
+    }
     Ok(())
 }
 
@@ -682,7 +711,11 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         |row| row.get(0),
     )?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
-    match versions(connection)? {
+    // One read transaction, so the two versions are read together.
+    let read = connection.transaction()?;
+    let found = versions(&read)?;
+    read.commit()?;
+    match found {
         (schema, _) if schema > SCHEMA_VERSION => return Ok(Init::Newer),
         (_, Some(parser)) if parser > CACHE_VERSION => return Ok(Init::Newer),
         (SCHEMA_VERSION, Some(CACHE_VERSION)) => return Ok(Init::Ready),
@@ -1703,6 +1736,38 @@ mod tests {
             size: 3,
             modified_ns: 1_790_000_000_123_456_789,
         }
+    }
+
+    #[test]
+    fn only_semons_own_directories_are_tightened() {
+        let state = Path::new("/home/u/.local/state/semon");
+        let store = |path: &str| Path::new(path).to_owned();
+        assert_eq!(
+            tightened(&state.join("sessions-index.sqlite3"), state),
+            Some(state.to_owned())
+        );
+        // Received machines sit under it: nothing above them.
+        assert_eq!(
+            tightened(
+                &state.join("received/abc/machine/sessions-index.sqlite3"),
+                state
+            ),
+            None
+        );
+        assert_eq!(
+            tightened(&store("/work/machine/.semon/sessions-index.sqlite3"), state),
+            Some(store("/work/machine/.semon"))
+        );
+        // A checkout named `semon`, directly or further up.
+        assert_eq!(
+            tightened(&store("/home/u/projects/semon/idx.sqlite3"), state),
+            None
+        );
+        assert_eq!(
+            tightened(&store("/home/u/projects/semon/tmp/idx.sqlite3"), state),
+            None
+        );
+        assert_eq!(tightened(&store("/tmp/idx.sqlite3"), state), None);
     }
 
     #[test]

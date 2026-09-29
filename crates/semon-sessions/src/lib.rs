@@ -71,16 +71,30 @@ pub struct Options {
     pub scan_window: bool,
 }
 
+/// Semon's own state directory: `$XDG_STATE_HOME/semon`, or
+/// `~/.local/state/semon`.
+fn default_state_dir(home: &Path) -> PathBuf {
+    env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/state"))
+        .join("semon")
+}
+
+/// [`default_state_dir`] for this process's `$HOME`.
+pub(crate) fn state_dir() -> PathBuf {
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    default_state_dir(&home)
+}
+
 impl Default for Options {
     fn default() -> Self {
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        let cache = env::var_os("XDG_STATE_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/state"))
-            .join("semon/sessions-index.json");
+        let cache = default_state_dir(&home).join("sessions-index.json");
         Self {
             claude_home: home.join(".claude"),
             claude_json: home.join(".claude.json"),

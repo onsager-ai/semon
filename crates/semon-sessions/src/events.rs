@@ -391,7 +391,7 @@ pub(crate) trait IndexStore: Send {
     /// Drops files' rows. A file given with a ledger loses its rows only if
     /// they are still at that ledger, so a file this process failed to read
     /// once keeps the rows another process keeps up; one given without a
-    /// ledger (its row doesn't decode) loses whatever is there.
+    /// ledger (its row didn't decode) loses them only if they still don't.
     fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError>;
 
     /// Saves reported runs and the `~/.claude.json` stamp they were read at,
@@ -422,8 +422,13 @@ pub(crate) struct EventCache {
     v1_cache: Option<PathBuf>,
     /// Without a store: when opening it is tried again.
     reopen_at: Option<Instant>,
-    /// The store was busy in this scan: its other writes wait for the next.
+    /// The store was busy in this refresh (reported runs, then the scan):
+    /// its other writes wait for the next, so a refresh waits at most once.
     busy: bool,
+    /// Gone files whose rows the store still holds: dropped when it can.
+    gone: Vec<(String, Option<Ledger>)>,
+    /// Reported runs the store didn't take: saved at the next refresh.
+    runs_unsaved: bool,
     /// Files whose change is in memory only (the store was busy, or other
     /// processes kept moving them on): read again at the next scan, which
     /// writes them through.
@@ -525,12 +530,16 @@ impl EventCache {
         cache
     }
 
-    /// Starts a scan: the store gets its writes again, and an index kept in
-    /// memory tries its store again, at most every [`REOPEN_EVERY`]. Once it
-    /// opens, the store's rows replace this process's: a file the store
-    /// lacks or holds at another ledger is read again when next scanned.
-    pub(crate) fn begin_scan(&mut self) {
+    /// Ends a scan, and with it the refresh: the store gets its writes again.
+    pub(crate) fn end_scan(&mut self) {
         self.busy = false;
+    }
+
+    /// Starts a scan: an index kept in memory tries its store again, at most
+    /// every [`REOPEN_EVERY`]. Once it opens, the store's rows replace this
+    /// process's: a file the store lacks or holds at another ledger is read
+    /// again when next scanned.
+    pub(crate) fn begin_scan(&mut self) {
         if self.store.is_some() || self.reopen_at.is_none_or(|at| Instant::now() < at) {
             return;
         }
@@ -605,6 +614,7 @@ impl EventCache {
             warn_unavailable(&store.describe(), error);
             self.reopen_at = Some(Instant::now() + REOPEN_EVERY);
             self.unpersisted.clear();
+            self.gone.clear();
         }
     }
 
@@ -657,6 +667,10 @@ impl EventCache {
             modified_ns,
         };
         if self.claude_json_stamp.as_ref() == Some(&stamp) {
+            if self.runs_unsaved {
+                let runs: Vec<_> = self.reported_runs().cloned().collect();
+                self.save_runs(&runs, &stamp);
+            }
             return;
         }
         let Ok(file) = fs::File::open(path) else {
@@ -698,12 +712,22 @@ impl EventCache {
     /// Writes reported runs through to the store, and takes back every run
     /// it holds.
     fn save_runs(&mut self, runs: &[crate::facts::ReportedRunSnapshot], stamp: &ReportedFileStamp) {
+        if self.store.is_none() {
+            return;
+        }
+        self.runs_unsaved = true;
+        if self.busy {
+            return;
+        }
         let saved = self
             .store
             .as_mut()
             .map(|store| store.save_runs(runs, stamp));
         match saved {
-            Some(Ok(Some(all))) => self.set_reported_runs(all),
+            Some(Ok(Some(all))) => {
+                self.runs_unsaved = false;
+                self.set_reported_runs(all);
+            }
             Some(Ok(None)) => self.lose_store(&"another version of semon rebuilt it"),
             Some(Err(error)) => self.store_failed(&error),
             None => {}
@@ -718,19 +742,27 @@ impl EventCache {
             .filter(|(path, _)| !seen.contains(*path))
             .map(|(path, entry)| (path.clone(), Some(entry.ledger.clone())))
             .collect();
-        if gone.is_empty() {
-            return;
-        }
         for (path, _) in &gone {
             self.files.remove(path);
             self.unpersisted.remove(path);
         }
-        *dirty = true;
-        let removed = self.store.as_mut().map(|store| store.remove_files(&gone));
+        *dirty |= !gone.is_empty();
+        if self.store.is_none() {
+            return;
+        }
+        self.gone.extend(gone);
+        if self.gone.is_empty() || self.busy {
+            return;
+        }
+        let removed = self
+            .store
+            .as_mut()
+            .map(|store| store.remove_files(&self.gone));
         match removed {
+            Some(Ok(Outcome::Written | Outcome::Conflict)) => self.gone.clear(),
             Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
             Some(Err(error)) => self.store_failed(&error),
-            Some(Ok(Outcome::Written | Outcome::Conflict)) | None => {}
+            None => {}
         }
     }
 
@@ -740,6 +772,7 @@ impl EventCache {
         let stored = self.store.as_ref().map(|store| store.ledger(path));
         match stored {
             Some(Ok(ledger)) => return ledger,
+            Some(Err(StoreError::Data(_))) if self.busy => return None,
             Some(Err(StoreError::Data(_))) => {
                 // A ledger row that doesn't decode is dropped, and the file
                 // read again from its start.
@@ -881,6 +914,8 @@ pub(crate) fn scan_file(
                 && let Some(index) = &base
             {
                 trace("unchanged");
+                // The store holds it as it is now: nothing waits to be written.
+                cache.unpersisted.remove(&key);
                 cache.files.insert(
                     key,
                     CachedFile {
@@ -3900,22 +3935,24 @@ mod tests {
     fn the_store_and_its_wal_are_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let loose = |path: &Path| {
+            fs::create_dir_all(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        };
         let root = scratch("private");
-        // Semon's state directory, left readable by an older save: it is
-        // tightened; the directories above it are not touched.
-        let state = root.join("state/semon");
-        fs::create_dir_all(&state).unwrap();
-        fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
-        let above = mode(&root.join("state"));
-        let v1 = state.join("received/abc/machine/index.json");
+        // A machine's `.semon`, left readable: tightened, and nothing above.
+        let machine = root.join("machine");
+        let own = machine.join(".semon");
+        loose(&own);
+        loose(&machine);
+        let v1 = own.join("index.json");
         let log = root.join("session.jsonl");
         write_lines(&log, &[said("m1", &["aa"])]);
         let mut cache = EventCache::open(&v1);
         scan_file(&log, "claude", &mut cache, &mut false).unwrap();
         let path = EventCache::path(&v1);
-        assert_eq!(mode(&state), 0o700);
-        assert_eq!(mode(&state.join("received")), 0o700, "created owner-only");
-        assert_eq!(mode(&root.join("state")), above);
+        assert_eq!(mode(&own), 0o700);
+        assert_eq!(mode(&machine), 0o755);
         for suffix in ["", "-wal", "-shm"] {
             let mut file = path.clone().into_os_string();
             file.push(suffix);
@@ -3927,6 +3964,19 @@ mod tests {
         let cache = EventCache::open(&v1);
         assert!(cache.store.is_some());
         assert_eq!(mode(&path), 0o600);
+        drop(cache);
+
+        // An absolute `--cache` in a user's own tree, even a checkout named
+        // `semon`: no existing directory changes; a missing one is created
+        // owner-only.
+        let checkout = root.join("projects/semon");
+        loose(&checkout);
+        let direct = EventCache::open(&checkout.join("idx.json"));
+        assert!(direct.store.is_some());
+        let nested = EventCache::open(&checkout.join("tmp/idx.json"));
+        assert!(nested.store.is_some());
+        assert_eq!(mode(&checkout), 0o755);
+        assert_eq!(mode(&checkout.join("tmp")), 0o700);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3990,14 +4040,27 @@ mod tests {
         assert!(cache.unpersisted.contains(&key(&log)));
         assert!(cache.unpersisted.contains(&key(&other)));
 
-        // Released: the next scan writes both through, though neither
-        // changed again.
+        // Released, and the other process writes the same change of `log`
+        // first. The next scan finds `log` current and stops holding it, and
+        // writes `other` through though it didn't change again.
         holder.execute_batch("ROLLBACK").unwrap();
         drop(holder);
+        let mut second = EventCache::open(&v1);
+        scan_file(&log, "claude", &mut second, &mut false).unwrap();
+        cache.end_scan();
         cache.begin_scan();
+        ledger_trace();
         scan_file(&log, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(ledger_trace(), ["unchanged"]);
+        assert!(!cache.unpersisted.contains(&key(&log)));
         scan_file(&other, "claude", &mut cache, &mut false).unwrap();
         assert!(cache.unpersisted.is_empty());
+        // Nothing waits any more: the next scan shares both.
+        cache.end_scan();
+        ledger_trace();
+        scan_file(&log, "claude", &mut cache, &mut false).unwrap();
+        scan_file(&other, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(ledger_trace(), ["unchanged", "unchanged"]);
         assert_eq!(stored(&v1, &log), cold(&log));
         assert_eq!(stored(&v1, &other), cold(&other));
 
