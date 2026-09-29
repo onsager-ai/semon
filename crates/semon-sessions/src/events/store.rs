@@ -33,7 +33,7 @@ use rusqlite::{
     Connection, ErrorCode, OpenFlags, OptionalExtension, Row, Statement, Transaction,
     TransactionBehavior, params, types::Type,
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use super::{
@@ -270,24 +270,173 @@ struct SqliteStore {
     path: PathBuf,
 }
 
-/// Opens (creating when missing) the store at `path` and reads all of it.
+/// Opens (creating when missing) the store at `path` and reads all of it,
+/// first importing what the retired JSON event cache at `legacy` holds that
+/// the logs can't give back ([`import_legacy`]).
 /// A file that isn't a database, or a damaged one, is renamed aside to
 /// `<path>.corrupt` and a new store is made in its place. Any other failure
 /// (a read-only directory, a lock held past the timeout, a store a newer
 /// Semon wrote) is returned for the caller to run in memory.
-pub(super) fn open(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), String> {
-    let (store, loaded) = match SqliteStore::attempt(path) {
+pub(super) fn open(path: &Path, legacy: &Path) -> Result<(Box<dyn IndexStore>, Loaded), String> {
+    let (store, loaded) = match SqliteStore::attempt(path, Some(legacy)) {
         Err(Unopened::Corrupt(error)) => {
             set_aside(path).map_err(|aside| format!("{error}; it can't be set aside: {aside}"))?;
             eprintln!(
                 "semon: the session index {} was damaged ({error}); it was set aside and is being rebuilt",
                 path.display()
             );
-            SqliteStore::attempt(path).map_err(|error| error.to_string())?
+            SqliteStore::attempt(path, Some(legacy)).map_err(|error| error.to_string())?
         }
         opened => opened.map_err(|error| error.to_string())?,
     };
     Ok((Box::new(store), loaded))
+}
+
+/// The `meta` key that marks the retired JSON event cache as imported (or
+/// set aside): its value is when, in epoch ms.
+const IMPORTED: &str = "legacy_json_imported";
+
+/// What the retired JSON event cache (`sessions-index.events.json`) holds
+/// that the logs can't give back: the reported runs `~/.claude.json` has
+/// since overwritten, and the stamp they were last read at. Only these
+/// fields are read; the rest of the file (its version and every file's
+/// index) is skipped as it streams past, and those files are read again
+/// from their logs.
+#[derive(Deserialize)]
+struct Legacy {
+    #[serde(default)]
+    reported_runs: BTreeMap<String, BTreeMap<i64, ReportedRunSnapshot>>,
+    #[serde(default)]
+    claude_json_stamp: Option<ReportedFileStamp>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The JSON caches this thread imported (or set aside), in order.
+    pub(super) static IMPORTS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Imports the retired JSON event cache once, then removes it.
+///
+/// Under `BEGIN IMMEDIATE`, with the [`IMPORTED`] marker checked inside it,
+/// so of two processes opening at once exactly one reads and imports the
+/// file, and the other finds it done and never needs the file. The file is
+/// removed only after the import commits; a crash between the two leaves a
+/// file the marker says is done, removed at the next open.
+///
+/// Its reported runs join the store's without replacing any (a run the
+/// store holds was captured since), and its stamp is taken only if the store
+/// has none. A file that isn't that JSON (unreadable as it, whatever its
+/// version) is marked done and renamed to `.corrupt`: it is kept, but never
+/// read again. A file that can't be opened is left for the next open.
+fn import_legacy(connection: &mut Connection, legacy: &Path) -> rusqlite::Result<()> {
+    let present = || fs::symlink_metadata(legacy).is_ok_and(|metadata| metadata.is_file());
+    // Without the lock first: after the import, every open ends here.
+    if imported(connection)? {
+        if present() {
+            remove_legacy(legacy);
+        }
+        return Ok(());
+    }
+    if !present() {
+        return Ok(());
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if imported(&transaction)? {
+        drop(transaction);
+        remove_legacy(legacy);
+        return Ok(());
+    }
+    let parsed = match fs::File::open(legacy) {
+        Ok(file) => serde_json::from_reader::<_, Legacy>(io::BufReader::new(file)),
+        // Removed meanwhile by something else: nothing to import.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            warn_import(legacy, &error);
+            return Ok(());
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis())
+        .to_string();
+    let runs = match &parsed {
+        Ok(Legacy {
+            reported_runs,
+            claude_json_stamp,
+        }) => {
+            let mut put = transaction.prepare(&PUT_RUN.replacen("OR REPLACE", "OR IGNORE", 1))?;
+            let mut runs = 0;
+            for run in reported_runs.values().flat_map(BTreeMap::values) {
+                put_run(&mut put, run)?;
+                runs += 1;
+            }
+            if let Some(stamp) = claude_json_stamp {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO meta (key, value) VALUES ('claude_json_stamp', ?1)",
+                    [json(stamp)?],
+                )?;
+            }
+            runs
+        }
+        Err(_) => 0,
+    };
+    transaction.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        [IMPORTED, now.as_str()],
+    )?;
+    transaction.commit()?;
+    #[cfg(test)]
+    IMPORTS.with(|imports| imports.borrow_mut().push(legacy.to_owned()));
+    match parsed {
+        Ok(_) => {
+            remove_legacy(legacy);
+            eprintln!(
+                "semon: imported {runs} reported runs from {} into the session index, and removed it",
+                legacy.display()
+            );
+        }
+        Err(error) => {
+            let aside = sibling(legacy, ".corrupt");
+            if let Err(rename) = fs::rename(legacy, &aside) {
+                warn_import(legacy, &rename);
+            }
+            eprintln!(
+                "semon: {} couldn't be read ({error}); it was set aside as {} and not imported",
+                legacy.display(),
+                aside.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn imported(connection: &Connection) -> rusqlite::Result<bool> {
+    Ok(connection
+        .query_row("SELECT 1 FROM meta WHERE key = ?1", [IMPORTED], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
+/// Removes the imported JSON cache; failing that, it is tried again at the
+/// next open.
+fn remove_legacy(legacy: &Path) {
+    match fs::remove_file(legacy) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => warn_import(legacy, &error),
+        _ => {}
+    }
+}
+
+/// Says once per process that the JSON cache's import is waiting.
+fn warn_import(legacy: &Path, error: &dyn fmt::Display) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "semon: {} isn't imported yet ({error}); it is tried again at the next start",
+            legacy.display()
+        );
+    }
 }
 
 /// A rusqlite error, as the cache handles it.
@@ -363,7 +512,7 @@ enum Init {
 }
 
 impl SqliteStore {
-    fn attempt(path: &Path) -> Result<(Self, Loaded), Unopened> {
+    fn attempt(path: &Path, legacy: Option<&Path>) -> Result<(Self, Loaded), Unopened> {
         let classify = |error: rusqlite::Error| {
             if is_corrupt(&error) {
                 Unopened::Corrupt(error)
@@ -395,6 +544,13 @@ impl SqliteStore {
                     "a newer version of semon wrote it".to_owned(),
                 ));
             }
+        }
+        // The import never keeps the store from opening: it is tried again
+        // at the next open.
+        if let Some(legacy) = legacy
+            && let Err(error) = import_legacy(&mut connection, legacy)
+        {
+            warn_import(legacy, &error);
         }
         let store = Self {
             connection,
@@ -1511,7 +1667,7 @@ mod tests {
     }
 
     fn opened(path: &Path) -> (SqliteStore, Loaded) {
-        match SqliteStore::attempt(path) {
+        match SqliteStore::attempt(path, None) {
             Ok(opened) => opened,
             Err(error) => panic!("the store opens: {error}"),
         }
@@ -1940,7 +2096,7 @@ mod tests {
             .unwrap();
         drop(store);
         assert!(matches!(
-            SqliteStore::attempt(&path),
+            SqliteStore::attempt(&path, None),
             Err(Unopened::Other(_))
         ));
         let connection = Connection::open(&path).unwrap();
@@ -1959,7 +2115,7 @@ mod tests {
             .unwrap();
         drop(connection);
         assert!(matches!(
-            SqliteStore::attempt(&path),
+            SqliteStore::attempt(&path, None),
             Err(Unopened::Other(_))
         ));
         fs::remove_dir_all(root).unwrap();
