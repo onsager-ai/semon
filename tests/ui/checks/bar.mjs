@@ -26,7 +26,7 @@
 //  - find and filter are one mode: Find takes over the bar, the match count agrees with the hits, and chips (All, Messages,
 //    Steps) choose one at a time: Messages hides every step, Steps every message, and All restores the transcript. The
 //    Failed steps chip opens errors mode: "Error 1 of N" (N the chip's count), the first failed step marked, in view and not
-//    expanded, with no menu open; Escape leaves it — and a session with a failed step must actually be found, or this fails
+//    expanded, with no menu open; Escape leaves it and returns to Find — and a session with a failed step must actually be found, or this fails
 //    instead of silently not running (checks/errnav.mjs covers the mode itself).
 //  - the ⋯ menu is one panel (a phone's bottom sheet, a desktop's anchored panel): actions (copy the resume command, open in
 //    claude.ai, the wide switch on desktop), details, and cost (one figure, this session and its runs, the harness's own figure,
@@ -230,7 +230,7 @@ export default async function barCheck(browser) {
         const badge = await page.evaluate(() => (document.querySelector('.find-chips .chip[data-filter="failures"] .n')?.textContent ?? "") + " errors");
         await page.click('.find-chips .chip[data-filter="failures"]'); await page.waitForTimeout(700);
         out.errsJump = { session: D.SESS[errSid].name, badge, ...(await page.evaluate(() => { const e = document.querySelector("#page .step.err-current"), r = e?.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect(); return { label: document.querySelector("#topbar .errnav-count")?.textContent ?? null, marked: !!e?.classList.contains("err"), expanded: e?.querySelector("button")?.getAttribute("aria-expanded") ?? null, inView: !!r && r.top >= bar.bottom - 1 && r.top < innerHeight, menu: !!document.querySelector("dialog[open]") }; })) };
-        await page.keyboard.press("Escape"); await page.waitForTimeout(300); out.errsJump.closed = await page.evaluate(() => !!document.querySelector("#topbar .meta-line") && !document.querySelector("#topbar .errnav-count"));
+        await page.keyboard.press("Escape"); await page.waitForTimeout(300); out.errsJump.closed = await page.evaluate(() => !!document.querySelector("#topbar .find-row") && !document.querySelector("#topbar .errnav-count"));
       }
       // Deep links land the turn fully below the bar.
       const landed = () => page.evaluate(() => { const st = history.state, t = [...document.querySelectorAll(".turn")].find((x) => x.dataset.turn === st?.turn), bar = document.querySelector("#topbar").getBoundingClientRect(); if (!t) return { found: false }; const r = t.getBoundingClientRect(); return { found: true, turn: st.turn, top: Math.round(r.top), barBottom: Math.round(bar.bottom), barTop: Math.round(bar.top), belowBar: r.top >= bar.bottom - 0.5 && r.top < innerHeight - 40, flash: t.classList.contains("flash") }; });
