@@ -1,0 +1,4 @@
+{
+  "note": "Ceilings per scenario and metric for tests/ui/checks/budget.mjs. Empty until the first CI run has measured main.",
+  "scenarios": {}
+}
