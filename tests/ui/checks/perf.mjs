@@ -155,20 +155,23 @@ async function checkLongSessionOpenEnd(page) {
     const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
     return sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 1;
   }, null, { timeout: 10_000 });
-  // The tail of the page sits clear of where the button floats. A 36 px button is appended as the very last thing in the
-  // transcript (cancelling the section's grid gap) and the page is scrolled to its end, where the jump button is hidden; the
-  // button is shown for one synchronous read to get its box. The floating button can still cover content mid-scroll: what is
-  // guaranteed is that it never sits over the tail.
+  // The tail of the page sits clear of where the button floats. The button is sticky at the foot of the viewport and hides once the
+  // reader is within 80 px of the end, so the case that matters is the first place it shows: 90 px from the end. A 36 px button is
+  // appended as the very last thing in the transcript (cancelling the section's grid gap), the page is scrolled to that place, and
+  // the button's box and the tail's are read there. The floating button can still cover content mid-scroll: what is guaranteed is
+  // that it never sits over the tail.
   const tail = await page.evaluate(async () => {
     const button = document.querySelector("#jump-bottom"), wrap = button.closest(".jump-wrap"), section = document.querySelector("#page section[aria-label='Transcript']");
     const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
     const probe = document.createElement("button"); probe.className = "tail-probe"; probe.textContent = "View all";
     probe.style.cssText = "display:block;width:100%;height:36px;margin-top:-" + getComputedStyle(section).rowGap;
-    section.append(probe); sc.scrollTop = sc.scrollHeight;
+    section.append(probe); sc.scrollTop = sc.scrollHeight - sc.clientHeight - 90;
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const wasHidden = wrap.hidden; wrap.hidden = false; const b = button.getBoundingClientRect(); wrap.hidden = wasHidden;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const shownThere = !wrap.hidden; const b = button.getBoundingClientRect();
     const r = probe.getBoundingClientRect(); probe.remove();
-    return { hiddenAtEnd: wasHidden, probeBottom: Math.round(innerHeight - r.bottom), buttonTop: Math.round(innerHeight - b.top), overlaps: r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top };
+    sc.scrollTop = sc.scrollHeight; await new Promise((resolve) => setTimeout(resolve, 200));
+    return { hiddenAtEnd: wrap.hidden, shownThere, probeBottom: Math.round(innerHeight - r.bottom), buttonTop: Math.round(innerHeight - b.top), overlaps: r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top };
   });
   const returnedGap = await page.evaluate(() => {
     const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
@@ -185,7 +188,7 @@ async function checkLongSessionOpenEnd(page) {
     centring,
     tail,
     returnedGap,
-    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && tail.hiddenAtEnd && !tail.overlaps && tail.probeBottom - tail.buttonTop >= 12 && returnedGap <= 1,
+    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && tail.hiddenAtEnd && tail.shownThere && !tail.overlaps && tail.probeBottom - tail.buttonTop >= 12 && returnedGap <= 1,
   };
 }
 
