@@ -588,13 +588,15 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 /* ---- Approved viewer UX: compact metadata, session tree and reading controls --------------------- */
 .app { transition: grid-template-columns .18s ease; }
 .sidebar { min-width: 0; }
-/* The sidebar never scrolls as a whole: the header, search and nav stay put, "Recent" is the one scroller, and "All sessions"
-   is pinned below it. The list is as tall as its rows and shrinks only when they overflow, so a short list leaves the footer
-   right after its last row. The hairline at the list's foot shows only while rows remain below: a scrolling-with-content
-   cover of the sidebar's colour sits over it once the list is scrolled to its end. */
-.side-search, .side-foot { flex: none; }
+/* The sidebar never scrolls as a whole: the header, search, nav and the "Recent" label stay put, the session list is the one
+   scroller, and "All sessions" is pinned below it. The list is as tall as its rows and shrinks only when they overflow, so a short
+   list leaves the footer right after its last row. A hairline at each end of the list shows only while rows remain beyond it: a
+   1px cover of the sidebar's colour scrolls with the content at each end and sits over the hairline until the list is scrolled
+   away from that end. */
+.side-search, .side-foot, .side-h { flex: none; }
 .side-list { flex: 0 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 8px;
-  background: linear-gradient(var(--side), var(--side)) 0 100% / 100% 1px no-repeat local, linear-gradient(var(--line), var(--line)) 0 100% / 100% 1px no-repeat scroll; }
+  background: linear-gradient(var(--side), var(--side)) 0 0 / 100% 1px no-repeat local, linear-gradient(var(--side), var(--side)) 0 100% / 100% 1px no-repeat local,
+    linear-gradient(var(--line), var(--line)) 0 0 / 100% 1px no-repeat scroll, linear-gradient(var(--line), var(--line)) 0 100% / 100% 1px no-repeat scroll; }
 .sidebar-head { display: flex; align-items: center; gap: 2px; padding: 10px 12px 2px; }
 .brandrow .brandname { min-width: 0; }
 .rail-toggle { display: inline-grid; }
