@@ -327,7 +327,7 @@ export default async function barCheck(browser) {
     });
     await goto(page, { v: "session", id: thoughtSid }, D);
     await page.waitForFunction((base) => document.querySelectorAll(".turns .think").length >= base + 2, baseThoughts);
-    thoughts = await page.evaluate((base) => { const rows = [...document.querySelectorAll(".turns .think")]; return { maskedRows: document.querySelectorAll(".think-masked").length, addedThoughts: rows.length - base, readable: rows.length > 0 && rows.every((x) => x.tagName === "BUTTON" && x.querySelector(".chev") && x.nextElementSibling?.hidden), emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] }; }, baseThoughts);
+    thoughts = await page.evaluate((base) => { const rows = [...document.querySelectorAll(".turns .think")]; return { addedThoughts: rows.length - base, readable: rows.length > 0 && rows.every((x) => x.tagName === "BUTTON" && x.querySelector(".chev") && x.nextElementSibling?.hidden), emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] }; }, baseThoughts);
     thoughts.errors = page.errors;
     await page.context().close();
   }
@@ -338,8 +338,37 @@ export default async function barCheck(browser) {
     const page = await served(browser, { size: "phone" });
     await goto(page, { v: "session", id: "principal" }, D);
     await page.waitForSelector(".turns .step", { state: "attached" });
-    maskedTurn = await page.evaluate(() => ({ maskedRows: document.querySelectorAll(".think-masked").length, thoughtRows: document.querySelectorAll(".turns .think, .turns .think-pending").length, steps: document.querySelectorAll(".turns .step").length, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] }));
+    maskedTurn = await page.evaluate(() => ({ thoughtRows: document.querySelectorAll(".turns .think, .turns .think-pending").length, steps: document.querySelectorAll(".turns .step").length, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] }));
     maskedTurn.errors = page.errors;
+    await page.context().close();
+  }
+
+  // Two turns are added to the served model and transcript of the principal session: one holding only masked thoughts, with
+  // no start, no message and no end (nothing to draw: its block must go, leaving no empty .tx), and one with a masked thought
+  // and then a reply (its block stays, with the reply and no thought row). The second also proves the injection reached the
+  // page: without it, "the first turn is gone" could mean the turn never existed.
+  let bareTurns = null;
+  if (D.SESS.principal) {
+    const page = await served(browser, { size: "phone" });
+    await page.route("**/api/model*", async (route) => {
+      const response = await route.fetch(), body = await response.json();
+      const base = body.turns.filter((t) => t.sid === "principal").at(-1);
+      for (const id of ["bt-bare-turn", "bt-masked-then-reply"]) body.turns.push({ id, sid: "principal", at: base?.at ?? 0, start: null, u: false, text: "", sent: [], end: null });
+      await route.fulfill({ response, json: body });
+    });
+    await page.route("**/api/tx*", async (route) => {
+      const u = new URL(route.request().url()); if (u.searchParams.get("sid") !== "principal") return route.continue();
+      const response = await route.fetch(), body = await response.json();
+      body.entries.push({ k: "think", text: "", secs: 4, turn: "bt-bare-turn" }, { k: "think", text: "", secs: 5, turn: "bt-masked-then-reply" }, { k: "a", text: "Reply after a masked thought" });
+      await route.fulfill({ response, json: body });
+    });
+    await goto(page, { v: "session", id: "principal" }, D);
+    await page.waitForSelector('section.turn[data-turn="bt-masked-then-reply"]', { timeout: 8000 }).catch(() => {});
+    bareTurns = await page.evaluate(() => {
+      const withReply = document.querySelector('section.turn[data-turn="bt-masked-then-reply"]');
+      return { bareBlock: !!document.querySelector('section.turn[data-turn="bt-bare-turn"]'), replyBlock: !!withReply, replyText: withReply?.querySelector(".msg")?.textContent ?? null, thoughtRowsInReply: withReply?.querySelectorAll(".think, .think-pending").length ?? null, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] };
+    });
+    bareTurns.errors = page.errors;
     await page.context().close();
   }
 
@@ -357,19 +386,24 @@ export default async function barCheck(browser) {
     await page.context().close();
   }
 
-  r.results = { modes, expected: X, thoughts, maskedTurn, extra, childAssertions };
+  r.results = { modes, expected: X, thoughts, maskedTurn, bareTurns, extra, childAssertions };
   r.expect(!!thoughtSid, "no session transcript was available for the masked-thinking check");
   if (thoughts) {
     r.expect(thoughts.errors.length === 0, "masked-thinking route: page errors: " + thoughts.errors.join(" | "));
-    r.expect(thoughts.maskedRows === 0, "masked thoughts are still drawn: " + JSON.stringify(thoughts));
     r.expect(thoughts.addedThoughts === 2, "the two readable injected thoughts should add exactly two thought rows, the four masked ones none: " + JSON.stringify(thoughts));
     r.expect(thoughts.readable === true, "readable thinking did not keep its disclosure control");
     r.expect(thoughts.emptyBlocks === 0, "a turn block was left empty by masked thoughts: " + JSON.stringify(thoughts));
   }
+  if (bareTurns) {
+    r.expect(bareTurns.errors.length === 0, "bare masked turn: page errors: " + bareTurns.errors.join(" | "));
+    r.expect(bareTurns.replyBlock && bareTurns.replyText?.includes("Reply after a masked thought") && bareTurns.thoughtRowsInReply === 0, "the injected masked-then-reply turn did not draw as its reply alone: " + JSON.stringify(bareTurns));
+    r.expect(!bareTurns.bareBlock && bareTurns.emptyBlocks === 0, "a turn holding only masked thoughts was left as a block: " + JSON.stringify(bareTurns));
+  }
+  r.expect(!D.SESS.principal || !!bareTurns, "the bare masked turn check did not run");
   r.expect(!D.SESS.principal || !!maskedTurn, "the principal session's masked-thinking turn was not checked");
   if (maskedTurn) {
     r.expect(maskedTurn.errors.length === 0, "principal masked-thinking route: page errors: " + maskedTurn.errors.join(" | "));
-    r.expect(maskedTurn.maskedRows === 0 && maskedTurn.thoughtRows === 0, "a turn of masked thoughts still shows thought rows: " + JSON.stringify(maskedTurn));
+    r.expect(maskedTurn.thoughtRows === 0, "a turn of masked thoughts still shows thought rows: " + JSON.stringify(maskedTurn));
     r.expect(maskedTurn.steps > 0 && maskedTurn.emptyBlocks === 0, "hiding masked thoughts lost the turn's steps or left an empty block: " + JSON.stringify(maskedTurn));
   }
   r.expect(!!process.env.SEMON_EXTRA_BASE, "SEMON_EXTRA_BASE not set: the tables-render positive check did not run");

@@ -1145,6 +1145,7 @@
       // A turn whose only thinking was masked is left with nothing to draw (no header, no rows): it goes, unless its end row still says something.
       const bare = masked && !blk.querySelector(".tx > *, .turn-h");
       if (bare && (opts.excludeH && t.last || !turnEnd(t) && !t.out.length)) { blk.remove(); return; }
+      if (bare) blk.querySelector(":scope > .tx")?.remove(); // its end row stays alone, with no empty space above it
       if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .think, .think-pending")) { blk.remove(); return; }
       if (opts.excludeH && t.last) return;
       const end = turnEnd(t); if (!end && !t.out.length) return;
