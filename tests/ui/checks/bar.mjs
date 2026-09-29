@@ -362,13 +362,13 @@ export default async function barCheck(browser) {
     const t = await page.evaluate((base) => {
       const readable = [...document.querySelectorAll(".turns .thought:not(.masked)")], masked = [...document.querySelectorAll(".turns .thought.masked")];
       const shown = (x) => { const b = x.getBoundingClientRect(); return b.width > 0 && b.height > 0; };
-      const labels = readable.map((x) => x.querySelector(".think-label")?.textContent ?? null);
+      const labels = readable.map((x) => (x.querySelector(".think-label")?.textContent ?? "").replace(/\s+/g, " ").trim()); // the viewer spaces a "·" out
       return { addedReadable: readable.length - base.readable, addedMasked: masked.length - base.masked,
         inline: readable.length > 0 && readable.every((x) => shown(x.querySelector(".think-text")) && !x.querySelector("button, [aria-expanded], [hidden]") && x.querySelector(".think-text").textContent.trim().length > 0),
         maskedLines: masked.every((x) => x.children.length === 1 && x.textContent.trim() === "Thinking hidden by the harness" && !x.querySelector("button, [aria-expanded]")),
         pairs: masked.filter((x) => x.nextElementSibling?.classList.contains("masked")).length,
         zero: [...document.querySelectorAll(".turns .think-label")].filter((x) => /\b0\s*s\b|Thought for/.test(x.textContent)).map((x) => x.textContent),
-        labels: labels.slice(-4), timed: labels.includes("Thinking · 12s"), untimed: labels.filter((x) => x === "Thinking").length > 0,
+        timed: labels.includes("Thinking · 12s"), untimed: labels.filter((x) => x === "Thinking").length > 0,
         oldRows: document.querySelectorAll(".turns button.think").length, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] };
     }, base);
     t.overflow = await overflow(page); t.errors = page.errors;
