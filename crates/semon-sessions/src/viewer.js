@@ -551,7 +551,7 @@
     for (const xs of children.values()) xs.sort((a, b) => b.last - a.last);
     return (CHILDREN = children);
   };
-  // Sibling navigation follows the handoffs in their original order; the sidebar and Runs list stay newest-first.
+  // Children in the order their handoffs were sent; the sidebar list stays newest-first.
   const childSessions = (sid) => [...(sessionChildren().get(sid) ?? [])].sort((a, b) => (originHandoff(a.id)?.at ?? a.last) - (originHandoff(b.id)?.at ?? b.last));
   const descendantsOf = (sid, children, out = [], seen = new Set([sid])) => {
     for (const child of children.get(sid) ?? []) if (!seen.has(child.id)) { seen.add(child.id); out.push(child); descendantsOf(child.id, children, out, seen); }
@@ -685,7 +685,7 @@
       opts.line2(l2); t.append(l2);
       if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); });
     }
-    bar.append(t); if (s && !phone.matches) { const nav = siblingNav(s); if (nav) bar.append(nav); }
+    bar.append(t);
     if (opts.analytics) { appendAnalyticsRange(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
     if (!s) { appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
     const fb = el("button", "ibtn"); fb.type = "button"; fb.setAttribute("aria-label", "Find in transcript"); fb.append(icon(I.search));
@@ -724,15 +724,6 @@
     bar.querySelector(".lineage-menu")?.remove(); const path = lineageOf(sid), menu = el("div", "lineage-menu"); menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", "Session path");
     path.forEach((s, i) => { const b = el("button"); b.type = "button"; b.setAttribute("role", "menuitem"); if (i === path.length - 1) b.setAttribute("aria-current", "page"); b.append(el("span", null, s.name), harnessName(s.harness)); b.addEventListener("click", () => { menu.remove(); goSession(s.id); }); menu.append(b); });
     bar.append(menu); const close = (e) => { if (!menu.contains(e.target) && !e.target.closest?.(".lineage-parent")) { menu.remove(); document.removeEventListener("click", close); } }; setTimeout(() => document.addEventListener("click", close), 0);
-  }
-  function siblingNav(s) {
-    const parent = parentOf(s.id); if (!parent) return null;
-    const siblings = childSessions(parent), at = siblings.findIndex((x) => x.id === s.id); if (siblings.length < 2 || at < 0) return null;
-    const nav = el("div", "sibling-nav"); nav.setAttribute("role", "group"); nav.setAttribute("aria-label", "Sibling sessions");
-    for (const [delta, label, path] of [[-1, "Previous sibling", I.back], [1, "Next sibling", I.chev]]) {
-      const target = siblings[at + delta], b = el("button", "ibtn"); b.type = "button"; b.disabled = !target; b.setAttribute("aria-label", target ? label + ": " + target.name : label); b.append(icon(path)); if (target) b.addEventListener("click", () => goSession(target.id)); nav.append(b);
-    }
-    nav.insertBefore(el("span", "sibling-count", (at + 1) + " of " + siblings.length), nav.lastChild); return nav;
   }
   // Kind and state are the two items line 2 always keeps. Everything else drops from the right in append order
   // (model, machine, branch, tools, runs, tokens, cost); errors, the kind word, turn count, then state word give way last.
@@ -1297,7 +1288,6 @@
     const parent = SESS[h.from], block = el("section", "child-intro"); block.setAttribute("aria-label", "Brief from " + parent.name);
     const title = el("div", "intro-title"), open = el("button", null, parent.name); open.type = "button"; open.addEventListener("click", () => openParentAtHandoff(h));
     title.append("Brief from ", open, el("span", "tm", clock(h.at)));
-    if (phone.matches && SESS[h.to]) { const nav = siblingNav(SESS[h.to]); if (nav) title.append(nav); }
     block.append(title);
     const brief = markdown(h.brief, "brief"), more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
     more.addEventListener("click", () => { const expanded = brief.classList.toggle("open"); more.textContent = expanded ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(expanded)); });
