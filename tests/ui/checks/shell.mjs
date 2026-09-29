@@ -14,6 +14,7 @@ const sizes = [
 ];
 const schemes = ["light", "dark"];
 const output = path.join(ENV.out, "shell");
+const GALLERY_PATH = "/__shell-gallery.html";
 const PHONE_TARGET_SELECTOR = ".btn, .field input, .code .copy, dialog.sheet button";
 fs.mkdirSync(output, { recursive: true });
 
@@ -34,10 +35,19 @@ async function galleryPage(browser, html, width, height, mobile, scheme) {
   await page.route(/.*/, (route) => (
     route.request().url().startsWith(ENV.base + "/") ? route.continue() : route.abort()
   ));
-  // Loading the stylesheet with the token sets the server cookie and gives setContent the right same-origin base URL.
-  await page.goto(ENV.base + "/shell.css?t=" + ENV.token, { waitUntil: "load" });
+  // Loading the stylesheet with the token sets the server cookie and shows which security headers the viewer's origin sends.
+  const stylesheet = await page.goto(ENV.base + "/shell.css?t=" + ENV.token, { waitUntil: "load" });
+  // The gallery is then navigated to as a page of its own on that origin, answered from the file with those same headers
+  // (CSP included), rather than written into the stylesheet's document with page.setContent. Two CI runs (36483037109 and
+  // 36528320379) hung in setContent's wait for "load" on the first gallery page, the second after a 30 s timeout, so the
+  // wait was not merely slow. The cause was not established (no browser to reproduce it here); a navigation does not
+  // go through document.open() on the just-loaded stylesheet document, and serves the same page under the same origin,
+  // headers and cookie.
+  const headers = Object.fromEntries(Object.entries(stylesheet.headers())
+    .filter(([name]) => !["content-type", "content-length", "content-encoding", "etag", "set-cookie", "date", "connection", "transfer-encoding", "keep-alive"].includes(name)));
+  await page.route(ENV.base + GALLERY_PATH, (route) => route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", headers, body: html }));
+  await page.goto(ENV.base + GALLERY_PATH, { waitUntil: "load" });
   await page.emulateMedia({ colorScheme: scheme });
-  await page.setContent(html, { waitUntil: "load" });
   await page.evaluate(() => document.fonts.ready);
   return { context, page };
 }
