@@ -4,7 +4,7 @@ import { served, data, reporter, overflow, goto, settled } from "../lib.mjs";
 
 export default async function analyticsCheck(browser) {
   const D = await data(), r = reporter("analytics"), modes = [];
-  const expectedLabels = ["Agent-hours", "Cost · UTC days", "Sessions started", "Turns", "Tool calls", "Peak concurrency", "Waited on you", "Longest current wait"];
+  const expectedLabels = ["Agent-hours", "Cost in UTC days", "Sessions started", "Turns", "Tool calls", "Peak concurrency", "Waited on you", "Longest current wait"];
   const expectedHarborIds = Object.values(D.SESS).filter((s) => s.repo === "harbor").map((s) => s.id).sort();
   r.expect(!!D.SESS.deps?.rate_limits, "the fixture must serve Codex rate limits for the allowance panel");
 
@@ -27,7 +27,7 @@ export default async function analyticsCheck(browser) {
       if (days.length) for (const model of session.cost?.unpriced_models ?? []) missingModels.add(model);
     }
     record.costExpected = missingModels.size ? "—" : "$" + expectedUsd.toFixed(2);
-    record.costHeadline = await page.locator('.analytics-metric').filter({ hasText: "Cost · UTC days" }).locator(".value").textContent();
+    record.costHeadline = await page.locator('.analytics-metric').filter({ hasText: "Cost in UTC days" }).locator(".value").textContent();
     record.charts = await page.evaluate(() => [...document.querySelectorAll(".analytics-chart svg")].map((svg) => ({ label: svg.getAttribute("aria-label"), columns: [...svg.querySelectorAll("rect.cost-claude, rect.cost-codex")].map((x) => ({ width: Number(x.getAttribute("width")), height: Number(x.getAttribute("height")) })).filter((x) => x.width > 0 && x.height > 0).length })));
     record.allowance = await page.evaluate(() => ({ heading: [...document.querySelectorAll(".analytics-panel h2")].find((x) => x.textContent === "Codex allowance")?.textContent, windows: [...document.querySelectorAll(".allowance-window .window-name")].map((x) => x.textContent.trim()), used: [...document.querySelectorAll(".allowance-window .window-used")].map((x) => x.textContent.trim()) }));
     record.sideways = size === "phone" ? await overflow(page) : 0;
@@ -71,12 +71,12 @@ export default async function analyticsCheck(browser) {
   costTwoDays.day = { label: (await fx.locator(".analytics-metric .label").allTextContents()).map((x) => x.trim()).find((x) => x.startsWith("Cost")), value: await figure("Cost today (UTC)").locator(".value").textContent(), note: await figure("Cost today (UTC)").locator(".note").textContent(),
     charts: await fx.locator(".analytics-chart svg").count(), costChart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .analytics-chart").count() };
   await fx.click('#topbar .analytics-range button:has-text("7 d")');
-  costTwoDays.week = { value: await figure("Cost · UTC days").locator(".value").textContent(), chart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .panel-sub").textContent() };
+  costTwoDays.week = { value: await figure("Cost in UTC days").locator(".value").textContent(), chart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .panel-sub").textContent(), columns: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) rect.cost-claude, .analytics-panel:has(h2:has-text('Cost over time')) rect.cost-codex").count() };
   costTwoDays.errors = fx.errors;
   await fx.context().close();
   r.expect(costTwoDays.day.label === "Cost today (UTC)" && costTwoDays.day.value === "$3.00" && costTwoDays.day.note.includes("−$7.00"), "24 h cost headline must be the one UTC day ($3.00 against yesterday's $10.00), not the $13.00 sum: " + JSON.stringify(costTwoDays.day));
   r.expect(costTwoDays.day.charts === 1 && costTwoDays.day.costChart === 0, "the 24 h range must draw no hourly cost series: " + JSON.stringify(costTwoDays.day));
-  r.expect(costTwoDays.week.value === "$10.00" && costTwoDays.week.chart.includes("whole UTC days"), "7 d must count only the whole UTC day inside the range ($10.00): " + JSON.stringify(costTwoDays.week));
+  r.expect(costTwoDays.week.value === "$10.00" && costTwoDays.week.chart.includes("whole UTC days") && costTwoDays.week.columns === 1, "7 d must count only the whole UTC day inside the range ($10.00): " + JSON.stringify(costTwoDays.week));
   r.expect(costTwoDays.errors.length === 0, "cost fixture: page errors: " + costTwoDays.errors.join(" | "));
 
   const legacy = await served(browser, { size: "desktop", path: "/timeline" });
@@ -91,7 +91,9 @@ export default async function analyticsCheck(browser) {
     r.expect(m.figures === 8 && expectedLabels.every((label) => m.labels.some((value) => value.startsWith(label))), m.mode + ": expected eight headline figures: " + JSON.stringify(m.labels));
     r.expect(m.longestCurrentWait === "8m", m.mode + ": completed result messages were counted as current waits: " + m.longestCurrentWait);
     r.expect(m.costHeadline === m.costExpected, m.mode + ": Analytics headline did not sum the served by_day cost: " + JSON.stringify({ actual: m.costHeadline, expected: m.costExpected }));
-    r.expect(m.charts.length === 2 && m.charts.every((chart) => chart.columns > 0), m.mode + ": expected both charts to render vertical columns: " + JSON.stringify(m.charts));
+    // The fixture's cost is all on the current UTC day, which no 7 d window holds whole: its cost chart has no columns (the
+    // two-day fixture below draws one).
+    r.expect(m.charts.length === 2 && m.charts[0].columns > 0 && m.charts[1].columns === 0, m.mode + ": expected the agents chart to render vertical columns and the whole-UTC-day cost chart none: " + JSON.stringify(m.charts));
     r.expect(m.slice?.open && m.slice.sessions > 0, m.mode + ": an Analytics slice did not open with busy sessions: " + JSON.stringify(m.slice));
     if (m.mode === "phone") r.expect(m.slice?.bottomSheet && m.sideways === 0, "phone: the slice must be a bottom sheet with no sideways page scroll: " + JSON.stringify({ slice: m.slice, sideways: m.sideways }));
     r.expect(m.repoRow === 1 && m.filtered?.title === "Sessions" && m.filtered.rows.length === expectedHarborIds.length && m.filtered.rows.join(",") === expectedHarborIds.join(",") && m.filtered.rows.length < Object.keys(D.SESS).length, m.mode + ": a repo breakdown did not filter the Sessions list to every harbor session: " + JSON.stringify({ found: m.repoRow, expected: expectedHarborIds, filtered: m.filtered }));

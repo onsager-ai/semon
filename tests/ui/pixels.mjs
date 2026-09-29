@@ -150,7 +150,7 @@ const COST_LINES = [
   ['    panel.append(title, el("div", "panel-sub", "API-equivalent cost " + unit + " · stacked by harness"));',
     '    panel.append(title, el("div", "panel-sub", "API-equivalent cost per day · whole UTC days · stacked by harness"));'],
   ['    addMetric("API-equivalent cost", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, null, true);',
-    '    addMetric(analyticsRange === 1 ? "Cost today (UTC)" : "Cost · UTC days", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, null, true);'],
+    '    addMetric(analyticsRange === 1 ? "Cost today (UTC)" : "Cost in UTC days", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, null, true);'],
   ['      const ms = busyMsIn(row, from, to); if (!ms && !inRange(row.startedAt, from, to)) continue;\n      const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);',
     '      const ms = busyMsIn(row, from, to), c = sessionCostInRange(row.s, from, to); if (!ms && !inRange(row.startedAt, from, to) && !c.hasData) continue;\n      const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);'],
   ['      if (inRange(row.costAt, from, to)) { const c = costForSession(row.id); g.cost += c.knownUsd; c.unknown.forEach((x) => g.unknown.add(x)); }',
