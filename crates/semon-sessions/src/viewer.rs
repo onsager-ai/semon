@@ -1513,7 +1513,7 @@ impl MachineView {
             "/viewer.css" => Ok((
                 200,
                 "text/css; charset=utf-8",
-                include_str!("viewer.css").into(),
+                crate::shell::VIEWER_CSS.into(),
             )),
             "/mark.svg" => Ok((200, "image/svg+xml", include_str!("mark.svg").into())),
             _ if crate::HARNESS_ICONS
@@ -1532,11 +1532,7 @@ impl MachineView {
                 "text/javascript; charset=utf-8",
                 crate::shell::JS.into(),
             )),
-            "/shell.css" => Ok((
-                200,
-                "text/css; charset=utf-8",
-                include_str!("shell.css").into(),
-            )),
+            "/shell.css" => Ok((200, "text/css; charset=utf-8", crate::shell::CSS.into())),
             "/api/tree" => Ok((200, json, self.tree_json()?.into_bytes())),
             "/api/transcript" => Ok((200, json, serde_json::to_vec(&self.transcript(query)?)?)),
             "/api/tx" => Ok((200, json, self.tx(query)?.into_bytes())),
@@ -3319,7 +3315,7 @@ mod tests {
         }
         for banned in ["@import", "http://", "https://"] {
             assert!(
-                !include_str!("viewer.css").contains(banned),
+                !crate::shell::VIEWER_CSS.contains(banned),
                 "viewer.css uses {banned}"
             );
         }

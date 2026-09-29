@@ -1,0 +1,51 @@
+/* Select: a button that opens a list of options (select.js). The look follows the overhaul mockup's controls: a 1px outline
+   in --line-2, radius 8, --fs-sm text, --tap tall (36px, 44px on a phone). */
+.sh-select { position: relative; min-width: 0; }
+.sh-select-trigger { display: flex; align-items: center; justify-content: space-between; gap: 4px; width: 100%; min-width: 0; height: var(--tap); padding: 0 6px 0 9px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--ground); color: var(--ink); font: 400 var(--fs-sm)/1.2 var(--sans); text-align: left; cursor: pointer; }
+.sh-select-trigger:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
+.sh-select-trigger[aria-expanded="true"] { border-color: var(--accent); }
+.sh-select-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-select-label { color: var(--muted); }
+.sh-select-value { color: var(--ink); }
+.sh-select-chevron { flex: none; width: 16px; height: 16px; color: var(--muted); }
+
+/* The popover floats under the trigger, or over it when there is no room below (select.js sets left, top and max-height). It sits
+   just under the sticky top bar (z-index 5), so scrolling the page slides it beneath the bar instead of over it. */
+.sh-select-pop { position: fixed; z-index: 4; box-sizing: border-box; display: flex; flex-direction: column; max-width: calc(100vw - 16px); border: 1px solid var(--line-2); border-radius: 10px; background: var(--ground); box-shadow: var(--shadow); overflow: hidden; }
+.sh-select-pop[hidden] { display: none; }
+.sh-select-search { display: flex; align-items: center; gap: 8px; flex: none; height: 38px; padding: 0 10px; border-bottom: 1px solid var(--line); color: var(--muted); }
+.sh-select-search[hidden] { display: none; }
+.sh-select-search svg { flex: none; width: 16px; height: 16px; }
+.sh-select .sh-select-search input, .sh-select .sh-select-search input:focus-visible { flex: 1 1 auto; width: auto; min-width: 0; height: 100%; min-height: 0; padding: 0; border: 0; border-radius: 0; outline: 0; background: transparent; color: var(--ink); font: 400 var(--fs-sm)/1.2 var(--sans); }
+.sh-select .sh-select-search:focus-within { border-bottom-color: var(--accent); }
+.sh-select-search input::placeholder { color: var(--muted); }
+.sh-select-list { flex: 1 1 auto; min-height: 0; padding: 4px; overflow-y: auto; overscroll-behavior: contain; outline: 0; }
+.sh-select-option { position: relative; display: flex; align-items: center; min-height: 32px; padding: 0 10px 0 30px; border-radius: 6px; color: var(--ink); font-size: var(--fs-sm); line-height: 1.3; cursor: pointer; }
+.sh-select-option-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-select-check { position: absolute; left: 9px; width: 14px; height: 14px; color: var(--ink); visibility: hidden; }
+.sh-select-option[aria-selected="true"] { font-weight: 600; }
+.sh-select-option[aria-selected="true"] .sh-select-check { visibility: visible; }
+.sh-select-option.sh-active { background: var(--hover); }
+.sh-select-empty { padding: 10px 12px; color: var(--muted); font-size: var(--fs-sm); }
+.sh-select-empty[hidden] { display: none; }
+
+/* On a phone the list is a bottom sheet: a modal dialog (so focus stays in it and Escape closes it) with 44px rows. */
+dialog.sh-select-sheet { overscroll-behavior: contain; position: fixed; inset: auto 0 0; box-sizing: border-box; width: 100%; max-width: none; max-height: min(80dvh, 640px); margin: 0; padding: 0; border: 0; border-top: 1px solid var(--line); border-radius: 16px 16px 0 0; background: var(--ground); color: var(--ink); overflow: hidden; }
+dialog.sh-select-sheet[open] { display: flex; flex-direction: column; }
+dialog.sh-select-sheet::backdrop { background: rgb(0 0 0 / .35); }
+dialog.sh-select-sheet::before { position: absolute; top: 8px; left: 50%; width: 36px; height: 4px; border-radius: 4px; background: var(--faint); content: ""; transform: translateX(-50%); }
+.sh-select-sheet-h { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; padding: 18px 6px 2px 16px; font-size: 16px; font-weight: 600; }
+.sh-select-close { display: grid; place-items: center; flex: none; width: 44px; height: 44px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); cursor: pointer; }
+.sh-select-close svg { width: 20px; height: 20px; }
+.sh-select-sheet .sh-select-search { height: 44px; margin: 4px 16px 0; padding: 0 12px; border: 1px solid var(--line-2); border-radius: 10px; }
+.sh-select-sheet .sh-select-search input, .sh-select-sheet .sh-select-search input:focus-visible { font-size: 16px; }
+.sh-select-sheet .sh-select-list { padding: 6px 8px calc(10px + env(safe-area-inset-bottom, 0px)); }
+.sh-select-sheet .sh-select-option { min-height: 44px; padding-top: 8px; padding-bottom: 8px; padding-left: 40px; border-radius: 10px; font-size: 15px; }
+.sh-select-sheet .sh-select-option-text { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+.sh-select-sheet .sh-select-check { left: 14px; width: 16px; height: 16px; }
+.sh-select-sheet .sh-select-empty { padding: 14px 16px calc(14px + env(safe-area-inset-bottom, 0px)); font-size: 15px; }
+
+@media (hover: hover) {
+  .sh-select-trigger:hover { background: var(--hover); }
+  .sh-select-close:hover { background: var(--hover); }
+}
