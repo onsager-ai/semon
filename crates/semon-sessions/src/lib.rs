@@ -32,7 +32,7 @@ pub use inputs::{Input, InputRoot, inputs, is_input_path};
 pub use mcp::serve_mcp;
 pub use model::{model_json, model_json_at};
 pub use query::{DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools};
-pub use received::ReceivedMachines;
+pub use received::{ReceivedMachines, is_machine_name};
 pub use union::{AccountLink, AccountMenu, AccountWorkspace, AdminLink, LinkMethod, ViewerCore};
 pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve};
 
@@ -236,25 +236,60 @@ fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
 
-/// A regular file's bytes, without following a symbolic link: the input
-/// set has none (see `inputs`), so a link where a record is read is
-/// ignored, as `file_list` ignores a linked transcript.
+/// The most of a pid record or a subagent's metadata that is read: a
+/// larger one is taken as absent.
+pub(crate) const RECORD_MAX: u64 = 1024 * 1024;
+
+/// A pid record's or a subagent metadata file's bytes: at most
+/// [`RECORD_MAX`], from a regular file, a symbolic link not followed (the
+/// input set has none; see `inputs`). A larger file reads as absent, with
+/// one warning per path.
 pub(crate) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
+    static WARNED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+    let read = read_regular_at_most(path, RECORD_MAX);
+    if let Err(error) = &read
+        && error.kind() == io::ErrorKind::FileTooLarge
+        && WARNED
+            .lock()
+            .is_ok_and(|mut warned| warned.insert(path.to_owned()))
+    {
+        eprintln!(
+            "semon: {} is over {RECORD_MAX} bytes; it is ignored",
+            path.display()
+        );
+    }
+    read
+}
+
+/// A regular file's bytes, at most `max` of them. The path must name a
+/// regular file itself, not a link to one, and the file opened must be that
+/// file (the same device and inode, from the opened file's own metadata):
+/// otherwise `InvalidInput`. A larger file is `FileTooLarge`.
+pub(crate) fn read_regular_at_most(path: &Path, max: u64) -> io::Result<Vec<u8>> {
     use std::io::Read;
     let linked = fs::symlink_metadata(path)?;
     if !linked.is_file() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    let mut file = fs::File::open(path)?;
+    if linked.len() > max {
+        return Err(io::ErrorKind::FileTooLarge.into());
+    }
+    let file = fs::File::open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
     #[cfg(unix)]
     {
-        let opened = file.metadata()?;
         if (opened.dev(), opened.ino()) != (linked.dev(), linked.ino()) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
     }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    file.take(max + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(io::ErrorKind::FileTooLarge.into());
+    }
     Ok(bytes)
 }
 
