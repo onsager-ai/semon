@@ -19,6 +19,7 @@ mod mcp;
 mod model;
 pub mod pricing;
 mod query;
+mod received;
 pub mod shell;
 mod tx;
 mod union;
@@ -31,6 +32,7 @@ pub use inputs::{Input, InputRoot, inputs, is_input_path};
 pub use mcp::serve_mcp;
 pub use model::{model_json, model_json_at};
 pub use query::{DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools};
+pub use received::ReceivedMachines;
 pub use union::{AccountLink, AccountMenu, AccountWorkspace, AdminLink, LinkMethod, ViewerCore};
 pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve};
 
@@ -232,6 +234,28 @@ impl Summary {
 
 fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
+}
+
+/// A regular file's bytes, without following a symbolic link: the input
+/// set has none (see `inputs`), so a link where a record is read is
+/// ignored, as `file_list` ignores a linked transcript.
+pub(crate) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let linked = fs::symlink_metadata(path)?;
+    if !linked.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut file = fs::File::open(path)?;
+    #[cfg(unix)]
+    {
+        let opened = file.metadata()?;
+        if (opened.dev(), opened.ino()) != (linked.dev(), linked.ino()) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn file_list(root: &Path, output: &mut Vec<PathBuf>, suffix: &str) -> io::Result<()> {
@@ -847,7 +871,7 @@ pub(crate) fn collect_with_index(
             let Ok(pid) = pid_text.parse::<u32>() else {
                 continue;
             };
-            let Ok(bytes) = fs::read(entry.path()) else {
+            let Ok(bytes) = read_regular(&entry.path()) else {
                 continue;
             };
             let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
@@ -917,7 +941,7 @@ pub(crate) fn collect_with_index(
         });
         if is_agent {
             let meta_path = path.with_extension("meta.json");
-            if let Some(meta) = fs::read(&meta_path)
+            if let Some(meta) = read_regular(&meta_path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                 .filter(Value::is_object)

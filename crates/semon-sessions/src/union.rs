@@ -21,8 +21,9 @@ use std::{
 use serde_json::{Map, Value, json};
 
 use crate::{
-    Node, Options,
-    model::{Built, fnv},
+    Options,
+    model::{self, Built, fnv},
+    received::{Listing, ReceivedMachines},
     viewer::{
         MachineView, ViewerReply, decoded, has_session_page, has_trace_page, percent_encode,
         query_value,
@@ -196,9 +197,22 @@ impl AccountMenu {
 /// lock: one core answers one request at a time.
 pub struct ViewerCore {
     views: Vec<(String, MachineView)>,
+    received: Option<Following>,
     admin: Option<AdminLink>,
     account: Option<AccountMenu>,
     nav_machines: Option<String>,
+}
+
+/// The received machines a core follows, served after its fixed ones.
+struct Following {
+    machines: ReceivedMachines,
+    /// How many of the core's views, from the front, are its fixed machines.
+    fixed: usize,
+    /// The hostnames of the fixed machines read from this one (no recorded
+    /// facts), read at the first pass.
+    hosts: Option<Vec<String>>,
+    /// What the last pass saw.
+    seen: Option<Listing>,
 }
 
 /// Which machine answers for each session id the union serves.
@@ -386,6 +400,18 @@ fn union_json(parts: &[(&str, &Built)], plan: &Plan, now: i64) -> Result<String,
     Ok(union.to_string())
 }
 
+/// Sets `machine` on a V1 tree node and every node under it.
+fn tag(node: &mut Value, machine: &str) {
+    if let Some(fields) = node.as_object_mut() {
+        fields.insert("machine".into(), Value::from(machine));
+        if let Some(Value::Array(children)) = fields.get_mut("children") {
+            for child in children {
+                tag(child, machine);
+            }
+        }
+    }
+}
+
 /// Adds per-request embedding values at the front of a model's JSON object.
 fn with_model_extras(
     body: &[u8],
@@ -502,10 +528,111 @@ impl ViewerCore {
                 .into_iter()
                 .map(|(key, options)| (key, MachineView::new(options)))
                 .collect(),
+            received: None,
             admin: None,
             account: None,
             nav_machines: None,
         }
+    }
+
+    /// A core over `machines` (as [`ViewerCore::with_machines`], possibly
+    /// none) and every machine under `received`'s directory, after them in
+    /// name order. The received machines are followed: every request first
+    /// takes one pass over `DIR/machines/` (file types and the facts file's
+    /// stamp only), and a machine added or removed since is served, or no
+    /// longer, from that request on. A received machine's key is its
+    /// directory's name, so one with the same hostname as a fixed machine
+    /// is served as `<hostname>~<name>`.
+    pub fn with_received(machines: Vec<(String, Options)>, received: ReceivedMachines) -> Self {
+        let fixed = machines.len();
+        let mut core = Self::with_machines(machines);
+        core.received = Some(Following {
+            machines: received,
+            fixed,
+            hosts: None,
+            seen: None,
+        });
+        core
+    }
+
+    /// Brings the served machines in line with the received ones, when
+    /// this core follows any: one pass over `DIR/machines/`, and changes
+    /// only where it differs from the last.
+    fn follow(&mut self) {
+        let Self {
+            views, received, ..
+        } = self;
+        let Some(following) = received else {
+            return;
+        };
+        let listing = following.machines.scan();
+        if following.seen.as_ref() == Some(&listing) {
+            return;
+        }
+        let previous = following.seen.take().unwrap_or_default();
+        let fixed = following.fixed;
+        let hosts = following.hosts.get_or_insert_with(|| {
+            views[..fixed]
+                .iter()
+                .filter(|(_, view)| view.options().facts.is_none())
+                .map(|(_, view)| model::local_hostname(view.options()))
+                .collect()
+        });
+        for (name, seen) in &listing {
+            let before = previous.get(name);
+            if before == Some(seen) {
+                continue;
+            }
+            let Some(seen) = seen else {
+                eprintln!(
+                    "semon: {} is not a machine directory; ignored",
+                    following
+                        .machines
+                        .dir()
+                        .join("machines")
+                        .join(name)
+                        .display()
+                );
+                continue;
+            };
+            let before = before.cloned().flatten();
+            for (home, readable, was) in [
+                (
+                    "claude",
+                    seen.claude,
+                    before.as_ref().map(|seen| seen.claude),
+                ),
+                ("codex", seen.codex, before.as_ref().map(|seen| seen.codex)),
+            ] {
+                if !readable && was != Some(false) {
+                    eprintln!(
+                        "semon: received machine {name}: its {home} home is behind a \
+                         symbolic link; ignored"
+                    );
+                }
+            }
+            if before.is_none_or(|before| before.facts != seen.facts) {
+                following.machines.copy_facts(name, seen, hosts);
+            }
+        }
+        let mut old: BTreeMap<String, MachineView> = views.drain(fixed..).collect();
+        for (name, seen) in &listing {
+            let Some(seen) = seen else {
+                continue;
+            };
+            let options = following.machines.options(name, seen);
+            let view = match old.remove(name) {
+                Some(view)
+                    if view.options().claude_home == options.claude_home
+                        && view.options().codex_home == options.codex_home =>
+                {
+                    view
+                }
+                _ => MachineView::new(options),
+            };
+            views.push((name.clone(), view));
+        }
+        following.seen = Some(listing);
     }
 
     /// How many machines this core serves.
@@ -552,6 +679,7 @@ impl ViewerCore {
         if method != "GET" {
             return text(405, "Method not allowed");
         }
+        self.follow();
         if self.views.is_empty() {
             return text(404, "Not found");
         }
@@ -669,6 +797,7 @@ impl ViewerCore {
     /// there. With one machine that is always the one machine, under `sid`
     /// itself: whether it has the session is its own answer.
     pub(crate) fn owner(&mut self, sid: &str) -> io::Result<Owner> {
+        self.follow();
         match self.views.len() {
             0 => Ok(Owner::Missing),
             1 => Ok(Owner::At(0, sid.to_owned())),
@@ -687,6 +816,7 @@ impl ViewerCore {
 
     /// Machine `index`'s model, rebuilt first if its logs changed.
     pub(crate) fn built_at(&mut self, index: usize) -> io::Result<&Built> {
+        self.follow();
         self.views
             .get_mut(index)
             .ok_or(io::ErrorKind::NotFound)?
@@ -697,6 +827,7 @@ impl ViewerCore {
     /// The model `/api/model` serves (without an admin link) at `now`, or
     /// the ids two machines both claim.
     pub(crate) fn model_at(&mut self, now: i64) -> io::Result<Result<String, Vec<String>>> {
+        self.follow();
         match self.views.len() {
             0 => Err(io::ErrorKind::NotFound.into()),
             1 => Ok(Ok(self.views[0].1.built_at(now)?.json(now))),
@@ -710,6 +841,7 @@ impl ViewerCore {
     /// Every machine's model, brought up to date, with how the core serves
     /// its session ids.
     pub(crate) fn served(&mut self, now: i64) -> io::Result<Vec<Served<'_>>> {
+        self.follow();
         let machine_ids = if self.views.len() > 1 {
             self.refresh_at(now)?.machine_ids
         } else {
@@ -760,16 +892,25 @@ impl ViewerCore {
         })
     }
 
-    /// The V1 tree: every machine's roots.
+    /// The V1 tree: every machine's roots, each node with its machine's
+    /// id as `machine`.
     fn tree(&mut self) -> io::Result<ViewerReply> {
-        let mut roots: Vec<Node> = Vec::new();
-        for (_, view) in &mut self.views {
-            roots.extend(view.tree_roots()?);
+        let plan = self.refresh()?;
+        let mut roots = Vec::new();
+        for (index, (_, view)) in self.views.iter_mut().enumerate() {
+            let machine = plan.machine_ids.get(index).cloned().unwrap_or_default();
+            for root in view.tree_roots()? {
+                let mut root = serde_json::to_value(&root).map_err(io::Error::other)?;
+                tag(&mut root, &machine);
+                roots.push(root);
+            }
         }
+        let body = serde_json::to_string_pretty(&json!({"schema_version": 1, "roots": roots}))
+            .map_err(io::Error::other)?;
         Ok(ViewerReply {
             status: 200,
             content_type: "application/json; charset=utf-8",
-            body: crate::render_json(&roots).into_bytes(),
+            body: body.into_bytes(),
             etag: None,
         })
     }
