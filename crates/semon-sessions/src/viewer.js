@@ -665,7 +665,7 @@
   // Always visible, the same on every page: the menu toggle (phones), the title, and the page's actions. A list page
   // (Home, Sessions, Machines) shows its name. A detail page (a session, a trace, a machine) shows two lines: its name
   // after a crumb up a level, then a one-line summary that ellipsizes. On a session, search takes over the bar and the
-  // filter drops down from it; tapping the title block opens the session's details.
+  // filter drops down from it; the ⋯ menu holds the session's details.
   function renderTopbar(title, crumb, opts = {}) {
     const bar = $("#topbar"), s = opts.session; bar.replaceChildren(); bar.classList.remove("scrolled");
     bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("searching", !!(s && findOpen));
@@ -679,7 +679,6 @@
     const tt = el("span", "t", title); tt.title = title; l1.append(tt); t.append(l1);
     if (opts.line2) {
       const l2 = el("div", "l2" + (s ? " session-meta" : ""));
-      if (s) { const hit = el("button", "meta-hit"); hit.type = "button"; hit.setAttribute("aria-label", s.name + ": open Session details"); hit.addEventListener("click", () => openSessionDetails(s)); l2.append(hit); }
       opts.line2(l2); t.append(l2);
       if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); });
     }
@@ -737,12 +736,12 @@
   function fitSessionLine(l2) {
     const keep = new Set(["meta-kind", "meta-state"]), droppable = [...l2.children].filter((n) => (n.classList.contains("meta-item") || n.classList.contains("meta-runs")) && ![...n.classList].some((c) => keep.has(c)));
     droppable.forEach((n) => { n.hidden = false; });
-    const errs = l2.querySelector(".errs"); if (errs) errs.hidden = false;
+    const errs = l2.querySelector(".errs"), errsSep = l2.querySelector(".errs-sep"); if (errs) errs.hidden = false; if (errsSep) errsSep.hidden = false;
     const kindValue = l2.querySelector(".meta-kind .meta-value"); if (kindValue) kindValue.hidden = false;
     const stateValues = [...l2.querySelectorAll(".meta-state .meta-value")], sep = l2.querySelector(".meta-state .state-sep"); stateValues.forEach((n) => { n.hidden = false; }); if (sep) sep.hidden = false;
     const fits = () => l2.scrollWidth <= l2.clientWidth + 1;
     for (let i = droppable.length - 1; i >= 0 && !fits(); i--) droppable[i].hidden = true;
-    if (!fits() && errs) errs.hidden = true;
+    if (!fits() && errs) { errs.hidden = true; if (errsSep) errsSep.hidden = true; }
     if (!fits() && kindValue) kindValue.hidden = true;
     if (!fits() && stateValues[1]) { stateValues[1].hidden = true; if (sep) sep.hidden = true; }
     if (!fits() && stateValues[0]) stateValues[0].hidden = true;
@@ -762,26 +761,33 @@
     const c = el("span", meta ? "meta-item meta-kind" : "child-kind"); c.style.setProperty("--h", "var(--" + s.harness + ")");
     const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
     if (mark) c.append(mark);
-    c.append(el("span", meta ? "meta-value" : null, s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"))); return c;
+    const kindText = s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"); if (meta) c.title = "Kind: " + kindText;
+    c.append(el("span", meta ? "meta-value" : null, kindText)); return c;
   }
   // A session's compact metadata line: state, model, machine, branch, tools, runs, tokens and API-equivalent cost.
+  // Every item is a static badge: a tooltip (title) for the pointer and hidden text ("Tool calls: ") for a screen reader.
+  // Only the errors jump and the runs item are controls. The session's details live in the ⋯ menu.
+  const metaSr = (label) => el("span", "sr-only", label + ": ");
   const sessionLine = (s) => (l2) => {
     const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
-    const st = el("span", "meta-item meta-state"); st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", nT + (nT === 1 ? " turn" : " turns")));
-    if (errors) { const j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")); j.type = "button"; j.setAttribute("aria-label", j.textContent + ": jump to the first failed step");
+    const turnsText = nT + (nT === 1 ? " turn" : " turns");
+    const st = el("span", "meta-item meta-state"); st.title = "Status: " + STATE[s.state] + " · " + turnsText; st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", turnsText));
+    if (errors) {
+      const sep = el("span", "state-sep errs-sep", "·"), j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); j.prepend(mark);
+      j.type = "button"; j.title = j.textContent + ": jump to the first failed step"; j.setAttribute("aria-label", j.title);
       j.addEventListener("click", (ev) => { ev.stopPropagation(); stopOpeningEndPin(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
-      st.append(j); }
+      st.append(sep, j); }
     const kind = s.kind ? childKindChip(s, true) : null;
-    const model = el("span", "meta-item meta-model"); model.append(harnessName(s.harness), el("span", "meta-value", shortModel(s.model))); model.title = s.model ?? "Unknown model";
-    const machine = el("span", "meta-item meta-machine"); machine.append(icon(I.machine), el("span", "meta-value", shortHost(s))); machine.title = hostOf(s);
-    const branch = el("span", "meta-item meta-branch"); branch.append(icon(I.branch), el("span", "meta-value", branchOf(s))); branch.title = branchOf(s);
-    const tools = el("span", "meta-item meta-tools"); tools.append(icon(I.wrench), el("span", "meta-value", calls == null ? "—" : String(calls))); tools.setAttribute("aria-label", callsText(calls));
+    const model = el("span", "meta-item meta-model"); model.append(metaSr("Model"), harnessName(s.harness), el("span", "meta-value", shortModel(s.model))); model.title = "Model: " + (s.model ?? "Unknown model");
+    const machine = el("span", "meta-item meta-machine"); machine.append(metaSr("Machine"), icon(I.machine), el("span", "meta-value", shortHost(s))); machine.title = "Machine: " + hostOf(s);
+    const branch = el("span", "meta-item meta-branch"); branch.append(metaSr(s.worktree ? "Worktree" : "Branch"), icon(I.branch), el("span", "meta-value", branchOf(s))); branch.title = (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s);
+    const tools = el("span", "meta-item meta-tools"); tools.append(metaSr("Tool calls"), icon(I.wrench), el("span", "meta-value", calls == null ? "—" : String(calls))); tools.title = "Tool calls: " + (calls ?? "—");
     const kids = childSessions(s.id), allKids = descendantsOf(s.id, sessionChildren());
     let runs = null;
-    if (kids.length) { runs = el("button", "meta-item meta-runs"); runs.type = "button"; runs.setAttribute("aria-label", kids.length + (kids.length === 1 ? " child session" : " child sessions") + (allKids.some((x) => x.state === "work") ? ", work in progress" : "") + ": open runs"); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); if (allKids.some((x) => x.state === "work")) runs.append(dot("work")); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
+    if (kids.length) { const working = allKids.filter((x) => x.state === "work").length; runs = el("button", "meta-item meta-runs"); runs.type = "button"; runs.title = kids.length + (kids.length === 1 ? " child session" : " child sessions") + (working ? ", work in progress" : "") + ": open runs"; runs.setAttribute("aria-label", runs.title); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
     const totalTokens = usageTotal(s);
-    const tokens = el("span", "meta-item meta-tokens"); tokens.append(icon(I.tokens), el("span", "meta-value", tok(totalTokens / 1e6))); tokens.title = totalTokens.toLocaleString() + " tokens";
-    const parentCost = kids.length ? costForSessions([s, ...allKids]) : costForSession(s.id), missing = costMissing(parentCost), costItem = el("span", "meta-item meta-cost"); costItem.append(icon(I.coin), el("span", "meta-value", (kids.length ? "incl. runs " : "") + (costText(parentCost) === "—" ? "—" : shortMoney(parentCost.usd)))); costItem.title = "API-equivalent cost. " + COST_TIP + (missing.length ? " no price for " + missing.join(", ") : ""); costItem.setAttribute("aria-label", "API-equivalent cost " + costText(parentCost) + (kids.length ? ", including runs" : "") + ". " + COST_TIP + (missing.length ? " no price for " + missing.join(", ") : ""));
+    const tokens = el("span", "meta-item meta-tokens"); tokens.append(metaSr("Tokens"), icon(I.tokens), el("span", "meta-value", tok(totalTokens / 1e6))); tokens.title = "Tokens: " + totalTokens.toLocaleString();
+    const parentCost = kids.length ? costForSessions([s, ...allKids]) : costForSession(s.id), missing = costMissing(parentCost), costItem = el("span", "meta-item meta-cost"); costItem.append(metaSr("API-equivalent cost"), icon(I.coin), el("span", "meta-value", (kids.length ? "incl. runs " : "") + (costText(parentCost) === "—" ? "—" : shortMoney(parentCost.usd)))); costItem.title = "API-equivalent cost" + (kids.length ? ", including runs" : "") + ": " + costText(parentCost) + ". " + COST_TIP + (missing.length ? " no price for " + missing.join(", ") : "");
     l2.append(...(kind ? [kind] : []), st, model, machine, branch, tools, ...(runs ? [runs] : []), tokens, costItem);
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
@@ -810,6 +816,7 @@
       const runs = $("#topbar .meta-runs"), kids = childSessions(s.id);
       if (runs?.hidden && kids.length) { const item = el("button", "menu-runs"); item.type = "button"; item.setAttribute("role", "menuitem"); item.append(icon(I.stack, "icon"), el("span", null, "Runs · " + kids.length)); item.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); openRuns(s, runs); }); m.append(item); }
     }
+    const details = el("button"); details.type = "button"; details.setAttribute("role", "menuitem"); details.append(icon(I.read, "icon"), el("span", null, "Session details")); details.addEventListener("click", (e) => { e.stopPropagation(); openSessionDetails(s); }); m.append(details);
     const copy = el("button"); copy.type = "button"; copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command"));
     const cmd = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + s.id;
     copy.addEventListener("click", () => { navigator.clipboard?.writeText(cmd).then(() => { copy.lastChild.textContent = "Copied"; }, () => { copy.lastChild.textContent = cmd; }); });
@@ -853,7 +860,7 @@
     list.append(breakdown);
     body.append(list); d.append(head, body); document.body.append(d);
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
-    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); });
+    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); $("#more-btn")?.focus(); });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
     try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
   }
@@ -1851,7 +1858,7 @@
     else if (dirty.size) morphTurns(box, transcript(route.id, { only: dirty }).querySelector(".turns"), dirty);
     const h1 = $("#page .ph h1"); if (h1) h1.textContent = s.name;
     const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.title = s.name; }
-    const l2 = $("#topbar .l2"); if (l2) { l2.replaceChildren(); const hit = el("button", "meta-hit"); hit.type = "button"; hit.setAttribute("aria-label", s.name + ": open Session details"); hit.addEventListener("click", () => openSessionDetails(s)); l2.append(hit); sessionLine(s)(l2); requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); }); }
+    const l2 = $("#topbar .l2"); if (l2) { l2.replaceChildren(); sessionLine(s)(l2); requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); }); }
     const fc = $("#topbar .fcount"); if (fc) { const n = find ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : 0; fc.textContent = find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""; }
     renderNav(); renderLanes(); ticker();
     let n = 0; for (const k of keys()) if (!before.has(k)) n++;
