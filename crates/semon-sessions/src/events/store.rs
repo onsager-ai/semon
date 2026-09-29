@@ -320,14 +320,26 @@ thread_local! {
     /// takes the write lock.
     pub(super) static BEFORE_IMPORT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    /// Runs once, after the JSON cache is claimed and before the claimed
+    /// file is checked and removed.
+    pub(super) static AFTER_CLAIM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// The JSON cache as found: its identity, so it is removed only if it is
-/// still the file that was read.
-fn identity(legacy: &Path) -> Option<(u64, u64, u64, Option<std::time::SystemTime>)> {
-    let metadata = fs::symlink_metadata(legacy)
-        .ok()
-        .filter(fs::Metadata::is_file)?;
+#[cfg(test)]
+fn hook(slot: &'static std::thread::LocalKey<std::cell::RefCell<Option<Box<dyn FnOnce()>>>>) {
+    if let Some(hook) = slot.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+}
+
+/// Which file a handle is: dev, inode, size and modified time. A rename
+/// keeps all four; an older semon's save (a new file renamed over the path)
+/// changes the inode.
+type Identity = (u64, u64, u64, Option<std::time::SystemTime>);
+
+fn identity(file: &fs::File) -> io::Result<Identity> {
+    let metadata = file.metadata()?;
     #[cfg(unix)]
     let (dev, ino) = {
         use std::os::unix::fs::MetadataExt;
@@ -335,7 +347,18 @@ fn identity(legacy: &Path) -> Option<(u64, u64, u64, Option<std::time::SystemTim
     };
     #[cfg(not(unix))]
     let (dev, ino) = (0, 0);
-    Some((dev, ino, metadata.len(), metadata.modified().ok()))
+    Ok((dev, ino, metadata.len(), metadata.modified().ok()))
+}
+
+/// A JSON cache read from an open handle: which file it was, and what it
+/// held. `None` when it couldn't be read to its end (an I/O error): it is
+/// then left for the next open.
+fn read_legacy(file: &fs::File) -> io::Result<(Identity, Result<Legacy, serde_json::Error>)> {
+    let read_as = identity(file)?;
+    match serde_json::from_reader::<_, Legacy>(io::BufReader::new(file)) {
+        Err(error) if error.is_io() => Err(io::Error::other(error)),
+        parsed => Ok((read_as, parsed)),
+    }
 }
 
 /// Imports the retired JSON event cache whenever it is found, then removes
@@ -349,89 +372,193 @@ fn identity(legacy: &Path) -> Option<(u64, u64, u64, Option<std::time::SystemTim
 /// upgrade rewrites it with runs no process here has seen, and
 /// `~/.claude.json` has since overwritten them.
 ///
-/// The file is parsed before the write lock is taken, reading only those
-/// two fields as it streams past. The import commits with
-/// `synchronous = FULL`, so it is on disk before the file goes; and the
-/// file is removed only if it is still the one that was read, so a rewrite
-/// meanwhile waits for the next open.
+/// The file is parsed from its open handle before the write lock is taken,
+/// reading only those two fields as it streams past, and its rows commit
+/// with `synchronous = FULL`, so they are on disk before the file goes.
+///
+/// Removal claims the file first, renaming it to `<name>.importing.<pid>.<n>`,
+/// so no save an older semon makes to the path is ever removed or set aside
+/// unread: the claimed file is removed (or set aside) only if it is the one
+/// that was parsed, and read and imported first if it isn't. A claim left by
+/// a crash is imported and removed at the next open, as is any other
+/// process's claim: every step is idempotent.
 ///
 /// A file that isn't that JSON, whatever its version, is renamed aside
-/// (`.corrupt`, never over an earlier one) and recorded in `meta`. A file
-/// that can't be opened or read to its end is left for the next open.
+/// (`.corrupt`, then `.corrupt.1`, …; never over an existing file) and
+/// recorded in `meta`. A file that can't be opened or read to its end is
+/// left for the next open.
 fn import_legacy(connection: &mut Connection, legacy: &Path) -> rusqlite::Result<()> {
-    let Some(read_as) = identity(legacy) else {
-        return Ok(());
-    };
-    let parsed = match fs::File::open(legacy) {
-        Ok(file) => serde_json::from_reader::<_, Legacy>(io::BufReader::new(file)),
-        // Removed meanwhile, by another process's import: nothing to do.
+    for claimed in claims(legacy) {
+        finish(connection, legacy, &claimed, None)?;
+    }
+    let file = match fs::File::open(legacy) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             warn_import(legacy, &error);
             return Ok(());
         }
     };
-    let parsed = match parsed {
-        Err(error) if error.is_io() => {
+    let (read_as, parsed) = match read_legacy(&file) {
+        Ok(read) => read,
+        Err(error) => {
             warn_import(legacy, &error);
             return Ok(());
         }
-        parsed => parsed,
     };
+    drop(file);
     #[cfg(test)]
-    {
-        if let Some(hook) = BEFORE_IMPORT.with(|hook| hook.borrow_mut().take()) {
-            hook();
+    hook(&BEFORE_IMPORT);
+    if let Ok(found) = &parsed {
+        import_rows(connection, legacy, Some(found))?;
+    }
+    // Unique to this call, so no two claims, even in one process, share
+    // a name (a rename would replace the other).
+    static CLAIMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let claim = CLAIMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let claimed = sibling(
+        legacy,
+        &format!(".importing.{}.{claim}", std::process::id()),
+    );
+    match fs::rename(legacy, &claimed) {
+        Ok(()) => {}
+        // Claimed or removed by another process meanwhile: its import is
+        // the same as this one.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            warn_import(legacy, &error);
+            return Ok(());
         }
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_millis())
-        .to_string();
-    connection.pragma_update(None, "synchronous", "FULL")?;
-    let committed = import_rows(connection, parsed.as_ref().ok(), &now);
-    connection.pragma_update(None, "synchronous", "NORMAL")?;
-    let runs = committed?;
     #[cfg(test)]
-    IMPORTS.with(|imports| imports.borrow_mut().push(legacy.to_owned()));
-    match parsed {
-        Ok(_) => {
-            if identity(legacy) == Some(read_as) {
-                remove_legacy(legacy);
-                eprintln!(
-                    "semon: imported {runs} reported runs from {} into the session index, and removed it",
-                    legacy.display()
-                );
+    hook(&AFTER_CLAIM);
+    finish(connection, legacy, &claimed, Some((read_as, parsed)))
+}
+
+/// The claims (`<name>.importing.…`) a crash or another process left.
+fn claims(legacy: &Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(name)) = (legacy.parent(), legacy.file_name()) else {
+        return Vec::new();
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let prefix = format!("{}.importing.", name.to_string_lossy());
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Ends the import of a claimed file: removes it when it is the file whose
+/// rows were imported (or sets it aside, when that file was unreadable), and
+/// otherwise reads it and does the same with its own contents.
+fn finish(
+    connection: &mut Connection,
+    legacy: &Path,
+    claimed: &Path,
+    read: Option<(Identity, Result<Legacy, serde_json::Error>)>,
+) -> rusqlite::Result<()> {
+    let file = match fs::File::open(claimed) {
+        Ok(file) => file,
+        // Finished by another process.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            warn_import(legacy, &error);
+            return Ok(());
+        }
+    };
+    let parsed = match (identity(&file), read) {
+        (Ok(now), Some((read_as, parsed))) if now == read_as => parsed,
+        // Not the file that was parsed (or no file was): read this one.
+        _ => match read_legacy(&file) {
+            Ok((_, parsed)) => {
+                if let Ok(found) = &parsed {
+                    import_rows(connection, legacy, Some(found))?;
+                }
+                parsed
             }
+            Err(error) => {
+                warn_import(legacy, &error);
+                return Ok(());
+            }
+        },
+    };
+    drop(file);
+    match parsed {
+        Ok(Legacy { reported_runs, .. }) => {
+            remove_legacy(claimed);
+            let runs: usize = reported_runs.values().map(BTreeMap::len).sum();
+            eprintln!(
+                "semon: imported {runs} reported runs from {} into the session index, and removed it",
+                legacy.display()
+            );
         }
         Err(error) => {
-            let mut aside = sibling(legacy, ".corrupt");
-            if fs::symlink_metadata(&aside).is_ok() {
-                aside = sibling(legacy, &format!(".corrupt.{now}"));
+            import_rows(connection, legacy, None)?;
+            match set_aside_legacy(legacy, claimed) {
+                Ok(aside) => eprintln!(
+                    "semon: {} couldn't be read ({error}); it was set aside as {} and not imported",
+                    legacy.display(),
+                    aside.display()
+                ),
+                Err(rename) => warn_import(legacy, &rename),
             }
-            if let Err(rename) = fs::rename(legacy, &aside) {
-                warn_import(legacy, &rename);
-            }
-            eprintln!(
-                "semon: {} couldn't be read ({error}); it was set aside as {} and not imported",
-                legacy.display(),
-                aside.display()
-            );
         }
     }
     Ok(())
 }
 
+/// Moves an unreadable claimed file to the first free name of
+/// `<legacy>.corrupt`, `<legacy>.corrupt.1`, …: linked there, which fails
+/// rather than replaces an existing file, then unlinked from its claim.
+fn set_aside_legacy(legacy: &Path, claimed: &Path) -> io::Result<PathBuf> {
+    for n in 0..1000 {
+        let aside = if n == 0 {
+            sibling(legacy, ".corrupt")
+        } else {
+            sibling(legacy, &format!(".corrupt.{n}"))
+        };
+        match fs::hard_link(claimed, &aside) {
+            Ok(()) => {
+                fs::remove_file(claimed)?;
+                return Ok(aside);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::other("no free .corrupt name"))
+}
+
 /// Writes a parsed JSON cache's runs and stamp in one `BEGIN IMMEDIATE`
-/// transaction, or, for one that couldn't be read (`None`), the record
-/// that it is set aside. Returns how many runs it held.
+/// transaction with `synchronous = FULL`, or, for one that couldn't be read
+/// (`None`), the record that it is set aside.
 fn import_rows(
     connection: &mut Connection,
+    legacy: &Path,
     parsed: Option<&Legacy>,
-    now: &str,
-) -> rusqlite::Result<usize> {
+) -> rusqlite::Result<()> {
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    let written = write_import(connection, parsed);
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    written?;
+    #[cfg(test)]
+    IMPORTS.with(|imports| imports.borrow_mut().push(legacy.to_owned()));
+    #[cfg(not(test))]
+    let _ = legacy;
+    Ok(())
+}
+
+fn write_import(connection: &mut Connection, parsed: Option<&Legacy>) -> rusqlite::Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let mut runs = 0;
     match parsed {
         Some(Legacy {
             reported_runs,
@@ -440,7 +567,6 @@ fn import_rows(
             let mut put = transaction.prepare(&PUT_RUN.replacen("OR REPLACE", "OR IGNORE", 1))?;
             for run in reported_runs.values().flat_map(BTreeMap::values) {
                 put_run(&mut put, run)?;
-                runs += 1;
             }
             drop(put);
             if let Some(stamp) = claude_json_stamp {
@@ -451,14 +577,17 @@ fn import_rows(
             }
         }
         None => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis())
+                .to_string();
             transaction.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
-                [SET_ASIDE, now],
+                [SET_ASIDE, now.as_str()],
             )?;
         }
     }
-    transaction.commit()?;
-    Ok(runs)
+    transaction.commit()
 }
 
 /// Removes the imported JSON cache; failing that, it is imported again at

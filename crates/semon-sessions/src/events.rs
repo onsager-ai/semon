@@ -4333,7 +4333,8 @@ mod tests {
         drop(cache);
 
         // An older semon rewrites the file (a new one renamed over it) after
-        // this open parsed it: the file stays, and the next open imports it.
+        // this open parsed it: the claim takes the new file, sees it isn't
+        // the one parsed, and imports it before removing it.
         fs::write(&legacy, legacy_json(&["run-a"]).to_string()).unwrap();
         let (hook_legacy, next) = (legacy.clone(), root.join("next.json"));
         store::BEFORE_IMPORT.with(|hook| {
@@ -4342,14 +4343,40 @@ mod tests {
                 fs::rename(&next, &hook_legacy).unwrap();
             }));
         });
-        drop(EventCache::open(&v1));
-        assert!(
-            legacy.exists(),
-            "a file rewritten since it was read is kept"
-        );
         let cache = EventCache::open(&v1);
         assert_eq!(ran(&cache), ["run-a", "run-b", "run-c"]);
         assert!(!legacy.exists());
+        drop(cache);
+
+        // A save renamed over the path after the claim, before the claimed
+        // file is removed: only the claimed file goes, and the new one is
+        // imported at the next open.
+        fs::write(&legacy, legacy_json(&["run-a"]).to_string()).unwrap();
+        let (hook_legacy, next) = (legacy.clone(), root.join("next.json"));
+        store::AFTER_CLAIM.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let runs = ["run-a", "run-b", "run-c", "run-d"];
+                fs::write(&next, legacy_json(&runs).to_string()).unwrap();
+                fs::rename(&next, &hook_legacy).unwrap();
+            }));
+        });
+        drop(EventCache::open(&v1));
+        assert!(legacy.exists(), "the save after the claim is kept");
+        let cache = EventCache::open(&v1);
+        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c", "run-d"]);
+        assert!(!legacy.exists());
+        drop(cache);
+
+        // A claim a crash left is imported, then removed.
+        let leftover = root.join("index.events.json.importing.4242.0");
+        fs::write(
+            &leftover,
+            legacy_json(&["run-a", "run-b", "run-c", "run-d", "run-e"]).to_string(),
+        )
+        .unwrap();
+        let cache = EventCache::open(&v1);
+        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c", "run-d", "run-e"]);
+        assert!(!leftover.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4363,7 +4390,12 @@ mod tests {
         fs::write(&legacy, legacy_json(&["run-a"]).to_string()).unwrap();
         fs::set_permissions(&legacy, fs::Permissions::from_mode(0o000)).unwrap();
         if fs::File::open(&legacy).is_ok() {
-            // A privileged user reads it anyway: nothing to test here.
+            // Running as root, which reads a mode-000 file anyway: the
+            // unreadable case can't happen, so check the file is simply
+            // imported and removed.
+            let cache = EventCache::open(&v1);
+            assert_eq!(ran(&cache), ["run-a"]);
+            assert!(!legacy.exists());
             fs::remove_dir_all(root).unwrap();
             return;
         }
