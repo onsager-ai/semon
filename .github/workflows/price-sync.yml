@@ -9,6 +9,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: write
 
 concurrency:
   group: pricing-sync
@@ -49,6 +50,31 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Install Rust toolchain
+        if: steps.compare.outputs.parse_failure == 'false' && steps.compare.outputs.changed == 'true'
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        if: steps.compare.outputs.parse_failure == 'false' && steps.compare.outputs.changed == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Update and verify pricing goldens
+        if: steps.compare.outputs.parse_failure == 'false' && steps.compare.outputs.changed == 'true'
+        run: |
+          SEMON_UPDATE_GOLDEN=1 cargo test -p semon-sessions
+          cargo test -p semon-sessions
 
       - name: Open or update the pricing issue on a parse failure
         if: steps.compare.outputs.parse_failure == 'true'
@@ -91,14 +117,19 @@ jobs:
           chore(pricing): sync official rates as of $price_date
 
           Generated from the official pricing pages.
-
-          Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
-          Claude-Session: https://claude.ai/code/session_01WnBJpoJrbTpWuzRwsuouWs
-          Implemented-By: codex/gpt-6-luna
           EOF
 
           git switch -C chore/pricing-sync
-          git add crates/semon-sessions/src/pricing.json scripts/pricing/fixtures/anthropic.html scripts/pricing/fixtures/openai.html
+          git add \
+            crates/semon-sessions/src/pricing.json \
+            crates/semon-sessions/src/model/golden/answers.json \
+            crates/semon-sessions/src/model/golden/lineage.json \
+            crates/semon-sessions/src/model/golden/relays.json \
+            crates/semon-sessions/src/model/golden/spawns.json \
+            crates/semon-sessions/src/model/golden/turns.json \
+            crates/semon-sessions/tests/golden/model.json \
+            scripts/pricing/fixtures/anthropic.html \
+            scripts/pricing/fixtures/openai.html
           git commit -F "$commit_message"
 
           if git ls-remote --exit-code --heads origin chore/pricing-sync >/dev/null 2>&1; then
@@ -108,10 +139,19 @@ jobs:
             git push -u origin HEAD:refs/heads/chore/pricing-sync
           fi
 
+          gh workflow run rust.yml --ref chore/pricing-sync
+          gh workflow run ui.yml --ref chore/pricing-sync
+
+          {
+            cat "$RUNNER_TEMP/pricing-sync-report.md"
+            echo
+            echo 'Checks were dispatched on the `chore/pricing-sync` branch head (Rust CI and viewer UI); bot-token pull requests do not trigger `pull_request` runs.'
+          } > "$RUNNER_TEMP/pricing-pr-body.md"
+
           pr_title="chore(pricing): prices as of $price_date"
           pr_number=$(gh pr list --state open --head chore/pricing-sync --json number --jq '.[0].number // empty')
           if [ -n "$pr_number" ]; then
-            gh pr edit "$pr_number" --title "$pr_title" --body-file "$RUNNER_TEMP/pricing-sync-report.md"
+            gh pr edit "$pr_number" --title "$pr_title" --body-file "$RUNNER_TEMP/pricing-pr-body.md"
           else
-            gh pr create --base main --head chore/pricing-sync --title "$pr_title" --body-file "$RUNNER_TEMP/pricing-sync-report.md"
+            gh pr create --base main --head chore/pricing-sync --title "$pr_title" --body-file "$RUNNER_TEMP/pricing-pr-body.md"
           fi
