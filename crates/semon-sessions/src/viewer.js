@@ -1262,7 +1262,7 @@
     try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
   }
   // 739,682 reads "740k" and 12,422,228 "12.4M"; the exact figure is the cell's tooltip.
-  const countText = (n) => { if (n < 1e3) return String(n); if (n < 1e4) return +(n / 1e3).toFixed(1) + "k"; const k = Math.round(n / 1e3); return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M"; };
+  const compactCount = (n) => { if (n < 1e3) return String(n); if (n < 1e4) return +(n / 1e3).toFixed(1) + "k"; const k = Math.round(n / 1e3); return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M"; };
   // The tokens and cost of a session, always shown: one table per model, a row for each kind of token that was used or billed.
   function costBreakdown(sid, includeRuns) {
     const cost = costForSession(sid, includeRuns), box = el("div", "cost-breakdown"), head = el("div", "cost-breakdown-head");
@@ -1273,7 +1273,7 @@
       for (const [key, label] of TOKEN_KINDS) {
         const tokens = Number(model.tokens?.[key]) || 0, amount = Number(model.usd_by_kind?.[key]) || 0;
         if (tokens === 0 && (!priced || amount < 0.005)) continue;
-        const row = el("div", "cost-line"), count = el("span", "cost-amount", tokens ? countText(tokens) : "");
+        const row = el("div", "cost-line"), count = el("span", "cost-amount", tokens ? compactCount(tokens) : "");
         if (tokens) { count.dataset.tip = tokens.toLocaleString() + (key === "web_search" ? " searches" : " tokens"); count.append(el("span", "sr-only", " (" + tokens.toLocaleString() + ")")); }
         row.append(el("span", "cost-kind", label), count, el("span", "cost-value", priced ? asMoney(amount) : "—")); rows.push(row);
       }
