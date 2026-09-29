@@ -1,0 +1,117 @@
+name: Pricing sync
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pricing-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Check official prices
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test pricing parsers
+        run: python3 scripts/pricing/test_sync.py
+
+      - name: Read and compare official prices
+        id: compare
+        run: |
+          set +e
+          python3 scripts/pricing/sync.py 2>&1 | tee "$RUNNER_TEMP/pricing-sync-report.md"
+          sync_status=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$sync_status" -eq 2 ]; then
+            echo "parse_failure=true" >> "$GITHUB_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$sync_status" -ne 0 ]; then
+            exit "$sync_status"
+          fi
+
+          echo "parse_failure=false" >> "$GITHUB_OUTPUT"
+          if git diff --quiet -- crates/semon-sessions/src/pricing.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update the pricing issue on a parse failure
+        if: steps.compare.outputs.parse_failure == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh label list --limit 100 --json name --jq '.[].name' | grep -Fxq pricing; then
+            gh label create pricing --color 5319e7 --description "Official pricing page parsing or synchronization failed"
+          fi
+
+          issue_title="[pricing-sync] Could not parse official pricing"
+          {
+            echo "The weekly pricing parser could not read the official pricing pages. The generated table was left unchanged."
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/pricing-sync-report.md"
+            echo '```'
+            echo
+            echo "Sources: https://platform.claude.com/docs/en/about-claude/pricing and https://developers.openai.com/api/docs/pricing"
+          } > "$RUNNER_TEMP/pricing-issue.md"
+
+          issue_number=$(gh issue list --state open --label pricing --search "pricing-sync in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$issue_number" ]; then
+            gh issue edit "$issue_number" --title "$issue_title" --body-file "$RUNNER_TEMP/pricing-issue.md" --add-label pricing
+          else
+            gh issue create --title "$issue_title" --body-file "$RUNNER_TEMP/pricing-issue.md" --label pricing
+          fi
+
+      - name: Create or update the pricing pull request
+        if: steps.compare.outputs.parse_failure == 'false' && steps.compare.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          price_date=$(python3 -c 'import json; print(json.load(open("crates/semon-sessions/src/pricing.json"))["as_of"])')
+          commit_message="$RUNNER_TEMP/pricing-commit-message"
+          cat > "$commit_message" <<EOF
+          chore(pricing): sync official rates as of $price_date
+
+          Generated from the official pricing pages.
+
+          Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+          Claude-Session: https://claude.ai/code/session_01WnBJpoJrbTpWuzRwsuouWs
+          Implemented-By: codex/gpt-6-luna
+          EOF
+
+          git switch -C chore/pricing-sync
+          git add crates/semon-sessions/src/pricing.json scripts/pricing/fixtures/anthropic.html scripts/pricing/fixtures/openai.html
+          git commit -F "$commit_message"
+
+          if git ls-remote --exit-code --heads origin chore/pricing-sync >/dev/null 2>&1; then
+            git fetch origin chore/pricing-sync
+            git push --force-with-lease -u origin HEAD:refs/heads/chore/pricing-sync
+          else
+            git push -u origin HEAD:refs/heads/chore/pricing-sync
+          fi
+
+          pr_title="chore(pricing): prices as of $price_date"
+          pr_number=$(gh pr list --state open --head chore/pricing-sync --json number --jq '.[0].number // empty')
+          if [ -n "$pr_number" ]; then
+            gh pr edit "$pr_number" --title "$pr_title" --body-file "$RUNNER_TEMP/pricing-sync-report.md"
+          else
+            gh pr create --base main --head chore/pricing-sync --title "$pr_title" --body-file "$RUNNER_TEMP/pricing-sync-report.md"
+          fi
