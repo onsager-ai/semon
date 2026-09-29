@@ -389,6 +389,8 @@ export default async function tooltipCheck(browser) {
       await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
       await page.waitForSelector("dialog.session-details[open]");
       // The dialog's own tipped element: the "?" icon by its API-equivalent cost row (costInfoTip).
+      // On a phone the sheet has more rows (Kind, Status, Tool calls), so the cost row can lie below the fold.
+      await page.locator("dialog.session-details .cost-info").scrollIntoViewIfNeeded(); await page.waitForTimeout(100);
       const shownAt = await hover(page, "dialog.session-details .cost-info", 1500), open = await state(page);
       r.expect(shownAt != null && /^What these tokens would cost/.test(open.text ?? ""), tag + ": the tooltip did not open on the cost icon inside the modal dialog " + JSON.stringify(open.text));
       await page.keyboard.press("Escape"); await page.waitForTimeout(150);
