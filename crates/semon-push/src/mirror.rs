@@ -29,7 +29,7 @@ use std::{
     },
 };
 
-use semon_sessions::{Facts, is_input_path};
+use semon_sessions::{Facts, is_input_path, is_machine_name};
 use serde_json::{Value, json};
 
 use crate::wire::{Append, CHUNK_BYTES, HEAD_BYTES, base64_decode, sha256_hex};
@@ -45,19 +45,7 @@ pub const MAX_BODY_BYTES: usize = 6 * 1024 * 1024;
 /// The most bytes one machine's copy may hold unless told otherwise.
 pub const DEFAULT_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 
-/// The longest machine name.
-const MACHINE_NAME_MAX: usize = 63;
-
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
-
-/// Whether `name` can name a machine: 1 to 63 of `a-z`, `0-9` and `-`.
-pub fn is_machine_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= MACHINE_NAME_MAX
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
 
 /// The two requests of the protocol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

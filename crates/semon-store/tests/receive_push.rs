@@ -1,6 +1,7 @@
 //! `semon push` against `semon receive`, both the real binary, on loopback:
 //! a synthetic home with one Claude session and one Codex run is mirrored,
-//! redacted, into the receiver's directory; a rewrite is sent again with
+//! redacted, into the receiver's directory, and `semon sessions --machines
+//! DIR` then shows that machine and both its sessions; a rewrite is sent again with
 //! `replace`; a copy lost on the receiver is recovered through a 409; and a
 //! revoked token is refused with 401.
 
@@ -149,6 +150,36 @@ impl Fixture {
             .unwrap()
     }
 
+    /// `semon sessions --model-json --all --machines DIR --no-local`, with
+    /// the reader's own homes and cache in the fixture.
+    fn model(&self) -> serde_json::Value {
+        let viewer = self.path("viewer");
+        let output = semon()
+            .args([
+                "sessions",
+                "--model-json",
+                "--all",
+                "--no-local",
+                "--machines",
+            ])
+            .arg(self.dir())
+            .arg("--claude-home")
+            .arg(viewer.join("claude"))
+            .arg("--codex-home")
+            .arg(viewer.join("codex"))
+            .arg("--proc-root")
+            .arg(self.path("home/proc"))
+            .arg("--cache")
+            .arg(viewer.join("state/index.json"))
+            .env("HOME", &viewer)
+            .env("XDG_STATE_HOME", viewer.join("state"))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_ok(&output, "the model over DIR");
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
     /// The receiver's copy of a file under the home.
     fn copy(&self, relative: &str) -> Vec<u8> {
         fs::read(self.dir().join("machines/laptop").join(relative)).unwrap_or_default()
@@ -170,6 +201,14 @@ fn claude(text: &str) -> String {
     line(json!({
         "type": "user", "timestamp": "2026-09-29T10:00:00.000Z", "sessionId": "lane",
         "cwd": "/work/app", "message": {"role": "user", "content": text}
+    }))
+}
+
+fn assistant(text: &str) -> String {
+    line(json!({
+        "type": "assistant", "timestamp": "2026-09-29T10:00:01.000Z", "sessionId": "lane",
+        "cwd": "/work/app",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}
     }))
 }
 
@@ -217,19 +256,21 @@ fn push_mirrors_a_home_into_semon_receive() {
     let log = format!("home/{LOG}");
     fixture.write(
         &log,
-        (claude(&format!("deploy with {SECRET} please")) + &claude("and then stop")).as_bytes(),
+        (claude(&format!("deploy with {SECRET} please")) + &assistant("deployed")).as_bytes(),
     );
     let rollout = format!("home/{ROLLOUT}");
     fixture.write(
         &rollout,
-        (line(
-            json!({"timestamp": "2026-09-29T10:00:00.000Z", "type": "session_meta",
-            "payload": {"id": "cx", "cwd": "/work/app", "timestamp": "2026-09-29T10:00:00.000Z"}}),
-        ) + &line(
-            json!({"timestamp": "2026-09-29T10:00:01.000Z", "type": "event_msg",
-                "payload": {"type": "user_message", "message": "hello"}}),
-        ))
-            .as_bytes(),
+        [
+            line(json!({"timestamp": "2026-09-29T10:00:00.000Z", "type": "session_meta",
+                "payload": {"id": "cx", "cwd": "/work/app", "originator": "codex_exec", "thread_source": "user"}})),
+            line(json!({"timestamp": "2026-09-29T10:00:01.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Fix the lexer"}]}})),
+            line(json!({"timestamp": "2026-09-29T10:00:02.000Z", "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Fixed"}]}})),
+        ]
+        .concat()
+        .as_bytes(),
     );
     fixture.write("home/claude/settings.json", b"{\"NEVER\":\"SENT\"}");
 
@@ -243,6 +284,24 @@ fn push_mirrors_a_home_into_semon_receive() {
     assert!(!machine.join("claude/settings.json").exists());
     let facts = semon_sessions::read_facts(&machine.join("facts.json")).unwrap();
     assert_eq!(facts.hostname, "laptop");
+
+    // The viewer over DIR shows the pushed machine with both its sessions.
+    let model = fixture.model();
+    let machines: Vec<&str> = model["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|machine| machine["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(machines, ["laptop"]);
+    assert_eq!(model["machines"][0]["up"], true);
+    for session in ["lane", "cx"] {
+        assert_eq!(
+            model["sessions"][session]["machine"], "laptop",
+            "{session}: {}",
+            model["sessions"]
+        );
+    }
 
     // Rewritten shorter: sent again whole, with replace.
     fixture.write(&log, claude("rewritten").as_bytes());

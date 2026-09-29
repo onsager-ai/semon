@@ -14,7 +14,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
-use crate::mirror::is_machine_name;
+use semon_sessions::is_machine_name;
 
 /// The token file, in the receiver's directory.
 pub const TOKENS_FILE: &str = "tokens";
