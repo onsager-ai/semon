@@ -60,7 +60,10 @@
   const shortHost = (s) => { const h = hostOf(s).split(".")[0]; return h.length > 14 ? h.slice(0, 14) + "…" : h; };
   const branchOf = (s) => s.worktree ?? s.branch ?? "No branch";
   const shortModel = (model) => String(model ?? "Unknown model").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
-  const harnessMark = (harness) => { const mark = el("span", "hmark h-" + harness, harness === "claude" ? "✳" : "⌘"); mark.setAttribute("aria-hidden", "true"); mark.title = HARNESS[harness] ?? harness; return mark; };
+  // A harness is named in plain text, never drawn: no logo and no vendor colour. "short" gives "Claude" where the line is tight.
+  // Colour and size live in .hname. `hidden` is for rows whose aria-label already names the harness.
+  const HARNESS_SHORT = { claude: "Claude", codex: "Codex" };
+  const harnessName = (harness, short = false, hidden = false) => { const name = el("span", "hname h-" + harness, (short ? HARNESS_SHORT : HARNESS)[harness] ?? harness); name.title = HARNESS[harness] ?? harness; if (hidden) name.setAttribute("aria-hidden", "true"); return name; };
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
   const parentOf = (sid) => SESS[sid]?.parent ?? H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
   const originHandoff = (sid) => H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === sid && h.from !== sid && (h.kind === "spawn" || SESS[sid]?.kind === "Relayed" || !SESS[sid]?.lane));
@@ -631,10 +634,10 @@
     let ancestor = target, selected = false; const seen = new Set();
     while (ancestor && SESS[ancestor] && !seen.has(ancestor)) { if (ancestor === s.id) { selected = true; break; } seen.add(ancestor); ancestor = parentOf(ancestor); }
     if (selected) row.setAttribute("aria-current", "page");
-    const main = el("span", "srow-main"); main.append(dot(s.state), harnessMark(s.harness), el("span", "nm", s.name), el("span", "ag", ago(s.last)));
+    const main = el("span", "srow-main"); main.append(dot(s.state), el("span", "nm", s.name), el("span", "ag", ago(s.last)));
     if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work"); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
     if (kids.length && !rail && !open && allKids.length) { const summary = el("span", "tree-summary"); const state = urgentDescendant(s.id, children); if (state) summary.append(dot(state)); summary.append(String(allKids.length)); main.append(summary); }
-    const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").title = hostOf(s); meta.querySelector(".repo-short").title = branchOf(s);
+    const meta = el("span", "srow-meta"); meta.append(harnessName(s.harness, true, true), icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").title = hostOf(s); meta.querySelector(".repo-short").title = branchOf(s);
     row.append(main, meta); row.addEventListener("click", () => goSession(s.id)); line.append(row); item.append(line);
     item.addEventListener("keydown", (e) => {
       if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); item.querySelector(":scope > .tree-row .tree-toggle")?.click(); } }
@@ -711,7 +714,7 @@
   }
   function showLineageMenu(sid, bar) {
     bar.querySelector(".lineage-menu")?.remove(); const path = lineageOf(sid), menu = el("div", "lineage-menu"); menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", "Session path");
-    path.forEach((s, i) => { const b = el("button"); b.type = "button"; b.setAttribute("role", "menuitem"); if (i === path.length - 1) b.setAttribute("aria-current", "page"); b.append(harnessMark(s.harness), el("span", null, s.name)); b.addEventListener("click", () => { menu.remove(); goSession(s.id); }); menu.append(b); });
+    path.forEach((s, i) => { const b = el("button"); b.type = "button"; b.setAttribute("role", "menuitem"); if (i === path.length - 1) b.setAttribute("aria-current", "page"); b.append(el("span", null, s.name), harnessName(s.harness)); b.addEventListener("click", () => { menu.remove(); goSession(s.id); }); menu.append(b); });
     bar.append(menu); const close = (e) => { if (!menu.contains(e.target) && !e.target.closest?.(".lineage-parent")) { menu.remove(); document.removeEventListener("click", close); } }; setTimeout(() => document.addEventListener("click", close), 0);
   }
   function siblingNav(s) {
@@ -751,8 +754,9 @@
   }
   function childKindChip(s, meta = false) {
     const c = el("span", meta ? "meta-item meta-kind" : "child-kind"); c.style.setProperty("--h", "var(--" + s.harness + ")");
-    const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : harnessMark(s.harness);
-    c.append(mark, el("span", meta ? "meta-value" : null, s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"))); return c;
+    const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
+    if (mark) c.append(mark);
+    c.append(el("span", meta ? "meta-value" : null, s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"))); return c;
   }
   // A session's compact metadata line: state, model, machine, branch, tools, runs, tokens and API-equivalent cost.
   const sessionLine = (s) => (l2) => {
@@ -762,7 +766,7 @@
       j.addEventListener("click", (ev) => { ev.stopPropagation(); stopOpeningEndPin(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
       st.append(j); }
     const kind = s.kind ? childKindChip(s, true) : null;
-    const model = el("span", "meta-item meta-model"); model.append(harnessMark(s.harness), el("span", "meta-value", shortModel(s.model))); model.title = s.model ?? "Unknown model";
+    const model = el("span", "meta-item meta-model"); model.append(harnessName(s.harness), el("span", "meta-value", shortModel(s.model))); model.title = s.model ?? "Unknown model";
     const machine = el("span", "meta-item meta-machine"); machine.append(icon(I.machine), el("span", "meta-value", shortHost(s))); machine.title = hostOf(s);
     const branch = el("span", "meta-item meta-branch"); branch.append(icon(I.branch), el("span", "meta-value", branchOf(s))); branch.title = branchOf(s);
     const tools = el("span", "meta-item meta-tools"); tools.append(icon(I.wrench), el("span", "meta-value", String(calls))); tools.setAttribute("aria-label", calls + (calls === 1 ? " tool call" : " tool calls"));
@@ -1493,7 +1497,7 @@
     const body = el("div", "vb"), list = el("div", "analytics-list"); if (!active.length) body.append(el("p", "empty", costMode ? "No sessions had a recorded cost then." : "No sessions were busy then."));
     const rows = costMode ? active.map((entry) => ({ r: entry.row, usd: entry.usd, unpriced_models: entry.unpriced_models })) : active.map((r) => ({ r, ms: busyMsIn(r, a, b) }));
     rows.sort((x, y) => costMode ? y.usd - x.usd || x.r.s.name.localeCompare(y.r.s.name) : y.ms - x.ms || x.r.s.name.localeCompare(y.r.s.name));
-    for (const row of rows) { const s = row.r.s, item = el("button", "analytics-session analytics-slice"); item.type = "button"; item.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", costMode ? asMoney(row.usd) : timeText(row.ms) + " busy")); if (costMode && row.unpriced_models.length) item.append(el("span", "no-price", "no price for " + row.unpriced_models.join(", "))); item.addEventListener("click", () => { pendingSessionOpen = s.id; d.close(); }); list.append(item); }
+    for (const row of rows) { const s = row.r.s, item = el("button", "analytics-session analytics-slice"); item.type = "button"; item.append(el("span", "session-name", s.name), harnessName(s.harness, true), el("span", "session-value", costMode ? asMoney(row.usd) : timeText(row.ms) + " busy")); if (costMode && row.unpriced_models.length) item.append(el("span", "no-price", "no price for " + row.unpriced_models.join(", "))); item.addEventListener("click", () => { pendingSessionOpen = s.id; d.close(); }); list.append(item); }
     if (active.length) body.append(list); d.append(head, body); document.body.append(d); d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
@@ -1514,7 +1518,7 @@
   }
   function analyticsList(title, items, value) {
     const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title)); const list = el("div", "analytics-list"); if (!items.length) list.append(el("p", "empty", "No sessions in this range."));
-    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", value(item))); const missing = item.cost?.unpriced_models ?? []; if (missing.length) b.append(el("span", "no-price", "no price for " + missing.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); } panel.append(list); return panel;
+    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(el("span", "session-name", s.name), harnessName(s.harness, true), el("span", "session-value", value(item))); const missing = item.cost?.unpriced_models ?? []; if (missing.length) b.append(el("span", "no-price", "no price for " + missing.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); } panel.append(list); return panel;
   }
   function renderAnalytics(page) {
     const all = analyticsSessions().filter((row) => matchesSessionFacets(row.s)), to = NOW, from = to - rangeMs(analyticsRange), now = analyticsStats(all, from, to), previous = analyticsStats(all, from - rangeMs(analyticsRange), from);

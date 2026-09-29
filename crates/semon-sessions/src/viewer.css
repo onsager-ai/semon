@@ -520,14 +520,12 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .srow .ag { flex: none; font-size: 11.5px; color: var(--faint); font-family: var(--mono); }
 .srow-meta { padding-left: 1px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 .srow-meta .host, .srow-meta .repo-short { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.srow-meta .host { flex: 0 1 15ch; }
+.srow-meta .host { flex: 0 1 auto; max-width: 15ch; }
 .srow-meta .repo-short { flex: 0 1 auto; }
 .srow-meta svg { width: 14px; height: 14px; flex: none; color: var(--faint); }
 .tree-summary { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 1px 5px; border-radius: 8px; background: var(--sunken); color: var(--muted); font: 11px/1.4 var(--mono); }
 .tree-summary .dot { width: 6px; height: 6px; }
-.hmark { width: 16px; height: 16px; display: inline-grid; place-items: center; flex: none; color: var(--h); font-size: 14px; font-weight: 600; line-height: 1; }
-.hmark.h-claude { font-size: 17px; }
-.hmark.h-codex { font-size: 15px; }
+.hname { flex: none; font-size: 11.5px; font-weight: 500; line-height: 1.2; letter-spacing: .01em; white-space: nowrap; color: color-mix(in srgb, var(--h) 60%, var(--ink-2)); }
 .page.wide-mode { max-width: 1400px; }
 
 .topbar .l2.session-meta { position: relative; gap: 12px; width: 100%; min-height: 30px; overflow: hidden; border: 0; border-radius: 8px; background: none; padding: 0; text-align: left; pointer-events: none; }
@@ -542,8 +540,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .topbar .l2.session-meta .meta-state { gap: 5px; }
 .topbar .l2.session-meta .meta-state .meta-value { max-width: none; }
 .topbar .l2.session-meta .meta-state .state-sep { color: var(--faint); }
-.topbar .l2.session-meta .meta-item svg, .topbar .l2.session-meta .meta-item .hmark { width: 15px; height: 15px; flex: none; color: var(--faint); }
-.topbar .l2.session-meta .meta-item .hmark { color: var(--h); }
+.topbar .l2.session-meta .meta-item svg { width: 15px; height: 15px; flex: none; color: var(--faint); }
+.topbar .l2.session-meta .meta-model { gap: 6px; align-items: baseline; }
 .topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, var(--h) 12%, transparent); color: var(--h); }
 .topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--h); }
 .topbar .l2.session-meta .meta-item.meta-cost { gap: 4px; }
@@ -560,6 +558,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .lineage-menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 40px; border: 0; border-radius: 7px; background: none; padding: 7px 9px; text-align: left; }
 .lineage-menu button[aria-current="page"] { background: var(--sunken); }
 .lineage-menu button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lineage-menu button span:first-child { flex: 1 1 auto; }
+.lineage-menu button .hname { flex: none; overflow: visible; }
 .sibling-nav { display: inline-flex; align-items: center; gap: 2px; flex: none; }
 .sibling-nav .sibling-count { min-width: 4ch; color: var(--muted); font: 11.5px var(--mono); text-align: center; white-space: nowrap; }
 .sibling-nav .ibtn { width: 36px; height: 36px; }
@@ -575,7 +575,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .runs-row .run-cost { color: var(--muted); font: 11.5px var(--mono); white-space: nowrap; }
 .runs-group { min-width: 0; margin-left: 13px; padding-left: 10px; border-left: 1px solid var(--line); }
 .child-kind { display: inline-flex; align-items: center; gap: 5px; width: fit-content; max-width: 100%; color: var(--h); font-size: 12px; }
-.child-kind svg, .child-kind .hmark { width: 15px; height: 15px; flex: none; color: var(--h); }
+.child-kind svg { width: 15px; height: 15px; flex: none; color: var(--h); }
 .child-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 12px; }
 .child-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
 .child-actions button { min-height: 36px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; text-align: left; }
@@ -647,10 +647,10 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .analytics-row .row-hours, .analytics-row .row-cost { grid-row: 2; align-self: center; color: var(--muted); font: 10.5px var(--mono); white-space: nowrap; text-align: right; }
 .analytics-row .on { color: var(--ink); } .analytics-row .row-hours { grid-column: 2; } .analytics-row .row-cost { grid-column: 3; }
 .analytics-split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
-.analytics-session { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 44px; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 5px 0; text-align: left; }
+.analytics-session { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 44px; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 5px 0; text-align: left; }
 .analytics-session .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-size: 12.5px; color: var(--ink-2); }
 .analytics-session .session-value { color: var(--muted); font: 11px var(--mono); white-space: nowrap; }
-.analytics-session .no-price { grid-column: 2 / -1; margin-top: -3px; } .analytics-slice .session-name { white-space: normal; overflow-wrap: anywhere; }
+.analytics-session .no-price { grid-column: 1 / -1; margin-top: -3px; } .analytics-slice .session-name { white-space: normal; overflow-wrap: anywhere; }
 @media (min-width: 761px) { .analytics-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 20px; } .analytics-metric:nth-last-child(-n+4) { border-bottom: 0; } .analytics-breakdowns, .analytics-split { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 760px) {
   .facet-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .facet-field select { height: 44px; }
@@ -697,11 +697,12 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .app.rail .nav-item .cnt { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; overflow: hidden; border-radius: 50%; background: var(--faint); color: transparent; font-size: 0; }
   .app.rail .nav-item .cnt.hot { background: var(--wait); }
   .app.rail .tree-row { grid-template-columns: minmax(0, 1fr); margin: 0 7px; }
-  .app.rail .tree-toggle, .app.rail .tree-spacer, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta, .app.rail .tree-group, .app.rail .tree-summary { display: none !important; }
-  .app.rail .srow { display: flex; justify-content: center; min-height: 44px; padding: 0; }
-  .app.rail .srow-main { position: relative; justify-content: center; }
-  .app.rail .srow .dot { position: absolute; top: -3px; right: -4px; width: 7px; height: 7px; }
-  .app.rail .srow .child-dot { position: absolute; top: auto; right: -5px; bottom: -3px; width: 6px; height: 6px; border: 1px solid var(--side); }
+  .app.rail .tree-toggle, .app.rail .tree-spacer, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta > :not(.hname), .app.rail .tree-group, .app.rail .tree-summary { display: none !important; }
+  .app.rail .srow { position: relative; display: flex; justify-content: center; min-height: 44px; padding: 0; }
+  .app.rail .srow-main { justify-content: center; }
+  .app.rail .srow-meta { padding: 0; }
+  .app.rail .srow .dot { position: absolute; top: 6px; right: 5px; width: 7px; height: 7px; }
+  .app.rail .srow .child-dot { position: absolute; top: auto; right: 5px; bottom: 6px; width: 6px; height: 6px; border: 1px solid var(--side); }
   dialog.session-details { width: min(680px, calc(100vw - 48px)); max-height: 85vh; margin: auto; border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 20px 60px color-mix(in srgb, var(--ink) 25%, transparent); overflow: hidden; }
 }
 @media (max-width: 760px) {
