@@ -269,6 +269,13 @@ export default async function barCheck(browser) {
     await goto(page, { v: "session", id: grandchild.id }, D);
     const origin = D.H.find((h) => h.kind === "spawn" && h.to === grandchild.id);
     const briefCard = await page.evaluate((text) => { const intro = document.querySelector(".child-intro"), brief = intro?.querySelector(".brief"); return { visible: !!intro && !!brief, includesBrief: !!brief && brief.textContent.includes(text.slice(0, 48)), openInParent: intro?.querySelector(".intro-open")?.textContent, bars: [...document.querySelectorAll(".child-intro, .child-return")].map((x) => getComputedStyle(x).borderLeftWidth), transcript: (() => { const sec = document.querySelector('#page section[aria-label="Transcript"]'), cs = sec && getComputedStyle(sec); return sec ? { rail: cs.borderLeftWidth, pad: cs.paddingLeft } : null; })() }; }, origin?.brief ?? "");
+    // "Show more" and "Open in <parent>" are separate targets: with the first shown (unhidden for the measurement) they never touch.
+    const introActions = await page.evaluate(() => {
+      const more = document.querySelector(".child-intro .more"), open = document.querySelector(".child-intro .intro-open"); if (!more || !open) return null;
+      const wasHidden = more.hidden; more.hidden = false; const a = more.getBoundingClientRect(), b = open.getBoundingClientRect(); more.hidden = wasHidden;
+      const sameLine = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0;
+      return { sameLine, gap: sameLine ? Math.round((b.left - a.right) * 10) / 10 : null, moreH: Math.round(a.height), openH: Math.round(b.height), moreW: Math.round(a.width) };
+    });
     await page.click(".child-intro .intro-open"); await afterTitle(page, D.SESS[parentOf(grandchild.id)].name); await page.waitForTimeout(260);
     const openedParent = await page.evaluate((id) => ({ id: history.state?.id, handoff: !!document.querySelector('.hcard[data-h="' + id + '"].flash') }), origin?.id);
 
@@ -295,7 +302,7 @@ export default async function barCheck(browser) {
     if (runsVisible || runsViaMenu) await page.waitForSelector(runsSelector);
     const runs = runsVisible || runsViaMenu ? await page.evaluate((selector) => { const box = document.querySelector(selector); return { open: !!box, rows: box?.querySelectorAll(".runs-row").length ?? 0, nested: box?.querySelectorAll(".runs-group .runs-row").length ?? 0, costs: box?.querySelectorAll(".run-cost").length ?? 0, apiLabel: box?.textContent.includes("API-equivalent cost") ?? false }; }, runsSelector) : { open: false, rows: 0, nested: 0, costs: 0, apiLabel: false };
     const expectedRuns = Object.values(D.SESS).filter((s) => { let p = parentOf(s.id); while (p && p !== "harbor") p = parentOf(p); return p === "harbor"; }).length;
-    childAssertions.push({ size, pathNames, expectedPath, pathOk, briefCard, openedParent, returnRow, returnParent, siblingNav, prevId, nextId, expectedPrev: parentKids[middleIndex - 1].id, expectedNext: parentKids[middleIndex + 1].id, runs, runsViaMenu, expectedRuns });
+    childAssertions.push({ size, introActions, pathNames, expectedPath, pathOk, briefCard, openedParent, returnRow, returnParent, siblingNav, prevId, nextId, expectedPrev: parentKids[middleIndex - 1].id, expectedNext: parentKids[middleIndex + 1].id, runs, runsViaMenu, expectedRuns });
     await page.context().close();
   }
 
@@ -304,6 +311,7 @@ export default async function barCheck(browser) {
     r.expect(child.briefCard.visible && child.briefCard.includesBrief && child.briefCard.openInParent?.includes("Open in") && child.openedParent.id === parentOf(grandchild.id) && child.openedParent.handoff, child.size + ": child brief or Open in parent handoff link failed: " + JSON.stringify({ brief: child.briefCard, opened: child.openedParent }));
     r.expect(child.briefCard.bars.length > 0 && child.briefCard.bars.every((w) => parseFloat(w) === 0), child.size + ": the child intro still has a left bar: " + JSON.stringify(child.briefCard.bars));
     r.expect(child.briefCard.transcript && parseFloat(child.briefCard.transcript.rail) === 0 && parseFloat(child.briefCard.transcript.pad) === 0, child.size + ": a child session's transcript still carries a left rail or the padding for one: " + JSON.stringify(child.briefCard.transcript));
+    r.expect(child.introActions && (!child.introActions.sameLine || child.introActions.gap >= 12) && (child.size !== "phone" || Math.min(child.introActions.moreH, child.introActions.openH) >= 44), child.size + ": the intro's Show more and Open in buttons touch or are under the phone tap size: " + JSON.stringify(child.introActions));
     r.expect(child.returnRow.text?.toLowerCase().includes("failed") && child.returnRow.openParent?.includes("Open in") && child.returnParent.id === parentOf(failedChild.id) && child.returnParent.handoff, child.size + ": failed child return row did not reopen its parent handoff: " + JSON.stringify({ row: child.returnRow, parent: child.returnParent }));
     r.expect(child.siblingNav.present && child.siblingNav.prev && child.siblingNav.next && child.prevId === child.expectedPrev && child.nextId === child.expectedNext, child.size + ": previous/next sibling controls did not open adjacent runs: " + JSON.stringify(child));
     r.expect(child.runs.open && child.runs.rows === child.expectedRuns && child.runs.nested > 0 && child.runs.costs === child.expectedRuns && child.runs.apiLabel, child.size + ": Runs view did not list the full nested tree and its API-equivalent costs: " + JSON.stringify(child.runs));
