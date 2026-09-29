@@ -668,6 +668,20 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 @media (min-width: 761px) { .tree-all svg { transform: rotate(90deg); } }
 @media (hover: hover) { .tree-all:hover, .tree-fewer:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); color: var(--ink); } }
 .tree-all:focus-visible, .tree-fewer:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* An expanded top-level parent keeps its row at the top of the list while any of its children are in view, like an iOS section header: the
+   parent's `.treeitem` holds the row and its group, so it is the row's containing block, and the row leaves with the group, which lets the
+   next parent take over. Only the top level pins (a nested row and a collapsed parent stay in the flow), and the rail has neither group
+   nor `aria-expanded`. The row has the sidebar's own colour, and the shadows cover its side margins, so nothing shows through. Where scroll-state
+   queries are supported a hairline shows under it while it is stuck. A row that "Show fewer" pins (`.stuck`, below) keeps its own rules.
+   Focus and scrolling into view stop below the pinned row (the row is about 50px tall), which the tree's own stuck row sets more exactly. */
+:where(#lanes) > .treeitem[aria-expanded="true"] > .tree-row { position: sticky; top: 0; z-index: 3; background: var(--side); }
+:where(#lanes) > .treeitem[aria-expanded="true"] > .tree-row:not(.stuck) { box-shadow: -8px 0 0 var(--side), 4px 0 0 var(--side); }
+.side-list:has(#lanes > .treeitem[aria-expanded="true"]) { scroll-padding-top: 58px; }
+@supports (container-type: scroll-state) {
+  :where(#lanes) > .treeitem[aria-expanded="true"] > .tree-row:not(.stuck) { container-type: scroll-state; }
+  :where(#lanes) > .treeitem[aria-expanded="true"] > .tree-row:not(.stuck)::after { content: ""; position: absolute; left: -8px; right: -4px; bottom: 0; height: 1px; background: var(--line); opacity: 0; pointer-events: none; }
+  @container scroll-state(stuck: top) { :where(#lanes) > .treeitem[aria-expanded="true"] > .tree-row:not(.stuck)::after { opacity: 1; } }
+}
 /* A parent whose whole list is open sticks to the top of the sidebar's scroll area; the shadows cover the row's side margins. */
 .tree-row.stuck { position: sticky; top: 0; z-index: 3; padding-bottom: 34px; background: var(--side); box-shadow: -8px 0 0 var(--side), 4px 0 0 var(--side), 0 1px 0 var(--line); }
 .tree-row.stuck .tree-toggle { bottom: 34px; }

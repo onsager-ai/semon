@@ -35,6 +35,11 @@
 //     only while rows lie beyond that edge (read from a screenshot strip: none at rest above the rows, both when scrolled to the
 //     middle, none below at the end, none on a short list).
 //   - the nav runs Home, Sessions, Analytics, Machines top to bottom in the expanded sidebar, the rail and the phone drawer.
+//   - an expanded top-level parent's row pins at the top of the list (position: sticky, opaque, in the sidebar's colour) while its
+//     children scroll, in the phone drawer and the 1280x800 sidebar, light and dark: its top equals the list's top, it is the topmost
+//     element there, its children are under it and its chevron takes a tap; past the group it goes with it and the next parent is
+//     pinned; a focused child scrolls clear of it; a collapsed parent and a nested one do not stick. The model is patched so two
+//     parents overflow the list (out/sidebar-sticky-*.png).
 //   - screenshots of the sidebar (and of the sheet, and of the sticky list) at 390 and 1280, light and dark, go to out/sidebar-*.png.
 import path from "node:path";
 import { PNG } from "pngjs";
@@ -979,6 +984,97 @@ export default async function sidebarCheck(browser) {
       r.expect(await overflow(page) === 0, P + ": no sideways overflow");
       r.expect(page.errors.length === 0, P + ": page errors " + page.errors.join("; "));
       await page.context().close();
+    }
+  }
+
+  // ---- An expanded top-level parent stays pinned while its children scroll (phone drawer and desktop sidebar, light and dark) --------
+  // The model is patched so two parents overflow the list on their own: Swarm gets four grandchildren (under Workers 10 to 7), and a copy
+  // of it, "Swarm B", gets the same. Scrolling into each group then shows its row pinned at the list's top, the topmost thing there, with
+  // its children under it; past the group the next parent takes over. Nested parents and collapsed ones do not pin.
+  {
+    const runningKids = swarmKids.filter((c) => c.state === "work"), topKids = runningKids.slice(0, 4);
+    const stickyPatch = (m) => {
+      const spawnTo = (to) => m.handoffs.find((h) => h.kind === "spawn" && h.to === to);
+      const put = (src, id, nm, parent, extra = {}) => {
+        m.sessions[id] = { ...structuredClone(m.sessions[src]), id, name: nm, parent, ...extra };
+        const sp = spawnTo(src); if (sp) m.handoffs.push({ ...structuredClone(sp), id: id + "-spawn", from: parent, to: id });
+      };
+      const b = "sticky-swarm-b";
+      m.sessions[b] = { ...structuredClone(m.sessions[swarm.id]), id: b, name: "Swarm B", last: m.sessions[swarm.id].last - 1 };
+      for (const k of runningKids) put(k.id, "sticky-b-" + k.id, k.name, b);
+      for (const [i, k] of topKids.entries()) {
+        put(k.id, "sticky-gc-a-" + i, "Helper " + (i + 1), k.id, { state: "work" });
+        put(k.id, "sticky-gc-b-" + i, "Helper " + (i + 1), "sticky-b-" + k.id, { state: "work" });
+      }
+      return m;
+    };
+    const layout = (page) => page.evaluate(() => {
+      const list = document.querySelector("#side-list"), lr = list.getBoundingClientRect();
+      return {
+        client: list.clientHeight, max: list.scrollHeight - list.clientHeight,
+        tops: [...document.querySelectorAll("#lanes > .treeitem")].map((x) => { const row = x.querySelector(":scope > .tree-row"), b = x.getBoundingClientRect(); return { id: x.dataset.id, name: x.getAttribute("aria-label"), open: x.getAttribute("aria-expanded") === "true", kids: !!x.querySelector(":scope > .tree-group"), top: b.top - lr.top + list.scrollTop, height: b.height, position: getComputedStyle(row).position }; }),
+        nested: [...document.querySelectorAll("#lanes .tree-group .treeitem[aria-expanded='true'] > .tree-row")].map((row) => getComputedStyle(row).position),
+      };
+    });
+    // Where the item's row is, what is topmost at the list's top edge and just under the row, and whether the chevron can be tapped.
+    const probe = (page, id) => page.evaluate((id) => {
+      const list = document.querySelector("#side-list"), lr = list.getBoundingClientRect();
+      const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id), row = item.querySelector(":scope > .tree-row"), rr = row.getBoundingClientRect();
+      const x = rr.left + Math.min(40, rr.width / 2), atTop = document.elementFromPoint(x, lr.top + 2), under = document.elementFromPoint(x, lr.top + rr.height + 8);
+      const t = row.querySelector(".tree-toggle"), tb = t?.getBoundingClientRect(), hit = tb ? document.elementFromPoint(tb.left + tb.width / 2, tb.top + tb.height / 2) : null;
+      const cs = getComputedStyle(row), side = getComputedStyle(document.querySelector("#sidebar")).backgroundColor;
+      return {
+        rowTop: Math.round((rr.top - lr.top) * 10) / 10, rowH: Math.round(rr.height * 10) / 10, position: cs.position, topmost: !!atTop && row.contains(atTop),
+        underIsChild: !!under && item.querySelector(":scope > .tree-group").contains(under), bg: cs.backgroundColor, side, scrollTop: Math.round(list.scrollTop),
+        toggleTappable: !!t && !!hit && (hit === t || t.contains(hit)) && tb.top >= lr.top - 0.5 && tb.bottom <= lr.bottom + 0.5, aboveList: rr.bottom <= lr.top + 0.5,
+      };
+    }, id);
+    for (const [size, tagSize, viewport] of [["phone", "390", null], ["desktop", "1280", { width: 1280, height: 800 }]]) {
+      for (const dark of [false, true]) {
+        const tag = dark ? "dark" : "light", P = "sticky parent " + tagSize + " " + tag;
+        const { page } = await servedModel(browser, { extras: true, size, dark }, stickyPatch);
+        if (viewport) { await page.setViewportSize(viewport); await page.waitForTimeout(150); }
+        if (size === "phone") await openDrawer(page);
+        await page.waitForFunction(() => document.querySelectorAll("#lanes > .treeitem[aria-expanded='true']").length >= 2);
+        const L = await layout(page);
+        R[P + " layout"] = L;
+        const tall = L.tops.filter((t) => t.open && t.height >= L.client + 60);
+        r.expect(tall.length >= 2, P + ": the patched fixture needs two open parents taller than the list (" + L.client + " px), so the check proves nothing: " + JSON.stringify(L.tops));
+        r.expect(L.tops.some((t) => t.kids && !t.open) && L.tops.filter((t) => t.kids && !t.open).every((t) => t.position !== "sticky"), P + ": a collapsed parent's row does not stick: " + JSON.stringify(L.tops));
+        r.expect(L.nested.length >= 1 && L.nested.every((p) => p !== "sticky"), P + ": a nested parent's row does not stick (only the top level does): " + JSON.stringify(L.nested));
+        if (tall.length >= 2) {
+          const [a, b] = tall;
+          const check = async (which, want, other) => {
+            const p = await probe(page, want.id);
+            R[P + " " + which] = p;
+            r.expect(p.position === "sticky", P + " " + which + ": " + want.name + "'s row is position: sticky: " + JSON.stringify(p));
+            r.expect(Math.abs(p.rowTop) <= 1, P + " " + which + ": " + want.name + "'s row top equals the list's top: " + JSON.stringify(p));
+            r.expect(p.topmost, P + " " + which + ": " + want.name + "'s row is the topmost element at the list's top: " + JSON.stringify(p));
+            r.expect(p.underIsChild, P + " " + which + ": its children are under the row: " + JSON.stringify(p));
+            r.expect(p.toggleTappable, P + " " + which + ": the chevron is in view and takes the tap: " + JSON.stringify(p));
+            r.expect(p.bg === p.side && /^rgb\(/.test(p.bg), P + " " + which + ": the row is opaque, in the sidebar's colour: " + p.bg + " vs " + p.side);
+            if (other) { const o = await probe(page, other.id); r.expect(o.aboveList, P + " " + which + ": " + other.name + "'s row has gone with its group: " + JSON.stringify(o)); }
+          };
+          await scrollSidebar(page, a.top + 30);
+          await check("first", a, null);
+          await page.screenshot({ path: path.join(ENV.out, "sidebar-sticky-" + tagSize + "-" + tag + "-first.png") });
+          // Focus lands clear of the pinned row: the first child starts under it and is scrolled to below the row.
+          const kid = await page.evaluate((id) => {
+            const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id), k = item.querySelector(":scope > .tree-group > .treeitem .srow");
+            k.focus();
+            return new Promise((res) => setTimeout(() => { const kr = k.getBoundingClientRect(), rr = item.querySelector(":scope > .tree-row").getBoundingClientRect(); res({ kidTop: Math.round(kr.top * 10) / 10, rowBottom: Math.round(rr.bottom * 10) / 10, focused: document.activeElement === k }); }, 150));
+          }, a.id);
+          R[P + " focus"] = kid;
+          r.expect(kid.focused && kid.kidTop >= kid.rowBottom - 1, P + ": a focused child is scrolled clear of the pinned row: " + JSON.stringify(kid));
+          await scrollSidebar(page, Math.min(b.top + 30, L.max));
+          await check("second", b, a);
+          await page.screenshot({ path: path.join(ENV.out, "sidebar-sticky-" + tagSize + "-" + tag + "-second.png") });
+          await scrollSidebar(page, 0);
+        }
+        r.expect(await overflow(page) === 0, P + ": no sideways overflow");
+        r.expect(page.errors.length === 0, P + ": page errors " + page.errors.join("; "));
+        await page.context().close();
+      }
     }
   }
   return r.done();
