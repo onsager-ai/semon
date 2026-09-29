@@ -2,7 +2,7 @@
 // are exercised exactly as they are for an ordinary page served beside the viewer.
 import fs from "node:fs";
 import path from "node:path";
-import { ENV, reporter, served } from "../lib.mjs";
+import { ENV, reporter, served, contrastOf } from "../lib.mjs";
 
 const pages = [
   ["shell-gallery", new URL("../shell-gallery.html", import.meta.url)],
@@ -15,7 +15,7 @@ const sizes = [
 const schemes = ["light", "dark"];
 const output = path.join(ENV.out, "shell");
 const GALLERY_PATH = "/__shell-gallery.html";
-const PHONE_TARGET_SELECTOR = ".btn, .field input, .code .copy, dialog.sheet button";
+const PHONE_TARGET_SELECTOR = ".btn, .field input, .code .copy, dialog.sheet button, .sh-select-trigger, .sh-select-option, .sh-select-close";
 fs.mkdirSync(output, { recursive: true });
 
 async function galleryPage(browser, html, width, height, mobile, scheme) {
@@ -117,6 +117,177 @@ const chromeDimensions = (page) => page.evaluate(() => {
     nav: computed(document.querySelector(".nav-item")),
   };
 });
+
+// The Select in the gallery (select.js): built from the native selects marked data-select, closed and open, by mouse and by
+// keyboard; a popover under the button on a desktop, a bottom sheet on a phone. Screenshots: <key>-select-{closed,open,search,flip}.png.
+async function selectChecks(page, key, mobile, r, results) {
+  const out = (results[key].select = {});
+  const room = '.sh-select[data-label="Room"]', device = '.sh-select[data-label="Device"]', trig = (root) => root + " .sh-select-trigger";
+  const state = (root) => page.evaluate((root) => {
+    const box = document.querySelector(root), t = box.querySelector(".sh-select-trigger"), pop = box.querySelector(".sh-select-pop"), sheet = box.querySelector("dialog.sh-select-sheet");
+    const list = box.querySelector('[role="listbox"]'), at = t.getAttribute("aria-activedescendant") ?? list.getAttribute("aria-activedescendant") ?? box.querySelector(".sh-select-search input")?.getAttribute("aria-activedescendant");
+    const shown = [...list.querySelectorAll('[role="option"]')].filter((o) => o.getClientRects().length);
+    const rect = (n) => { const b = n?.getBoundingClientRect(); return b && b.width ? { left: b.left, top: b.top, right: b.right, bottom: b.bottom, width: b.width, height: b.height } : null; };
+    const search = box.querySelector(".sh-select-search input");
+    return {
+      text: t.textContent.trim(), expanded: t.getAttribute("aria-expanded"), controls: t.getAttribute("aria-controls"), role: t.getAttribute("role"), listId: list.id,
+      popOpen: !!pop && !pop.hidden, sheetOpen: !!sheet?.open, focus: document.activeElement === t, searchFocus: !!search && document.activeElement === search,
+      active: at ? document.getElementById(at)?.textContent.trim() ?? null : null,
+      options: shown.map((o) => ({ text: o.textContent.trim(), selected: o.getAttribute("aria-selected"), height: o.getBoundingClientRect().height, check: getComputedStyle(o.querySelector(".sh-select-check")).visibility })),
+      searchShown: !!search && search.getClientRects().length > 0, searchFont: search ? Number.parseFloat(getComputedStyle(search).fontSize) : null,
+      empty: box.querySelector(".sh-select-empty")?.getClientRects().length > 0,
+      pop: rect(pop), sheet: rect(sheet), side: pop?.dataset.side ?? null, barBottom: document.getElementById("topbar")?.getBoundingClientRect().bottom ?? 0, vw: document.documentElement.clientWidth, vh: innerHeight,
+      native: { room: document.getElementById("room-select").value, device: document.getElementById("device-select").value },
+    };
+  }, root);
+  // Whether focus is on the next tabbable control after the root's button (what a Tab from the button reaches).
+  const nextFocus = (root) => page.evaluate((root) => {
+    const tabbable = [...document.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')].filter((e) => e.getClientRects().length && getComputedStyle(e).visibility !== "hidden");
+    const at = tabbable.indexOf(document.querySelector(root + " .sh-select-trigger")), a = document.activeElement;
+    return { onNext: at >= 0 && a === tabbable[at + 1], active: a?.outerHTML.slice(0, 80), next: tabbable[at + 1]?.outerHTML.slice(0, 80) };
+  }, root);
+  const inside = (b, s) => !!b && b.left >= -0.5 && b.top >= -0.5 && b.right <= s.vw + 0.5 && b.bottom <= s.vh + 0.5;
+  const wait = (root, open) => page.waitForFunction(({ root, open }) => { const t = document.querySelector(root + " .sh-select-trigger"); return (t.getAttribute("aria-expanded") === "true") === open; }, { root, open });
+
+  const built = await page.evaluate(() => ({ triggers: [...document.querySelectorAll(".sh-select-trigger")].map((t) => t.textContent.trim()), natives: [...document.querySelectorAll("select[data-select]")].every((s) => s.hidden) }));
+  out.built = built;
+  r.expect(built.triggers.join("|") === "Room: Living room|Device: Router" && built.natives, key + " the native selects weren't replaced by Selects: " + JSON.stringify(built));
+  await page.locator('section[aria-labelledby="select-title"]').screenshot({ path: path.join(output, key + "-select-closed.png") });
+
+  // Open by a click.
+  await page.evaluate((root) => document.querySelector(root).scrollIntoView({ block: "center" }), room);
+  const scrolledTo = await page.evaluate(() => window.scrollY); // the baseline for the phone's scroll lock: the page is scrolled before the sheet opens
+  if (mobile) r.expect(scrolledTo > 0, key + " the gallery isn't scrolled before the sheet opens (no baseline for the scroll lock): " + scrolledTo);
+  if (mobile) {
+    // The probe's control: with no sheet open a wheel does scroll the page (so "it didn't move" below means something).
+    await page.mouse.move(195, 300); await page.mouse.wheel(0, 200); await page.waitForTimeout(200);
+    const moved = await page.evaluate(() => window.scrollY); out.wheelControl = { from: scrolledTo, to: moved };
+    r.expect(moved > scrolledTo, key + " a wheel doesn't scroll the page even with no sheet open, so the lock check proves nothing: " + JSON.stringify(out.wheelControl));
+    await page.evaluate((y) => window.scrollTo(0, y), scrolledTo);
+  }
+  await page.click(trig(room)); await wait(room, true);
+  let s = await state(room); out.open = s;
+  r.expect(s.role === "combobox" && s.controls === s.listId && s.expanded === "true", key + " the trigger isn't an expanded combobox that controls its listbox: " + JSON.stringify({ role: s.role, controls: s.controls, list: s.listId }));
+  r.expect(s.options.length === 5 && s.options[0].text === "All rooms" && s.options.filter((o) => o.selected === "true").map((o) => o.text).join() === "Living room", key + " options or selection are wrong: " + JSON.stringify(s.options));
+  r.expect(s.options.filter((o) => o.check === "visible").length === 1 && s.options.find((o) => o.text === "Living room")?.check === "visible", key + " the selected option doesn't carry the only check mark: " + JSON.stringify(s.options));
+  r.expect(!s.searchShown, key + " a list of 5 options shows a search field");
+  if (mobile) {
+    r.expect(s.sheetOpen && !s.popOpen, key + " a phone didn't open a sheet: " + JSON.stringify({ sheet: s.sheetOpen, pop: s.popOpen }));
+    r.expect(!!s.sheet && Math.abs(s.sheet.bottom - s.vh) <= 1 && s.sheet.left <= 0.5 && s.sheet.right >= s.vw - 0.5, key + " the sheet isn't at the bottom edge, full width: " + JSON.stringify(s.sheet));
+    r.expect(s.options.every((o) => o.height >= 44), key + " sheet rows under 44 px: " + JSON.stringify(s.options.map((o) => o.height)));
+    const pad = await page.evaluate(() => Number.parseFloat(getComputedStyle(document.querySelector(".sh-select-sheet .sh-select-list")).paddingBottom));
+    r.expect(pad >= 10, key + " the sheet's list has no bottom padding for the safe area: " + pad);
+  } else {
+    r.expect(s.popOpen && !s.sheetOpen && inside(s.pop, s), key + " the popover isn't open inside the viewport: " + JSON.stringify(s.pop));
+    r.expect(s.pop && s.pop.top >= (await page.evaluate((root) => document.querySelector(root + " .sh-select-trigger").getBoundingClientRect().bottom, room)) - 1, key + " the popover isn't under the trigger: " + JSON.stringify(s.pop));
+  }
+  out.contrast = {};
+  for (const [name, selector] of [["label", room + " .sh-select-label"], ["value", room + " .sh-select-value"], ["option", room + " .sh-select-option"], ["active", room + " .sh-select-option.sh-active"]]) {
+    const ratio = await contrastOf(page, selector); out.contrast[name] = ratio;
+    r.expect(ratio != null && ratio >= 4.5, key + " " + name + " text contrast " + ratio + " is under 4.5 (AA)");
+  }
+  await page.screenshot({ path: path.join(output, key + "-select-open.png"), fullPage: false });
+
+  if (mobile) {
+    // The page behind the sheet doesn't scroll, and the sheet is a history entry: Back closes it and stays on the page.
+    const before = await page.evaluate(() => ({ overflow: getComputedStyle(document.documentElement).overflow, y: window.scrollY, entry: history.state?.shSelect ?? null, path: location.pathname }));
+    await page.mouse.move(s.vw / 2, 20); await page.mouse.wheel(0, 300); await page.waitForTimeout(200);
+    const scrolled = await page.evaluate(() => window.scrollY);
+    out.lock = { ...before, scrolledTo, after: scrolled };
+    r.expect(before.y === scrolledTo && scrolled === scrolledTo, key + " opening the sheet moved the page, or a wheel over its backdrop scrolled it: " + JSON.stringify(out.lock));
+    r.expect(before.entry != null, key + " opening the sheet pushed no history entry: " + JSON.stringify(before));
+    await page.goBack(); await wait(room, false); s = await state(room);
+    const back = await page.evaluate(() => ({ overflow: getComputedStyle(document.documentElement).overflow, entry: history.state?.shSelect ?? null, path: location.pathname }));
+    out.back = { ...back, sheet: s.sheetOpen, text: s.text };
+    r.expect(!s.sheetOpen && s.text === "Room: Living room" && back.path === before.path && back.entry == null, key + " Back didn't close the sheet, stay on the page and unlock it: " + JSON.stringify(out.back));
+    await page.click(trig(room)); await wait(room, true);
+    // Tapping a row picks it and closes the sheet, and focus returns to the button.
+    await page.locator(room + " .sh-select-option", { hasText: "Kitchen" }).click();
+    await wait(room, false); s = await state(room); out.tapped = s;
+    await page.waitForFunction(() => !history.state?.shSelect);
+    r.expect(s.text === "Room: Kitchen" && s.native.room === "kitchen" && !s.sheetOpen && s.focus, key + " tapping a row didn't pick it, close the sheet and return focus: " + JSON.stringify({ text: s.text, native: s.native, sheet: s.sheetOpen, focus: s.focus }));
+    // The backdrop closes it without a change; Escape does too.
+    await page.click(trig(room)); await wait(room, true);
+    await page.mouse.click(s.vw / 2, 20); await wait(room, false);
+    s = await state(room); r.expect(s.text === "Room: Kitchen" && !s.sheetOpen, key + " a tap above the sheet didn't close it without a change: " + JSON.stringify(s.text));
+    await page.click(trig(room)); await wait(room, true); await page.keyboard.press("Escape"); await wait(room, false);
+    s = await state(room); r.expect(!s.sheetOpen && s.focus && s.text === "Room: Kitchen", key + " Escape didn't close the sheet and return focus");
+    // More than eight options: a search field in the sheet, at 16 px so a phone doesn't zoom.
+    await page.click(trig(device)); await wait(device, true); s = await state(device); out.deviceSheet = s;
+    r.expect(s.searchShown && s.searchFont >= 16 && s.options.length === 13 && s.options.every((o) => o.height >= 44), key + " the 13-option sheet: " + JSON.stringify({ search: s.searchShown, font: s.searchFont, n: s.options.length }));
+    r.expect(inside(s.sheet, s) && s.sheet.height <= s.vh * 0.81, key + " the tall sheet leaves the viewport or is over 80% of it: " + JSON.stringify(s.sheet));
+    await page.screenshot({ path: path.join(output, key + "-select-search.png"), fullPage: false });
+    // A wheel over the open 13-option list scrolls the list and never the page, at its end too.
+    const listBox = await page.locator(device + " .sh-select-list").boundingBox(), readList = () => page.evaluate((root) => ({ top: document.querySelector(root + " .sh-select-list").scrollTop, room: document.querySelector(root + " .sh-select-list").scrollHeight - document.querySelector(root + " .sh-select-list").clientHeight, y: scrollY }), device);
+    const w0 = await readList();
+    await page.mouse.move(listBox.x + listBox.width / 2, listBox.y + listBox.height / 2); await page.mouse.wheel(0, 150); await page.waitForTimeout(250);
+    const w1 = await readList();
+    await page.mouse.wheel(0, 4000); await page.waitForTimeout(250); await page.mouse.wheel(0, 500); await page.waitForTimeout(250);
+    const w2 = await readList();
+    out.listWheel = { w0, w1, w2 };
+    r.expect(w0.room > 0 && w1.top > w0.top && w2.top >= w1.top && w1.y === w0.y && w2.y === w0.y, key + " a wheel over the open list didn't scroll only the list: " + JSON.stringify(out.listWheel));
+    await page.keyboard.press("Escape"); await wait(device, false);
+    return;
+  }
+
+  // Keyboard, on the open list (focus stays on the button): Down moves the highlight, a letter jumps, Enter picks.
+  r.expect(s.focus && s.active === "Living room", key + " focus or highlight after opening: " + JSON.stringify({ focus: s.focus, active: s.active }));
+  await page.keyboard.press("ArrowDown"); s = await state(room); r.expect(s.active === "Kitchen", key + " ArrowDown highlighted " + s.active);
+  await page.keyboard.press("End"); s = await state(room); r.expect(s.active === "Garage", key + " End highlighted " + s.active);
+  await page.keyboard.press("Home"); s = await state(room); r.expect(s.active === "All rooms", key + " Home highlighted " + s.active);
+  await page.keyboard.press("o"); s = await state(room); r.expect(s.active === "Office", key + " type-ahead 'o' highlighted " + s.active);
+  await page.keyboard.press("Enter"); await wait(room, false); s = await state(room); out.picked = s;
+  r.expect(s.text === "Room: Office" && s.native.room === "office" && s.focus && !s.popOpen, key + " Enter didn't pick, close and keep focus on the button: " + JSON.stringify({ text: s.text, native: s.native, focus: s.focus }));
+  // Space opens; Escape closes and returns focus, with no change.
+  await page.keyboard.press(" "); await wait(room, true);
+  await page.keyboard.press("ArrowDown"); await page.keyboard.press("Escape"); await wait(room, false); s = await state(room);
+  r.expect(s.text === "Room: Office" && s.focus && !s.popOpen, key + " Escape didn't close without a change and return focus: " + JSON.stringify({ text: s.text, focus: s.focus }));
+  // A click outside closes it.
+  await page.click(trig(room)); await wait(room, true); await page.click("#select-title"); await wait(room, false);
+  s = await state(room); r.expect(!s.popOpen && s.text === "Room: Office", key + " a click outside didn't close it");
+  // The 13-option list has a search field, focused on open; typing narrows the list and Enter picks the first match.
+  await page.click(trig(device)); await wait(device, true); s = await state(device); out.device = s;
+  r.expect(s.searchShown && s.searchFocus && s.options.length === 13 && inside(s.pop, s), key + " the 13-option list: " + JSON.stringify({ search: s.searchShown, focus: s.searchFocus, n: s.options.length, pop: s.pop }));
+  await page.screenshot({ path: path.join(output, key + "-select-search.png"), fullPage: false });
+  await page.keyboard.type("sens"); s = await state(device); r.expect(s.options.length === 1 && s.options[0].text === "Sensor" && s.active === "Sensor", key + " searching 'sens' left " + JSON.stringify(s.options.map((o) => o.text)));
+  await page.keyboard.press("Control+a"); await page.keyboard.type("zzz"); s = await state(device); r.expect(s.options.length === 0 && s.empty, key + " no match doesn't say so");
+  // "s" leaves All devices, Display, Sensor, Speaker and Thermostat; three Downs reach Speaker.
+  await page.keyboard.press("Control+a"); await page.keyboard.type("s"); for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowDown"); await page.keyboard.press("Enter"); await wait(device, false); s = await state(device);
+  r.expect(s.native.device === "d11" && s.text === "Device: Speaker" && s.focus, key + " picking from a search: " + JSON.stringify({ text: s.text, native: s.native }));
+  // Tab from the button, with the list open and no search field, picks the highlighted option and moves on to the next control.
+  await page.click(trig(room)); await wait(room, true); await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Tab"); await wait(room, false); s = await state(room);
+  const tabbed = await nextFocus(room); out.tabButton = { ...tabbed, text: s.text, native: s.native };
+  r.expect(s.text === "Room: Garage" && s.native.room === "garage" && !s.popOpen && tabbed.onNext, key + " Tab from the button didn't pick, close and move on to the next control: " + JSON.stringify(out.tabButton));
+  // A letter typed on the closed button (13 options: it has a search field) opens the list and lands in the field, not in a
+  // type-ahead; more letters narrow it. The search field is a combobox that names the highlight.
+  await page.focus(trig(device)); await page.keyboard.press("t");
+  await wait(device, true); s = await state(device);
+  const typed = await page.evaluate((root) => { const f = document.querySelector(root + " .sh-select-search input"); return { value: f.value, focus: document.activeElement === f, role: f.getAttribute("role"), expanded: f.getAttribute("aria-expanded"), controls: f.getAttribute("aria-controls"), listId: document.querySelector(root + ' [role="listbox"]').id, descendant: f.getAttribute("aria-activedescendant") }; }, device);
+  out.typed = typed;
+  r.expect(typed.value === "t" && typed.focus && s.options.length > 0 && s.options.every((o) => o.text.toLowerCase().includes("t")), key + " the first letter typed on the closed button didn't reach the search field: " + JSON.stringify({ typed, options: s.options.map((o) => o.text) }));
+  r.expect(typed.role === "combobox" && typed.expanded === "true" && typed.controls === typed.listId && !!typed.descendant, key + " the search field isn't a combobox that controls the list and names the highlight: " + JSON.stringify(typed));
+  await page.keyboard.type("h"); s = await state(device); r.expect(s.options.map((o) => o.text).join() === "Thermostat", key + " 'th' left " + JSON.stringify(s.options.map((o) => o.text)));
+  await page.keyboard.press("Escape"); await wait(device, false);
+  // Tab from the search field picks the highlighted option, closes the list and moves focus on to the next control after the button.
+  await page.click(trig(device)); await wait(device, true); await page.keyboard.type("hea");
+  await page.keyboard.press("Tab"); await wait(device, false); s = await state(device);
+  const moved = await nextFocus(device);
+  out.tab = { ...moved, text: s.text, native: s.native };
+  r.expect(s.text === "Device: Heater" && s.native.device === "d3" && !s.popOpen && moved.onNext, key + " Tab from the search field didn't pick, close and move on to the next control: " + JSON.stringify(out.tab));
+  // Room for the list is short below the button: it flips up, and stays inside the viewport.
+  await page.evaluate((root) => document.querySelector(root).scrollIntoView({ block: "end" }), device);
+  await page.click(trig(device)); await wait(device, true); s = await state(device); out.flip = s;
+  r.expect(s.side === "top" && inside(s.pop, s) && s.pop.top >= s.barBottom - 0.5, key + " the list didn't flip up inside the viewport, under the top bar: " + JSON.stringify({ side: s.side, pop: s.pop, bar: s.barBottom, vh: s.vh }));
+  await page.screenshot({ path: path.join(output, key + "-select-flip.png"), fullPage: false });
+  await page.keyboard.press("Escape"); await wait(device, false);
+  // With the button mid-page (about y=400 at 800 high) a 13-option list has more room above than below only by the top bar's
+  // height: it stays under the bar (below the button, or above it but never higher than the bar's bottom edge).
+  await page.evaluate((root) => document.querySelector(root).scrollIntoView({ block: "center" }), device);
+  await page.click(trig(device)); await wait(device, true); s = await state(device); out.mid = s;
+  r.expect(inside(s.pop, s) && s.pop.top >= s.barBottom - 0.5, key + " a mid-page list rose under the top bar or left the viewport: " + JSON.stringify({ side: s.side, pop: s.pop, bar: s.barBottom, vh: s.vh }));
+  await page.keyboard.press("Escape"); await wait(device, false);
+}
 
 export default async function shellCheck(browser) {
   const r = reporter("shell");
@@ -285,6 +456,8 @@ export default async function shellCheck(browser) {
           r.expect(copied.value === "example-value-123", key + " copied text was " + JSON.stringify(copied.value));
           r.expect(copied.label === "Copied", key + " copy control did not show Copied feedback");
         }
+
+        if (name === "shell-gallery") await selectChecks(page, key, mobile, r, results);
 
         results[key].pageErrors = page.errors;
         r.expect(page.errors.length === 0, key + " page errors: " + page.errors.join(" | "));

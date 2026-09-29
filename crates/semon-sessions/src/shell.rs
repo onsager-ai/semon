@@ -4,12 +4,18 @@
 //! `/favicon.svg`, and serve each font at `/fonts/<name>`; the viewer's content security policy permits same-origin
 //! assets only.
 
-/// The viewer's base styles, including its tokens, fonts, and chrome.
-pub const VIEWER_CSS: &str = include_str!("viewer.css");
+/// The viewer's base styles, including its tokens, fonts, and chrome, and the Select's styles (`select.css`).
+pub const VIEWER_CSS: &str = concat!(include_str!("viewer.css"), "\n", include_str!("select.css"));
 
 /// The viewer's page script. Embedders serving the viewer without a `ViewerCore` can serve it at `/viewer.js`. It starts
-/// with the tooltip (`tooltip.js`, also the start of [`JS`]) and then the viewer itself.
-pub const VIEWER_JS: &str = concat!(include_str!("tooltip.js"), include_str!("viewer.js"));
+/// with the tooltip (`tooltip.js`, also the start of [`JS`]), then the Select component (`select.js`), then the viewer itself.
+pub const VIEWER_JS: &str = concat!(
+    include_str!("tooltip.js"),
+    "\n",
+    include_str!("select.js"),
+    "\n",
+    include_str!("viewer.js")
+);
 
 /// The viewer page returned by its page routes. Embedders serving the viewer without a `ViewerCore` can serve these
 /// bytes for each page route.
@@ -18,9 +24,16 @@ pub const PAGE_HTML: &str = include_str!("viewer.html");
 /// Additional components for forms and other server-rendered pages.
 pub const CSS: &str = include_str!("shell.css");
 
-/// The drawer, copy, dialog, and readiness-poll behavior for shell pages, and the tooltip for any element with a
-/// `data-tip` attribute (its source, `tooltip.js`, is also the start of the viewer's own script).
-pub const JS: &str = concat!(include_str!("tooltip.js"), include_str!("shell.js"));
+/// The tooltip for any element with a `data-tip` attribute (its source, `tooltip.js`, is also the start of the viewer's own
+/// script), the Select component (`SemonShell.select`, and `<select data-select>` pages), then the drawer, copy, dialog, and
+/// readiness-poll behavior for shell pages.
+pub const JS: &str = concat!(
+    include_str!("tooltip.js"),
+    "\n",
+    include_str!("select.js"),
+    "\n",
+    include_str!("shell.js")
+);
 
 /// The Semon mark, a monochrome glyph. `.mark` paints it as a mask from `/mark.svg`, so a page that uses `.mark` must
 /// serve this at that path (as `image/svg+xml`).
@@ -141,7 +154,10 @@ mod tests {
             "nav-item", "page", "ph", "sec-h", "list", "empty", "dot",
         ];
         let viewer_classes = defined_classes(include_str!("viewer.css"));
-        let shell_classes = defined_classes(include_str!("shell.css"));
+        let shell_classes = defined_classes(concat!(
+            include_str!("shell.css"),
+            include_str!("select.css")
+        ));
         for class in &shell_classes {
             if SHARED_CHROME.contains(class) {
                 continue;
@@ -168,7 +184,7 @@ mod tests {
             .nth(1)
             .expect("class list fence");
         let viewer_css = include_str!("viewer.css");
-        let shell_css = include_str!("shell.css");
+        let shell_css = concat!(include_str!("shell.css"), include_str!("select.css"));
         for class in classes
             .lines()
             .map(str::trim)

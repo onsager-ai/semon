@@ -721,9 +721,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .analytics-range { display: inline-flex; align-items: center; gap: 2px; flex: none; padding: 2px; border-radius: 10px; background: var(--sunken); white-space: nowrap; }
 .analytics-range button { min-width: 38px; min-height: 32px; border: 0; border-radius: 8px; background: none; padding: 0 7px; color: var(--muted); font-size: var(--fs-sm); }
 .analytics-range button[aria-pressed="true"] { background: var(--ground); color: var(--ink); box-shadow: 0 1px 3px color-mix(in srgb, var(--ink) 12%, transparent); font-weight: 600; }
-.facet-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
-.facet-field { display: grid; gap: 3px; min-width: 0; color: var(--muted); font-size: var(--fs-cap); }
-.facet-field select { width: 100%; min-width: 0; height: 34px; border: 1px solid var(--line); border-radius: 8px; background: var(--ground); color: var(--ink); padding: 0 7px; font-size: var(--fs-sm); }
+.facet-filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1.2fr) minmax(0, 1fr); gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .analytics-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; margin-top: -6px; }
 .analytics-metric:nth-last-child(-n+2) { border-bottom: 0; }
 .analytics-metric { min-width: 0; padding: 12px 0 13px; border-bottom: 1px solid var(--line); }
@@ -775,7 +773,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .analytics-session .no-price { grid-column: 1 / -1; margin-top: -3px; } .analytics-slice .session-name { white-space: normal; overflow-wrap: anywhere; }
 @media (min-width: 761px) { .analytics-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 20px; } .analytics-metric:nth-last-child(-n+4) { border-bottom: 0; } .analytics-breakdowns, .analytics-split { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 760px) {
-  .facet-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .facet-field select { height: 44px; }
+  .facet-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .topbar .analytics-range button { min-width: 38px; min-height: 44px; padding: 0 5px; }
   .analytics-measure button, .topbar .l2.session-meta .meta-runs { min-height: 44px; }
   .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-intro .more, .child-return button, .child-work .cw-toggle, .lineage-menu button { min-height: 44px; }

@@ -151,6 +151,33 @@ Pages without navigation can use `.signin` as their centered single-column layou
 </html>
 ```
 
+## Select
+
+The shell includes a Select: a button that opens a list of options, with the look and behaviour of shadcn/ui's Select. Its script is part of `shell.js`; its styles are part of `viewer.css` (not `shell.css`), which every shell page loads first, so a page that loads `viewer.css` and `shell.js` has all of it. A value cut off by an ellipsis shows its full text in a tooltip (`data-tip`). On a desktop it opens a popover under the button (over it when there is no room below) and keeps inside the viewport. At 760 px and narrower it opens a bottom sheet with 44 px rows and safe-area padding; the page behind it does not scroll, and the sheet is a history entry, so Back closes it. Above eight options a search field sits at the top of the list.
+
+The button shows "Label: value" and a chevron. The list is a `listbox` of `option`s; the selected option has a check mark and `aria-selected="true"`, and the first option is usually "All …". The button is a `combobox` with `aria-expanded` and `aria-controls`, and the keyboard follows the WAI-ARIA Authoring Practices "select-only combobox": Enter, Space and Up or Down open it, Up, Down, Home and End move the highlight, letters jump to a matching option, Enter or Space picks, Escape closes and returns focus to the button, Tab picks the highlighted option and moves on, and a click outside closes it.
+
+To use it with a form, mark a native `<select>` and give it a label. Without the script it stays a native select. With it the native select is hidden, keeps its value (so the form submits it) and gets a `change` event when the choice changes:
+
+```html
+<select name="room" data-select data-label="Room">
+  <option value="">All rooms</option>
+  <option value="kitchen" selected>Kitchen</option>
+</select>
+```
+
+A script builds one with `SemonShell.select`, and gives it new options later without closing it:
+
+```js
+const room = SemonShell.select({ label: "Room", options: [{ value: "", label: "All rooms" }, { value: "kitchen", label: "Kitchen" }], value: "", onChange: (value) => {} });
+parent.append(room.el);
+room.setOptions(next);   // in place: an open list stays open, with its highlight and search text
+room.setValue("kitchen"); // without calling onChange
+room.value; room.options; room.isOpen; room.open(); room.close(); room.focus();
+```
+
+`SemonShell.enhance(select)` is what the `data-select` markup calls. Everything is built with `createElement` and `textContent`; nothing is written as HTML. The Select's source is `select.js` and `select.css`. `semon_sessions::shell::JS` is `select.js` followed by `shell.js`, `VIEWER_CSS` is `viewer.css` followed by `select.css`, and the viewer's own `VIEWER_JS` is `select.js` followed by `viewer.js`, so each page loads the Select through the files it already loads.
+
 ## Script contract
 
 The script uses `#lead-btn`, `#sidebar`, `#drawer-close`, and `#scrim` for the phone drawer. It uses `#topbar` and `#main` to synchronize `.topbar.scrolled` with the active scroll container. Missing elements are allowed, so the script can also be loaded by the sign-in skeleton.
@@ -226,6 +253,20 @@ pending
 signin
 account
 account-login
+sh-select
+sh-select-trigger
+sh-select-text
+sh-select-label
+sh-select-value
+sh-select-chevron
+sh-select-pop
+sh-select-search
+sh-select-list
+sh-select-option
+sh-select-check
+sh-select-empty
+sh-select-sheet
+sh-select-close
 ```
 
 Classes prefixed `sh-` are renamed from a shorter name because `viewer.css` already defines a class of that name for its own, unrelated chrome (for example, the transcript's `.steps`/`.step` draw a numbered rail with a different meaning). A Rust test in `shell.rs` fails the build if a class `shell.css` defines, other than the shared chrome list above, is also defined by `viewer.css`.

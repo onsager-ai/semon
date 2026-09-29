@@ -141,6 +141,40 @@
         </form>
       </section>
 
+      <section aria-labelledby="select-title">
+        <h2 class="sec-h" id="select-title">Select</h2>
+        <form action="#chosen" method="get">
+          <div class="field">
+            <select id="room-select" name="room" data-select data-label="Room">
+              <option value="">All rooms</option>
+              <option value="living" selected>Living room</option>
+              <option value="kitchen">Kitchen</option>
+              <option value="office">Office</option>
+              <option value="garage">Garage</option>
+            </select>
+            <span class="hint">Opens a list under the button, or a bottom sheet on a phone.</span>
+          </div>
+          <div class="field">
+            <select id="device-select" name="device" data-select data-label="Device">
+              <option value="">All devices</option>
+              <option value="d1">Display</option>
+              <option value="d2">Doorbell</option>
+              <option value="d3">Heater</option>
+              <option value="d4">Hub</option>
+              <option value="d5">Lamp</option>
+              <option value="d6">Lock</option>
+              <option value="d7">Meter</option>
+              <option value="d8">Oven</option>
+              <option value="d9" selected>Router</option>
+              <option value="d10">Sensor</option>
+              <option value="d11">Speaker</option>
+              <option value="d12">Thermostat</option>
+            </select>
+            <span class="hint">More than eight options add a search field.</span>
+          </div>
+        </form>
+      </section>
+
       <section aria-labelledby="tips-title">
         <h2 class="sec-h" id="tips-title">Tooltips</h2>
         <p class="status">

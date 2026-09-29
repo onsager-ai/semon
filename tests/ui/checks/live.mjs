@@ -32,9 +32,10 @@
 //   - a step stops running within 4 s when its process dies (no line written);
 //   - open child work shows its child's new message, with the view below it held; a selection in a turn whose call is
 //     running survives updates; the Sessions search and Analytics range focus survive redraws;
-//   - the filters (Repo, Machine, Harness, Model) and the Sessions search field are kept, not rebuilt, by a live update that adds a
-//     repo: the same elements stay in the document, the focused one keeps focus (and the search field its text and caret), the
-//     new repo is an option, and the selection is unchanged; a selected repo that leaves the data stays, marked "(no sessions)";
+//   - the filters (Repo, Machine, Harness, Model: Selects) and the Sessions search field are kept, not rebuilt, by a live update
+//     that adds a repo: the same elements stay in the document, the focused one keeps focus (and the search field its text and
+//     caret), an open list stays open with its highlight, the new repo is an option, and the selection is unchanged; a selected
+//     repo that leaves the data stays, marked "(no sessions)";
 //   - a 403 stops polling and shows "Session ended: reload with the printed URL";
 //   - 0 page errors and 0 sideways overflow on every page.
 // Once (desktop): polling pauses while the tab is hidden and resumes when it shows; failed polls back off from 2 s,
@@ -396,9 +397,10 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.moreActivity.range === "30 d" && R.moreActivity.metrics === 8, name + ": Analytics changed after more activity: " + JSON.stringify(R.moreActivity));
 
     // ---- 6b. the filters and the search field are kept through an update that adds a repo ----
-    // The same elements stay in the document (tagged before the update), the focused one keeps focus and its caret, the new
-    // repo is an option, and the selection is unchanged. A selected repo that leaves the data stays, marked "(no sessions)".
-    const REPO = '.facet-filters select[aria-label="Repo"]';
+    // The same elements stay in the document (tagged before the update), the focused one keeps focus (the search field its
+    // text and caret), an open list stays open, the new repo is an option, and the selection is unchanged. A selected repo that
+    // leaves the data stays, marked "(no sessions)".
+    const ROOT = '.facet-filters .sh-select[data-label="Repo"]';
     const repoLog = (repo, sid, t) => {
       const cwd = path.join(dir, "work", repo), file = path.join(dir, "claude/projects", cwd.replace(/[^A-Za-z0-9]/g, "-"), sid + ".jsonl");
       fs.mkdirSync(path.join(cwd, ".git"), { recursive: true }); fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -406,8 +408,12 @@ async function scheme(browser, name, opts, r, protocol) {
       fs.writeFileSync(file, line(t, "user", { message: { role: "user", content: "Live check: a session in " + repo } }) + line(t + 1000, "assistant", { message: { id: "msg-" + sid, model: "claude-opus-5-5", role: "assistant", type: "message", content: [{ type: "text", text: "Live check: hello from " + repo }] } }));
       return file;
     };
-    const hasRepo = (page, repo) => appear(page, Date.now(), (name) => [...document.querySelectorAll('.facet-filters select[aria-label="Repo"] option')].some((o) => o.value.endsWith(name)), repo);
-    const facetState = (page) => page.evaluate((sel) => { const s = document.querySelector(sel), bar = document.querySelector(".facet-filters"); return { kept: s?.__kept === true, barKept: bar?.__kept === true, focus: document.activeElement === s, value: s?.value, labels: [...(s?.options ?? [])].map((o) => o.textContent), values: [...(s?.options ?? [])].map((o) => o.value) }; }, REPO);
+    const hasRepo = (page, repo) => appear(page, Date.now(), ([root, name]) => document.querySelector(root)?.semonSelect.options.some((o) => o.value.endsWith(name)), [ROOT, repo]);
+    const facetState = (page) => page.evaluate((root) => { const box = document.querySelector(root), api = box.semonSelect, t = box.querySelector(".sh-select-trigger"), bar = document.querySelector(".facet-filters");
+      return { kept: t.__kept === true, barKept: bar.__kept === true, focus: document.activeElement === t, open: api.isOpen, expanded: t.getAttribute("aria-expanded"), value: api.value, text: t.textContent.trim(), labels: api.options.map((o) => o.label), values: api.options.map((o) => o.value),
+        listed: [...box.querySelectorAll('[role="option"]')].filter((o) => o.getClientRects().length).map((o) => o.dataset.value), active: box.querySelector('[role="option"].sh-active')?.dataset.value ?? null }; }, ROOT);
+    const pick = async (page, value) => { await page.click(ROOT + " .sh-select-trigger"); await page.locator(ROOT + ' [role="option"][data-value="' + value + '"]').click(); await page.waitForFunction((root) => document.querySelector(root + " .sh-select-trigger").getAttribute("aria-expanded") === "false", ROOT); await sleep(300); };
+    const tag = (page) => page.evaluate((root) => { document.querySelector(".facet-filters").__kept = true; const t = document.querySelector(root + " .sh-select-trigger"); t.__kept = true; t.focus(); }, ROOT);
     // The Sessions search: same input, still focused, its text and its caret.
     await SP.evaluate(() => { const f = document.querySelector("#sq"); f.__kept = true; f.focus(); f.setSelectionRange(3, 3); });
     let uSp = SP.updates; repoLog("nova", "live-nova", at(12, 44, 10));
@@ -415,32 +421,48 @@ async function scheme(browser, name, opts, r, protocol) {
     await sleep(700);
     R.searchKept = await SP.evaluate(() => { const f = document.querySelector("#sq"); return { kept: f?.__kept === true, focus: document.activeElement === f, value: f?.value, caret: f?.selectionStart }; });
     r.expect(SP.updates > uSp && R.searchKept.kept && R.searchKept.focus && R.searchKept.value === "harbor" && R.searchKept.caret === 3, name + ": the Sessions search field was replaced or lost its focus, text or caret: " + JSON.stringify(R.searchKept));
-    // The filters, on both pages: pick the first repo, focus the field, then add another repo.
-    const first = await AN.evaluate((sel) => [...document.querySelector(sel).options].map((o) => o.value).find((v) => v && v !== "__none__"), REPO);
+    // The filters, on both pages: pick the first repo, focus the button, then add another repo.
+    const first = await AN.evaluate((root) => document.querySelector(root).semonSelect.options.map((o) => o.value).find((v) => v && v !== "__none__"), ROOT);
     R.facets = {};
-    for (const [key, page] of [["analytics", AN], ["sessions", SP]]) {
-      await page.selectOption(REPO, first); await sleep(300);
-      await page.evaluate((sel) => { document.querySelector(".facet-filters").__kept = true; const s = document.querySelector(sel); s.__kept = true; s.focus(); }, REPO);
-      R.facets[key] = { before: await facetState(page) };
-    }
+    // The Sessions list follows a filter choice: with the search cleared, choosing the repo leaves only its sessions.
+    await SP.fill("#sq", ""); await sleep(200);
+    const rowsOf = () => SP.evaluate((repo) => ({ n: document.querySelectorAll("#page .nrow").length, other: [...document.querySelectorAll("#page .nrow .for")].filter((f) => !f.textContent.includes(repo)).length }), first);
+    const rowsAll = (await rowsOf()).n;
+    for (const [key, page] of [["analytics", AN], ["sessions", SP]]) { await pick(page, first); await tag(page); R.facets[key] = { before: await facetState(page) }; }
+    R.sessionsList = { all: rowsAll, filtered: await rowsOf() };
+    r.expect(R.sessionsList.filtered.n > 0 && R.sessionsList.filtered.n < rowsAll && R.sessionsList.filtered.other === 0, name + ": the Sessions list didn't follow the repo filter: " + JSON.stringify(R.sessionsList));
+    // The other persistent controls are tagged too: the range in Analytics' bar, its breakdown measure toggle, the Sessions group-by.
+    await AN.evaluate(() => { document.querySelector("#topbar .analytics-range").__kept = true; document.querySelector(".analytics-bd-head").__kept = true; });
+    await SP.evaluate(() => { document.querySelector(".groupby").__kept = true; });
     const uFacets = [AN.updates, SP.updates]; repoLog("orbit", "live-orbit", at(12, 44, 20));
     for (const [key, page] of [["analytics", AN], ["sessions", SP]]) {
       r.expect(await hasRepo(page, "orbit") != null, name + ": " + key + ": the new repo isn't an option within 4 s");
       await sleep(700); R.facets[key].after = await facetState(page);
       const { before, after } = R.facets[key];
-      r.expect(before.kept && before.focus && after.kept && after.barKept && after.focus && after.value === first && before.value === first, name + ": " + key + ": the filters were replaced, lost focus or changed their selection: " + JSON.stringify(R.facets[key]));
+      r.expect(before.kept && before.focus && after.kept && after.barKept && after.focus && after.value === first && before.value === first && after.text === "Repo: " + first, name + ": " + key + ": the filters were replaced, lost focus or changed their selection: " + JSON.stringify(R.facets[key]));
       r.expect(after.values.some((v) => v.endsWith("orbit")) && !after.labels.some((l) => l.includes("(no sessions)")), name + ": " + key + ": the options after the update: " + JSON.stringify(after.labels));
     }
     r.expect(AN.updates > uFacets[0] && SP.updates > uFacets[1], name + ": a page got no update for the new repo");
+    R.keptControls = { range: await AN.evaluate(() => document.querySelector("#topbar .analytics-range")?.__kept === true), measure: await AN.evaluate(() => document.querySelector(".analytics-bd-head")?.__kept === true), groupby: await SP.evaluate(() => document.querySelector(".groupby")?.__kept === true) };
+    r.expect(R.keptControls.range && R.keptControls.measure && R.keptControls.groupby, name + ": the range, measure or group-by control was rebuilt by an update: " + JSON.stringify(R.keptControls));
+    // An open list stays open, with its highlight, while an update adds a repo to it; Escape then closes it and returns focus.
+    await AN.click(ROOT + " .sh-select-trigger"); await AN.waitForFunction((root) => document.querySelector(root).semonSelect.isOpen, ROOT);
+    R.open = { before: await facetState(AN) }; uFacets[0] = AN.updates; repoLog("vega", "live-vega", at(12, 44, 30));
+    r.expect(await hasRepo(AN, "vega") != null, name + ": Analytics: the open list has no Vega option within 4 s");
+    await sleep(700); R.open.after = await facetState(AN);
+    r.expect(AN.updates > uFacets[0] && R.open.after.open && R.open.after.expanded === "true" && R.open.after.kept && R.open.after.active === R.open.before.active && R.open.after.listed.some((v) => v.endsWith("vega")) && R.open.after.value === first, name + ": the open list closed, lost its highlight or lacks the new repo: " + JSON.stringify(R.open));
+    await AN.keyboard.press("Escape"); await sleep(200); R.open.closed = await facetState(AN);
+    r.expect(!R.open.closed.open && R.open.closed.focus && R.open.closed.kept, name + ": Escape didn't close the list and return focus: " + JSON.stringify(R.open.closed));
     // A selected repo that no session has now stays selected, marked.
     const orbit = R.facets.analytics.after.values.find((v) => v.endsWith("orbit"));
-    await AN.selectOption(REPO, orbit); await sleep(300);
-    await AN.evaluate((sel) => { const s = document.querySelector(sel); s.__kept = true; s.focus(); }, REPO);
+    await pick(AN, orbit); await tag(AN);
     fs.rmSync(path.join(dir, "claude/projects", path.join(dir, "work", "orbit").replace(/[^A-Za-z0-9]/g, "-")), { recursive: true, force: true });
-    R.stale = await appear(AN, Date.now(), (sel) => [...document.querySelector(sel).options].some((o) => o.textContent.includes("(no sessions)")), REPO);
+    R.stale = await appear(AN, Date.now(), (root) => document.querySelector(root).semonSelect.options.some((o) => o.label.includes("(no sessions)")), ROOT);
     await sleep(300); R.facets.stale = await facetState(AN);
     r.expect(R.stale != null && R.facets.stale.kept && R.facets.stale.focus && R.facets.stale.value === orbit && R.facets.stale.labels.filter((l) => l.includes("(no sessions)")).length === 1, name + ": a selected repo that left the data isn't kept and marked: " + JSON.stringify(R.facets.stale));
-    await AN.selectOption(REPO, ""); await sleep(300);
+    await pick(AN, ""); await pick(SP, "");
+    R.sessionsList.reset = (await rowsOf()).n;
+    r.expect(R.sessionsList.reset > R.sessionsList.filtered.n, name + ": the Sessions list didn't widen when the filter was cleared: " + JSON.stringify(R.sessionsList));
 
     // ---- 7. harbor's process dies mid-call: the step stops running, though no line is written ----
     await S.click('#topbar button[aria-label="Close search"]'); await S.waitForFunction(() => !document.querySelector("#find")); // find from step 5 would hide the call

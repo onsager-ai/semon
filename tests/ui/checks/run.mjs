@@ -23,6 +23,7 @@ import scrollbarsCheck from "./scrollbars.mjs";
 import switchCheck from "./switch.mjs";
 import embedCheck from "./embed.mjs";
 import tooltipCheck from "./tooltip.mjs";
+import selectCheck from "./select.mjs";
 
 const checks = [
   ["home", homeCheck],
@@ -42,6 +43,7 @@ const checks = [
   ["switch", switchCheck],
   ["embed", embedCheck],
   ["tooltip", tooltipCheck],
+  ["select", selectCheck],
 ];
 
 const browser = await launch();
