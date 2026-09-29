@@ -3700,6 +3700,19 @@ impl Slot {
             first: false,
         }
     }
+
+    /// Whether this slot is a tool call and, if it is, whether it failed or
+    /// never finished: exactly what a transcript's `calls` and `errors`
+    /// count, so the errors badge and `/api/tx?errors=1` agree.
+    pub(crate) fn failed_call(&self) -> Option<bool> {
+        match &self.kind {
+            SlotKind::Tool { shown, .. }
+            | SlotKind::Yielded { shown, .. }
+            | SlotKind::Sent { shown, .. } => Some(matches!(shown, Shown::Err | Shown::Unfinished)),
+            SlotKind::Operation { ok, .. } => Some(*ok == Some(false)),
+            _ => None,
+        }
+    }
 }
 
 /// A session's transcript index and its totals.
@@ -3715,21 +3728,9 @@ impl Transcript {
     fn from_slots(slots: Vec<Slot>) -> Self {
         let mut calls = 0;
         let mut errors = 0;
-        for slot in &slots {
-            if let SlotKind::Tool { shown, .. }
-            | SlotKind::Yielded { shown, .. }
-            | SlotKind::Sent { shown, .. } = &slot.kind
-            {
-                calls += 1;
-                if matches!(shown, Shown::Err | Shown::Unfinished) {
-                    errors += 1;
-                }
-            } else if let SlotKind::Operation { ok, .. } = &slot.kind {
-                calls += 1;
-                if *ok == Some(false) {
-                    errors += 1;
-                }
-            }
+        for failed in slots.iter().filter_map(Slot::failed_call) {
+            calls += 1;
+            errors += usize::from(failed);
         }
         Self {
             slots,

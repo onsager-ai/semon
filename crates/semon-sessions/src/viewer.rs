@@ -122,7 +122,7 @@ pub const SECURITY_HEADERS: [(&str, &str); 4] = [
 ];
 
 /// One answer from [`ViewerCore::respond`]: the status, the body's content
-/// type, the body and, for `/api/model`, its `ETag`.
+/// type, the body and, for `/api/model` and `/api/tx?errors=1`, its `ETag`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewerReply {
     pub status: u16,
@@ -686,6 +686,12 @@ impl MachineView {
         }
         let answer = if path == "/api/model" {
             self.model(query, if_none_match)
+        } else if path == "/api/tx"
+            && query
+                .split('&')
+                .any(|part| part == "errors" || part.starts_with("errors="))
+        {
+            self.tx_errors(query, if_none_match)
         } else {
             self.route(path, query)
                 .map(|(status, content_type, body)| (status, content_type, body, None))
@@ -801,6 +807,40 @@ impl MachineView {
         self.refresh_model()?;
         let built = &self.model.as_ref().expect("model loaded").built;
         tx::page(built, &sid, &anchor, model::now_ms())
+    }
+
+    /// `/api/tx?sid=&errors=1`: where the session's failed steps are
+    /// ([`tx::errors`]), or 304 when the client's `ETag` or `?since=` version
+    /// is still current. It names no page: `before`, `after` and `turn` are
+    /// refused with it.
+    fn tx_errors(&mut self, query: &str, if_none_match: Option<&str>) -> io::Result<Routed> {
+        let json = "application/json; charset=utf-8";
+        if query_value(query, "errors") != Some("1") {
+            return Err(invalid_input("errors"));
+        }
+        if ["before", "after", "turn"]
+            .iter()
+            .any(|key| query_value(query, key).is_some())
+        {
+            return Err(invalid_input("errors names no page"));
+        }
+        let sid = query_value(query, "sid")
+            .and_then(decoded)
+            .ok_or_else(|| invalid_input("sid"))?;
+        let since = query_value(query, "since")
+            .map(|value| decoded(value).ok_or_else(|| invalid_input("since")))
+            .transpose()?;
+        self.refresh_model()?;
+        let built = &self.model.as_ref().expect("model loaded").built;
+        if !built.tx.contains_key(&sid) {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        let etag = format!("\"{}\"", built.version);
+        if if_none_match == Some(etag.as_str()) || since.as_deref() == Some(built.version.as_str())
+        {
+            return Ok((304, json, Vec::new(), Some(etag)));
+        }
+        Ok((200, json, tx::errors(built, &sid)?.into_bytes(), Some(etag)))
     }
 
     /// Whether a page URL names something in the model: `/machines/<id>`,
@@ -2505,6 +2545,235 @@ mod tests {
         assert_eq!(session["errors"], page["errors"]);
     }
 
+    /// A session whose failed steps span three pages: 450 calls in three
+    /// turns, failing at calls 3, 210 (never answered) and 449, and 17 and
+    /// 300 as well (`is_error`).
+    fn faults_fixture() -> Fixture {
+        let fixture = Fixture::new();
+        fixture.write("proc/sys/kernel/hostname", "testbox\n");
+        let at = |second: usize| {
+            format!(
+                "2026-09-24T{:02}:{:02}:{:02}Z",
+                second / 3600,
+                second / 60 % 60,
+                second % 60
+            )
+        };
+        let mut records = Vec::new();
+        for call in 0..450 {
+            if call % 150 == 0 {
+                records.push(json!({"type":"user","timestamp":at(call * 4),"sessionId":"faults","origin":{"kind":"human"},
+                    "message":{"role":"user","content":format!("batch {}", call / 150)}}));
+            }
+            let id = format!("toolu-{call}");
+            records.push(json!({"type":"assistant","timestamp":at(call * 4 + 1),"sessionId":"faults",
+                "message":{"role":"assistant","content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":format!("step {call}")}}]}}));
+            if call == 210 {
+                continue;
+            }
+            let failed = [3, 17, 300, 449].contains(&call);
+            records.push(json!({"type":"user","timestamp":at(call * 4 + 2),"sessionId":"faults","toolUseResult":{},
+                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"out","is_error":failed}]}}));
+        }
+        fixture.claude("faults", &records);
+        fixture
+    }
+
+    /// `/api/tx?errors=1` lists exactly the steps the errors badge counts,
+    /// each at a slot whose page (`after=` it, or `before=` one past it)
+    /// holds that failed step, in transcript order across pages.
+    #[test]
+    fn failed_steps_are_listed_where_the_badge_counts_them() {
+        let fixture = faults_fixture();
+        let mut core = fixture.viewer();
+        let body = |core: &mut MachineView, query: &str| -> Value {
+            let reply = core.respond("GET", "/api/tx", query, None);
+            assert_eq!(reply.status, 200, "{query}");
+            serde_json::from_slice(&reply.body).unwrap()
+        };
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        let list = body(&mut core, "sid=faults&errors=1");
+        assert_eq!(list["errors"], 5);
+        assert_eq!(list["errors"], model["sessions"]["faults"]["errors"]);
+        assert_eq!(list["truncated"], false);
+        assert_eq!(list["version"], model["version"]);
+        let slots: Vec<u64> = list["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|slot| slot.as_u64().unwrap())
+            .collect();
+        // Every failed step of the whole transcript, read page by page.
+        let mut failed = Vec::new();
+        let mut page = body(&mut core, "sid=faults");
+        assert_eq!(list["total"], page["total"]);
+        loop {
+            let entries = page["entries"].as_array().unwrap();
+            let mut here: Vec<u64> = entries
+                .iter()
+                .filter(|entry| entry["k"] == "tool" && entry["ok"] == false)
+                .map(|entry| entry["slot"].as_u64().unwrap())
+                .collect();
+            here.append(&mut failed);
+            failed = here;
+            if page["from"] == 0 {
+                break;
+            }
+            page = body(&mut core, &format!("sid=faults&before={}", page["from"]));
+        }
+        assert_eq!(slots, failed);
+        assert_eq!(slots.len(), 5);
+        assert!(
+            slots.last().unwrap() - slots.first().unwrap() > 2 * tx::PAGE_ENTRIES as u64,
+            "the failures span pages: {slots:?}"
+        );
+        for slot in slots {
+            let after = body(&mut core, &format!("sid=faults&after={slot}"));
+            let first = &after["entries"][0];
+            assert_eq!(
+                (first["slot"].as_u64(), &first["ok"]),
+                (Some(slot), &json!(false))
+            );
+            let before = body(&mut core, &format!("sid=faults&before={}", slot + 1));
+            let last = before["entries"].as_array().unwrap().last().unwrap();
+            assert_eq!(
+                (last["slot"].as_u64(), &last["ok"]),
+                (Some(slot), &json!(false))
+            );
+        }
+        // The one never answered is among them, as the badge counts it.
+        let unfinished = body(&mut core, "sid=faults&errors=1")["slots"][2]
+            .as_u64()
+            .unwrap();
+        let page = body(&mut core, &format!("sid=faults&after={unfinished}"));
+        assert_eq!(page["entries"][0]["unfinished"], true);
+    }
+
+    #[test]
+    fn the_error_list_refuses_bad_requests_and_unknown_sessions() {
+        let fixture = faults_fixture();
+        let mut core = fixture.viewer();
+        for query in [
+            "errors=1",
+            "sid=faults&errors=0",
+            "sid=faults&errors",
+            "sid=faults&errors=",
+            "sid=faults&errors=yes",
+            "sid=faults&errors=1&before=3",
+            "sid=faults&errors=1&after=3",
+            "sid=faults&errors=1&turn=x",
+            "sid=%zz&errors=1",
+            "sid=faults&errors=1&since=%zz",
+        ] {
+            let reply = core.respond("GET", "/api/tx", query, None);
+            assert_eq!((reply.status, reply.etag), (400, None), "{query}");
+        }
+        assert_eq!(
+            core.respond("GET", "/api/tx", "sid=nobody&errors=1", None)
+                .status,
+            404
+        );
+        // Not even a matching ETag answers for a session that isn't there.
+        let etag = core
+            .respond("GET", "/api/tx", "sid=faults&errors=1", None)
+            .etag
+            .unwrap();
+        let reply = core.respond("GET", "/api/tx", "sid=nobody&errors=1", Some(&etag));
+        assert_eq!(reply.status, 404);
+        assert!(get(&fixture, "/api/tx?sid=faults&errors=2").starts_with("HTTP/1.1 400"));
+        assert!(get(&fixture, "/api/tx?sid=nobody&errors=1").starts_with("HTTP/1.1 404"));
+    }
+
+    /// The list carries the model's `ETag`: 304 while it holds (by
+    /// `If-None-Match` or `since=`), a new list once a failure lands.
+    #[test]
+    fn the_error_list_is_304_until_the_model_moves() {
+        let fixture = faults_fixture();
+        let mut core = fixture.viewer();
+        let first = core.respond("GET", "/api/tx", "sid=faults&errors=1", None);
+        assert_eq!(first.status, 200);
+        let etag = first.etag.clone().unwrap();
+        let version = body_of(&first)["version"].as_str().unwrap().to_owned();
+        assert_eq!(etag, format!("\"{version}\""));
+        let cached = core.respond("GET", "/api/tx", "sid=faults&errors=1", Some(&etag));
+        assert_eq!((cached.status, cached.body.len()), (304, 0));
+        assert_eq!(cached.etag.as_deref(), Some(etag.as_str()));
+        let since = core.respond(
+            "GET",
+            "/api/tx",
+            &format!("sid=faults&errors=1&since={version}"),
+            None,
+        );
+        assert_eq!((since.status, since.body.len()), (304, 0));
+        // Over the wire too, with the header.
+        let token = "0123456789abcdef0123456789abcdef";
+        let wire = http(
+            &fixture,
+            &format!(
+                "GET /api/tx?sid=faults&errors=1&t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nIf-None-Match: {etag}\r\n\r\n"
+            ),
+        );
+        assert!(wire.starts_with("HTTP/1.1 304"), "{wire}");
+        assert!(wire.contains(&format!("ETag: {etag}")));
+        // One more failed call lands: a new version and a longer list.
+        let path = fixture.root.join("claude/projects/project/faults.jsonl");
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{}", json!({"type":"assistant","timestamp":"2026-09-24T02:00:00Z","sessionId":"faults",
+            "message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu-late","name":"Bash","input":{"command":"late"}}]}})).unwrap();
+        writeln!(file, "{}", json!({"type":"user","timestamp":"2026-09-24T02:00:01Z","sessionId":"faults","toolUseResult":{},
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-late","content":"no","is_error":true}]}})).unwrap();
+        drop(file);
+        let mut moved = None;
+        for _ in 0..50 {
+            let reply = core.respond("GET", "/api/tx", "sid=faults&errors=1", Some(&etag));
+            if reply.status == 200 {
+                moved = Some(reply);
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let moved = moved.expect("the list never moved");
+        assert_ne!(moved.etag.as_deref(), Some(etag.as_str()));
+        let list = body_of(&moved);
+        assert_eq!(list["errors"], 6);
+        let slots = list["slots"].as_array().unwrap();
+        assert_eq!(slots.len(), 6);
+        assert_eq!(
+            slots[5].as_u64().unwrap() + 1,
+            list["total"].as_u64().unwrap()
+        );
+        let model = body_of(&core.respond("GET", "/api/model", "", None));
+        assert_eq!(model["sessions"]["faults"]["errors"], 6);
+    }
+
+    /// The list stops at its cap and says so; the count stays whole.
+    #[test]
+    fn the_error_list_is_capped_and_says_so() {
+        assert_eq!(tx::ERRORS_MAX, 10_000);
+        let fixture = faults_fixture();
+        let mut core = fixture.viewer();
+        let whole: Value =
+            serde_json::from_str(&tx::errors(core.built().unwrap(), "faults").unwrap()).unwrap();
+        let capped: Value =
+            serde_json::from_str(&tx::errors_limited(core.built().unwrap(), "faults", 2).unwrap())
+                .unwrap();
+        assert_eq!(capped["errors"], 5);
+        assert_eq!(capped["truncated"], true);
+        assert_eq!(
+            capped["slots"].as_array().unwrap()[..],
+            whole["slots"].as_array().unwrap()[..2]
+        );
+        assert_eq!(whole["truncated"], false);
+        let exact: Value =
+            serde_json::from_str(&tx::errors_limited(core.built().unwrap(), "faults", 5).unwrap())
+                .unwrap();
+        assert_eq!(exact["truncated"], false);
+        assert!(matches!(
+            tx::errors(core.built().unwrap(), "nobody").map_err(|error| error.kind()),
+            Err(io::ErrorKind::NotFound)
+        ));
+    }
+
     /// The core answers without a transport: the same bodies, statuses and
     /// `ETag` the loopback server sends, GET only, and the headers it sends
     /// are the ones a server embedding the core is given.
@@ -2911,6 +3180,7 @@ mod tests {
         for (path, query) in [
             ("/api/model", ""),
             ("/api/tx", "sid=lane"),
+            ("/api/tx", "sid=lane&errors=1"),
             ("/api/tree", ""),
             ("/s/claude/lane", ""),
             ("/machines/laptop", ""),
