@@ -1520,11 +1520,14 @@
   }
 
   // ---- Session page --------------------------------------------------------------------------------------------------
+  // A child's brief is drawn once, in its intro block, so its transcript leaves out the handoff that started it. Every draw of
+  // that transcript takes these options: a live update redraws turns too, and one drawn without them shows the brief again.
+  const transcriptOpts = (sid) => { const origin = originHandoff(sid); return origin ? { excludeH: origin.id } : {}; };
   function renderSession(page, sid) {
     markSeenResults(H.filter((h) => isResult(h) && h.from === sid));
     const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr"); const h1 = el("h1", null, s.name); head.append(h1); page.append(head); observeTitle(h1);
     if (origin) { page.classList.add("child-page"); page.append(childBriefBlock(origin)); }
-    page.append(transcript(sid, origin ? { excludeH: origin.id } : {}));
+    page.append(transcript(sid, transcriptOpts(sid)));
     if (origin && (s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err")) page.append(childReturnBlock(s, origin));
   }
 
@@ -2447,8 +2450,8 @@
     const before = keys();
     // Only the changed turns are drawn again, unless the turns shown no longer match the index or nothing was shown.
     const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some((b) => !TURN.has(b.dataset.turn));
-    if (whole) morph(box, transcript(route.id).querySelector(".turns"));
-    else if (dirty.size) morphTurns(box, transcript(route.id, { only: dirty }).querySelector(".turns"), dirty);
+    if (whole) morph(box, transcript(route.id, transcriptOpts(route.id)).querySelector(".turns"));
+    else if (dirty.size) morphTurns(box, transcript(route.id, { ...transcriptOpts(route.id), only: dirty }).querySelector(".turns"), dirty);
     const h1 = $("#page .ph h1"); if (h1) h1.textContent = s.name;
     const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.dataset.tip = s.name; }
     const lead = $("#topbar .l1-state"); if (lead) lead.replaceWith(stateLead(s));
