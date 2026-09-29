@@ -538,6 +538,9 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .hname { flex: none; font-size: 11.5px; font-weight: 500; line-height: 1.2; letter-spacing: .01em; white-space: nowrap; color: color-mix(in srgb, var(--h) 60%, var(--ink-2)); }
 .treeitem[aria-expanded="true"] > .tree-row .tree-summary { display: none; }
 .page.wide-mode { max-width: 1400px; }
+/* Wide mode widens the reading column, so the prose measure that keeps the normal column readable no longer applies. */
+.page.wide-mode .msg.assistant { max-width: none; }
+.page.wide-mode .msg.user { max-width: 85%; }
 
 /* Line 2 clips its overflow, so the working dot's 6px pulse ring needs that much room on the left: the line takes it as
    padding and gives it back as a negative margin, which keeps the dot on the title's left edge. Every item is a static
