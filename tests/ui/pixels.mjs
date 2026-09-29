@@ -341,13 +341,14 @@ async function nav(page, route, D, mockup) {
 const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name + ".png"), PNG.sync.write(img)); };
 // The ratchet: a pending screen may not drift away from the overhaul. tests/ui/pixel-baseline.json holds, per screen and scheme, its
 // ratio of differing pixels and the size of both pictures (served, reference). A screen fails when its ratio rises by more than half
-// a point, or when either size changes. A port PR moves the baselines it changes in its own diff (out/pixel-baseline.<section>.json,
+// a tenth of a point (the run-to-run drift seen so far is 0.013), when it falls by more than that (so the baseline tightens as screens
+// improve), or when either size changes. A port PR moves the baselines it changes in its own diff (out/pixel-baseline.<section>.json,
 // written by every run, holds the current values), and its body says which and why. SEMON_PIXEL_BASELINE names the section
 // ("main" by default; the two-machines step uses "two-machines").
 const SECTION = process.env.SEMON_PIXEL_BASELINE ?? "main";
 const BASELINE_FILE = path.join(here, "pixel-baseline.json");
 const BASELINE = fs.existsSync(BASELINE_FILE) ? JSON.parse(fs.readFileSync(BASELINE_FILE, "utf8"))[SECTION] : undefined;
-const RISE = 0.005;
+const RISE = 0.001;
 const CURRENT = {};
 function ratchet(row, p) {
   const key = row.scheme + "|" + row.screen, d = p.A.width + "×" + p.A.height, size = p.size ?? [d, d];
@@ -356,6 +357,7 @@ function ratchet(row, p) {
   if (!BASELINE) return "no baseline section " + SECTION + " in pixel-baseline.json";
   if (!was) return "no baseline for " + key;
   if (p.ratio > was.ratio + RISE) return "rose from " + (was.ratio * 100).toFixed(2) + "% to " + (p.ratio * 100).toFixed(2) + "%";
+  if (p.ratio < was.ratio - RISE) return "fell from " + (was.ratio * 100).toFixed(2) + "% to " + (p.ratio * 100).toFixed(2) + "%: copy this screen's entry from out/pixel-baseline." + SECTION + ".json into tests/ui/pixel-baseline.json";
   if (was.size[0] !== size[0] || was.size[1] !== size[1]) return "size changed from " + was.size.join(" vs ") + " to " + size.join(" vs ");
   return null;
 }
