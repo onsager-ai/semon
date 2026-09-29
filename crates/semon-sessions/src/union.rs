@@ -16,6 +16,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
+    sync::{Arc, Condvar, Mutex, PoisonError, RwLock},
 };
 
 use serde_json::{Map, Value, json};
@@ -25,8 +26,8 @@ use crate::{
     model::{self, Built, MODEL_API, fnv},
     received::{Listing, ReceivedMachines},
     viewer::{
-        MachineView, ViewerReply, decoded, has_session_page, has_trace_page, percent_encode,
-        query_value,
+        MachineView, Reading, ViewerReply, decoded, has_session_page, has_trace_page, lock,
+        percent_encode, query_value, read_lock, write_lock,
     },
 };
 
@@ -182,6 +183,30 @@ impl AccountMenu {
     }
 }
 
+/// When a [`ViewerCore`] brings each machine's model up to date with its
+/// logs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Refresh {
+    /// Before each read: every answer reflects the logs as they are. A read
+    /// that finds a log changed rebuilds before it answers (185–303 ms for
+    /// 519 files); reads that find nothing changed answer at once, side by
+    /// side. For one-shot and tool callers. The default.
+    #[default]
+    OnRead,
+    /// In the background: a read answers from the last model built, at
+    /// once, and never waits for a rebuild. While reads keep coming, a
+    /// thread per machine looks for changed logs every 250 ms (a stat pass)
+    /// and rebuilds only when they changed, at most once a second, so the
+    /// changes of one second are one rebuild. An answer is at most about
+    /// 1 s plus one build behind the logs. The thread stops 30 s after the
+    /// last read. A read waits for a build only when its machine has no
+    /// model yet, or has one last checked over a second ago with no thread
+    /// to check it (the first read after 30 s without one): it refreshes
+    /// first, as the very first read builds. For servers; `semon sessions
+    /// --serve` uses it.
+    Background,
+}
+
 /// The session viewer without a transport: the pages, assets and API routes
 /// `semon sessions --serve` answers, with the in-memory model, caches and
 /// live refresh behind them, and no listener, token or Host check of its own.
@@ -193,21 +218,40 @@ impl AccountMenu {
 /// A core reads one machine's homes ([`ViewerCore::new`]) or several
 /// ([`ViewerCore::with_machines`]). A call does blocking file I/O, and the
 /// first one builds the model, so an async server should call it off its
-/// runtime (for example on a blocking thread) and keep the core behind a
-/// lock: one core answers one request at a time.
+/// runtime (for example on a blocking thread).
+///
+/// [`ViewerCore::respond`] takes `&self`: share one core (in an `Arc`)
+/// and call it from as many threads at once as there are requests. Each
+/// answer comes from one snapshot of each machine's model, cloned (an
+/// `Arc`) under a lock held for nothing else, and its `ETag` is that
+/// snapshot's version. With [`Refresh::Background`]
+/// ([`ViewerCore::set_refresh`]) no read waits for a rebuild; see
+/// [`Refresh`] for how far behind the logs an answer can be. The setters
+/// take `&mut self`: configure the core before sharing it.
+/// [`ViewerCore::close`] stops it before the files it reads are removed.
 pub struct ViewerCore {
-    views: Vec<(String, MachineView)>,
-    received: Option<Following>,
+    views: RwLock<Arc<Views>>,
+    received: Option<Received>,
     admin: Option<AdminLink>,
     account: Option<AccountMenu>,
     nav_machines: Option<String>,
+    refresh: Refresh,
+    open: Gate,
 }
 
+/// The machines a core serves, each with its key, in order.
+type Views = Vec<(String, Arc<MachineView>)>;
+
 /// The received machines a core follows, served after its fixed ones.
-struct Following {
-    machines: ReceivedMachines,
+struct Received {
     /// How many of the core's views, from the front, are its fixed machines.
     fixed: usize,
+    following: Mutex<Following>,
+}
+
+/// What following the received machines keeps between requests.
+struct Following {
+    machines: ReceivedMachines,
     /// The hostnames of the fixed machines read from this one (no recorded
     /// facts), read at the first pass.
     hosts: Option<Vec<String>>,
@@ -218,6 +262,52 @@ struct Following {
     /// How many sessions each received machine last had left out, as
     /// another machine's: warned about when it changes.
     dropped: BTreeMap<String, usize>,
+}
+
+/// Counts the calls in progress, so [`ViewerCore::close`] can wait them
+/// out; its lock is held only to count.
+#[derive(Default)]
+struct Gate {
+    /// Closed, and how many calls are in progress.
+    state: Mutex<(bool, usize)>,
+    idle: Condvar,
+}
+
+/// A call in progress, until dropped.
+struct Entered<'a>(&'a Gate);
+
+impl Gate {
+    /// A call starts, unless the core is closed.
+    fn enter(&self) -> Option<Entered<'_>> {
+        let mut state = lock(&self.state);
+        if state.0 {
+            return None;
+        }
+        state.1 += 1;
+        Some(Entered(self))
+    }
+
+    /// No call starts again; waits for those in progress.
+    fn close(&self) {
+        let mut state = lock(&self.state);
+        state.0 = true;
+        while state.1 > 0 {
+            state = self
+                .idle
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+impl Drop for Entered<'_> {
+    fn drop(&mut self) {
+        let mut state = lock(&self.0.state);
+        state.1 -= 1;
+        if state.1 == 0 {
+            self.0.idle.notify_all();
+        }
+    }
 }
 
 /// Which machine answers for each session id the union serves.
@@ -251,16 +341,16 @@ pub(crate) enum Owner {
 /// One machine's part of what a core serves: its model, and the machine id
 /// its machine-local ids are served under (`None` with one machine, where
 /// no id is renamed).
-pub(crate) struct Served<'a> {
-    pub(crate) built: &'a Built,
+pub(crate) struct Served {
+    pub(crate) built: Arc<Built>,
     pub(crate) machine: Option<String>,
 }
 
-impl Served<'_> {
+impl Served {
     /// The id the core serves this machine's session `id` under.
     pub(crate) fn served(&self, id: &str) -> String {
         match &self.machine {
-            Some(machine) if machine_local(self.built, id) => format!("{id}@{machine}"),
+            Some(machine) if machine_local(&self.built, id) => format!("{id}@{machine}"),
             _ => id.to_owned(),
         }
     }
@@ -566,6 +656,15 @@ fn with_param(query: &str, key: &str, value: &str) -> String {
         .join("&")
 }
 
+/// Each machine's key and model, in the order they are served.
+fn parts<'a>(views: &'a Views, models: &'a [Arc<Built>]) -> Vec<(&'a str, &'a Built)> {
+    views
+        .iter()
+        .zip(models)
+        .map(|((key, _), built)| (key.as_str(), &**built))
+        .collect()
+}
+
 impl ViewerCore {
     /// A core over one machine's agent homes, `/proc` and cache that
     /// `options` name. Nothing is read until the first request.
@@ -580,14 +679,18 @@ impl ViewerCore {
     /// machine this is [`ViewerCore::new`], byte for byte.
     pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
         Self {
-            views: machines
-                .into_iter()
-                .map(|(key, options)| (key, MachineView::new(options)))
-                .collect(),
+            views: RwLock::new(Arc::new(
+                machines
+                    .into_iter()
+                    .map(|(key, options)| (key, MachineView::new(options)))
+                    .collect(),
+            )),
             received: None,
             admin: None,
             account: None,
             nav_machines: None,
+            refresh: Refresh::OnRead,
+            open: Gate::default(),
         }
     }
 
@@ -602,34 +705,53 @@ impl ViewerCore {
     pub fn with_received(machines: Vec<(String, Options)>, received: ReceivedMachines) -> Self {
         let fixed = machines.len();
         let mut core = Self::with_machines(machines);
-        core.received = Some(Following {
-            machines: received,
+        core.received = Some(Received {
             fixed,
-            hosts: None,
-            seen: None,
-            warned: BTreeSet::new(),
-            dropped: BTreeMap::new(),
+            following: Mutex::new(Following {
+                machines: received,
+                hosts: None,
+                seen: None,
+                warned: BTreeSet::new(),
+                dropped: BTreeMap::new(),
+            }),
         });
         core
     }
 
+    /// The machines served now.
+    fn views(&self) -> Arc<Views> {
+        read_lock(&self.views).clone()
+    }
+
+    /// A view of a machine, in this core's refresh mode.
+    fn view(&self, options: Options) -> Arc<MachineView> {
+        let view = MachineView::new(options);
+        view.set_background(self.refresh == Refresh::Background);
+        view
+    }
+
     /// Brings the served machines in line with the received ones, when
     /// this core follows any: one pass over `DIR/machines/`, and changes
-    /// only where it differs from the last.
-    fn follow(&mut self) {
-        let Self {
-            views, received, ..
-        } = self;
-        let Some(following) = received else {
+    /// only where it differs from the last. One request follows at a time.
+    fn follow(&self) {
+        let Some(received) = &self.received else {
             return;
         };
+        let mut following = lock(&received.following);
         let listing = following.machines.scan();
         if following.seen.as_ref() == Some(&listing) {
             return;
         }
         let previous = following.seen.take().unwrap_or_default();
-        let fixed = following.fixed;
-        let hosts = following.hosts.get_or_insert_with(|| {
+        let fixed = received.fixed;
+        let views = self.views();
+        let Following {
+            machines,
+            hosts,
+            warned,
+            ..
+        } = &mut *following;
+        let hosts = hosts.get_or_insert_with(|| {
             views[..fixed]
                 .iter()
                 .filter(|(_, view)| view.options().facts.is_none())
@@ -642,11 +764,11 @@ impl ViewerCore {
                 continue;
             }
             let Some(seen) = seen else {
-                if following.warned.insert(name.clone()) {
+                if warned.insert(name.clone()) {
                     eprintln!(
                         "semon: {name} in {}: not a machine directory (a directory named with \
                          a-z, 0-9 and -, 1 to 63 of them); ignored",
-                        following.machines.dir().join("machines").display()
+                        machines.dir().join("machines").display()
                     );
                 }
                 continue;
@@ -669,17 +791,16 @@ impl ViewerCore {
             }
             if before.is_none_or(|before| before.facts != seen.facts || before.stale != seen.stale)
             {
-                following
-                    .machines
-                    .copy_facts(name, seen, hosts, &mut following.warned);
+                machines.copy_facts(name, seen, hosts, warned);
             }
         }
-        let mut old: BTreeMap<String, MachineView> = views.drain(fixed..).collect();
+        let mut old: BTreeMap<String, Arc<MachineView>> = views[fixed..].iter().cloned().collect();
+        let mut next: Views = views[..fixed].to_vec();
         for (name, seen) in &listing {
             let Some(seen) = seen else {
                 continue;
             };
-            let options = following.machines.options(name, seen);
+            let options = machines.options(name, seen);
             let view = match old.remove(name) {
                 Some(view)
                     if view.options().claude_home == options.claude_home
@@ -687,16 +808,40 @@ impl ViewerCore {
                 {
                     view
                 }
-                _ => MachineView::new(options),
+                _ => self.view(options),
             };
-            views.push((name.clone(), view));
+            next.push((name.clone(), view));
         }
+        *write_lock(&self.views) = Arc::new(next);
         following.seen = Some(listing);
     }
 
     /// How many machines this core serves.
     pub fn machines(&self) -> usize {
-        self.views.len()
+        self.views().len()
+    }
+
+    /// Sets when the core brings its models up to date with the logs: see
+    /// [`Refresh`]. [`Refresh::OnRead`] unless set.
+    pub fn set_refresh(&mut self, refresh: Refresh) {
+        self.refresh = refresh;
+        for (_, view) in self.views().iter() {
+            view.set_background(refresh == Refresh::Background);
+        }
+    }
+
+    /// Stops the core for good, and returns once it no longer reads or
+    /// writes any file: calls in progress and each machine's background
+    /// rebuild have finished, and every later call answers 404 without
+    /// touching a file. An embedding server calls it before it removes
+    /// the files the core reads (its caches included), since a background
+    /// rebuild outlives the request that started it. It blocks for as long
+    /// as the slowest of those takes: call it off an async runtime.
+    pub fn close(&self) {
+        self.open.close();
+        for (_, view) in self.views().iter() {
+            view.close();
+        }
     }
 
     /// Sets, or clears, the link the Machines page shows to the embedding
@@ -728,8 +873,9 @@ impl ViewerCore {
     /// percent-encoded, and the request's `If-None-Match`. Only GET is
     /// answered (405 otherwise); every URL the viewer uses is a GET. The
     /// caller authenticates first: the core serves whoever it is handed.
+    /// Any number of threads may call it at once.
     pub fn respond(
-        &mut self,
+        &self,
         method: &str,
         path: &str,
         query: &str,
@@ -738,13 +884,17 @@ impl ViewerCore {
         if method != "GET" {
             return text(405, "Method not allowed");
         }
+        let Some(_entered) = self.open.enter() else {
+            return text(404, "Not found");
+        };
         self.follow();
-        if self.views.is_empty() {
+        let views = self.views();
+        if views.is_empty() {
             return text(404, "Not found");
         }
         // With received machines the tree always names each node's machine.
-        if self.views.len() == 1 && !(self.received.is_some() && path == "/api/tree") {
-            let mut reply = self.views[0].1.respond(method, path, query, if_none_match);
+        if views.len() == 1 && !(self.received.is_some() && path == "/api/tree") {
+            let mut reply = views[0].1.respond(method, path, query, if_none_match);
             if path == "/api/model" && reply.status == 200 {
                 reply.body = with_model_extras(
                     &reply.body,
@@ -756,37 +906,38 @@ impl ViewerCore {
             return reply;
         }
         let answer = match path {
-            "/api/model" => self.model(query, if_none_match),
-            "/api/tx" => self.by_session(path, query, if_none_match),
+            "/api/model" => self.model(&views, query, if_none_match),
+            "/api/tx" => self.by_session(&views, path, query, if_none_match),
             "/api/entry" if query_value(query, "as").is_some() => {
-                self.by_session(path, query, if_none_match)
+                self.by_session(&views, path, query, if_none_match)
             }
-            "/api/entry" | "/api/transcript" => self.by_transcript(path, query, if_none_match),
-            "/api/tree" => self.tree(),
+            "/api/entry" | "/api/transcript" => {
+                self.by_transcript(&views, path, query, if_none_match)
+            }
+            "/api/tree" => self.tree(&views),
             _ if path.starts_with("/machines/")
                 || path.starts_with("/s/")
                 || path.starts_with("/trace/") =>
             {
-                self.page(path)
+                self.page(&views, path)
             }
-            _ => Ok(self.views[0].1.respond(method, path, query, if_none_match)),
+            _ => Ok(views[0].1.respond(method, path, query, if_none_match)),
         };
         answer.unwrap_or_else(|error| failed(&error))
     }
 
-    /// Brings every machine's model up to date, and plans the union.
-    fn refresh(&mut self) -> io::Result<Plan> {
-        self.refresh_at(crate::model::now_ms())
-    }
-
-    /// [`ViewerCore::refresh`], a rebuild taking `now` as its clock.
-    fn refresh_at(&mut self, now: i64) -> io::Result<Plan> {
-        for (_, view) in &mut self.views {
-            view.built_at(now)?;
-        }
-        let plan = plan(&self.parts(), self.droppable());
-        if let Some(following) = &mut self.received {
-            for ((name, _), dropped) in self.views.iter().zip(&plan.dropped).skip(following.fixed) {
+    /// Every machine's model, read as `read` says, and the union's plan.
+    /// Each model is read once, so an answer comes from one snapshot of
+    /// each.
+    fn refresh_at(&self, views: &Views, read: Reading) -> io::Result<(Vec<Arc<Built>>, Plan)> {
+        let models = views
+            .iter()
+            .map(|(_, view)| view.built(read))
+            .collect::<io::Result<Vec<_>>>()?;
+        let plan = plan(&parts(views, &models), self.droppable());
+        if let Some(received) = &self.received {
+            let mut following = lock(&received.following);
+            for ((name, _), dropped) in views.iter().zip(&plan.dropped).skip(received.fixed) {
                 let count = dropped.len();
                 if following.dropped.insert(name.clone(), count).unwrap_or(0) != count && count > 0
                 {
@@ -798,7 +949,7 @@ impl ViewerCore {
                 }
             }
         }
-        Ok(plan)
+        Ok((models, plan))
     }
 
     /// The first view whose ids an earlier view's win over: the first
@@ -806,19 +957,17 @@ impl ViewerCore {
     fn droppable(&self) -> usize {
         self.received
             .as_ref()
-            .map_or(usize::MAX, |following| following.fixed)
+            .map_or(usize::MAX, |received| received.fixed)
     }
 
-    fn parts(&self) -> Vec<(&str, &Built)> {
-        self.views
-            .iter()
-            .filter_map(|(key, view)| view.last_built().map(|built| (key.as_str(), built)))
-            .collect()
-    }
-
-    fn model(&mut self, query: &str, if_none_match: Option<&str>) -> io::Result<ViewerReply> {
+    fn model(
+        &self,
+        views: &Views,
+        query: &str,
+        if_none_match: Option<&str>,
+    ) -> io::Result<ViewerReply> {
         let json = "application/json; charset=utf-8";
-        let plan = self.refresh()?;
+        let (models, plan) = self.refresh_at(views, Reading::Served)?;
         let etag = format!("\"{}\"", plan.version);
         let since = query_value(query, "since").and_then(decoded);
         if if_none_match == Some(etag.as_str()) || since.as_deref() == Some(plan.version.as_str()) {
@@ -830,7 +979,7 @@ impl ViewerCore {
             });
         }
         let now = crate::model::now_ms();
-        match union_json(&self.parts(), &plan, now) {
+        match union_json(&parts(views, &models), &plan, now) {
             Ok(body) => {
                 let body = body.into_bytes();
                 Ok(ViewerReply {
@@ -851,7 +1000,8 @@ impl ViewerCore {
 
     /// `/api/tx` and `/api/entry?sid=…`: the machine that owns the session.
     fn by_session(
-        &mut self,
+        &self,
+        views: &Views,
         path: &str,
         query: &str,
         if_none_match: Option<&str>,
@@ -859,7 +1009,7 @@ impl ViewerCore {
         let Some(sid) = query_value(query, "sid").and_then(decoded) else {
             return Ok(text(400, "Invalid request"));
         };
-        Ok(match self.owner(&sid)? {
+        Ok(match self.owner_in(views, &sid, Reading::Served)? {
             Owner::Conflict => conflict(&[sid]),
             Owner::Missing => text(404, "Not found"),
             Owner::At(index, own) => {
@@ -868,23 +1018,21 @@ impl ViewerCore {
                 } else {
                     with_param(query, "sid", &own)
                 };
-                self.views[index]
-                    .1
-                    .respond("GET", path, &query, if_none_match)
+                views[index].1.respond("GET", path, &query, if_none_match)
             }
         })
     }
 
-    /// The machine that answers for session `sid`, and the session's id
-    /// there. With one machine that is always the one machine, under `sid`
-    /// itself: whether it has the session is its own answer.
-    pub(crate) fn owner(&mut self, sid: &str) -> io::Result<Owner> {
-        self.follow();
-        match self.views.len() {
+    /// The machine among `views` that answers for session `sid`, and the
+    /// session's id there. With one machine that is always the one
+    /// machine, under `sid` itself: whether it has the session is its own
+    /// answer.
+    fn owner_in(&self, views: &Views, sid: &str, read: Reading) -> io::Result<Owner> {
+        match views.len() {
             0 => Ok(Owner::Missing),
             1 => Ok(Owner::At(0, sid.to_owned())),
             _ => {
-                let plan = self.refresh()?;
+                let (_, plan) = self.refresh_at(views, read)?;
                 if plan.conflicts.contains(sid) {
                     return Ok(Owner::Conflict);
                 }
@@ -896,51 +1044,59 @@ impl ViewerCore {
         }
     }
 
-    /// Machine `index`'s model, rebuilt first if its logs changed.
-    pub(crate) fn built_at(&mut self, index: usize) -> io::Result<&Built> {
+    /// The machine that answers for session `sid`, every model brought up
+    /// to date first.
+    pub(crate) fn owner(&self, sid: &str) -> io::Result<Owner> {
         self.follow();
-        self.views
-            .get_mut(index)
+        self.owner_in(&self.views(), sid, Reading::At(crate::model::now_ms()))
+    }
+
+    /// Machine `index`'s model, rebuilt first if its logs changed.
+    pub(crate) fn built_at(&self, index: usize) -> io::Result<Arc<Built>> {
+        self.follow();
+        self.views()
+            .get(index)
             .ok_or(io::ErrorKind::NotFound)?
             .1
-            .built()
+            .built(Reading::At(crate::model::now_ms()))
     }
 
     /// The model `/api/model` serves (without an admin link) at `now`, or
     /// the ids two machines both claim.
-    pub(crate) fn model_at(&mut self, now: i64) -> io::Result<Result<String, Vec<String>>> {
+    pub(crate) fn model_at(&self, now: i64) -> io::Result<Result<String, Vec<String>>> {
         self.follow();
-        match self.views.len() {
+        let views = self.views();
+        match views.len() {
             0 => Err(io::ErrorKind::NotFound.into()),
-            1 => Ok(Ok(self.views[0].1.built_at(now)?.json(now))),
+            1 => Ok(Ok(views[0].1.built(Reading::At(now))?.json(now))),
             _ => {
-                let plan = self.refresh_at(now)?;
-                Ok(union_json(&self.parts(), &plan, now))
+                let (models, plan) = self.refresh_at(&views, Reading::At(now))?;
+                Ok(union_json(&parts(&views, &models), &plan, now))
             }
         }
     }
 
     /// Every machine's model, brought up to date, with how the core serves
     /// its session ids.
-    pub(crate) fn served(&mut self, now: i64) -> io::Result<Vec<Served<'_>>> {
+    pub(crate) fn served(&self, now: i64) -> io::Result<Vec<Served>> {
         self.follow();
-        let machine_ids = if self.views.len() > 1 {
-            self.refresh_at(now)?.machine_ids
+        let views = self.views();
+        let (models, machine_ids) = if views.len() > 1 {
+            let (models, plan) = self.refresh_at(&views, Reading::At(now))?;
+            (models, plan.machine_ids)
         } else {
-            for (_, view) in &mut self.views {
-                view.built_at(now)?;
-            }
-            Vec::new()
+            let models = views
+                .iter()
+                .map(|(_, view)| view.built(Reading::At(now)))
+                .collect::<io::Result<Vec<_>>>()?;
+            (models, Vec::new())
         };
-        Ok(self
-            .views
-            .iter()
+        Ok(models
+            .into_iter()
             .enumerate()
-            .filter_map(|(index, (_, view))| {
-                view.last_built().map(|built| Served {
-                    built,
-                    machine: machine_ids.get(index).cloned(),
-                })
+            .map(|(index, built)| Served {
+                built,
+                machine: machine_ids.get(index).cloned(),
             })
             .collect())
     }
@@ -948,7 +1104,8 @@ impl ViewerCore {
     /// The V1 routes that name a transcript by harness and id: the machine
     /// that has that file.
     fn by_transcript(
-        &mut self,
+        &self,
+        views: &Views,
         path: &str,
         query: &str,
         if_none_match: Option<&str>,
@@ -960,34 +1117,31 @@ impl ViewerCore {
             return Ok(text(400, "Invalid request"));
         };
         let mut found = Vec::new();
-        for (index, (_, view)) in self.views.iter_mut().enumerate() {
+        for (index, (_, view)) in views.iter().enumerate() {
             if view.has_transcript(&harness, &id)? {
                 found.push(index);
             }
         }
         let droppable = self.droppable();
         Ok(match found.as_slice() {
-            [index] => self.views[*index]
-                .1
-                .respond("GET", path, query, if_none_match),
+            [index] => views[*index].1.respond("GET", path, query, if_none_match),
             [] => text(404, "Not found"),
             // Received machines' copies give way to the first.
-            [index, rest @ ..] if rest.iter().all(|later| *later >= droppable) => self.views
-                [*index]
-                .1
-                .respond("GET", path, query, if_none_match),
+            [index, rest @ ..] if rest.iter().all(|later| *later >= droppable) => {
+                views[*index].1.respond("GET", path, query, if_none_match)
+            }
             _ => conflict(&[id]),
         })
     }
 
     /// The V1 tree: every machine's roots, each node with its machine's
     /// id as `machine`.
-    fn tree(&mut self) -> io::Result<ViewerReply> {
-        let plan = self.refresh()?;
+    fn tree(&self, views: &Views) -> io::Result<ViewerReply> {
+        let (_, plan) = self.refresh_at(views, Reading::Served)?;
         let droppable = self.droppable();
         let mut roots = Vec::new();
         let mut seen = BTreeSet::new();
-        for (index, (_, view)) in self.views.iter_mut().enumerate() {
+        for (index, (_, view)) in views.iter().enumerate() {
             let machine = plan.machine_ids.get(index).cloned().unwrap_or_default();
             for root in view.tree_roots()? {
                 // A received machine's copy of a root an earlier machine
@@ -1012,7 +1166,7 @@ impl ViewerCore {
 
     /// A page URL that names something in the union: a machine, a session
     /// or a trace.
-    fn page(&mut self, path: &str) -> io::Result<ViewerReply> {
+    fn page(&self, views: &Views, path: &str) -> io::Result<ViewerReply> {
         let parts: Option<Vec<String>> = path
             .trim_start_matches('/')
             .split('/')
@@ -1022,17 +1176,12 @@ impl ViewerCore {
             return Ok(text(400, "Invalid request"));
         };
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let plan = self.refresh()?;
+        let (models, plan) = self.refresh_at(views, Reading::Served)?;
         let built = |id: &str| {
             plan.owners
                 .get(id)
                 .filter(|_| !plan.conflicts.contains(id))
-                .and_then(|(index, own)| {
-                    self.views[*index]
-                        .1
-                        .last_built()
-                        .map(|built| (built, own.clone()))
-                })
+                .map(|(index, own)| (&*models[*index], own.clone()))
         };
         let exists = match parts.as_slice() {
             ["machines", id] => plan.machine_ids.iter().any(|machine| machine == id),
@@ -1045,7 +1194,7 @@ impl ViewerCore {
             _ => false,
         };
         Ok(if exists {
-            self.views[0].1.respond("GET", "/", "", None)
+            views[0].1.respond("GET", "/", "", None)
         } else {
             text(404, "Not found")
         })

@@ -147,6 +147,8 @@ The model endpoint returns the mockup's globals verbatim in shape; other shapes 
 
 Home, Timeline, Sessions and Machines poll `/api/model?since=` every 2 s, paused while the tab is hidden. A session page follows its tail with `/api/tx?after=`.
 
+On the server no poll waits for a rebuild (#29). `--serve` answers every request from each machine's last built model, a snapshot shared by every request in flight, and the `ETag` is that snapshot's version. While requests keep coming, a thread per machine takes a stat pass over the watched files every 250 ms and rebuilds only when something changed, at most once a second, so the changes of one second are one rebuild. An answer is then at most about 1 s plus one build behind the logs. The thread stops 30 s after the last request; the next request after that, like the first, refreshes before it answers (a stat pass, and a build only if something changed). An embedding server chooses this with `ViewerCore::set_refresh(Refresh::Background)`; the default, `Refresh::OnRead`, rebuilds before the read that finds a change, for one-shot and tool callers.
+
 A new model re-renders the current screen with its view state kept:
 - the scroll position
 - expanded steps and child runs
