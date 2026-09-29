@@ -8,12 +8,40 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Value, json};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// `ago` before now, as an RFC 3339 UTC time.
+fn ts(ago: Duration) -> String {
+    let seconds = (SystemTime::now() - ago)
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    // Days since 1970-01-01 to a civil date (proleptic Gregorian).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.000Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
+const MINUTE: Duration = Duration::from_secs(60);
+const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
 struct Root(PathBuf);
 
@@ -21,7 +49,8 @@ impl Root {
     /// This machine, `homebox`, with the Claude session `lane-home`; under
     /// `received/machines/`, `alpha` (facts, the Claude session
     /// `lane-alpha`) and `bravo` (no facts, the Codex run `lane-bravo`).
-    fn new() -> Self {
+    /// The sessions ran minutes ago; bravo's run, `bravo_age` ago.
+    fn new(bravo_age: Duration) -> Self {
         let root = Self(std::env::temp_dir().join(format!(
             "semon-machines-{}-{}",
             std::process::id(),
@@ -37,24 +66,24 @@ impl Root {
                 "codex_locks": {}, "repos": {}})
             .to_string(),
         );
-        let codex = |time: &str, kind: &str, payload: Value| {
+        let codex = |time: String, kind: &str, payload: Value| {
             json!({"timestamp": time, "type": kind, "payload": payload}).to_string() + "\n"
         };
         root.write(
             "received/machines/bravo/codex/sessions/2026/09/24/rollout-lane-bravo.jsonl",
             &[
                 codex(
-                    "2026-09-24T05:00:00.000Z",
+                    ts(bravo_age + 3 * MINUTE),
                     "session_meta",
                     json!({"id": "lane-bravo", "cwd": "/work/proj", "originator": "codex_exec", "thread_source": "user"}),
                 ),
                 codex(
-                    "2026-09-24T05:01:00.000Z",
+                    ts(bravo_age + 2 * MINUTE),
                     "response_item",
                     json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Fix the lexer"}]}),
                 ),
                 codex(
-                    "2026-09-24T05:02:00.000Z",
+                    ts(bravo_age + MINUTE),
                     "response_item",
                     json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Fixed on bravo"}]}),
                 ),
@@ -73,10 +102,10 @@ impl Root {
 
     fn claude(&self, home: &str, sid: &str) -> PathBuf {
         let lines = [
-            json!({"type": "user", "timestamp": "2026-09-24T04:00:00.000Z", "sessionId": sid,
+            json!({"type": "user", "timestamp": ts(3 * MINUTE), "sessionId": sid,
                 "cwd": "/work/proj", "origin": {"kind": "human"},
                 "message": {"role": "user", "content": format!("Start {sid}")}}),
-            json!({"type": "assistant", "timestamp": "2026-09-24T04:01:00.000Z", "sessionId": sid,
+            json!({"type": "assistant", "timestamp": ts(2 * MINUTE), "sessionId": sid,
                 "cwd": "/work/proj",
                 "message": {"role": "assistant", "content": [{"type": "text", "text": format!("Done {sid}")}]}}),
         ];
@@ -164,12 +193,12 @@ fn roots(tree: &Value) -> BTreeMap<String, String> {
 
 #[test]
 fn machines_shows_this_machine_and_every_received_one_and_only_reads_dir() {
-    let root = Root::new();
+    let root = Root::new(MINUTE);
     let dir = root.dir();
     let dir = dir.as_str();
     let before = root.received();
 
-    let output = root.semon(&["sessions", "--model-json", "--machines", dir]);
+    let output = root.semon(&["sessions", "--model-json", "--all", "--machines", dir]);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -201,7 +230,14 @@ fn machines_shows_this_machine_and_every_received_one_and_only_reads_dir() {
     assert_eq!(roots(&tree), expected);
 
     // --no-local leaves this machine out.
-    let model = root.json(&["sessions", "--model-json", "--machines", dir, "--no-local"]);
+    let model = root.json(&[
+        "sessions",
+        "--model-json",
+        "--all",
+        "--machines",
+        dir,
+        "--no-local",
+    ]);
     assert_eq!(machine_ids(&model), ["alpha", "bravo"]);
     assert!(model["sessions"].get("lane-home").is_none());
 
@@ -212,11 +248,11 @@ fn machines_shows_this_machine_and_every_received_one_and_only_reads_dir() {
 
 #[test]
 fn received_machines_keep_the_local_window_rules() {
-    let root = Root::new();
+    // bravo's run was last written to three days ago.
+    let root = Root::new(3 * DAY);
     let dir = root.dir();
     let dir = dir.as_str();
-    // bravo's run was last written three days ago.
-    let old = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
+    let old = SystemTime::now() - 3 * DAY;
     fs::File::options()
         .append(true)
         .open(
@@ -235,7 +271,7 @@ fn received_machines_keep_the_local_window_rules() {
 
 #[test]
 fn machines_flags_are_checked() {
-    let root = Root::new();
+    let root = Root::new(MINUTE);
     let dir = root.dir();
     let dir = dir.as_str();
     for (args, message) in [
