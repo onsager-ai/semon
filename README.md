@@ -1,3 +1,5 @@
+<img src="crates/semon-sessions/src/favicon.svg" width="48" height="48" alt="Semon">
+
 # Semon
 
 Semon captures an agent's working memory in a carrier-neutral, content-addressed

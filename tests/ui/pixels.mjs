@@ -30,6 +30,8 @@ const SCHEMES = [["phone", false], ["phone", true], ["desktop", false], ...(proc
 // SEMON_PIXEL_SCREENS=a,b compares only the screens whose names start with one of these (all by default).
 const ONLY = (process.env.SEMON_PIXEL_SCREENS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 const FONTS = path.join(here, "../../crates/semon-sessions/src/fonts");
+// The brand mark, which the reference origin serves at /mark.svg as the served viewer does: from the crate's own file.
+const MARK_SVG = fs.readFileSync(path.join(here, "../../crates/semon-sessions/src/mark.svg"));
 const OUT = path.join(ENV.out, "pixels");
 
 const MOCKUP = fs.readFileSync(path.join(here, "reference/semon-sample.html"), "utf8");
@@ -79,6 +81,7 @@ async function referencePage(browser, size, dark, html) {
   await page.route(/.*/, async (r) => {
     const url = new URL(r.request().url());
     if (url.href === "http://reference.test/") return r.fulfill({ contentType: "text/html; charset=utf-8", body: html });
+    if (url.href === "http://reference.test/mark.svg") return r.fulfill({ contentType: "image/svg+xml", body: MARK_SVG });
     if (url.host === "fonts.googleapis.com") return r.fulfill({ contentType: "text/css", body: FACES.replaceAll('url("/fonts/', 'url("http://reference.test/fonts/') });
     const font = /^\/fonts\/(instrument-sans|jetbrains-mono|source-serif-4)-(latin-ext|latin)\.woff2$/.exec(url.pathname);
     if (url.host === "reference.test" && font) return r.fulfill({ contentType: "font/woff2", body: fs.readFileSync(path.join(FONTS, font[1], font[2] + ".woff2")) });
