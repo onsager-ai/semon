@@ -409,13 +409,21 @@ async function runScreen(browser, screen, server, fixture) {
       const name = (await page.locator(`.srow[data-id="${id}"] .nm`).textContent()).trim();
       await page.evaluate(() => { window.__perfPaintWait = null; });
       // The click is made in the page, so the task it starts is timed as well: what the click itself costs before the browser can paint.
-      const { started, clickMs } = await page.evaluate((id) => {
+      // Feedback is read in the page too: the second animation frame after the click, once the top bar names the session, is
+      // when the browser has drawn it (a wait started from here would add this harness's own round trips).
+      const { started, clickMs } = await page.evaluate(([id, expected]) => {
         const row = [...document.querySelectorAll(".srow[data-id]")].find((x) => x.dataset.id === id), t0 = performance.now();
+        window.__perfFeedback = null;
         row.click();
-        return { started: t0, clickMs: performance.now() - t0 };
-      }, id);
-      await page.waitForFunction((expected) => document.querySelector("#topbar .t")?.textContent.trim() === expected, name, { timeout: 60_000, polling: "raf" });
-      const feedbackMs = await page.evaluate((start) => performance.now() - start, started);
+        const clickMs = performance.now() - t0;
+        const frame = () => requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (document.querySelector("#topbar .t")?.textContent.trim() === expected) window.__perfFeedback = performance.now() - t0; else frame();
+        }));
+        frame();
+        return { started: t0, clickMs };
+      }, [id, name]);
+      await page.waitForFunction(() => window.__perfFeedback != null, null, { timeout: 60_000, polling: 50 });
+      const feedbackMs = await page.evaluate(() => window.__perfFeedback);
       await waitPaint(page, PAINT_MARKERS[id]);
       return { clickMs, feedbackMs, paintMs: await page.evaluate((start) => performance.now() - start, started) };
     };

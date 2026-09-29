@@ -325,11 +325,14 @@
     let sum = 0; for (const c of TXCACHE.values()) sum += c.bytes;
     for (const [id, c] of TXCACHE) { if (TXCACHE.size <= TXCACHE_MAX && sum <= TXCACHE_BYTES) break; TXCACHE.delete(id); sum -= c.bytes; }
   }
-  // A kept transcript becomes the session's loaded one. False when there is none, or when the route deep-links to a turn it lacks.
+  // A kept transcript becomes the session's loaded one; the caller spreads its entries over the turns before drawing (that walks
+  // every entry, so it is not done in the click's task, except to check a deep link). False when there is none, or when the
+  // route deep-links to a turn it lacks.
   function adoptCached(r) {
     const c = TXCACHE.get(r.id); if (!c) return false;
-    TXCACHE.delete(r.id); TX[r.id] = c.entries; TXM[r.id] = c.meta; spread(r.id);
-    const t = r.turn ? TURN.get(r.turn) : null;
+    TXCACHE.delete(r.id); TX[r.id] = c.entries; TXM[r.id] = c.meta;
+    if (!r.turn) return true;
+    spread(r.id); const t = TURN.get(r.turn);
     if (t && t.sid === r.id && !t.entries.length) { delete TX[r.id]; delete TXM[r.id]; return false; }
     return true;
   }
@@ -511,7 +514,7 @@
     // afterwards. Otherwise the route waits for its data, with the top bar and the sidebar already drawn.
     if (r.v === "session" && SESS[r.id] && !TX[r.id] && adoptCached(r)) {
       paintPending(r);
-      requestAnimationFrame(() => setTimeout(() => { if (route !== r) return; done(); revalidate(r); }, 0));
+      requestAnimationFrame(() => setTimeout(() => { if (route !== r) return; if (!r.turn) spread(r.id); done(); revalidate(r); }, 0));
       return;
     }
     const signal = r.v === "session" ? (navAbort = new AbortController()).signal : undefined, p = load(r, signal);
