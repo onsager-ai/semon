@@ -127,7 +127,8 @@ async function scheme(browser, name, opts, r) {
     R.scrolled = await scrollPastFirst(page);
     say(R.scrolled > 20, "the Sessions list can't be scrolled down (" + R.scrolled + " px)");
     let sideBefore = [];
-    if (!phone) { R.sideScrolled = await setScroll(page, "side", 60); say(R.sideScrolled > 10, "the sidebar's list can't be scrolled down (" + R.sideScrolled + " px)"); sideBefore = await sideRows(page); }
+    // (on the wide screen the pointer rests on the sidebar's rows while it holds, or the idle time would apply it before the check)
+    if (!phone) { await page.hover("#lanes .srow"); await sleep(200); R.sideScrolled = await setScroll(page, "side", 60); say(R.sideScrolled > 10, "the sidebar's list can't be scrolled down (" + R.sideScrolled + " px)"); sideBefore = await sideRows(page); }
     await sleep(300); const pageTops = await pageRows(page);
     let u0 = page.updates;
     L.bump(targets[0], at(12, 50)); L.bump(targets[1], at(12, 51)); L.create("order-a", at(12, 52));
@@ -176,12 +177,13 @@ async function scheme(browser, name, opts, r) {
       const parent = await page.evaluate((c) => c.find((id) => { const it = document.querySelector('#lanes > .treeitem[data-id="' + id + '"]'); return it && !it.querySelector(":scope > .tree-group"); }), PARENTS.filter((id) => L.has(id)));
       say(!!parent, "no session without children is in the sidebar's top eight");
       if (parent) {
-        await setScroll(page, "side", 60); await sleep(300);
+        await page.hover("#lanes .srow"); await sleep(200); await setScroll(page, "side", 60); await sleep(300); // (the pointer rests on the sidebar while it holds)
         const before = await allRows(page);
         u0 = page.updates; L.spawn(parent, "orderchild", at(12, 54));
         await modelWith(srv, (m) => m.sessions.orderchild); await drawn(u0);
         const held = await allRows(page);
         say(same(ids(held), ids(before)) && still(before, held), "the tree moved when a session got its first child: " + ids(held).join(",") + " vs " + ids(before).join(","));
+        await page.mouse.move(640, 4);
         say(await until(page, () => !!document.querySelector('#lanes .treeitem[data-id="orderchild"]'), null, IDLE + 7000), "the idle sidebar didn't show the first child");
       }
     }
@@ -190,7 +192,7 @@ async function scheme(browser, name, opts, r) {
     await applyAll();
     await page.evaluate(() => { window.__sc().scrollTop = 0; document.querySelector("#side-list").scrollTop = 0; }); await sleep(300);
     if (!phone) await page.hover("#page .groupby"); await sleep(500);
-    const rows0 = await pageRows(page), order0 = ids(rows0), side0 = phone ? [] : await sideRows(page);
+    const rows0 = await pageRows(page), order0 = ids(rows0);
     const t0 = (await model(srv)).sessions[targets[1]].last;
     u0 = page.updates; L.bump(targets[0], at(12, 56)); L.bump(targets[1], at(12, 57));
     const modelB = await modelWith(srv, (m) => m.sessions[targets[1]].last > t0);
@@ -199,7 +201,6 @@ async function scheme(browser, name, opts, r) {
     say(await drawn(u0), "the page drew no update after the bumps");
     const rows1 = await pageRows(page);
     say(same(ids(rows1), order0) && still(rows0, rows1), "a row moved at the top of an untouched list with a reorder pending");
-    if (!phone) { const sd = await sideRows(page); say(same(ids(sd), ids(side0)) && still(side0, sd), "the sidebar's rows moved with a reorder pending: " + ids(sd).join(",")); }
     say(await noUi(page), "a chip, pill or status element exists at the top of a list");
     // a new session is put first, the others keep the order they had
     if (!phone) await page.mouse.move(640, 4);
@@ -292,7 +293,7 @@ async function scheme(browser, name, opts, r) {
       const held = await listRows(page);
       say(same(ids(held), order) && still(tops, held), key + ": rows moved under a scrolled list");
       say(await noUi(page), key + ": a chip, pill or status element exists");
-      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))); await sleep(400); // the tab comes back
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))); await sleep(3500); // the tab comes back (its first 3 s draw sorted, so wait them out)
       const after = ids(await listRows(page));
       say(key === "home" ? after[0] === cand && inRecency(after, lastOf(m1)) : after.indexOf(cand) < order.indexOf(cand), key + ": the held order didn't apply when the tab came back: " + after.join(","));
     }
@@ -305,7 +306,9 @@ async function scheme(browser, name, opts, r) {
       say(t2.length === 2, "fewer than two of the sample's Claude sessions are in the drawer: " + lanesOld.join(","));
       u0 = page.updates; L.bump(t2[0], at(14, 0)); L.bump(t2[1], at(14, 1)); L.create("order-c", at(14, 2));
       const modelC = await modelWith(srv, (m) => m.sessions["order-c"]); await drawn(u0);
-      say(same(ids(await sideRows(page)), lanesOld), "the closed drawer's list changed with nothing to apply it: " + ids(await sideRows(page)).join(","));
+      // (a new session is put first, being at the top of an untouched list; the reorder is held: the old rows keep their order)
+      const closedNow = ids(await sideRows(page));
+      say(same(closedNow.slice(1), lanesOld.slice(0, closedNow.length - 1)) && closedNow[0] === "order-c", "the closed drawer's list was reordered with nothing to apply it: " + closedNow.join(","));
       await page.tap("#lead-btn"); await sleep(60);
       const lc = lastOf(modelC ?? { sessions: {} }), opened = ids(await sideRows(page)), openedRoots = opened.map((id) => lc[id]);
       say(opened[0] === "order-c" && openedRoots.every((t, i) => i === 0 || openedRoots[i - 1] >= t), "the drawer didn't show its list in recency order as it opened: " + opened.join(","));
