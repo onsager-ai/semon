@@ -448,7 +448,7 @@
   try { railMode = localStorage.getItem("semon.rail") === "1"; } catch {}
   try { const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = pruneTreePrefs(saved); } catch {}
   const app = $(".app");
-  const syncLayoutPrefs = () => { app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
+  const syncLayoutPrefs = () => { app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches && route.v === "session"); };
   function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); }
   function setRailMode(on) { railMode = on; try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
   // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
@@ -546,6 +546,7 @@
     dropErrors(true); // (first: it drops a range the error stepper moved, and that is not kept)
     // The session left is kept for opening it again; weighing it waits until the frame the click drew has been painted.
     if (route.v === "session" && (r.v !== "session" || r.id !== route.id) && TX[route.id] && TXM[route.id]) { const sid = route.id, entries = TX[sid], meta = { ...TXM[sid] }; requestAnimationFrame(() => setTimeout(() => cacheTx(sid, entries, meta), 0)); }
+    if (r.v !== "session" || r.id !== route.id) show = { ...SHOW_ALL };
     route = r; find = ""; findOpen = false; closeDrawer(true); clearNewEntries();
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     const done = () => {
@@ -1023,7 +1024,7 @@
   const keepFocus = (fn) => { const id = document.activeElement?.id; fn(); const n = id && document.getElementById(id); if (n && n !== document.activeElement) n.focus({ preventScroll: true }); };
   function openErrors(sid) {
     if (ERR.on || route.v !== "session" || route.id !== sid || !TXM[sid]) return;
-    stopOpeningEndPin();
+    stopOpeningEndPin(); find = "";
     Object.assign(ERR, { on: true, sid, slots: [], listed: false, count: countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: show.tools, gen: ERR.gen + 1 });
     if (!show.tools) { show.tools = true; render(); } else drawSessionBar();
     document.getElementById("err-next")?.focus({ preventScroll: true }); errLabel(true);
@@ -1115,7 +1116,7 @@
     p.then(() => {
       if (route.v !== "session" || route.id !== sid || ERR.on) return;
       render(); if (saved) restore(saved);
-      const b = $("#topbar .errs"), shown = b && !b.getClientRects().length ? $("#more-btn") : b; /* on a phone line 2 is not drawn: focus goes to ⋯ */ if (b && shown && !b.hidden && document.activeElement !== shown && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) shown.focus({ preventScroll: true });
+      const b = $("#topbar .lab-errs") ?? $('#topbar .chip[data-filter="failures"]'); if (b && !b.hidden && document.activeElement !== b && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) b.focus({ preventScroll: true });
     });
   }
   // Keys while the mode is on: n and p (and Enter, Shift+Enter in the bar) step, Escape closes. Not while typing, and not
@@ -1158,25 +1159,32 @@
     const order = labs.filter((n) => !n.classList.contains("state")).sort((a, b) => Number(b.dataset.drop ?? 0) - Number(a.dataset.drop ?? 0));
     for (const n of order) { if (fits()) break; n.hidden = true; }
   }
-  const lab = (text, tip, drop, cls) => { const x = el("span", "lab" + (cls ? " " + cls : ""), text); if (tip) x.title = tip; x.dataset.drop = String(drop); return x; };
+  // A label is information; one that leads somewhere (`act`) is a button that looks the same, with its hit area padded to the tap size.
+  const lab = (text, tip, drop, cls, act) => { const x = el(act ? "button" : "span", "lab" + (act ? " lab-btn" : "") + (cls ? " " + cls : ""), text); if (tip) { x.dataset.tip = tip; if (act) x.setAttribute("aria-label", tip); } if (act) { x.type = "button"; x.addEventListener("click", act); } x.dataset.drop = String(drop); return x; };
+  // "Started 21:57 on <machine>" stays on one line: the machine name ellipsises (its tip, only while cut off, has the whole name).
+  const startedDivider = (sid) => { const d = el("div", "divider started"), name = MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine], line = el("span", "dv-text"), m = el("span", "dv-machine", name); m.dataset.tip = name; m.dataset.tipClipped = ""; line.append(el("span", "dv-lead", "Started " + clock(SESS[sid].start) + " on\u00a0"), m); d.append(line); return d; };
   // A session's line: its state, then kind, model, failed steps, machine, branch and API-equivalent cost, each a plain label.
   const sessionLine = (s) => (l2) => {
     const failed = countOf(s, "errors") ?? 0;
     const st = el("span", "lab state " + s.state); st.append(dot(s.state), el("span", null, STATE[s.state])); l2.append(st);
     l2.append(lab(kindText(s), s.kind ? s.kind + " · " + HARNESS[s.harness] : null, 2));
     l2.append(lab(shortModel(s.model), "Model: " + modelIdOf(s), 3));
-    if (failed) l2.append(lab(failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ". Find › Failed steps lists them.", 4));
+    // Failed steps and runs are the two labels that lead somewhere, so they are the last two the fitter drops.
+    if (failed) l2.append(lab(failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ": step through them", 0, "lab-errs", () => openErrors(s.id)));
+    const runs = descendantsOf(s.id, sessionChildren());
+    if (runs.length) l2.append(lab(runs.length + (runs.length === 1 ? " run" : " runs"), runs.length + (runs.length === 1 ? " run" : " runs") + " under this session: open the list with their cost", 1, "lab-runs", () => openSessionMenu(s, $("#more-btn"), ".runs")));
     l2.append(lab(MACHINE[s.machine], "Machine: " + MACHINE[s.machine] + " · " + hostOf(s), 5));
     if (s.branch) l2.append(lab(s.branch, "Branch: " + s.branch, 6));
-    const kids = descendantsOf(s.id, sessionChildren()), cost = kids.length ? costForSessions([s, ...kids]) : costForSession(s.id);
-    l2.append(lab(costText(cost), "API-equivalent cost" + (kids.length ? ", with " + kids.length + (kids.length === 1 ? " run" : " runs") : "") + ". Details in the session menu.", 7));
-  // "Started 21:57 on <machine>" stays on one line: the machine name ellipsises (its tip, only while cut off, has the whole name).
-  const startedDivider = (sid) => { const d = el("div", "divider started"), name = MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine], line = el("span", "dv-text"), m = el("span", "dv-machine", name); m.dataset.tip = name; m.dataset.tipClipped = ""; line.append(el("span", "dv-lead", "Started " + clock(SESS[sid].start) + " on\u00a0"), m); d.append(line); return d; };
+    const cost = runs.length ? costForSessions([s, ...runs]) : costForSession(s.id);
+    l2.append(lab(costText(cost), "API-equivalent cost" + (runs.length ? ", with " + runs.length + (runs.length === 1 ? " run" : " runs") : "") + ". Details in the session menu.", 7));
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
     const st = el("span", "lab state " + (up ? "done" : "err")); st.append(dot(up ? (w ? "work" : "idle") : "err"), el("span", null, up ? "Up" : "Not responding")); l2.append(st);
     const sessions = here.length + (here.length === 1 ? " session" : " sessions");
     l2.append(lab(up ? w + " working · " + sessions : movedOff(m).length ? movedOff(m).length + " moved off" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, sessions].filter(Boolean).join(" · "), null, 1)); };
+  // What Find counts: the matches on the page when there is a search or a filter, else nothing.
+  const matchCount = () => find || !show.messages || !show.tools || !show.thinking ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : null;
+  const matchText = (n) => n == null ? "" : n ? n + (n === 1 ? " match" : " matches") : "No matches";
   // Find and filter: one mode. Search takes over the bar and the filters sit under it as chips, one choice at a time.
   function findBar(bar, s, account) {
     const row = el("div", "find-row");
@@ -1184,8 +1192,7 @@
     const fr = el("label", "search"); const fi = el("input"); fi.id = "find"; fi.type = "search"; fi.placeholder = "Find in " + s.name; fi.setAttribute("aria-label", "Find in transcript"); fi.value = find; fr.append(icon(I.search), fi);
     fi.addEventListener("input", () => { find = fi.value.toLowerCase(); const pos = fi.selectionStart; render(); const a = $("#find"); a?.focus(); a?.setSelectionRange(pos, pos); });
     fi.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); back.click(); } });
-    const n = find || !show.messages || !show.tools || !show.thinking ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : null;
-    const c = el("span", "fcount", n == null ? "" : n ? n + (n === 1 ? " match" : " matches") : "No matches"); c.setAttribute("aria-live", "polite");
+    const c = el("span", "fcount", matchText(matchCount())); c.setAttribute("aria-live", "polite");
     row.append(back, fr, c); account(row); bar.append(row);
     const chips = el("div", "find-chips"); chips.setAttribute("role", "group"); chips.setAttribute("aria-label", "Show");
     const failed = countOf(s, "errors") ?? 0;
@@ -1221,7 +1228,7 @@
 
   // The session menu: actions, then details, then cost. It is the one place for all three.
   const RUNS_CAP = 5;
-  function openSessionMenu(s, anchor) {
+  function openSessionMenu(s, anchor, scrollTo) {
     const kids = descendantsOf(s.id, sessionChildren());
     const { d, body, show: open } = panel(s.name, { cls: "anchored session-menu", label: "Session menu for " + s.name, sub: [STATE[s.state], kindText(s), shortModel(s.model)].join(" · "), onClose: () => { anchor?.setAttribute("aria-expanded", "false"); anchor?.focus({ focusVisible: false }); } });
     const acts = el("div", "menu-list"); acts.setAttribute("role", "menu");
@@ -1236,7 +1243,7 @@
     for (const [k, v, mono] of rows) { if (v == null || v === "") continue; dl.append(el("dt", null, k), el("dd", mono ? "mono" : null, String(v))); }
     det.append(dl); body.append(det, costSection(s, kids, d));
     anchor?.setAttribute("aria-expanded", "true");
-    open(); return d;
+    open(); if (scrollTo) body.querySelector(scrollTo)?.scrollIntoView({ block: "nearest" }); return d;
   }
   const MENU_KINDS = [["Input", ["input"]], ["Output", ["output"]], ["Cache write", ["cache_write_5m", "cache_write_1h"]], ["Cache read", ["cache_read"]]];
   const COST_NOTE = "What these tokens would cost at API rates. Subscriptions aren't billed this way.";
@@ -2365,7 +2372,9 @@
     const h1 = $("#page .ph h1"); if (h1) h1.textContent = s.name;
     const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.dataset.tip = s.name; }
     const l2 = $("#topbar .meta-line"); if (l2) { l2.replaceChildren(); sessionLine(s)(l2); requestAnimationFrame(() => { if (l2.isConnected) fitMeta(l2); }); }
-    const fc = $("#topbar .fcount"); if (fc) { const n = find ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : 0; fc.textContent = find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""; }
+    // Find's count and the Failed steps chip's count follow the page; a chip that appears or goes redraws the bar.
+    const fc = $("#topbar .fcount"); if (fc) fc.textContent = matchText(matchCount());
+    if (findOpen && !errOn(s.id)) { const chip = $('#topbar .chip[data-filter="failures"]'), failed = countOf(s, "errors") ?? 0; if (!!chip !== !!failed) keepFocus(drawSessionBar); else if (chip) { const nn = chip.querySelector(".n"); if (nn) nn.textContent = String(failed); } }
     renderNav(); renderLanes(); ticker();
     let n = 0; for (const k of keys()) if (!before.has(k)) n++;
     return n;

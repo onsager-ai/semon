@@ -341,9 +341,10 @@ async function nav(page, route, D, mockup) {
 const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name + ".png"), PNG.sync.write(img)); };
 // The ratchet: a pending screen may not drift away from the overhaul. tests/ui/pixel-baseline.json holds, per screen and scheme, its
 // ratio of differing pixels and the size of both pictures (served, reference). A screen fails when its ratio rises by more than half
-// a tenth of a point (the run-to-run drift seen so far is 0.013), when it falls by more than that (so the baseline tightens as screens
-// improve), or when either size changes. A port PR moves the baselines it changes in its own diff (out/pixel-baseline.<section>.json,
-// written by every run, holds the current values), and its body says which and why. SEMON_PIXEL_BASELINE names the section
+// a tenth of a point (the run-to-run drift seen so far is 0.013), or when either size changes. A fall is reported ("fell", in the
+// table) but does not fail, so improving a screen never makes the baseline a conflict for the next PR; a PR that ports a screen
+// refreshes the baselines it touches in its own diff (out/pixel-baseline.<section>.json, written by every run, holds the current
+// values), and its body says which and why. SEMON_PIXEL_BASELINE names the section
 // ("main" by default; the two-machines step uses "two-machines").
 const SECTION = process.env.SEMON_PIXEL_BASELINE ?? "main";
 const BASELINE_FILE = path.join(here, "pixel-baseline.json");
@@ -357,8 +358,8 @@ function ratchet(row, p) {
   if (!BASELINE) return "no baseline section " + SECTION + " in pixel-baseline.json";
   if (!was) return "no baseline for " + key;
   if (p.ratio > was.ratio + RISE) return "rose from " + (was.ratio * 100).toFixed(2) + "% to " + (p.ratio * 100).toFixed(2) + "%";
-  if (p.ratio < was.ratio - RISE) return "fell from " + (was.ratio * 100).toFixed(2) + "% to " + (p.ratio * 100).toFixed(2) + "%: copy this screen's entry from out/pixel-baseline." + SECTION + ".json into tests/ui/pixel-baseline.json";
   if (was.size[0] !== size[0] || was.size[1] !== size[1]) return "size changed from " + was.size.join(" vs ") + " to " + size.join(" vs ");
+  if (p.ratio < was.ratio - RISE) return "~fell from " + (was.ratio * 100).toFixed(2) + "% to " + (p.ratio * 100).toFixed(2) + "%"; // reported, never a failure
   return null;
 }
 // Served against served: the same viewer built over the same data, compared with itself. SEMON_REF_BASE/SEMON_REF_TOKEN name the
@@ -413,7 +414,7 @@ function saveMismatch(row, name, scheme, p) {
       const b = await shot(port, size);
       const p = compare(a, b);
       const row = { scheme, screen: s.name, reference: ref, port: { pixels: p.pixels, ratio: p.ratio, size: p.size, enforced, pass: !enforced || (p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size) } };
-      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; row.port.pass = false; } }
+      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; if (!problem.startsWith("~")) row.port.pass = false; } }
       saveMismatch(row, s.name, scheme, p);
       for (const region of regionsOf(s.name)) {
         const name = s.name + "#" + region.name, rrow = { scheme, screen: name, reference: "overhaul", port: { enforced: true, pass: false } };
@@ -445,7 +446,7 @@ function saveMismatch(row, name, scheme, p) {
       const p = compare(await shot(drawerPage, "desktop"), await shot(side, "desktop"));
       const enforced = other ? true : referenceOf("drawer") !== "pending";
       const row = { scheme, screen: "drawer", reference: other ? "served" : enforced ? referenceOf("drawer") : "overhaul", port: { pixels: p.pixels, ratio: p.ratio, size: p.size, enforced, pass: !enforced || (p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size) } };
-      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; row.port.pass = false; } }
+      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; if (!problem.startsWith("~")) row.port.pass = false; } }
       saveMismatch(row, "drawer", scheme, p);
       results.push(row);
       errors.push(...drawerPage.errors.map((e) => scheme + " served drawer: " + e));
@@ -461,7 +462,7 @@ function saveMismatch(row, name, scheme, p) {
   fs.writeFileSync(path.join(ENV.out, "pixel-baseline." + SECTION + ".json"), J({ [SECTION]: Object.fromEntries(Object.entries(CURRENT).sort(([a], [b]) => (a < b ? -1 : 1))) }, null, 1) + "\n");
   const pct = (x) => (x * 100).toFixed(3) + "%";
   const md = ["| Screen | Scheme | vs port reference | vs sample mockup |", "|---|---|---|---|",
-    ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.enforced ? (r.port.pass ? "✓ " : "✗ ") : r.port.ratchet ? "✗ ratchet (" + r.port.ratchet + ") · " : "pending · ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
+    ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.enforced ? (r.port.pass ? "✓ " : "✗ ") : r.port.ratchet ? (r.port.ratchet.startsWith("~") ? "pending (" + r.port.ratchet.slice(1) + ") · " : "✗ ratchet (" + r.port.ratchet + ") · ") : "pending · ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
   const regionMd = regions.length ? "\n\n| Region | Scheme | vs overhaul |\n|---|---|---|\n" + regions.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.error ? "✗ " + r.error : (r.port.pass ? "✓ " : "✗ ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "")) + " |").join("\n") : "";
   fs.writeFileSync(path.join(ENV.out, "pixels.json"), J({ threshold: THRESHOLD, maxRatio: MAX_RATIO, results, regions, errors }, null, 1));
   const note = skipped.length ? "\nNot compared (unmapped in reference-map.json, not drawn by the viewer yet): " + skipped.join(", ") + "\n" : "";

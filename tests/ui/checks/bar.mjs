@@ -12,9 +12,10 @@
 //  - no page errors, in any mode.
 //  - the bar stays pinned at the top after scrolling (notPinned is empty), is never sideways (sideways === 0), and every
 //    control is at least the tap size (36px, 44px on a phone).
-//  - a session's second line is one line of plain labels: the state first with its dot, then kind, model, failed steps, machine,
-//    branch and cost in that order (the fitter drops from the end), none of them a control; the bar's only actions are Find and
-//    the ⋯ menu. Other detail pages keep their summary in the same line.
+//  - a session's second line is one line of labels: the state first with its dot, then kind, model, failed steps, runs, machine,
+//    branch and cost. Two of them are buttons that look the same: "N failed" (enters errors mode) and "N runs" (opens the menu
+//    at its runs); they are the last two the fitter drops (failed steps last of all), the others drop from the end. The bar's
+//    other actions are Find and the ⋯ menu. Other detail pages keep their summary in the same line.
 //  - zero overflow screens.
 //  - gap markers: this fixture's data has none at all (neither the sample nor the extras fixture produces a gap
 //    marker), so rendered counts are asserted directly against the literal 0, not against a same-data expectation
@@ -36,7 +37,7 @@
 //  - the sidebar shows the 8 most recent top-level tree rows with nested children; the Sessions page keeps all session rows,
 //    every grouping produces sections, search narrows to model matches, and opening a row lands at the end.
 import path from "node:path";
-import { ENV, VIEWPORTS, settled, served, goto, data, reporter, overflow } from "../lib.mjs";
+import { ENV, VIEWPORTS, settled, served, goto, data, reporter, overflow, wide } from "../lib.mjs";
 
 const isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
 const TABLE = /^\s*\|.*\n\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/m;
@@ -110,12 +111,12 @@ export default async function barCheck(browser) {
       const tap = phone ? 44 : 36;
       const ctl = [...bar.querySelectorAll("button, input, [role=link]")].filter((x) => x.offsetParent || getComputedStyle(x).position === "absolute").map((x) => [x.className || x.tagName, segmentHit(x) ?? x.getBoundingClientRect().height, x.classList.contains("crumb")]);
       const small = ctl.filter(([, h, crumb]) => h < tap - 0.5 && !(crumb && !phone));
-      // Labels are information: none is a control, the state is first and holds its dot, and the rest keep their order.
+      // Labels are information: the state is first and holds its dot, the rest keep their order, and only failed steps and runs are controls.
       let metaFacts = null;
       if (sessionMeta) {
         const labs = [...l2.querySelectorAll(":scope > .lab")].filter((x) => !x.hidden), first = labs[0];
         const drops = labs.slice(1).map((x) => Number(x.dataset.drop));
-        metaFacts = { first: first?.classList.contains("state") ?? false, dot: !!first?.querySelector(".dot"), drops, inOrder: drops.every((d, i) => i === 0 || drops[i - 1] < d), buttons: l2.querySelectorAll("button, a, input").length, actions: [...bar.querySelectorAll(":scope > .ibtn:not(.lead)")].map((b) => b.id), text: labs.map((x) => x.textContent) };
+        metaFacts = { first: first?.classList.contains("state") ?? false, dot: !!first?.querySelector(".dot"), drops, inOrder: drops.filter((d) => d > 1).every((d, i, all) => i === 0 || all[i - 1] < d), keep: labs.some((x) => x.classList.contains("lab-errs")) ? Math.min(...labs.filter((x) => !x.classList.contains("lab-errs")).map((x) => Number(x.dataset.drop))) > 0 : true, buttons: l2.querySelectorAll("a, input, button:not(.lab-errs):not(.lab-runs)").length, actions: [...bar.querySelectorAll(":scope > .ibtn:not(.lead)")].map((b) => b.id), text: labs.map((x) => x.textContent) };
       }
       const side = [...bar.querySelectorAll("*")].filter((x) => { const r = x.getBoundingClientRect(); return r.width && (r.right > vw + 0.5 || r.left < -0.5) && !x.closest(".meta-line"); }).length + (bar.scrollWidth > bar.clientWidth + 1 ? 1 : 0);
       const out = { pinned: Math.abs(br.top) < 0.5 && br.height > 30 && br.bottom > 0 && getComputedStyle(bar).visibility !== "hidden", scrolled: scrolled > 0, barH: Math.round(br.height), small: small.map(([c, h]) => c + ":" + Math.round(h)), side, metaFacts,
@@ -131,7 +132,8 @@ export default async function barCheck(browser) {
       if (mf) {
         if (!mf.first || !mf.dot) R.metaFailures.push(name + ": the state is not the first label with its dot: " + JSON.stringify(mf.text));
         if (!mf.inOrder) R.metaFailures.push(name + ": labels are out of order: " + JSON.stringify(mf.drops));
-        if (mf.buttons) R.metaFailures.push(name + ": " + mf.buttons + " control(s) inside the label line");
+        if (mf.buttons) R.metaFailures.push(name + ": " + mf.buttons + " control(s) inside the label line besides failed steps and runs");
+        if (!mf.keep) R.metaFailures.push(name + ": another label outlasts the failed-steps label in the fitter");
         if (mf.actions.join() !== "find-btn,more-btn") R.metaFailures.push(name + ": a session bar's actions are " + JSON.stringify(mf.actions) + ", not Find and the menu");
       }
       R.sideways += c.side; if (c.small.length) R.smallControls.push(name + " " + c.small.join(","));
@@ -231,6 +233,45 @@ export default async function barCheck(browser) {
         await page.click('.find-chips .chip[data-filter="failures"]'); await page.waitForTimeout(700);
         out.errsJump = { session: D.SESS[errSid].name, badge, ...(await page.evaluate(() => { const e = document.querySelector("#page .step.err-current"), r = e?.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect(); return { label: document.querySelector("#topbar .errnav-count")?.textContent ?? null, marked: !!e?.classList.contains("err"), expanded: e?.querySelector("button")?.getAttribute("aria-expanded") ?? null, inView: !!r && r.top >= bar.bottom - 1 && r.top < innerHeight, menu: !!document.querySelector("dialog[open]") }; })) };
         await page.keyboard.press("Escape"); await page.waitForTimeout(300); out.errsJump.closed = await page.evaluate(() => !!document.querySelector("#topbar .find-row") && !document.querySelector("#topbar .errnav-count"));
+      }
+      // The "N failed" label enters errors mode too, and Escape puts focus back on it; a search typed before the mode opens is cleared;
+      // a filter chosen on one session is gone on the next; "N runs" opens the menu at its runs; wide mode is for session pages only.
+      out.labs = {};
+      if (errSid) {
+        await goto(page, { v: "session", id: errSid }, D);
+        const L = out.labs.errs = { count: await page.locator("#topbar .lab-errs").count() };
+        if (L.count) {
+          const box = await page.locator("#topbar .lab-errs").boundingBox(); L.h = Math.round(box.height);
+          await page.click("#topbar .lab-errs"); await page.waitForTimeout(700);
+          L.label = await page.evaluate(() => document.querySelector("#topbar .errnav-count")?.textContent ?? null);
+          await page.keyboard.press("Escape"); await page.waitForTimeout(300);
+          L.focusBack = await page.evaluate(() => document.activeElement?.classList.contains("lab-errs") === true);
+          await page.click("#find-btn"); await page.keyboard.type("zzzz", { delay: 10 }); await page.waitForTimeout(150);
+          await page.click('.find-chips .chip[data-filter="failures"]'); await page.waitForTimeout(600);
+          await page.keyboard.press("Escape"); await page.waitForTimeout(300);
+          L.findAfter = await page.evaluate(() => document.querySelector("#find")?.value ?? null);
+          await page.click('.find-chips .chip[data-filter="messages"]'); await page.waitForTimeout(100);
+          await goto(page, { v: "home" }, D); await goto(page, { v: "session", id: errSid }, D); await page.click("#find-btn");
+          L.chipsAfterNav = await page.evaluate(() => [...document.querySelectorAll(".find-chips .chip")].filter((c) => c.getAttribute("aria-pressed") === "true").map((c) => c.dataset.filter).join());
+        }
+      }
+      {
+        const parent = Object.values(D.SESS).find((x) => x.name && Object.values(D.SESS).some((c) => c.parent === x.id))?.id ?? "harbor";
+        await goto(page, { v: "session", id: parent }, D);
+        const L = out.labs.runs = { count: await page.locator("#topbar .lab-runs").count() };
+        if (L.count) {
+          L.h = Math.round((await page.locator("#topbar .lab-runs").boundingBox()).height);
+          await page.click("#topbar .lab-runs"); await page.waitForFunction(() => document.querySelector("dialog.session-menu")?.open === true); await page.waitForTimeout(200);
+          L.runsShown = await page.evaluate(() => { const runs = document.querySelector("dialog.session-menu .runs"), body = document.querySelector("dialog.session-menu .panel-b"); if (!runs || !body) return false; const a = runs.getBoundingClientRect(), b = body.getBoundingClientRect(); return a.top >= b.top - 1 && a.top < b.bottom; });
+          await page.keyboard.press("Escape"); await page.waitForTimeout(150);
+        }
+      }
+      if (mode === "desktop") {
+        await goto(page, { v: "session", id: "harbor" }, D); await wide(page, true);
+        const isWide = () => page.evaluate(() => document.querySelector("#page").classList.contains("wide-mode"));
+        const W = out.labs.wide = { onSession: await isWide() };
+        await goto(page, { v: "home" }, D); W.onHome = await isWide();
+        await goto(page, { v: "session", id: "harbor" }, D); W.backOnSession = await isWide(); await wide(page, false);
       }
       // Deep links land the turn fully below the bar.
       const landed = () => page.evaluate(() => { const st = history.state, t = [...document.querySelectorAll(".turn")].find((x) => x.dataset.turn === st?.turn), bar = document.querySelector("#topbar").getBoundingClientRect(); if (!t) return { found: false }; const r = t.getBoundingClientRect(); return { found: true, turn: st.turn, top: Math.round(r.top), barBottom: Math.round(bar.bottom), barTop: Math.round(bar.top), belowBar: r.top >= bar.bottom - 0.5 && r.top < innerHeight - 40, flash: t.classList.contains("flash") }; });
@@ -534,6 +575,16 @@ export default async function barCheck(browser) {
         r.expect(m.errsJump.inView === true, m.mode + ": errors-jump step not in view");
         r.expect(m.errsJump.menu === false, m.mode + ": errors-jump left a menu open");
       }
+      const labs = m.labs ?? {};
+      if (labs.errs?.count) {
+        r.expect(/^Error 1 of \d+$/.test(labs.errs.label ?? "") && labs.errs.focusBack === true, m.mode + ": the N failed label did not enter errors mode, or Escape did not return focus to it: " + JSON.stringify(labs.errs));
+        r.expect(labs.errs.h >= (m.mode.startsWith("phone") ? 44 : 36), m.mode + ": the N failed label is under the tap size: " + JSON.stringify(labs.errs));
+        r.expect(labs.errs.findAfter === "", m.mode + ": entering errors mode left the search text in Find: " + JSON.stringify(labs.errs));
+        r.expect(labs.errs.chipsAfterNav === "all", m.mode + ": a filter chosen on one session was still chosen on the next: " + JSON.stringify(labs.errs));
+      } else r.expect(false, m.mode + ": no N failed label on a session with failed steps: " + JSON.stringify(labs.errs));
+      if (labs.runs?.count) r.expect(labs.runs.runsShown === true && labs.runs.h >= (m.mode.startsWith("phone") ? 44 : 36), m.mode + ": the N runs label did not open the menu at its runs, or is under the tap size: " + JSON.stringify(labs.runs));
+      else r.expect(false, m.mode + ": no N runs label on a session with runs");
+      if (labs.wide) r.expect(labs.wide.onSession === true && labs.wide.onHome === false && labs.wide.backOnSession === true, m.mode + ": wide mode is not limited to session pages: " + JSON.stringify(labs.wide));
 
       r.expect(!!m.details, m.mode + ": the session menu test never ran");
       if (m.details) {
