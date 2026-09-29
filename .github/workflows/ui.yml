@@ -218,6 +218,9 @@ jobs:
           failed=0
           node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN" || failed=1
           node pixels.mjs || failed=1
+          # An empty or short list of screens must not pass: 5 screens at 3 schemes.
+          node -e 'const n = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).results.length; if (n !== 15) { console.error("pixels compared " + n + " screens, expected 15"); process.exit(1); } console.log("pixels compared " + n + " screens")' \
+            "$SEMON_UI_OUT/pixels.json" || failed=1
           exit "$failed"
 
       - name: Server logs
