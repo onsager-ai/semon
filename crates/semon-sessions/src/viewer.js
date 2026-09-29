@@ -1162,6 +1162,7 @@
   const kindText = (s) => s.kind ?? HARNESS[s.harness];
   const modelIdOf = (s) => Object.keys(s.tokens_by_model ?? {})[0] ?? s.model;
   function renderTopbar(title, crumb, opts = {}) {
+    closeAccountMenu(); // the bar is redrawn from scratch, the desktop menu with it: close it properly, not by detaching it
     const bar = $("#topbar"), s = opts.session; clearBox(bar, route); bar.classList.remove("scrolled"); bar.classList.toggle("session-bar", !!s);
     // What the bar holds is added through `put`, so the range control on Analytics (a persistent control) stays where it is.
     const put = placer(bar), sink = { append: put };
