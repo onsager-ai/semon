@@ -1,8 +1,12 @@
 // Pixel comparison of every screen of the served viewer against the mockup, at 390×844 light and dark and 1280×860.
 //
-// Which mockup a screen is compared with is set per screen in reference-map.json: the previous mockup (reference/semon-sample.html)
-// until the screen's port PR flips it to the overhaul mockup (reference/overhaul.html), or null for a screen the viewer doesn't
-// draw yet (loading, empty, error, not found), which is not compared. A name in the map covers itself and every "<name>-…" screen.
+// Which mockup a screen is compared with is set per screen in reference-map.json, by name (a name covers itself and every
+// "<name>-…" screen):
+//   "sample"    the previous mockup (reference/semon-sample.html): enforced
+//   "overhaul"  the overhaul mockup (reference/overhaul.html): enforced. A screen's port PR flips it here.
+//   "pending"   a screen whose port PR hasn't landed but whose look has already moved on (the overhaul's tokens are global, so
+//               the previous mockup no longer describes it): compared with the overhaul mockup and reported, not enforced
+//   null        a screen the viewer doesn't draw yet (loading, empty, error, not found): not compared
 //
 // Two comparisons per screen, both against the screen's mapped mockup rendered in the same browser:
 //
@@ -23,6 +27,7 @@ import { PNG } from "pngjs";
 import pixelmatch from "pixelmatch";
 import { ENV, launch, context, served, goto, data } from "./lib.mjs";
 import { sample, BASE } from "./fixture.mjs";
+import { overhaulPortReference, stableOverhaul } from "./overhaul-port.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const J = JSON.stringify;
@@ -41,7 +46,7 @@ const OUT = path.join(ENV.out, "pixels");
 
 const MAP = JSON.parse(fs.readFileSync(path.join(here, "reference-map.json"), "utf8"));
 for (const [name, file] of Object.entries(MAP.references)) if (!fs.existsSync(path.join(here, file))) throw new Error("reference-map.json: " + name + ": " + file + " is missing");
-for (const [screen, ref] of Object.entries(MAP.screens)) if (ref !== null && !(ref in MAP.references)) throw new Error("reference-map.json: " + screen + " names an unknown reference: " + ref);
+for (const [screen, ref] of Object.entries(MAP.screens)) if (ref !== null && ref !== "pending" && !(ref in MAP.references)) throw new Error("reference-map.json: " + screen + " names an unknown reference: " + ref);
 // The reference a screen is compared with: the longest map name that is the screen's name or its prefix before a "-". `null` means
 // unmapped (no comparison); undefined means the map has no entry, which is an error, so a new screen can't go unmapped by accident.
 function referenceOf(name) {
@@ -49,7 +54,9 @@ function referenceOf(name) {
   return keys.length ? MAP.screens[keys[0]] : undefined;
 }
 const MOCKUP = fs.readFileSync(path.join(here, MAP.references.sample), "utf8");
+const OVERHAUL = fs.readFileSync(path.join(here, MAP.references.overhaul), "utf8");
 function stableMockup(html) {
+  if (html.includes('if (route.v !== "session" || loadingView || panelEl) return;')) return stableOverhaul(html);
   const liveDemo = 'if (route.v !== "session") return;';
   if (html.split(liveDemo).length !== 2) throw new Error("mockup demo tick guard moved");
   return html.replace(liveDemo, 'if (window.__SEMON_PIXEL_COMPARE || route.v !== "session") return;');
@@ -216,10 +223,9 @@ const MACHINE_LINES = [
     'l2.append(el("span", "rest", up ? w + " working · " + here.length + (here.length === 1 ? " session" : " sessions") : movedOff(m).length ? "Semon moved its sessions to other machines" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, here.length + (here.length === 1 ? " session" : " sessions")].filter(Boolean).join(" · "))); };'],
 ];
 
-// The mockup file with the served data in its data block. Only the previous mockup has its patches; the overhaul mockup's are added
-// by the port PRs that flip a screen to it.
+// The mockup file with the served data in its data block. The overhaul mockup's is built in overhaul-port.mjs.
 function portReference(D, ref = "sample") {
-  if (ref !== "sample") throw new Error("the " + ref + " mockup has no port reference yet: the first PR that flips a screen to it adds its patches");
+  if (ref === "overhaul") return overhaulPortReference(D, OVERHAUL);
   const start = MOCKUP.indexOf(DATA_START), end = MOCKUP.indexOf(DATA_END);
   if (start < 0 || end < start) throw new Error("mockup data block markers moved");
   const hhmm = (t) => new Date(t).toISOString().slice(11, 16);
@@ -333,6 +339,38 @@ async function nav(page, route, D, mockup) {
 }
 
 const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name + ".png"), PNG.sync.write(img)); };
+// The ratchet: a pending screen may not drift away from the overhaul. tests/ui/pixel-baseline.json holds, per screen and scheme, its
+// ratio of differing pixels and the size of both pictures (served, reference). A screen fails when its ratio rises by more than half
+// a point, or when either size changes. A port PR moves the baselines it changes in its own diff (out/pixel-baseline.<section>.json,
+// written by every run, holds the current values), and its body says which and why. SEMON_PIXEL_BASELINE names the section
+// ("main" by default; the two-machines step uses "two-machines").
+const SECTION = process.env.SEMON_PIXEL_BASELINE ?? "main";
+const BASELINE_FILE = path.join(here, "pixel-baseline.json");
+const BASELINE = fs.existsSync(BASELINE_FILE) ? JSON.parse(fs.readFileSync(BASELINE_FILE, "utf8"))[SECTION] : undefined;
+const RISE = 0.005;
+const CURRENT = {};
+function ratchet(row, p) {
+  const key = row.scheme + "|" + row.screen, d = p.A.width + "×" + p.A.height, size = p.size ?? [d, d];
+  CURRENT[key] = { ratio: Math.round(p.ratio * 1e5) / 1e5, size };
+  const was = BASELINE?.[key];
+  if (!BASELINE) return "no baseline section " + SECTION + " in pixel-baseline.json";
+  if (!was) return "no baseline for " + key;
+  if (p.ratio > was.ratio + RISE) return "rose from " + (was.ratio * 100).toFixed(2) + "% to " + (p.ratio * 100).toFixed(2) + "%";
+  if (was.size[0] !== size[0] || was.size[1] !== size[1]) return "size changed from " + was.size.join(" vs ") + " to " + size.join(" vs ");
+  return null;
+}
+// Served against served: the same viewer built over the same data, compared with itself. SEMON_REF_BASE/SEMON_REF_TOKEN name the
+// second server (the pushed-data step compares the received copy with the machine's own). No mockup and no ratchet is involved.
+const REF_BASE = (process.env.SEMON_REF_BASE ?? "").replace(/\/$/, ""), REF_TOKEN = process.env.SEMON_REF_TOKEN ?? "";
+// Both pictures and the diff of an enforced mismatch. A pending screen differs by design until its port PR, so only the diff is kept,
+// with the pictures for the screens that show the most (Home, the lists, one session, one trace).
+const SHOWN = ["home", "sessions", "machines", "analytics", "session-harbor", "session-h-codex", "drawer"];
+function saveMismatch(row, name, scheme, p) {
+  if (row.port.pass && (row.port.enforced || !p.pixels)) return;
+  const dir = path.join(OUT, row.port.enforced ? "port" : "pending", scheme);
+  save(dir, name + "-diff", p.diff);
+  if (row.port.enforced || SHOWN.includes(name)) { save(dir, name + "-served", p.A); save(dir, name + "-reference", p.B); }
+}
 
 (async () => {
   const D = await data(), S = sample("semon-sample.html"), ids = sampleIds(D, S), list = screens(D, S, ids);
@@ -349,15 +387,19 @@ const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.wr
     // One port reference per mockup a screen is mapped to, opened on first use.
     const ports = new Map();
     const portFor = async (ref) => { if (!ports.has(ref)) ports.set(ref, await referencePage(browser, size, dark, portReference(D, ref))); return ports.get(ref); };
-    const orig = await referencePage(browser, size, dark, MOCKUP);
-    for (const s of list.filter((x) => referenceOf(x.name) !== null)) {
-      const port = await portFor(referenceOf(s.name));
+    const other = REF_BASE ? await served(browser, { size, dark, base: REF_BASE, token: REF_TOKEN }) : null;
+    const orig = other ? null : await referencePage(browser, size, dark, MOCKUP);
+    for (const s of list.filter((x) => other || referenceOf(x.name) !== null)) {
+      const mapped = other ? "served" : referenceOf(s.name), enforced = mapped !== "pending", ref = other ? "served" : enforced ? mapped : "overhaul";
+      const port = other ?? await portFor(ref);
       await nav(page, s.served, D, false); const a = await shot(page, size);
-      await nav(port, s.port, D, true); const b = await shot(port, size);
+      if (other) await nav(port, s.served, D, false); else await nav(port, s.port, D, true);
+      const b = await shot(port, size);
       const p = compare(a, b);
-      const row = { scheme, screen: s.name, port: { pixels: p.pixels, ratio: p.ratio, size: p.size, pass: p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size } };
-      if (!row.port.pass) { const dir = path.join(OUT, "port", scheme); save(dir, s.name + "-served", p.A); save(dir, s.name + "-reference", p.B); save(dir, s.name + "-diff", p.diff); }
-      if (s.sample) {
+      const row = { scheme, screen: s.name, reference: ref, port: { pixels: p.pixels, ratio: p.ratio, size: p.size, enforced, pass: !enforced || (p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size) } };
+      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; row.port.pass = false; } }
+      saveMismatch(row, s.name, scheme, p);
+      if (s.sample && !other) {
         await nav(orig, s.sample, D, true); const c = await shot(orig, size);
         const q = compare(a, c);
         row.sample = { pixels: q.pixels, ratio: q.ratio, size: q.size };
@@ -366,34 +408,40 @@ const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.wr
       results.push(row);
     }
     // The phone's navigation drawer, open on Home.
-    if (size === "phone" && !ONLY.length && referenceOf("drawer") !== null) {
-      const port = await portFor(referenceOf("drawer"));
+    if (size === "phone" && !ONLY.length && (other || referenceOf("drawer") !== null)) {
+      const port = other ?? await portFor(referenceOf("drawer") === "pending" ? "overhaul" : referenceOf("drawer"));
       // Each session screenshot can mark result handoffs read. Start the drawer comparison in a fresh served context,
       // matching the reference page reload below, so both drawers show the fixture's initial unread count.
       const drawerPage = await served(browser, { size, dark });
       await drawerPage.click("#lead-btn"); await drawerPage.waitForTimeout(350);
-      await port.goto("http://reference.test/", { waitUntil: "load" }); await port.waitForSelector("#lead-btn"); await port.click("#lead-btn"); await port.waitForTimeout(350);
-      const p = compare(await shot(drawerPage, "desktop"), await shot(port, "desktop"));
-      const row = { scheme, screen: "drawer", port: { pixels: p.pixels, ratio: p.ratio, size: p.size, pass: p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size } };
-      if (!row.port.pass) { const dir = path.join(OUT, "port", scheme); save(dir, "drawer-served", p.A); save(dir, "drawer-reference", p.B); save(dir, "drawer-diff", p.diff); }
+      let side;
+      if (other) { side = await served(browser, { size, dark, base: REF_BASE, token: REF_TOKEN }); await side.click("#lead-btn"); await side.waitForTimeout(350); }
+      else { await port.goto("http://reference.test/", { waitUntil: "load" }); await port.waitForSelector("#lead-btn"); await port.click("#lead-btn"); await port.waitForTimeout(350); side = port; }
+      const p = compare(await shot(drawerPage, "desktop"), await shot(side, "desktop"));
+      const enforced = other ? true : referenceOf("drawer") !== "pending";
+      const row = { scheme, screen: "drawer", reference: other ? "served" : enforced ? referenceOf("drawer") : "overhaul", port: { pixels: p.pixels, ratio: p.ratio, size: p.size, enforced, pass: !enforced || (p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size) } };
+      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; row.port.pass = false; } }
+      saveMismatch(row, "drawer", scheme, p);
       results.push(row);
       errors.push(...drawerPage.errors.map((e) => scheme + " served drawer: " + e));
-      await drawerPage.context().close();
+      await drawerPage.context().close(); if (other) await side.context().close();
     }
-    errors.push(...page.errors.map((e) => scheme + " served: " + e), ...[...ports].flatMap(([ref, p]) => p.errors.map((e) => scheme + " " + ref + " port reference: " + e)), ...orig.errors.map((e) => scheme + " sample: " + e));
-    await page.context().close(); await orig.context().close();
+    errors.push(...page.errors.map((e) => scheme + " served: " + e), ...[...ports].flatMap(([ref, p]) => p.errors.map((e) => scheme + " " + ref + " port reference: " + e)), ...(orig?.errors ?? []).map((e) => scheme + " sample: " + e), ...(other?.errors ?? []).map((e) => scheme + " second server: " + e));
+    await page.context().close(); await orig?.context().close(); await other?.context().close();
     for (const p of ports.values()) await p.context().close();
   }
   await browser.close();
-  const failed = results.filter((r) => !r.port.pass);
+  const failed = results.filter((r) => !r.port.pass), pending = results.filter((r) => !r.port.enforced);
+  // The current baselines, for a PR that moves them: written every run, never read back.
+  fs.writeFileSync(path.join(ENV.out, "pixel-baseline." + SECTION + ".json"), J({ [SECTION]: Object.fromEntries(Object.entries(CURRENT).sort(([a], [b]) => (a < b ? -1 : 1))) }, null, 1) + "\n");
   const pct = (x) => (x * 100).toFixed(3) + "%";
   const md = ["| Screen | Scheme | vs port reference | vs sample mockup |", "|---|---|---|---|",
-    ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.pass ? "✓ " : "✗ ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
+    ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.enforced ? (r.port.pass ? "✓ " : "✗ ") : r.port.ratchet ? "✗ ratchet (" + r.port.ratchet + ") · " : "pending · ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
   fs.writeFileSync(path.join(ENV.out, "pixels.json"), J({ threshold: THRESHOLD, maxRatio: MAX_RATIO, results, errors }, null, 1));
   const note = skipped.length ? "\nNot compared (unmapped in reference-map.json, not drawn by the viewer yet): " + skipped.join(", ") + "\n" : "";
   fs.writeFileSync(path.join(ENV.out, "pixels.md"), md + "\n" + note);
   console.log(md);
-  console.log("screens: " + results.length + ", port mismatches: " + failed.length + ", page errors: " + errors.length);
+  console.log("screens: " + results.length + ", port mismatches: " + failed.length + ", page errors: " + errors.length + (pending.length ? ", pending (reported, not enforced): " + pending.length : ""));
   if (skipped.length) console.log("unmapped, not compared: " + skipped.join(", "));
   for (const e of errors) console.log("  page error: " + e);
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Pixel comparison\n\n" + md + "\n" + note);

@@ -18,6 +18,7 @@ import extras from "./extras.mjs";
 import shellCheck from "./shell.mjs";
 import namesCheck from "./names.mjs";
 import sidebarCheck from "./sidebar.mjs";
+import tokensCheck from "./tokens.mjs";
 
 const checks = [
   ["home", homeCheck],
@@ -32,6 +33,7 @@ const checks = [
   ["shell", shellCheck],
   ["names", namesCheck],
   ["sidebar", sidebarCheck],
+  ["tokens", tokensCheck],
 ];
 
 const browser = await launch();

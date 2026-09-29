@@ -148,14 +148,16 @@ jobs:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
         run: node checks/budget.mjs
 
-      # One viewer over two machines' homes (the sample and a second machine, `desktop`): its Machines screens, pixel
-      # for pixel against the mockup's code on the same data, at 390×844 and 1280×860, light and dark.
+      # One viewer over two machines' homes (the sample and a second machine, `desktop`): its Machines screens, held to
+      # their baselines against the overhaul mockup (the "two-machines" section of tests/ui/pixel-baseline.json), at 390×844
+      # and 1280×860, light and dark.
       - name: Two machines in one viewer
         if: ${{ !cancelled() }}
         env:
           SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/two-machines
           SEMON_PIXEL_SCREENS: machines,machine-
           SEMON_PIXEL_SCHEMES: all
+          SEMON_PIXEL_BASELINE: two-machines
         run: |
           [ "$(node tests/ui/fixture.mjs "$RUNNER_TEMP/second" --second)" = "$SEMON_NOW" ]
           HOME="$RUNNER_TEMP/sample" SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen 127.0.0.1:8767 \
@@ -201,7 +203,8 @@ jobs:
 
       # The viewer over the pushed copy alone (--no-local), and the subset of the suite that shows the pushed data renders as
       # the local one does: the fixture gaps (the served model and every transcript against the sample mockup's data, so the
-      # pushed transcripts are the machine's own), and the pixel comparison of Home, the sessions list, Analytics and two
+      # pushed transcripts are the machine's own), and the pixel comparison, served against served (the pushed copy against the
+      # machine's own server), of Home, the sessions list, Analytics and two
       # session transcripts (harbor, a Claude session with a Codex run and a subagent under it, and deps, a Codex run), at
       # 390×844 light and dark and 1280×860 light. The rest of the suite is about the viewer, not the data, and runs on the
       # local fixture above.
@@ -210,6 +213,10 @@ jobs:
         env:
           SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/pushed
           SEMON_PIXEL_SCREENS: home,sessions,analytics,session-harbor,session-deps
+          # The pushed copy's screens are compared with the same screens on the machine's own server (started above), not with a
+          # mockup: the same viewer over the same data must draw the same pixels.
+          SEMON_REF_BASE: ${{ env.SEMON_BASE }}
+          SEMON_REF_TOKEN: ${{ env.SEMON_TOKEN }}
         run: |
           [ -d "$RUNNER_TEMP/recv/machines/laptop" ] || { echo "nothing was received"; exit 1; }
           reader="$RUNNER_TEMP/pushed/reader"
