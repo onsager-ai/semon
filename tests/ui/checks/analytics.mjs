@@ -133,7 +133,9 @@ export default async function analyticsCheck(browser) {
   // Model updates every poll (each a new version) while it fails: no new ask for 7 s.
   const modelUrl = (u) => u.pathname === "/api/model";
   await fp.route(modelUrl, async (route) => {
-    const res = await route.fetch(); if (res.status() !== 200) return route.fulfill({ response: res });
+    // Without `since` the server answers the whole model (never a 304), which goes out under a new version.
+    const url = new URL(route.request().url()); url.searchParams.delete("since");
+    const res = await route.fetch({ url: url.toString() }); if (res.status() !== 200) return route.fulfill({ response: res });
     const m = await res.json(); m.version = "fake-" + ++fakeVersion; updates++;
     return route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(m) });
   });
