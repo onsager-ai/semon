@@ -103,7 +103,9 @@ export default async function barCheck(browser) {
       const bar = document.querySelector("#topbar"), br = bar.getBoundingClientRect(), vw = document.documentElement.clientWidth;
       const scrolled = phone ? scrollY : main.scrollTop;
       const l2 = bar.querySelector(".l2"), rest = l2?.querySelector(".rest"), sessionMeta = !!l2?.classList.contains("session-meta");
-      const ctl = [...bar.querySelectorAll("button, input, [role=link]")].filter((x) => x.offsetParent || getComputedStyle(x).position === "absolute").map((x) => [x.className || x.tagName, x.getBoundingClientRect().height]);
+      // A segmented control's buttons are drawn 24px tall on purpose; their tap target is the ::before box, so that is what counts here.
+      const segmentHit = (x) => { if (!x.closest(".analytics-range")) return null; const p = getComputedStyle(x, "::before"), h = x.getBoundingClientRect().height, top = parseFloat(p.top), bottom = parseFloat(p.bottom); return Number.isFinite(top) && Number.isFinite(bottom) ? h - top - bottom : h; };
+      const ctl = [...bar.querySelectorAll("button, input, [role=link]")].filter((x) => x.offsetParent || getComputedStyle(x).position === "absolute").map((x) => [x.className || x.tagName, segmentHit(x) ?? x.getBoundingClientRect().height]);
       const small = ctl.filter(([c, h]) => h < 35.5 && !String(c).split(/\s+/).some((x) => x === "errs" || x === "meta-runs"));
       const errorsTarget = bar.querySelector(".l2.session-meta .errs"), runsTarget = bar.querySelector(".l2.session-meta .meta-runs");
       const line2Targets = { errors: errorsTarget ? Math.round(errorsTarget.getBoundingClientRect().height) : null, runs: runsTarget ? Math.round(runsTarget.getBoundingClientRect().height) : null };
