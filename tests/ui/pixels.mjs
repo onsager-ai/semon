@@ -283,6 +283,7 @@ async function referencePage(browser, size, dark, html) {
 
 const FACE_LOADS = ['400 14px "Instrument Sans"', '500 14px "Instrument Sans"', '600 14px "Instrument Sans"', '400 12px "JetBrains Mono"', '500 12px "JetBrains Mono"', '400 14px "Source Serif 4"', '600 14px "Source Serif 4"'];
 async function ready(page) {
+  await mask(page);
   await page.evaluate((faces) => Promise.all(faces.map((f) => document.fonts.load(f))).then(() => document.fonts.ready), FACE_LOADS);
   await page.evaluate(() => {
     const state = history.state, sessionAtEnd = state?.v === "session" && !state.turn, main = document.querySelector("#main");
@@ -295,7 +296,7 @@ async function ready(page) {
 }
 async function shot(page, size) {
   await ready(page);
-  return PNG.sync.read(await page.screenshot({ fullPage: size === "phone", animations: "disabled", caret: "hide", style: MASK_CSS }));
+  return PNG.sync.read(await page.screenshot({ fullPage: size === "phone", animations: "disabled", caret: "hide" }));
 }
 
 // Differing pixels over the larger of the two images; the area one image lacks counts as differing.
@@ -341,6 +342,8 @@ async function nav(page, route, D, mockup) {
 // Masked in every comparison: the jump-to-latest button, a transient control that floats at a scroll position (its place shifts a pixel or two
 // with how far each page was scrolled), not part of a screen's design.
 const MASK_CSS = ".jump-wrap { visibility: hidden !important; }";
+// (Applied as a constructed stylesheet: the viewer's style-src does not allow an injected <style>, which screenshot({ style }) uses.)
+const mask = (page) => page.evaluate((css) => { if (window.__pixelMask) return; window.__pixelMask = true; const sheet = new CSSStyleSheet(); sheet.replaceSync(css); document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet]; }, MASK_CSS);
 const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name + ".png"), PNG.sync.write(img)); };
 // The ratchet: a pending screen may not drift away from the overhaul. tests/ui/pixel-baseline.json holds, per screen and scheme, its
 // ratio of differing pixels and the size of both pictures (served, reference). A screen fails when its ratio rises by more than half
@@ -375,13 +378,14 @@ const REF_BASE = (process.env.SEMON_REF_BASE ?? "").replace(/\/$/, ""), REF_TOKE
 const REGIONS = MAP.regions ?? [];
 const regionsOf = (name) => REGIONS.filter((r) => r.screens.some((x) => (x.endsWith("-") ? name.startsWith(x) : name === x)));
 async function regionShot(page, region) {
+  await mask(page);
   // A region that does not depend on how far the page is scrolled (the bar, whose border shows once it is) is taken at the top, so a
   // pending page that happens to be a few pixels taller on one side cannot change it.
   if (region.top) { await page.evaluate(() => { window.scrollTo(0, 0); const main = document.querySelector("#main"); if (main) main.scrollTop = 0; }); await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))); await page.waitForTimeout(120); }
   if (region.open) { await page.click(region.open); await page.waitForTimeout(200); }
   const target = page.locator(region.selector).first();
   await target.waitFor({ state: "visible", timeout: 3000 });
-  const png = PNG.sync.read(await target.screenshot({ animations: "disabled", caret: "hide", style: MASK_CSS }));
+  const png = PNG.sync.read(await target.screenshot({ animations: "disabled", caret: "hide" }));
   if (region.open) { await page.keyboard.press("Escape"); await page.waitForTimeout(150); }
   return png;
 }
