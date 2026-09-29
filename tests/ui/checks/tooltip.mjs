@@ -256,7 +256,7 @@ export default async function tooltipCheck(browser) {
       await goto(page, { v: "session", id: parent.id }, D);
       await page.waitForTimeout(250);
       // The line's labels that carry a tip (the state's word is its own name, and has none).
-      const items = await page.evaluate(() => [...document.querySelectorAll("#topbar .meta-line > .lab[data-tip]")].filter((n) => n.getClientRects().length && n.getBoundingClientRect().width > 0).map((n, i) => { n.dataset.probe = String(i); return { i, tip: n.dataset.tip, cls: n.className, tag: n.tagName }; }));
+      const items = await page.evaluate(() => [...document.querySelectorAll("#topbar .meta-line > .lab[data-tip], #topbar .l1-state[data-tip]")].filter((n) => n.getClientRects().length && n.getBoundingClientRect().width > 0).map((n, i) => { n.dataset.probe = String(i); return { i, tip: n.dataset.tip, cls: n.className, tag: n.tagName }; }));
       rec.items = items.map((x) => x.cls.replace(/^lab ?/, "") || x.tag + ":" + x.tip.slice(0, 20));
       r.expect(items.length >= (size === "desktop" ? 4 : 1), tag + ": only " + items.length + " tipped items in the session line: " + JSON.stringify(rec.items));
       const at = (i) => box(page, '#topbar [data-probe="' + i + '"]');
@@ -281,7 +281,7 @@ export default async function tooltipCheck(browser) {
       r.expect(checked >= (size === "desktop" ? 5 : 1), tag + ": only " + checked + " tooltips were placed");
       // A long tip (the cost badge, or the state), for the contrast, the size and the screenshot.
       await away(page); await page.waitForTimeout(450);
-      const shot = "#topbar .meta-line > .lab[data-tip]:not([hidden])";
+      const shot = size === "phone" ? "#topbar .l1-state[data-tip]" : "#topbar .meta-line > .lab[data-tip]:not([hidden])";
       await hover(page, shot, 1500);
       const c = await contrast(page); rec.contrast = c.ratio;
       appearance(tag, c, r);
@@ -292,7 +292,7 @@ export default async function tooltipCheck(browser) {
 
       if (size === "phone") {
         // Touch: a static label toggles its tip; elsewhere closes it; a control runs and shows none.
-        const stat = page.locator("#topbar .meta-line > span.lab[data-tip]:not([hidden])");
+        const stat = page.locator("#topbar .l1-state[data-tip], #topbar .meta-line > span.lab[data-tip]:not([hidden])");
         if (await stat.count()) {
           const state0 = await box(page, await stat.first().evaluate((n) => { n.dataset.probe = "touch"; return '#topbar [data-probe="touch"]'; })), blank = [4, 400];
           await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
