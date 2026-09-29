@@ -1274,7 +1274,7 @@
         const tokens = Number(model.tokens?.[key]) || 0, amount = Number(model.usd_by_kind?.[key]) || 0;
         if (tokens === 0 && (!priced || amount < 0.005)) continue;
         const row = el("div", "cost-line"), count = el("span", "cost-amount", tokens ? compactCount(tokens) : "");
-        if (tokens) { count.dataset.tip = tokens.toLocaleString() + (key === "web_search" ? " searches" : " tokens"); count.append(el("span", "sr-only", " (" + tokens.toLocaleString() + ")")); }
+        if (tokens) { count.dataset.tip = tokens.toLocaleString() + " tokens"; count.append(el("span", "sr-only", " (" + tokens.toLocaleString() + ")")); }
         row.append(el("span", "cost-kind", label), count, el("span", "cost-value", priced ? asMoney(amount) : "—")); rows.push(row);
       }
       if (!rows.length && priced) continue;
