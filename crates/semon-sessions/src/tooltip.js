@@ -34,7 +34,8 @@
   const focusVisible = (node) => { try { return node.matches(":focus-visible"); } catch { return true; } };
   const shown = (node) => node.isConnected && node.getClientRects().length > 0;
   // A rebuild puts a new node with the same tip under a resting pointer: that is still what was dismissed.
-  const dismiss = () => { dismissed = target ? { node: target, text: target.getAttribute("data-tip"), x: pointer?.x, y: pointer?.y } : null; };
+  // With no tip open or pending there is nothing new to dismiss, so an earlier dismissal stands (hover, Esc, click the same badge, rebuild).
+  const dismiss = () => { dismissed = target ? { node: target, text: target.getAttribute("data-tip"), x: pointer?.x, y: pointer?.y } : dismissed; };
   const isDismissed = (node) => !!dismissed && !!node && (node === dismissed.node || (pointer != null && pointer.x === dismissed.x && pointer.y === dismissed.y && node.getAttribute("data-tip") === dismissed.text));
   const clipped = (node) => node.scrollWidth > node.clientWidth + 1 || node.scrollHeight > node.clientHeight + 1;
 
@@ -149,7 +150,14 @@
     hide(true);
     if (node) schedule(node);
   });
-  document.addEventListener("pointermove", (event) => { if (event.pointerType !== "touch") pointer = { x: event.clientX, y: event.clientY }; }, { capture: true, passive: true });
+  document.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "touch") return;
+    // A nudge inside what was dismissed keeps it dismissed: the spot it rests on follows the pointer, and so does the node
+    // (a rebuild may have replaced it), so a later rebuild under the pointer is still the same dismissal.
+    const over = dismissed ? tipOf(event.target) : null;
+    if (over && isDismissed(over)) { dismissed.node = over; dismissed.x = event.clientX; dismissed.y = event.clientY; }
+    pointer = { x: event.clientX, y: event.clientY };
+  }, { capture: true, passive: true });
   // Leaving the window sends no pointerover to anything else.
   document.addEventListener("pointerout", (event) => { if (!event.relatedTarget && event.pointerType !== "touch") hide(true); });
 

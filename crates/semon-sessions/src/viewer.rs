@@ -3260,12 +3260,20 @@ mod tests {
                 "setAttribute('title'",
                 "svgEl(\"title\"",
                 "createElementNS(SVGNS, \"title\"",
-                // a `title` key in an attrs object (svgEl(..., { title: ... })), which svgEl sets as an attribute
-                "title:",
             ] {
                 assert!(
                     !script.contains(banned),
                     "{name} sets a native title: {banned}"
+                );
+            }
+            // A `title` key in an attrs object (svgEl(..., { title: ... })), which svgEl sets as an attribute. It must be
+            // the whole word: `subtitle:` is not one.
+            for (at, _) in script.match_indices("title:") {
+                let before = script[..at].chars().next_back();
+                assert!(
+                    before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$'),
+                    "{name} has a `title:` key near {:?}",
+                    &script[at.saturating_sub(30)..(at + 30).min(script.len())]
                 );
             }
         }
