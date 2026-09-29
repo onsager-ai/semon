@@ -15,7 +15,7 @@
 //     focuses it; the open list is not saved (a reload starts short); navigating to a row under the sticky row scrolls it clear.
 //   - opening a nested parent's "All N" inside an open parent leaves the ancestors listed and open and sticks only the innermost
 //     row; on a wide screen "All N" reveals exactly its number (every descendant, under its own parent, open); a live update keeps
-//     the whole list open and focus on "Show fewer"; crossing 760 px, the rail, collapsing the parent or an ancestor, and a list with
+//     the whole list open, its rows in place and focus on "Show fewer" (the pill then reorders it); crossing 760 px, the rail, collapsing the parent or an ancestor, and a list with
 //     nothing left to fold all drop the open list; Esc in a phone's sheet leaves the drawer open; the sheet says which parent a
 //     grandchild is under.
 //   - a collapsed parent's count pill is the bare total with no state dot, fully round and AA in both themes; it is amber (`wait`) exactly when a run inside needs you, and its title and the row's aria-label break the total down (runs, needs you, working, failed). A patched model puts a waiting and a failed run, and a grandchild, under Fan-out.
@@ -686,18 +686,32 @@ export default async function sidebarCheck(browser) {
       r.expect(await page.evaluate((id) => document.activeElement?.classList.contains("srow") && document.activeElement.dataset.id === id, c1), "nested " + tag + ": focus is on Reader 1's row after folding");
 
       if (!dark) {
-        // A live update while Swarm's whole list is open: it stays open, reorders, takes the new child, and keeps focus on "Show fewer".
+        // A live update while Swarm's whole list is open: it stays open with its rows where they were and focus on "Show fewer"; the
+        // new child (Worker 13) is held and Worker 10's finish is a move, so the sidebar's pill counts them (worked out below from the
+        // edited model, by a plain dynamic programme); the pill sits above the parent's stuck row; the pill then reorders the list.
         await page.evaluate(() => { document.querySelector("#side-list").scrollTop = 0; });
         await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
         await page.waitForTimeout(150);
+        await page.evaluate(() => { document.querySelector("#side-list").scrollTop = 40; }); // the list's top is out of view, so the pill shows
+        await page.waitForTimeout(150);
+        const held = await groupOf(page, swarm.id);
         state.edit = finishSwarm;
-        await page.waitForFunction((id) => document.querySelectorAll('#lanes .treeitem[data-id="' + id + '"] > .tree-group > .treeitem').length === 13, swarm.id, { timeout: 15000 });
+        await page.waitForFunction(() => document.querySelector('.order-pill[data-order="side"]:not([hidden])'), null, { timeout: 15000 });
         await page.waitForTimeout(100);
         const after = await groupOf(page, swarm.id);
         R.liveAfter = after;
-        r.expect(after && JSON.stringify(after.ids) === JSON.stringify(live), "live: the open list reorders (Worker 10 finished) and takes Worker 13: " + JSON.stringify(after?.ids.map((id) => finishSwarm(nest(structuredClone(D.model))).sessions[id].name)));
+        r.expect(after && JSON.stringify(after.ids) === JSON.stringify(held?.ids), "live: the open list keeps its rows in place (Worker 13 is held): " + JSON.stringify(after?.ids.map((id) => nname(id))));
+        const post = finishSwarm(nest(structuredClone(D.model))).sessions, kidRank = (x) => (x.state === "wait" ? 0 : x.state === "work" ? 1 : 2), cmp = (a, b) => kidRank(post[a]) - kidRank(post[b]) || post[b].last - post[a].last;
+        const dp = (order) => { const d = order.map(() => 1); let best = 0; for (let i = 0; i < order.length; i++) { for (let j = 0; j < i; j++) if (cmp(order[j], order[i]) <= 0) d[i] = Math.max(d[i], d[j] + 1); best = Math.max(best, d[i]); } return order.length - best; };
+        const want = 1 + dp(held?.ids ?? []);
+        r.expect(await page.evaluate(() => document.querySelector('.order-pill[data-order="side"]')?.textContent.trim()) === want + " updated", "live: the pill counts Worker 13 (held) and the rows that move (" + want + ")");
+        r.expect(await page.evaluate(() => { const b = document.querySelector('.order-pill[data-order="side"]'), r = b.getBoundingClientRect(), e = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return b.contains(e) && !!document.querySelector("#lanes .tree-row.stuck"); }), "live: the pill isn't on top of the parent's stuck row");
         r.expect(after?.stuck === true && after.fewer === "Show fewer" && after.dialogs === 0, "live: the list is still open and sticky after the update: " + JSON.stringify([after?.stuck, after?.fewer]));
         r.expect(await page.evaluate((id) => { const a = document.activeElement; return a?.classList.contains("tree-fewer") && a.closest(".treeitem").dataset.id === id; }, swarm.id), "live: focus stays on 'Show fewer' through the redraw");
+        await page.click('.order-pill[data-order="side"]');
+        await page.waitForFunction((id) => document.querySelectorAll('#lanes .treeitem[data-id="' + id + '"] > .tree-group > .treeitem').length === 13, swarm.id, { timeout: 5000 });
+        const sorted = await groupOf(page, swarm.id);
+        r.expect(sorted && JSON.stringify(sorted.ids) === JSON.stringify(live) && sorted.stuck === true, "live: the pill reorders the open list (Worker 10 finished) and takes Worker 13: " + JSON.stringify(sorted?.ids.map((id) => finishSwarm(nest(structuredClone(D.model))).sessions[id].name)));
         await page.click("#lanes .tree-row.stuck .tree-fewer");
       }
       r.expect(page.errors.length === 0, "nested " + tag + ": page errors " + page.errors.join("; "));

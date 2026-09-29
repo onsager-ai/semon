@@ -829,11 +829,32 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .analytics-slice .vh, .runs-sheet .vh, .kids-sheet .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); } .analytics-slice .vb, .runs-sheet .vb, .kids-sheet .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
   .analytics-slice .vclose, .runs-sheet .vclose, .kids-sheet .vclose { width: 44px; height: 44px; }
 }
-.jump-bottom { position: fixed; left: var(--jump-x, 50%); transform: translateX(-50%); bottom: 16px; z-index: 15; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 20px; background: var(--ground); padding: 0 10px; color: var(--ink-2); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 12%, transparent); }
-.jump-bottom[hidden] { display: none; }
-.jump-bottom svg { width: 18px; height: 18px; flex: none; }
-.jump-bottom .new-count { font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; }
-@media (hover: hover) { .jump-bottom:hover { background: var(--sunken); } }
+.jump-bottom, .order-pill { position: fixed; left: var(--jump-x, 50%); transform: translateX(-50%); bottom: 16px; z-index: 15; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 20px; background: var(--ground); padding: 0 10px; color: var(--ink-2); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 12%, transparent); }
+.jump-bottom[hidden], .order-pill[hidden] { display: none; }
+.jump-bottom svg, .order-pill svg { width: 18px; height: 18px; flex: none; }
+.jump-bottom .new-count, .order-pill .new-count { font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; }
+@media (hover: hover) { .jump-bottom:hover, .order-pill:hover { background: var(--sunken); } }
+/* The list-order pill ("3 updated ↑") is the transcript's pill (the rules above) at the top of a list: in the sidebar it hangs from a
+   zero-height sticky slot above the rows, on a page it is fixed under the top bar, so showing it moves no row. */
+.order-pill { bottom: auto; top: var(--order-top, 64px); }
+.order-slot { position: sticky; top: 0; height: 0; z-index: 6; } /* above a stuck parent row (z-index 3), which comes later in the tree */
+.order-slot .order-pill { position: absolute; left: 50%; top: 8px; }
+/* The chip is the same "N updated" in a list's own header row, while the list's top is in view: out of flow (it takes no room and moves
+   nothing), at the row's right end, with a hit area of 44 px that reaches only into the gaps around the row. */
+.groupby, .sec-h, .side-h { position: relative; }
+.order-chip { position: absolute; right: 0; top: 50%; transform: translateY(-50%); z-index: 2; display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--ground); color: var(--ink-2); font: 500 var(--fs-sm)/1 var(--sans, inherit); letter-spacing: 0; text-transform: none; white-space: nowrap; }
+.order-chip[hidden] { display: none; }
+.order-chip svg { width: 14px; height: 14px; flex: none; }
+.order-chip::before { content: ""; position: absolute; inset: -8px -4px; }
+.order-chip.compact .word, .order-chip.tiny .word, .order-chip.tiny svg { display: none; }
+.order-chip.compact { padding: 0 6px; }
+.order-chip.tiny { padding: 0 6px; min-width: 24px; justify-content: center; }
+/* (the row's own button rules would otherwise size the chip like a group-by button) */
+.page .groupby .order-chip { min-height: 28px; height: 28px; padding: 0 10px; border-radius: 14px; }
+.page .groupby .order-chip.compact, .page .groupby .order-chip.tiny { padding: 0 6px; }
+.side-h .order-chip { right: -6px; height: 24px; padding: 0 8px; }
+.side-h .order-chip::before { inset: -10px -4px -2px; }
+@media (hover: hover) { .order-chip:hover { background: var(--sunken); } }
 .think-pending { display: flex; align-items: center; gap: 6px; min-height: 28px; color: var(--muted); font-size: var(--fs-sm); }
 .think-text { min-width: 0; overflow-wrap: anywhere; color: var(--muted); font: calc(var(--fs-sm) + 1px)/1.55 var(--sans); }
 .think-text .mh { color: var(--ink-2); }
@@ -906,6 +927,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .tree-row { margin-inline: 4px; }
   .tree-all { min-height: 44px; margin-inline: 4px; }
   .srow { min-height: 44px; padding-block: 8px; }
+  .order-pill { height: var(--tap, 44px); border-radius: calc(var(--tap, 44px) / 2); }
   .jump-bottom { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
   dialog.session-details { position: fixed; inset: auto 0 0; width: 100%; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
   .session-details .vb { padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }
