@@ -1758,8 +1758,8 @@
   }
   // A relay, a message to you, or a machine move: who, when, the text, and what came back.
   function eventRow(h, sid) {
-    const r = el("div", "event" + (h.kind === "toyou" && h.status === "wait" ? " waiting" : "")); r.dataset.h = h.id;
-    const [ic, parts] = sentence(h, sid, true); const head = el("div", "ev-head"); const ln = el("span", "ln"); ln.append(...parts); head.append(icon(ic), ln, el("span", "tm", clock(h.at))); r.append(head);
+    const r = el("div", "event" + (h.kind === "toyou" && h.status === "wait" ? " waiting" : "") + (h.kind === "move" ? " move" : "")); r.dataset.h = h.id;
+    const [ic, parts] = sentence(h, sid); const head = el("div", "ev-head"); const ln = el("span", "ln"); ln.append(...parts); head.append(icon(ic), ln, el("span", "tm", clock(h.at))); r.append(head);
     clampText(r, h.brief);
     if (h.result) { const x = el("div", "ev-result"); x.append(el("span", "rl", h.kind === "relay" ? "Reply: " : "Returned: ")); inline(x, h.result); r.append(x); }
     const an = answerEl(h, "ev-result"); if (an) r.append(an);

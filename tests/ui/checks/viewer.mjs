@@ -44,13 +44,13 @@ export default async function viewerCheck(browser) {
     const C = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0 }; const cutLanes = [];
     for (const id of lanes) {
       await goto(page, { v: "session", id }, D); await page.waitForTimeout(150);
-      await page.evaluate(() => { for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"]').forEach((x) => x.click());
+      await page.evaluate(() => { for (let k = 0; k < 3; k++) document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click());
         document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => x.click()); });
       // ResizeObserver measures previews after their containing turn opens; inspect the resulting state on a later frame.
       await page.waitForTimeout(100);
       const rr = await page.evaluate(() => { const r = { steps: 0, cut: 0, viewAllShown: 0, mismatch: 0 };
         document.querySelectorAll('.step > button[aria-expanded="true"]').forEach((x) => { r.steps++; const o = x.parentElement.querySelector('.out');
-          const cut = [...o.querySelectorAll('.clip')].some((c) => c.scrollHeight > c.clientHeight + 1); const shown = !o.querySelector('.viewall').hidden;
+          const cut = /^Output · (first|last) \d+/.test([...o.querySelectorAll('.io')].at(-1)?.textContent ?? "") || /^Cut short/.test(o.querySelector('.cutnote')?.textContent ?? ""); const shown = !!o.querySelector('.viewall:not(.viewscript)');
           if (cut) r.cut++; if (shown) r.viewAllShown++; if (cut !== shown) r.mismatch++; }); return r; });
       for (const k in C) C[k] += rr[k];
       if (rr.cut) cutLanes.push(id);
@@ -75,20 +75,20 @@ export default async function viewerCheck(browser) {
       await page.screenshot({ path: path.join(ENV.out, "v-preview.png") });
       const expected = await btn.evaluate((x) => [...x.parentElement.querySelectorAll("pre")].map((q) => q.textContent.length));
       await btn.click(); await page.waitForTimeout(350);
-      R.sheet = await page.evaluate(() => { const d = document.querySelector("dialog.viewer"); const r = d.getBoundingClientRect(); const vw = document.documentElement.clientWidth;
+      R.sheet = await page.evaluate(() => { const d = document.querySelector("dialog.panel.full"); const r = d.getBoundingClientRect(); const vw = document.documentElement.clientWidth;
         let out = 0; d.querySelectorAll("*").forEach((e) => { const b = e.getBoundingClientRect(); if (b.width && (b.right > vw + 0.5 || b.left < -0.5)) out++; });
-        return { open: d.open, x: r.x, y: r.y, w: r.width, h: r.height, vw, vh: innerHeight, pres: [...d.querySelectorAll("pre")].map((q) => q.textContent.length), sideways: out, bodyScrolls: d.querySelector(".vb").scrollHeight > d.querySelector(".vb").clientHeight, state: history.state?.sheet ?? 0, focus: document.activeElement?.className }; });
+        return { open: d.open, x: r.x, y: r.y, w: r.width, h: r.height, vw, vh: innerHeight, pres: [...d.querySelectorAll("pre")].map((q) => q.textContent.length), sideways: out, bodyScrolls: d.querySelector(".panel-b").scrollHeight > d.querySelector(".panel-b").clientHeight, state: history.state?.sheet ?? 0, focus: document.activeElement?.className }; });
       R.sheet.previewPres = expected;
       await page.screenshot({ path: path.join(ENV.out, "v-sheet.png") });
-      await page.evaluate(() => { const b = document.querySelector(".viewer .vb"); b.scrollTop = b.scrollHeight; }); await page.waitForTimeout(200); await page.screenshot({ path: path.join(ENV.out, "v-sheet-end.png") });
+      await page.evaluate(() => { const b = document.querySelector("dialog.panel.full .panel-b"); b.scrollTop = b.scrollHeight; }); await page.waitForTimeout(200); await page.screenshot({ path: path.join(ENV.out, "v-sheet-end.png") });
       // Back closes it and keeps the page as it was (still expanded, same route).
       await page.goBack(); await page.waitForTimeout(350);
-      R.afterBack = await page.evaluate((h) => ({ dialog: !!document.querySelector("dialog.viewer"), sameState: JSON.stringify(history.state) === h, stepsStillOpen: document.querySelectorAll('.step > button[aria-expanded="true"]').length, htmlLock: document.documentElement.classList.contains("viewer-open") }), hashBefore);
+      R.afterBack = await page.evaluate((h) => ({ dialog: !!document.querySelector("dialog.panel.full"), sameState: JSON.stringify(history.state) === h, stepsStillOpen: document.querySelectorAll('.step > button[aria-expanded="true"]').length, htmlLock: document.documentElement.classList.contains("panel-open") }), hashBefore);
       // The close button, then Escape, each restore the same history entry.
-      await page.locator(".viewall:visible").first().click(); await page.waitForTimeout(250); await page.click(".viewer .vclose"); await page.waitForTimeout(350);
-      R.afterClose = await page.evaluate((h) => ({ dialog: !!document.querySelector("dialog.viewer"), sameState: JSON.stringify(history.state) === h, stepsStillOpen: document.querySelectorAll('.step > button[aria-expanded="true"]').length }), hashBefore);
+      await page.locator(".viewall:visible").first().click(); await page.waitForTimeout(250); await page.click("dialog.panel.full .panel-h .ibtn"); await page.waitForTimeout(350);
+      R.afterClose = await page.evaluate((h) => ({ dialog: !!document.querySelector("dialog.panel.full"), sameState: JSON.stringify(history.state) === h, stepsStillOpen: document.querySelectorAll('.step > button[aria-expanded="true"]').length }), hashBefore);
       await page.locator(".viewall:visible").first().click(); await page.waitForTimeout(250); await page.keyboard.press("Escape"); await page.waitForTimeout(350);
-      R.afterEsc = await page.evaluate((h) => ({ dialog: !!document.querySelector("dialog.viewer"), sameState: JSON.stringify(history.state) === h, stepsStillOpen: document.querySelectorAll('.step > button[aria-expanded="true"]').length }), hashBefore);
+      R.afterEsc = await page.evaluate((h) => ({ dialog: !!document.querySelector("dialog.panel.full"), sameState: JSON.stringify(history.state) === h, stepsStillOpen: document.querySelectorAll('.step > button[aria-expanded="true"]').length }), hashBefore);
     }
     }
     R.phoneErrors = page.errors;
@@ -105,10 +105,10 @@ export default async function viewerCheck(browser) {
     r.expect(R.sample.viewAll > 0, "no View all button on the sample harbor lane's first expanded step");
     if (R.sample.viewAll) {
       await page.locator(".viewall:visible").first().click(); await page.waitForTimeout(300);
-      R.desk = await page.evaluate(() => { const r = document.querySelector("dialog.viewer").getBoundingClientRect(); return { x: Math.round(r.x), w: Math.round(r.width), h: Math.round(r.height), vh: innerHeight, vw: document.documentElement.clientWidth }; });
+      R.desk = await page.evaluate(() => { const r = document.querySelector("dialog.panel.full").getBoundingClientRect(); return { x: Math.round(r.x), w: Math.round(r.width), h: Math.round(r.height), vh: innerHeight, vw: document.documentElement.clientWidth }; });
       await page.screenshot({ path: path.join(ENV.out, "v-desk.png") });
       await page.mouse.click(40, 40); await page.waitForTimeout(250);
-      R.desk.closedByBackdrop = !(await page.$("dialog.viewer"));
+      R.desk.closedByBackdrop = !(await page.$("dialog.panel.full"));
     }
     R.deskErrors = page.errors;
     await page.context().close();

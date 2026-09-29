@@ -113,6 +113,9 @@ export function overhaulPortReference(D, html) {
   out = swapFunction(out, "costForSessions", COST_FUNCTION);
   // The served model gives a thought's seconds itself.
   out = swapFunction(out, "thoughtSeconds", "  function thoughtSeconds(entries, i, sid) { const secs = entries[i]?.secs; return Number.isFinite(secs) && secs >= 0 ? secs : null; }");
+  // The mockup sets inline code in a transcript at .86em of 13px (11.2px), under the 12px floor its own principle P3 sets (and
+  // the tokens check enforces); the viewer floors it at the caption size, so the reference does too.
+  out = swapLine(out, ".body code, .cc-brief code, .ev-text code, .ib code { font-size: .86em;", ".body code, .cc-brief code, .ev-text code, .ib code { font-size: max(.86em, var(--fs-cap)); background: color-mix(in srgb, var(--ink) 6%, transparent); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }");
   // Until the sidebar's port (PR 4), the viewer's sidebar is 296px wide and the mockup's 272px. The regions compare parts of the main
   // column, so the reference takes the viewer's width; PR 4 removes this.
   const styleEnd = out.lastIndexOf("</style>");

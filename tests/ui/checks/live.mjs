@@ -147,7 +147,7 @@ async function updated(page, before, limit = 4000) {
   await sleep(700); return page.updates > before;
 }
 const openKeys = (page) => page.evaluate(() => [...document.querySelectorAll("#page [data-e]")].filter((n) => {
-  const t = n.matches(".step") ? n.querySelector(":scope > button") : n.matches(".tgroup") ? n.querySelector(":scope > .tsum") : n.matches(".child-work") ? n.querySelector(":scope > .cw-toggle") : null;
+  const t = n.matches(".step") ? n.querySelector(":scope > button") : n.matches(".tgroup") ? n.querySelector(":scope > .tsum") : null;
   return t?.getAttribute("aria-expanded") === "true"; }).map((n) => n.dataset.e));
 const topOf = (page, sel) => page.evaluate((sel) => document.querySelector(sel)?.getBoundingClientRect().top ?? null, sel);
 const byKey = (k) => '[data-e="' + k.replace(/["\\]/g, "\\$&") + '"]';
@@ -170,12 +170,12 @@ async function scheme(browser, name, opts, r, protocol) {
 
     // ---- Set up the views ----
     // harbor: every group, every step and the first child work open; scrolled to 40%.
-    await S.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll('.cw-toggle[aria-expanded="false"]').forEach((x) => x.click()); });
+    await S.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); });
     await S.evaluate(() => document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()));
     await S.evaluate(() => document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => x.click()));
     const open0 = await openKeys(S);
-    R.opened = { steps: open0.filter((k) => !k.startsWith("g:") && !k.startsWith("cw:")).length, groups: open0.filter((k) => k.startsWith("g:")).length, childWork: open0.filter((k) => k.startsWith("cw:")).length };
-    r.expect(R.opened.steps >= 3 && R.opened.groups >= 1 && R.opened.childWork >= 2, name + ": harbor didn't open steps, a group and child work to watch: " + JSON.stringify(R.opened));
+    R.opened = { steps: open0.filter((k) => !k.startsWith("g:")).length, groups: open0.filter((k) => k.startsWith("g:")).length };
+    r.expect(R.opened.steps >= 3 && R.opened.groups >= 1, name + ": harbor didn't open steps and a group to watch: " + JSON.stringify(R.opened));
     const live0 = await S.evaluate(() => document.querySelector('.step.live[data-live="harbor"]')?.dataset.e ?? null);
     r.expect(!!live0, name + ": harbor shows no running step");
     const mainBox = await S.locator("#main").boundingBox();
@@ -184,7 +184,7 @@ async function scheme(browser, name, opts, r, protocol) {
     R.room = await S.evaluate(() => { const s = window.__sc(); s.scrollTop = Math.round((s.scrollHeight - s.clientHeight) * 0.4); return window.__left(); });
     r.expect(R.room > 200, name + ": harbor isn't long enough to scroll up from its end: " + R.room);
     await sleep(150);
-    const anchor = await S.evaluate(() => { const line = window.__line(); const n = [...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .divider, .thought)[data-e]")].find((x) => { const b = x.getBoundingClientRect(); return b.height && b.top >= line; }); return n ? { e: n.dataset.e, top: n.getBoundingClientRect().top } : null; });
+    const anchor = await S.evaluate(() => { const line = window.__line(); const n = [...document.querySelectorAll("#page .turns :is(.msg, .step, .event, .child-card, .bubble, .divider, .thought, .think)[data-e]")].find((x) => { const b = x.getBoundingClientRect(); return b.height && b.top >= line; }); return n ? { e: n.dataset.e, top: n.getBoundingClientRect().top } : null; });
     r.expect(!!anchor, name + ": no block in view on harbor");
     // Analytics: select a range and keep its figures present while the other live views change.
     await AN.click('.analytics-range button:has-text("30 d")');
@@ -206,7 +206,7 @@ async function scheme(browser, name, opts, r, protocol) {
     for (const p of pages) await p.evaluate(() => window.__live.reset());
 
     // ---- 1. harbor's running call returns, and it says something; the reader is scrolled up ----
-    const beforeEntries = await S.evaluate(() => [...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .thought, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
+    const beforeEntries = await S.evaluate(() => [...document.querySelectorAll("#page .turns :is(.msg, .step, .event, .child-card, .bubble, .think, .think-pending)[data-e]")].map((n) => n.dataset.e));
     let t0 = Date.now();
     harbor.append(harbor.result(at(12, 41), "toolu-b3", "test result: ok. 214 passed; 0 failed"), harbor.think(at(12, 41, 2), THOUGHT), harbor.text(at(12, 41, 5), MESSAGE));
     R.message = await appear(S, t0, (m) => [...document.querySelectorAll("#page .msg.assistant")].some((x) => x.textContent.includes(m)), MESSAGE);
@@ -220,24 +220,25 @@ async function scheme(browser, name, opts, r, protocol) {
     const open1 = new Set(await openKeys(S));
     R.stillOpen1 = open0.filter((k) => !open1.has(k));
     r.expect(R.stillOpen1.length === 0, name + ": closed by the update: " + R.stillOpen1.join(", "));
-    R.jump = await S.evaluate((before) => { const p = document.querySelector(".jump-bottom"); if (!p || p.hidden) return null; const b = p.getBoundingClientRect(), keys = new Set([...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .thought, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e)); return { text: p.textContent.trim(), added: [...keys].filter((key) => !before.includes(key)).length, w: b.width, h: b.height, top: b.top, left: b.left, right: b.right, bottom: b.bottom, vw: document.documentElement.clientWidth, vh: innerHeight }; }, beforeEntries);
-    // The new thought is an entry like any other: it counts toward "N new" (the message and the thought make at least two).
-    R.thought = await S.evaluate((t) => { const n = [...document.querySelectorAll("#page .turns .thought[data-e]")].find((x) => x.querySelector(".think-text")?.textContent.includes(t)); return n ? { key: n.dataset.e, open: !n.querySelector("button, [hidden]") } : null; }, THOUGHT);
-    r.expect(!!R.thought && R.thought.open && !beforeEntries.includes(R.thought.key), name + ": harbor's new thought did not appear in full, or was already counted: " + JSON.stringify(R.thought));
+    R.jump = await S.evaluate((before) => { const p = document.querySelector("#jump-bottom"); if (!p || p.closest(".jump-wrap")?.hidden) return null; const b = p.getBoundingClientRect(), keys = new Set([...document.querySelectorAll("#page .turns :is(.msg, .step, .event, .child-card, .bubble, .think, .think-pending)[data-e]")].map((n) => n.dataset.e)); return { text: p.textContent.trim(), added: [...keys].filter((key) => !before.includes(key)).length, w: b.width, h: b.height, top: b.top, left: b.left, right: b.right, bottom: b.bottom, vw: document.documentElement.clientWidth, vh: innerHeight }; }, beforeEntries);
+    // The new thought is an entry like any other: it counts toward "N new" (the message and the thought make at least two). The overhaul draws it as a "Thought for Ns" row that opens the text.
+    R.thought = await S.evaluate((t) => { const g = [...document.querySelectorAll("#page .turns .thought")].find((x) => x.querySelector(".think-text")?.textContent.includes(t)); const b = g?.querySelector("button.think[data-e]"); return b ? { key: b.dataset.e, collapsed: b.getAttribute("aria-expanded") === "false" } : null; }, THOUGHT);
+    r.expect(!!R.thought && !beforeEntries.includes(R.thought.key), name + ": harbor's new thought did not appear as a row, or was already counted: " + JSON.stringify(R.thought));
     r.expect(R.jump && R.jump.added >= 2, name + ": the new thought and message should both count as new: " + JSON.stringify(R.jump));
     const jumpCount = R.jump && /^([1-9]\d*) new$/.exec(R.jump.text);
     r.expect(!!jumpCount && Number(jumpCount[1]) === R.jump.added, name + ": jump button count didn't match newly rendered entries: " + JSON.stringify(R.jump));
     if (R.jump) r.expect(R.jump.w >= 40 && R.jump.h >= 40 && R.jump.top >= 0 && R.jump.left >= 0 && R.jump.right <= R.jump.vw + 0.5 && R.jump.bottom <= R.jump.vh, name + ": the jump button is off screen or under 40 px: " + JSON.stringify(R.jump));
     await S.screenshot({ path: path.join(ENV.out, "live-" + name + "-jump.png") });
-    await S.click(".jump-bottom"); await S.waitForFunction(() => window.__left() <= 1, null, { timeout: 5000 });
-    R.afterJump = await S.evaluate(() => ({ hidden: document.querySelector(".jump-bottom")?.hidden, left: window.__left() }));
+    await S.click("#jump-bottom"); await S.waitForFunction(() => window.__left() <= 1, null, { timeout: 5000 });
+    R.afterJump = await S.evaluate(() => ({ hidden: document.querySelector(".jump-wrap")?.hidden, left: window.__left() }));
     r.expect(R.afterJump.hidden && R.afterJump.left <= 1, name + ": tapping the jump button didn't go to the end: " + JSON.stringify(R.afterJump));
 
     // ---- 2. a new call while the reader is at the end: pinned, ticking, then finished ----
-    // Child work closed with steps open inside it keeps them through a redraw of its turn.
-    const inner0 = await S.evaluate(() => { const w = document.querySelector('.child-work[data-e] > .cw-toggle[aria-expanded="true"]').parentElement;
-      const keys = [...w.querySelectorAll('.step[data-e] > button[aria-expanded="true"]')].map((b) => b.parentElement.dataset.e); w.querySelector(":scope > .cw-toggle").click(); return { cw: w.dataset.e, keys }; });
-    r.expect(inner0.keys.length >= 1, name + ": no step open inside child work to close it over");
+    // A group closed with steps open inside it keeps them through a redraw of its turn.
+    const inner0 = await S.evaluate(() => { const w = [...document.querySelectorAll('.tgroup[data-e]')].find((g) => g.querySelector(':scope > .steps .step[data-e] > button[aria-expanded="true"]') && g.querySelector(':scope > .tsum[aria-expanded="true"]'));
+      if (!w) return { cw: null, keys: [] };
+      const keys = [...w.querySelectorAll('.step[data-e] > button[aria-expanded="true"]')].map((b) => b.parentElement.dataset.e); w.querySelector(":scope > .tsum").click(); return { cw: w.dataset.e, keys }; });
+    r.expect(inner0.keys.length >= 1, name + ": no step open inside a group to close it over");
     await sleep(200); const top1 = await S.evaluate(() => window.__sc().scrollTop);
     t0 = Date.now();
     harbor.append(harbor.tool(at(12, 42), "toolu-live1", "Bash", { command: "sleep 30 && echo live", description: "Wait" }));
@@ -245,12 +246,12 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.call != null, name + ": the new call didn't appear within 4 s");
     await sleep(300);
     const live1 = await S.evaluate(() => [...document.querySelectorAll(".step.live")].find((x) => x.querySelector(".sa")?.textContent.includes("sleep 30"))?.dataset.e ?? null);
-    R.pinned = await S.evaluate(() => ({ hidden: document.querySelector(".jump-bottom")?.hidden, left: window.__left(), top: window.__sc().scrollTop }));
+    R.pinned = await S.evaluate(() => ({ hidden: document.querySelector(".jump-wrap")?.hidden, left: window.__left(), top: window.__sc().scrollTop }));
     R.pinned.before = top1;
     r.expect(R.pinned.hidden && R.pinned.left <= 1 && R.pinned.top > top1, name + ": not kept at the end: " + JSON.stringify(R.pinned));
-    R.innerKept = await S.evaluate(({ cw, keys }) => { const w = document.querySelector('.child-work[data-e="' + cw + '"]'), t = w.querySelector(":scope > .cw-toggle"), closed = t.getAttribute("aria-expanded") === "false"; t.click();
+    R.innerKept = await S.evaluate(({ cw, keys }) => { const w = [...document.querySelectorAll('.tgroup[data-e]')].find((g) => g.dataset.e === cw), t = w.querySelector(":scope > .tsum"), closed = t.getAttribute("aria-expanded") === "false"; t.click();
       return { closed, open: keys.filter((k) => w.querySelector('.step[data-e="' + k + '"] > button')?.getAttribute("aria-expanded") === "true").length, of: keys.length }; }, inner0);
-    r.expect(R.innerKept.closed && R.innerKept.open === R.innerKept.of, name + ": steps open inside closed child work didn't survive the redraw: " + JSON.stringify(R.innerKept));
+    r.expect(R.innerKept.closed && R.innerKept.open === R.innerKept.of, name + ": steps open inside a closed group didn't survive the redraw: " + JSON.stringify(R.innerKept));
     const sd = () => S.evaluate((k) => document.querySelector('.step.live[data-e="' + k + '"] .sd')?.textContent ?? null, live1);
     const tickA = await sd(); await sleep(2500); const tickB = await sd();
     R.ticks = [tickA, tickB];
@@ -273,8 +274,8 @@ async function scheme(browser, name, opts, r, protocol) {
 
     // ---- 3. a subagent starts while View all is open ----
     await S.locator(".viewall:visible").first().click();
-    await S.waitForFunction(() => document.querySelector("dialog.viewer")?.open === true);
-    const sheet0 = await S.evaluate(() => document.querySelector("dialog.viewer").textContent);
+    await S.waitForFunction(() => document.querySelector("dialog.panel.full")?.open === true);
+    const sheet0 = await S.evaluate(() => document.querySelector("dialog.panel.full").textContent);
     t0 = Date.now();
     harbor.append(harbor.tool(at(12, 43), "toolu-live2", "Agent", { description: "Live reviewer", subagent_type: "general-purpose", prompt: BRIEF, run_in_background: true }),
       harbor.result(at(12, 43, 0, 500), "toolu-live2", "Async agent launched successfully.", { toolUseResult: { status: "async_launched", agentId: "live-sub" } }));
@@ -296,35 +297,36 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(!!spawn, name + ": the model has no spawn to live-sub within 4 s");
     r.expect(R.spawnMs != null && R.spawnMs <= 2500, name + ": the spawn reached the served model after " + R.spawnMs + " ms, over the server's bound (2.5 s)");
     await sleep(Math.max(0, 4500 - (Date.now() - t0)));
-    R.underSheet = await S.evaluate((id) => ({ open: document.querySelector("dialog.viewer")?.open === true, text: document.querySelector("dialog.viewer")?.textContent, card: !!document.querySelector('.hcard[data-h="' + id + '"]') }), spawn?.id ?? "");
+    R.underSheet = await S.evaluate((id) => ({ open: document.querySelector("dialog.panel.full")?.open === true, text: document.querySelector("dialog.panel.full")?.textContent, card: !!document.querySelector('.child-card[data-h="' + id + '"]') }), spawn?.id ?? "");
     r.expect(R.underSheet.open && R.underSheet.text === sheet0, name + ": the View all sheet changed while open");
     r.expect(!R.underSheet.card, name + ": the page under the View all sheet was redrawn while it was open");
     delete R.underSheet.text;
-    t0 = Date.now(); await S.click(".viewer .vclose");
-    R.afterSheet = await appear(S, t0, (id) => { const c = document.querySelector('.hcard[data-h="' + id + '"]'); return !!c?.querySelector(".child-work"); }, spawn?.id ?? "", 2000);
-    r.expect(R.afterSheet != null, name + ": the subagent's card and child work didn't appear once the sheet closed");
+    t0 = Date.now(); await S.click("dialog.panel.full .panel-h .ibtn");
+    R.afterSheet = await appear(S, t0, (id) => !!document.querySelector('.child-card[data-h="' + id + '"]'), spawn?.id ?? "", 2000);
+    r.expect(R.afterSheet != null, name + ": the subagent's card didn't appear once the sheet closed");
     const open3 = new Set(await openKeys(S));
     R.stillOpen3 = open0.filter((k) => k !== live0 && !open3.has(k));
     r.expect(R.stillOpen3.length === 0, name + ": closed by the updates: " + R.stillOpen3.join(", "));
 
-    // ---- 3b. open child work grows above the view: the new message shows in it, the view stays, one transcript is asked for ----
-    // The first block in view is the card after h-codex's open child work (h-review's), its top 10 px under the bar; the
-    // Codex run then says something, so its child work grows above the view. Plenty of the turn is below it.
+    // ---- 3b. a child card above the view changes: the card shows it, the view stays, no transcript is asked for ----
+    // The first block in view is the second child card (h-review's), its top 10 px under the bar; the Codex run above it then
+    // makes a call, so its card (steps, current call) changes above the view. Plenty of the turn is below it.
     await S.setViewportSize({ width: opts.size === "phone" ? 390 : 1280, height: 480 }); await sleep(200);
-    const above = await S.evaluate(() => { const cards = [...document.querySelectorAll("#page .turns .hcard.child-card")].filter((x) => !x.closest(".cw-body")), cws = cards.map((x) => x.querySelector(":scope .child-work")).filter(Boolean), n = cards[1];
+    const cardsText = () => S.evaluate(() => [...document.querySelectorAll("#page .turns .child-card")].map((x) => x.textContent).join("|"));
+    const above = await S.evaluate(() => { const cards = [...document.querySelectorAll("#page .turns .child-card")], n = cards[1];
       const s = window.__sc(); s.scrollTop += n.getBoundingClientRect().top - window.__line() + 10;
-      return { e: n.dataset.e, card: n.matches(".hcard"), off: n.getBoundingClientRect().top - window.__line(), left: window.__left(), cw: cws[0].querySelector(":scope > .cw-toggle").getAttribute("aria-expanded") === "true" }; });
-    r.expect(above.card && Math.abs(above.off + 10) < 1.5 && above.left > 80 && above.cw, name + ": couldn't put the card under open child work at the top, away from the end: " + JSON.stringify(above));
-    await sleep(200); const aboveTop = await topOf(S, byKey(above.e)); txs = S.txs.length;
+      return { e: n.dataset.e, card: n.matches(".child-card"), off: n.getBoundingClientRect().top - window.__line(), left: window.__left(), cards: cards.length }; });
+    r.expect(above.card && above.cards >= 2 && Math.abs(above.off + 10) < 1.5 && above.left > 80, name + ": couldn't put the second child card at the top, away from the end: " + JSON.stringify(above));
+    await sleep(200); const aboveTop = await topOf(S, byKey(above.e)); txs = S.txs.length; const cards0 = await cardsText();
     const rollout = path.join(dir, "codex/sessions/2026/09/28", fs.readdirSync(path.join(dir, "codex/sessions/2026/09/28")).find((f) => f.endsWith("-h-codex.jsonl")));
     t0 = Date.now();
-    fs.appendFileSync(rollout, JSON.stringify({ timestamp: iso(at(12, 43, 30)), type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Live check: the child's new note." }] } }) + "\n");
-    R.childNote = await appear(S, t0, () => [...document.querySelectorAll("#page .cw-body .msg")].some((x) => x.textContent.includes("the child's new note")));
-    r.expect(R.childNote != null, name + ": the child's new message didn't appear in its open child work within 4 s");
+    fs.appendFileSync(rollout, JSON.stringify({ timestamp: iso(at(12, 43, 30)), type: "response_item", payload: { type: "function_call", name: "shell", arguments: JSON.stringify({ command: ["echo", "child-live"] }), call_id: "call-child-live" } }) + "\n");
+    R.childNote = await appear(S, t0, (was) => [...document.querySelectorAll("#page .turns .child-card")].map((x) => x.textContent).join("|") !== was, cards0);
+    r.expect(R.childNote != null, name + ": the child card didn't change after its run made a call, within 4 s");
     await sleep(500);
     R.aboveMoved = (await topOf(S, byKey(above.e))) - aboveTop; R.childTx = S.txs.length - txs;
-    r.expect(Math.abs(R.aboveMoved) <= 1, name + ": harbor's view moved " + R.aboveMoved + " px when child work above it grew");
-    r.expect(R.childTx === 1, name + ": an update to one child asked for " + R.childTx + " transcripts: " + S.txs.slice(txs).join(" "));
+    r.expect(Math.abs(R.aboveMoved) <= 1, name + ": harbor's view moved " + R.aboveMoved + " px when a child card above it changed");
+    r.expect(R.childTx === 0, name + ": an update to one child asked for " + R.childTx + " transcripts: " + S.txs.slice(txs).join(" "));
     await S.setViewportSize(opts.size === "phone" ? { width: 390, height: 844 } : { width: 1280, height: 860 }); await sleep(200);
 
     // ---- 4. a relay, with harbor's find mode open and its "Messages" chip chosen ----
@@ -523,11 +525,11 @@ async function scheme(browser, name, opts, r, protocol) {
 
     // The same ending on a session page scrolled up, where the jump button shows: the note sits above it, not under it.
     await S.evaluate(() => { window.__sc().scrollTop = 0; });
-    await S.waitForFunction(() => { const b = document.querySelector(".jump-bottom"); return !!b && !b.hidden; }, null, { timeout: 5000 });
+    await S.waitForFunction(() => { const b = document.querySelector(".jump-wrap"); return !!b && !b.hidden; }, null, { timeout: 5000 });
     await S.route("**/api/model**", (q) => q.fulfill({ status: 403, contentType: "text/plain", body: "Forbidden" }));
     R.endedOnSession = await appear(S, Date.now(), (t) => document.querySelector(".livenote")?.textContent === t, ENDED, 8000);
     r.expect(R.endedOnSession != null, name + ": no \"" + ENDED + "\" note on the session page after a 403");
-    R.noteVsJump = await S.evaluate(() => { const n = document.querySelector(".livenote")?.getBoundingClientRect(), j = document.querySelector(".jump-bottom"), b = j?.getBoundingClientRect(); return n && b ? { jumpShown: !j.hidden, noteTop: n.top, noteBottom: n.bottom, noteLeft: n.left, noteRight: n.right, jumpTop: b.top, jumpBottom: b.bottom, jumpLeft: b.left, jumpRight: b.right, overlaps: n.left < b.right && n.right > b.left && n.top < b.bottom && n.bottom > b.top } : null; });
+    R.noteVsJump = await S.evaluate(() => { const n = document.querySelector(".livenote")?.getBoundingClientRect(), j = document.querySelector("#jump-bottom"), b = j?.getBoundingClientRect(); return n && b ? { jumpShown: !j.closest(".jump-wrap").hidden, noteTop: n.top, noteBottom: n.bottom, noteLeft: n.left, noteRight: n.right, jumpTop: b.top, jumpBottom: b.bottom, jumpLeft: b.left, jumpRight: b.right, overlaps: n.left < b.right && n.right > b.left && n.top < b.bottom && n.bottom > b.top } : null; });
     r.expect(!!R.noteVsJump && R.noteVsJump.jumpShown && !R.noteVsJump.overlaps, name + ": the ended note and the jump button overlap or the button was gone: " + JSON.stringify(R.noteVsJump));
     await S.screenshot({ path: path.join(ENV.out, "live-" + name + "-ended-session.png") });
 

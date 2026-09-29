@@ -105,7 +105,7 @@ code { overflow-wrap: anywhere; }
 .dot.read { background: transparent; box-shadow: inset 0 0 0 1.5px var(--faint); }
 .spin { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--line-2); border-top-color: var(--work); animation: spin .9s linear infinite; flex: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .spin { animation: none; } .sidebar, .scrim, .topbar { transition: none !important; } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } .sidebar, .scrim, .topbar, .chev, .turn { transition: none !important; } }
 .h-claude { --h: var(--claude); } .h-codex { --h: var(--codex); } .h-you { --h: var(--you); }
 .icon { width: 18px; height: 18px; flex: none; }
 
@@ -124,6 +124,8 @@ code { overflow-wrap: anywhere; }
 .search svg { width: 18px; height: 18px; flex: none; }
 .search input { flex: 1 1 auto; min-width: 0; border: 0; outline: none; background: transparent; padding: 0; color: var(--ink); }
 .search input::placeholder { color: var(--muted); }
+.state { display: inline-flex; align-items: center; gap: 6px; flex: none; white-space: nowrap; color: var(--ink-2); }
+.state.wait { color: var(--wait); } .state.err { color: var(--err); }
 .lab { display: inline-flex; align-items: center; gap: 5px; flex: none; min-width: 0; white-space: nowrap; }
 .topbar { position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; align-items: center; column-gap: 4px; min-height: 56px; padding: 6px 12px 6px 24px; background: var(--ground); border-bottom: 1px solid transparent; }
 .topbar.scrolled { border-bottom-color: var(--line); }
@@ -217,6 +219,9 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .find > svg { width: 18px; height: 18px; flex: none; margin-right: 8px; color: var(--muted); }
 .link { display: inline-flex; align-items: center; gap: 4px; min-height: var(--tap); border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-size: var(--fs-sm); text-align: left; }
 @media (hover: hover) { .link:hover { text-decoration: underline; text-underline-offset: 3px; } }
+.link svg { width: 16px; height: 16px; }
+.who-link { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-weight: 600; text-align: left; }
+@media (hover: hover) { .who-link:hover { text-decoration: underline; text-underline-offset: 3px; } }
 .run-row .chev, .disclose .chev { width: 16px; height: 16px; color: var(--faint); transition: transform .15s; }
 .disclose[aria-expanded="true"] > .chev { transform: rotate(90deg); }
 .panel-foot { flex: none; display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); }
@@ -229,6 +234,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   .find-chips { padding: 6px 4px 6px; }
   .chip { min-height: 36px; }
   .chip::before { content: ""; position: absolute; inset: -4px 0; }
+  .who-link { padding: 12px 0; margin: -12px 0; }
 }
 @media (max-width: 760px) {
   dialog.panel { position: fixed; inset: auto 0 0; width: 100%; max-width: none; max-height: 88vh; max-height: 88dvh; margin: 0; border-radius: 16px 16px 0 0; border-bottom: 0; }
@@ -248,8 +254,6 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 
 
 /* ---- The session: messages, steps and the sessions it started (docs/design/overhaul.md) ---- */
-.state { display: inline-flex; align-items: center; gap: 6px; flex: none; white-space: nowrap; color: var(--ink-2); }
-.state.wait { color: var(--wait); } .state.err { color: var(--err); }
 
 /* ---- Session: messages ------------------------------------------------------------------------------------ */
 .transcript { display: grid; grid-template-columns: minmax(0, 1fr); }
@@ -276,7 +280,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .page.wide-mode .bubble.in { max-width: 92%; }
 .msg.assistant .body { font: var(--fs-read)/1.5 var(--serif); color: var(--ink); }
 .body p { margin: 0 0 8px; } .body > :last-child { margin-bottom: 0; }
-.body code, .cc-brief code, .ev-text code, .ib code { font-size: .86em; background: color-mix(in srgb, var(--ink) 6%, transparent); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }
+.body code, .cc-brief code, .ev-text code, .ib code { font-size: max(.86em, var(--fs-cap)); background: color-mix(in srgb, var(--ink) 6%, transparent); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }
 .md p { margin: 0 0 8px; } .md ul, .md ol { margin: 0 0 8px; padding-left: 22px; } .md li + li { margin-top: 2px; }
 .md li > ul, .md li > ol { margin: 2px 0 0; } .md > :last-child, .md li > :last-child { margin-bottom: 0; }
 .md .mh { margin: 12px 0 4px; font-weight: 600; color: var(--ink); } .md .mh1 { font-size: 1.2em; } .md .mh2 { font-size: 1.1em; } .md > .mh:first-child { margin-top: 0; }
@@ -355,6 +359,8 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .ev-more { justify-self: start; margin: -8px 0 -6px; }
 .ev-result { font-size: var(--fs-sm); line-height: 1.45; color: var(--ink-2); overflow-wrap: anywhere; }
 .event .state { font-size: var(--fs-sm); }
+.divider { display: flex; align-items: center; gap: 10px; font-size: var(--fs-cap); color: var(--muted); }
+.divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); min-width: 16px; }
 .turn-end { display: flex; align-items: center; gap: 12px; min-height: var(--tap); margin: -6px 0 -8px; font-size: var(--fs-sm); }
 .turn-end .link { margin-left: auto; }
 
@@ -362,6 +368,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .jump-wrap { position: sticky; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 6; height: 0; display: flex; justify-content: center; pointer-events: none; }
 .jump { pointer-events: auto; transform: translateY(-100%); display: inline-flex; align-items: center; gap: 6px; height: 40px; min-width: 40px; border: 1px solid var(--line-2); border-radius: 20px; background: var(--raised); padding: 0 12px; color: var(--ink-2); font-size: var(--fs-sm); font-weight: 500; box-shadow: 0 4px 14px color-mix(in srgb, #000 12%, transparent); }
 .jump svg { width: 18px; height: 18px; }
+@media (max-width: 760px) { .jump { height: 44px; min-width: 44px; border-radius: 22px; } .out .io .link, .viewer-b .vs .link { min-height: 44px; margin: -12px 0; } }
 
 .viewer-b pre { margin: 0; padding: 10px 12px; border-radius: var(--r2); background: var(--sunken); font: 12.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
 .viewer-b pre.in { color: var(--ink); }
@@ -564,15 +571,8 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 /* What you answered, under a question that went to you. */
 .ib .ans { grid-column: 2 / 4; min-width: 0; font-size: var(--fs-sm); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Your message's time sits under it, right-aligned, as in a chat. */
-/* Images a prompt attached: thumbnails above its text, at most 200×160 with their shape kept; one the logs don't hold is a chip. */
-.attach-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
-.attach-row:last-child { margin-bottom: 4px; }
-.attach { display: block; min-width: 44px; min-height: 44px; max-width: 100%; padding: 0; border: 1px solid var(--line-2); border-radius: 10px; background: var(--sunken); overflow: hidden; cursor: zoom-in; }
-.attach:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.attach-img { display: block; max-width: 100%; object-fit: contain; } /* its width and height attributes are its box, loaded or not */
-.attach-img.unsized { width: 160px; height: 120px; object-fit: contain; }
-.attach-na { display: inline-flex; align-items: center; min-height: 32px; padding: 4px 10px; border: 1px dashed var(--line-2); border-radius: 10px; font-size: var(--fs-sm); color: var(--muted); }
-.chev { width: 14px; height: 14px; flex: none; }
+.chev { width: 16px; height: 16px; flex: none; color: var(--faint); transition: transform .15s; }
+[aria-expanded="true"] > .chev, [aria-expanded="true"] .chev.turns { transform: rotate(90deg); }
 .cutgap { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 4px 12px; font-size: var(--fs-cap); text-align: center; color: var(--muted); }
 .cutgap::before, .cutgap::after { content: ""; flex: 1 1 12px; border-top: 1px dashed var(--line); }
 .viewer .cutout { display: grid; gap: 4px; }

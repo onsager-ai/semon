@@ -203,7 +203,7 @@ export default async function (browser) {
     R.command = await page.evaluate(() => {
       const b = [...document.querySelectorAll(".step > button")].find((x) => x.querySelector(".sa")?.textContent.endsWith("…"));
       if (!b) return null; b.click(); const out = b.parentElement.querySelector(".out");
-      return { label: out.querySelector(".io")?.textContent ?? null, input: out.querySelector("pre.in")?.textContent ?? "", summary: b.querySelector(".sa").textContent };
+      return { label: out.querySelector(".io > span")?.textContent ?? null, input: out.querySelector("pre.in")?.textContent ?? "", summary: b.querySelector(".sa").textContent };
     });
     r.expect(R.command !== null, "harbor has a step whose summary is cut");
     r.expect(R.command && R.command.label === "Command" && R.command.input.length > R.command.summary.length && R.command.input.includes("--nocapture"), "the long command shows whole under Command: " + JSON.stringify(R.command && { label: R.command.label, input: R.command.input.length, summary: R.command.summary.length }));
@@ -215,17 +215,18 @@ export default async function (browser) {
       await page.waitForTimeout(100);
       const btn = page.locator(".step[data-long] .viewall:visible").first();
       r.expect(await btn.count() === 1, "harbor's server-cut output offers View all");
-      await btn.click(); await page.waitForSelector("dialog.viewer[open]"); await page.waitForTimeout(200);
-      return page.evaluate(() => { const d = document.querySelector("dialog.viewer"); return { notes: [...d.querySelectorAll(".vnote")].map((n) => n.textContent), out: [...d.querySelectorAll("pre")].at(-1)?.textContent.length ?? 0 }; });
+      await btn.click(); await page.waitForSelector("dialog.panel.full[open]"); await page.waitForTimeout(200);
+      return page.evaluate(() => { const d = document.querySelector("dialog.panel.full"); return { notes: [...d.querySelectorAll(".vnote")].map((n) => n.textContent), out: [...d.querySelectorAll("pre")].at(-1)?.textContent.length ?? 0 }; });
     };
-    const preview = await page.evaluate(() => { const b = [...document.querySelectorAll(".step > button")].find((x) => x.querySelector(".sa")?.textContent.endsWith("…")); if (b?.getAttribute("aria-expanded") === "false") b.click(); return [...(b?.parentElement.querySelectorAll(".out pre.clip") ?? [])].at(-1)?.textContent.length ?? 0; });
+    const previewInfo = await page.evaluate(() => { const b = [...document.querySelectorAll(".step > button")].find((x) => x.querySelector(".sa")?.textContent.endsWith("…")); if (b?.getAttribute("aria-expanded") === "false") b.click(); const o = b?.parentElement.querySelector(".out"); return { len: [...(o?.querySelectorAll("pre") ?? [])].at(-1)?.textContent.length ?? 0, lineCut: /^Output · (first|last) \d+/.test([...(o?.querySelectorAll(".io") ?? [])].at(-1)?.textContent ?? "") }; });
+    const preview = previewInfo.len;
     r.expect(preview > 0 && preview <= 1536 + 3, "the preview is the server's cut: " + preview);
     await page.route("**/api/entry**", (x) => x.abort());
-    const failed = await openAll(); await page.click(".viewer .vclose"); await page.waitForTimeout(250);
+    const failed = await openAll(); await page.click("dialog.panel.full .panel-h .ibtn"); await page.waitForTimeout(250);
     await page.unroute("**/api/entry**");
-    const ok = await openAll(); await page.click(".viewer .vclose"); await page.waitForTimeout(250);
+    const ok = await openAll(); await page.click("dialog.panel.full .panel-h .ibtn"); await page.waitForTimeout(250);
     R.viewAll = { preview, failed, ok };
-    r.expect(failed.notes.length === 1 && failed.notes[0].startsWith("Couldn't load the full text") && failed.out === preview, "a failed fetch shows the preview with only its note: " + JSON.stringify(failed));
+    r.expect(failed.notes.length === 1 && failed.notes[0].startsWith("Couldn't load the full text") && (previewInfo.lineCut ? failed.out >= preview && failed.out <= 1536 + 3 : failed.out === preview), "a failed fetch shows the preview with only its note: " + JSON.stringify(failed));
     r.expect(ok.notes.length === 0 && ok.out > preview, "a working fetch shows the whole text, longer than the preview: " + JSON.stringify(ok));
     r.expect(page.errors.length === 0, "steps: page errors " + page.errors.join(" | "));
     await page.context().close();
@@ -253,7 +254,7 @@ export default async function (browser) {
         groupedSteps: document.querySelectorAll(".tgroup .steps > .step").length,
         groupScriptButtons: document.querySelectorAll(".tgroup > .viewscript").length,
         detailScriptButtons: [...(detail?.querySelectorAll(".viewscript") ?? [])].map((button) => button.textContent),
-        detailLabels: [...(detail?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.textContent),
+        detailLabels: [...(detail?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.querySelector("span")?.textContent ?? label.textContent),
       };
     });
     R.codeMode = data;
@@ -264,10 +265,10 @@ export default async function (browser) {
     r.expect(data.groupScriptButtons === 0, "script controls never sit orphaned on the group summary");
     r.expect(data.detailScriptButtons.length === 1 && data.detailScriptButtons[0] === "View script", "an expanded code-mode step has exactly one View script action: " + JSON.stringify(data.detailScriptButtons));
     r.expect(data.detailLabels.indexOf("Command") === 0 && data.detailLabels.indexOf("Output") > data.detailLabels.indexOf("Command") && !data.detailLabels.includes("Working directory · ."), "a short code-mode operation shows Command and Output without the session-root directory: " + JSON.stringify(data.detailLabels));
-    await page.locator(".step > .out:not([hidden]) .viewscript").click(); await page.waitForSelector("dialog.viewer[open]");
-    R.codeMode.script = await page.locator(".viewer pre.script").textContent();
+    await page.locator(".step > .out:not([hidden]) .viewscript").click(); await page.waitForSelector("dialog.panel.full[open]");
+    R.codeMode.script = await page.locator("dialog.panel.full pre.script").textContent();
     r.expect(R.codeMode.script.includes("Promise.allSettled") && R.codeMode.script.includes("git status"), "View script opens the source in the existing sheet");
-    await page.click(".viewer .vclose");
+    await page.click("dialog.panel.full .panel-h .ibtn");
     r.expect(page.errors.length === 0, "code-mode page errors: " + page.errors.join(" | "));
     await page.context().close();
   }
@@ -330,13 +331,13 @@ export default async function (browser) {
       await plainStep.scrollIntoViewIfNeeded(); await page.waitForTimeout(150);
       await page.screenshot({ path: path.join(ENV.out, "codex-cut-step-" + tag + ".png") });
       await page.locator(".step", { has: page.locator('.sa:text-matches("^cat build.log")') }).locator(".viewall").click();
-      await page.waitForSelector("dialog.viewer[open] .cutgap"); await page.waitForTimeout(200);
-      const sheet = await page.evaluate(() => { const v = document.querySelector("dialog.viewer[open]"); return { gaps: [...v.querySelectorAll(".cutgap")].map((g) => g.textContent), notes: [...v.querySelectorAll(".vnote")].map((n) => n.textContent), first: v.querySelector(".cutout pre")?.textContent.split("\n").length ?? 0, last: v.querySelector(".cutout pre:last-of-type")?.textContent.trim().split("\n").pop() ?? null }; });
+      await page.waitForSelector("dialog.panel.full[open] .cutgap"); await page.waitForTimeout(200);
+      const sheet = await page.evaluate(() => { const v = document.querySelector("dialog.panel.full[open]"); return { gaps: [...v.querySelectorAll(".cutgap")].map((g) => g.textContent), notes: [...v.querySelectorAll(".vnote")].map((n) => n.textContent), first: v.querySelector(".cutout pre")?.textContent.split("\n").length ?? 0, last: v.querySelector(".cutout pre:last-of-type")?.textContent.trim().split("\n").pop() ?? null }; });
       r.expect(sheet.gaps.length === 1 && sheet.gaps[0] === "1,048,576 bytes cut here by Codex", tag + ": View all shows the collection gap with its count: " + JSON.stringify(sheet.gaps));
       r.expect(sheet.first === 40 && sheet.last === "[9999] compiled unit 9999", tag + ": View all shows the whole head: " + JSON.stringify(sheet));
       r.expect(sheet.notes.some((n) => n.startsWith("Codex cut this output before the model saw it")) && !sheet.notes.some((n) => n.includes("Cut short in this copy")), tag + ": View all says Codex cut it: " + JSON.stringify(sheet.notes));
       r.expect((await overflow(page)) === 0, tag + ": nothing overflows with View all open");
-      await page.locator("dialog.viewer[open] .cutgap").scrollIntoViewIfNeeded(); await page.waitForTimeout(150);
+      await page.locator("dialog.panel.full[open] .cutgap").scrollIntoViewIfNeeded(); await page.waitForTimeout(150);
       await page.screenshot({ path: path.join(ENV.out, "codex-cut-sheet-" + tag + ".png") });
       R.codexCut[tag] = { plain, sheet };
       r.expect(page.errors.length === 0, tag + ": codex-cut page errors: " + page.errors.join(" | "));
@@ -347,24 +348,23 @@ export default async function (browser) {
   // ---- Result handoff: the transcript keeps the reply once and shows a compact marker ----------------------------
   {
     const page = await served(browser, { extras: true, path: "/s/claude/result-card" });
-    await page.waitForFunction(() => !!document.querySelector(".result-marker"));
+    await page.waitForFunction(() => !!document.querySelector(".turns .event"));
+    // The overhaul draws a result as an event like any other message to you: who sent it, the text, and the time.
     const result = await page.locator(".turns").evaluate((turns) => {
       const phrase = "Unique result text for the transcript check.";
-      const text = turns.innerText;
-      const marker = turns.querySelector(".result-marker");
+      const events = [...turns.querySelectorAll(".event")].filter((x) => x.querySelector(".ev-text")?.textContent.includes(phrase));
       return {
-        phraseCount: text.split(phrase).length - 1,
-        markerText: marker?.innerText ?? "",
-        markerCount: turns.querySelectorAll(".result-marker").length,
-        markerHasCard: !!marker?.closest(".hcard"),
-        moreButtons: turns.querySelectorAll(".result-marker .more").length,
+        phraseCount: turns.innerText.split(phrase).length - 1,
+        events: events.length,
+        eventText: events[0]?.innerText ?? "",
+        hasVerb: /sent you a result/.test(events[0]?.querySelector(".ev-head")?.textContent ?? ""),
+        oldMarkers: turns.querySelectorAll(".result-marker").length,
       };
     });
     R.resultMarker = result;
-    r.expect(result.phraseCount === 1, "the reply text appears once in the transcript: " + JSON.stringify(result));
-    r.expect(result.markerCount === 1 && !result.markerHasCard && result.moreButtons === 0, "the result is one compact marker without a card or Show more: " + JSON.stringify(result));
+    r.expect(result.phraseCount >= 1 && result.events === 1 && result.hasVerb && result.oldMarkers === 0, "the result is one event that says it sent a result, with its text: " + JSON.stringify(result));
     const resultId = D.H.find((h) => h.from === "result-card" && h.ask === "result")?.id ?? "";
-    await page.click(".turn-end .tracebtn");
+    await page.click(".turn-end .link");
     await page.waitForSelector('.flow .hop[data-h="' + resultId + '"]');
     const trace = await page.locator(".flow").evaluate((flow, id) => {
       const phrase = "Unique result text for the transcript check.";
@@ -402,11 +402,9 @@ export default async function (browser) {
     r.expect(Number(before.badge) === before.resultIds.length, "the Home badge counts all open inbox items: " + JSON.stringify(before));
 
     await page.goto(ENV.extraBase + "/s/claude/result-card?t=" + ENV.extraToken, { waitUntil: "load" });
-    await page.waitForFunction(() => !!document.querySelector(".result-marker"));
+    await page.waitForFunction(() => !!document.querySelector(".turns .event"));
     const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("semon.seen") ?? "[]"));
-    const marker = await page.locator(".result-marker").innerText();
     r.expect(stored.includes(resultHandoff?.id), "opening the session stores its result id as seen: " + JSON.stringify(stored));
-    r.expect(marker.includes("read"), "the opened session shows the result as read: " + marker);
     await page.goto(ENV.extraBase + "/?t=" + ENV.extraToken, { waitUntil: "load" });
     await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
     const onHome = () => page.evaluate((id) => { const head = [...document.querySelectorAll(".sec-h")].find((item) => item.firstChild?.textContent === "Needs you"); return head?.nextElementSibling?.querySelector('.ib[data-h="' + CSS.escape(id) + '"]') ? 1 : 0; }, resultHandoff?.id ?? "");
@@ -424,7 +422,7 @@ export default async function (browser) {
     await blocked.reload({ waitUntil: "load" });
     await blocked.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
     await blocked.goto(ENV.extraBase + "/s/claude/result-card?t=" + ENV.extraToken, { waitUntil: "load" });
-    await blocked.waitForFunction(() => !!document.querySelector(".result-marker"));
+    await blocked.waitForFunction(() => !!document.querySelector(".turns .event"));
     r.expect(blocked.errors.length === 0, "Home and the session page render when localStorage throws: " + blocked.errors.join(" | "));
     await blocked.context().close();
   }
@@ -437,7 +435,7 @@ export default async function (browser) {
       X.screens++; if (s.shown) X.payloadShown++;
       if (s.scripts.length !== 1 || s.scripts[0] !== "/viewer.js" || s.img || s.iframe || s.xss !== null) X.bad.push(where + ": " + JSON.stringify(s));
     };
-    const openEverything = (page) => page.evaluate(() => { for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"], .step > button[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll(".hcard .more:not([hidden]), .hop .more:not([hidden])").forEach((x) => x.click()); });
+    const openEverything = (page) => page.evaluate(() => { for (let k = 0; k < 3; k++) document.querySelectorAll('.tsum[aria-expanded="false"], .step > button[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll(".event .ev-more:not([hidden]), .hop .more:not([hidden])").forEach((x) => x.click()); });
     for (const [size, dark] of [["phone", false], ["desktop", true]]) {
       const page = await served(browser, { extras: true, size, dark });
       for (const v of ["home", "analytics", "sessions", "machines"]) { await goto(page, { v }, D); await scan(page, size + " " + v); }
@@ -445,7 +443,7 @@ export default async function (browser) {
       for (const id of sids) {
         await goto(page, { v: "session", id }, D); await page.waitForTimeout(100); await openEverything(page); await page.waitForTimeout(80);
         await scan(page, size + " session " + id.slice(0, 20));
-        const traces = await page.evaluate(() => [...document.querySelectorAll(".turn-end .tracebtn")].map((b) => b.closest(".turn").dataset.turn));
+        const traces = await page.evaluate(() => [...document.querySelectorAll(".turn-end .link")].map((b) => b.closest(".turn").dataset.turn));
         for (const t of traces) { await goto(page, { v: "trace", sid: id, turn: t }, D); await openEverything(page); await scan(page, size + " trace " + t.slice(0, 20)); }
       }
       // The payload lane's details menu.

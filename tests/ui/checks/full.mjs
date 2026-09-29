@@ -32,13 +32,13 @@ export default async function full(browser) {
 
   const openAll = () => page.evaluate(() => {
     const r = { steps: 0, withInput: 0, cutNoInput: 0, more: 0, moreFull: 0, moreStillClipped: 0, navigatedByMore: 0 };
-    for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"]').forEach((x) => x.click());
+    for (let k = 0; k < 3; k++) document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click());
     document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => { x.click(); r.steps++;
       const box = x.parentElement, arg = x.querySelector('.sa')?.textContent ?? '';
       if (box.querySelector('.out .io')) r.withInput++; else if (arg.endsWith('…')) r.cutNoInput++; });
     const before = location.href;
-    document.querySelectorAll('.hcard .more').forEach((m) => { if (m.hidden) return; r.more++; m.click();
-      const br = m.parentElement.querySelector('.brief'); if (br.scrollHeight <= br.clientHeight + 1) r.moreFull++; else r.moreStillClipped++; });
+    document.querySelectorAll('.event .ev-more').forEach((m) => { if (m.hidden) return; r.more++; m.click();
+      const br = m.parentElement.querySelector('.ev-text'); if (br.scrollHeight <= br.clientHeight + 1) r.moreFull++; else r.moreStillClipped++; });
     if (location.href !== before) r.navigatedByMore++;
     return r;
   });
@@ -56,10 +56,10 @@ export default async function full(browser) {
   for (const id of lanes) {
     await openLane(id);
     add(await openAll()); await page.waitForTimeout(60); T.screens++; if (await over()) T.overflowScreens++;
-    const tt = await page.evaluate(() => [...document.querySelectorAll(".turn-end .tracebtn")].map((b) => b.closest(".turn").dataset.turn));
+    const tt = await page.evaluate(() => [...document.querySelectorAll(".turn-end .link")].map((b) => b.closest(".turn").dataset.turn));
     for (const t of tt) {
       await openLane(id);
-      await page.click('.turn[data-turn="' + t + '"] > .turn-end .tracebtn');
+      await page.click('.turn[data-turn="' + t + '"] > .turn-end .link');
       await afterTitle(page, "Trace"); await page.waitForTimeout(150); T.traces++;
       const rr = await page.evaluate(() => { let n = 0, c = 0; document.querySelectorAll(".hop .more:not([hidden])").forEach((m) => { n++; m.click(); const br = m.parentElement.querySelector(".brief"); if (br.scrollHeight > br.clientHeight + 1) c++; }); return [n, c]; });
       T.hopMore += rr[0]; T.hopMoreStillClipped += rr[1]; await page.waitForTimeout(60); T.screens++; if (await over()) T.overflowScreens++;
@@ -71,7 +71,7 @@ export default async function full(browser) {
   await page.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); });
   const st = page.locator('.step > button:has(.sa:text-matches("…$"))').first();
   if (await st.count()) { await st.click(); await st.scrollIntoViewIfNeeded(); await page.evaluate(() => window.scrollBy(0, -120)); await page.waitForTimeout(400); await page.screenshot({ path: path.join(ENV.out, "full-step.png") }); }
-  const mo = page.locator(".hcard .more:visible").first();
+  const mo = page.locator(".event .ev-more:visible").first();
   if (await mo.count()) { await mo.click(); await mo.scrollIntoViewIfNeeded(); await page.evaluate(() => window.scrollBy(0, -300)); await page.waitForTimeout(400); await page.screenshot({ path: path.join(ENV.out, "full-relay.png") }); }
 
   // A spawn card's brief opens to its full height and pushes what follows it down. Its text is replaced with a long one and its
