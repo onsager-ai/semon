@@ -267,6 +267,78 @@ fn turns_of<'a>(built: &'a Built, sid: &str) -> Vec<&'a Turn> {
     built.turns.iter().filter(|turn| turn.sid == sid).collect()
 }
 
+/// The Session details summary (`tokens`) and its per-model table (`tokens_by_model`, and the
+/// cost table's token counts) come from the same billed messages, so they add up to one total:
+/// in = input + cache write, cached = cache read, out = output.
+#[test]
+fn session_tokens_equal_the_sums_of_the_per_model_rows() {
+    let home = Home::new();
+    let mut unnamed = assistant_usage(
+        "claude-sums",
+        ts(1, 2),
+        "message-3",
+        "unused",
+        json!({"input_tokens":50_000,"cache_creation_input_tokens":5_000,
+            "cache_read_input_tokens":400_000,"output_tokens":7_000}),
+    );
+    // A usage report that names no model still counts.
+    unnamed["message"].as_object_mut().unwrap().remove("model");
+    home.top(
+        "claude-sums",
+        &[
+            assistant_usage(
+                "claude-sums",
+                ts(1, 0),
+                "message-1",
+                "claude-opus-5-5",
+                json!({"input_tokens":90_000,"cache_creation_input_tokens":19_000,
+                    "cache_read_input_tokens":29_000,"output_tokens":39_000}),
+            ),
+            // The same message streamed again: it counts once, as this last report.
+            assistant_usage(
+                "claude-sums",
+                ts(1, 1),
+                "message-1",
+                "claude-opus-5-5",
+                json!({"input_tokens":100_000,"cache_creation_input_tokens":20_000,
+                    "cache_read_input_tokens":30_000,"output_tokens":40_000}),
+            ),
+            unnamed,
+        ],
+    );
+
+    let built = home.build();
+    let session = &built.sessions["claude-sums"];
+    let (mut input, mut cache_write, mut cache_read, mut output) = (0, 0, 0, 0);
+    for row in session.tokens_by_model.values() {
+        input += row.input;
+        cache_write += row.cache_write;
+        cache_read += row.cache_read;
+        output += row.output;
+    }
+    let million = |value: u64| (value as f64 / 1e6 * 1000.0).round() / 1000.0;
+    assert_eq!(
+        session.tokens,
+        [
+            million(input + cache_write),
+            million(cache_read),
+            million(output)
+        ]
+    );
+    assert_eq!(session.tokens, [0.175, 0.43, 0.047]);
+    // The cost table's token counts are the same numbers.
+    let (mut billed_input, mut billed_read, mut billed_output) = (0, 0, 0);
+    for row in session.cost.by_model.values() {
+        billed_input += row.tokens.input + row.tokens.cache_write_5m + row.tokens.cache_write_1h;
+        billed_read += row.tokens.cache_read;
+        billed_output += row.tokens.output;
+    }
+    assert_eq!(
+        (billed_input, billed_read, billed_output),
+        (input + cache_write, cache_read, output)
+    );
+}
+
 #[test]
 fn tokens_by_model_keep_claude_message_models_and_deduplicate_message_ids() {
     let home = Home::new();
