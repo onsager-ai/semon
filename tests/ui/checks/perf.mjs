@@ -103,6 +103,56 @@ async function waitPaint(page, marker) {
   }, marker, { timeout: 60_000, polling: "raf" });
 }
 
+async function checkLongSessionOpenEnd(page) {
+  const opened = await page.evaluate(async () => {
+    await document.fonts.ready;
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    return { top: sc.scrollTop, gap: sc.scrollHeight - sc.scrollTop - sc.clientHeight, jumpHidden: document.querySelector(".jump-bottom")?.hidden ?? true };
+  });
+  const main = await page.locator("#main").boundingBox();
+  await page.mouse.move(main ? main.x + Math.min(main.width / 2, 200) : 195, 300);
+  await page.mouse.wheel(0, await page.evaluate(() => innerHeight * 2));
+  await page.waitForFunction(() => {
+    const button = document.querySelector(".jump-bottom"), rect = button?.getBoundingClientRect();
+    return !!button && !button.hidden && !!rect && rect.width >= 40 && rect.height >= 40;
+  });
+  const raised = await page.evaluate(() => {
+    const button = document.querySelector(".jump-bottom"), rect = button.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect();
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    const composer = document.querySelector("#composer, .composer, [data-composer]")?.getBoundingClientRect();
+    const overlaps = (a, b) => !!a && !!b && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    return {
+      top: sc.scrollTop,
+      gap: sc.scrollHeight - sc.scrollTop - sc.clientHeight,
+      inside: rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
+      overlapsBar: overlaps(rect, bar),
+      overlapsComposer: overlaps(rect, composer),
+    };
+  });
+  await page.locator(".jump-bottom").click();
+  await page.waitForFunction(() => {
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    return sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 1;
+  }, null, { timeout: 10_000 });
+  const returnedGap = await page.evaluate(() => {
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    return sc.scrollHeight - sc.scrollTop - sc.clientHeight;
+  });
+  return {
+    openedGap: opened.gap,
+    jumpHiddenAtOpen: opened.jumpHidden,
+    scrollUpDistance: opened.top - raised.top,
+    raisedGap: raised.gap,
+    jumpInsideViewport: raised.inside,
+    overlapsBar: raised.overlapsBar,
+    overlapsComposer: raised.overlapsComposer,
+    returnedGap,
+    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && returnedGap <= 1,
+  };
+}
+
 function liveRecords({ sid, cwd, branch, sample, now }) {
   const records = [];
   let seq = 0;
@@ -152,6 +202,7 @@ async function runScreen(browser, screen, server, fixture) {
   const managedPages = new Set();
   const metrics = {
     coldOpen: { samplesMs: [], medianMs: null },
+    openAtEnd: null,
     switch: {
       marathonToRelay: { samplesMs: [], medianMs: null },
       relayToMarathon: { samplesMs: [], medianMs: null },
@@ -279,6 +330,10 @@ async function runScreen(browser, screen, server, fixture) {
     for (let i = 0; i < 3; i++) {
       const managed = await makePage();
       metrics.coldOpen.samplesMs.push(await openMarathon(managed));
+      if (i === 0) {
+        metrics.openAtEnd = await checkLongSessionOpenEnd(managed.page);
+        if (!metrics.openAtEnd.ok) failures.push(`long-session end pin/jump assertions failed: ${JSON.stringify(metrics.openAtEnd)}`);
+      }
       metrics.domSize.samples.push(await managed.page.evaluate(() => document.getElementsByTagName("*").length));
       if (i === 2) switchPage = managed;
       else await finishPage(managed);

@@ -343,7 +343,12 @@
     if (p[0] === "timeline" || p[0] === "analytics") return { v: "analytics" };
     if (p[0] === "sessions") return { v: "sessions" };
     if (p[0] === "machines") return p[1] && MACHINE[p[1]] ? { v: "machine", id: p[1] } : { v: "machines" };
-    if (p[0] === "s" && SESS[p[2]]) return turn ? { v: "session", id: p[2], turn } : { v: "session", id: p[2] };
+    if (p[0] === "s" && SESS[p[2]]) {
+      let fragment = ""; try { fragment = decodeURIComponent(loc.hash.slice(1)); } catch { fragment = loc.hash.slice(1); }
+      const fragmentTurn = TURN.get(fragment.split("#")[0]);
+      const targetTurn = turn ?? (fragmentTurn?.sid === p[2] ? fragmentTurn.id : null);
+      return targetTurn ? { v: "session", id: p[2], turn: targetTurn } : { v: "session", id: p[2] };
+    }
     if (p[0] === "trace" && SESS[p[2]] && p[3]) return { v: "trace", sid: p[2], turn: p[3] };
     return { v: "home" };
   }
@@ -351,10 +356,11 @@
     api("/api/model").then((m) => {
       adopt(m); route = routeOf(location); LIVE.version = m.version; remember(m);
       if (route.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
-      try { history.replaceState({ ...route, scrollTop: 0 }, "", urlOf(route)); } catch {}
+      try { history.replaceState({ ...route, scrollTop: 0 }, "", urlOf(route) + (route.v === "session" ? location.hash : "")); } catch {}
       const done = () => {
         render();
-        if (route.v === "session" && route.turn) revealTurn(route.turn, true);
+        if (route.v === "session" && route.turn) { revealTurn(route.turn, true); if (location.hash) requestAnimationFrame(() => requestAnimationFrame(revealEntryHash)); }
+        else if (route.v === "session" && location.hash) revealEntryHash();
         else if (route.v === "session") { openSessionAtEnd(); syncJump(); }
         else quietTop();
         schedule(2000); setInterval(ticker, 1000);
@@ -393,8 +399,9 @@
   window.addEventListener("scroll", queueScrollSave, { passive: true });
   $("#main").addEventListener("scroll", queueScrollSave, { passive: true });
   const quietTop = () => { if (phone.matches) window.scrollTo(0, 0); else $("#main").scrollTop = 0; };
-  const openSessionAtEnd = () => { if (phone.matches) window.scrollTo(0, document.documentElement.scrollHeight); else { const m = $("#main"); m.scrollTop = m.scrollHeight; } saveHistoryScroll(); };
+  function openSessionAtEnd() { if (location.hash) return; startOpeningEndPin(); }
   function go(r, fromHistory) {
+    stopOpeningEndPin();
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
@@ -405,7 +412,8 @@
       if (route !== r) return;
       render();
       if (fromHistory && Number.isFinite(r.scrollTop)) restoreScroll(r.scrollTop);
-      else if (r.v === "session" && r.turn) revealTurn(r.turn, !fromHistory);
+      else if (r.v === "session" && r.turn) { revealTurn(r.turn, !fromHistory); if (location.hash) requestAnimationFrame(() => requestAnimationFrame(revealEntryHash)); }
+      else if (r.v === "session" && location.hash) revealEntryHash();
       else if (r.v === "session") openSessionAtEnd();
       else quietTop();
       syncJump();
@@ -432,6 +440,16 @@
       syncJump(); saveHistoryScroll(); };
     place(); requestAnimationFrame(() => requestAnimationFrame(place));
     if (flash) { b.classList.add("flash"); setTimeout(() => b.classList.remove("flash"), 1500); }
+  }
+  function revealEntryHash() {
+    if (!location.hash) return;
+    let key = ""; try { key = decodeURIComponent(location.hash.slice(1)); } catch { key = location.hash.slice(1); }
+    const target = document.getElementById(key) ?? [...document.querySelectorAll("[data-e]")].find((n) => n.dataset.e === key) ?? [...document.querySelectorAll(".turn[data-turn]")].find((n) => n.dataset.turn === key);
+    if (!target) return;
+    const place = () => { if (!target.isConnected) return; const gap = $("#topbar").offsetHeight + 8;
+      if (phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + target.getBoundingClientRect().top - gap)); else { const m = $("#main"); m.scrollTop += target.getBoundingClientRect().top - m.getBoundingClientRect().top - gap; }
+      syncJump(); saveHistoryScroll(); };
+    place(); requestAnimationFrame(() => requestAnimationFrame(place));
   }
 
   // ---- Sidebar ----------------------------------------------------------------------------------
@@ -1062,9 +1080,7 @@
     const flush = () => {
       if (!run.length) return;
       const steps = el("div", "steps"); run.forEach((r) => steps.append(r.node));
-      const scripts = [], scriptKeys = new Set();
-      for (const r of run) if (r.entry?.script != null && !scriptKeys.has(String(r.entry.script))) { scriptKeys.add(String(r.entry.script)); scripts.push(r.entry); }
-      if ((run.length === 1 && !scripts.length) || find) { tx.append(steps); run = []; return; }
+      if (run.length === 1 || find) { tx.append(steps); run = []; return; }
       const counts = new Map(); for (const r of run) { const [, , p, one, many] = toolInfo(r.k), c = counts.get(p) ?? { n: 0, one, many }; c.n++; counts.set(p, c); }
       let text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
       text = text[0].toUpperCase() + text.slice(1);
@@ -1077,7 +1093,6 @@
       steps.hidden = true;
       b.addEventListener("click", () => { steps.hidden = !steps.hidden; b.setAttribute("aria-expanded", String(!steps.hidden)); });
       g.append(b);
-      for (const e of scripts) { const view = el("button", "viewscript", "View script"); view.type = "button"; view.addEventListener("click", () => openScript(e)); g.append(view); }
       g.append(steps); tx.append(g); run = [];
     };
     // A turn block: who started it, the work, and how it ended. While finding or filtering, a turn left with nothing drops out.
@@ -1114,10 +1129,11 @@
         const out = el("div", "out"); out.hidden = true;
         // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
         // eleven lines. When either is cut, "View all" opens the whole call in a sheet.
-        const inLabel = /^(Bash|shell|exec_command|local_shell)$/.test(e.name) ? "Command" : "Input";
-        if (e.in) out.append(el("div", "io", inLabel), el("pre", "in clip", e.in));
-        if (e.cwd) out.append(el("div", "io", "Working directory · " + e.cwd));
-        if (e.in) out.append(el("div", "io", "Output"));
+        const shell = /^(Bash|shell|exec_command|local_shell)$/.test(e.name), inLabel = shell ? "Command" : "Input";
+        const input = shell ? (e.in ?? e.arg) : e.in;
+        if (input != null) out.append(el("div", "io", inLabel), el("pre", "in clip", input));
+        if (e.cwd && e.cwd !== ".") out.append(el("div", "io", "Working directory · " + e.cwd));
+        if (e.out != null && e.out !== "") out.append(el("div", "io", "Output"));
         if (e.changes) {
           for (const change of e.changes) {
             out.append(el("div", "io", "Change · " + change.path + (change.move ? " → " + change.move : "")));
@@ -1125,14 +1141,15 @@
           }
           if (!e.changes.length) out.append(el("div", "noout", "No changes recorded"));
         } else if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) out.append(el("pre", "clip", e.out)); else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
-        if (find && e.script != null) { const script = el("button", "viewscript", "View script"); script.type = "button"; script.addEventListener("click", () => openScript(e)); out.append(script); }
+        const actions = el("div", "step-actions");
+        if (e.script != null) { const script = el("button", "viewscript", "View script"); script.type = "button"; script.addEventListener("click", () => openScript(e)); actions.append(script); }
         const all = el("button", "viewall"); all.type = "button"; all.hidden = true; all.append(icon(I.expand), el("span", null, "View all"));
-        all.addEventListener("click", () => openViewer(e, v, ic, inLabel)); out.append(all);
+        all.addEventListener("click", () => openViewer(e, v, ic, inLabel)); actions.append(all); actions.hidden = e.script == null; out.append(actions);
         b.addEventListener("click", () => { out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden));
-          if (!out.hidden) { let cut = !!e.more?.length; out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; }); all.hidden = !cut;
+          if (!out.hidden) { let cut = !!e.more?.length; out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; }); all.hidden = !cut; actions.hidden = e.script == null && !cut;
             // Text cut when this copy was made, with nothing more to show: say so instead of ending on "…".
             if (!cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs")); } });
-        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key, entry: e }); continue;
+        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key }); continue;
       }
       flush();
       if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg user"), e); m.append(markdown(e.text)); tx.append(m); }
@@ -1649,6 +1666,24 @@
   // View state. A block's identity: its class and keys, or its own text when it has no key (a section heading).
   const scroller = () => (phone.matches ? document.scrollingElement : $("#main"));
   const edge = () => $("#topbar").getBoundingClientRect().bottom;
+  // The opened transcript can still grow as fonts and clamped cards settle; hold the tail briefly, then yield on reader input.
+  let openingEndUntil = 0, openingEndTimer = null, openingEndObserver = null;
+  function stopOpeningEndPin() {
+    openingEndUntil = 0;
+    clearTimeout(openingEndTimer); openingEndTimer = null;
+    openingEndObserver?.disconnect(); openingEndObserver = null;
+  }
+  function pinOpeningEnd() {
+    if (route.v !== "session" || performance.now() >= openingEndUntil) { stopOpeningEndPin(); return; }
+    const sc = scroller(); sc.scrollTop = sc.scrollHeight; LIVE.anchor = null; syncJump(); saveHistoryScroll();
+  }
+  function startOpeningEndPin() {
+    stopOpeningEndPin(); if (route.v !== "session" || location.hash) return;
+    openingEndUntil = performance.now() + 2000;
+    const turns = $("#page section[aria-label='Transcript'] .turns");
+    if (turns) { openingEndObserver = new ResizeObserver(pinOpeningEnd); openingEndObserver.observe(turns); }
+    pinOpeningEnd(); openingEndTimer = setTimeout(stopOpeningEndPin, 2000);
+  }
   const ANCHORS = "[data-e], .turn, .hop, .ib, .nrow, .sec-h, .ph, .divider, .analytics-metric, .analytics-panel, .facet-filters, .groupby, .find, .empty";
   const HOSTS = "[data-e], [data-h], [data-id], [data-sid], [data-go], [data-turn], [data-g], [data-m]";
   const FOCUSABLE = "button, input, [tabindex]";
@@ -1812,6 +1847,12 @@
   jumpButton.addEventListener("click", () => scrollToEnd("smooth"));
   window.addEventListener("scroll", syncJump, { passive: true });
   $("#main").addEventListener("scroll", syncJump, { passive: true });
+  const cancelOpeningEndPin = () => { if (openingEndUntil) stopOpeningEndPin(); };
+  window.addEventListener("wheel", cancelOpeningEndPin, { passive: true });
+  window.addEventListener("touchmove", cancelOpeningEndPin, { passive: true });
+  document.addEventListener("keydown", (e) => {
+    if (!e.defaultPrevented && !e.target.closest?.("input, textarea, select, [contenteditable='true']") && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) cancelOpeningEndPin();
+  });
 
   // Every second: a running step's elapsed time, from its session's activity[3] (the call's start), and a running row's age.
   // A clock that stands still (the checks pin it) changes nothing.

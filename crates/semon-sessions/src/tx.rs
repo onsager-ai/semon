@@ -820,7 +820,16 @@ fn operation_entry(
     match kind {
         "CommandExecution" => {
             let command = item_command(item).unwrap_or_default();
-            entry.insert("arg".into(), json!(one_line(&command, 160)));
+            let arg = one_line(&command, 160);
+            let needs_input = command.trim() != arg.as_str();
+            entry.insert("arg".into(), json!(arg));
+            if needs_input {
+                let (input, cut) = clip(&command, PREVIEW_MAX);
+                entry.insert("in".into(), json!(input));
+                if cut {
+                    more.push("in");
+                }
+            }
             if let Some(exit) = item.get("exit_code").and_then(Value::as_i64) {
                 entry.insert("exit".into(), json!(exit));
             }
@@ -1218,6 +1227,20 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
             .and_then(|input| input.as_str().map(str::to_owned))
             .ok_or_else(invalid)?;
         let (text, truncated) = clip(&script, FULL_MAX);
+        return Ok(json!({"text": text, "truncated": truncated}).to_string());
+    }
+    if part == "in"
+        && let SlotKind::Operation { kind, .. } = &slot.kind
+        && kind == "CommandExecution"
+    {
+        let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "entry is not expandable");
+        let record = read_record(&file.path, slot.offset).ok_or_else(invalid)?;
+        let item = record
+            .get("payload")
+            .and_then(|payload| payload.get("item"))
+            .ok_or_else(invalid)?;
+        let command = item_command(item).unwrap_or_default();
+        let (text, truncated) = clip(&command, FULL_MAX);
         return Ok(json!({"text": text, "truncated": truncated}).to_string());
     }
     if let SlotKind::Yielded { .. } | SlotKind::Sent { .. } = &slot.kind {
@@ -1799,6 +1822,51 @@ mod tests {
             serde_json::from_str(&full_slot(&built, "ops", 0, "script").unwrap()).unwrap();
         assert_eq!(script_view["text"], script);
         assert_eq!(script_view["truncated"], false);
+    }
+
+    #[test]
+    fn code_mode_command_longer_than_summary_has_a_full_command_preview() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        let command = format!("printf {}", "x".repeat(PREVIEW_MAX + 32));
+        let script = "tools.exec_command({cmd: 'long command'})";
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-long-command.jsonl",
+            &[
+                codex(
+                    ts(4, 0, 0),
+                    "session_meta",
+                    json!({"id":"long-command","cwd":"/work/proj"}),
+                ),
+                codex(
+                    ts(4, 1, 0),
+                    "response_item",
+                    json!({"type":"custom_tool_call","call_id":"call","name":"exec","status":"completed","input":script}),
+                ),
+                codex(
+                    ts(4, 2, 0),
+                    "event_msg",
+                    json!({"type":"item_completed","item":{"type":"CommandExecution","id":"item","command":["/bin/zsh","-lc",command.clone()],"exit_code":0,"aggregated_output":"done\n"}}),
+                ),
+                codex(
+                    ts(4, 3, 0),
+                    "response_item",
+                    json!({"type":"custom_tool_call_output","call_id":"call","output":"done"}),
+                ),
+            ],
+        );
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "long-command", &Anchor::Last);
+        let entry = &page["entries"][0];
+        assert!(entry["arg"].as_str().unwrap().ends_with('…'));
+        assert!(entry["in"].as_str().unwrap().starts_with("printf "));
+        assert!(entry["in"].as_str().unwrap().ends_with('…'));
+        assert!(entry["more"].as_array().unwrap().contains(&json!("in")));
+        let slot = entry["slot"].as_u64().unwrap() as usize;
+        let full: Value =
+            serde_json::from_str(&full_slot(&built, "long-command", slot, "in").unwrap()).unwrap();
+        assert_eq!(full["text"], command);
+        assert_eq!(full["truncated"], false);
     }
 
     #[test]

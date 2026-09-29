@@ -348,7 +348,6 @@ code { overflow-wrap: anywhere; }
 .tsum[aria-expanded="true"] .chev { transform: rotate(90deg); }
 .tgroup > .steps { margin-top: 2px; }
 .viewscript { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; border: 0; border-radius: 6px; background: none; padding: 3px 8px; color: var(--accent); font-size: 12.5px; }
-.tgroup > .viewscript { justify-self: end; margin: -2px 4px 2px; }
 @media (hover: hover) { .viewscript:hover { background: var(--sunken); } }
 .step .out { margin: 4px 0 8px; border-radius: 10px; background: var(--sunken); overflow: hidden; }
 .step .out pre { margin: 0; padding: 8px 12px; font: 12px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
@@ -362,10 +361,11 @@ code { overflow-wrap: anywhere; }
 .step .out .clip { max-height: 15.6em; overflow: hidden; }
 .step .out .clip.clipped { -webkit-mask-image: linear-gradient(#000 calc(100% - 32px), transparent); mask-image: linear-gradient(#000 calc(100% - 32px), transparent); }
 .step .out .diff.clip { max-height: 16.5em; }
-.step .out .viewall { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 40px; border: 0; border-top: 1px solid var(--line); background: none; padding: 8px 12px; color: var(--accent); font-size: 13.5px; }
-.step .out .viewscript { width: 100%; min-height: 40px; border-top: 1px solid var(--line); border-radius: 0; }
-.step .out .viewall svg { width: 15px; height: 15px; }
-@media (hover: hover) { .step .out .viewall:hover { background: color-mix(in srgb, var(--sunken) 60%, var(--line)); } }
+.step .out .step-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-height: 42px; border-top: 1px solid var(--line); padding: 6px 10px; }
+.step .out .step-actions[hidden], .step .out .step-actions > button[hidden] { display: none; }
+.step .out .step-actions > button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 30px; border: 1px solid var(--line); border-radius: 7px; background: none; padding: 4px 9px; color: var(--accent); font-size: 12.5px; }
+.step .out .step-actions svg { width: 15px; height: 15px; }
+@media (hover: hover) { .step .out .step-actions > button:hover { background: color-mix(in srgb, var(--sunken) 60%, var(--line)); } }
 /* The whole call: a full-screen sheet on phones, a dialog on wider screens. Text wraps; nothing scrolls sideways. */
 html.viewer-open, html.viewer-open body { overflow: hidden; }
 dialog.viewer { padding: 0; border: 0; color: var(--ink); background: var(--ground); }

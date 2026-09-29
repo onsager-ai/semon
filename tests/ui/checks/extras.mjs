@@ -183,6 +183,14 @@ export default async function (browser) {
     });
     r.expect(R.unknown !== null, "a step with no exit status reads \"exit unknown · …\"");
     r.expect(R.unknown && !R.unknown.err && R.unknown.grouped && !R.unknown.groupFailed, "an unknown exit is neither failed nor counted as failed: " + JSON.stringify(R.unknown));
+    R.shortCommand = await page.evaluate(() => {
+      const step = [...document.querySelectorAll(".step")].find((item) => item.querySelector(".sa")?.textContent === "cargo metadata --format-version 1 --no-deps");
+      if (!step) return null;
+      const button = step.querySelector(":scope > button"); if (button?.getAttribute("aria-expanded") === "false") button.click();
+      const out = step.querySelector(":scope > .out"), labels = [...out.querySelectorAll(":scope > .io")].map((label) => label.textContent);
+      return { command: out.querySelector("pre.in")?.textContent ?? null, labels, cwd: labels.find((label) => label.startsWith("Working directory")) ?? null };
+    });
+    r.expect(R.shortCommand?.command === "cargo metadata --format-version 1 --no-deps" && R.shortCommand.labels.indexOf("Command") === 0 && R.shortCommand.labels.indexOf("Output") > R.shortCommand.labels.indexOf("Command") && R.shortCommand.cwd === null, "a short shell detail shows Command then Output and hides the session-root directory: " + JSON.stringify(R.shortCommand));
 
     await page.goto(ENV.extraBase + "/s/claude/harbor", { waitUntil: "load" }); await page.waitForFunction(() => !!document.querySelector(".turns"));
     await page.evaluate(() => document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click()));
@@ -226,6 +234,9 @@ export default async function (browser) {
       const response = await fetch("/api/tx?sid=code-mode&t=" + encodeURIComponent(token));
       const totals = await response.json();
       document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click());
+      const step = [...document.querySelectorAll(".step")].find((item) => item.querySelector(".sa")?.textContent === "git status");
+      const toggle = step?.querySelector(":scope > button"); if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
+      const detail = step?.querySelector(":scope > .out");
       return {
         calls: totals.calls,
         errors: totals.errors,
@@ -233,15 +244,21 @@ export default async function (browser) {
           arg: step.querySelector(".sa")?.textContent ?? "",
           err: step.classList.contains("err"),
         })),
-        scriptButtons: [...document.querySelectorAll(".viewscript")].map((button) => button.textContent),
+        groupedSteps: document.querySelectorAll(".tgroup .steps > .step").length,
+        groupScriptButtons: document.querySelectorAll(".tgroup > .viewscript").length,
+        detailScriptButtons: [...(detail?.querySelectorAll(".viewscript") ?? [])].map((button) => button.textContent),
+        detailLabels: [...(detail?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.textContent),
       };
     });
     R.codeMode = data;
     r.expect(data.calls === 3 && data.errors === 0, "three indexed operations are counted: " + JSON.stringify({ calls: data.calls, errors: data.errors }));
     r.expect(data.steps.map((step) => step.arg).join("|") === "git status|sed -n '1,9p' a.rs|src/code-mode.rs", "the steps show unwrapped commands and the changed path: " + JSON.stringify(data.steps));
     r.expect(data.steps.length === 3 && data.steps.every((step) => !step.err), "three ordinary, successful tool steps are shown");
-    r.expect(data.scriptButtons.length === 1 && data.scriptButtons[0] === "View script", "the operation group has one View script control: " + JSON.stringify(data.scriptButtons));
-    await page.click(".viewscript"); await page.waitForSelector("dialog.viewer[open]");
+    r.expect(data.groupedSteps === 3, "the script-backed operation remains inside a multi-step group: " + data.groupedSteps);
+    r.expect(data.groupScriptButtons === 0, "script controls never sit orphaned on the group summary");
+    r.expect(data.detailScriptButtons.length === 1 && data.detailScriptButtons[0] === "View script", "an expanded code-mode step has exactly one View script action: " + JSON.stringify(data.detailScriptButtons));
+    r.expect(data.detailLabels.indexOf("Command") === 0 && data.detailLabels.indexOf("Output") > data.detailLabels.indexOf("Command") && !data.detailLabels.includes("Working directory · ."), "a short code-mode operation shows Command and Output without the session-root directory: " + JSON.stringify(data.detailLabels));
+    await page.locator(".step > .out:not([hidden]) .viewscript").click(); await page.waitForSelector("dialog.viewer[open]");
     R.codeMode.script = await page.locator(".viewer pre.script").textContent();
     r.expect(R.codeMode.script.includes("Promise.allSettled") && R.codeMode.script.includes("git status"), "View script opens the source in the existing sheet");
     await page.click(".viewer .vclose");
