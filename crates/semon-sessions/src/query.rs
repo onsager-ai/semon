@@ -786,7 +786,7 @@ impl Query {
             return Err(QueryError::unknown_session(&id));
         }
         let page =
-            tx::page_limited(built, &own.1, &anchor, now, limit).map_err(|error| {
+            tx::page_limited(&built, &own.1, &anchor, now, limit).map_err(|error| {
                 match (&anchor, error.kind()) {
                     (tx::Anchor::Turn(turn), io::ErrorKind::NotFound) => QueryError::new(
                         "unknown_turn",
@@ -857,7 +857,7 @@ impl Query {
         let mut matches = Vec::new();
         let mut stopped = None;
         'sessions: for (_, served, index, own) in &order {
-            let built = parts[*index].built;
+            let built = &*parts[*index].built;
             let Some(transcript) = built.tx.get(*own) else {
                 continue;
             };

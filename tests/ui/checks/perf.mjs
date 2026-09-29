@@ -1,7 +1,8 @@
 // Long-session performance baseline (#29 item 0). A `semon sessions --serve` process reads the generated homes;
 // Chromium measures cold open, session switches, a live tail, scrolling, DOM size and request costs at phone and desktop
-// sizes with 4× CPU throttling. Each browser metric is sampled three times and summarized by its median; values are
-// reported only, while page errors and missing paint markers fail the check.
+// sizes with 4× CPU throttling. Last, it switches again while another session writes a line every 250 ms (#29 item 1), as
+// an agent at work, or pushed logs arriving at an embedding server, would. Each browser metric is sampled three times and
+// summarized by its median; values are reported only, while page errors and missing paint markers fail the check.
 //
 //   SEMON_BIN     the semon binary built with the test clock (default: target/debug/semon)
 //   SEMON_UI_OUT  where perf.json is written (default: ./out)
@@ -289,6 +290,10 @@ async function runScreen(browser, screen, server, fixture) {
       marathonToRelay: { samplesMs: [], medianMs: null },
       relayToMarathon: { samplesMs: [], medianMs: null },
     },
+    switchWhileWriting: {
+      marathonToRelay: { samplesMs: [], medianMs: null },
+      relayToMarathon: { samplesMs: [], medianMs: null },
+    },
     liveUpdate: { samples: [], medianPaintMs: null, medianLongestTaskMs: null },
     scroll: { samples: [], medianFramesOver20Ms: null, medianLongestFrameMs: null },
     domSize: { samples: [], medianElements: null },
@@ -399,12 +404,12 @@ async function runScreen(browser, screen, server, fixture) {
         return !!row && row.getBoundingClientRect().width > 0 && row.getBoundingClientRect().height > 0;
       }, `.srow[data-id="${id}"]`, { timeout: 60_000 });
     };
-    const clickAndPaint = async (page, id) => {
+    const clickAndPaint = async (page, id, marker = PAINT_MARKERS[id]) => {
       await prepareSidebarRow(page, id);
       await page.evaluate(() => { window.__perfPaintWait = null; });
       const started = await page.evaluate(() => performance.now());
       await page.locator(`.srow[data-id="${id}"]`).click();
-      await waitPaint(page, PAINT_MARKERS[id]);
+      await waitPaint(page, marker);
       return await page.evaluate((start) => performance.now() - start, started);
     };
 
@@ -484,6 +489,39 @@ async function runScreen(browser, screen, server, fixture) {
       })));
     }
 
+    // Switching while another session writes its log: a line every 250 ms. The server's answers must not wait for the
+    // rebuilds those lines cause. Marathon's last message is now the third live update's.
+    const busyFile = path.join(path.dirname(fixture.marathonFile), "perf-busy.jsonl");
+    let busyLines = 0;
+    const busyLine = () => {
+      const n = busyLines++;
+      return JSON.stringify({
+        parentUuid: null,
+        isSidechain: false,
+        type: "assistant",
+        timestamp: new Date(fixture.now - 60_000 + n * 10).toISOString(),
+        sessionId: "perf-busy",
+        cwd: fixture.cwd,
+        gitBranch: "main",
+        version: "2.1.0",
+        uuid: `u-perf-busy-${n}`,
+        message: { id: `msg-perf-busy-${n}`, model: "claude-opus-5-5", role: "assistant", type: "message", content: [{ type: "text", text: `Busy line ${n}.` }] },
+      }) + "\n";
+    };
+    fs.appendFileSync(busyFile, busyLine());
+    const writer = setInterval(() => {
+      try { fs.appendFileSync(busyFile, busyLine()); } catch (error) { failures.push(`busy writer: ${error.message}`); }
+    }, 250);
+    try {
+      await switchPage.page.waitForTimeout(1500);
+      for (let i = 0; i < 3; i++) {
+        metrics.switchWhileWriting.marathonToRelay.samplesMs.push(await clickAndPaint(switchPage.page, "relay"));
+        metrics.switchWhileWriting.relayToMarathon.samplesMs.push(await clickAndPaint(switchPage.page, "marathon", "PERF_LIVE_3_LAST"));
+      }
+    } finally {
+      clearInterval(writer);
+    }
+
     await finishPage(switchPage);
   } catch (error) {
     failures.push(error.stack ?? String(error));
@@ -499,6 +537,8 @@ async function runScreen(browser, screen, server, fixture) {
   metrics.domSize.medianElements = median(metrics.domSize.samples);
   metrics.switch.marathonToRelay.medianMs = round(median(metrics.switch.marathonToRelay.samplesMs));
   metrics.switch.relayToMarathon.medianMs = round(median(metrics.switch.relayToMarathon.samplesMs));
+  metrics.switchWhileWriting.marathonToRelay.medianMs = round(median(metrics.switchWhileWriting.marathonToRelay.samplesMs));
+  metrics.switchWhileWriting.relayToMarathon.medianMs = round(median(metrics.switchWhileWriting.relayToMarathon.samplesMs));
   metrics.liveUpdate.medianPaintMs = round(median(metrics.liveUpdate.samples.map((sample) => sample.paintMs)));
   metrics.liveUpdate.medianLongestTaskMs = round(median(metrics.liveUpdate.samples.map((sample) => sample.longestTaskMs)));
   metrics.scroll.medianFramesOver20Ms = median(metrics.scroll.samples.map((sample) => sample.framesOver20Ms));
@@ -520,14 +560,14 @@ function markdownTable(screens) {
   const number = (value) => value == null ? "—" : String(round(value));
   const request = (entry) => `${entry.count} / ${entry.encodedBytes} B / ${number(entry.ttfbMs.median)} / ${number(entry.ttfbMs.max)} ms`;
   const rows = [
-    "| Screen | Cold open ms | Switch marathon→relay ms | Switch relay→marathon ms | Live paint ms | Live task ms | Scroll frames >20 ms | Longest frame ms | DOM elements | `/api/model`: req / bytes / TTFB median / max | `/api/tx`: req / bytes / TTFB median / max | Other: req / bytes / TTFB median / max |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    "| Screen | Cold open ms | Switch marathon→relay ms | Switch relay→marathon ms | Switching while writing: →relay / →marathon ms | Live paint ms | Live task ms | Scroll frames >20 ms | Longest frame ms | DOM elements | `/api/model`: req / bytes / TTFB median / max | `/api/tx`: req / bytes / TTFB median / max | Other: req / bytes / TTFB median / max |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
   ];
   for (const name of ["phone", "desktop"]) {
     const screen = screens[name];
     const m = screen?.metrics;
     const r = screen?.requests ?? Object.fromEntries(BUCKETS.map((key) => [key, { count: 0, encodedBytes: 0, ttfbMs: { median: null, max: null } }]));
-    rows.push(`| ${name} | ${number(m?.coldOpen.medianMs)} | ${number(m?.switch.marathonToRelay.medianMs)} | ${number(m?.switch.relayToMarathon.medianMs)} | ${number(m?.liveUpdate.medianPaintMs)} | ${number(m?.liveUpdate.medianLongestTaskMs)} | ${number(m?.scroll.medianFramesOver20Ms)} | ${number(m?.scroll.medianLongestFrameMs)} | ${number(m?.domSize.medianElements)} | ${request(r["/api/model"])} | ${request(r["/api/tx"])} | ${request(r.other)} |`);
+    rows.push(`| ${name} | ${number(m?.coldOpen.medianMs)} | ${number(m?.switch.marathonToRelay.medianMs)} | ${number(m?.switch.relayToMarathon.medianMs)} | ${number(m?.switchWhileWriting.marathonToRelay.medianMs)} / ${number(m?.switchWhileWriting.relayToMarathon.medianMs)} | ${number(m?.liveUpdate.medianPaintMs)} | ${number(m?.liveUpdate.medianLongestTaskMs)} | ${number(m?.scroll.medianFramesOver20Ms)} | ${number(m?.scroll.medianLongestFrameMs)} | ${number(m?.domSize.medianElements)} | ${request(r["/api/model"])} | ${request(r["/api/tx"])} | ${request(r.other)} |`);
   }
   return rows.join("\n");
 }

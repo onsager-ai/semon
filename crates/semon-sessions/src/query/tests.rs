@@ -466,7 +466,7 @@ fn read_transcript_pages_as_the_viewer_does() {
         ], "window_start": null})
     );
     // The same page the viewer serves at /api/tx.
-    let mut core = ViewerCore::new(home.options.clone());
+    let core = ViewerCore::new(home.options.clone());
     for (args, url) in [
         (json!({"id": "done"}), "sid=done".to_owned()),
         (json!({"id": "scan"}), "sid=scan".to_owned()),
