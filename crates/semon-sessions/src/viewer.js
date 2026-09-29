@@ -396,6 +396,7 @@
         if (where !== "before") return;
         const by = (d) => { if (phone.matches) window.scrollBy(0, d); else box.scrollTop += d; };
         const node = () => anchor && [...document.querySelectorAll("#page .turns > .turn")].find((t) => t.dataset.turn === anchor.id);
+        window.__pager = { seen: !!seen, found: !!node(), turns: document.querySelectorAll("#page .turns > .turn").length };
         if (!node()) { by(box.scrollHeight - h0); return; }
         const put = () => { const n = node(); if (n) { const d = n.getBoundingClientRect().top - anchor.top; if (Math.abs(d) > 0.5) by(d); } };
         put(); requestAnimationFrame(() => { put(); requestAnimationFrame(put); });

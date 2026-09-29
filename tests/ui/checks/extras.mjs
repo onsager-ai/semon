@@ -152,7 +152,7 @@ export default async function (browser) {
     }
     P.done = { ...(await count()), pager: await pager(page) };
     r.expect(P.clicks.length > 0 && P.clicks.every((c) => c.after >= c.before), "Load earlier adds turns: " + JSON.stringify(P.clicks));
-    r.expect(P.clicks.every((c) => c.anchorMoved !== null && Math.abs(c.anchorMoved) <= 2), "what was on screen stays put after Load earlier: " + JSON.stringify(P.clicks));
+    r.expect(P.clicks.every((c) => c.anchorMoved !== null && Math.abs(c.anchorMoved) <= 2), "what was on screen stays put after Load earlier: " + JSON.stringify({ clicks: P.clicks, dbg: await page.evaluate(() => window.__pager) }));
     r.expect(P.done.turns === 10 && P.done.started && P.done.pager.length === 0, "the first page starts with the Started divider and holds all 10 turns: " + JSON.stringify(P.done));
     P.gaps = await page.evaluate(() => [...document.querySelectorAll(".turns > .divider")].filter((d) => d.textContent.startsWith("Some entries not included")).length);
     r.expect(P.gaps === 1, "the unreadable line shows as one gap divider between turns: " + P.gaps);
