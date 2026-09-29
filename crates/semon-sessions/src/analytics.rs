@@ -570,6 +570,13 @@ struct Group {
     sessions: usize,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many rows the last [`answer`] on this thread walked: those left
+    /// after the rows that don't touch its range were dropped.
+    static WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// `row` as of `now`: a working session's last busy interval runs to now.
 fn live<'a>(row: &Row<'a>, now: i64) -> Live<'a> {
     let mut busy = row.activity.busy.clone();
@@ -634,6 +641,8 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
         .filter(|row| touches(row.activity))
         .map(|row| live(row, now))
         .collect();
+    #[cfg(test)]
+    WALKED.with(|walked| walked.set(all.len()));
     let active = |row: &Live| {
         in_range(row.activity().start, from, to)
             || row.busy_in(from, to) > 0
@@ -1367,10 +1376,20 @@ mod tests {
         old.start = NOW - 50 * DAY_MS;
         old.busy = vec![(NOW - 50 * DAY_MS, NOW - 50 * DAY_MS + HOUR)];
         activity.insert("old".into(), old);
+        let walked = || WALKED.with(std::cell::Cell::get);
+        assert_eq!(activity.len(), 6);
+        // 7 d and the week before: today, older (5 d), before (10 d) and
+        // waiting (working now); not month (20 d) nor old (50 d).
         let week = at("range=7d", &activity);
+        assert_eq!(walked(), 4);
         assert_eq!(week["facets"]["repo"], json!([null, "atlas", "harbor"]));
         assert_eq!(week["previous"]["agent_ms"], 4 * HOUR);
+        // 24 h and the day before: today and waiting.
+        at("range=24h", &activity);
+        assert_eq!(walked(), 2);
+        // 30 d and the 30 days before: every row.
         let month = at("range=30d", &activity);
+        assert_eq!(walked(), 6);
         assert_eq!(month["previous"]["agent_ms"], HOUR);
         assert_eq!(month["previous"]["started"], 1);
     }
