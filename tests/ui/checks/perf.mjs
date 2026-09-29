@@ -288,9 +288,9 @@ async function runScreen(browser, screen, server, fixture) {
     // A switch to a session not opened before (its transcript is not cached): the time until the top bar shows the new session
     // (feedback) and until its last message has painted. `cached` is a switch back to a session just left, drawn from the cache.
     switch: {
-      marathonToRelay: { samplesMs: [], medianMs: null, feedbackSamplesMs: [], medianFeedbackMs: null },
-      relayToMarathon: { samplesMs: [], medianMs: null, feedbackSamplesMs: [], medianFeedbackMs: null },
-      cached: { samplesMs: [], medianMs: null, feedbackSamplesMs: [], medianFeedbackMs: null },
+      marathonToRelay: { samplesMs: [], medianMs: null, feedbackSamplesMs: [], medianFeedbackMs: null, clickTaskSamplesMs: [], medianClickTaskMs: null },
+      relayToMarathon: { samplesMs: [], medianMs: null, feedbackSamplesMs: [], medianFeedbackMs: null, clickTaskSamplesMs: [], medianClickTaskMs: null },
+      cached: { samplesMs: [], medianMs: null, feedbackSamplesMs: [], medianFeedbackMs: null, clickTaskSamplesMs: [], medianClickTaskMs: null },
     },
     liveUpdate: { samples: [], medianPaintMs: null, medianLongestTaskMs: null },
     scroll: { samples: [], medianFramesOver20Ms: null, medianLongestFrameMs: null },
@@ -408,14 +408,18 @@ async function runScreen(browser, screen, server, fixture) {
       await prepareSidebarRow(page, id);
       const name = (await page.locator(`.srow[data-id="${id}"] .nm`).textContent()).trim();
       await page.evaluate(() => { window.__perfPaintWait = null; });
-      const started = await page.evaluate(() => performance.now());
-      await page.locator(`.srow[data-id="${id}"]`).click();
+      // The click is made in the page, so the task it starts is timed as well: what the click itself costs before the browser can paint.
+      const { started, clickMs } = await page.evaluate((id) => {
+        const row = [...document.querySelectorAll(".srow[data-id]")].find((x) => x.dataset.id === id), t0 = performance.now();
+        row.click();
+        return { started: t0, clickMs: performance.now() - t0 };
+      }, id);
       await page.waitForFunction((expected) => document.querySelector("#topbar .t")?.textContent.trim() === expected, name, { timeout: 60_000, polling: "raf" });
       const feedbackMs = await page.evaluate((start) => performance.now() - start, started);
       await waitPaint(page, PAINT_MARKERS[id]);
-      return { feedbackMs, paintMs: await page.evaluate((start) => performance.now() - start, started) };
+      return { clickMs, feedbackMs, paintMs: await page.evaluate((start) => performance.now() - start, started) };
     };
-    const record = (entry, sample) => { entry.samplesMs.push(sample.paintMs); entry.feedbackSamplesMs.push(sample.feedbackMs); };
+    const record = (entry, sample) => { entry.samplesMs.push(sample.paintMs); entry.feedbackSamplesMs.push(sample.feedbackMs); entry.clickTaskSamplesMs.push(sample.clickMs); };
 
     for (const how of ["wheel", "press", "after"]) {
       const managed = await makePage();
@@ -514,6 +518,7 @@ async function runScreen(browser, screen, server, fixture) {
   for (const entry of Object.values(metrics.switch)) {
     entry.medianMs = round(median(entry.samplesMs));
     entry.medianFeedbackMs = round(median(entry.feedbackSamplesMs));
+    entry.medianClickTaskMs = round(median(entry.clickTaskSamplesMs));
   }
   metrics.liveUpdate.medianPaintMs = round(median(metrics.liveUpdate.samples.map((sample) => sample.paintMs)));
   metrics.liveUpdate.medianLongestTaskMs = round(median(metrics.liveUpdate.samples.map((sample) => sample.longestTaskMs)));
@@ -536,14 +541,14 @@ function markdownTable(screens) {
   const number = (value) => value == null ? "—" : String(round(value));
   const request = (entry) => `${entry.count} / ${entry.encodedBytes} B / ${number(entry.ttfbMs.median)} / ${number(entry.ttfbMs.max)} ms`;
   const rows = [
-    "| Screen | Cold open ms | Switch marathon→relay ms | Switch relay→marathon ms | Feedback marathon→relay ms | Feedback relay→marathon ms | Cached switch ms | Live paint ms | Live task ms | Scroll frames >20 ms | Longest frame ms | DOM elements | `/api/model`: req / bytes / TTFB median / max | `/api/tx`: req / bytes / TTFB median / max | Other: req / bytes / TTFB median / max |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    "| Screen | Cold open ms | Switch marathon→relay ms | Switch relay→marathon ms | Feedback marathon→relay ms | Feedback relay→marathon ms | Cached switch ms | Click task marathon→relay ms | Live paint ms | Live task ms | Scroll frames >20 ms | Longest frame ms | DOM elements | `/api/model`: req / bytes / TTFB median / max | `/api/tx`: req / bytes / TTFB median / max | Other: req / bytes / TTFB median / max |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
   ];
   for (const name of ["phone", "desktop"]) {
     const screen = screens[name];
     const m = screen?.metrics;
     const r = screen?.requests ?? Object.fromEntries(BUCKETS.map((key) => [key, { count: 0, encodedBytes: 0, ttfbMs: { median: null, max: null } }]));
-    rows.push(`| ${name} | ${number(m?.coldOpen.medianMs)} | ${number(m?.switch.marathonToRelay.medianMs)} | ${number(m?.switch.relayToMarathon.medianMs)} | ${number(m?.switch.marathonToRelay.medianFeedbackMs)} | ${number(m?.switch.relayToMarathon.medianFeedbackMs)} | ${number(m?.switch.cached.medianMs)} | ${number(m?.liveUpdate.medianPaintMs)} | ${number(m?.liveUpdate.medianLongestTaskMs)} | ${number(m?.scroll.medianFramesOver20Ms)} | ${number(m?.scroll.medianLongestFrameMs)} | ${number(m?.domSize.medianElements)} | ${request(r["/api/model"])} | ${request(r["/api/tx"])} | ${request(r.other)} |`);
+    rows.push(`| ${name} | ${number(m?.coldOpen.medianMs)} | ${number(m?.switch.marathonToRelay.medianMs)} | ${number(m?.switch.relayToMarathon.medianMs)} | ${number(m?.switch.marathonToRelay.medianFeedbackMs)} | ${number(m?.switch.relayToMarathon.medianFeedbackMs)} | ${number(m?.switch.cached.medianMs)} | ${number(m?.switch.marathonToRelay.medianClickTaskMs)} | ${number(m?.liveUpdate.medianPaintMs)} | ${number(m?.liveUpdate.medianLongestTaskMs)} | ${number(m?.scroll.medianFramesOver20Ms)} | ${number(m?.scroll.medianLongestFrameMs)} | ${number(m?.domSize.medianElements)} | ${request(r["/api/model"])} | ${request(r["/api/tx"])} | ${request(r.other)} |`);
   }
   return rows.join("\n");
 }

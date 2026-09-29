@@ -14,6 +14,8 @@ import { ENV, served, data, reporter, overflow } from "../lib.mjs";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const plain = (text) => String(text ?? "").replace(/ /g, "").replace(/\s+/g, " ").trim();
 const HELD = 1000;
+// A cached session draws on the frame after the click (the sidebar and top bar first), so a frame or two, not the network's 1.5 s.
+const HIT_MS = 100;
 
 // The page with /api/tx held back per session (`delays`: sid, or "*" for any) and every request noted in `seen`.
 async function open(browser, opts) {
@@ -47,6 +49,21 @@ async function update(page) {
   for (let i = 0; i < 80 && page.force; i++) await sleep(100);
   await sleep(400);
 }
+
+// Clicks a row and waits, frame by frame, until the page shows that session's transcript (not busy, its title as the heading),
+// up to `limit` ms. Used where the network is held: what draws in that time came from the cache.
+const drawn = (page, id, name, limit) => page.evaluate(([id, name, limit]) => new Promise((resolve) => {
+  const plain = (t) => String(t ?? "").replace(/\u2009/g, "").replace(/\s+/g, " ").trim(), main = document.querySelector("#page");
+  const row = [...document.querySelectorAll("#lanes .srow[data-id]")].find((x) => x.dataset.id === id), t0 = performance.now();
+  row.click();
+  const look = () => {
+    const ms = performance.now() - t0;
+    if (main.getAttribute("aria-busy") !== "true" && !document.querySelector(".skeleton") && plain(main.querySelector(".ph h1")?.textContent) === name) return resolve({ drawn: true, ms });
+    if (ms > limit) return resolve({ drawn: false, ms, busy: main.getAttribute("aria-busy") === "true" });
+    requestAnimationFrame(look);
+  };
+  requestAnimationFrame(look);
+}), [id, name, limit]);
 
 // The sidebar's session rows, top to bottom (the drawer holds them on a phone, hidden but in the page).
 const rowsOf = (page) => page.evaluate(() => [...document.querySelectorAll("#lanes .srow[data-id]")].map((x) => x.dataset.id));
@@ -143,10 +160,12 @@ export default async function switchCheck(browser) {
     // ---- Back to a session left a moment ago (a): from the cache, with the network held ------------------------------------
     await update(page);
     page.delays.clear(); page.delays.set("*", 1500); page.seen.length = 0;
-    const hit = await click(page, a);
+    const hit = await drawn(page, a, nameOf(a), HIT_MS);
     out.hit = { ...hit, ms: Math.round(hit.ms * 10) / 10 };
-    r.expect(!hit.busy && hit.transcript && !hit.skeleton && plain(hit.heading) === nameOf(a) && plain(hit.title) === nameOf(a) && hit.current === a, tag + ": a session left a moment ago did not draw at once from the cache: " + JSON.stringify(hit));
-    r.expect(hit.ms <= 50, tag + ": the cached session took " + hit.ms + " ms to draw (limit 50)");
+    r.expect(hit.drawn, tag + ": a session left a moment ago did not draw from the cache within " + HIT_MS + " ms with the network held: " + JSON.stringify(hit));
+    r.expect(out.hit.ms <= HIT_MS, tag + ": the cached session took " + out.hit.ms + " ms to draw (limit " + HIT_MS + ")");
+    out.hitState = await page.evaluate(() => ({ current: document.querySelector('#lanes .srow[aria-current="page"]')?.dataset.id ?? null, title: document.querySelector("#topbar .t")?.textContent ?? null }));
+    r.expect(out.hitState.current === a && plain(out.hitState.title) === nameOf(a), tag + ": the cached session's row or top bar is wrong: " + JSON.stringify(out.hitState));
     await sleep(400);
     r.expect(!page.seen.includes(a), tag + ": the cached session asked /api/tx for its own transcript although nothing had changed");
     await sleep(1600); // child work held for 1.5 s arrives and the page is drawn again; nothing may break
@@ -167,15 +186,15 @@ export default async function switchCheck(browser) {
     await update(page);
     page.delays.set("*", 1500);
     // The five kept are rows 2 to 6 (the seventh is open): the first is out, and so, once the first is opened, is the second.
-    const oldest = await click(page, rows[0]);
+    // With the network held for 1.5 s, a session is drawn within 400 ms only if it came from the cache.
+    const oldest = await drawn(page, rows[0], nameOf(rows[0]), 400);
     await landed(page, rows[0], nameOf(rows[0]));
-    const recent = await click(page, rows[5]);
-    await landed(page, rows[5], nameOf(rows[5]));
-    const second = await click(page, rows[1]);
-    out.busy = { oldest: oldest.busy, recent: recent.busy, second: second.busy };
-    r.expect(oldest.busy, tag + ": the first of seven sessions was still in the cache");
-    r.expect(!recent.busy && plain(recent.heading) === nameOf(rows[5]), tag + ": a recently left session was not drawn from the cache: " + JSON.stringify(recent));
-    r.expect(second.busy, tag + ": the cache kept more than five sessions");
+    const recent = await drawn(page, rows[5], nameOf(rows[5]), 400);
+    const second = await drawn(page, rows[1], nameOf(rows[1]), 400);
+    out.drawn = { oldest, recent, second };
+    r.expect(!oldest.drawn, tag + ": the first of seven sessions was still in the cache");
+    r.expect(recent.drawn && recent.ms <= HIT_MS, tag + ": a recently left session was not drawn from the cache: " + JSON.stringify(recent));
+    r.expect(!second.drawn, tag + ": the cache kept more than five sessions");
     r.expect(page.errors.length === 0, tag + ": page errors: " + page.errors.join(" | "));
     await page.context().close();
   }

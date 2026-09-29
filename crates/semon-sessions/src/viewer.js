@@ -317,11 +317,11 @@
   // entry's text). Opening one takes it out of the cache; leaving it puts it back at the newest end.
   const TXCACHE = new Map(), TXCACHE_MAX = 5, TXCACHE_BYTES = 2 * 1024 * 1024;
   const weigh = (entries) => { let n = 0; for (const e of entries) for (const v of Object.values(e)) n += typeof v === "string" ? v.length : v && typeof v === "object" ? JSON.stringify(v).length : 8; return n; };
-  function cacheTx(sid) {
-    const entries = TX[sid], meta = TXM[sid]; if (!entries || !meta || meta.to < meta.total || meta.tok == null) return; // without its mark there is no telling later whether it grew
+  function cacheTx(sid, entries, meta) {
+    if (!entries || !meta || meta.to < meta.total || meta.tok == null) return; // without its mark there is no telling later whether it grew
     TXCACHE.delete(sid);
     const bytes = weigh(entries); if (bytes > TXCACHE_BYTES) return;
-    TXCACHE.set(sid, { entries, meta: { ...meta }, bytes });
+    TXCACHE.set(sid, { entries, meta, bytes });
     let sum = 0; for (const c of TXCACHE.values()) sum += c.bytes;
     for (const [id, c] of TXCACHE) { if (TXCACHE.size <= TXCACHE_MAX && sum <= TXCACHE_BYTES) break; TXCACHE.delete(id); sum -= c.bytes; }
   }
@@ -488,7 +488,8 @@
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
     closeAccountMenu();
-    if (route.v === "session" && (r.v !== "session" || r.id !== route.id)) cacheTx(route.id); // kept for opening it again
+    // The session left is kept for opening it again; weighing it waits until the click has drawn.
+    if (route.v === "session" && (r.v !== "session" || r.id !== route.id) && TX[route.id] && TXM[route.id]) { const sid = route.id, entries = TX[sid], meta = { ...TXM[sid] }; setTimeout(() => cacheTx(sid, entries, meta), 0); }
     dropErrors(true); route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     const done = () => {
@@ -505,9 +506,14 @@
         requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1500); });
       }
     };
-    // A transcript kept in the cache draws at once and is brought up to date afterwards; otherwise the route waits for its data,
-    // with the top bar and the sidebar already drawn from the model.
-    if (r.v === "session" && SESS[r.id] && !TX[r.id] && adoptCached(r)) { done(); revalidate(r); return; }
+    // A transcript kept in the cache needs no network: the top bar and the sidebar are drawn from the model at once, the page
+    // itself on the next frame (so the first two are on screen before a long transcript is built), and it is brought up to date
+    // afterwards. Otherwise the route waits for its data, with the top bar and the sidebar already drawn.
+    if (r.v === "session" && SESS[r.id] && !TX[r.id] && adoptCached(r)) {
+      paintPending(r);
+      requestAnimationFrame(() => setTimeout(() => { if (route !== r) return; done(); revalidate(r); }, 0));
+      return;
+    }
     const signal = r.v === "session" ? (navAbort = new AbortController()).signal : undefined, p = load(r, signal);
     if (p) { if (r.v === "session") paintPending(r); p.then(done, done); } else done();
   }
