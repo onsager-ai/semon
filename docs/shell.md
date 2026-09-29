@@ -179,7 +179,7 @@ room.value; room.options; room.isOpen; room.open(); room.close(); room.focus();
 
 ## Script contract
 
-The script uses `#lead-btn`, `#sidebar`, `#drawer-close`, and `#scrim` for the phone drawer. It uses `#topbar` and `#main` to synchronize `.topbar.scrolled` with the active scroll container. Missing elements are allowed, so the script can also be loaded by the sign-in skeleton.
+The script uses `#lead-btn`, `#sidebar`, `#drawer-close`, and `#scrim` for the phone drawer. Esc closes the drawer, except while a popover is open: then Esc closes only the popover, so a menu opened from the drawer (a `popover` element) closes on its own. It uses `#topbar` and `#main` to synchronize `.topbar.scrolled` with the active scroll container. Missing elements are allowed, so the script can also be loaded by the sign-in skeleton.
 
 Use `form[data-confirm="dialog-id"]` to open that `dialog.sheet` before submission. A `button[value="confirm"]` submits the original form; another button, Escape, or the backdrop closes the sheet. Use `button[data-open="dialog-id"]` to open a sheet, and `[data-close]` to close its enclosing dialog. A `[data-copy="element-id"]` button copies the target's text. An element with `[data-poll="/path"]` checks that same-origin URL every three seconds for up to 30 minutes and navigates to `data-poll-go` (or `/`) when it receives status 200.
 
