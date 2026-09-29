@@ -30,7 +30,7 @@ pub use facts::{
 };
 pub use inputs::{Input, InputRoot, inputs, is_input_path};
 pub use mcp::serve_mcp;
-pub use model::{model_json, model_json_at};
+pub use model::{MODEL_API, model_json, model_json_at};
 pub use query::{DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools};
 pub use received::{ReceivedMachines, is_machine_name};
 pub use union::{AccountLink, AccountMenu, AccountWorkspace, AdminLink, LinkMethod, ViewerCore};
