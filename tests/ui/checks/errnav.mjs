@@ -83,11 +83,13 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     r.expect(N >= FAILED.length && list.errors === N && list.slots.length === N, tag + "the list and the model disagree: " + JSON.stringify({ N, list }));
     r.expect(list.slots[0] < last.from && list.slots[3] < last.from, tag + "the first failures should be on pages not loaded: " + JSON.stringify({ slots: list.slots, from: last.from }));
     await sleep(2300); // past the opening pin to the end
-    // Before: the last group opened, and the view scrolled up from the end.
-    await page.evaluate(() => { const g = [...document.querySelectorAll("#page .tgroup > .tsum")].at(-1); if (g?.getAttribute("aria-expanded") === "false") g.click(); window.__sc().scrollTop -= 500; });
+    // Before: the last group opened, and the view scrolled to the middle of it (away from both ends, so putting it back is
+    // a real test).
+    await page.evaluate(() => { const g = [...document.querySelectorAll("#page .tgroup > .tsum")].at(-1); if (g?.getAttribute("aria-expanded") === "false") g.click(); const sc = window.__sc(); sc.scrollTop = Math.round((sc.scrollHeight - sc.clientHeight) / 2); });
     await sleep(300);
     const before = await state(page);
-    R.before = { top: before.top, badge: before.badge, groups: before.groups };
+    R.before = { top: before.top, max: before.max, badge: before.badge, groups: before.groups };
+    r.expect(before.top > 200 && before.top < before.max - 200, tag + "the view before is not away from both ends: " + JSON.stringify(R.before));
     r.expect(before.badge === N + " errors", tag + "the badge reads " + before.badge + ", the model " + N);
     r.expect(before.groups.at(-1) === true && before.groups.slice(0, -1).every((x) => !x), tag + "only the last group should be open before: " + JSON.stringify(before.groups));
 
