@@ -266,6 +266,34 @@ export default async function (browser) {
     await page.context().close();
   }
 
+  // ---- Yielded Codex command and poll input ---------------------------------------------------------------------
+  {
+    const page = await served(browser, { extras: true, path: "/s/codex/yielded-ui" });
+    await page.waitForFunction(() => !!document.querySelector(".turns"));
+    const data = await page.evaluate(async () => {
+      const token = new URLSearchParams(location.search).get("t");
+      const response = await fetch("/api/tx?sid=yielded-ui&t=" + encodeURIComponent(token));
+      const tx = await response.json(), entries = tx.entries.filter((entry) => entry.k === "tool");
+      const commandEntry = entries.find((entry) => entry.name === "exec_command"), inputEntry = entries.find((entry) => entry.name === "write_stdin");
+      document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click());
+      const steps = [...document.querySelectorAll(".step")];
+      const commandStep = steps.find((step) => step.querySelector(".sv")?.textContent === "Ran");
+      const inputStep = steps.find((step) => step.querySelector(".sv")?.textContent === "Sent input to");
+      for (const step of [commandStep, inputStep]) { const button = step?.querySelector(":scope > button"); if (button?.getAttribute("aria-expanded") === "false") button.click(); }
+      const detail = (step) => {
+        const out = step?.querySelector(":scope > .out");
+        return { labels: [...(out?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.textContent), value: out?.querySelector("pre.in")?.textContent ?? null };
+      };
+      return { commandEntry, inputEntry, command: detail(commandStep), input: detail(inputStep) };
+    });
+    R.yielded = data;
+    r.expect(data.commandEntry?.in?.startsWith("printf ") && data.commandEntry.arg.endsWith("…"), "the yielded command has a full input alongside its short summary: " + JSON.stringify(data.commandEntry));
+    r.expect(data.command.value === data.commandEntry.in && data.command.labels[0] === "Command" && data.command.labels.indexOf("Output") > data.command.labels.indexOf("Command"), "the yielded exec_command step shows its full command under Command, then Output: " + JSON.stringify(data.command));
+    r.expect(data.inputEntry?.in === "y\n" && data.input.value === "y\n" && data.input.labels[0] === "Input" && data.input.labels.indexOf("Output") > data.input.labels.indexOf("Input"), "the write_stdin step shows its sent text under Input, then Output: " + JSON.stringify(data.input));
+    r.expect(page.errors.length === 0, "yielded Codex steps have page errors: " + page.errors.join(" | "));
+    await page.context().close();
+  }
+
   // ---- Result handoff: the transcript keeps the reply once and shows a compact marker ----------------------------
   {
     const page = await served(browser, { extras: true, path: "/s/claude/result-card" });

@@ -8,7 +8,7 @@
 // --extras writes the sample plus what only the served viewer has to handle, for the check scripts (never for the pixel
 // comparison or the gap check): what the mockup's markdown check page (mkmd.js) added (one message in harbor using every
 // markdown construct, and an answered two-part question from ledger); a harbor step whose command is longer than its
-// summary; a Codex call with no exit status in deps; a `backlog` lane of 460 entries (paging); and a lane whose key, name,
+// summary; a yielded Codex command with a poll that sends input; a Codex call with no exit status in deps; a `backlog` lane of 460 entries (paging); and a lane whose key, name,
 // branch, messages, tools, relay, question, answer and subagent all carry an injection payload (XSS).
 //
 // What the model's rules can't reproduce is listed in gaps.json, and checked by gaps.mjs.
@@ -316,6 +316,10 @@ export function write(out, { extras = false } = {}) {
       shell: (t, callId, command) => at(t, "response_item", { type: "function_call", name: "shell", arguments: JSON.stringify({ command: command.split(" ") }), call_id: callId }),
       call: (t, callId, name, input) => at(t, "response_item", { type: "function_call", name, arguments: JSON.stringify(input), call_id: callId }),
       code: (t, callId, script) => at(t, "response_item", { type: "custom_tool_call", status: "completed", call_id: callId, name: "exec", input: script }),
+      scriptResult: (t, callId, result) => at(t, "response_item", { type: "custom_tool_call_output", call_id: callId, output: [
+        { type: "input_text", text: "Script completed\nWall time 1.0s\nOutput:\n" },
+        { type: "input_text", text: JSON.stringify({ chunk_id: "fixture", wall_time_seconds: 1, original_token_count: 1, ...result }) },
+      ] }),
       item: (t, item) => at(t, "event_msg", { type: "item_completed", item }),
       patch: (t, callId, patch) => at(t, "response_item", { type: "custom_tool_call", status: "completed", call_id: callId, name: "apply_patch", input: patch }),
       output: (t, callId, text, code, custom) => at(t, "response_item", { type: custom ? "custom_tool_call_output" : "function_call_output", call_id: callId, output: out(text, code) }),
@@ -421,6 +425,22 @@ export function write(out, { extras = false } = {}) {
       c.item(ms(T(8, 4)), { type: "FileChange", id: "change-1", changes: { [path.join(cwd, "src/code-mode.rs")]: { type: "update", unified_diff: "@@ -1 +1 @@\n-old\n+new\n", move_path: null } } });
       c.output(ms(T(8, 5)), "script-call", "Script completed", null, true);
       c.text(ms(T(8, 6)), "Three operations completed.");
+      c.save();
+    }
+    // yielded-ui: a long command outlives its yield, then a poll sends input before completion.
+    {
+      const cwd = repo("meridian"), start = ms(T(8, 10)), c = codex("yielded-ui", start, { cwd, branch: "feat/yielded-ui", tokens: [0, 0, 0] });
+      const pid = 4242, command = "printf " + "x".repeat(220);
+      const poll = (chars) => "const r = await tools.write_stdin({session_id:" + pid + ",chars:" + JSON.stringify(chars) + ",yield_time_ms:1000});\ntext(JSON.stringify(r));\n";
+      c.user(start, "Run a long command, then send input to its poll.");
+      c.code(start + 1000, "yield-start", "const r = await tools.exec_command({cmd:" + JSON.stringify(command) + ",workdir:\"" + cwd + "\",yield_time_ms:1000});\ntext(JSON.stringify(r));\n");
+      c.scriptResult(start + 2000, "yield-start", { session_id: pid, output: "started\n" });
+      c.code(start + 3000, "yield-input", poll("y\n"));
+      c.scriptResult(start + 4000, "yield-input", { session_id: pid, output: "received\n" });
+      c.code(start + 5000, "yield-finish", poll(""));
+      c.item(start + 5500, { type: "CommandExecution", id: "yield-ui-exec", process_id: String(pid), command: ["/bin/zsh", "-lc", command], cwd: "file://" + cwd, status: "completed", exit_code: 0, duration: { secs: 5, nanos: 0 }, aggregated_output: "started\nreceived\nfinished\n" });
+      c.scriptResult(start + 6000, "yield-finish", { output: "finished\n", exit_code: 0 });
+      c.text(start + 7000, "The long command accepted input and finished.");
       c.save();
     }
     // backlog: a long transcript, two and a half pages of tool calls in ten turns, with one unreadable line.

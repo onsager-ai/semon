@@ -1055,7 +1055,7 @@
   // What a tool call did: an icon and verb for its step row, and a phrase and nouns for a group summary
   // ("ran 2 commands, asked you 1 question"). An unknown tool keeps its own name ("TodoWrite 1 step").
   const RUN = ["run", "Ran", "ran", "command", "commands"], FIND = ["find", "Searched for", "searched", "time", "times"];
-  const TOOLS = { Bash: RUN, shell: RUN, exec_command: RUN, local_shell: RUN, Grep: FIND, Glob: FIND,
+  const TOOLS = { Bash: RUN, shell: RUN, exec_command: RUN, local_shell: RUN, write_stdin: ["run", "Sent input to", "sent input to", "time", "times"], Grep: FIND, Glob: FIND,
     Read: ["read", "Read", "read", "file", "files"], Edit: ["edit", "Edited", "edited", "file", "files"], MultiEdit: ["edit", "Edited", "edited", "file", "files"],
     Write: ["edit", "Wrote", "wrote", "file", "files"], apply_patch: ["edit", "Patched", "patched", "file", "files"], NotebookEdit: ["edit", "Edited", "edited", "notebook", "notebooks"],
     AskUserQuestion: ["q", "Asked you", "asked you", "question", "questions"], ToolSearch: ["find", "Loaded", "loaded", "tool", "tools"],
