@@ -3090,13 +3090,15 @@ mod tests {
         )
     }
 
+    /// The model's machines: `machines`, or with one machine `machine`.
     fn machine_ids(model: &Value) -> Vec<String> {
-        model["machines"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|machine| machine["id"].as_str().unwrap().to_owned())
-            .collect()
+        match model["machines"].as_array() {
+            Some(machines) => machines
+                .iter()
+                .map(|machine| machine["id"].as_str().unwrap().to_owned())
+                .collect(),
+            None => vec![model["machine"]["id"].as_str().unwrap().to_owned()],
+        }
     }
 
     #[test]
