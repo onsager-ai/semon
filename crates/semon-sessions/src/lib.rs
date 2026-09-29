@@ -20,6 +20,7 @@ mod model;
 pub mod pricing;
 mod query;
 mod received;
+mod refresh;
 pub mod shell;
 mod tx;
 mod union;
@@ -33,6 +34,7 @@ pub use mcp::serve_mcp;
 pub use model::{MODEL_API, model_json, model_json_at};
 pub use query::{DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools};
 pub use received::{ReceivedMachines, is_machine_name};
+pub use refresh::RefreshPool;
 pub use union::{
     AccountLink, AccountMenu, AccountWorkspace, AdminLink, Extras, LinkMethod, Refresh, ViewerCore,
 };
