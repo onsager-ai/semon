@@ -1379,7 +1379,7 @@
   // A session's line: its state, then kind, model, failed steps, machine, branch and API-equivalent cost, each a plain label.
   const sessionLine = (s) => (l2) => {
     const failed = countOf(s, "errors") ?? 0;
-    const st = el("span", "lab state " + s.state); st.append(dot(s.state), el("span", null, STATE[s.state])); l2.append(st);
+    const st = el("span", "lab state " + s.state); st.append(dot(s.state, false), el("span", null, STATE[s.state])); l2.append(st);
     l2.append(lab(kindText(s), s.kind ? s.kind + " · " + HARNESS[s.harness] : null, 2));
     l2.append(lab(shortModel(s.model), "Model: " + modelIdOf(s), 3));
     // Failed steps and runs are the two labels that lead somewhere, so they are the last two the fitter drops.
@@ -1392,7 +1392,7 @@
     l2.append(lab(costText(cost), "API-equivalent cost" + (runs.length ? ", with " + runs.length + (runs.length === 1 ? " run" : " runs") : "") + ". Details in the session menu.", 7));
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
-    const st = el("span", "lab state " + (up ? "done" : "err")); st.append(dot(up ? (w ? "work" : "idle") : "err"), el("span", null, up ? "Up" : "Not responding")); l2.append(st);
+    const st = el("span", "lab state " + (up ? "done" : "err")); st.append(dot(up ? (w ? "work" : "idle") : "err", false), el("span", null, up ? "Up" : "Not responding")); l2.append(st);
     const sessions = here.length + (here.length === 1 ? " session" : " sessions");
     l2.append(lab(up ? w + " working · " + sessions : movedOff(m).length ? movedOff(m).length + " moved off" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, sessions].filter(Boolean).join(" · "), null, 1)); };
   // What Find counts: the matches on the page when there is a search or a filter, else nothing.
