@@ -1629,7 +1629,6 @@
   // What a step shows opened: what was asked first (the command, the file, the input), then what came back. A failed command
   // shows the end of its output, where the failure is; anything else shows the start. "View all" opens the whole call.
   const PREVIEW_LINES = 12;
-  const rich = (tag, cls, text) => { const n = el(tag, cls); inline(n, text); return n; };
   const stateLabel = (st, text) => { const x = el("span", "state " + st); x.append(st === "work" && text !== STATE.work ? el("span", "spin") : dot(st), el("span", null, text ?? STATE[st] ?? st)); return x; };
   function copyBtn(text) { const c = btn("link copy", null, "Copy"); c.append(icon(I.copy), el("span", null, "Copy")); c.addEventListener("click", () => navigator.clipboard?.writeText(text).then(() => { c.lastChild.textContent = "Copied"; }, () => { c.lastChild.textContent = "Copy failed"; })); return c; }
   function stepDetail(e, v, ic) {
@@ -1657,7 +1656,6 @@
     if ((cut && !parts) || more) { const all = btn("viewall"); all.append(icon(I.expand), el("span", null, more || parts ? "View all" : "View all " + lines.length + " lines")); all.addEventListener("click", () => openStepViewer(e, v, ic, cmd ? (isCmd(e.name) ? "Command" : "Input") : "Input")); out.append(all); }
     actions(); return out;
   }
-  const diffEl = (rows) => { const d = el("div", "diff"); rows.forEach(([c, t]) => d.append(el("div", c, t))); return d; };
   // The whole call, in a full sheet: what the preview cut, fetched from the server when it is longer than the preview.
   function openStepViewer(e, v, ic, inLabel) {
     if (e.more?.length && e.slot != null && !e.full) { const open = (f) => openStepViewer({ ...e, ...f, full: true }, v, ic, inLabel); fullOf(e).then(open, () => open({ fullFailed: true })); return; }
