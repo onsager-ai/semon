@@ -27,8 +27,9 @@
 //  - the filter dropdown opens without moving the transcript underneath it (contentMoved === false), narrows and
 //    is undone, and closes both by its own button and by an outside tap; unchecking "tools" actually hides every
 //    step (toolsOff.steps === 0), not just a `turns <= of` comparison that can't fail.
-//  - the errors segment jumps to the first failed step, expanded and in view, with no menu open — and a session
-//    with a failed step must actually be found, or this fails instead of silently not running.
+//  - the errors segment opens errors mode: "Error 1 of N" (N the segment's count), the first failed step marked, in view
+//    and not expanded, with no menu open; Escape leaves it — and a session with a failed step must actually be found,
+//    or this fails instead of silently not running (checks/errnav.mjs covers the mode itself).
 //  - deep links land the target turn below the bar; a relay header's sender link opens the sender's turn — both
 //    must actually be found (a trace child node, a Home item, a relay header), not silently skipped.
 //  - the sidebar shows the 8 most recent top-level tree rows with nested children; the Sessions page keeps all session rows,
@@ -210,11 +211,12 @@ export default async function barCheck(browser) {
       await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click(); await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
       await page.keyboard.press("Escape"); await page.waitForTimeout(150);
       out.details.escFocus = await page.evaluate(() => ({ closed: !document.querySelector("dialog.session-details"), focus: document.activeElement?.id ?? document.activeElement?.tagName }));
-      // The errors segment keeps its jump: the first failed step, expanded, in view; no menu.
+      // The errors segment opens errors mode on the first failed step: marked, in view, not expanded; no menu.
       const errSid = sids.find((s) => (D.TX[s] ?? []).some((e) => e.k === "tool" && e.ok === false));
       r.expect(!!errSid, "no session with a failed tool call to test the errors-segment jump on");
-      if (errSid) { await goto(page, { v: "session", id: errSid }, D); await page.click(".topbar .errs"); await page.waitForTimeout(700);
-        out.errsJump = { session: D.SESS[errSid].name, ...(await page.evaluate(() => { const e = document.querySelector(".step.err"), r = e.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect(); return { label: document.querySelector(".topbar .errs").textContent, expanded: e.querySelector("button")?.getAttribute("aria-expanded"), inView: r.top >= bar.bottom - 1 && r.top < innerHeight, menu: !!document.querySelector(".menu") }; })) }; }
+      if (errSid) { await goto(page, { v: "session", id: errSid }, D); const badge = await page.evaluate(() => document.querySelector(".topbar .errs").textContent.replace(/\u2009/g, " ").trim()); await page.click(".topbar .errs"); await page.waitForTimeout(700);
+        out.errsJump = { session: D.SESS[errSid].name, badge, ...(await page.evaluate(() => { const e = document.querySelector("#page .step.err-current"), r = e?.getBoundingClientRect(), bar = document.querySelector("#topbar").getBoundingClientRect(); return { label: document.querySelector("#topbar .errnav-count")?.textContent ?? null, marked: !!e?.classList.contains("err"), expanded: e?.querySelector("button")?.getAttribute("aria-expanded") ?? null, inView: !!r && r.top >= bar.bottom - 1 && r.top < innerHeight, menu: !!document.querySelector(".menu") }; })) };
+        await page.keyboard.press("Escape"); await page.waitForTimeout(300); out.errsJump.closed = await page.evaluate(() => !!document.querySelector(".topbar .errs") && !document.querySelector("#topbar .errnav-count")); }
       // Deep links land the turn fully below the bar.
       const landed = () => page.evaluate(() => { const st = history.state, t = [...document.querySelectorAll(".turn")].find((x) => x.dataset.turn === st?.turn), bar = document.querySelector("#topbar").getBoundingClientRect(); if (!t) return { found: false }; const r = t.getBoundingClientRect(); return { found: true, turn: st.turn, top: Math.round(r.top), barBottom: Math.round(bar.bottom), barTop: Math.round(bar.top), belowBar: r.top >= bar.bottom - 0.5 && r.top < innerHeight - 40, flash: t.classList.contains("flash") }; });
       const DL = {};
@@ -472,7 +474,10 @@ export default async function barCheck(browser) {
       }
       r.expect(!!m.errsJump, m.mode + ": no session with a failed tool call was found for the errors-jump test");
       if (m.errsJump) {
-        r.expect(m.errsJump.expanded === "true", m.mode + ": errors-jump step not expanded: " + m.errsJump.expanded);
+        const n = /^(\d+) errors?$/.exec(m.errsJump.badge ?? "")?.[1];
+        r.expect(!!n && m.errsJump.label === "Error 1 of " + n, m.mode + ": errors mode does not read Error 1 of the segment's count: " + JSON.stringify(m.errsJump));
+        r.expect(m.errsJump.marked && m.errsJump.expanded === "false", m.mode + ": errors mode did not mark the failed step, or expanded it: " + JSON.stringify(m.errsJump));
+        r.expect(m.errsJump.closed === true, m.mode + ": Escape did not leave errors mode");
         r.expect(m.errsJump.inView === true, m.mode + ": errors-jump step not in view");
         r.expect(m.errsJump.menu === false, m.mode + ": errors-jump left a menu open");
       }
