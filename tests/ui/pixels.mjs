@@ -122,8 +122,8 @@ const COST_LINES = [
   const costForSession = (sid, includeRuns = false) => costForSessions(SESS[sid] ? [SESS[sid], ...(includeRuns ? descendantsOf(sid, sessionChildren()) : [])] : []);
   const costText = (cost) => cost.unknown.length || cost.usd == null ? "—" : asMoney(cost.usd);
   function costSpan(from, to) {
-    if (analyticsRange === 1) { const day = Math.floor(to / DAY_MS) * DAY_MS; return [day, day + DAY_MS]; }
-    return [Math.ceil(from / DAY_MS) * DAY_MS, Math.floor(to / DAY_MS) * DAY_MS];
+    const day = Math.floor(to / DAY_MS) * DAY_MS;
+    return [day - (analyticsRange - 1) * DAY_MS, day + DAY_MS];
   }
   const wholeDay = (day, a, b) => { const start = Date.parse(day + "T00:00:00.000Z"); return Number.isFinite(start) && start >= a && start + DAY_MS <= b; };
   function sessionCostInRange(s, from, to) {
@@ -146,11 +146,11 @@ const COST_LINES = [
   ['      longestCurrent: current[0] ?? null, waitBy, costRows, costUnknown,\n      apiCost: costUnknown.length ? null : costRows.reduce((sum, x) => sum + x.cost.knownUsd, 0),',
     '      longestCurrent: current[0] ?? null, waitBy, costUnknown,\n      apiCost: costRange.usd,'],
   ['    const bins = Array.from({ length: count }, () => ({ claude: 0, codex: 0 })), unpriced = new Set();\n    for (const row of rows) {\n      if (!inRange(row.costAt, from, to)) continue; const cost = costForSession(row.id); if (cost.usd == null) { cost.unknown.forEach((m) => unpriced.add(m)); continue; }\n      const at = Math.min(count - 1, Math.floor((row.costAt - from) / (to - from) * count)); bins[at][row.s.harness] += cost.usd;\n    }',
-    '    const bins = Array.from({ length: count }, () => ({ claude: 0, codex: 0 })), unpriced = new Set(), [spanFrom, spanTo] = costSpan(from, to);\n    for (const row of rows) for (const [day, amount] of Object.entries(row.s.cost?.by_day ?? {})) {\n      if (!wholeDay(day, spanFrom, spanTo)) continue;\n      for (const model of row.s.cost?.unpriced_models ?? []) unpriced.add(model);\n      const at = Date.parse(day + "T00:00:00.000Z") + DAY_MS / 2, index = Math.min(count - 1, Math.max(0, Math.floor((at - from) / (to - from) * count))); bins[index][row.s.harness] += Number(amount) || 0;\n    }'],
+    '    const bins = Array.from({ length: count }, () => ({ claude: 0, codex: 0 })), unpriced = new Set(), [spanFrom, spanTo] = costSpan(from, to);\n    for (const row of rows) for (const [day, amount] of Object.entries(row.s.cost?.by_day ?? {})) {\n      if (!wholeDay(day, spanFrom, spanTo)) continue;\n      for (const model of row.s.cost?.unpriced_models ?? []) unpriced.add(model);\n      const index = Math.round((Date.parse(day + "T00:00:00.000Z") - spanFrom) / DAY_MS); bins[index][row.s.harness] += Number(amount) || 0;\n    }'],
   ['    panel.append(title, el("div", "panel-sub", "API-equivalent cost " + unit + " · stacked by harness"));',
-    '    panel.append(title, el("div", "panel-sub", "API-equivalent cost per day · whole UTC days · stacked by harness"));'],
+    '    panel.append(title, el("div", "panel-sub", "API-equivalent cost per UTC day · today so far · stacked by harness"));'],
   ['    addMetric("API-equivalent cost", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, null, true);',
-    '    addMetric(analyticsRange === 1 ? "Cost today (UTC)" : "Cost in UTC days", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, null, true);'],
+    '    addMetric(analyticsRange === 1 ? "Cost today (UTC)" : "Cost, last " + analyticsRange + " UTC days", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, null, true);'],
   ['      const ms = busyMsIn(row, from, to); if (!ms && !inRange(row.startedAt, from, to)) continue;\n      const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);',
     '      const ms = busyMsIn(row, from, to), c = sessionCostInRange(row.s, from, to); if (!ms && !inRange(row.startedAt, from, to) && !c.hasData) continue;\n      const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);'],
   ['      if (inRange(row.costAt, from, to)) { const c = costForSession(row.id); g.cost += c.knownUsd; c.unknown.forEach((x) => g.unknown.add(x)); }',

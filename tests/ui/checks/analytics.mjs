@@ -4,7 +4,7 @@ import { served, data, reporter, overflow, goto, settled } from "../lib.mjs";
 
 export default async function analyticsCheck(browser) {
   const D = await data(), r = reporter("analytics"), modes = [];
-  const expectedLabels = ["Agent-hours", "Cost in UTC days", "Sessions started", "Turns", "Tool calls", "Peak concurrency", "Waited on you", "Longest current wait"];
+  const expectedLabels = ["Agent-hours", "Cost, last 7 UTC days", "Sessions started", "Turns", "Tool calls", "Peak concurrency", "Waited on you", "Longest current wait"];
   const expectedHarborIds = Object.values(D.SESS).filter((s) => s.repo === "harbor").map((s) => s.id).sort();
   r.expect(!!D.SESS.deps?.rate_limits, "the fixture must serve Codex rate limits for the allowance panel");
 
@@ -19,15 +19,15 @@ export default async function analyticsCheck(browser) {
     record.labels = await page.evaluate(() => [...document.querySelectorAll(".analytics-metric .label")].map((x) => x.textContent.trim()));
     record.figures = await page.locator(".analytics-metric").count();
     record.longestCurrentWait = await page.locator('.analytics-metric').filter({ hasText: "Longest current wait" }).locator(".value").textContent();
-    // Cost is served per UTC day: 7 d counts only the whole UTC days fully inside the range.
-    const DAY = 86400000, costFrom = Math.ceil((D.NOW - 7 * DAY) / DAY) * DAY, costTo = Math.floor(D.NOW / DAY) * DAY, missingModels = new Set(); let expectedUsd = 0;
+    // Cost is served per UTC day: 7 d counts the last 7 UTC days, today so far included.
+    const DAY = 86400000, today = Math.floor(D.NOW / DAY) * DAY, costFrom = today - 6 * DAY, costTo = today + DAY, missingModels = new Set(); let expectedUsd = 0;
     for (const session of Object.values(D.SESS)) {
       const days = Object.entries(session.cost?.by_day ?? {}).filter(([day]) => { const start = Date.parse(day + "T00:00:00.000Z"); return start >= costFrom && start + DAY <= costTo; });
       for (const [, amount] of days) expectedUsd += Number(amount) || 0;
       if (days.length) for (const model of session.cost?.unpriced_models ?? []) missingModels.add(model);
     }
     record.costExpected = missingModels.size ? "—" : "$" + expectedUsd.toFixed(2);
-    record.costHeadline = await page.locator('.analytics-metric').filter({ hasText: "Cost in UTC days" }).locator(".value").textContent();
+    record.costHeadline = await page.locator('.analytics-metric').filter({ hasText: "Cost, last 7 UTC days" }).locator(".value").textContent();
     record.charts = await page.evaluate(() => [...document.querySelectorAll(".analytics-chart svg")].map((svg) => ({ label: svg.getAttribute("aria-label"), columns: [...svg.querySelectorAll("rect.cost-claude, rect.cost-codex")].map((x) => ({ width: Number(x.getAttribute("width")), height: Number(x.getAttribute("height")) })).filter((x) => x.width > 0 && x.height > 0).length })));
     record.allowance = await page.evaluate(() => ({ heading: [...document.querySelectorAll(".analytics-panel h2")].find((x) => x.textContent === "Codex allowance")?.textContent, windows: [...document.querySelectorAll(".allowance-window .window-name")].map((x) => x.textContent.trim()), used: [...document.querySelectorAll(".allowance-window .window-used")].map((x) => x.textContent.trim()) }));
     record.sideways = size === "phone" ? await overflow(page) : 0;
@@ -52,7 +52,7 @@ export default async function analyticsCheck(browser) {
   }
 
   // A session whose cost falls on two UTC days around the 24 h window (yesterday $10, today $3): the 24 h headline is
-  // today's UTC day alone, the previous period is yesterday's, and there is no hourly cost series.
+  // today's UTC day alone, the previous period is yesterday's, and there is no hourly cost series. 7 d counts both days.
   const fx = await served(browser, { size: "desktop", path: "/analytics" });
   const isoDay = (t) => new Date(t).toISOString().slice(0, 10);
   await fx.route(/\/api\/model(\?|$)/, async (route) => {
@@ -71,12 +71,12 @@ export default async function analyticsCheck(browser) {
   costTwoDays.day = { label: (await fx.locator(".analytics-metric .label").allTextContents()).map((x) => x.trim()).find((x) => x.startsWith("Cost")), value: await figure("Cost today (UTC)").locator(".value").textContent(), note: await figure("Cost today (UTC)").locator(".note").textContent(),
     charts: await fx.locator(".analytics-chart svg").count(), costChart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .analytics-chart").count() };
   await fx.click('#topbar .analytics-range button:has-text("7 d")');
-  costTwoDays.week = { value: await figure("Cost in UTC days").locator(".value").textContent(), chart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .panel-sub").textContent(), columns: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) rect.cost-claude, .analytics-panel:has(h2:has-text('Cost over time')) rect.cost-codex").count() };
+  costTwoDays.week = { value: await figure("Cost, last 7 UTC days").locator(".value").textContent(), chart: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) .panel-sub").textContent(), columns: await fx.locator(".analytics-panel:has(h2:has-text('Cost over time')) rect.cost-claude, .analytics-panel:has(h2:has-text('Cost over time')) rect.cost-codex").count() };
   costTwoDays.errors = fx.errors;
   await fx.context().close();
   r.expect(costTwoDays.day.label === "Cost today (UTC)" && costTwoDays.day.value === "$3.00" && costTwoDays.day.note.includes("−$7.00"), "24 h cost headline must be the one UTC day ($3.00 against yesterday's $10.00), not the $13.00 sum: " + JSON.stringify(costTwoDays.day));
   r.expect(costTwoDays.day.charts === 1 && costTwoDays.day.costChart === 0, "the 24 h range must draw no hourly cost series: " + JSON.stringify(costTwoDays.day));
-  r.expect(costTwoDays.week.value === "$10.00" && costTwoDays.week.chart.includes("whole UTC days") && costTwoDays.week.columns === 1, "7 d must count only the whole UTC day inside the range ($10.00): " + JSON.stringify(costTwoDays.week));
+  r.expect(costTwoDays.week.value === "$13.00" && costTwoDays.week.chart.includes("today so far") && costTwoDays.week.columns === 2, "7 d must count yesterday and today so far ($13.00, two columns): " + JSON.stringify(costTwoDays.week));
   r.expect(costTwoDays.errors.length === 0, "cost fixture: page errors: " + costTwoDays.errors.join(" | "));
 
   const legacy = await served(browser, { size: "desktop", path: "/timeline" });
@@ -91,9 +91,8 @@ export default async function analyticsCheck(browser) {
     r.expect(m.figures === 8 && expectedLabels.every((label) => m.labels.some((value) => value.startsWith(label))), m.mode + ": expected eight headline figures: " + JSON.stringify(m.labels));
     r.expect(m.longestCurrentWait === "8m", m.mode + ": completed result messages were counted as current waits: " + m.longestCurrentWait);
     r.expect(m.costHeadline === m.costExpected, m.mode + ": Analytics headline did not sum the served by_day cost: " + JSON.stringify({ actual: m.costHeadline, expected: m.costExpected }));
-    // The fixture's cost is all on the current UTC day, which no 7 d window holds whole: its cost chart has no columns (the
-    // two-day fixture below draws one).
-    r.expect(m.charts.length === 2 && m.charts[0].columns > 0 && m.charts[1].columns === 0, m.mode + ": expected the agents chart to render vertical columns and the whole-UTC-day cost chart none: " + JSON.stringify(m.charts));
+    r.expect(m.charts.length === 2 && m.charts.every((chart) => chart.columns > 0), m.mode + ": expected both charts to render vertical columns: " + JSON.stringify(m.charts));
+    r.expect(m.costExpected === "—" || Number(m.costHeadline.replace("$", "")) > 0, m.mode + ": the fixture's cost is all on today, which the 7 d figure must include: " + m.costHeadline);
     r.expect(m.slice?.open && m.slice.sessions > 0, m.mode + ": an Analytics slice did not open with busy sessions: " + JSON.stringify(m.slice));
     if (m.mode === "phone") r.expect(m.slice?.bottomSheet && m.sideways === 0, "phone: the slice must be a bottom sheet with no sideways page scroll: " + JSON.stringify({ slice: m.slice, sideways: m.sideways }));
     r.expect(m.repoRow === 1 && m.filtered?.title === "Sessions" && m.filtered.rows.length === expectedHarborIds.length && m.filtered.rows.join(",") === expectedHarborIds.join(",") && m.filtered.rows.length < Object.keys(D.SESS).length, m.mode + ": a repo breakdown did not filter the Sessions list to every harbor session: " + JSON.stringify({ found: m.repoRow, expected: expectedHarborIds, filtered: m.filtered }));

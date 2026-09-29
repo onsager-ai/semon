@@ -1356,12 +1356,12 @@
       .map((h) => ({ sid: h.from, startAt: h.at, endAt: null }));
   }
   function busyMsIn(row, from, to) { return row.busy.reduce((sum, [a, b]) => sum + Math.max(0, Math.min(b, to) - Math.max(a, from)), 0); }
-  // Cost is served per UTC day (cost.by_day), so a window of hours can't be priced. Only whole UTC days count: over 24 h
-  // the UTC day `to` falls in (today, so far), over 7 d and 30 d the days lying fully inside the range. The previous
-  // period is the same rule on the range before it.
+  // Cost is served per UTC day (cost.by_day), so a window of hours can't be priced. Only whole UTC days count: the range's
+  // length in UTC days, ending with the UTC day `to` falls in (today, so far): today for 24 h, the last 7 or 30 UTC days
+  // otherwise. The previous period is the same rule on the range before it, so it is the whole days just before these.
   function costSpan(from, to) {
-    if (analyticsRange === 1) { const day = Math.floor(to / DAY_MS) * DAY_MS; return [day, day + DAY_MS]; }
-    return [Math.ceil(from / DAY_MS) * DAY_MS, Math.floor(to / DAY_MS) * DAY_MS];
+    const day = Math.floor(to / DAY_MS) * DAY_MS;
+    return [day - (analyticsRange - 1) * DAY_MS, day + DAY_MS];
   }
   const wholeDay = (day, a, b) => { const start = Date.parse(day + "T00:00:00.000Z"); return Number.isFinite(start) && start >= a && start + DAY_MS <= b; };
   function sessionCostInRange(s, from, to) {
@@ -1459,12 +1459,12 @@
     const panel = el("section", "analytics-panel"), title = el("h2", null, "Cost over time"); title.append(costInfoTip());
     // Cost is recorded per UTC day: an hourly series would put a whole day into one hour.
     if (analyticsRange === 1) { panel.append(title, el("p", "empty", "Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.")); return panel; }
-    const count = analyticsRange, unit = "per day"; panel.append(title, el("div", "panel-sub", "API-equivalent cost per day · whole UTC days · stacked by harness"));
-    const bins = Array.from({ length: count }, (_, i) => ({ a: from + (to - from) * i / count, b: from + (to - from) * (i + 1) / count, claude: 0, codex: 0, rows: [] })), unknown = new Set(), [spanFrom, spanTo] = costSpan(from, to);
+    const count = analyticsRange, unit = "per day"; panel.append(title, el("div", "panel-sub", "API-equivalent cost per UTC day · today so far · stacked by harness"));
+    const [spanFrom, spanTo] = costSpan(from, to), bins = Array.from({ length: count }, (_, i) => ({ a: spanFrom + i * DAY_MS, b: spanFrom + (i + 1) * DAY_MS, claude: 0, codex: 0, rows: [] })), unknown = new Set();
     for (const row of rows) for (const [day, amount] of Object.entries(row.s.cost?.by_day ?? {})) {
       if (!wholeDay(day, spanFrom, spanTo)) continue;
       for (const model of costMissing(row.s.cost)) unknown.add(model);
-      const at = Date.parse(day + "T00:00:00.000Z") + DAY_MS / 2, index = Math.min(count - 1, Math.max(0, Math.floor((at - from) / (to - from) * count))), usd = Number(amount) || 0;
+      const index = Math.round((Date.parse(day + "T00:00:00.000Z") - spanFrom) / DAY_MS), usd = Number(amount) || 0;
       bins[index][row.s.harness] += usd; bins[index].rows.push({ row, usd, unpriced_models: costMissing(row.s.cost) });
     }
     const W = chartWidth(), svg = svgEl("svg", { viewBox: "0 0 " + W + " 190", role: "img", "aria-label": "API-equivalent cost " + unit + ", stacked by harness" });
@@ -1524,7 +1524,7 @@
     const metrics = el("div", "analytics-metrics"), addMetric = (label, value, note, more, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label"); l.append(el("span", null, label)); if (tip) l.append(costInfoTip()); if (more) { m.dataset.more = ""; m.title = more; } m.append(l, el("div", "value", value), note); metrics.append(m); }, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
     addMetric("Agent-hours", hoursText(now.agentMs), deltaNote(now.agentMs, previous.agentMs, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
     const costNote = now.apiCost == null || previous.apiCost == null ? el("div", "note", "no price for " + [...new Set([...now.costUnknown, ...previous.costUnknown])].join(", ")) : deltaNote(now.apiCost, previous.apiCost, asMoney);
-    addMetric(analyticsRange === 1 ? "Cost today (UTC)" : "Cost in UTC days", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, analyticsRange === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: only whole UTC days inside the range count, compared with the same days of the range before.", true);
+    addMetric(analyticsRange === 1 ? "Cost today (UTC)" : "Cost, last " + analyticsRange + " UTC days", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, analyticsRange === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + analyticsRange + " UTC days count, today so far, compared with the " + analyticsRange + " whole UTC days before.", true);
     addMetric("Sessions started", countText(now.started), deltaNote(now.started, previous.started, countText)); addMetric("Turns", countText(now.turns), deltaNote(now.turns, previous.turns, countText));
     const toolNote = deltaNote(now.tools, previous.tools, countText), loading = COUNT_QUEUED.size, unavailable = all.filter((r) => ANALYTICS_COUNTS[r.id]?.failed && TXM[r.id]?.calls == null).length;
     metrics.dataset.counts = loading ? "loading" : "ready";
