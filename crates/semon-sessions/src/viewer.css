@@ -520,7 +520,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .srow .ag { flex: none; font-size: 11.5px; color: var(--faint); font-family: var(--mono); }
 .srow-meta { padding-left: 1px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 .srow-meta .host, .srow-meta .repo-short { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.srow-meta .host { flex: 0 1 15ch; }
+.srow-meta .host { flex: 0 1 auto; max-width: 15ch; }
 .srow-meta .repo-short { flex: 0 1 auto; }
 .srow-meta svg { width: 14px; height: 14px; flex: none; color: var(--faint); }
 .tree-summary { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 1px 5px; border-radius: 8px; background: var(--sunken); color: var(--muted); font: 11px/1.4 var(--mono); }
@@ -541,7 +541,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .topbar .l2.session-meta .meta-state .meta-value { max-width: none; }
 .topbar .l2.session-meta .meta-state .state-sep { color: var(--faint); }
 .topbar .l2.session-meta .meta-item svg { width: 15px; height: 15px; flex: none; color: var(--faint); }
-.topbar .l2.session-meta .meta-model { gap: 6px; }
+.topbar .l2.session-meta .meta-model { gap: 6px; align-items: baseline; }
 .topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, var(--h) 12%, transparent); color: var(--h); }
 .topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--h); }
 .topbar .l2.session-meta .meta-item.meta-cost { gap: 4px; }

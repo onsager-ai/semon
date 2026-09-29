@@ -60,6 +60,8 @@ export default async function namesCheck(browser) {
     rec.sideways = size === "phone" ? await overflow(page) : 0;
     r.expect(rec.sideways === 0, tag + ": Analytics scrolls sideways (" + rec.sideways + ")");
     await shot("analytics");
+    await page.locator(".analytics-session").first().scrollIntoViewIfNeeded(); await page.waitForTimeout(150);
+    await shot("analytics-list");
     // The sidebar last: on a phone it is the drawer over Home, on desktop it sits beside the open session (its row selected).
     if (size === "phone") { await goto(page, { v: "home" }, D); await page.click("#lead-btn"); await page.waitForTimeout(320); } else { await goto(page, { v: "session", id: claude.id }, D); await page.waitForTimeout(200); }
     audit("sidebar", await measure(page, "#lanes"));
