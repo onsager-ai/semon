@@ -148,7 +148,7 @@ export default async function tapsCheck(browser) {
       });
       // Details are the same sheet for every session: two of them are enough, the first with the cost breakdown open.
       if (detailsDone < 2) await attempt("open the details sheet of " + short, async () => {
-        await page.locator(".topbar .l2.session-meta .meta-hit").click(); await page.waitForSelector("dialog.session-details[open]");
+        await menuAction(page, "Session details"); await page.waitForSelector("dialog.session-details[open]");
         await tally(page, at("details sheet " + short));
         if (await page.locator("dialog.session-details .cost-row").count()) {
           await page.locator("dialog.session-details .cost-row").click(); await page.waitForTimeout(100); await tally(page, at("details cost " + short));
@@ -201,7 +201,7 @@ export default async function tapsCheck(browser) {
   for (const p of problems) r.expect(false, p);
   // The check is not vacuous: it reached the screens it names, and measured the controls those screens are made of.
   r.expect(screens > 60, "measured only " + screens + " screens");
-  for (const must of ["tracebtn", "nav-item", "srow", "meta-hit", "vclose", "jump-bottom", "analytics-range", "analytics-measure", "viewscript", "account-trigger"]) {
+  for (const must of ["tracebtn", "nav-item", "srow", "session-details", "vclose", "jump-bottom", "analytics-range", "analytics-measure", "viewscript", "account-trigger"]) {
     r.expect(Object.keys(bySignature).some((sig) => sig.includes("." + must)), "no ." + must + " was measured: its screen was not reached");
   }
   return r.done();
