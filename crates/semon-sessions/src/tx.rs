@@ -234,22 +234,31 @@ pub(crate) enum Source {
 /// seconds`, then `Process exited with code N` or `Process running with
 /// session ID N`, `Original token count: N`, and `Output:` on a line of its
 /// own (codex-rs `core/src/tools/context.rs`, `ExecCommandToolOutput`). Codex's
-/// warning header and cut come after it. Returns the text after the frame, and
-/// whether there was one. A frame needs its `Wall time:` line.
-fn strip_frame(text: &str) -> (&str, bool) {
+/// warning header and cut come after it. Returns the text after the frame,
+/// whether there was one, and the frame's `Original token count` if it has
+/// one. A frame needs its `Wall time:` line.
+fn strip_frame(text: &str) -> (&str, bool, Option<u64>) {
     let mut rest = text;
     let mut timed = false;
+    let mut count = None;
     while let Some((line, after)) = rest.split_once('\n') {
         if line == "Output:" {
-            return if timed { (after, true) } else { (text, false) };
+            return if timed {
+                (after, true, count)
+            } else {
+                (text, false, None)
+            };
         }
-        if line.starts_with("Wall time: ") && line.ends_with(" seconds") {
+        if let Some(number) = line.strip_prefix("Original token count: ") {
+            count = digits(number)
+                .filter(|(_, rest)| rest.is_empty())
+                .map(|(n, _)| n);
+        } else if line.starts_with("Wall time: ") && line.ends_with(" seconds") {
             timed = true;
         } else if ![
             "Chunk ID: ",
             "Process exited with code ",
             "Process running with session ID ",
-            "Original token count: ",
         ]
         .iter()
         .any(|prefix| line.starts_with(prefix))
@@ -258,7 +267,7 @@ fn strip_frame(text: &str) -> (&str, bool) {
         }
         rest = after;
     }
-    (text, false)
+    (text, false, None)
 }
 
 /// The gaps Codex left in `body`, in order, by the forms it writes them in:
@@ -289,8 +298,13 @@ fn find_gaps(body: &str, marked: bool, anchored: bool, model: bool) -> Vec<Marke
         && let Some((n, rest)) = digits(rest)
         && let Some(after) = rest.strip_prefix(" bytes omitted ...\n")
     {
-        // The blank line Codex writes after it goes with it.
-        let end = body.len() - after.strip_prefix('\n').unwrap_or(after).len();
+        // After a warning line, Codex writes a blank line, which goes with
+        // it. With no warning line the marker's own newline is all there is.
+        let end = if marked {
+            body.len() - after.strip_prefix('\n').unwrap_or(after).len()
+        } else {
+            body.len() - after.len()
+        };
         gaps.push(Marker {
             start: 0,
             end,
@@ -387,16 +401,23 @@ pub(crate) fn split_cut(text: &str, source: Source) -> (String, Option<Cut>) {
     if source == Source::Plain {
         return (text.to_owned(), None);
     }
-    let (after_frame, framed) = if model {
+    let (after_frame, framed, frame_tokens) = if model {
         strip_frame(text)
     } else {
-        (text, false)
+        (text, false, None)
     };
-    let (rest, mut original_tokens, mut lines, mut marked) = if model {
+    let (mut rest, mut original_tokens, mut lines, mut marked) = if model {
         strip_header(after_frame)
     } else {
         (after_frame, None, None, false)
     };
+    // Behind a frame, Codex's warning carries the count the frame does (both
+    // are `ceil(bytes / 4)` of the same output, codex-rs `unified_exec/
+    // process_manager.rs` and `tools/context.rs`). A warning line with any
+    // other count, or a frame with none, is the command's own first line.
+    if framed && marked && (original_tokens.is_none() || original_tokens != frame_tokens) {
+        (rest, original_tokens, lines, marked) = (after_frame, None, None, false);
+    }
     let mut unwrapped = None;
     if model
         && let Ok(value) = serde_json::from_str::<Value>(rest.trim())
@@ -2819,6 +2840,48 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("Warning: truncated")
+        );
+    }
+
+    #[test]
+    fn a_printed_warning_line_behind_a_frame_is_kept_unless_its_count_is_the_frames() {
+        // A command printed a rollout's cut output; Codex cut nothing.
+        let printed = "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\nline 1\n…19500 tokens truncated…line 900\n";
+        let with = |count: &str| {
+            format!(
+                "Chunk ID: a\nWall time: 1.0000 seconds\nProcess exited with code 0\n{count}Output:\n{printed}"
+            )
+        };
+        // The frame's count is the whole output's, not the printed one's.
+        let other = with("Original token count: 12\n");
+        assert_eq!(model(&other), (other.clone(), None));
+        // A frame with no count (an intercepted patch's) can't vouch for it.
+        let none = with("");
+        assert_eq!(model(&none), (none.clone(), None));
+        // Equal counts are Codex's own header.
+        let real = with("Original token count: 24000\n");
+        let (plain, cut) = model(&real);
+        assert!(!plain.contains("Warning: truncated output"));
+        assert_eq!(cut.unwrap().original_tokens, Some(24000));
+        // With no frame at all (legacy and code-mode forms) the header is
+        // Codex's wherever it starts the text.
+        assert_eq!(model(printed).1.unwrap().original_tokens, Some(24000));
+    }
+
+    #[test]
+    fn a_leading_cap_marker_takes_only_its_own_newline_without_a_warning_line() {
+        // `format!("{marker}\n{text}")`: a kept output that starts blank.
+        let raw =
+            "Chunk ID: a\nWall time: 1.0000 seconds\nOutput:\n... 5 bytes omitted ...\n\nkept\n";
+        assert_eq!(
+            model(raw).1.unwrap().parts,
+            vec![gap(5, "bytes", None), text("\nkept\n")]
+        );
+        // After a warning line the blank line is Codex's separator.
+        let warned = "Chunk ID: a\nWall time: 1.0000 seconds\nOriginal token count: 9\nOutput:\nWarning: truncated output (original token count: 9)\n... 5 bytes omitted ...\n\nkept\n";
+        assert_eq!(
+            model(warned).1.unwrap().parts,
+            vec![gap(5, "bytes", None), text("kept\n")]
         );
     }
 
