@@ -22,7 +22,7 @@
   let opened = false;
   let timer = 0;
   let closedAt = -Infinity;   // when a shown tip last closed by moving away: the skip-delay window runs from here
-  let dismissed = null;  // the target Esc or a click closed: it stays closed until the pointer leaves that element
+  let dismissed = null;  // what Esc or a click closed: it stays closed until the pointer leaves, or moves off the spot it rested on
   let pointerType = "mouse";
   let described = null;  // the aria-describedby to give back when the tip closes
   let watcher = null;
@@ -33,6 +33,10 @@
   const tipOf = (node) => node?.closest?.(HAS_TIP) ?? null;
   const focusVisible = (node) => { try { return node.matches(":focus-visible"); } catch { return true; } };
   const shown = (node) => node.isConnected && node.getClientRects().length > 0;
+  // A rebuild puts a new node with the same tip under a resting pointer: that is still what was dismissed.
+  // With no tip open or pending there is nothing new to dismiss, so an earlier dismissal stands (hover, Esc, click the same badge, rebuild).
+  const dismiss = () => { dismissed = target ? { node: target, text: target.getAttribute("data-tip"), x: pointer?.x, y: pointer?.y } : dismissed; };
+  const isDismissed = (node) => !!dismissed && !!node && (node === dismissed.node || (pointer != null && pointer.x === dismissed.x && pointer.y === dismissed.y && node.getAttribute("data-tip") === dismissed.text));
   const clipped = (node) => node.scrollWidth > node.clientWidth + 1 || node.scrollHeight > node.clientHeight + 1;
 
   function element() {
@@ -140,20 +144,27 @@
     pointer = { x: event.clientX, y: event.clientY };
     origin = "pointer";
     const node = tipOf(event.target);
-    if (node !== dismissed) dismissed = null;
+    if (!isDismissed(node)) dismissed = null;
     if (node === target) return;
-    if (node && node === dismissed) return;
+    if (node && isDismissed(node)) return;
     hide(true);
     if (node) schedule(node);
   });
-  document.addEventListener("pointermove", (event) => { if (event.pointerType !== "touch") pointer = { x: event.clientX, y: event.clientY }; }, { capture: true, passive: true });
+  document.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "touch") return;
+    // A nudge inside what was dismissed keeps it dismissed: the spot it rests on follows the pointer, and so does the node
+    // (a rebuild may have replaced it), so a later rebuild under the pointer is still the same dismissal.
+    const over = dismissed ? tipOf(event.target) : null;
+    if (over && isDismissed(over)) { dismissed.node = over; dismissed.x = event.clientX; dismissed.y = event.clientY; }
+    pointer = { x: event.clientX, y: event.clientY };
+  }, { capture: true, passive: true });
   // Leaving the window sends no pointerover to anything else.
   document.addEventListener("pointerout", (event) => { if (!event.relatedTarget && event.pointerType !== "touch") hide(true); });
 
   document.addEventListener("pointerdown", (event) => {
     pointerType = event.pointerType || "mouse";
     if (event.pointerType === "touch") return; // a touch tap is settled by its click, below
-    if (target) dismissed = target;
+    dismiss();
     hide();
   }, true);
 
@@ -173,7 +184,7 @@
     if (event.key !== "Escape" || !target) return;
     // Inside an open dialog, one Esc closes the tip and leaves the dialog: the next Esc closes that.
     const inDialog = opened && !!target.closest?.("dialog[open]");
-    dismissed = target;
+    dismiss();
     hide();
     if (inDialog) { event.preventDefault(); event.stopPropagation(); }
   }, true);

@@ -313,9 +313,9 @@ export default async function tooltipCheck(browser) {
         await page.waitForTimeout(80);
         const s = await state(page), want = await page.evaluate(() => document.activeElement.dataset.tip);
         // The explanation is the card's description all the time (hidden text), so the tooltip adds no second description.
-        const own = await page.evaluate(() => { const c = document.activeElement, n = document.getElementById(c.getAttribute("aria-describedby") ?? ""); return { text: n?.textContent ?? null, sr: n?.classList.contains("sr-only") ?? false, cards: [...document.querySelectorAll(".analytics-metric[data-more]")].filter((x) => document.getElementById(x.getAttribute("aria-describedby") ?? "")?.textContent !== x.dataset.tip).length }; });
+        const own = await page.evaluate(() => { const c = document.activeElement, n = document.getElementById(c.getAttribute("aria-describedby") ?? ""); return { text: n?.textContent ?? null, hidden: n?.hidden ?? false, cards: [...document.querySelectorAll(".analytics-metric[data-more]")].filter((x) => document.getElementById(x.getAttribute("aria-describedby") ?? "")?.textContent !== x.dataset.tip).length }; });
         r.expect(s.open && s.text === want && s.described === 0, tag + ": focusing a card did not show its tooltip, or described it twice " + JSON.stringify(s));
-        r.expect(own.text === want && own.sr && own.cards === 0, tag + ": a metric card does not carry its explanation as hidden text at all times " + JSON.stringify(own));
+        r.expect(own.text === want && own.hidden && own.cards === 0, tag + ": a metric card does not carry its explanation as a hidden description at all times " + JSON.stringify(own));
         await page.keyboard.press("Escape"); await page.waitForTimeout(80);
         const after = await state(page);
         r.expect(!after.open && after.described === 0, tag + ": Esc did not hide the card's tooltip " + JSON.stringify(after));
@@ -356,7 +356,47 @@ export default async function tooltipCheck(browser) {
         r.expect(after.open && after.text === before.text && info.hides === 0, tag + ": " + name + ": the tooltip did not stay open on the rebuilt element " + JSON.stringify({ before: before.text, after: after.text, hides: info.hides }));
         await away(page); await page.waitForTimeout(200);
       }
+      // Esc closes the tip, and a rebuild under the resting pointer does not bring it back, even when the pointer moves on
+      // the spot or is put back on it.
+      await away(page); await page.waitForTimeout(450);
+      const spot = await box(page, "#topbar .meta-tokens"), [px, py] = centre(spot);
+      r.expect((await hover(page, spot, 1500)) != null, tag + ": the Tokens badge never showed a tooltip before Esc");
+      await page.keyboard.press("Escape"); await page.waitForTimeout(100);
+      r.expect(!(await state(page)).open, tag + ": Esc did not close the tooltip");
+      await page.mouse.move(px + 2, py + 1); // a nudge inside the badge
+      await page.evaluate(() => { window.__was = document.querySelector("#topbar .meta-tokens"); });
+      await page.waitForFunction(() => !window.__was.isConnected, null, { timeout: 12000 }).catch(() => {});
+      await page.waitForTimeout(300);
+      await page.mouse.move(px + 2, py + 1); // and put back on the same coordinates after the rebuild
+      await page.waitForTimeout(700);
+      const back = await page.evaluate(() => ({ replaced: !window.__was.isConnected, open: !document.getElementById("sh-tooltip").hidden }));
+      results[tag].escThenRebuild = back;
+      r.expect(back.replaced && !back.open, tag + ": after Esc, a rebuild under the resting pointer brought the tooltip back or never happened " + JSON.stringify(back));
+      // The positive control: off the badge and back on it, the tip shows again.
+      await away(page); await page.waitForTimeout(450);
+      const again = await hover(page, spot, 1500);
+      r.expect(again != null && /^Tokens: /.test((await state(page)).text ?? ""), tag + ": the tooltip did not show again after the pointer left and returned");
       r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join("; "));
+    });
+  }
+
+  // ---- Esc inside a dialog closes only the tooltip, and the next Esc closes the dialog ----
+  for (const size of ["desktop", "phone"]) {
+    const tag = "dialog esc " + size, page = await served(browser, { size });
+    await guard(r, tag, page, async () => {
+      await goto(page, { v: "session", id: parent.id }, D); await page.waitForTimeout(200);
+      await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
+      await page.waitForSelector("dialog.session-details[open]");
+      // The dialog's own tipped element: the "?" icon by its API-equivalent cost row (costInfoTip).
+      const shownAt = await hover(page, "dialog.session-details .cost-info", 1500), open = await state(page);
+      r.expect(shownAt != null && /^What these tokens would cost/.test(open.text ?? ""), tag + ": the tooltip did not open on the cost icon inside the modal dialog " + JSON.stringify(open.text));
+      await page.keyboard.press("Escape"); await page.waitForTimeout(150);
+      const first = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-details[open]"), tip: !document.getElementById("sh-tooltip").hidden }));
+      r.expect(first.dialog && !first.tip, tag + ": the first Esc should close only the tooltip " + JSON.stringify(first));
+      await page.keyboard.press("Escape"); await page.waitForTimeout(200);
+      const second = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-details[open]") }));
+      r.expect(!second.dialog, tag + ": the second Esc did not close the dialog " + JSON.stringify(second));
+      results[tag] = { first, second };
     });
   }
 
