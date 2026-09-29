@@ -537,6 +537,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .srow-meta .repo-short { flex: 0 1 auto; }
 .srow-meta svg { width: 14px; height: 14px; flex: none; color: var(--faint); }
 .tree-summary { display: inline-flex; align-items: center; flex: none; min-width: 20px; justify-content: center; padding: 1px 7px; border-radius: 999px; background: var(--sunken); color: var(--ink-2); font: 11px/1.4 var(--mono); }
+.tree-summary.wait { background: var(--wait-soft); color: var(--ink); }
 .hname { flex: none; font-size: 11.5px; font-weight: 500; line-height: 1.2; letter-spacing: .01em; white-space: nowrap; color: var(--muted); }
 .treeitem[aria-expanded="true"] > .tree-row .tree-summary { display: none; }
 .page.wide-mode { max-width: 1400px; }
