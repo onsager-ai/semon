@@ -17,8 +17,8 @@
 //   - output Codex cut before the model saw it (codex-cut): a plain call's step shows a divider with the count where Codex cut, the note
 //     "Codex cut this output before the model saw it" and none of the warning header; a code-mode command cut by the collection cap
 //     shows the same in View all. Neither says "Cut short in this copy of the logs". Screenshots at 390 and 1280, light and dark.
-//   - spawn cards: the kind badge and the title share one row (phone and desktop, light and dark, also with a long title, and never sideways),
-//     the title does not repeat the kind its badge shows, and the Subagent badge on a card carries the delegation icon, not the person icon, and the top bar names the kind as a plain label.
+//   - spawn cards: the name and the state share one row (phone and desktop, light and dark, also with a long name, and never sideways), a
+//     card names its kind once (in its meta line) and never uses the person icon, and the top bar names the kind as a plain label.
 //   - no page errors.
 import path from "node:path";
 import { ENV, served, goto, data, reporter, overflow } from "../lib.mjs";
@@ -468,7 +468,7 @@ export default async function (browser) {
     r.expect(X.bad.length === 0, "screens with a script, img or iframe from content, or __xss set: " + X.bad.slice(0, 5).join(" || "));
     r.expect(X.payloadShown > 10, "the payload shows as text on the screens that carry it: " + X.payloadShown + " of " + X.screens);
   }
-  // ---- Spawn cards name the kind once, on the title row, and a subagent's icon is not the person icon ---------------
+  // ---- Spawn cards: the kind is named once, in the card's meta line, and the name shares the first row with the state -----------
   {
     const kid = Object.values(D.SESS).find((s) => s.kind === "Subagent" && D.H.some((h) => h.kind === "spawn" && h.to === s.id));
     r.expect(!!kid, "the extras fixture needs a subagent with a spawn handoff");
@@ -479,30 +479,24 @@ export default async function (browser) {
         const tag = size + "-" + (dark ? "dark" : "light");
         const page = await served(browser, { extras: true, size, dark });
         await goto(page, { v: "session", id: parent }, D); await page.waitForTimeout(150);
-        const probe = () => page.evaluate(() => {
-          const PERSON = "a4 4 0 1 0 0-8";
-          return [...document.querySelectorAll(".hcard.child-card")].map((c) => {
-            const head = c.querySelector(":scope > .child-head"), badge = head?.querySelector(".child-kind"), title = head?.querySelector(".ln");
-            const b = badge?.getBoundingClientRect(), t = title?.getBoundingClientRect(), kind = badge?.textContent.trim() ?? "";
-            const svg = badge?.querySelector("svg");
-            return { kind, title: title?.textContent ?? "", inHead: !!head, dTop: b && t ? Math.round(Math.abs(b.top - t.top) * 10) / 10 : null, badgeLeftOfTitle: b && t ? b.right <= t.left + 0.5 : false, badgeWraps: b ? b.height > 24 : true, delegate: svg?.classList.contains("kind-delegate") ?? false, person: !!svg && [...svg.querySelectorAll("path")].some((p) => p.getAttribute("d").includes(PERSON)) };
-          });
-        });
+        const probe = () => page.evaluate(() => [...document.querySelectorAll(".child-card")].map((c) => {
+          const name = c.querySelector(".cc-name"), state = c.querySelector(".cc-head .state"), meta = c.querySelector(".cc-meta")?.textContent ?? "";
+          const a = name?.getBoundingClientRect(), b = state?.getBoundingClientRect();
+          return { name: name?.textContent ?? "", meta, dTop: a && b ? Math.round(Math.abs((a.top + a.bottom) / 2 - (b.top + b.bottom) / 2) * 10) / 10 : null, stateRightOfName: a && b ? b.left >= a.right - 0.5 : false, person: !!c.querySelector("svg path[d*='a4 4 0 1 0 0-8']") };
+        }));
         const before = await probe();
         cards[tag] = before.length;
         r.expect(before.length > 0, tag + ": no spawn cards to check");
         for (const c of before) {
-          r.expect(c.inHead && c.dTop <= 3 && c.badgeLeftOfTitle && !c.badgeWraps, tag + ": the kind badge and the title share one row: " + JSON.stringify(c));
-          r.expect(!c.title.includes(c.kind) && !/·\s*(Subagent|Codex run|Relayed)\s*$/.test(c.title), tag + ": the title repeats the kind its badge shows: " + JSON.stringify(c.title));
-          if (c.kind === "Subagent") r.expect(c.delegate && !c.person, tag + ": the Subagent badge should carry the delegation icon (class kind-delegate), not the person icon: " + JSON.stringify(c));
+          r.expect(c.dTop != null && c.dTop <= 12 && c.stateRightOfName, tag + ": the card's name and state share a row: " + JSON.stringify(c));
+          const kinds = ["Subagent", "Codex run", "Relayed"].filter((k) => c.meta.startsWith(k));
+          r.expect(!kinds.some((k) => c.name.includes(k)) && !c.person, tag + ": the card repeats its kind in the name, or carries the person icon: " + JSON.stringify(c));
         }
-        // A long title wraps beside the badge (the badge keeps its row and its width) and never widens the page.
-        await page.evaluate(() => { for (const t of document.querySelectorAll(".hcard.child-card .child-head .ln")) t.textContent = "A deliberately long handoff title that has to wrap onto a second and a third line on a phone " + t.textContent; });
-        const after = await probe();
-        for (const c of after) r.expect(c.dTop <= 3 && c.badgeLeftOfTitle && !c.badgeWraps, tag + ": with a long title the badge and the title's first line still share a row: " + JSON.stringify(c));
+        // A long name never widens the page.
+        await page.evaluate(() => { for (const t of document.querySelectorAll(".child-card .cc-name")) t.textContent = "A deliberately long handoff title that has to fit a phone " + t.textContent; });
         const sideways = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
-        r.expect(sideways <= 0, tag + ": the long title pushed the page " + sideways + "px sideways");
-        await page.locator(".hcard.child-card").first().scrollIntoViewIfNeeded();
+        r.expect(sideways <= 0, tag + ": the long name pushed the page " + sideways + "px sideways");
+        await page.locator(".child-card").first().scrollIntoViewIfNeeded();
         await page.screenshot({ path: path.join(ENV.out, "spawn-card-" + tag + ".png") });
         if (size === "desktop") {
           await goto(page, { v: "session", id: kid.id }, D);
