@@ -1,15 +1,23 @@
 // What an embedding page can do with the viewer: listen for `semon:ended` (and cancel it), ask for a poll with
 // `semon:refresh`, watch `semon:polled`, and hand it an account menu in `window.semonEmbed.account`. Runs on the primary
-// fixture's viewer at 1280×860, answering the polls itself (a real 304, a full 200, a 500 or a 403) through Playwright routes:
+// fixture's viewer, answering the polls itself (a real 304, a full 200, a 500, a 403, or one held open) through Playwright
+// routes:
 //   - cancelling `semon:ended` keeps the "Session ended" note away when the server answers 403; not cancelling shows it, and the
-//     event says which status ended the session;
-//   - dispatching `semon:refresh` during a backoff polls within 100 ms, and the poll after it comes 2 s later, not at the
-//     backed-off delay;
-//   - `semon:polled` says `ok` for a 200 and a 304, and not for a 500;
+//     event says which status ended the session; a refresh after that polls nothing;
+//   - dispatching `semon:refresh` during a backoff, a second after the last poll started, polls within 100 ms, and the poll
+//     after it comes 2 s later, not at the backed-off delay;
+//   - the refresh floor: a listener that refreshes on every `semon:polled` polls at most about once a second, polls at least a
+//     second apart, and the same against a server answering 500, whose backoff still holds once the listener stops;
+//   - refreshes while a poll is in flight add exactly one follow-up poll, and never a second request in flight;
+//   - a refresh before the first model has loaded polls nothing;
+//   - `semon:polled` fires exactly once per poll (the n-th event sees n polls started), says `ok` for a 200 and a 304, and not
+//     for a 500 or a 403;
 //   - `window.semonEmbed.account`, set before the page loads, gives the account menu, all text (no markup made from the name);
 //     an href that is not a same-origin path (`javascript:`, `//host`, a backslash) rejects the menu, the same as a server's;
+//     the menu is a copy, so changing the embedding page's object afterwards changes nothing; a getter that throws leaves no
+//     menu and no page error;
 //   - a menu the server provides wins over the embedding page's; an invalid one from the server leaves the embedding page's.
-// Screenshots of the open menu are written to out/embed/.
+// Screenshots of the open menu, at 1280 and 390 in light and dark, are written to out/embed/.
 import fs from "node:fs";
 import path from "node:path";
 import { ENV, context, settled, reporter } from "../lib.mjs";
@@ -29,13 +37,17 @@ const sleep = (n) => new Promise((resolve) => setTimeout(resolve, n));
 // A page on the fixture's viewer. `state.mode` picks how a poll is answered: "pass" (the server's own answer, a 304 when
 // nothing changed), "full" (a 200 with the whole model), "500" or "403". The boot request, the only one without `since`, goes
 // through, with `serverAccount` added to the model when given (null: an invalid account, to test the fallback).
-async function open(browser, { embed, state = { mode: "pass" }, serverAccount } = {}) {
-  const ctx = await context(browser, { size: "desktop", dark: false });
+// `state.mode` "hold" keeps a poll open until `state.gate` resolves; `state.bootGate`, when set, holds the boot request the same
+// way (and `open` returns before the page has drawn). `embed: "throw"` sets a `semonEmbed` whose `account` getter throws.
+async function open(browser, { embed, state = { mode: "pass" }, serverAccount, size = "desktop", dark = false } = {}) {
+  const ctx = await context(browser, { size, dark });
   await ctx.addInitScript((embedded) => {
-    if (embedded) window.semonEmbed = embedded;
+    if (embedded === "throw") Object.defineProperty(window, "semonEmbed", { value: { get account() { throw new Error("embed getter"); } } });
+    else if (embedded) window.semonEmbed = embedded;
     window.__ev = []; window.__fetches = []; window.__cancel = false;
+    // Each event notes how many polls had started when it fired.
     for (const type of ["semon:ended", "semon:polled"]) {
-      window.addEventListener(type, (e) => { if (type === "semon:ended" && window.__cancel) e.preventDefault(); window.__ev.push({ type, detail: e.detail, cancelable: e.cancelable, prevented: e.defaultPrevented }); });
+      window.addEventListener(type, (e) => { if (type === "semon:ended" && window.__cancel) e.preventDefault(); window.__ev.push({ type, detail: e.detail, cancelable: e.cancelable, prevented: e.defaultPrevented, fetches: window.__fetches.length }); });
     }
     const orig = window.fetch;
     window.fetch = function (...a) { if (/\/api\/model\?since=/.test(String(a[0]))) window.__fetches.push(performance.now()); return orig.apply(window, a); };
@@ -48,20 +60,29 @@ async function open(browser, { embed, state = { mode: "pass" }, serverAccount } 
   await page.route("**/api/model**", async (route) => {
     const url = new URL(route.request().url());
     if (!url.searchParams.has("since")) {
+      if (state.bootGate) await state.bootGate;
       if (serverAccount === undefined) return route.continue();
       const model = await (await route.fetch()).json();
       return route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ ...model, account: serverAccount }) });
     }
+    if (state.mode === "hold") { await state.gate; return route.continue(); }
     if (state.mode === "500") return route.fulfill({ status: 500, body: "no" });
     if (state.mode === "403") return route.fulfill({ status: 403, contentType: "text/plain", body: "Forbidden" });
     if (state.mode === "full") { url.searchParams.delete("since"); return route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: await (await route.fetch({ url: url.toString() })).text() }); }
     return route.continue();
   });
   await page.goto(ENV.base + "/?t=" + ENV.token, { waitUntil: "load" });
-  await settled(page);
+  if (!state.bootGate) await settled(page);
   return page;
 }
 const events = (page, type) => page.evaluate((t) => window.__ev.filter((e) => e.type === t), type);
+// Poll start times (page clock) since `from`.
+const fetchesSince = (page, from) => page.evaluate((t) => window.__fetches.filter((x) => x >= t), from);
+const now = (page) => page.evaluate(() => performance.now());
+const refresh = (page) => page.evaluate(() => dispatchEvent(new Event("semon:refresh")));
+const minGap = (xs) => xs.slice(1).reduce((m, x, i) => Math.min(m, x - xs[i]), Infinity);
+// Exactly once per poll: the n-th `semon:polled` fired when n polls had started.
+const oncePerPoll = async (page) => (await events(page, "semon:polled")).every((e, i) => e.fetches === i + 1);
 // The next `semon:polled` after the `n` seen so far.
 const nextPolled = async (page, n) => { await page.waitForFunction((k) => window.__ev.filter((e) => e.type === "semon:polled").length > k, n, { timeout: 12000 }); return (await events(page, "semon:polled"))[n]; };
 
@@ -83,8 +104,10 @@ export default async function embedCheck(browser) {
     r.expect(p500.detail?.ok === false, "semon:polled after a 500 should not say ok: " + JSON.stringify(p500));
     R.polled = [p304.detail, p200.detail, p500.detail];
 
-    // The failure backed the next poll off to 4 s. A refresh polls at once, and the 304 that follows resets the delay to 2 s.
+    // The failure backed the next poll off to 4 s. A second after that poll started, a refresh polls at once, and the 304 that
+    // follows resets the delay to 2 s.
     state.mode = "pass";
+    await sleep(1200);
     const before = await page.evaluate(() => { const t = performance.now(); window.__count = window.__fetches.length; dispatchEvent(new Event("semon:refresh")); return t; });
     await page.waitForFunction((k) => window.__fetches.length > k, await page.evaluate(() => window.__count), { timeout: 3000 }).catch(() => {});
     const fetches = await page.evaluate(() => window.__fetches.slice(window.__count));
@@ -94,7 +117,74 @@ export default async function embedCheck(browser) {
     const after = await page.evaluate(() => window.__fetches.slice(window.__count));
     R.afterRefresh = after.length > 1 ? Math.round(after[1] - after[0]) : null;
     r.expect(after.length > 1 && after[1] - after[0] < 3000, "the poll after a refresh should come 2 s later, not at the backed-off delay: " + R.afterRefresh);
+    r.expect(await oncePerPoll(page), "semon:polled should fire exactly once per poll: " + JSON.stringify(await events(page, "semon:polled")));
     r.expect(page.errors.length === 0, "page errors: " + page.errors.join("; "));
+    await page.context().close();
+  }
+
+  // ---- The refresh floor: a listener that refreshes on every semon:polled, against a healthy server and a failing one ----
+  for (const mode of ["pass", "500"]) {
+    const state = { mode: "pass" }, page = await open(browser, { state });
+    await nextPolled(page, 0);
+    state.mode = mode;
+    const t0 = await now(page);
+    await page.evaluate(() => { window.__loop = () => dispatchEvent(new Event("semon:refresh")); addEventListener("semon:polled", window.__loop); dispatchEvent(new Event("semon:refresh")); });
+    await sleep(5000);
+    await page.evaluate(() => removeEventListener("semon:polled", window.__loop));
+    const polls = (await fetchesSince(page, t0)).filter((x) => x < t0 + 5000), gap = minGap(polls);
+    const tag = mode === "pass" ? "healthy" : "500";
+    R["floor " + tag] = { polls: polls.length, minGap: Math.round(gap) };
+    r.expect(polls.length >= 3 && polls.length <= 6, "refresh on every semon:polled (" + tag + ") should poll about once a second over 5 s: " + polls.length);
+    r.expect(gap >= 950, "polls driven by refresh (" + tag + ") should start at least a second apart: " + Math.round(gap));
+    if (mode === "500") {
+      // The pending floor poll runs (and fails); after it, the backoff the failures set holds: nothing for the next 3 s.
+      await sleep(1500);
+      const t1 = await now(page); await sleep(3000);
+      const later = await fetchesSince(page, t1);
+      R["floor 500 after"] = later.length;
+      r.expect(later.length === 0, "once refreshes stop, the backoff from the 500s should hold, not a 2 s poll: " + later.length);
+    }
+    r.expect(await oncePerPoll(page), "semon:polled once per poll (" + tag + ")");
+    r.expect(page.errors.length === 0, "page errors (floor " + tag + "): " + page.errors.join("; "));
+    await page.context().close();
+  }
+
+  // ---- Refreshes while a poll is in flight: one follow-up ----
+  {
+    const state = { mode: "pass" }, page = await open(browser, { state });
+    await nextPolled(page, 0);
+    let release; state.gate = new Promise((resolve) => { release = resolve; }); state.mode = "hold";
+    const k = await page.evaluate(() => window.__fetches.length);
+    await refresh(page);
+    await page.waitForFunction((n) => window.__fetches.length > n, k, { timeout: 3000 });
+    for (let i = 0; i < 3; i++) await refresh(page);
+    await sleep(300);
+    const during = (await page.evaluate(() => window.__fetches.length)) - k;
+    state.mode = "pass"; release();
+    await sleep(1500);
+    const total = (await page.evaluate(() => window.__fetches.length)) - k;
+    R.inFlight = { during, total };
+    r.expect(during === 1, "refreshes during a poll should not start a second request: " + during);
+    r.expect(total === 2, "refreshes during a poll should add exactly one follow-up poll: " + (total - 1));
+    r.expect(await oncePerPoll(page), "semon:polled once per poll (in flight)");
+    r.expect(page.errors.length === 0, "page errors (in flight): " + page.errors.join("; "));
+    await page.context().close();
+  }
+
+  // ---- A refresh before the first model has loaded ----
+  {
+    let release; const state = { mode: "pass", bootGate: new Promise((resolve) => { release = resolve; }) };
+    const page = await open(browser, { state });
+    for (let i = 0; i < 3; i++) await refresh(page);
+    await sleep(300);
+    const held = await page.evaluate(() => window.__fetches.length);
+    release(); state.bootGate = null;
+    await settled(page);
+    await sleep(1000);
+    const polls = await page.evaluate(() => window.__fetches.length);
+    R.beforeLoad = { held, polls };
+    r.expect(held === 0 && polls === 0, "a refresh before the first model load should poll nothing, then or once it loads (the first poll is 2 s after it): " + JSON.stringify(R.beforeLoad));
+    r.expect(page.errors.length === 0, "page errors (before load): " + page.errors.join("; "));
     await page.context().close();
   }
 
@@ -109,26 +199,56 @@ export default async function embedCheck(browser) {
     R["ended " + tag] = { detail: ended.detail, cancelable: ended.cancelable, note };
     r.expect(ended.cancelable === true && ended.detail?.status === 403, "semon:ended (" + tag + ") should be cancelable and carry the 403: " + JSON.stringify(ended));
     r.expect(cancel ? note === null : note === ENDED, "semon:ended " + tag + ": the note read " + JSON.stringify(note));
-    const polls = await page.evaluate(() => window.__fetches.length); await sleep(2500);
-    r.expect((await page.evaluate(() => window.__fetches.length)) === polls, "polling should stop after a 403 (" + tag + ")");
+    const polls = await page.evaluate(() => window.__fetches.length);
+    await refresh(page); await sleep(2500);
+    r.expect((await page.evaluate(() => window.__fetches.length)) === polls, "polling should stop after a 403, and a refresh should not start it (" + tag + ")");
+    const polled = await events(page, "semon:polled");
+    r.expect(polled.length === polls && polled.at(-1)?.detail?.ok === false && await oncePerPoll(page), "semon:polled once per poll, the last with ok:false after the 403 (" + tag + "): " + JSON.stringify(polled));
     r.expect(page.errors.length === 0, "page errors (" + tag + "): " + page.errors.join("; "));
     await page.context().close();
   }
 
   // ---- The account menu from the embedding page ----
-  const menuOf = (page) => page.evaluate(() => {
-    const menu = document.querySelector("#topbar .account-popover");
+  const menuOf = (page, scope = "#topbar") => page.evaluate((sc) => {
+    const menu = document.querySelector(sc + " .account-popover");
     return menu ? { name: menu.querySelector(".account-name")?.textContent, login: menu.querySelector(".account-login-value")?.textContent, bold: menu.querySelectorAll("b").length, hrefs: [...menu.querySelectorAll("a[href]")].map((a) => a.getAttribute("href")), actions: [...menu.querySelectorAll("form")].map((f) => f.getAttribute("action")), workspaces: [...menu.querySelectorAll(".account-workspace-name")].map((n) => n.textContent) } : null;
-  });
+  }, scope);
   const openMenu = async (page) => { await page.locator("#topbar .account-avatar-button").click(); return menuOf(page); };
+  // On a phone the menu opens from the account row at the drawer's foot.
+  const openPhoneMenu = async (page) => {
+    await page.locator("#lead-btn").click();
+    const footer = page.locator("#account-drawer"); await footer.scrollIntoViewIfNeeded();
+    await footer.locator(".account-trigger").click();
+    await page.locator("#account-drawer .account-popover").scrollIntoViewIfNeeded();
+    return menuOf(page, "#account-drawer");
+  };
+  for (const [size, dark] of [["desktop", false], ["desktop", true], ["phone", false], ["phone", true]]) {
+    const tag = (size === "desktop" ? "1280" : "390") + (dark ? "-dark" : "");
+    const page = await open(browser, { embed: { account: account() }, size, dark });
+    const menu = size === "desktop" ? await openMenu(page) : await openPhoneMenu(page);
+    R["embedMenu " + tag] = menu;
+    r.expect(menu?.name === "Embed <b>Ada</b> Lovelace" && menu.login === "ada" && menu.bold === 0, "the embedding page's account should show as text (" + tag + "): " + JSON.stringify(menu));
+    r.expect(menu && menu.hrefs.join() === "/embed/profile" && menu.actions.join() === "/embed/switch/1,/embed/sign-out" && menu.workspaces.join() === "Engine room", "the embedding page's menu links (" + tag + "): " + JSON.stringify(menu));
+    await page.screenshot({ path: path.join(OUT, "embed-menu-" + tag + ".png") });
+    r.expect(page.errors.length === 0, "page errors (embed menu " + tag + "): " + page.errors.join("; "));
+    await page.context().close();
+  }
+  // The menu is a copy: changing the embedding page's object after it was read changes nothing on screen.
   {
     const page = await open(browser, { embed: { account: account() } });
+    await page.evaluate(() => { const a = window.semonEmbed.account; a.name = "x".repeat(200); a.links[0].href = "//evil.example/x"; a.workspaces[0].name = "Changed"; });
     const menu = await openMenu(page);
-    R.embedMenu = menu;
-    r.expect(menu?.name === "Embed <b>Ada</b> Lovelace" && menu.login === "ada" && menu.bold === 0, "the embedding page's account should show as text: " + JSON.stringify(menu));
-    r.expect(menu && menu.hrefs.join() === "/embed/profile" && menu.actions.join() === "/embed/switch/1,/embed/sign-out" && menu.workspaces.join() === "Engine room", "the embedding page's menu links: " + JSON.stringify(menu));
-    await page.screenshot({ path: path.join(OUT, "embed-menu.png") });
-    r.expect(page.errors.length === 0, "page errors (embed menu): " + page.errors.join("; "));
+    R.embedCopy = menu;
+    r.expect(menu?.name === "Embed <b>Ada</b> Lovelace" && menu.hrefs.join() === "/embed/profile" && menu.workspaces.join() === "Engine room", "the account menu should be a copy of the embedding page's object: " + JSON.stringify(menu));
+    await page.context().close();
+  }
+  // A getter that throws: no menu, and the page still draws and polls.
+  {
+    const page = await open(browser, { embed: "throw" });
+    await nextPolled(page, 0);
+    const widgets = await page.locator(".account-widget").count();
+    R.embedThrows = { widgets, errors: page.errors };
+    r.expect(widgets === 0 && page.errors.length === 0, "a throwing semonEmbed.account getter should leave no menu and no page error: " + JSON.stringify(R.embedThrows));
     await page.context().close();
   }
   for (const [what, over] of [

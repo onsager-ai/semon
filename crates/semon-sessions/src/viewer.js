@@ -231,13 +231,39 @@
   const enc = encodeURIComponent;
   const safePath = (href) => typeof href === "string" && href.startsWith("/") && !href.startsWith("//") && !href.includes("\\") && !/[\u0000-\u001f\u007f-\u009f]/.test(href) && href.length <= 512;
   const textField = (value, min, max) => typeof value === "string" && [...value].length >= min && [...value].length <= max && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
-  function accountOf(value) {
-    if (!value || !textField(value.name, 1, 80) || !value.name.trim() || !textField(value.login, 0, 80) || !textField(value.initials, 1, 3) || !value.initials.trim()) return null;
-    if (value.avatar_href != null && !safePath(value.avatar_href)) return null;
-    if (!Array.isArray(value.workspaces) || value.workspaces.length > 50 || !Array.isArray(value.links) || value.links.length > 12) return null;
+  // A validated copy of an account menu, or null. Each field is read once, inside `try` (an embedding page's object may have
+  // getters that throw or answer differently the second time), into plain data, and the copy is what gets checked and kept.
+  function accountOf(source) {
+    let value;
+    try {
+      if (!source || typeof source !== "object") return null;
+      const list = (xs, max, pick) => {
+        if (!Array.isArray(xs)) return null;
+        const n = xs.length; if (!(n <= max)) return null;
+        const out = []; for (let i = 0; i < n; i++) { const x = xs[i]; out.push(x && typeof x === "object" ? pick(x) : null); }
+        return out;
+      };
+      value = {
+        name: source.name, login: source.login, initials: source.initials, avatar_href: source.avatar_href ?? null,
+        workspaces: list(source.workspaces, 50, (w) => ({ name: w.name, role: w.role, current: w.current, switch_href: w.switch_href })),
+        links: list(source.links, 12, (a) => ({ label: a.label, href: a.href, method: a.method, danger: a.danger })),
+      };
+    } catch { return null; }
+    if (!textField(value.name, 1, 80) || !value.name.trim() || !textField(value.login, 0, 80) || !textField(value.initials, 1, 3) || !value.initials.trim()) return null;
+    if (value.avatar_href !== null && !safePath(value.avatar_href)) return null;
+    if (!value.workspaces || !value.links) return null;
     if (value.workspaces.some((w) => !w || !textField(w.name, 1, 80) || !w.name.trim() || !textField(w.role, 0, 80) || typeof w.current !== "boolean" || !safePath(w.switch_href))) return null;
     if (value.links.some((a) => !a || !textField(a.label, 1, 80) || !a.label.trim() || !safePath(a.href) || (a.method !== "get" && a.method !== "post") || typeof a.danger !== "boolean")) return null;
     return value;
+  }
+  // The embedding page's menu, `window.semonEmbed.account`, validated like a server's. A rejected one is reported once on
+  // the console, since the embedding page gets no other sign of it.
+  let embedWarned = false;
+  function embeddedAccount() {
+    let source; try { source = window.semonEmbed?.account; } catch { source = undefined; }
+    const account = accountOf(source);
+    if (source != null && !account && !embedWarned) { embedWarned = true; console.warn("semon: window.semonEmbed.account was rejected (see the account menu rules)"); }
+    return account;
   }
   // An error carries the HTTP status (0: no response), so live polling can tell a 403 from a dropped connection.
   const api = (path) => fetch(path, { credentials: "same-origin" }).then((r) => { if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status }); return r.json(); }, (e) => { throw Object.assign(e, { status: 0 }); });
@@ -254,7 +280,7 @@
     for (const x of m.machines ?? [m.machine]) { MACHINE[x.id] = x.name; MACHINE_UP[x.id] = x.up; if (x.last != null) MACHINE_LAST[x.id] = x.last; }
     ADMIN = m.admin && safePath(m.admin.href) ? m.admin : null;
     // A server-provided menu wins; otherwise an embedding page may set `window.semonEmbed.account`, held to the same rules.
-    ACCOUNT = accountOf(m.account) ?? accountOf(window.semonEmbed?.account);
+    ACCOUNT = accountOf(m.account) ?? embeddedAccount();
     NAV_MACHINES = m.nav && safePath(m.nav.machines) ? m.nav.machines : null;
     for (const k of Object.keys(SESS)) delete SESS[k];
     for (const [id, s] of Object.entries(m.sessions)) { s.id = id; SESS[id] = s; }
@@ -1884,7 +1910,7 @@
   // again with its view state kept: the scroll position, anchored to the first visible block; what is open, by stable keys;
   // focus, find and filters; the drawer. A session page follows its transcript's tail
   // with /api/tx?after= and replaces only the turns that changed. An open View all sheet holds the redraw until it closes.
-  const LIVE = { version: null, timer: null, busy: false, delay: 2000, ended: false, again: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
+  const LIVE = { version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2000, ended: false, again: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
   // The turn index as last drawn, to tell which turns an update changed.
   const remember = (m) => { LIVE.turns = new Map(m.turns.map((x) => [x.id, turnKey(x)])); };
   // What an update can change in a turn record or a handoff, cheaply (not the text, which a record never rewrites).
@@ -1892,18 +1918,27 @@
   const handKey = (h) => [h.status, h.to, h.done, h.result?.length, h.answer?.length, h.answers?.length, h.declined ? 1 : 0].join("|");
   let rendered = null; // the route the page shows
   const visible = () => document.visibilityState === "visible";
-  function schedule(ms) { clearTimeout(LIVE.timer); LIVE.timer = null; if (!LIVE.ended && visible()) LIVE.timer = setTimeout(poll, ms); }
+  function schedule(ms) { clearTimeout(LIVE.timer); LIVE.timer = null; if (!LIVE.ended && visible()) { LIVE.due = performance.now() + ms; LIVE.timer = setTimeout(poll, ms); } }
   document.addEventListener("visibilitychange", () => {
     if (!visible()) { clearTimeout(LIVE.timer); LIVE.timer = null; } else if (LIVE.version && !LIVE.busy && !LIVE.timer) schedule(LIVE.delay > 2000 ? LIVE.delay : 0); }); // a backoff in progress holds
-  // An embedding page can ask for a poll now (it knows something changed): any backoff resets to 2 s. A poll in flight
-  // is followed by another at once, since its request may have left before the change.
+  // An embedding page can ask for a poll soon (it knows something changed) with `semon:refresh`. The rule, one floor:
+  // a refresh starts a poll no sooner than REFRESH_FLOOR after the previous poll started, and never touches the backoff.
+  // - Refreshes inside that second merge into the one poll at its end; a pending timer that is due sooner is kept.
+  // - During a poll, a refresh asks for one follow-up (its request may have left before the change), at the same floor.
+  // - The backoff is only what polls set: a refresh-driven poll that succeeds resets it to 2 s like any other, and one that
+  //   fails doubles it. So a listener that refreshes on every `semon:polled` polls at most once a second, even against a
+  //   server answering 500, and when it stops, the timer resumes at the backoff the failures set.
+  // Ignored before the first model has loaded and after the session ended.
+  const REFRESH_FLOOR = 1000;
+  const floorWait = () => Math.max(0, LIVE.started + REFRESH_FLOOR - performance.now());
   window.addEventListener("semon:refresh", () => {
     if (!LIVE.version || LIVE.ended) return;
-    LIVE.delay = 2000;
-    if (LIVE.busy) LIVE.again = true; else schedule(0);
+    if (LIVE.busy) { LIVE.again = true; return; }
+    const wait = floorWait();
+    if (!LIVE.timer || performance.now() + wait < LIVE.due) schedule(wait);
   });
   function poll() {
-    LIVE.timer = null; if (LIVE.busy || LIVE.ended || !visible()) return; LIVE.busy = true;
+    LIVE.timer = null; if (LIVE.busy || LIVE.ended || !visible()) return; LIVE.busy = true; LIVE.started = performance.now();
     let ok = false;
     fetch("/api/model?since=" + enc(LIVE.version ?? ""), { credentials: "same-origin" })
       .then((r) => r.status === 304 ? null : r.ok ? r.json() : Promise.reject(Object.assign(new Error(r.status + " " + r.statusText), { status: r.status })), (e) => Promise.reject(Object.assign(e, { status: 0 })))
@@ -1914,8 +1949,9 @@
         if (err?.status == null) setTimeout(() => { throw err; }); // not the network: a fault on the page, reported as one
       })
       .finally(() => {
-        LIVE.busy = false; schedule(LIVE.again ? 0 : LIVE.delay); LIVE.again = false;
-        window.dispatchEvent(new CustomEvent("semon:polled", { detail: { ok } })); // ok: the server answered 200 or 304
+        LIVE.busy = false; schedule(LIVE.again ? floorWait() : LIVE.delay); LIVE.again = false;
+        // Once per poll, after the next one is scheduled. ok: the server answered 200 or 304 and the update drew.
+        window.dispatchEvent(new CustomEvent("semon:polled", { detail: { ok } }));
       });
   }
   // An embedding page can cancel `semon:ended` to draw its own note in place of this one.
