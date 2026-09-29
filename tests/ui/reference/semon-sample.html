@@ -722,7 +722,6 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .page .groupby button { min-height: 44px; }
   .topbar .l1 .crumb { min-width: 44px; padding: 12px 0; margin: -12px 0; }
   .topbar .l2.session-meta .errs { min-height: 44px; min-width: 44px; }
-  .topbar .analytics-range button { min-width: 44px; min-height: 44px; }
   .tracebtn { min-height: 44px; min-width: 44px; }
   .turn-end { min-height: 44px; margin-bottom: -14px; }
   .ib .ctx .tracebtn { margin: -12px -10px -12px auto; }
@@ -730,13 +729,13 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .turn-h .from { min-height: 44px; min-width: 44px; }
   .hop .open { min-height: 44px; min-width: 44px; margin: -4px 0; }
   .hop .more { min-height: 44px; min-width: 44px; margin: -12px 0; }
-  .hcard .more { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 0; margin: -12px 0 -10px; }
+  .hcard:not(.child-card) .more { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 0; margin: -12px 0 -10px; }
   .list .more { display: flex; align-items: center; min-height: 44px; padding: 0; }
   .step > button, .tsum { min-height: 44px; }
   .viewscript { min-height: 44px; min-width: 44px; }
   .step .out .step-actions { min-height: 45px; padding-block: 0; }
   .step .out .step-actions > button { min-height: 44px; min-width: 44px; }
-  .child-actions button, .child-intro .intro-title button, .child-return button, .child-work .cw-toggle, .child-work .show-all, .child-intro .more, .child-intro .intro-open { min-width: 44px; min-height: 44px; }
+  .child-actions button, .child-intro .intro-title button, .child-return button, .child-work .cw-toggle, .child-work .show-all, .child-intro .more, .hcard.child-card .more, .child-intro .intro-open { min-width: 44px; min-height: 44px; }
 }
 @media (max-width: 760px) {
   .side-search, .find { height: 44px; min-height: 44px; }
