@@ -192,14 +192,15 @@ jobs:
 
       # The viewer over the pushed copy alone (--no-local), and the subset of the suite that shows the pushed data renders as
       # the local one does: the fixture gaps (the served model and every transcript against the sample mockup's data, so the
-      # pushed transcripts are the machine's own), and the pixel comparison of the sessions list, two session transcripts (one
-      # with its details and cost, one a subagent's) and Analytics, at 390×844 light and dark and 1280×860. The rest of the
-      # suite is about the viewer, not the data, and runs on the local fixture above.
+      # pushed transcripts are the machine's own), and the pixel comparison of Home, the sessions list, Analytics and two
+      # session transcripts (harbor, a Claude session with a Codex run and a subagent under it, and deps, a Codex run), at
+      # 390×844 light and dark and 1280×860 light. The rest of the suite is about the viewer, not the data, and runs on the
+      # local fixture above.
       - name: Pushed data in the viewer
         if: ${{ !cancelled() }}
         env:
           SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/pushed
-          SEMON_PIXEL_SCREENS: home,sessions,session-details-cost,child-session,analytics-7d
+          SEMON_PIXEL_SCREENS: home,sessions,analytics,session-harbor,session-deps
         run: |
           [ -d "$RUNNER_TEMP/recv/machines/laptop" ] || { echo "nothing was received"; exit 1; }
           reader="$RUNNER_TEMP/pushed/reader"
