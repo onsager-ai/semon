@@ -39,6 +39,13 @@
         "session-atlas-ingest",
         "session-deps"
       ]
+    },
+    {
+      "name": "transcript",
+      "selector": "#page section[aria-label=\"Transcript\"]",
+      "screens": [
+        "session-"
+      ]
     }
   ]
 }
