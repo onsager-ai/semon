@@ -89,9 +89,14 @@ export default async function analyticsCheck(browser) {
   older.inModel = await ox.evaluate(async () => Object.keys((await (await fetch("/api/model")).json()).sessions).includes("archive"));
   const archiveRow = '.analytics-row[data-breakdown="repo"][data-key="archive"]';
   older.rowWithoutFilter = await ox.locator(archiveRow).count();
-  older.option = await ox.evaluate(() => [...document.querySelectorAll('.facet-filters select[aria-label="Repo"] option')].map((o) => o.value).includes("archive"));
+  // The Repo filter is a Select (no <select> element): its options are on the component, and choosing is a click on its button, then on the option.
+  const repoSelect = '.facet-filters .sh-select[data-label="Repo"]';
+  older.control = await ox.locator(repoSelect + " .sh-select-trigger").count();
+  older.option = older.control === 1 && await ox.evaluate((root) => document.querySelector(root).semonSelect.options.map((o) => o.value).includes("archive"), repoSelect);
   if (older.option) {
-    await ox.selectOption('.facet-filters select[aria-label="Repo"]', "archive");
+    await ox.click(repoSelect + " .sh-select-trigger");
+    await ox.locator(repoSelect + ' [role="option"][data-value="archive"]').click();
+    await ox.waitForFunction((root) => document.querySelector(root + " .sh-select-trigger").textContent.trim() === "Repo: archive", repoSelect);
     for (const [label, range] of [["7 d", "7d"], ["30 d", "30d"], ["24 h", "24h"]]) {
       await ox.click('#topbar .analytics-range button:has-text("' + label + '")');
       await drawn(ox, "range=" + range + "&repo=archive");
@@ -101,6 +106,7 @@ export default async function analyticsCheck(browser) {
   older.errors = ox.errors;
   await ox.context().close();
   r.expect(older.inModel === false, "the extras fixture's archive session must be older than the model's day: " + JSON.stringify(older));
+  r.expect(older.control === 1, "the Repo filter (a Select) wasn't found, so the archive steps could not run: " + JSON.stringify(older));
   r.expect(older.rowWithoutFilter === 1 && older.option, "7 d must list archive's repo as a breakdown row and a Repo filter value: " + JSON.stringify(older));
   r.expect(older.ranges["7d"]?.started === "1" && older.ranges["30d"]?.started === "1" && older.ranges["24h"]?.started === "0", "Sessions started for archive must be 1 in 7 d and 30 d, 0 in 24 h: " + JSON.stringify(older.ranges));
   r.expect(older.ranges["7d"]?.row === 1 && older.ranges["30d"]?.row === 1 && older.ranges["24h"]?.row === 0, "archive's repo row must show in 7 d and 30 d only: " + JSON.stringify(older.ranges));
