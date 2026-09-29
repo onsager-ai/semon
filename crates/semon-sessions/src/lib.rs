@@ -12,6 +12,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod analytics;
 mod events;
 mod facts;
 mod inputs;

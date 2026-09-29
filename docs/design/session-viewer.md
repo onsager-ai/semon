@@ -128,6 +128,10 @@ The model endpoint returns the mockup's globals verbatim in shape; other shapes 
   - Tool entries carry `in` and `out` previews capped as in the mockup, plus an `offset` for the full text.
   - Pages are bounded like #47's (200 entries or 2 MB). `turn=` returns the page that contains a turn, for deep links.
 - **`GET /api/entry`** (#47, kept) returns one tool call's full input and output for the View all sheet.
+- **`GET /api/analytics?range=24h|7d|30d`** (#102) returns what the Analytics page draws for that range, computed on the server, because the model holds only its own window (a day):
+  - The headline figures for the range and the one before it (`current`, `previous`), the longest current wait, the agent-hours columns and the cost per UTC day (none for 24 h), each column with its sessions for the drill-in (at most 100, then `more`), the breakdowns by repo, machine, and harness and model, the top-five lists, the names of the sessions they cite, the latest Codex allowance, and the filters' values in the range.
+  - It takes the page's filters too, each at most once: `repo` (empty for no repo), `machine`, `harness` and `model`. Anything else, a key named twice, or a value over 256 bytes is a 400.
+  - A build keeps what it reads of every session active in the last 60 days before it trims the model to its window, so a request builds nothing. Answers are kept per range and filters until the model changes (at most once a second) or for 30 s as time moves; the `ETag` hashes the body and `If-None-Match` answers 304. `version` is the model version the answer was computed from.
 - **Pages:**
   - `/`, `/timeline`, `/sessions`, `/machines`, `/machines/<id>`, `/s/<harness>/<id>` (with `?turn=`) and `/trace/<harness>/<id>/<turn>` all serve the same HTML.
   - The frontend switches from state-only `history.pushState` to real URLs. `/s/...` stays compatible with #47's links.
