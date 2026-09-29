@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod analytics;
+mod attachments;
 mod events;
 mod facts;
 pub mod harness;

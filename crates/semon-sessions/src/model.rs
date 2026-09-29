@@ -26,7 +26,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    Marker, Options, codex_meta, events,
+    Marker, Options, attachments, codex_meta, events,
     events::{
         ACK, ANSWERED, ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
@@ -373,6 +373,16 @@ fn stable_id(prefix: &str, source: &str) -> String {
     format!("{prefix}{:016x}", fnv(source))
 }
 
+/// The prefix of an ask's id: your message to a session. No other handoff
+/// id starts with it.
+const ASK_PREFIX: &str = "a";
+
+/// Whether `id` is an ask's: its transcript slot sits on your message's line.
+pub(crate) fn is_ask(id: &str) -> bool {
+    id.strip_prefix(ASK_PREFIX)
+        .is_some_and(|hash| hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 /// Writes the model for `options` as JSON, and saves the metadata cache.
 pub fn model_json(options: &Options) -> io::Result<String> {
     model_json_at(options, now_ms())
@@ -618,13 +628,29 @@ pub(crate) fn content_text(value: &Value) -> String {
 }
 
 /// A prompt's text: a Claude user record, a queued command or a Codex user
-/// message, with reminders removed.
+/// message, with reminders removed. Images it attaches aren't text: the
+/// transcript shows them apart ([`attachments::refs`]), so the harness's
+/// `[Image #N]` placeholders for them, and Codex's `<image>` frames, go too.
 pub(crate) fn prompt_text(record: &Value) -> Option<String> {
+    let images = attachments::parts(record).is_some_and(attachments::has_image);
+    let placeholders = |text: String| {
+        if images {
+            attachments::strip_placeholders(&text)
+        } else {
+            text
+        }
+    };
     if let Some(attachment) = record.get("attachment") {
-        return attachment
-            .get("prompt")
-            .map(content_text)
-            .map(|text| events::clean_prompt(&text));
+        let text = match attachment.get("prompt")? {
+            Value::Array(parts) => parts
+                .iter()
+                .filter(|part| field(part, "type").is_none_or(|kind| kind == "text"))
+                .filter_map(|part| field(part, "text"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            other => content_text(other),
+        };
+        return Some(placeholders(events::clean_prompt(&text)));
     }
     if let Some(message) = record.get("message") {
         let text = match message.get("content")? {
@@ -637,7 +663,7 @@ pub(crate) fn prompt_text(record: &Value) -> Option<String> {
                 .join("\n"),
             _ => return None,
         };
-        return Some(events::clean_prompt(&text));
+        return Some(placeholders(events::clean_prompt(&text)));
     }
     let payload = record.get("payload")?;
     let text = payload
@@ -645,12 +671,13 @@ pub(crate) fn prompt_text(record: &Value) -> Option<String> {
         .as_array()?
         .iter()
         .filter_map(|part| field(part, "text"))
+        .filter(|text| !(images && attachments::is_image_tag(text)))
         .collect::<String>();
     let kept: Vec<&str> = text
         .lines()
         .filter(|line| !line.starts_with("Semon-Parent:") && !line.starts_with("Semon-Handoff:"))
         .collect();
-    Some(kept.join("\n").trim().to_owned())
+    Some(placeholders(kept.join("\n").trim().to_owned()))
 }
 
 fn block_of(record: &Value, block: usize) -> Option<&Value> {
@@ -2559,7 +2586,7 @@ impl<'a> Builder<'a> {
                 let file = &self.files[at.0];
                 let source = format!("ask:{}:{}", file.id, event(self.files, at).o);
                 let handoff = Handoff::new(
-                    stable_id("a", &source),
+                    stable_id(ASK_PREFIX, &source),
                     "ask",
                     ("you".into(), self.sessions[index].key.clone()),
                     event(self.files, at)
