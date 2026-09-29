@@ -24,6 +24,7 @@ pub mod pricing;
 mod query;
 mod received;
 mod refresh;
+mod repo;
 pub mod shell;
 mod tx;
 mod union;

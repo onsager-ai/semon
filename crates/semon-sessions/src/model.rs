@@ -422,6 +422,9 @@ struct TextKey {
 /// least recently used first. A line at an offset stays valid while its file
 /// only grows (the event cache's own rule); a replaced, truncated or
 /// rewritten file starts a new generation, so stale text is never returned.
+/// The most working directories whose repository [`Texts`] remembers.
+const REPO_CACHE_MAX: usize = 512;
+
 #[derive(Default)]
 pub(crate) struct Texts {
     memo: HashMap<TextKey, (Option<String>, u64)>,
@@ -540,6 +543,11 @@ impl Texts {
             return repo.clone();
         }
         let repo = repo_of(cwd, crate::facts::env_home().as_deref().map(Path::new));
+        // Bounded: a full cache is dropped whole and refilled as the
+        // working directories are met again.
+        if self.repos.len() >= REPO_CACHE_MAX {
+            self.repos.clear();
+        }
         self.repos.insert(cwd.to_owned(), repo.clone());
         repo
     }
@@ -810,28 +818,7 @@ pub(crate) fn tool_result_text(record: &Value, block: usize) -> Option<String> {
         .map(content_text)
 }
 
-/// The repository `cwd` is in: the directory holding the nearest `.git`
-/// below `home` (or a worktree's owner), by name.
-pub(crate) fn repo_of(cwd: &str, home: Option<&Path>) -> Option<String> {
-    if let Some((before, _)) = cwd.split_once("/.claude/worktrees/") {
-        return Path::new(before)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
-    }
-    let mut path = Some(Path::new(cwd));
-    while let Some(current) = path {
-        if current == Path::new("/") || home == Some(current) {
-            break;
-        }
-        if current.join(".git").exists() {
-            return current
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned());
-        }
-        path = current.parent();
-    }
-    None
-}
+pub(crate) use crate::repo::repo_of;
 
 fn pretty_model(model: &str) -> Option<String> {
     if model.is_empty() || model.starts_with('<') {
