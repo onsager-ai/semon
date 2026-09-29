@@ -273,7 +273,7 @@ async function referencePage(browser, size, dark, html) {
     if (url.href === "http://reference.test/") return r.fulfill({ contentType: "text/html; charset=utf-8", body: stableMockup(html) });
     if (url.href === "http://reference.test/mark.svg") return r.fulfill({ contentType: "image/svg+xml", body: MARK_SVG });
     if (url.host === "fonts.googleapis.com") return r.fulfill({ contentType: "text/css", body: FACES.replaceAll('url("/fonts/', 'url("http://reference.test/fonts/') });
-    const font = /^\/fonts\/(instrument-sans|jetbrains-mono|source-serif-4)-(latin-ext|latin)\.woff2$/.exec(url.pathname);
+    const font = /^\/fonts\/(instrument-sans|jetbrains-mono)-(latin-ext|latin)\.woff2$/.exec(url.pathname);
     if (url.host === "reference.test" && font) return r.fulfill({ contentType: "font/woff2", body: fs.readFileSync(path.join(FONTS, font[1], font[2] + ".woff2")) });
     return r.abort();
   });
@@ -281,7 +281,7 @@ async function referencePage(browser, size, dark, html) {
   return page;
 }
 
-const FACE_LOADS = ['400 14px "Instrument Sans"', '500 14px "Instrument Sans"', '600 14px "Instrument Sans"', '400 12px "JetBrains Mono"', '500 12px "JetBrains Mono"', '400 14px "Source Serif 4"', '600 14px "Source Serif 4"'];
+const FACE_LOADS = ['400 14px "Instrument Sans"', '500 14px "Instrument Sans"', '600 14px "Instrument Sans"', '400 12px "JetBrains Mono"', '500 12px "JetBrains Mono"'];
 async function ready(page) {
   await page.evaluate((faces) => Promise.all(faces.map((f) => document.fonts.load(f))).then(() => document.fonts.ready), FACE_LOADS);
   await page.evaluate(() => {
