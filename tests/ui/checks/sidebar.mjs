@@ -26,8 +26,16 @@
 //     without saving that, and its saved choice is unchanged after navigating away; a collapse made while the child is open
 //     stays collapsed through redraws; the open child is always listed; in the rail the ancestor keeps a ring, no highlight, and
 //     aria-current="true".
+//   - the sidebar as a whole never scrolls: the header, search and nav keep their boxes (with the "Recent" label) while the session list scrolls on its own, and
+//     "All sessions ›" stays fully inside the screen at 390 and 1280 whether the list overflows or not. A short list leaves
+//     the footer right after its last row; a row focused by keyboard scrolls into the list, never under the footer; the rail
+//     still toggles and shows no footer. The "Recent" label stays above the scroller, and a hairline shows at the list's top and foot
+//     only while rows lie beyond that edge (read from a screenshot strip: none at rest above the rows, both when scrolled to the
+//     middle, none below at the end, none on a short list).
+//   - the nav runs Home, Sessions, Analytics, Machines top to bottom in the expanded sidebar, the rail and the phone drawer.
 //   - screenshots of the sidebar (and of the sheet, and of the sticky list) at 390 and 1280, light and dark, go to out/sidebar-*.png.
 import path from "node:path";
+import { PNG } from "pngjs";
 import { ENV, served, goto, data, reporter, overflow, settled } from "../lib.mjs";
 
 const openDrawer = async (page) => { await page.click("#lead-btn"); await page.waitForTimeout(300); };
@@ -84,7 +92,7 @@ const collapsedPills = (page) => page.evaluate(() => {
       const layers = []; for (let e = s; e; e = e.parentElement) layers.push(rgba(getComputedStyle(e).backgroundColor));
       let bg = [255, 255, 255, 1]; for (const layer of layers.reverse()) bg = over(layer, bg);
       const cs = getComputedStyle(s), x = lum(rgba(cs.color)), y = lum(bg);
-      out = { id: item.dataset.id, text: s.textContent, dots: s.querySelectorAll(".dot").length, title: s.title, label: row.getAttribute("aria-label"), wait: s.classList.contains("wait"), ratio: Math.round((Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) * 100) / 100, radius: cs.borderRadius, height: s.getBoundingClientRect().height, background: cs.backgroundColor };
+      out = { id: item.dataset.id, text: s.textContent, dots: s.querySelectorAll(".dot").length, tip: s.dataset.tip, label: row.getAttribute("aria-label"), wait: s.classList.contains("wait"), ratio: Math.round((Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) * 100) / 100, radius: cs.borderRadius, height: s.getBoundingClientRect().height, background: cs.backgroundColor };
     }
     if (wasOpen) toggle.click();
     return out;
@@ -102,13 +110,13 @@ const tally = (SESS, H, id) => {
 const breakdown = (t) => [t.total + (t.total === 1 ? " run" : " runs"), t.wait && t.wait + " needs you", t.work && t.work + " working", t.err && t.err + " failed"].filter(Boolean);
 
 // Each pill: the bare total and no dot, fully round, AA against its backdrop; amber (`wait`) exactly when something inside
-// needs you, and neutral otherwise (a failure is named in the text, never coloured); title and label break the total down.
+// needs you, and neutral otherwise (a failure is named in the text, never coloured); tooltip (data-tip) and label break the total down.
 function assertPills(r, where, pills, SESS, H, mustShow) {
   r.expect(pills.length > 0 && pills.every((p) => !p.missing), where + ": a collapsed parent shows no count pill: " + JSON.stringify(pills.filter((p) => p.missing)));
   for (const p of pills.filter((x) => !x.missing)) {
     const t = tally(SESS, H, p.id), parts = breakdown(t), name = SESS[p.id]?.name + " ";
     r.expect(p.dots === 0 && p.text === String(t.total), where + " " + name + ": the pill is the bare total with no state dot: " + JSON.stringify(p));
-    r.expect(p.title === parts.join(" · "), where + " " + name + ": the title is " + JSON.stringify(parts.join(" · ")) + ": " + JSON.stringify(p.title));
+    r.expect(p.tip === parts.join(" · "), where + " " + name + ": the tooltip is " + JSON.stringify(parts.join(" · ")) + ": " + JSON.stringify(p.tip));
     r.expect(p.label?.endsWith(", " + parts.join(", ")), where + " " + name + ": the row's aria-label carries the breakdown: " + JSON.stringify(p.label));
     r.expect(p.wait === t.wait > 0, where + " " + name + ": the wait class is " + p.wait + " with " + t.wait + " waiting");
     r.expect(p.ratio >= 4.5, where + " " + name + ": the pill's text has contrast " + p.ratio + ", under 4.5");
@@ -135,6 +143,37 @@ const servedPatched = async (browser, opts, kidIds) => {
   await page.reload({ waitUntil: "load" }); await settled(page);
   return page;
 };
+// The sidebar's boxes and the list's scroll state, in one read.
+const sideGeometry = (page) => page.evaluate(() => {
+  const r4 = (e) => { if (!e) return null; const b = e.getBoundingClientRect(); return [b.left, b.top, b.width, b.height].map((n) => Math.round(n * 10) / 10); };
+  const sb = document.querySelector("#sidebar"), list = document.querySelector("#side-list"), all = document.querySelector("#all-sessions");
+  const rows = [...document.querySelectorAll("#lanes .srow")].filter((e) => e.getClientRects().length);
+  const last = rows.at(-1)?.getBoundingClientRect(), a = all?.getBoundingClientRect(), l = list.getBoundingClientRect();
+  return {
+    brand: r4(document.querySelector(".brandrow")), search: r4(document.querySelector(".side-search")), nav: r4(document.querySelector("#nav")),
+    recent: r4(document.querySelector(".side-h")), recentInList: !!document.querySelector("#side-list .side-h"),
+    sidebarTop: sb.scrollTop, listTop: Math.round(list.scrollTop), overflowing: list.scrollHeight > list.clientHeight + 1, atEnd: list.scrollTop + list.clientHeight >= list.scrollHeight - 1,
+    footShown: !!all && all.getClientRects().length > 0, footTop: a ? Math.round(a.top * 10) / 10 : null, footBottom: a ? Math.round(a.bottom * 10) / 10 : null,
+    listBottom: Math.round(l.bottom * 10) / 10, lastRowBottom: last ? Math.round(last.bottom * 10) / 10 : null, vh: innerHeight,
+  };
+});
+// Whether a hairline shows at the list's top edge and at its foot: a 1px-wide strip at the list's left edge (clear of every row) is
+// screenshotted, and any pixel that differs from the sidebar's own colour counts as a line.
+const edges = async (page) => {
+  const box = await page.evaluate(() => {
+    const l = document.querySelector("#side-list").getBoundingClientRect(), probe = document.createElement("i");
+    probe.style.background = "var(--side)"; document.body.append(probe); const side = getComputedStyle(probe).backgroundColor; probe.remove();
+    return { x: l.left + 2, top: l.top, bottom: l.bottom, side };
+  });
+  const rgb = box.side.match(/\d+/g).slice(0, 3).map(Number);
+  const strip = async (y) => {
+    const png = PNG.sync.read(await page.screenshot({ clip: { x: Math.floor(box.x), y: Math.floor(y), width: 1, height: 6 } }));
+    for (let i = 0; i < png.data.length; i += 4) if ([0, 1, 2].some((k) => Math.abs(png.data[i + k] - rgb[k]) > 6)) return true;
+    return false;
+  };
+  return { top: await strip(box.top - 2), bottom: await strip(box.bottom - 4) };
+};
+const scrollList = (page, where) => page.evaluate((where) => { const l = document.querySelector("#side-list"); l.scrollTop = where === "end" ? l.scrollHeight : where === "mid" ? (l.scrollHeight - l.clientHeight) / 2 : 0; }, where);
 
 // The contrast ratio of each visible element's text against what is behind it (its ancestors' backgrounds, composited).
 const contrast = (page, selector, pseudo) => page.evaluate(({ selector, pseudo }) => {
@@ -171,8 +210,9 @@ const sheetOf = (page) => page.evaluate(() => {
   };
 });
 
+// Sticky rows stick to the top of the sidebar's one scroller, #side-list (the header, search and nav sit above it).
 const stickyBox = (page, id) => page.evaluate((id) => {
-  const sb = document.querySelector("#sidebar"), item = [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id), row = item?.querySelector(":scope > .tree-row");
+  const sb = document.querySelector("#side-list"), item = [...document.querySelectorAll("#lanes .treeitem")].find((x) => x.dataset.id === id), row = item?.querySelector(":scope > .tree-row");
   if (!row) return null;
   const s = sb.getBoundingClientRect(), r = row.getBoundingClientRect(), f = row.querySelector(".tree-fewer")?.getBoundingClientRect();
   return { top: Math.round((r.top - s.top) * 10) / 10, bottom: Math.round((r.bottom - s.top) * 10) / 10, scrollTop: Math.round(sb.scrollTop), max: Math.round(sb.scrollHeight - sb.clientHeight), stuck: row.classList.contains("stuck"), fewerVisible: !!f && f.top >= s.top - 0.5 && f.bottom <= s.bottom + 0.5, viewport: Math.round(s.height) };
@@ -192,7 +232,7 @@ const servedModel = async (browser, opts, patch) => {
   await page.reload({ waitUntil: "load" }); await settled(page);
   return { page, state };
 };
-const scrollSidebar = async (page, y) => { await page.evaluate((y) => { document.querySelector("#sidebar").scrollTop = y; }, y); await page.waitForTimeout(80); };
+const scrollSidebar = async (page, y) => { await page.evaluate((y) => { document.querySelector("#side-list").scrollTop = y; }, y); await page.waitForTimeout(80); };
 
 export default async function sidebarCheck(browser) {
   const D = await data({ extras: true });
@@ -472,13 +512,13 @@ export default async function sidebarCheck(browser) {
 
     // Navigating to a row that sits under the sticky row scrolls it clear of that row.
     const target = swarmFull[2];
-    await page.evaluate((id) => { const sb = document.querySelector("#sidebar"), row = sb.querySelector('.srow[data-id="' + CSS.escape(id) + '"]'); sb.scrollTop += row.getBoundingClientRect().top - sb.getBoundingClientRect().top - 4; }, target);
+    await page.evaluate((id) => { const sb = document.querySelector("#side-list"), row = sb.querySelector('.srow[data-id="' + CSS.escape(id) + '"]'); sb.scrollTop += row.getBoundingClientRect().top - sb.getBoundingClientRect().top - 4; }, target);
     await page.waitForTimeout(80);
     await page.evaluate((id) => document.querySelector('#lanes .srow[data-id="' + CSS.escape(id) + '"]').click(), target);
     await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, name(target));
     await page.waitForTimeout(150);
     const cleared2 = await page.evaluate(() => {
-      const sb = document.querySelector("#sidebar").getBoundingClientRect(), cur = document.querySelector('#lanes .srow[aria-current="page"]')?.getBoundingClientRect(), st = document.querySelector("#lanes .tree-row.stuck")?.getBoundingClientRect();
+      const sb = document.querySelector("#side-list").getBoundingClientRect(), cur = document.querySelector('#lanes .srow[aria-current="page"]')?.getBoundingClientRect(), st = document.querySelector("#lanes .tree-row.stuck")?.getBoundingClientRect();
       return cur && st ? { curTop: Math.round(cur.top - sb.top), curBottom: Math.round(cur.bottom - sb.top), stickyBottom: Math.round(st.bottom - sb.top), viewport: Math.round(sb.height) } : null;
     });
     R.desktopReveal = cleared2;
@@ -511,7 +551,7 @@ export default async function sidebarCheck(browser) {
     const collapsedAfter = await groupOf(page, swarm.id);
     r.expect(collapsedAfter && collapsedAfter.expanded === "false" && !collapsedAfter.stuck, "desktop " + tag + ": collapsing the parent drops its sticky row: " + JSON.stringify([collapsedAfter?.expanded, collapsedAfter?.stuck]));
     // The count pill: a neutral total with no state dot (a dot next to "53" read as 53 running); it turns amber only when a
-    // descendant needs you; its title and the row's accessible label break the total down, failures included. It collapses every
+    // descendant needs you; its tooltip and the row's accessible label break the total down, failures included. It collapses every
     // parent in turn and saves that, so it runs after the reload assertions.
     {
       const pills = await collapsedPills(page);
@@ -550,7 +590,7 @@ export default async function sidebarCheck(browser) {
       assertPills(r, "patched " + tag, pills, SESS, M.handoffs, ["Fan-out"]);
       const fanPill = pills.find((p) => p.id === fan.id), t = tally(SESS, M.handoffs, fan.id);
       r.expect(t.wait === 1 && t.err === 1 && t.total === fanKids.length + 1, "patched " + tag + ": the patch did not land: " + JSON.stringify(t));
-      r.expect(fanPill?.wait === true && /1 needs you/.test(fanPill.title) && /1 failed/.test(fanPill.title), "patched " + tag + ": Fan-out's pill is amber and names the waiting and the failed run: " + JSON.stringify(fanPill));
+      r.expect(fanPill?.wait === true && /1 needs you/.test(fanPill.tip) && /1 failed/.test(fanPill.tip), "patched " + tag + ": Fan-out's pill is amber and names the waiting and the failed run: " + JSON.stringify(fanPill));
       // Collapsed for the screenshot.
       await page.evaluate((id) => { const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id); if (item.getAttribute("aria-expanded") === "true") item.querySelector(":scope > .tree-row .tree-toggle").click(); }, fan.id);
       await page.screenshot({ path: path.join(ENV.out, "sidebar-wait-pill-" + tag + ".png") });
@@ -645,7 +685,7 @@ export default async function sidebarCheck(browser) {
 
       if (!dark) {
         // A live update while Swarm's whole list is open: it stays open, reorders, takes the new child, and keeps focus on "Show fewer".
-        await page.evaluate(() => { document.querySelector("#sidebar").scrollTop = 0; });
+        await page.evaluate(() => { document.querySelector("#side-list").scrollTop = 0; });
         await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
         await page.waitForTimeout(150);
         state.edit = finishSwarm;
@@ -717,6 +757,74 @@ export default async function sidebarCheck(browser) {
     }
   }
 
+  // ---- The list scrolls, the rest of the sidebar and "All sessions" stay put -------------------------------------------
+  // A lane with no spawned sessions and no parent gives a query that leaves one row, so the list is short.
+  const spawned = new Set(D.H.filter((h) => h.kind === "spawn").flatMap((h) => [h.from, h.to]));
+  const lone = Object.values(D.SESS).find((s) => s.lane && !spawned.has(s.id));
+  for (const [size, tagSize] of [["phone", "390"], ["desktop", "1280"]]) {
+    for (const dark of [false, true]) {
+      const tag = dark ? "dark" : "light", P = size + " " + tag;
+      const page = await served(browser, { extras: true, size, dark });
+      await page.waitForSelector("#lanes .treeitem", { state: "attached" });
+      if (size === "phone") await openDrawer(page);
+      const top = await sideGeometry(page);
+      r.expect(top.overflowing, P + ": the fixture's list must overflow or this proves nothing: " + JSON.stringify(top));
+      r.expect(top.sidebarTop === 0 && top.listTop === 0 && top.footShown && top.footTop >= 0 && top.footBottom <= top.vh, P + ": at rest 'All sessions' is inside the screen: " + JSON.stringify(top));
+      r.expect(top.footTop >= top.listBottom - 0.5, P + ": 'All sessions' sits below the list, not over it: " + JSON.stringify(top));
+      r.expect(!top.recentInList && top.recent !== null, P + ": the 'Recent' label sits above the scroller, not inside it: " + JSON.stringify([top.recent, top.recentInList]));
+      const atTop = await edges(page);
+      R["edges" + P + "top"] = atTop;
+      r.expect(!atTop.top && atTop.bottom, P + ": at rest there is no hairline above the rows and one below them: " + JSON.stringify(atTop));
+      await page.screenshot({ path: path.join(ENV.out, "sidebar-scroll-" + tagSize + "-" + tag + "-top.png") });
+      for (const where of ["mid", "end"]) {
+        await scrollList(page, where);
+        const g = await sideGeometry(page);
+        R["scroll" + P + where] = g;
+        r.expect(g.listTop > 0, P + ": the list scrolled to " + where + ": " + JSON.stringify(g));
+        r.expect(g.sidebarTop === 0, P + ": the sidebar itself did not scroll (" + where + "): scrollTop " + g.sidebarTop);
+        r.expect(JSON.stringify([g.brand, g.search, g.nav]) === JSON.stringify([top.brand, top.search, top.nav]), P + ": header, search and nav kept their boxes (" + where + "): " + JSON.stringify([g.brand, g.search, g.nav]) + " vs " + JSON.stringify([top.brand, top.search, top.nav]));
+        r.expect(g.footShown && g.footTop >= 0 && g.footBottom <= g.vh && g.footTop === top.footTop, P + ": 'All sessions' stays fully on screen and does not move (" + where + "): " + JSON.stringify(g));
+        r.expect(JSON.stringify(g.recent) === JSON.stringify(top.recent), P + ": the 'Recent' label does not move (" + where + "): " + JSON.stringify(g.recent) + " vs " + JSON.stringify(top.recent));
+        const e = await edges(page);
+        R["edges" + P + where] = e;
+        r.expect(e.top && e.bottom === (where === "mid"), P + ": scrolled to " + where + " the hairline shows above the rows" + (where === "mid" ? " and below them" : " and not below them") + ": " + JSON.stringify(e));
+        if (where === "mid") await page.screenshot({ path: path.join(ENV.out, "sidebar-scroll-" + tagSize + "-" + tag + "-mid.png") });
+      }
+      r.expect((await sideGeometry(page)).atEnd, P + ": the list reaches its end");
+      // Keyboard focus scrolls the row into the list, never under the footer.
+      await scrollList(page, "top");
+      await page.evaluate(() => [...document.querySelectorAll("#lanes .srow")].filter((e) => e.getClientRects().length).at(-1).focus());
+      const focused = await page.evaluate(() => { const f = document.activeElement.getBoundingClientRect(), l = document.querySelector("#side-list").getBoundingClientRect(), a = document.querySelector("#all-sessions").getBoundingClientRect(); return { top: Math.round(f.top), bottom: Math.round(f.bottom), listTop: Math.round(l.top), listBottom: Math.round(l.bottom), footTop: Math.round(a.top), sidebar: document.querySelector("#sidebar").scrollTop }; });
+      R["focus" + P] = focused;
+      r.expect(focused.bottom <= focused.listBottom && focused.bottom <= focused.footTop && focused.top >= focused.listTop && focused.sidebar === 0, P + ": the last row, focused, sits inside the list and above the footer: " + JSON.stringify(focused));
+      r.expect(await overflow(page) === 0, P + ": no sideways overflow");
+      // A short list: the footer follows the last row.
+      if (lone) {
+        await page.fill("#q", lone.name); await page.waitForTimeout(150);
+        const g = await sideGeometry(page);
+        R["short" + P] = g;
+        r.expect(!g.overflowing && g.lastRowBottom !== null, P + ": a query for '" + lone.name + "' leaves a short list: " + JSON.stringify(g));
+        r.expect(g.footTop - g.lastRowBottom >= 0 && g.footTop - g.lastRowBottom <= 16, P + ": a short list leaves 'All sessions' right after its last row: gap " + (g.footTop - g.lastRowBottom));
+        const e = await edges(page);
+        r.expect(!e.top && !e.bottom, P + ": a short list shows no hairline at either end: " + JSON.stringify(e));
+        if (!dark) await page.screenshot({ path: path.join(ENV.out, "sidebar-scroll-" + tagSize + "-" + tag + "-short.png") });
+      } else r.expect(false, "the extras fixture has no lone lane for the short-list check");
+      // The rail: still toggles, no footer, no sidebar scroll.
+      if (size === "desktop" && !dark) {
+        await page.fill("#q", ""); await page.waitForTimeout(100);
+        await page.click("#rail-toggle"); await page.waitForTimeout(300);
+        const g = await sideGeometry(page);
+        R.railScroll = g;
+        r.expect(await page.evaluate(() => document.querySelector(".app").classList.contains("rail")), "rail: the toggle still collapses the sidebar");
+        r.expect(!g.footShown && g.sidebarTop === 0, "rail: no 'All sessions' footer and the sidebar does not scroll: " + JSON.stringify(g));
+        await page.click("#rail-toggle"); await page.waitForTimeout(300);
+        r.expect(!(await page.evaluate(() => document.querySelector(".app").classList.contains("rail"))) && (await sideGeometry(page)).footShown, "rail: the toggle expands it again and the footer returns");
+      }
+      r.expect(page.errors.length === 0, P + ": page errors " + page.errors.join("; "));
+      await page.context().close();
+    }
+  }
+
   // ---- The open session's row is the only one marked ----------------------------------------------------------------
   {
     // The newest child the short list leaves out when nothing is open.
@@ -776,6 +884,40 @@ export default async function sidebarCheck(browser) {
     r.expect(rail.ringColor?.startsWith("rgb(93, 101, 97)"), "rail: the ring is --muted, not --faint: " + rail.ringColor);
     r.expect(page.errors.length === 0, "open: page errors " + page.errors.join("; "));
     await page.context().close();
+  }
+  // ---- The nav order: Home, Sessions, Analytics, Machines, in the sidebar, the rail and the drawer ------------------------
+  {
+    const order = (page) => page.evaluate(() => [...document.querySelectorAll("#nav .nav-item")].map((b) => ({ go: b.dataset.go, label: b.querySelector("span:not(.cnt)")?.textContent, shown: b.getClientRects().length > 0, top: Math.round(b.getBoundingClientRect().top) })));
+    const want = ["home", "sessions", "analytics", "machines"], labels = ["Home", "Sessions", "Analytics", "Machines"];
+    const ok = (o) => JSON.stringify(o.map((b) => b.go)) === JSON.stringify(want) && JSON.stringify(o.map((b) => b.label)) === JSON.stringify(labels) && o.every((b) => b.shown) && o.every((b, i) => i === 0 || b.top > o[i - 1].top);
+    const desktop = await served(browser, { extras: true, size: "desktop", dark: false });
+    await desktop.waitForSelector("#nav .nav-item");
+    const expanded = await order(desktop);
+    R.navExpanded = expanded;
+    r.expect(ok(expanded), "nav: the expanded sidebar lists Home, Sessions, Analytics, Machines top to bottom: " + JSON.stringify(expanded));
+    await desktop.click("#rail-toggle"); await desktop.waitForTimeout(300);
+    const rail = await order(desktop);
+    R.navRail = rail;
+    r.expect(rail.map((b) => b.go).join() === want.join() && rail.every((b) => b.shown) && rail.every((b, i) => i === 0 || b.top > rail[i - 1].top), "nav: the rail's icons run Home, Sessions, Analytics, Machines top to bottom: " + JSON.stringify(rail));
+    await desktop.screenshot({ path: path.join(ENV.out, "sidebar-nav-1280-light-rail.png") });
+    r.expect(desktop.errors.length === 0, "nav desktop: page errors " + desktop.errors.join("; "));
+    await desktop.context().close();
+    for (const dark of [false, true]) {
+      const tag = dark ? "dark" : "light", phone = await served(browser, { extras: true, size: "phone", dark });
+      await openDrawer(phone);
+      const drawer = await order(phone);
+      R["navDrawer" + tag] = drawer;
+      r.expect(ok(drawer), "nav: the phone drawer (" + tag + ") lists Home, Sessions, Analytics, Machines top to bottom: " + JSON.stringify(drawer));
+      await phone.screenshot({ path: path.join(ENV.out, "sidebar-nav-390-" + tag + ".png") });
+      await phone.context().close();
+    }
+    for (const dark of [false, true]) {
+      const page = await served(browser, { extras: true, size: "desktop", dark });
+      await page.waitForSelector("#nav .nav-item");
+      r.expect(ok(await order(page)), "nav: the 1280 sidebar (" + (dark ? "dark" : "light") + ") keeps the order");
+      await page.screenshot({ path: path.join(ENV.out, "sidebar-nav-1280-" + (dark ? "dark" : "light") + ".png") });
+      await page.context().close();
+    }
   }
   return r.done();
 }

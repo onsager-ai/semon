@@ -8,7 +8,40 @@ Serve the viewer's base stylesheet at `/viewer.css`, the component stylesheet at
 
 The brand mark is an image too. `.mark` paints `/mark.svg` as a CSS mask in the current text colour (`var(--ink)`), so a page that uses `.mark` must serve `semon_sessions::shell::MARK_SVG` at `/mark.svg` as `image/svg+xml`, or the mark is invisible. Serve `semon_sessions::shell::FAVICON_SVG` at `/favicon.svg` as `image/svg+xml` too and link it from the page's `<head>` with `<link rel="icon" href="/favicon.svg" type="image/svg+xml">`; its fill switches between light and dark with the browser's colour scheme. Serve both from the page's own origin: the content security policy allows same-origin assets only, so a `data:` URI or another host will not load.
 
-The Rust API exposes `semon_sessions::shell::{VIEWER_CSS, CSS, JS, MARK_SVG, FAVICON_SVG, FONT_FILES, font}`. An embedding server can serve these bytes directly and use `font(name)` for font requests.
+The Rust API exposes `semon_sessions::shell::{VIEWER_CSS, CSS, JS, MARK_SVG, FAVICON_SVG, FONT_FILES, font}`, and for the viewer page itself `VIEWER_JS`, `PAGE_HTML` and `is_page_path` (see [Embedding the viewer page](#embedding-the-viewer-page)). An embedding server can serve these bytes directly and use `font(name)` for font requests.
+
+## Embedding the viewer page
+
+An embedding server that serves the viewer itself, without a `ViewerCore`, serves `semon_sessions::shell::PAGE_HTML` for every path `semon_sessions::shell::is_page_path` accepts and `semon_sessions::shell::VIEWER_JS` at `/viewer.js`, alongside `/viewer.css`, the fonts, `/mark.svg` and `/favicon.svg` above, and the `/api/model` and `/api/tx` answers.
+
+### Adding the embedding page's own script
+
+The page is served verbatim, and its content security policy is `script-src 'self'`, so an inline script or a second `<script>` tag is not an option. The supported way is a prelude: the embedding server answers `/viewer.js` with its own script followed by `VIEWER_JS`, in one response. The prelude runs before the viewer's code, so it can set `window.semonEmbed` before the viewer reads it and add its event listeners; afterwards it dispatches events whenever it learns something.
+
+- End the prelude with a semicolon and a newline. `VIEWER_JS` starts with `(`, so a prelude ending in an expression would call it.
+- Wrap the prelude in its own function so its names stay out of the page's global scope, and keep it to the events and `window.semonEmbed` below; everything else in the viewer's script is private and may change.
+- Anything the prelude loads must come from the page's own origin (`default-src 'self'`).
+
+```js
+(() => {
+  window.semonEmbed = { account: accountFromServer };
+  window.addEventListener("semon:ended", (e) => { e.preventDefault(); showOwnNote(e.detail.status); });
+  window.addEventListener("semon:polled", (e) => markStale(!e.detail.ok));
+  onServerSaysChanged(() => window.dispatchEvent(new Event("semon:refresh")));
+})();
+```
+
+### Events
+
+All three are on `window`.
+
+- `semon:refresh` (dispatched by the embedding page): ask for a poll of `/api/model` soon. A refresh starts a poll no sooner than one second after the previous poll started; refreshes inside that second merge into one poll at its end, and refreshes while a poll is in flight add one follow-up. A refresh never changes the error backoff (2 s, doubling to 30 s): only a poll's own answer does, so a refresh-driven poll that succeeds resets it and one that fails doubles it. A listener that refreshes on every `semon:polled` therefore polls at most once a second, even against a failing server. Ignored before the first model has loaded and after the session ended.
+- `semon:polled` (from the viewer), `detail: {ok}`: fired once after every poll. `ok` is true when the server answered 200 or 304 and the update drew; false after an error or a 403.
+- `semon:ended` (from the viewer), `detail: {status}`, cancelable: the server answered 403 and polling has stopped. Fired before the viewer draws its "Session ended" note; cancel it to draw your own instead.
+
+### Account menu
+
+`window.semonEmbed.account` gives the account menu when the server's model carries none (a valid `account` in `/api/model` wins). It has the same shape and rules as that `account` field (see `docs/design/session-viewer.md`), and one invalid field or path rejects the whole menu, with a console warning. The viewer reads it each time it takes a new model (at load and on every changed update), keeps a validated copy, and renders it as text only; a getter that throws counts as no menu.
 
 ## Signed-in page skeleton
 
@@ -123,6 +156,17 @@ Pages without navigation can use `.signin` as their centered single-column layou
 The script uses `#lead-btn`, `#sidebar`, `#drawer-close`, and `#scrim` for the phone drawer. It uses `#topbar` and `#main` to synchronize `.topbar.scrolled` with the active scroll container. Missing elements are allowed, so the script can also be loaded by the sign-in skeleton.
 
 Use `form[data-confirm="dialog-id"]` to open that `dialog.sheet` before submission. A `button[value="confirm"]` submits the original form; another button, Escape, or the backdrop closes the sheet. Use `button[data-open="dialog-id"]` to open a sheet, and `[data-close]` to close its enclosing dialog. A `[data-copy="element-id"]` button copies the target's text. An element with `[data-poll="/path"]` checks that same-origin URL every three seconds for up to 30 minutes and navigates to `data-poll-go` (or `/`) when it receives status 200.
+
+## Tooltips
+
+Put `data-tip="text"` on any element to give it a tooltip; `/shell.js` and the viewer's own script both include the controller (a page that loaded both would still run one), and `/viewer.css` styles it, so a page needs nothing else. It replaces the native `title` attribute, which the viewer no longer uses anywhere.
+
+- One `<div id="sh-tooltip" role="tooltip">` is made on first use and reused. The text is set as text, never as markup. Set or change `data-tip` at any time (also when the element is re-rendered): it is read when the tooltip opens, and an open tooltip follows a change or closes if its element is removed or hidden.
+- It opens after about 500 ms of hover. Once one has shown, another element reached within 300 ms shows at once. Keyboard focus (`:focus-visible` only) shows it with no delay. It closes on pointer leave, blur, Esc, a click, or a scroll that moves its element. Esc keeps it closed until the pointer leaves the element; inside an open `dialog` one Esc closes only the tooltip. If a re-render replaces the element under a shown tooltip, it moves to the replacement under the pointer (or holding focus) and stays open. The tooltip takes no pointer events.
+- It sits above the element, below when there is no room, at least 8 px inside the viewport, never over the element. It is 13 px text on the inverse surface (`--ink` behind `--ground`), at most 280 px wide, and a popover, so it shows above an open `dialog.sheet`. It fades in unless the user prefers reduced motion.
+- While it shows, the element gets `aria-describedby="sh-tooltip"`, unless its `aria-label` or own text already contains the tip's text. A tip is not a place to keep the only copy of anything: an icon or badge whose text is only in its tip needs `tabindex="0"` (so keyboard focus can show it) and an `aria-label`, or hidden text that its `aria-describedby` names (the tooltip then adds no second description), and a control's own accessible name must carry the information.
+- On touch, tapping a static element with a tip toggles it and tapping anywhere else closes it. Tapping a button, link or other control runs the control and shows no tip.
+- `data-tip-clipped` on an element with an ellipsis shows the tip only while its text is cut off, for a tip that would otherwise repeat the visible text.
 
 ## Classes
 

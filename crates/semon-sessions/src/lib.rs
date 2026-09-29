@@ -12,6 +12,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod analytics;
 mod events;
 mod facts;
 pub mod harness;
@@ -21,6 +22,7 @@ mod model;
 pub mod pricing;
 mod query;
 mod received;
+mod refresh;
 pub mod shell;
 mod tx;
 mod union;
@@ -35,7 +37,10 @@ pub use mcp::serve_mcp;
 pub use model::{MODEL_API, model_json, model_json_at};
 pub use query::{DEFAULT_WINDOW, Query, QueryError, QueryTool, query_tools};
 pub use received::{ReceivedMachines, is_machine_name};
-pub use union::{AccountLink, AccountMenu, AccountWorkspace, AdminLink, LinkMethod, ViewerCore};
+pub use refresh::RefreshPool;
+pub use union::{
+    AccountLink, AccountMenu, AccountWorkspace, AdminLink, Extras, LinkMethod, Refresh, ViewerCore,
+};
 pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve};
 
 #[derive(Clone, Debug)]
@@ -336,8 +341,13 @@ pub(crate) fn save_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Unique per call, not only per process: two threads may save one file
+    // at once (a background rebuild, and a request writing facts), and each
+    // must rename a whole file of its own.
+    static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let save = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".{}.tmp", std::process::id()));
+    temporary.push(format!(".{}.{save}.tmp", std::process::id()));
     let temporary = PathBuf::from(temporary);
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);

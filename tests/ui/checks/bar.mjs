@@ -40,7 +40,8 @@ import { ENV, VIEWPORTS, settled, served, goto, data, reporter, overflow } from 
 const isGap = (e) => e.k === "end" && /entries (not included|omitted)|^No activity/.test(e.text ?? "");
 const TABLE = /^\s*\|.*\n\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/m;
 const KNOWN = new Set(["Bash", "shell", "exec_command", "local_shell", "write_stdin", "Grep", "Glob", "Read", "Edit", "MultiEdit", "Write", "apply_patch", "NotebookEdit", "AskUserQuestion", "ToolSearch", "SendMessage", "SendUserFile", "Agent", "Task", "Monitor", "ScheduleWakeup", "TaskStop", "Artifact", "WebFetch", "WebSearch", "Skill"]);
-const afterTitle = (page, text) => page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, text);
+// The title is in the bar as soon as a session is clicked; the page is ready once it is no longer aria-busy.
+const afterTitle = (page, text) => page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t && !document.querySelector("#page").hasAttribute("aria-busy"), text);
 
 // The extras fixture (SEMON_EXTRA_BASE/SEMON_EXTRA_TOKEN): sample + a markdown message in harbor with a genuine
 // table, used below because the sample fixture's own data has zero gap markers and zero tables (nothing to detect
@@ -180,10 +181,10 @@ export default async function barCheck(browser) {
       const detailsSid = Object.values(D.SESS).find((s) => s.reported_runs?.length)?.id ?? busy;
       if (detailsSid !== busy) await goto(page, { v: "session", id: detailsSid }, D);
       await page.evaluate(() => { window.scrollTo(0, 400); document.querySelector("#main").scrollTop = 400; }); await page.waitForTimeout(100);
-      // Clicking a plain meta item (a badge with a tooltip) does nothing: no dialog, no menu, no navigation.
+      // Clicking a plain meta item (a badge with a data-tip tooltip) does nothing: no dialog, no menu, no navigation.
       // Real pointer clicks at each badge's centre (the state badge's dot, since its row also holds the errors button), so an
       // overlay under a badge is caught: the badge must be the element under the pointer, and the click must do nothing.
-      const badges = await page.evaluate(() => [...document.querySelectorAll("#topbar .l2.session-meta .meta-item:not(button)")].map((item) => { const t = item.querySelector(":scope > .dot") ?? item, r = t.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return { shown: r.width > 0 && item.getClientRects().length > 0, x, y, titled: !!item.title, underPointer: r.width > 0 && item.contains(document.elementFromPoint(x, y)) }; }));
+      const badges = await page.evaluate(() => [...document.querySelectorAll("#topbar .l2.session-meta .meta-item:not(button)")].map((item) => { const t = item.querySelector(":scope > .dot") ?? item, r = t.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return { shown: r.width > 0 && item.getClientRects().length > 0, x, y, titled: !!item.dataset.tip, underPointer: r.width > 0 && item.contains(document.elementFromPoint(x, y)) }; }));
       const before = await page.evaluate(() => ({ depth: history.length, route: JSON.stringify(history.state) }));
       for (const b of badges) if (b.shown) await page.mouse.click(b.x, b.y);
       await page.waitForTimeout(120);

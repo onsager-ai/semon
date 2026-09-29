@@ -54,7 +54,8 @@
   const ago = (t) => { const d = Math.floor((NOW - t) / 60000); return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d"; };
   const dur = (a, b) => { const d = Math.max(0, Math.floor(((b ?? NOW) - a) / 60000)); return d >= 1440 ? Math.floor(d / 1440) + "d " + Math.floor((d % 1440) / 60) + "h" : d >= 60 ? Math.floor(d / 60) + "h " + (d % 60) + "m" : d + "m"; };
   const tok = (m) => m >= 1 ? m.toFixed(1) + "M" : Math.round(m * 1000) + "k";
-  const dot = (st) => { const d = el("span", "dot " + st); d.title = STATE[st] ?? st; d.setAttribute("role", "img"); d.setAttribute("aria-label", d.title); return d; };
+  // A dot is the state's only sign where nothing beside it says the state, and then it carries a tooltip; `tip = false` where a word does.
+  const dot = (st, tip = true) => { const d = el("span", "dot " + st); d.setAttribute("role", "img"); d.setAttribute("aria-label", STATE[st] ?? st); if (tip) d.dataset.tip = STATE[st] ?? st; return d; };
   const STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed", new: "New result", read: "Read result" };
   const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
@@ -65,7 +66,8 @@
   const shortModel = (model) => String(model ?? "Unknown model").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
   // A harness is named in plain text, never drawn: no logo and no vendor colour. "short" gives "Claude" where the line is tight.
   // The harness is named in plain muted text (.hname); the word itself tells Claude and Codex apart, so its hue is not used here.
-  const harnessName = (harness, short = false) => { const name = el("span", "hname h-" + harness, (short ? HARNESS_SHORT : HARNESS)[harness] ?? harness); name.title = HARNESS[harness] ?? harness; return name; };
+  // The short name ("Claude") gets the long one ("Claude Code") as its tooltip; the long one repeats itself, so it has none.
+  const harnessName = (harness, short = false) => { const name = el("span", "hname h-" + harness, (short ? HARNESS_SHORT : HARNESS)[harness] ?? harness); if (short && HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness]) name.dataset.tip = HARNESS[harness]; return name; };
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
   const parentOf = (sid) => SESS[sid]?.parent ?? H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
   const originHandoff = (sid) => H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === sid && h.from !== sid && (h.kind === "spawn" || SESS[sid]?.kind === "Relayed" || !SESS[sid]?.lane));
@@ -233,16 +235,42 @@
   const enc = encodeURIComponent;
   const safePath = (href) => typeof href === "string" && href.startsWith("/") && !href.startsWith("//") && !href.includes("\\") && !/[\u0000-\u001f\u007f-\u009f]/.test(href) && href.length <= 512;
   const textField = (value, min, max) => typeof value === "string" && [...value].length >= min && [...value].length <= max && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
-  function accountOf(value) {
-    if (!value || !textField(value.name, 1, 80) || !value.name.trim() || !textField(value.login, 0, 80) || !textField(value.initials, 1, 3) || !value.initials.trim()) return null;
-    if (value.avatar_href != null && !safePath(value.avatar_href)) return null;
-    if (!Array.isArray(value.workspaces) || value.workspaces.length > 50 || !Array.isArray(value.links) || value.links.length > 12) return null;
+  // A validated copy of an account menu, or null. Each field is read once, inside `try` (an embedding page's object may have
+  // getters that throw or answer differently the second time), into plain data, and the copy is what gets checked and kept.
+  function accountOf(source) {
+    let value;
+    try {
+      if (!source || typeof source !== "object") return null;
+      const list = (xs, max, pick) => {
+        if (!Array.isArray(xs)) return null;
+        const n = xs.length; if (!(n <= max)) return null;
+        const out = []; for (let i = 0; i < n; i++) { const x = xs[i]; out.push(x && typeof x === "object" ? pick(x) : null); }
+        return out;
+      };
+      value = {
+        name: source.name, login: source.login, initials: source.initials, avatar_href: source.avatar_href ?? null,
+        workspaces: list(source.workspaces, 50, (w) => ({ name: w.name, role: w.role, current: w.current, switch_href: w.switch_href })),
+        links: list(source.links, 12, (a) => ({ label: a.label, href: a.href, method: a.method, danger: a.danger })),
+      };
+    } catch { return null; }
+    if (!textField(value.name, 1, 80) || !value.name.trim() || !textField(value.login, 0, 80) || !textField(value.initials, 1, 3) || !value.initials.trim()) return null;
+    if (value.avatar_href !== null && !safePath(value.avatar_href)) return null;
+    if (!value.workspaces || !value.links) return null;
     if (value.workspaces.some((w) => !w || !textField(w.name, 1, 80) || !w.name.trim() || !textField(w.role, 0, 80) || typeof w.current !== "boolean" || !safePath(w.switch_href))) return null;
     if (value.links.some((a) => !a || !textField(a.label, 1, 80) || !a.label.trim() || !safePath(a.href) || (a.method !== "get" && a.method !== "post") || typeof a.danger !== "boolean")) return null;
     return value;
   }
+  // The embedding page's menu, `window.semonEmbed.account`, validated like a server's. A rejected one is reported once on
+  // the console, since the embedding page gets no other sign of it.
+  let embedWarned = false;
+  function embeddedAccount() {
+    let source; try { source = window.semonEmbed?.account; } catch { source = undefined; }
+    const account = accountOf(source);
+    if (source != null && !account && !embedWarned) { embedWarned = true; console.warn("semon: window.semonEmbed.account was rejected (see the account menu rules)"); }
+    return account;
+  }
   // An error carries the HTTP status (0: no response), so live polling can tell a 403 from a dropped connection.
-  const api = (path) => fetch(path, { credentials: "same-origin" }).then((r) => { if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status }); return r.json(); }, (e) => { throw Object.assign(e, { status: 0 }); });
+  const api = (path, signal) => fetch(path, { credentials: "same-origin", signal }).then((r) => { if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status }); return r.json(); }, (e) => { throw Object.assign(e, { status: 0 }); });
   // NOW follows the client clock from the model's `now`, so every "ago" keeps moving; a running tool's age follows NOW.
   function tick() {
     NOW = serverNow + (Date.now() - fetchedAt);
@@ -255,7 +283,8 @@
     // Several machines come as `machines`; one comes as `machine` alone.
     for (const x of m.machines ?? [m.machine]) { MACHINE[x.id] = x.name; MACHINE_UP[x.id] = x.up; if (x.last != null) MACHINE_LAST[x.id] = x.last; }
     ADMIN = m.admin && safePath(m.admin.href) ? m.admin : null;
-    ACCOUNT = accountOf(m.account);
+    // A server-provided menu wins; otherwise an embedding page may set `window.semonEmbed.account`, held to the same rules.
+    ACCOUNT = accountOf(m.account) ?? embeddedAccount();
     NAV_MACHINES = m.nav && safePath(m.nav.machines) ? m.nav.machines : null;
     for (const k of Object.keys(SESS)) delete SESS[k];
     for (const [id, s] of Object.entries(m.sessions)) { s.id = id; SESS[id] = s; }
@@ -287,9 +316,9 @@
   // A return line arrives as data; it reads as the mockup's "Returned to … · HH:MM".
   const txEntry = (e) => e.k === "end" && e.ret ? { k: "end", text: "Returned to " + nameOf(e.ret.to) + (e.ret.failed ? " · failed" : "") + (e.ret.at != null ? " · " + clock(e.ret.at) : ""), turn: e.turn } : e;
   // where: "before" and "after" extend the loaded range; otherwise the page replaces it.
-  function fetchTx(sid, q, where) {
+  function fetchTx(sid, q, where, signal) {
     const tok = TOK[sid];
-    return api("/api/tx?sid=" + enc(sid) + (q ? "&" + q : "")).then((p) => {
+    return api("/api/tx?sid=" + enc(sid) + (q ? "&" + q : ""), signal).then((p) => {
       const es = p.entries.map((e) => txEntry({ ...e, sid })), m = TXM[sid];
       if (where === "before" && m) { TX[sid] = es.concat(TX[sid]); m.from = p.from; }
       else if (where === "after" && m) { TX[sid] = TX[sid].concat(es); m.to = p.to; }
@@ -298,20 +327,59 @@
     });
   }
   // A spawn's child work opens inline under its card: load the turn each brief started, when its session isn't loaded.
-  function kids(sid) {
+  function kids(sid, signal) {
     const jobs = [];
     for (const e of TX[sid] ?? []) {
       const h = e.k === "h" ? HID.get(e.id) : null, c = h && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id) : null;
-      if (c && !TX[c.sid]) jobs.push(fetchTx(c.sid, "turn=" + enc(c.id)));
+      if (c && !TX[c.sid]) jobs.push(fetchTx(c.sid, "turn=" + enc(c.id), undefined, signal));
     }
     return jobs.length ? Promise.all(jobs) : null;
   }
   // What a route needs before it can draw: a session's page (the one holding a deep-linked turn), and its child work.
-  function load(r) {
+  // `signal` cancels what a navigation asked for when the reader goes elsewhere first.
+  function load(r, signal) {
+    if (r.v === "analytics") return fetchAnalytics().then(() => { scheduleAnalytics(); }); // the range's answer, from the server
     if (r.v !== "session" || !SESS[r.id]) return null;
     const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
-    if (TX[r.id] && !deep) return kids(r.id);
-    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "").then(() => kids(r.id));
+    if (TX[r.id] && !deep) return lenient(kids(r.id, signal));
+    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal).then(() => lenient(kids(r.id, signal)));
+  }
+  // Child work that fails to load leaves its cards as they were: only the session's own transcript failing fails the route.
+  const lenient = (p) => (p ? p.catch(() => {}) : p);
+  // The last few transcripts opened, kept when the reader leaves them, so opening one again draws it at once. (A transcript
+  // still in TX, which only a model update prunes, draws from there just the same.) A transcript is kept only when it was
+  // loaded to its end, and the cache is bounded by entries and by estimated memory: two bytes for each character of an entry's
+  // text, since JavaScript strings are UTF-16. Opening one takes it out of the cache; leaving it puts it back at the newest end.
+  const TXCACHE = new Map(), TXCACHE_MAX = 5, TXCACHE_BYTES = 2 * 1024 * 1024;
+  const weigh = (entries) => { let n = 0; for (const e of entries) for (const v of Object.values(e)) n += typeof v === "string" ? v.length : v && typeof v === "object" ? JSON.stringify(v).length : 4; return n * 2; };
+  function cacheTx(sid, entries, meta) {
+    if (!entries || !meta || meta.to < meta.total || meta.tok == null) return; // without its mark there is no telling later whether it grew
+    TXCACHE.delete(sid);
+    const bytes = weigh(entries); if (bytes > TXCACHE_BYTES) return;
+    TXCACHE.set(sid, { entries, meta, bytes });
+    let sum = 0; for (const c of TXCACHE.values()) sum += c.bytes;
+    for (const [id, c] of TXCACHE) { if (TXCACHE.size <= TXCACHE_MAX && sum <= TXCACHE_BYTES) break; TXCACHE.delete(id); sum -= c.bytes; }
+  }
+  // A kept transcript becomes the session's loaded one; the caller spreads its entries over the turns before drawing (that walks
+  // every entry, so it is not done in the click's task, except to check a deep link). False when there is none, or when the
+  // route deep-links to a turn it lacks.
+  function adoptCached(r) {
+    const c = TXCACHE.get(r.id); if (!c) return false;
+    TXCACHE.delete(r.id); TX[r.id] = c.entries; TXM[r.id] = c.meta;
+    if (!r.turn) return true;
+    spread(r.id); const t = TURN.get(r.turn);
+    if (t && t.sid === r.id && !t.entries.length) { delete TX[r.id]; delete TXM[r.id]; return false; }
+    return true;
+  }
+  // A mark with fewer entries or bytes than the one loaded means the file was cut or rewritten: load it again.
+  function shrank(a, b) { const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number); return s1 < s0 || b1 < b0; }
+  // A transcript drawn from the cache is brought up to date the way a live update does it: when the model's mark for it moved
+  // since it was kept, its tail is fetched (or the whole page, if the file shrank), and its child work loads. Nothing is asked
+  // for when the mark is the same. The page is drawn again, keeping the reader's place, once something arrived.
+  function revalidate(r) {
+    const sid = r.id, m = TXM[sid], moved = m && m.to >= m.total && m.tok != null && TOK[sid] != null && m.tok !== TOK[sid];
+    const job = moved ? (shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid)) : null, work = job ? job.then(() => kids(sid)) : kids(sid);
+    if (work) work.then(() => { if (route === r && rendered === r) refresh(null); }, () => {});
   }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
   function pager(sid, where, label) {
@@ -382,7 +450,7 @@
   const app = $(".app");
   const syncLayoutPrefs = () => { app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
   function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); }
-  function setRailMode(on) { railMode = on; try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("title", on ? "Expand sidebar" : "Collapse sidebar"); }
+  function setRailMode(on) { railMode = on; try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
   // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
   // it is dropped on load, along with any entry that has no `open`, and the next save writes the pruned list.
   function pruneTreePrefs(saved) {
@@ -395,7 +463,7 @@
     treePrefs = Object.fromEntries(Object.entries(treePrefs).sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0)).slice(0, 500));
     try { localStorage.setItem("semon.tree", JSON.stringify(treePrefs)); } catch {}
   }
-  const railToggle = $("#rail-toggle"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("title", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
+  const railToggle = $("#rail-toggle"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
   let route = { v: "home" }; let groupBy = "recent"; let query = ""; let analyticsRange = 7, analyticsMeasure = "hours";
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
   let pendingSessionOpen = null, pendingFlashHandoff = null;
@@ -411,17 +479,73 @@
   $("#main").addEventListener("scroll", queueScrollSave, { passive: true });
   const quietTop = () => { if (phone.matches) window.scrollTo(0, 0); else $("#main").scrollTop = 0; };
   function openSessionAtEnd() { if (location.hash) return; startOpeningEndPin(); }
+  // Opening a session draws what the model already holds at once, before its transcript arrives: the sidebar row, the top bar,
+  // and the old page held dimmed and inert (aria-busy). If the transcript is still on its way after 150 ms, a skeleton of turn-shaped
+  // placeholders stands in for the old page, so fast switches don't flash it. `navAbort` cancels the transcript request of a
+  // navigation the reader has left; a response that still arrives late is dropped because its route is no longer the current one.
+  const SKELETON_MS = 150;
+  // The sidebar's list was drawn for this route under this model version: the render that follows draws it only if either changed.
+  let navAbort = null, skeletonTimer = null, lanesFor = null;
+  // The turn shapes the skeleton cycles through: a bubble (yours), text lines, a step row. Widths are classes, sk-w1..sk-w5, in percent.
+  const SKELETON_TURNS = [["bubble", [1, 3, 5], "step"], [null, [1, 2, 4], "step"], ["bubble", [2, 1, 3], null], [null, [1, 1, 5], "step"]];
+  function skeleton(turns = 6) {
+    const box = el("div", "skeleton"); box.setAttribute("aria-hidden", "true");
+    for (let i = 0; i < turns; i++) {
+      const [bubble, lines, step] = SKELETON_TURNS[i % SKELETON_TURNS.length], t = el("div", "sk-turn"), text = el("div", "sk-text");
+      if (bubble) t.append(el("span", "sk-line sk-bubble sk-w3"));
+      for (const w of lines) text.append(el("span", "sk-line sk-w" + w));
+      t.append(text); if (step) t.append(el("span", "sk-line sk-step sk-w2"));
+      box.append(t);
+    }
+    return box;
+  }
+  function paintPending(r) {
+    const page = $("#page"), hadFocus = $("#sidebar").contains(document.activeElement);
+    renderNav(); renderLanes(); drawSessionBar();
+    lanesFor = { r, version: LIVE.version };
+    if (hadFocus) $("#lanes .srow[data-id='" + CSS.escape(r.id) + "']")?.focus({ preventScroll: true });
+    page.setAttribute("aria-busy", "true"); page.inert = true; page.classList.add("loading");
+    clearTimeout(skeletonTimer);
+    skeletonTimer = setTimeout(() => {
+      if (route !== r || !page.classList.contains("loading")) return;
+      page.classList.remove("loading"); page.classList.remove("child-page"); page.style.paddingBottom = "";
+      clearBox(page, r); page.append(skeleton()); quietTop(); syncBarLine();
+    }, SKELETON_MS);
+  }
+  function endLoading() {
+    clearTimeout(skeletonTimer); skeletonTimer = null;
+    const page = $("#page"); page.removeAttribute("aria-busy"); page.inert = false; page.classList.remove("loading");
+  }
+  // Once the transcript is in, a reader who hasn't put focus anywhere else on the page moves to the session's title.
+  function focusTitle() {
+    const a = document.activeElement; if (a && a !== document.body && !$("#sidebar").contains(a)) return;
+    const h = $("#page .ph h1"); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); }
+  }
+  // The session's own transcript couldn't be loaded: the skeleton gives way to the reason and a way to try again.
+  function failLoad(r, err) {
+    if (route !== r || err?.name === "AbortError") return;
+    endLoading();
+    const page = $("#page"), box = el("div", "load-error"), retry = el("button", "more", "Try again");
+    box.setAttribute("role", "alert"); retry.type = "button"; retry.addEventListener("click", () => go({ ...r }, true));
+    box.append(el("p", "empty", "Couldn't load this session: " + (err?.message ?? "no response")), retry);
+    page.classList.remove("child-page"); page.style.paddingBottom = ""; clearBox(page, r); page.append(box);
+  }
+  // A deep link to a turn the loaded transcript doesn't hold yet.
+  const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
   function go(r, fromHistory) {
-    stopOpeningEndPin();
+    stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
     closeAccountMenu();
-    dropErrors(true); route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
+    dropErrors(true); // (first: it drops a range the error stepper moved, and that is not kept)
+    // The session left is kept for opening it again; weighing it waits until the frame the click drew has been painted.
+    if (route.v === "session" && (r.v !== "session" || r.id !== route.id) && TX[route.id] && TXM[route.id]) { const sid = route.id, entries = TX[sid], meta = { ...TXM[sid] }; requestAnimationFrame(() => setTimeout(() => cacheTx(sid, entries, meta), 0)); }
+    route = r; find = ""; findOpen = false; filterOpen = false; closeDrawer(true); $(".session-menu")?.remove(); clearNewEntries();
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     const done = () => {
       if (route !== r) return;
-      render();
+      endLoading(); render(); if (r.v === "session") focusTitle();
       if (fromHistory && Number.isFinite(r.scrollTop)) restoreScroll(r.scrollTop);
       else if (r.v === "session" && r.turn) { revealTurn(r.turn, !fromHistory); if (location.hash) requestAnimationFrame(() => requestAnimationFrame(revealEntryHash)); }
       else if (r.v === "session" && location.hash) revealEntryHash();
@@ -433,7 +557,21 @@
         requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1500); });
       }
     };
-    const p = load(r); if (p) p.then(done, done); else done();
+    // A transcript already in memory, still in TX or kept in the cache, needs no network: the top bar and the sidebar are drawn
+    // from the model at once, the page itself on the next frame (so the first two are on screen before a long transcript is
+    // built), and it is brought up to date afterwards. Otherwise the route waits for its data, with the top bar and the
+    // sidebar already drawn.
+    if (r.v === "session" && SESS[r.id]) {
+      const kept = !TX[r.id];
+      if (kept ? adoptCached(r) : !isDeep(r)) {
+        TXCACHE.delete(r.id);
+        paintPending(r);
+        requestAnimationFrame(() => setTimeout(() => { if (route !== r) return; if (kept && !r.turn) spread(r.id); done(); revalidate(r); }, 0));
+        return;
+      }
+    }
+    const signal = r.v === "session" ? (navAbort = new AbortController()).signal : undefined, p = load(r, signal);
+    if (p) { if (r.v === "session") paintPending(r); p.then(done, (err) => failLoad(r, err)); } else done();
   }
   window.addEventListener("popstate", (e) => {
     if (skipPop) { skipPop = false; if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close a sheet before opening its session
@@ -543,8 +681,8 @@
     const under = { home: ["home"], analytics: ["analytics"], sessions: ["sessions", "session", "trace"], machines: ["machines", "machine"] };
     const item = (v, label, ic, count, hot) => { const b = el("button", "nav-item"); b.type = "button"; b.dataset.go = v; if (under[v].includes(route.v)) b.setAttribute("aria-current", "page"); b.append(icon(ic, "icon"), el("span", null, label)); if (count) b.append(el("span", "cnt" + (hot ? " hot" : ""), String(count))); b.addEventListener("click", () => go({ v })); nav.append(b); };
     item("home", "Home", I.home, inbox().length, true);
-    item("analytics", "Analytics", I.chart);
     item("sessions", "Sessions", I.sessions, Object.keys(SESS).length);
+    item("analytics", "Analytics", I.chart);
     item("machines", "Machines", I.machine, Object.keys(MACHINE).filter((m) => !MACHINE_UP[m]).length, true);
   }
   // Sessions match by name, repo, branch, machine, harness and the messages that started their turns.
@@ -592,7 +730,9 @@
   const costText = (cost) => cost.usd == null || cost.unpriced_models?.length ? "—" : asMoney(cost.usd);
   const costMissing = (cost) => cost.unpriced_models ?? [];
   const COST_TIP = "What these tokens would cost at API rates. Subscriptions (Claude Max, ChatGPT plans) aren't billed this way.";
-  function costInfoTip() { const b = el("span", "cost-info"); b.title = COST_TIP; b.setAttribute("role", "img"); b.setAttribute("aria-label", COST_TIP); b.append(icon(I.q)); return b; }
+  // The icon is the only place this text is; it takes keyboard focus so the tip is reachable without a pointer.
+  let metricSeq = 0;
+  function costInfoTip() { const b = el("span", "cost-info"); b.dataset.tip = COST_TIP; b.tabIndex = 0; b.setAttribute("role", "img"); b.setAttribute("aria-label", COST_TIP); b.append(icon(I.q)); return b; }
   const TREE_RANK = { wait: 0, work: 1, err: 2, idle: 3, done: 4 };
   const urgentDescendant = (sid, children) => descendantsOf(sid, children).filter((s) => s.state in TREE_RANK).sort((a, b) => TREE_RANK[a.state] - TREE_RANK[b.state] || b.last - a.last)[0]?.state;
   // What a parent's descendants are doing, as parts to join: the runs, then only the non-zero needs-you, working and failed counts (the viewer's own state words).
@@ -716,15 +856,15 @@
       toggle.addEventListener("click", (e) => { e.stopPropagation(); const value = item.getAttribute("aria-expanded") !== "true"; item.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-label", (value ? "Collapse " : "Expand ") + s.name); if (!value) forcedOpenIds().delete(s.id); saveTreePref(s.id, value); if (!value && (expandedAll === s.id || expandedPath.has(s.id))) { expandedAll = null; renderLanes(); $('#lanes .treeitem[data-id="' + CSS.escape(s.id) + '"] > .tree-row .tree-toggle')?.focus(); } });
       lineToggle = toggle; line.classList.add("has-toggle");
     }
-    const row = el("button", "srow"); row.type = "button"; row.dataset.id = s.id; row.title = s.name;
+    const row = el("button", "srow"); row.type = "button"; row.dataset.id = s.id; if (rail) row.dataset.tip = s.name; // the collapsed rail shows only a dot; otherwise the name has a tip while it is cut off
     row.setAttribute("aria-label", s.name + ", " + (STATE[s.state] ?? s.state) + ", " + (HARNESS[s.harness] ?? s.harness) + ", " + shortHost(s));
     const parts = allKids.length ? childParts(allKids) : []; if (parts.length) row.setAttribute("aria-label", row.getAttribute("aria-label") + ", " + parts.join(", "));
     if (current === s.id) row.setAttribute("aria-current", "page");
     if (rail && ancestors.has(s.id)) { row.classList.add("on-path"); row.setAttribute("aria-current", "true"); }
-    const main = el("span", "srow-main"), ag = el("span", "ag", ago(s.last)); main.append(dot(s.state), el("span", "nm", s.name), ag);
-    if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work"); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
-    if (kids.length && !rail && allKids.length) { const summary = el("span", "tree-summary", String(allKids.length)); summary.title = parts.join(" · "); summary.classList.toggle("wait", allKids.some((x) => x.state === "wait")); ag.before(summary); }
-    const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").title = hostOf(s); meta.querySelector(".repo-short").title = branchOf(s);
+    const main = el("span", "srow-main"), ag = el("span", "ag", ago(s.last)), nm = el("span", "nm", s.name); nm.dataset.tip = s.name; nm.dataset.tipClipped = ""; main.append(dot(s.state, !rail), nm, ag); // in the rail the row has the tip (the name), and a dot inside it would answer first
+    if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work", false); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
+    if (kids.length && !rail && allKids.length) { const summary = el("span", "tree-summary", String(allKids.length)); summary.dataset.tip = parts.join(" · "); summary.classList.toggle("wait", allKids.some((x) => x.state === "wait")); ag.before(summary); }
+    const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").dataset.tip = "Machine: " + hostOf(s); meta.querySelector(".repo-short").dataset.tip = spaced("Repo: " + (s.repo ?? "none") + " · " + (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s));
     row.append(main, meta); row.addEventListener("click", () => goSession(s.id)); line.append(row); if (lineToggle) line.append(lineToggle); item.append(line);
     item.addEventListener("keydown", (e) => {
       if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { if (e.target !== item && e.target !== row && e.target !== lineToggle) return; const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); item.querySelector(":scope > .tree-row .tree-toggle")?.click(); } }
@@ -760,7 +900,7 @@
     restoreLaneFocus(focus);
     // A stuck row covers the top of the sidebar: what is scrolled into view (the open session, after a navigation) stays clear of it.
     const stuck = box.querySelector(".tree-row.stuck"), navigated = revealedFor !== route; revealedFor = route;
-    $("#sidebar").style.scrollPaddingTop = stuck ? stuck.offsetHeight + "px" : "";
+    ($("#side-list") ?? $("#sidebar")).style.scrollPaddingTop = stuck ? stuck.offsetHeight + 8 + "px" : "";
     if (stuck && navigated) box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" });
   }
 
@@ -770,25 +910,27 @@
   // after a crumb up a level, then a one-line summary that ellipsizes. On a session, search takes over the bar and the
   // filter drops down from it; the ⋯ menu holds the session's details.
   function renderTopbar(title, crumb, opts = {}) {
-    const bar = $("#topbar"), s = opts.session; bar.replaceChildren(); bar.classList.remove("scrolled");
+    const bar = $("#topbar"), s = opts.session; clearBox(bar, route); bar.classList.remove("scrolled");
+    // What the bar holds is added through `put`, so the range control on Analytics (a persistent control) stays where it is.
+    const put = placer(bar), sink = { append: put };
     bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("searching", !!(s && (findOpen || errOn(s.id))));
-    if (s && errOn(s.id)) { errorsBar(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
-    if (s && findOpen) { searchBar(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
-    const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); bar.append(m);
+    if (s && errOn(s.id)) { errorsBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
+    if (s && findOpen) { searchBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
+    const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); put(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
     if (opts.lineage?.length) {
       if (phone.matches) { const parent = opts.lineage.at(-1), c = el("button", "crumb lineage-parent", parent.name); c.type = "button"; c.setAttribute("aria-label", "Open session path through " + parent.name); c.addEventListener("click", () => showLineageMenu(s.id, bar)); l1.append(c, el("span", "sep", "›")); }
       else opts.lineage.forEach((item) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); });
     } else if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
-    const tt = el("span", "t", title); tt.title = title; l1.append(tt); t.append(l1);
+    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; l1.append(tt); t.append(l1);
     if (opts.line2) {
       const l2 = el("div", "l2" + (s ? " session-meta" : ""));
       opts.line2(l2); t.append(l2);
       if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); });
     }
-    bar.append(t);
-    if (opts.analytics) { appendAnalyticsRange(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
-    if (!s) { appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
+    put(t);
+    if (opts.analytics) { put(rangeControl(bar)); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
+    if (!s) { appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
     const fb = el("button", "ibtn"); fb.type = "button"; fb.setAttribute("aria-label", "Find in transcript"); fb.append(icon(I.search));
     fb.addEventListener("click", () => { findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
     const pop = el("div", "filters pop"); pop.hidden = !filterOpen;
@@ -800,21 +942,27 @@
     // On phones search and filter live in the ⋯ menu, and the filter hangs from that button.
     const place = () => { const anchor = phone.matches ? more : tb; pop.style.right = Math.max(0, bar.getBoundingClientRect().right - anchor.getBoundingClientRect().right) + "px"; };
     tb.addEventListener("click", place);
-    if (phone.matches) bar.append(more, pop); else bar.append(fb, tb, more, pop);
-    appendWideToggle(bar); if (filterOpen) place();
-    const account = accountWidget(false); if (account) bar.append(account);
+    if (phone.matches) put(more, pop); else put(fb, tb, more, pop);
+    appendWideToggle(sink); if (filterOpen) place();
+    const account = accountWidget(false); if (account) put(account);
+    put.done();
   }
   function appendWideToggle(bar) {
-    const b = el("button", "ibtn wide-toggle"); b.type = "button"; b.setAttribute("aria-label", "Wide reading mode"); b.setAttribute("aria-pressed", String(wideMode)); b.title = "Wide reading mode"; b.append(icon(I.wide));
+    const b = el("button", "ibtn wide-toggle"); b.type = "button"; b.setAttribute("aria-label", "Wide reading mode"); b.setAttribute("aria-pressed", String(wideMode)); b.dataset.tip = "Wide reading mode"; b.append(icon(I.wide));
     b.addEventListener("click", () => setWideMode(!wideMode)); bar.append(b);
   }
-  function appendAnalyticsRange(bar) {
-    const group = el("div", "analytics-range"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Analytics range");
-    for (const [days, label] of [[1, "24 h"], [7, "7 d"], [30, "30 d"]]) {
-      const b = el("button", null, label); b.type = "button"; b.dataset.e = "analytics-range:" + days; b.setAttribute("aria-pressed", String(analyticsRange === days));
-      b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); }); group.append(b);
-    }
-    bar.append(group);
+  // The Analytics range control, a persistent control of the bar: each redraw keeps it and only sets which button is pressed.
+  function rangeControl(bar) {
+    const group = slot("range", bar, () => {
+      const g = el("div", "analytics-range"); g.setAttribute("role", "group"); g.setAttribute("aria-label", "Analytics range");
+      for (const [days, label] of [[1, "24 h"], [7, "7 d"], [30, "30 d"]]) {
+        const b = el("button", null, label); b.type = "button"; b.dataset.e = "analytics-range:" + days;
+        b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); refreshAnalytics(); }); g.append(b);
+      }
+      return g;
+    }).el;
+    for (const b of group.children) b.setAttribute("aria-pressed", String(analyticsRange === Number(b.dataset.e.split(":")[1])));
+    return group;
   }
   function lineageOf(sid) {
     const path = [], seen = new Set(); let id = sid;
@@ -1012,37 +1160,38 @@
     const c = el("span", meta ? "meta-item meta-kind" : "child-kind"); c.style.setProperty("--h", "var(--" + s.harness + ")");
     const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
     if (mark) c.append(mark);
-    const kindText = s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"); if (meta) c.title = "Kind: " + kindText;
+    const kindText = s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"); if (meta) c.dataset.tip = "Kind: " + kindText;
     c.append(el("span", meta ? "meta-value" : null, kindText)); return c;
   }
   // A session's compact metadata line: state, model, machine, branch, tools, runs, tokens and API-equivalent cost.
-  // Every item is a static badge: a tooltip (title) for the pointer and hidden text ("Tool calls: ") for a screen reader.
+  // Every item is a static badge: a tooltip (data-tip) for the pointer and hidden text ("Tool calls: ") for a screen reader,
+  // so a badge is not a tab stop: its label is read out, and the tooltip only adds the full value for a pointer or a tap.
   // Only the errors jump and the runs item are controls. The session's details live in the ⋯ menu.
   const metaSr = (label) => el("span", "sr-only", label + ": ");
   const sessionLine = (s) => (l2) => {
     const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0, nT = (TURNS[s.id] ?? []).filter(hasTurn).length;
     const turnsText = nT + (nT === 1 ? " turn" : " turns");
-    const st = el("span", "meta-item meta-state"); st.title = "Status: " + STATE[s.state] + " · " + turnsText; st.append(dot(s.state), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", turnsText));
+    const st = el("span", "meta-item meta-state"); st.dataset.tip = spaced("Status: " + STATE[s.state] + " · " + turnsText); st.append(dot(s.state, false), el("span", "meta-value", STATE[s.state]), el("span", "state-sep", "·"), el("span", "meta-value", turnsText));
     if (errors) {
       const sep = el("span", "state-sep errs-sep", "·"), j = el("button", "errs", errors + (errors === 1 ? " error" : " errors")), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); j.prepend(mark);
-      j.type = "button"; j.setAttribute("aria-label", j.textContent + ": step through the failed steps");
+      const stepTip = j.textContent + ": step through the failed steps"; j.type = "button"; j.dataset.tip = stepTip; j.setAttribute("aria-label", stepTip);
       j.addEventListener("click", (ev) => { ev.stopPropagation(); openErrors(s.id); });
       st.append(sep, j); }
     const kind = s.kind ? childKindChip(s, true) : null;
-    const model = el("span", "meta-item meta-model"); model.append(metaSr("Model"), harnessName(s.harness), el("span", "meta-value", shortModel(s.model))); model.title = "Model: " + (s.model ?? "Unknown model");
-    const machine = el("span", "meta-item meta-machine"); machine.append(metaSr("Machine"), icon(I.machine), el("span", "meta-value", shortHost(s))); machine.title = "Machine: " + hostOf(s);
-    const branch = el("span", "meta-item meta-branch"); branch.append(metaSr(s.worktree ? "Worktree" : "Branch"), icon(I.branch), el("span", "meta-value", branchOf(s))); branch.title = (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s);
-    const tools = el("span", "meta-item meta-tools"); tools.append(metaSr("Tool calls"), icon(I.wrench), el("span", "meta-value", calls == null ? "—" : String(calls))); tools.title = "Tool calls: " + (calls ?? "—");
+    const model = el("span", "meta-item meta-model"); model.append(metaSr("Model"), harnessName(s.harness), el("span", "meta-value", shortModel(s.model))); model.dataset.tip = "Model: " + (s.model ?? "Unknown model");
+    const machine = el("span", "meta-item meta-machine"); machine.append(metaSr("Machine"), icon(I.machine), el("span", "meta-value", shortHost(s))); machine.dataset.tip = "Machine: " + hostOf(s);
+    const branch = el("span", "meta-item meta-branch"); branch.append(metaSr(s.worktree ? "Worktree" : "Branch"), icon(I.branch), el("span", "meta-value", branchOf(s))); branch.dataset.tip = (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s);
+    const tools = el("span", "meta-item meta-tools"); tools.append(metaSr("Tool calls"), icon(I.wrench), el("span", "meta-value", calls == null ? "—" : String(calls))); tools.dataset.tip = "Tool calls: " + (calls ?? "—");
     const kids = childSessions(s.id), allKids = descendantsOf(s.id, sessionChildren());
     let runs = null;
-    if (kids.length) { const working = allKids.filter((x) => x.state === "work").length; runs = el("button", "meta-item meta-runs"); runs.type = "button"; runs.title = kids.length + (kids.length === 1 ? " child session" : " child sessions") + (working ? ", work in progress" : "") + ": open runs"; runs.setAttribute("aria-label", runs.title); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
+    if (kids.length) { const working = allKids.filter((x) => x.state === "work").length; runs = el("button", "meta-item meta-runs"); const runsTip = kids.length + (kids.length === 1 ? " child session" : " child sessions") + (working ? ", work in progress" : "") + ": open runs"; runs.type = "button"; runs.dataset.tip = runsTip; runs.setAttribute("aria-label", runsTip); runs.append(icon(I.stack), el("span", "meta-value", String(kids.length))); runs.addEventListener("click", (e) => { e.stopPropagation(); openRuns(s, runs); }); }
     const totalTokens = usageTotal(s);
-    const tokens = el("span", "meta-item meta-tokens"); tokens.append(metaSr("Tokens"), icon(I.tokens), el("span", "meta-value", tok(totalTokens / 1e6))); tokens.title = "Tokens: " + totalTokens.toLocaleString();
-    const parentCost = kids.length ? costForSessions([s, ...allKids]) : costForSession(s.id), missing = costMissing(parentCost), costItem = el("span", "meta-item meta-cost"); costItem.append(metaSr("API-equivalent cost"), icon(I.coin), el("span", "meta-value", (kids.length ? "incl. runs " : "") + (costText(parentCost) === "—" ? "—" : shortMoney(parentCost.usd)))); costItem.title = "API-equivalent cost" + (kids.length ? ", including runs" : "") + ": " + costText(parentCost) + ". " + COST_TIP + (missing.length ? " no price for " + missing.join(", ") : "");
+    const tokens = el("span", "meta-item meta-tokens"); tokens.append(metaSr("Tokens"), icon(I.tokens), el("span", "meta-value", tok(totalTokens / 1e6))); tokens.dataset.tip = "Tokens: " + totalTokens.toLocaleString();
+    const parentCost = kids.length ? costForSessions([s, ...allKids]) : costForSession(s.id), missing = costMissing(parentCost), costItem = el("span", "meta-item meta-cost"); costItem.append(metaSr("API-equivalent cost"), icon(I.coin), el("span", "meta-value", (kids.length ? "incl. runs " : "") + (costText(parentCost) === "—" ? "—" : shortMoney(parentCost.usd)))); costItem.dataset.tip = "API-equivalent cost" + (kids.length ? ", including runs" : "") + ": " + costText(parentCost) + ". " + COST_TIP + (missing.length ? " no price for " + missing.join(", ") : "");
     l2.append(...(kind ? [kind] : []), st, model, machine, branch, tools, ...(runs ? [runs] : []), tokens, costItem);
   };
   const machineLine = (m) => (l2) => { const here = onMachine(m), w = here.filter((s) => s.state === "work").length, up = MACHINE_UP[m];
-    const st = el("span", "stat " + (!up ? "err" : w ? "work" : "idle")); st.append(dot(!up ? "err" : w ? "work" : "idle"), !up ? "Not responding" : w ? "Up" : "Idle"); l2.append(st, el("span", "sep", " · "));
+    const st = el("span", "stat " + (!up ? "err" : w ? "work" : "idle")); st.append(dot(!up ? "err" : w ? "work" : "idle", false), !up ? "Not responding" : w ? "Up" : "Idle"); l2.append(st, el("span", "sep", " · "));
     l2.append(el("span", "rest", up ? w + " working · " + here.length + (here.length === 1 ? " session" : " sessions") : movedOff(m).length ? "Semon moved its sessions to other machines" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, here.length + (here.length === 1 ? " session" : " sessions")].filter(Boolean).join(" · "))); };
   // One observer for the current page title; the previous page's is disconnected so it can't flip the new bar.
   let titleObs = null;
@@ -1268,7 +1417,7 @@
     body.append(more);
   }
   function traceMeta(body, st, text, sid, turn, note) {
-    const meta = el("div", "meta"), s = SESS[sid]; const sw = el("span", "stat " + st); sw.append(st === "work" ? el("span", "spin") : dot(st), text); meta.append(sw);
+    const meta = el("div", "meta"), s = SESS[sid]; const sw = el("span", "stat " + st); sw.append(st === "work" ? el("span", "spin") : dot(st, false), text); meta.append(sw);
     if (s) meta.append(el("span", "chip-h " + hcls(sid), (s.kind ?? HARNESS[s.harness]) + " · " + MACHINE[s.machine]));
     if (note) meta.append(el("span", "gone", note));
     if (s && !s.stub) { const o = el("button", "open", "Open in " + s.name + " ›"); o.type = "button"; o.addEventListener("click", () => goSession(sid, turn?.id)); meta.append(o); }
@@ -1401,7 +1550,7 @@
       if (opts.excludeH && t.last) return;
       const end = turnEnd(t); if (!end && !t.out.length) return;
       const d = el("div", "turn-end");
-      if (end) { const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st), spaced(end.text)); d.append(st); }
+      if (end) { const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st, false), spaced(end.text)); d.append(st); }
       if (t.out.length) d.append(traceBtn(t)); blk.append(d); };
     const openTurn = (t) => { closeTurn(); const blk = el("section", "turn"); blk.dataset.turn = t.id;
       // Your own message needs no header: the bubble is yours and its time sits under it. A relay or brief says who sent it.
@@ -1555,7 +1704,7 @@
     const block = el("div", "child-return"), finished = s.state === "done" || s.state === "err" || h.status === "done" || h.status === "err";
     const status = finished ? (s.state === "err" || h.status === "err" ? "err" : "done") : "work";
     const text = finished ? (status === "err" ? "Failed" : "Done") : "Working · " + callsText(countOf(s, "calls")) + " · " + dur(s.start, null);
-    const state = el("span", "stat " + status); state.append(status === "work" ? el("span", "spin") : dot(status), el("span", null, finished ? "Returned to " + nameOf(h.from) + " · " + text + " · " + dur(s.start, s.last) : text)); block.append(state);
+    const state = el("span", "stat " + status); state.append(status === "work" ? el("span", "spin") : dot(status, false), el("span", null, finished ? "Returned to " + nameOf(h.from) + " · " + text + " · " + dur(s.start, s.last) : text)); block.append(state);
     if (finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
     return block;
   }
@@ -1568,7 +1717,7 @@
     const [ic, parts] = sentence(h, viewer);
     if (child) { c.append(childKindChip(child)); const ln = el("span", "ln", child.name); ln.append(el("span", "verb", " · " + (child.kind ?? HARNESS[child.harness]))); c.append(ln); }
     else { c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln); }
-    const shownState = child?.state ?? h.status, sw = el("span", "stat " + shownState); sw.append(shownState === "work" ? el("span", "spin") : dot(shownState === "done" ? "done" : shownState), child ? STATE[shownState] : statWord(h)); c.append(sw);
+    const shownState = child?.state ?? h.status, sw = el("span", "stat " + shownState); sw.append(shownState === "work" ? el("span", "spin") : dot(shownState === "done" ? "done" : shownState, false), child ? STATE[shownState] : statWord(h)); c.append(sw);
     if (child) { const meta = el("div", "child-meta"); meta.append(el("span", null, dur(child.start, child.state === "work" ? null : child.last)), el("span", null, callsText(countOf(child, "calls")))); c.append(meta); }
     const br = markdown(h.brief, "brief"); c.append(br);
     // Long messages open in place; the rest of the card still goes to the other session.
@@ -1598,10 +1747,35 @@
   }
 
   // ---- Render --------------------------------------------------------------------------------------------------------
+  // Persistent controls. A control the reader may be operating (a filter, the search field, a toggle group) is built once for
+  // the page shown and kept by every redraw of that page: it is never taken out of the document, so its focus, an open
+  // dropdown and the caret in a text field survive. `slot` finds or builds it in its box; the caller then hands it the
+  // page's current data and handlers through `ctx` (a handler is read from `ctx` when the control fires, so it never calls
+  // the closure of an earlier draw). A navigation to another route drops every slot.
+  const SLOTS = new Map();
+  function slot(key, box, build) {
+    let s = SLOTS.get(key);
+    if (!s || s.route !== route || s.box !== box || s.el.parentNode !== box) { s = { route, box, ctx: {}, el: null }; s.el = build(s.ctx); SLOTS.set(key, s); }
+    return s;
+  }
+  // Empties `box` of everything but the slots the route being drawn already holds in it.
+  function clearBox(box, r) {
+    for (const [key, s] of SLOTS) if (s.route !== r) SLOTS.delete(key);
+    const kept = new Set([...SLOTS.values()].filter((s) => s.box === box).map((s) => s.el));
+    for (const n of [...box.childNodes]) if (!kept.has(n)) n.remove();
+  }
+  // Adds nodes to `box` in order, after `clearBox`: a node already at the next place stays where it is, and any other
+  // goes in before it. `put.done()` drops what is left over.
+  function placer(box) {
+    let cur = box.firstChild;
+    const put = (...nodes) => { for (const n of nodes) { if (n === cur) cur = cur.nextSibling; else box.insertBefore(n, cur); } };
+    put.done = () => { while (cur) { const next = cur.nextSibling; cur.remove(); cur = next; } };
+    return put;
+  }
   function render() {
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
     closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
-    tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; page.replaceChildren(); page.classList.remove("child-page");
+    tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; clearBox(page, r); page.classList.remove("child-page");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
     else if (r.v === "sessions") { renderSessions(page); renderTopbar("Sessions"); }
@@ -1611,88 +1785,116 @@
     else if (r.v === "session") { const s = SESS[r.id], lineage = lineageOf(r.id).slice(0, -1); renderSession(page, r.id); renderTopbar(s.name, null, { session: s, lineage, line2: sessionLine(s) }); }
     if (r.v === "session" && errOn(r.id)) markError(false);
     document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px");
-    syncLayoutPrefs(); syncBarLine(); renderNav(); renderLanes(); renderDrawerAccount(); syncJump();
+    const lanesKept = lanesFor && lanesFor.r === r && lanesFor.version === LIVE.version; lanesFor = null;
+    syncLayoutPrefs(); syncBarLine(); renderNav(); if (!lanesKept) renderLanes(); renderDrawerAccount(); syncJump();
   }
 
-  // Analytics uses epoch milliseconds from the served model. While a session is still working, extend its last
-  // recorded busy interval to the model clock so the figures and charts include live work.
-  const MIN = 60000, HOUR = 60 * MIN;
-  const busyOf = (s) => { const iv = (s.busy ?? []).map(([a, b]) => [a, b]); if (s.state === "work" && iv.length) iv.at(-1)[1] = Math.max(iv.at(-1)[1], NOW); return iv; };
-
-  // Analytics is computed from the served model's sessions, busy intervals, turn index and handoffs.
-  // The model gives per-session aggregate tool counts, so (as in the approved mockup) those calls are attributed to session start.
-  const DAY_MS = 86400000;
-  const rangeMs = (days) => days * DAY_MS;
-  const inRange = (t, from, to) => Number.isFinite(t) && t >= from && t < to;
-  function analyticsSessions() {
-    return Object.values(SESS).map((s) => {
-      const startedAt = Number(s.start) || 0, calls = countOf(s, "calls") ?? 0;
-      const errors = countOf(s, "errors") ?? 0;
-      const turns = (TURNS[s.id] ?? []).filter(hasTurn);
-      return { s, id: s.id, startedAt, busy: busyOf(s),
-        turnEvents: turns.map((t) => Number.isFinite(t.at) ? t.at : Number.isFinite(t.start?.at) ? t.start.at : startedAt),
-        toolEvents: Array.from({ length: Math.max(0, calls) }, (_, i) => ({ at: startedAt, error: i < errors })) };
+  // ---- Analytics: the server computes each range (/api/analytics) -----------------------------------------------------------
+  // The model holds only its own window (a day), so the page asks the server for the range it shows: 24 h, 7 d or 30 d, with
+  // the filters. The answer has every figure, chart column and list the page draws, and the page does no range math. It is
+  // asked for when the page opens, when the range or a filter changes, after every model update (the server answers 304
+  // while nothing changed), and every 10 s while the page shows, as time moves the range. Answers are kept per range and
+  // filters, so switching back draws at once while the page asks again.
+  const MIN = 60000, HOUR = 60 * MIN, AN_EVERY = 10000, AN_KEEP = 8;
+  const AN = { answers: new Map(), inflight: null, again: false, timer: null, error: null };
+  function analyticsQuery() {
+    const q = ["range=" + (analyticsRange === 1 ? "24h" : analyticsRange + "d")];
+    // "No repo" is an empty repo; an unset filter isn't sent.
+    if (sessionFilters.repo) q.push("repo=" + (sessionFilters.repo === "__none__" ? "" : enc(sessionFilters.repo)));
+    for (const key of ["machine", "harness", "model"]) if (sessionFilters[key]) q.push(key + "=" + enc(sessionFilters[key]));
+    return q.join("&");
+  }
+  const analyticsData = () => AN.answers.get(analyticsQuery())?.data ?? null;
+  // One request at a time: a change while one is out asks again when it is back. Resolves true when the answer changed.
+  function fetchAnalytics() {
+    if (AN.inflight) { AN.again = true; return AN.inflight; }
+    const key = analyticsQuery(), kept = AN.answers.get(key);
+    const asked = fetch("/api/analytics?" + key, { credentials: "same-origin", headers: kept?.etag ? { "If-None-Match": kept.etag } : {} })
+      .then((r) => {
+        if (r.status === 304) { const cleared = AN.error != null; AN.error = null; return cleared; } // unchanged, and asking works again
+        if (r.status === 403) { ended(403); return false; }
+        if (!r.ok) throw Object.assign(new Error(r.status + " " + r.statusText), { status: r.status });
+        const etag = r.headers.get("ETag");
+        return r.json().then((data) => {
+          AN.answers.delete(key); AN.answers.set(key, { etag, data });
+          while (AN.answers.size > AN_KEEP) AN.answers.delete(AN.answers.keys().next().value);
+          const changed = AN.error != null || kept?.etag !== etag; AN.error = null; return changed;
+        });
+      })
+      .catch((e) => { const changed = AN.error !== e.message; AN.error = e.message; return changed; });
+    AN.inflight = asked.then((changed) => {
+      AN.inflight = null;
+      if (!AN.again) return changed;
+      AN.again = false; return fetchAnalytics().then((more) => changed || more);
+    });
+    return AN.inflight;
+  }
+  // Asks again in 10 s, or in a little over a second when the answer came from an older model than the page has. While
+  // asking fails (a 409 or a 500), it waits the 10 s: the kept answer stays drawn, with the error above it.
+  function scheduleAnalytics() {
+    clearTimeout(AN.timer); AN.timer = null;
+    if (route.v !== "analytics" || LIVE.ended || !visible()) return;
+    const data = analyticsData(), behind = !AN.error && data && LIVE.version && data.version !== LIVE.version;
+    AN.timer = setTimeout(refreshAnalytics, behind ? 1200 : AN_EVERY);
+  }
+  function refreshAnalytics() {
+    clearTimeout(AN.timer); AN.timer = null;
+    if (route.v !== "analytics") return Promise.resolve();
+    return fetchAnalytics().then((changed) => {
+      if (changed && route.v === "analytics" && rendered === route) {
+        if (viewerEl) LIVE.pending = true; // drawn when the sheet closes
+        else { const st = capture(); render(); restore(st); }
+      }
+      scheduleAnalytics();
     });
   }
-  function analyticsWaits() {
-    return H.filter((h) => h.kind === "toyou" && h.status === "wait" && SESS[h.from])
-      .map((h) => ({ sid: h.from, startAt: h.at, endAt: null }));
-  }
-  function busyMsIn(row, from, to) { return row.busy.reduce((sum, [a, b]) => sum + Math.max(0, Math.min(b, to) - Math.max(a, from)), 0); }
-  // Cost is served per UTC day (cost.by_day), so a window of hours can't be priced. Only whole UTC days count: the range's
-  // length in UTC days, ending with the UTC day `to` falls in (today, so far): today for 24 h, the last 7 or 30 UTC days
-  // otherwise. The previous period is the same rule on the range before it, so it is the whole days just before these.
-  function costSpan(from, to) {
-    const day = Math.floor(to / DAY_MS) * DAY_MS;
-    return [day - (analyticsRange - 1) * DAY_MS, day + DAY_MS];
-  }
-  const wholeDay = (day, a, b) => { const start = Date.parse(day + "T00:00:00.000Z"); return Number.isFinite(start) && start >= a && start + DAY_MS <= b; };
-  function sessionCostInRange(s, from, to) {
-    const [a, b] = costSpan(from, to), cost = s.cost ?? {}, unknown = new Set(), byDay = Object.entries(cost.by_day ?? {}).filter(([day]) => wholeDay(day, a, b));
-    if (byDay.length) for (const model of costMissing(cost)) unknown.add(model);
-    return { usd: unknown.size ? null : byDay.reduce((sum, [, amount]) => sum + (Number(amount) || 0), 0), unpriced_models: [...unknown], hasData: byDay.length > 0 };
-  }
-  function analyticsCost(rows, from, to) {
-    const unpriced = new Set(); let usd = 0, hasData = false;
-    for (const row of rows) {
-      const cost = sessionCostInRange(row.s, from, to); if (!cost.hasData) continue;
-      hasData = true; usd += Number(cost.usd) || 0; for (const model of cost.unpriced_models) unpriced.add(model);
-    }
-    return { usd: unpriced.size ? null : usd, unpriced_models: [...unpriced].sort(), hasData };
+  document.addEventListener("visibilitychange", () => { if (visible() && route.v === "analytics") refreshAnalytics(); else if (!visible()) { clearTimeout(AN.timer); AN.timer = null; } });
+  const nameOfSid = (A, sid) => SESS[sid]?.name ?? A.sessions[sid]?.name ?? sid;
+  const harnessOfSid = (A, sid) => SESS[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
+  // A session older than the model's window has no page to open: its row is text.
+  function sessionRow(A, sid, cls, value, onOpen) {
+    const open = !!SESS[sid], b = el(open ? "button" : "div", cls);
+    if (open) { b.type = "button"; b.addEventListener("click", onOpen); }
+    b.append(el("span", "session-name", nameOfSid(A, sid)), harnessName(harnessOfSid(A, sid), true), el("span", "session-value", value));
+    return b;
   }
   const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
   function matchesSessionFacets(s) { return Object.keys(sessionFilters).every((key) => !sessionFilters[key] || sessionFacetValue(s, key) === sessionFilters[key]); }
-  function renderFacetFilters(onChange) {
-    const box = el("div", "facet-filters"); box.setAttribute("aria-label", "Filter sessions");
-    const specs = [
-      ["repo", "Repo", "All repos", [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "repo")))].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
-      ["machine", "Machine", "All machines", [...new Set(Object.values(SESS).map((s) => s.machine ?? ""))].sort(), (v) => MACHINE[v] ?? v],
-      ["harness", "Harness", "All harnesses", [...new Set(Object.values(SESS).map((s) => s.harness ?? ""))].sort(), (v) => HARNESS[v] ?? v],
-      ["model", "Model", "All models", [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "model")))].sort(), shortModel],
-    ];
-    for (const [key, label, allLabel, values, showValue] of specs) {
-      const field = el("label", "facet-field"); field.append(el("span", null, label)); const select = el("select"); select.setAttribute("aria-label", label);
-      const all = el("option", null, allLabel); all.value = ""; select.append(all);
-      for (const value of values) { const option = el("option", null, showValue(value)); option.value = value; select.append(option); }
-      select.value = sessionFilters[key]; select.addEventListener("change", () => { sessionFilters[key] = select.value; onChange(); }); field.append(select); box.append(field);
-    }
-    return box;
-  }
-  function analyticsStats(rows, from, to) {
-    const relevant = rows.filter((r) => inRange(r.startedAt, from, to) || r.busy.some(([a, b]) => a < to && b > from));
-    const waits = analyticsWaits().filter((w) => rows.some((r) => r.id === w.sid) && w.startAt < to && (w.endAt ?? to) > from);
-    const durations = waits.map((w) => Math.max(0, Math.min(w.endAt ?? to, to) - Math.max(w.startAt, from))).filter((x) => x > 0).sort((a, b) => a - b);
-    const median = durations.length ? durations.length % 2 ? durations[(durations.length - 1) / 2] : (durations[durations.length / 2 - 1] + durations[durations.length / 2]) / 2 : 0;
-    const waitBy = new Map(); for (const w of waits) { const ms = Math.max(0, Math.min(w.endAt ?? to, to) - Math.max(w.startAt, from)); waitBy.set(w.sid, (waitBy.get(w.sid) ?? 0) + ms); }
-    const current = analyticsWaits().filter((w) => !w.endAt && rows.some((r) => r.id === w.sid)).map((w) => ({ ...w, ms: Math.max(0, NOW - w.startAt), s: SESS[w.sid] })).sort((a, b) => b.ms - a.ms);
-    const agentMs = relevant.reduce((sum, r) => sum + busyMsIn(r, from, to), 0);
-    const rangeCost = analyticsCost(rows, from, to), costUnknown = rangeCost.unpriced_models;
-    return { rows: relevant, agentMs, started: rows.filter((r) => inRange(r.startedAt, from, to)).length,
-      turns: rows.reduce((sum, r) => sum + r.turnEvents.filter((at) => inRange(at, from, to)).length, 0),
-      tools: rows.reduce((sum, r) => sum + r.toolEvents.filter((e) => inRange(e.at, from, to)).length, 0),
-      errors: rows.reduce((sum, r) => sum + r.toolEvents.filter((e) => inRange(e.at, from, to) && e.error).length, 0),
-      waitsMs: durations.reduce((sum, x) => sum + x, 0), medianWaitMs: median, longestWaitMs: durations.at(-1) ?? 0,
-      longestCurrent: current[0] ?? null, waitBy, costUnknown, apiCost: rangeCost.usd };
+  // The four filters (Repo, Machine, Harness, Model) of Analytics and Sessions: one persistent control per page. A redraw
+  // (`sync`) brings its option lists and selections up to date in place. A selected value that no session has now stays
+  // selected, marked "(no sessions)", until the reader changes it.
+  // On Analytics the range's own values join the model's: a repo that worked last week is a choice there.
+  const rangeFacet = (key) => route.v !== "analytics" ? [] : (analyticsData()?.facets?.[key] ?? []).map((v) => v ?? "__none__");
+  const FACETS = [
+    ["repo", "Repo", "All repos", () => [...new Set([...Object.values(SESS).map((s) => sessionFacetValue(s, "repo")), ...rangeFacet("repo")])].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
+    ["machine", "Machine", "All machines", () => [...new Set([...Object.values(SESS).map((s) => s.machine ?? ""), ...rangeFacet("machine")])].sort(), (v) => MACHINE[v] ?? v],
+    ["harness", "Harness", "All harnesses", () => [...new Set([...Object.values(SESS).map((s) => s.harness ?? ""), ...rangeFacet("harness")])].sort(), (v) => HARNESS[v] ?? v],
+    ["model", "Model", "All models", () => [...new Set([...Object.values(SESS).map((s) => sessionFacetValue(s, "model")), ...rangeFacet("model")])].sort(), shortModel],
+  ];
+  function renderFacetFilters(box, onChange) {
+    const s = slot("facets", box, (ctx) => {
+      const bar = el("div", "facet-filters"); bar.setAttribute("aria-label", "Filter sessions"); const fields = [];
+      for (const [key, label, allLabel, valuesOf, showValue] of FACETS) {
+        const field = el("label", "facet-field"); field.append(el("span", null, label)); const select = el("select"); select.setAttribute("aria-label", label);
+        select.addEventListener("change", () => { sessionFilters[key] = select.value; ctx.onChange(); }); field.append(select); bar.append(field);
+        fields.push({ key, select, allLabel, valuesOf, showValue, options: new Map() });
+      }
+      ctx.sync = () => {
+        for (const f of fields) {
+          const current = sessionFilters[f.key], values = f.valuesOf().filter((v) => v !== ""), gone = current !== "" && !values.includes(current);
+          if (gone) values.push(current);
+          const wanted = [["", f.allLabel], ...values.map((v) => [v, f.showValue(v) + (gone && v === current ? " (no sessions)" : "")])], put = placer(f.select), next = new Map();
+          for (const [value, text] of wanted) {
+            let option = f.options.get(value); if (!option) { option = el("option"); option.value = value; }
+            if (option.textContent !== spaced(text)) option.textContent = spaced(text);
+            next.set(value, option); put(option);
+          }
+          put.done(); f.options = next; f.select.value = current;
+        }
+      };
+      return bar;
+    });
+    s.ctx.onChange = onChange; s.ctx.sync(); return s.el;
   }
   const hoursText = (ms) => (ms / HOUR).toFixed(1) + " h", rangeName = () => analyticsRange === 1 ? "24 h" : analyticsRange + " d";
   function deltaNote(value, previous, format) {
@@ -1700,128 +1902,125 @@
     if (Math.abs(delta) < 1e-9) { note.textContent = "No change vs previous " + rangeName(); return note; }
     note.append(el("span", delta > 0 ? "up" : "down", (delta > 0 ? "+" : "−") + format(Math.abs(delta))), " vs previous " + rangeName()); return note;
   }
-  // The most sessions busy at one moment in [from, to): each session's intervals clipped and merged so it counts once, then
-  // a sweep over the sorted starts (+1) and ends (−1), ends first at a shared instant.
-  function peakBusy(rows, from, to) {
-    const events = [];
-    for (const r of rows) {
-      const iv = r.busy.map(([a, b]) => [Math.max(a, from), Math.min(b, to)]).filter(([a, b]) => a < b).sort((x, y) => x[0] - y[0]);
-      let cur = null;
-      for (const [a, b] of iv) { if (cur && a <= cur[1]) cur[1] = Math.max(cur[1], b); else { if (cur) events.push([cur[0], 1], [cur[1], -1]); cur = [a, b]; } }
-      if (cur) events.push([cur[0], 1], [cur[1], -1]);
-    }
-    events.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
-    let now = 0, best = 0; for (const [, d] of events) { now += d; if (now > best) best = now; } return best;
-  }
   function chartWidth() { const page = $("#page"), style = getComputedStyle(page); return Math.max(280, Math.round(page.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight))); }
   const niceStep = (max) => [.25, .5, 1, 2, 5, 10, 20, 50, 100, 200, 500].find((x) => x * 3 >= max) ?? 1000;
   const svgEl = (tag, attrs, text) => { const node = document.createElementNS(SVGNS, tag); for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value)); if (text != null) node.textContent = text; return node; };
   function timeText(ms) { const mins = Math.max(0, Math.round(ms / MIN)), days = Math.floor(mins / 1440), hours = Math.floor(mins % 1440 / 60), rem = mins % 60; return days ? days + "d " + hours + "h" : hours ? hours + "h " + rem + "m" : mins + "m"; }
   const countText = (n) => Math.round(n).toLocaleString(), hLabel = (n) => n ? +n.toFixed(2) + " h" : "0";
-  const agentBuckets = () => analyticsRange === 1 ? [24, "per hour"] : analyticsRange === 7 ? [28, "per 6 hours"] : [30, "per day"];
-  function renderAgentsChart(rows, from, to) {
-    const [count, unit] = agentBuckets(), span = (to - from) / count, panel = el("section", "analytics-panel");
+  const rangeAgo = (A) => A.days === 1 ? "24 h ago" : A.days + " d ago";
+  function renderAgentsChart(A) {
+    const columns = A.agents.columns, count = columns.length, unit = A.agents.unit, panel = el("section", "analytics-panel");
     panel.append(el("h2", null, "Agents at work"), el("div", "panel-sub", "Agent-hours " + unit + " · stacked by harness"));
-    const bins = Array.from({ length: count }, (_, i) => { const a = from + i * span, b = a + span, hrs = (h) => rows.filter((r) => r.s.harness === h).reduce((n, r) => n + busyMsIn(r, a, b), 0) / HOUR; return { a, b, claude: hrs("claude"), codex: hrs("codex") }; });
+    const bins = columns.map((c) => ({ a: c.from, b: c.to, claude: c.claude_ms / HOUR, codex: c.codex_ms / HOUR, sessions: c.sessions, more: c.more }));
     const W = chartWidth(), height = 190, left = 40, right = W - 4, top = 12, bottom = 151, most = Math.max(0, ...bins.map((x) => x.claude + x.codex)), stepY = niceStep(most || 1), max = Math.max(stepY, Math.ceil(most / stepY) * stepY);
     const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + height, role: "group", "aria-label": "Agent-hours " + unit + " over the selected range, stacked by harness" }), yOf = (n) => bottom - (bottom - top) * n / max;
     for (let n = 0; n <= max + 1e-9; n += stepY) svg.append(svgEl("line", { x1: left, x2: right, y1: yOf(n), y2: yOf(n), class: "gridline" }), svgEl("text", { x: 0, y: yOf(n) + 4, class: "axis-label" }, hLabel(n)));
-    const step = (right - left) / count, w = Math.max(2, step * .64);
+    const step = (right - left) / Math.max(1, count), w = Math.max(2, step * .64);
     bins.forEach((bin, i) => { const x = left + i * step + (step - w) / 2, ch = (bottom - top) * bin.claude / max, xh = (bottom - top) * bin.codex / max, total = bin.claude + bin.codex;
       if (ch) svg.append(svgEl("rect", { x, y: bottom - ch, width: w, height: ch, class: "cost-claude" })); if (xh) svg.append(svgEl("rect", { x, y: bottom - ch - xh, width: w, height: xh, class: "cost-codex" }));
-      const label = clock(bin.a) + "–" + clock(bin.b) + ": " + hLabel(total), hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); hit.append(svgEl("title", {}, label));
+      const label = clock(bin.a) + "–" + clock(bin.b) + ": " + hLabel(total), hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); hit.dataset.tip = label;
       if (total > 0) { hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", label + ". Open the sessions busy then"); }
-      const open = () => { if (total > 0) openAnalyticsSlice(bin.a, bin.b, rows.filter((r) => busyMsIn(r, bin.a, bin.b) > 0)); };
+      const open = () => { if (total > 0) openAnalyticsSlice(A, bin.a, bin.b, bin.sessions, bin.more); };
       hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
     });
-    svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, analyticsRange === 1 ? "24 h ago" : analyticsRange + " d ago"), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
+    svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart);
     const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend); return panel;
   }
-  function renderCostChart(rows, from, to) {
+  function renderCostChart(A) {
     const panel = el("section", "analytics-panel"), title = el("h2", null, "Cost over time"); title.append(costInfoTip());
     // Cost is recorded per UTC day: an hourly series would put a whole day into one hour.
-    if (analyticsRange === 1) { panel.append(title, el("p", "empty", "Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.")); return panel; }
-    const count = analyticsRange, unit = "per day"; panel.append(title, el("div", "panel-sub", "API-equivalent cost per UTC day · today so far · stacked by harness"));
-    const [spanFrom, spanTo] = costSpan(from, to), bins = Array.from({ length: count }, (_, i) => ({ a: spanFrom + i * DAY_MS, b: spanFrom + (i + 1) * DAY_MS, claude: 0, codex: 0, rows: [] })), unknown = new Set();
-    for (const row of rows) for (const [day, amount] of Object.entries(row.s.cost?.by_day ?? {})) {
-      if (!wholeDay(day, spanFrom, spanTo)) continue;
-      for (const model of costMissing(row.s.cost)) unknown.add(model);
-      const index = Math.round((Date.parse(day + "T00:00:00.000Z") - spanFrom) / DAY_MS), usd = Number(amount) || 0;
-      bins[index][row.s.harness] += usd; bins[index].rows.push({ row, usd, unpriced_models: costMissing(row.s.cost) });
-    }
+    if (!A.cost) { panel.append(title, el("p", "empty", "Cost is recorded per UTC day, so there is no hourly series. Pick 7 d or 30 d for a daily chart.")); return panel; }
+    const days = A.cost.days, count = days.length, unit = "per day"; panel.append(title, el("div", "panel-sub", "API-equivalent cost per UTC day · today so far · stacked by harness"));
+    const bins = days.map((d) => ({ a: d.from, b: d.to, claude: d.claude_usd, codex: d.codex_usd, sessions: d.sessions, more: d.more }));
     const W = chartWidth(), svg = svgEl("svg", { viewBox: "0 0 " + W + " 190", role: "img", "aria-label": "API-equivalent cost " + unit + ", stacked by harness" });
-    const left = 46, right = W - 4, top = 12, bottom = 151, max = Math.max(.01, ...bins.map((b) => b.claude + b.codex)), step = (right - left) / count;
+    const left = 46, right = W - 4, top = 12, bottom = 151, max = Math.max(.01, ...bins.map((b) => b.claude + b.codex)), step = (right - left) / Math.max(1, count);
     for (let n = 0; n <= 2; n++) { const y = bottom - (bottom - top) * n / 2; svg.append(svgEl("line", { x1: left, x2: right, y1: y, y2: y, class: "gridline" }), svgEl("text", { x: 0, y: y + 4, class: "axis-label" }, "$" + (max * n / 2).toFixed(2))); }
     bins.forEach((bin, i) => { const w = Math.max(2, step * .64), x = left + i * step + (step - w) / 2, ch = bin.claude / max * (bottom - top), xh = bin.codex / max * (bottom - top);
       if (ch) svg.append(svgEl("rect", { x, y: bottom - ch, width: w, height: ch, class: "cost-claude" })); if (xh) svg.append(svgEl("rect", { x, y: bottom - ch - xh, width: w, height: xh, class: "cost-codex" }));
-      const hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); if (bin.rows.length) { hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", clock(bin.a) + " to " + clock(bin.b) + ": " + asMoney(bin.claude + bin.codex)); }
-      const open = () => { if (bin.rows.length) openAnalyticsSlice(bin.a, bin.b, bin.rows, true); }; hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
+      const hit = svgEl("rect", { x: left + i * step, y: top, width: step, height: bottom - top, class: "chart-hit" }); if (bin.sessions.length) { hit.setAttribute("role", "button"); hit.setAttribute("tabindex", "0"); hit.setAttribute("aria-label", clock(bin.a) + " to " + clock(bin.b) + ": " + asMoney(bin.claude + bin.codex)); }
+      const open = () => { if (bin.sessions.length) openAnalyticsSlice(A, bin.a, bin.b, bin.sessions, bin.more, true); }; hit.addEventListener("click", open); hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }); svg.append(hit);
     });
-    svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, analyticsRange === 1 ? "24 h ago" : analyticsRange + " d ago"), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
+    svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart); const legend = el("div", "analytics-legend");
     for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend);
-    if (unknown.size) panel.append(el("div", "no-price", "no price for " + [...unknown].join(", ") + "; unpriced usage is omitted from bars.")); return panel;
+    if (A.cost.unpriced_models.length) panel.append(el("div", "no-price", "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars.")); return panel;
   }
-  function renderCodexAllowance() {
-    const latest = Object.values(SESS).filter((s) => s.harness === "codex" && s.rate_limits?.recorded_at != null).sort((a, b) => b.rate_limits.recorded_at - a.rate_limits.recorded_at)[0]; if (!latest) return null;
-    const limits = latest.rate_limits, panel = el("section", "analytics-panel"), grid = el("div", "allowance-grid"); panel.append(el("h2", null, "Codex allowance"), el("div", "panel-sub", "Latest recorded rate limits · " + new Date(limits.recorded_at).toLocaleString([], { hour: "numeric", minute: "2-digit" })));
+  function renderCodexAllowance(limits) {
+    if (!limits || limits.recorded_at == null) return null;
+    const panel = el("section", "analytics-panel"), grid = el("div", "allowance-grid"); panel.append(el("h2", null, "Codex allowance"), el("div", "panel-sub", "Latest recorded rate limits · " + new Date(limits.recorded_at).toLocaleString([], { hour: "numeric", minute: "2-digit" })));
     for (const limit of limits.windows ?? []) { const label = limit.minutes === 300 ? "5-hour window" : limit.minutes === 10080 ? "Weekly window" : limit.minutes + "-minute window", box = el("div", "allowance-window");
       box.append(el("div", "window-name", label), el("div", "window-used", limit.used_percent + "% used"), el("div", "window-reset", "Resets " + new Date(limit.resets_at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))); grid.append(box); }
     if (!grid.childElementCount) return null; panel.append(grid); return panel;
   }
-  function openAnalyticsSlice(a, b, active, costMode = false) {
+  // A chart column's sessions, as the server listed them (most first); `more` counts those it left out.
+  function openAnalyticsSlice(A, a, b, items, more, costMode = false) {
     const d = el("dialog", "viewer analytics-slice"), head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose"), when = new Date(a).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) + "–" + new Date(b).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), heading = costMode ? "Sessions with cost" : "Sessions busy";
     d.setAttribute("aria-label", heading + " " + when); title.append(el("span", null, heading + " · " + when)); close.type = "button"; close.setAttribute("aria-label", "Close sessions list"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
-    const body = el("div", "vb"), list = el("div", "analytics-list"); if (!active.length) body.append(el("p", "empty", costMode ? "No sessions had a recorded cost then." : "No sessions were busy then."));
-    const rows = costMode ? active.map((entry) => ({ r: entry.row, usd: entry.usd, unpriced_models: entry.unpriced_models })) : active.map((r) => ({ r, ms: busyMsIn(r, a, b) }));
-    rows.sort((x, y) => costMode ? y.usd - x.usd || x.r.s.name.localeCompare(y.r.s.name) : y.ms - x.ms || x.r.s.name.localeCompare(y.r.s.name));
-    for (const row of rows) { const s = row.r.s, item = el("button", "analytics-session analytics-slice"); item.type = "button"; item.append(el("span", "session-name", s.name), harnessName(s.harness, true), el("span", "session-value", costMode ? asMoney(row.usd) : timeText(row.ms) + " busy")); if (costMode && row.unpriced_models.length) item.append(el("span", "no-price", "no price for " + row.unpriced_models.join(", "))); item.addEventListener("click", () => { pendingSessionOpen = s.id; d.close(); }); list.append(item); }
-    if (active.length) body.append(list); d.append(head, body); document.body.append(d); d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
+    const body = el("div", "vb"), list = el("div", "analytics-list"); if (!items.length) body.append(el("p", "empty", costMode ? "No sessions had a recorded cost then." : "No sessions were busy then."));
+    for (const item of items) {
+      const row = sessionRow(A, item.sid, "analytics-session analytics-slice", costMode ? asMoney(item.usd) : timeText(item.ms) + " busy", () => { pendingSessionOpen = item.sid; d.close(); });
+      if (costMode && item.unpriced_models.length) row.append(el("span", "no-price", "no price for " + item.unpriced_models.join(", "))); list.append(row);
+    }
+    if (more) list.append(el("p", "empty", "and " + more + " more"));
+    if (items.length) body.append(list); d.append(head, body); document.body.append(d); d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
   }
-  function analyticsBreakdown(title, rows, from, to, groupKey) {
-    const groups = new Map(), keyFor = (s) => groupKey === "repo" ? s.repo ?? "__none__" : groupKey === "machine" ? s.machine : s.harness + "\u0000" + (s.model ?? s.modelId ?? "Unknown model");
+  // The server's groups: repo (null for none), machine, or harness and model, each with its busy time, cost and sessions.
+  function analyticsBreakdown(title, groups, groupKey) {
+    const keyFor = (g) => groupKey === "repo" ? g.repo ?? "__none__" : groupKey === "machine" ? g.machine : g.harness + "\u0000" + g.model;
     const labelFor = (key) => groupKey === "repo" ? key === "__none__" ? "No repo (roles)" : key : groupKey === "machine" ? MACHINE[key] ?? key : (HARNESS[key.split("\u0000")[0]] ?? key.split("\u0000")[0]) + " · " + shortModel(key.split("\u0000")[1]);
-    for (const row of rows) { const ms = busyMsIn(row, from, to), c = sessionCostInRange(row.s, from, to); if (!ms && !inRange(row.startedAt, from, to) && !c.hasData) continue; const key = keyFor(row.s), g = groups.get(key) ?? { key, ms: 0, cost: 0, unknown: new Set(), sessions: new Set() }; g.ms += ms; g.sessions.add(row.id);
-      if (c.hasData) { g.cost += Number(c.usd) || 0; c.unpriced_models.forEach((x) => g.unknown.add(x)); } groups.set(key, g); }
-    const selected = (x) => analyticsMeasure === "cost" ? x.cost : x.ms, items = [...groups.values()].sort((a, b) => selected(b) - selected(a) || labelFor(a.key).localeCompare(labelFor(b.key))), max = Math.max(1, ...items.map(selected));
+    const selected = (x) => analyticsMeasure === "cost" ? x.cost : x.ms, items = groups.map((g) => ({ key: keyFor(g), ms: g.ms, cost: g.usd, unknown: g.unpriced_models, sessions: g.sessions })).sort((a, b) => selected(b) - selected(a) || labelFor(a.key).localeCompare(labelFor(b.key))), max = Math.max(1, ...items.map(selected));
     const panel = el("section", "analytics-panel"); panel.append(el("h3", null, title)); const list = el("div", "analytics-list");
-    for (const item of items) { const b = el("button", "analytics-row"); b.type = "button"; b.append(el("span", "row-title", labelFor(item.key)), el("span", "row-count", item.sessions.size + (item.sessions.size === 1 ? " session" : " sessions")));
+    for (const item of items) { const b = el("button", "analytics-row"); b.type = "button"; b.append(el("span", "row-title", labelFor(item.key)), el("span", "row-count", item.sessions + (item.sessions === 1 ? " session" : " sessions")));
       const measure = selected(item), track = el("span", "row-track"), bar = el("i", "row-bar"); bar.style.width = Math.max(measure ? 2 : 0, measure / max * 100) + "%"; if (groupKey === "harness") bar.style.background = item.key.startsWith("claude") ? "var(--claude)" : "var(--codex)"; track.append(bar);
-      b.append(track, el("span", "row-hours" + (analyticsMeasure === "hours" ? " on" : ""), hoursText(item.ms)), el("span", "row-cost" + (analyticsMeasure === "cost" ? " on" : ""), item.unknown.size ? "—" : asMoney(item.cost))); if (item.unknown.size) b.append(el("span", "no-price", "no price for " + [...item.unknown].join(", ")));
+      b.append(track, el("span", "row-hours" + (analyticsMeasure === "hours" ? " on" : ""), hoursText(item.ms)), el("span", "row-cost" + (analyticsMeasure === "cost" ? " on" : ""), item.unknown.length ? "—" : asMoney(item.cost))); if (item.unknown.length) b.append(el("span", "no-price", "no price for " + item.unknown.join(", ")));
       b.dataset.breakdown = groupKey; b.dataset.key = item.key;
       b.addEventListener("click", () => { if (groupKey === "repo") sessionFilters.repo = item.key; else if (groupKey === "machine") sessionFilters.machine = item.key; else { const [harness, model] = item.key.split("\u0000"); sessionFilters.harness = harness; sessionFilters.model = model; } query = ""; groupBy = "recent"; go({ v: "sessions" }); }); list.append(b); }
     if (!items.length) list.append(el("p", "empty", "No activity in this range.")); panel.append(list); return panel;
   }
-  function analyticsList(title, items, value) {
+  function analyticsList(A, title, items, value) {
     const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title)); const list = el("div", "analytics-list"); if (!items.length) list.append(el("p", "empty", "No sessions in this range."));
-    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(el("span", "session-name", s.name), harnessName(s.harness, true), el("span", "session-value", value(item))); const missing = item.cost?.unpriced_models ?? []; if (missing.length) b.append(el("span", "no-price", "no price for " + missing.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); } panel.append(list); return panel;
+    for (const item of items) { const b = sessionRow(A, item.sid, "analytics-session", value(item), () => goSession(item.sid)); const missing = item.unpriced_models ?? []; if (missing.length) b.append(el("span", "no-price", "no price for " + missing.join(", "))); list.append(b); } panel.append(list); return panel;
   }
   function renderAnalytics(page) {
-    const all = analyticsSessions().filter((row) => matchesSessionFacets(row.s)), to = NOW, from = to - rangeMs(analyticsRange), now = analyticsStats(all, from, to), previous = analyticsStats(all, from - rangeMs(analyticsRange), from);
-    const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days"))); page.append(head); observeTitle(h1); page.append(renderFacetFilters(() => render()));
-    const measure = el("div", "analytics-measure"); measure.setAttribute("role", "group"); measure.setAttribute("aria-label", "Breakdown bar measure");
-    for (const [key, label] of [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]]) { const b = el("button", null, label); b.type = "button"; b.setAttribute("aria-pressed", String(analyticsMeasure === key)); b.addEventListener("click", () => { if (analyticsMeasure === key) return; const top = currentScroll(); analyticsMeasure = key; render(); restoreScroll(top); }); measure.append(b); }
-    const metrics = el("div", "analytics-metrics"), addMetric = (label, value, note, more, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label"); l.append(el("span", null, label)); if (tip) l.append(costInfoTip()); if (more) { m.dataset.more = ""; m.title = more; } m.append(l, el("div", "value", value), note); metrics.append(m); }, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
-    addMetric("Agent-hours", hoursText(now.agentMs), deltaNote(now.agentMs, previous.agentMs, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
-    const costNote = now.apiCost == null || previous.apiCost == null ? el("div", "note", "no price for " + [...new Set([...now.costUnknown, ...previous.costUnknown])].join(", ")) : deltaNote(now.apiCost, previous.apiCost, asMoney);
-    addMetric(analyticsRange === 1 ? "Cost today (UTC)" : "Cost, last " + analyticsRange + " UTC days", now.apiCost == null ? "—" : asMoney(now.apiCost), costNote, analyticsRange === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + analyticsRange + " UTC days count, today so far, compared with the " + analyticsRange + " whole UTC days before.", true);
+    const A = analyticsData();
+    const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days")));
+    const put = placer(page); put(head); observeTitle(h1); put(renderFacetFilters(page, () => { render(); refreshAnalytics(); }));
+    // Until the range's answer is here (the first time a range or filter is asked for), the page says so.
+    if (!A) { const wait = el("p", "empty", AN.error ? "Couldn't load Analytics: " + AN.error : "Loading…"); wait.setAttribute("role", "status"); put(wait); put.done(); return; }
+    // An answer kept from before a request that failed is still drawn, under the error.
+    if (AN.error) { const stale = el("p", "empty", "Couldn't update Analytics: " + AN.error + ". Showing the last answer."); stale.setAttribute("role", "status"); put(stale); }
+    const now = A.current, previous = A.previous;
+    // A card with an explanation carries it for a screen reader all the time (hidden text, its description); the tooltip shows it to a pointer,
+    // and the card takes keyboard focus so the tooltip is reachable.
+    const metrics = el("div", "analytics-metrics"), addMetric = (label, value, note, more, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label"); l.append(el("span", null, label)); if (tip) l.append(costInfoTip()); if (more) { const note = el("span", "sr-only"); note.textContent = more; note.id = "metric-more-" + (++metricSeq); m.dataset.more = ""; m.dataset.tip = more; m.tabIndex = 0; m.setAttribute("aria-describedby", note.id); m.append(note); } m.append(l, el("div", "value", value), note); metrics.append(m); }, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
+    addMetric("Agent-hours", hoursText(now.agent_ms), deltaNote(now.agent_ms, previous.agent_ms, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
+    const costNote = now.cost.usd == null || previous.cost.usd == null ? el("div", "note", "no price for " + [...new Set([...now.cost.unpriced_models, ...previous.cost.unpriced_models])].join(", ")) : deltaNote(now.cost.usd, previous.cost.usd, asMoney);
+    addMetric(A.days === 1 ? "Cost today (UTC)" : "Cost, last " + A.days + " UTC days", now.cost.usd == null ? "—" : asMoney(now.cost.usd), costNote, A.days === 1 ? "API-equivalent cost. Cost is recorded per UTC day: this is the whole current UTC day so far, compared with the whole day before." : "API-equivalent cost. Cost is recorded per UTC day: the last " + A.days + " UTC days count, today so far, compared with the " + A.days + " whole UTC days before.", true);
     addMetric("Sessions started", countText(now.started), deltaNote(now.started, previous.started, countText)); addMetric("Turns", countText(now.turns), deltaNote(now.turns, previous.turns, countText));
-    const toolNote = deltaNote(now.tools, previous.tools, countText), unavailable = all.filter((r) => !r.s.stub && countOf(r.s, "calls") == null).length;
+    const toolNote = deltaNote(now.tools, previous.tools, countText), unavailable = A.calls_unknown;
     if (unavailable) toolNote.append(" · — for " + unavailable + (unavailable === 1 ? " session" : " sessions"));
     addMetric("Tool calls", countText(now.tools), toolNote, countText(now.errors) + " failed (" + pct(now.errors, now.tools) + ") · previous " + rangeName() + ": " + countText(previous.errors) + " failed (" + pct(previous.errors, previous.tools) + ")");
-    const peak = peakBusy(all, from, to), peakBefore = peakBusy(all, from - rangeMs(analyticsRange), from);
-    addMetric("Peak concurrency", countText(peak), deltaNote(peak, peakBefore, countText), "The most sessions busy at the same moment.");
-    addMetric("Waited on you", timeText(now.waitsMs), deltaNote(now.waitsMs, previous.waitsMs, timeText), "Median wait " + timeText(now.medianWaitMs) + " · previous " + rangeName() + ": " + timeText(previous.medianWaitMs));
-    const currentWait = now.longestCurrent; addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longestWaitMs, timeText), currentWait ? currentWait.s.name + " has waited on you for " + timeText(currentWait.ms) : "No session is waiting on you"); page.append(metrics);
-    const breakdowns = el("div", "analytics-breakdowns"); breakdowns.append(analyticsBreakdown("By repo", all, from, to, "repo"), analyticsBreakdown("By machine", all, from, to, "machine"), analyticsBreakdown("By harness and model", all, from, to, "harness"));
-    const bdHead = el("div", "analytics-bd-head"), bdTitle = el("div"); bdTitle.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Agent-hours and API-equivalent cost; bars follow the toggle")); bdHead.append(bdTitle, measure);
-    const busyTop = [...all].map((r) => ({ ...r, value: busyMsIn(r, from, to) })).filter((r) => r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5), waitTop = [...now.waitBy].map(([id, ms]) => ({ s: SESS[id], id, value: ms })).filter((r) => r.s && r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5);
-    const costTop = all.map((r) => { const cost = sessionCostInRange(r.s, from, to); return { ...r, cost, value: cost.usd }; }).filter((r) => r.cost.hasData).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5), bottom = el("div", "analytics-split");
-    bottom.append(analyticsList("Top sessions · busy time", busyTop, (x) => timeText(x.value)), analyticsList("Top sessions · waited on", waitTop, (x) => timeText(x.value)), analyticsList("Most expensive sessions · API-equivalent cost", costTop, (x) => x.value == null ? "—" : asMoney(x.value)));
-    page.append(renderAgentsChart(all, from, to), renderCostChart(all, from, to), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(); if (allowance) page.append(allowance); metrics.dataset.analyticsReady = ""; // data-analytics-ready: the figures and charts are drawn (a stable hook for the budget check);
+    addMetric("Peak concurrency", countText(now.peak), deltaNote(now.peak, previous.peak, countText), "The most sessions busy at the same moment.");
+    addMetric("Waited on you", timeText(now.wait_ms), deltaNote(now.wait_ms, previous.wait_ms, timeText), "Median wait " + timeText(now.median_wait_ms) + " · previous " + rangeName() + ": " + timeText(previous.median_wait_ms));
+    const currentWait = A.longest_current_wait; addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longest_wait_ms, timeText), currentWait ? nameOfSid(A, currentWait.sid) + " has waited on you for " + timeText(currentWait.ms) : "No session is waiting on you"); put(metrics);
+    const breakdowns = el("div", "analytics-breakdowns"); breakdowns.append(analyticsBreakdown("By repo", A.breakdown.repo, "repo"), analyticsBreakdown("By machine", A.breakdown.machine, "machine"), analyticsBreakdown("By harness and model", A.breakdown.model, "harness"));
+    // The breakdown's heading and its measure toggle: a persistent control (the toggle's state is the page's).
+    const bdHead = slot("measure", page, () => {
+      const bar = el("div", "analytics-bd-head"), title = el("div"), toggle = el("div", "analytics-measure"); title.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Agent-hours and API-equivalent cost; bars follow the toggle"));
+      toggle.setAttribute("role", "group"); toggle.setAttribute("aria-label", "Breakdown bar measure");
+      for (const [key, label] of [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.measure = key; b.addEventListener("click", () => { if (analyticsMeasure === key) return; const top = currentScroll(); analyticsMeasure = key; render(); restoreScroll(top); }); toggle.append(b); }
+      bar.append(title, toggle); return bar;
+    }).el;
+    for (const b of bdHead.querySelectorAll(".analytics-measure button")) b.setAttribute("aria-pressed", String(analyticsMeasure === b.dataset.measure));
+    const bottom = el("div", "analytics-split");
+    bottom.append(analyticsList(A, "Top sessions · busy time", A.top.busy, (x) => timeText(x.ms)), analyticsList(A, "Top sessions · waited on", A.top.waited, (x) => timeText(x.ms)), analyticsList(A, "Most expensive sessions · API-equivalent cost", A.top.cost, (x) => x.usd == null ? "—" : asMoney(x.usd)));
+    put(renderAgentsChart(A), renderCostChart(A), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(A.allowance); if (allowance) put(allowance);
+    // data-analytics-ready: the figures and charts are drawn (a stable hook for the budget check); data-query: for which range and filters.
+    metrics.dataset.analyticsReady = ""; metrics.dataset.query = analyticsQuery();
+    put.done();
   }
 
   // ---- Sessions: every top-level session and its child runs ---------------------------------------------------------------
@@ -1834,10 +2033,18 @@
     const all = Object.values(SESS).filter(matchesSessionFacets);
     const head = el("div", "ph"); const h1 = el("h1", null, "Sessions"); head.append(h1);
     const sub = el("div", "sub"); for (const [v, l] of [[all.length, all.length === 1 ? "session" : "sessions"], [all.filter((s) => s.state === "work").length, "working"], [all.filter((s) => s.state === "wait").length, "waiting on you"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
-    head.append(sub); page.append(head); observeTitle(h1);
-    const fr = el("label", "find"); const fi = el("input"); fi.id = "sq"; fi.type = "search"; fi.placeholder = "Search sessions"; fi.setAttribute("aria-label", "Search sessions"); fi.value = query; fr.append(icon(I.search), fi);
-    const gb = el("div", "groupby"); gb.setAttribute("role", "group"); gb.setAttribute("aria-label", "Group by");
-    for (const [g, label] of [["recent", "Recent"], ["project", "Project"], ["machine", "Machine"], ["harness", "Harness"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.g = g; b.addEventListener("click", () => { groupBy = g; draw(); }); gb.append(b); }
+    head.append(sub); const put = placer(page); put(head); observeTitle(h1);
+    // The search field and the group-by buttons are persistent controls: the page's redraws keep them, and the field's focus, text and caret.
+    const found = slot("find", page, (ctx) => {
+      const fr = el("label", "find"), fi = el("input"); fi.id = "sq"; fi.type = "search"; fi.placeholder = "Search sessions"; fi.setAttribute("aria-label", "Search sessions"); fi.value = query; fr.append(icon(I.search), fi);
+      fi.addEventListener("input", () => { query = fi.value.trim(); ctx.draw(); }); return fr;
+    }), fr = found.el, fi = fr.querySelector("input");
+    if (fi.value.trim() !== query) fi.value = query; // the sidebar's search can have changed it
+    const grouped = slot("groupby", page, (ctx) => {
+      const gb = el("div", "groupby"); gb.setAttribute("role", "group"); gb.setAttribute("aria-label", "Group by");
+      for (const [g, label] of [["recent", "Recent"], ["project", "Project"], ["machine", "Machine"], ["harness", "Harness"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.g = g; b.addEventListener("click", () => { groupBy = g; ctx.draw(); }); gb.append(b); }
+      return gb;
+    }), gb = grouped.el;
     const out = el("div", "sess"); out.style.display = "grid"; out.style.gap = "16px";
     const draw = () => {
       out.replaceChildren(); const lanes = all.filter((s) => sessMatch(s, query));
@@ -1854,8 +2061,8 @@
       for (const b of gb.children) b.setAttribute("aria-pressed", String(b.dataset.g === groupBy));
       renderLanes();
     };
-    fi.addEventListener("input", () => { query = fi.value.trim(); draw(); });
-    page.append(renderFacetFilters(() => draw()), fr, gb, out); draw();
+    found.ctx.draw = grouped.ctx.draw = draw;
+    put(renderFacetFilters(page, () => render()), fr, gb, out); put.done(); draw();
   }
 
   // ---- Drawer (phone) ---------------------------------------------------------------------------------------------------------
@@ -1885,7 +2092,7 @@
   // again with its view state kept: the scroll position, anchored to the first visible block; what is open, by stable keys;
   // focus, find and filters; the drawer. A session page follows its transcript's tail
   // with /api/tx?after= and replaces only the turns that changed. An open View all sheet holds the redraw until it closes.
-  const LIVE = { version: null, timer: null, busy: false, delay: 2000, ended: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
+  const LIVE = { version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2000, ended: false, again: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
   // The turn index as last drawn, to tell which turns an update changed.
   const remember = (m) => { LIVE.turns = new Map(m.turns.map((x) => [x.id, turnKey(x)])); };
   // What an update can change in a turn record or a handoff, cheaply (not the text, which a record never rewrites).
@@ -1893,29 +2100,52 @@
   const handKey = (h) => [h.status, h.to, h.done, h.result?.length, h.answer?.length, h.answers?.length, h.declined ? 1 : 0].join("|");
   let rendered = null; // the route the page shows
   const visible = () => document.visibilityState === "visible";
-  function schedule(ms) { clearTimeout(LIVE.timer); LIVE.timer = null; if (!LIVE.ended && visible()) LIVE.timer = setTimeout(poll, ms); }
+  function schedule(ms) { clearTimeout(LIVE.timer); LIVE.timer = null; if (!LIVE.ended && visible()) { LIVE.due = performance.now() + ms; LIVE.timer = setTimeout(poll, ms); } }
   document.addEventListener("visibilitychange", () => {
     if (!visible()) { clearTimeout(LIVE.timer); LIVE.timer = null; } else if (LIVE.version && !LIVE.busy && !LIVE.timer) schedule(LIVE.delay > 2000 ? LIVE.delay : 0); }); // a backoff in progress holds
+  // An embedding page can ask for a poll soon (it knows something changed) with `semon:refresh`. The rule, one floor:
+  // a refresh starts a poll no sooner than REFRESH_FLOOR after the previous poll started, and never touches the backoff.
+  // - Refreshes inside that second merge into the one poll at its end; a pending timer that is due sooner is kept.
+  // - During a poll, a refresh asks for one follow-up (its request may have left before the change), at the same floor.
+  // - The backoff is only what polls set: a refresh-driven poll that succeeds resets it to 2 s like any other, and one that
+  //   fails doubles it. So a listener that refreshes on every `semon:polled` polls at most once a second, even against a
+  //   server answering 500, and when it stops, the timer resumes at the backoff the failures set.
+  // Ignored before the first model has loaded and after the session ended.
+  const REFRESH_FLOOR = 1000;
+  const floorWait = () => Math.max(0, LIVE.started + REFRESH_FLOOR - performance.now());
+  window.addEventListener("semon:refresh", () => {
+    if (!LIVE.version || LIVE.ended) return;
+    if (LIVE.busy) { LIVE.again = true; return; }
+    const wait = floorWait();
+    if (!LIVE.timer || performance.now() + wait < LIVE.due) schedule(wait);
+  });
   function poll() {
-    LIVE.timer = null; if (LIVE.busy || LIVE.ended || !visible()) return; LIVE.busy = true;
+    LIVE.timer = null; if (LIVE.busy || LIVE.ended || !visible()) return; LIVE.busy = true; LIVE.started = performance.now();
+    let ok = false;
     fetch("/api/model?since=" + enc(LIVE.version ?? ""), { credentials: "same-origin" })
       .then((r) => r.status === 304 ? null : r.ok ? r.json() : Promise.reject(Object.assign(new Error(r.status + " " + r.statusText), { status: r.status })), (e) => Promise.reject(Object.assign(e, { status: 0 })))
       .then((m) => (m ? update(m) : null))
-      .then(() => { LIVE.delay = 2000; }, (err) => {
-        if (err?.status === 403) return ended();
+      .then(() => { LIVE.delay = 2000; ok = true; }, (err) => {
+        if (err?.status === 403) return ended(403);
         LIVE.delay = Math.min(30000, LIVE.delay * 2);
         if (err?.status == null) setTimeout(() => { throw err; }); // not the network: a fault on the page, reported as one
       })
-      .finally(() => { LIVE.busy = false; schedule(LIVE.delay); });
+      .finally(() => {
+        LIVE.busy = false; schedule(LIVE.again ? floorWait() : LIVE.delay); LIVE.again = false;
+        // Once per poll, after the next one is scheduled. ok: the server answered 200 or 304 and the update drew.
+        window.dispatchEvent(new CustomEvent("semon:polled", { detail: { ok } }));
+      });
   }
-  function ended() {
+  // An embedding page can cancel `semon:ended` to draw its own note in place of this one.
+  function ended(status) {
     LIVE.ended = true; clearTimeout(LIVE.timer); LIVE.timer = null; if ($(".livenote")) return;
+    if (!window.dispatchEvent(new CustomEvent("semon:ended", { cancelable: true, detail: { status } }))) return;
     const n = el("p", "livenote", "Session ended: reload with the printed URL"); n.setAttribute("role", "status"); document.body.append(n);
   }
   // A 403 or a dropped connection fails the update (and backs off); anything else skips that one transcript.
   const soft = (p) => p.catch((e) => { if (e?.status === 403 || e?.status === 0) throw e; });
-  // The transcripts on screen: a session page's own, and its child runs'. Any other loaded transcript is dropped, so opening
-  // it again loads it fresh.
+  // The transcripts on screen: a session page's own, and its child runs'. Any other loaded transcript is dropped from TX (the
+  // last few opened are kept in TXCACHE, and brought up to date when opened again).
   const viewed = () => { const v = new Set(); if (route.v !== "session") return v; v.add(route.id); for (const h of H) if (h.kind === "spawn" && h.from === route.id && h.to) v.add(h.to); return v; };
   function update(m) {
     const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
@@ -1926,12 +2156,10 @@
     for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
     // Only transcripts whose mark in the model moved are asked for, one at a time.
     let chain = Promise.resolve();
-    // A mark with fewer entries or bytes than the one loaded means the file was cut or rewritten: load it again.
-    const shrank = (a, b) => { const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number); return s1 < s0 || b1 < b0; };
     for (const sid of view) if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
     else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.reload) full = true; })));
     if (route.v === "session" && TX[route.id]) chain = chain.then(() => newKids(route.id, grown));
-    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); const e = errorsLive(); return e && soft(e); });
+    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
   }
   // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), those
   // whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw them all.
@@ -2112,7 +2340,7 @@
     if (whole) morph(box, transcript(route.id).querySelector(".turns"));
     else if (dirty.size) morphTurns(box, transcript(route.id, { only: dirty }).querySelector(".turns"), dirty);
     const h1 = $("#page .ph h1"); if (h1) h1.textContent = s.name;
-    const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.title = s.name; }
+    const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.dataset.tip = s.name; }
     const l2 = $("#topbar .l2"); if (l2) { l2.replaceChildren(); sessionLine(s)(l2); requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); }); }
     const fc = $("#topbar .fcount"); if (fc) { const n = find ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : 0; fc.textContent = find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""; }
     renderNav(); renderLanes(); ticker();

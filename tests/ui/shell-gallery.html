@@ -141,6 +141,18 @@
         </form>
       </section>
 
+      <section aria-labelledby="tips-title">
+        <h2 class="sec-h" id="tips-title">Tooltips</h2>
+        <p class="status">
+          <span id="tip-static" data-tip="A static badge: hover it, or tap it on a phone. Its full value is here.">Static badge</span>
+          <span id="tip-static-2" data-tip="A second badge, next to the first">Second badge</span>
+          <span id="tip-icon" class="cost-info" role="img" tabindex="0" aria-label="What the badges are" data-tip="What the badges are: tips on any element with data-tip.">?</span>
+        </p>
+        <div class="btn-row">
+          <button id="tip-button" class="btn" type="button" data-tip="A button's tooltip shows on hover and on keyboard focus, never on a tap.">Button with a tip</button>
+        </div>
+      </section>
+
       <section aria-label="Messages">
         <div class="notice ok">Saved. See the <a href="#" id="notice-link">devices</a>.</div>
         <div class="notice sh-err">We could not reach this device. Try again in a moment.</div>
