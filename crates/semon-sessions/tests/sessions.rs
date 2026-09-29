@@ -910,7 +910,17 @@ fn planted_secrets_never_reach_the_cache_and_reach_the_model_only_as_their_sessi
     let model: Value = serde_json::from_str(&model_json(&fixture.options).unwrap()).unwrap();
     let nodes = collect(&fixture.options).unwrap();
     let cache = fs::read_to_string(&fixture.options.cache).unwrap();
-    let events = fs::read_to_string(fixture.options.cache.with_extension("events.json")).unwrap();
+    // The event index's bytes, and its WAL's if it has one: a secret stored
+    // in any row would show here as plain UTF-8.
+    let index = fixture.options.cache.with_extension("sqlite3");
+    let mut events = String::from_utf8_lossy(&fs::read(&index).unwrap()).into_owned();
+    if let Ok(wal) = fs::read(index.with_extension("sqlite3-wal")) {
+        events.push_str(&String::from_utf8_lossy(&wal));
+    }
+    assert!(
+        events.contains("harbor"),
+        "the event index holds the fixture's files"
+    );
     // label -> a session the handoff carrying it must touch; None: never shown.
     let owners: [(&str, Option<&str>); 22] = [
         ("ASK", Some("harbor")),

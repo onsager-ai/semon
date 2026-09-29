@@ -167,8 +167,6 @@ struct Work {
     index_dirty: bool,
     last_save: Option<Instant>,
     events: Option<EventCache>,
-    events_dirty: bool,
-    events_saved: Option<Instant>,
     texts: Texts,
     /// When the last rebuild of either model started.
     built_at: Option<Instant>,
@@ -976,14 +974,17 @@ impl MachineView {
         if let Some(model) = self.shown_model()
             && !self.changed(&model.snapshot)
         {
-            self.persist_events_if_due(work)?;
             return Ok(model);
         }
         work.built_at = Some(Instant::now());
-        let path = EventCache::path(&self.options.cache);
-        let cache = work.events.get_or_insert_with(|| EventCache::read(&path));
+        let cache = work
+            .events
+            .get_or_insert_with(|| EventCache::open(&self.options.cache));
+        // The index commits each file's change as it reads it: nothing is
+        // left to save.
+        let mut dirty = false;
         if self.options.facts.is_none() {
-            cache.refresh_reported_runs(&self.options.claude_json, now, &mut work.events_dirty);
+            cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty);
         }
         // The files are stamped before the build reads them: a line that
         // lands while it runs is then a change the next check sees, never
@@ -992,13 +993,7 @@ impl MachineView {
         let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
         #[cfg(test)]
         self.hooks.building()?;
-        let built = model::build(
-            &self.options,
-            cache,
-            &mut work.events_dirty,
-            &mut work.texts,
-            now,
-        )?;
+        let built = model::build(&self.options, cache, &mut dirty, &mut work.texts, now)?;
         if self.options.facts.is_none() {
             snapshot.pids = built
                 .pids
@@ -1011,23 +1006,7 @@ impl MachineView {
             snapshot,
         });
         write_lock(&self.shown).model = Some(model.clone());
-        self.persist_events_if_due(work)?;
         Ok(model)
-    }
-
-    /// The event cache is saved at most every 30 s, like V1's index.
-    fn persist_events_if_due(&self, work: &mut Work) -> io::Result<()> {
-        if work.events_dirty
-            && work
-                .events_saved
-                .is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
-            && let Some(cache) = &work.events
-        {
-            cache.save(&EventCache::path(&self.options.cache))?;
-            work.events_dirty = false;
-            work.events_saved = Some(Instant::now());
-        }
-        Ok(())
     }
 
     /// The model, rebuilt at `now` first if its logs or facts changed.
@@ -1038,9 +1017,6 @@ impl MachineView {
         if let Some(model) = self.shown_model()
             && !self.changed(&model.snapshot)
         {
-            if let Some(mut work) = try_lock(&self.work) {
-                self.persist_events_if_due(&mut work)?;
-            }
             return Ok(model);
         }
         self.refresh_model_locked(&mut lock(&self.work), now)
@@ -6064,6 +6040,9 @@ mod tests {
         let pool = RefreshPool::new(1);
         let view = pooled(&fixture, Refresh::Background, &pool);
         let v1 = warm(&view);
+        // A build counts when it starts: the model it shows is what ends it.
+        let shown = || view.shown_model().map(|model| model.built.version.clone());
+        let before = shown();
         let started = pool.peak_and_started().1;
         let armed = Arc::new(AtomicBool::new(true));
         let trigger = armed.clone();
@@ -6081,7 +6060,7 @@ mod tests {
         // No read from here until the new worker has rebuilt it.
         let builds = view.hooks.builds();
         eventually("a rebuild by the new worker", || {
-            (view.hooks.builds() > builds).then_some(())
+            (view.hooks.builds() > builds && shown() != before).then_some(())
         });
         assert!(serves(&view, "after the panic"));
         assert!(pool.threads() <= 1);
@@ -6108,6 +6087,10 @@ mod tests {
                 view
             })
             .collect();
+        // A build counts when it starts: the model it shows is what ends it.
+        let shown =
+            |view: &Arc<MachineView>| view.shown_model().map(|model| model.built.version.clone());
+        let before: Vec<_> = views.iter().map(shown).collect();
         let builds: Vec<_> = views.iter().map(|view| view.hooks.builds()).collect();
         say(&fixture, "lane", 1, "seen by fifty views");
         eventually("a rebuild of every view, with no read", || {
@@ -6118,8 +6101,10 @@ mod tests {
             }
             views
                 .iter()
-                .zip(&builds)
-                .all(|(view, builds)| view.hooks.builds() > *builds)
+                .zip(builds.iter().zip(&before))
+                .all(|(view, (builds, before))| {
+                    view.hooks.builds() > *builds && shown(view) != *before
+                })
                 .then_some(())
         });
         for view in &views {

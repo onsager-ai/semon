@@ -122,19 +122,15 @@ impl Home {
         self.build_at(&self.options, NOW)
     }
 
-    /// Builds from this home's saved event cache, saves it back, and checks
-    /// the model's invariants.
+    /// Builds from this home's persisted event index (which commits as it
+    /// reads), and checks the model's invariants.
     fn build_at(&self, options: &Options, now: i64) -> Built {
-        let path = EventCache::path(&options.cache);
-        let mut cache = EventCache::read(&path);
+        let mut cache = EventCache::open(&options.cache);
         let mut dirty = false;
         if options.facts.is_none() {
             cache.refresh_reported_runs(&options.claude_json, now, &mut dirty);
         }
         let built = build(options, &mut cache, &mut dirty, &mut Texts::default(), now).unwrap();
-        if dirty {
-            cache.save(&path).unwrap();
-        }
         invariants(&built);
         built
     }
