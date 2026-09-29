@@ -218,7 +218,7 @@ struct ModelCache {
 type Routed = (u16, &'static str, Vec<u8>, Option<String>);
 
 /// The viewer's page: every screen's URL serves it.
-const PAGE: &str = include_str!("viewer.html");
+const PAGE: &str = crate::shell::PAGE_HTML;
 
 /// The mockup's three families, vendored (D1): Instrument Sans, JetBrains
 /// Mono and Source Serif 4, each in its latin and latin-ext subsets.
@@ -873,7 +873,7 @@ impl MachineView {
             "/viewer.js" => Ok((
                 200,
                 "text/javascript; charset=utf-8",
-                include_str!("viewer.js").into(),
+                crate::shell::VIEWER_JS.into(),
             )),
             "/viewer.css" => Ok((
                 200,
@@ -2819,6 +2819,49 @@ mod tests {
         assert_eq!(HEADERS.len(), SECURITY_HEADERS.len());
         for (header, (name, value)) in HEADERS.iter().zip(SECURITY_HEADERS) {
             assert_eq!(*header, format!("{name}: {value}"));
+        }
+    }
+
+    #[test]
+    fn public_shell_exports_match_viewer_core_routes() {
+        let fixture = lane_fixture();
+        let mut core = crate::ViewerCore::new(fixture.options.clone());
+
+        let script = core.respond("GET", "/viewer.js", "", None);
+        assert_eq!(script.body, crate::shell::VIEWER_JS.as_bytes());
+
+        let model = core.respond("GET", "/api/model", "", None);
+        assert_eq!(model.status, 200);
+        let model: Value = serde_json::from_slice(&model.body).unwrap();
+        let turn = model["turns"][0]["id"].as_str().unwrap();
+
+        let paths = [
+            "/".to_owned(),
+            "/timeline".into(),
+            "/analytics".into(),
+            "/sessions".into(),
+            "/machines".into(),
+            "/machines/testbox".into(),
+            "/s/claude/lane".into(),
+            format!("/trace/claude/lane/{turn}"),
+        ];
+        for path in paths {
+            assert!(crate::shell::is_page_path(&path), "{path}");
+            let reply = core.respond("GET", &path, "", None);
+            assert_eq!(reply.status, 200, "{path}");
+            assert_eq!(reply.body, crate::shell::PAGE_HTML.as_bytes(), "{path}");
+        }
+
+        // The predicate checks dynamic route shapes without querying the model.
+        assert!(crate::shell::is_page_path("/s/claude/not-in-model"));
+        for path in [
+            "/api/model",
+            "/viewer.js",
+            "/viewer.css",
+            "/nonexistent.txt",
+            "/api/tx",
+        ] {
+            assert!(!crate::shell::is_page_path(path), "{path}");
         }
     }
 
