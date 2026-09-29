@@ -468,6 +468,8 @@
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
   let pendingSessionOpen = null, pendingFlashHandoff = null;
   let accountOpen = false;
+  // The phone's account menu adds a history entry, so the back gesture closes it.
+  let accountSheet = false;
   try { history.scrollRestoration = "manual"; } catch {}
   let show = { messages: true, tools: true, thinking: true }; let find = ""; let findOpen = false; let filterOpen = false;
   const currentScroll = () => phone.matches ? window.scrollY : $("#main").scrollTop;
@@ -575,6 +577,7 @@
   }
   window.addEventListener("popstate", (e) => {
     if (skipPop) { skipPop = false; if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close a sheet before opening its session
+    if (accountSheet) { accountSheet = false; closeAccountMenu(); return; } // back gesture closes the phone's account menu
     if (viewerEl) { const d = viewerEl; viewerEl = null; d.close(); return; } // back gesture closes the viewer, page stays
     if (e.state?.v) go(e.state, true); });
   const goSession = (id, turn) => go(turn ? { v: "session", id, turn } : { v: "session", id });
@@ -626,32 +629,47 @@
     }
     menu.append(workspaces);
     if (ACCOUNT.links.length) {
-      const links = el("section", "account-section account-links");
+      // A destructive link (Sign out) gets a section of its own, set apart from the rest.
+      const links = el("section", "account-section account-links"), apart = el("section", "account-section account-links account-danger");
       for (const link of ACCOUNT.links) {
         if (!safePath(link.href)) continue;
+        const into = link.danger ? apart : links;
         const row = el(link.method === "post" ? "button" : "a", "account-menu-row" + (link.danger ? " danger" : ""), link.label);
         row.setAttribute("role", "menuitem");
         if (link.method === "post") {
           const form = el("form", "account-menu-form account-link-form"); form.setAttribute("method", "post"); form.setAttribute("action", link.href);
-          row.type = "submit"; form.append(row); links.append(form);
+          row.type = "submit"; form.append(row); into.append(form);
         } else {
-          row.setAttribute("href", link.href); links.append(row);
+          row.setAttribute("href", link.href); into.append(row);
         }
       }
-      menu.append(links);
+      for (const section of [links, apart]) if (section.childElementCount) menu.append(section);
     }
     return menu;
   }
-  function closeAccountMenu() {
-    document.querySelectorAll(".account-popover").forEach((menu) => menu.remove());
+  // `byUser`: the person closed it (the backdrop, Esc, the row again), so its history entry goes too. A navigation or a redraw
+  // that closes it leaves the entry, since stepping back then would undo the navigation.
+  function closeAccountMenu(byUser) {
+    document.querySelectorAll(".account-popover, .account-backdrop").forEach((node) => node.remove());
     document.querySelectorAll(".account-trigger").forEach((button) => button.setAttribute("aria-expanded", "false"));
     accountOpen = false;
+    if (accountSheet) { accountSheet = false; if (byUser && history.state?.sheet) { skipPop = true; history.back(); } }
   }
   function toggleAccountMenu(widget, trigger, compact) {
-    if (accountOpen) { closeAccountMenu(); return; }
+    if (accountOpen) { closeAccountMenu(true); return; }
     closeAccountMenu(); closeFilter(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false");
     const menu = accountPopover();
-    if (compact) widget.insertBefore(menu, trigger); else widget.append(menu);
+    if (compact) {
+      // On a phone it floats just above its row, as wide as the row, over a clear backdrop that takes the tap outside it, so it
+      // never pushes the drawer and never runs past the screen (the stylesheet caps its height and it scrolls inside).
+      const at = trigger.getBoundingClientRect();
+      widget.style.setProperty("--account-left", at.left + "px");
+      widget.style.setProperty("--account-width", at.width + "px");
+      widget.style.setProperty("--account-bottom", Math.max(0, innerHeight - at.top + 6) + "px");
+      const backdrop = el("div", "account-backdrop"); backdrop.addEventListener("click", (e) => { e.stopPropagation(); closeAccountMenu(true); });
+      widget.insertBefore(backdrop, trigger); widget.insertBefore(menu, trigger);
+      try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); accountSheet = true; } catch {}
+    } else widget.append(menu);
     accountOpen = true; trigger.setAttribute("aria-expanded", "true");
   }
   function accountWidget(compact) {
@@ -892,10 +910,9 @@
     const focus = laneFocus(), children = sessionChildren(), lanes = Object.values(SESS).filter((s) => s.lane && !parentOf(s.id) && matchesTree(s.id, children)).sort((a, b) => b.last - a.last);
     if (expandedAll && (phone.matches || railMode || !SESS[expandedAll])) expandedAll = null;
     expandedPath = expandedAll ? ancestorsOf(expandedAll) : new Set(); expandedUnder = expandedAll ? new Set(descendantsOf(expandedAll, children).map((x) => x.id)) : new Set();
-    const box = $("#lanes"), more = $("#lanes-all"); box.replaceChildren(); more.replaceChildren();
+    const box = $("#lanes"); box.replaceChildren();
     for (const s of lanes.slice(0, 8)) box.append(buildLaneItem(s, 0, children, railMode && !phone.matches));
     if (!lanes.length) { const empty = el("p", "ghead", "No sessions match"); empty.setAttribute("role", "none"); box.append(empty); }
-    const all = el("button", "side-all", query ? "All matching sessions ›" : "All sessions ›"); all.type = "button"; all.id = "all-sessions"; all.addEventListener("click", () => go({ v: "sessions" })); more.append(all);
     const q = $("#q"); if (document.activeElement !== q) q.value = query;
     restoreLaneFocus(focus);
     // A stuck row covers the top of the sidebar: what is scrolled into view (the open session, after a navigation) stays clear of it.
@@ -2084,7 +2101,7 @@
   function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); closeAccountMenu(); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); }
   $("#drawer-close").addEventListener("click", () => closeDrawer());
   $("#scrim").addEventListener("click", () => closeDrawer());
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(true); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
   let sx = null;
   sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
   sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });

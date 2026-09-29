@@ -16,7 +16,10 @@
 //     an href that is not a same-origin path (`javascript:`, `//host`, a backslash) rejects the menu, the same as a server's;
 //     the menu is a copy, so changing the embedding page's object afterwards changes nothing; a getter that throws leaves no
 //     menu and no page error;
-//   - a menu the server provides wins over the embedding page's; an invalid one from the server leaves the embedding page's.
+//   - a menu the server provides wins over the embedding page's; an invalid one from the server leaves the embedding page's;
+//   - on a phone the open menu floats above its row at the drawer's foot: inside the screen, above the row, the nav's boxes
+//     unmoved, 44 px rows, Sign out in a section of its own, no row repeating a nav row's label; a tap outside it, Esc and the
+//     back gesture each close it and leave the drawer open on the same page, and a tap outside it does not reach the drawer.
 // Screenshots of the open menu, at 1280 and 390 in light and dark, are written to out/embed/.
 import fs from "node:fs";
 import path from "node:path";
@@ -232,6 +235,51 @@ export default async function embedCheck(browser) {
     r.expect(menu && menu.hrefs.join() === "/embed/profile" && menu.actions.join() === "/embed/switch/1,/embed/sign-out" && menu.workspaces.join() === "Engine room", "the embedding page's menu links (" + tag + "): " + JSON.stringify(menu));
     await page.screenshot({ path: path.join(OUT, "embed-menu-" + tag + ".png") });
     r.expect(page.errors.length === 0, "page errors (embed menu " + tag + "): " + page.errors.join("; "));
+    await page.context().close();
+  }
+  // On a phone the menu floats above its row and never moves the drawer; outside, Esc and back close it.
+  for (const dark of [false, true]) {
+    const tag = "390" + (dark ? "-dark" : "");
+    const page = await open(browser, { embed: { account: account() }, size: "phone", dark });
+    await page.locator("#lead-btn").click(); await page.waitForTimeout(350);
+    const navBoxes = () => page.evaluate(() => [...document.querySelectorAll("#nav .nav-item")].map((n) => { const b = n.getBoundingClientRect(); return [b.left, b.top, b.width, b.height].map((x) => Math.round(x * 10) / 10); }).join(" "));
+    const state = () => page.evaluate(() => ({ open: !!document.querySelector("#account-drawer .account-popover"), drawer: document.body.classList.contains("drawer-open"), path: location.pathname, sheet: !!history.state?.sheet }));
+    const openIt = async () => { await page.locator("#account-drawer .account-trigger").click(); await page.waitForSelector("#account-drawer .account-popover"); };
+    const before = await navBoxes(), path0 = (await state()).path;
+    await openIt();
+    const facts = await page.evaluate(() => {
+      const menu = document.querySelector("#account-drawer .account-popover"), trigger = document.querySelector("#account-drawer .account-trigger");
+      const m = menu.getBoundingClientRect(), t = trigger.getBoundingClientRect();
+      const nav = [...document.querySelectorAll("#nav .nav-item > span:first-of-type")].map((x) => x.textContent.trim());
+      const rows = [...menu.querySelectorAll(".account-menu-row")].filter((row) => row.getClientRects().length);
+      const labels = rows.map((row) => (row.querySelector(".account-workspace-name") ?? row).textContent.trim());
+      const danger = menu.querySelector(".account-menu-row.danger");
+      return {
+        menu: [m.left, m.top, m.right, m.bottom].map((x) => Math.round(x * 10) / 10), triggerTop: Math.round(t.top * 10) / 10, vw: innerWidth, vh: innerHeight,
+        rows: rows.map((row) => Math.round(row.getBoundingClientRect().height)), labels, nav, repeated: labels.filter((label) => nav.includes(label)),
+        dangerApart: !!danger && danger.closest(".account-section")?.querySelectorAll(".account-menu-row").length === 1,
+      };
+    });
+    R["phoneMenu " + tag] = facts;
+    r.expect(facts.menu[0] >= 0 && facts.menu[1] >= 0 && facts.menu[2] <= facts.vw && facts.menu[3] <= facts.vh, "the phone menu fits the screen (" + tag + "): " + JSON.stringify(facts));
+    r.expect(facts.menu[3] <= facts.triggerTop, "the phone menu sits above its row (" + tag + "): " + JSON.stringify(facts));
+    r.expect(await navBoxes() === before, "opening the phone menu moves nothing in the drawer (" + tag + ")");
+    r.expect(facts.rows.length >= 3 && facts.rows.every((h) => h >= 44), "the phone menu's rows are 44 px to tap (" + tag + "): " + JSON.stringify(facts.rows));
+    r.expect(facts.repeated.length === 0, "no phone menu row repeats a nav row (" + tag + "): " + JSON.stringify(facts));
+    r.expect(facts.dangerApart, "Sign out sits in a section of its own (" + tag + ")");
+    await page.screenshot({ path: path.join(OUT, "embed-phone-menu-" + tag + ".png") });
+    // A tap outside the menu closes it and reaches nothing under it (here the drawer's first nav row).
+    const home = await page.locator("#nav .nav-item").first().boundingBox();
+    await page.mouse.click(home.x + home.width / 2, home.y + home.height / 2); await page.waitForTimeout(250);
+    const tapped = await state();
+    r.expect(!tapped.open && tapped.drawer && tapped.path === path0 && !tapped.sheet, "a tap outside closes the phone menu and nothing else (" + tag + "): " + JSON.stringify(tapped));
+    await openIt(); await page.keyboard.press("Escape"); await page.waitForTimeout(250);
+    const escaped = await state();
+    r.expect(!escaped.open && escaped.drawer && escaped.path === path0 && !escaped.sheet, "Esc closes the phone menu and leaves the drawer open (" + tag + "): " + JSON.stringify(escaped));
+    await openIt(); await page.evaluate(() => history.back()); await page.waitForTimeout(300);
+    const backed = await state();
+    r.expect(!backed.open && backed.drawer && backed.path === path0, "back closes the phone menu and stays on the page (" + tag + "): " + JSON.stringify(backed));
+    r.expect(page.errors.length === 0, "page errors (phone menu " + tag + "): " + page.errors.join("; "));
     await page.context().close();
   }
   // The menu is a copy: changing the embedding page's object after it was read changes nothing on screen.
