@@ -27,7 +27,25 @@ async function open(browser, opts) {
     if (ms) await sleep(ms);
     try { await route.continue(); } catch {} // the page may have cancelled the request meanwhile
   });
+  // A model update on demand. The page keeps every transcript it has loaded until a model update says which ones are still on
+  // screen, so the cache is only asked once one has come: the next poll is answered with the real model under a new version.
+  page.force = false; page.forced = 0;
+  await page.route("**/api/model*", async (route) => {
+    const url = new URL(route.request().url());
+    if (!page.force || !url.searchParams.has("since")) return route.continue();
+    page.force = false; page.forced++;
+    const response = await route.fetch({ url: url.origin + url.pathname }), body = await response.json();
+    body.version = "forced-" + page.forced;
+    await route.fulfill({ response, json: body });
+  });
   return page;
+}
+
+// Waits for the page's next poll to be answered with an update, and for the page to have applied it.
+async function update(page) {
+  page.force = true;
+  for (let i = 0; i < 80 && page.force; i++) await sleep(100);
+  await sleep(400);
 }
 
 // The sidebar's session rows, top to bottom (the drawer holds them on a phone, hidden but in the page).
@@ -123,6 +141,7 @@ export default async function switchCheck(browser) {
     r.expect(out.double.path.endsWith("/" + encodeURIComponent(d)) && plain(out.double.title) === nameOf(d) && plain(out.double.heading) === nameOf(d) && out.double.current === d && out.double.skeleton === 0, tag + ": a fast double switch did not end on the second session: " + JSON.stringify(out.double));
 
     // ---- Back to a session left a moment ago (a): from the cache, with the network held ------------------------------------
+    await update(page);
     page.delays.clear(); page.delays.set("*", 1500); page.seen.length = 0;
     const hit = await click(page, a);
     out.hit = { ...hit, ms: Math.round(hit.ms * 10) / 10 };
@@ -145,6 +164,7 @@ export default async function switchCheck(browser) {
     r.expect(rows.length === 7, tag + ": the sidebar needs 7 session rows, has " + rows.length);
     if (rows.length < 7) { await page.context().close(); return; }
     for (const id of rows) { await click(page, id); await landed(page, id, nameOf(id)); }
+    await update(page);
     page.delays.set("*", 1500);
     // The five kept are rows 2 to 6 (the seventh is open): the first is out, and so, once the first is opened, is the second.
     const oldest = await click(page, rows[0]);
