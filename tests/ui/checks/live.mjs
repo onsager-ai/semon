@@ -49,7 +49,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { ENV, launch, context, settled, reporter, overflow } from "../lib.mjs";
+import { ENV, launch, context, settled, reporter, overflow, filterSheet, doneFilterSheet, pickFilter } from "../lib.mjs";
 import { write, ms } from "../fixture.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -404,9 +404,11 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.moreActivity.range === "30 d" && R.moreActivity.metrics === 8, name + ": Analytics changed after more activity: " + JSON.stringify(R.moreActivity));
 
     // ---- 6b. the filters and the search field are kept through an update that adds a repo ----
-    // The same elements stay in the document (tagged before the update), the focused one keeps focus (the search field its
-    // text and caret), an open list stays open, the new repo is an option, and the selection is unchanged. A selected repo that
-    // leaves the data stays, marked "(no sessions)".
+    // The filters are one Filter button and chips, with the four Selects in the sheet the button opens. The same elements stay in the
+    // document (tagged before the update), the focused one keeps focus (the search field its text and caret), the new repo is an
+    // option, the chip and the selection are unchanged. While the sheet is open with a list open, an update draws nothing under
+    // it: the list stays open with its highlight, and the update lands when the sheet closes. A selected repo that leaves the data
+    // stays, marked "(no sessions)".
     const ROOT = '.facet-filters .sh-select[data-label="Repo"]';
     const repoLog = (repo, sid, t) => {
       const cwd = path.join(dir, "work", repo), file = path.join(dir, "claude/projects", cwd.replace(/[^A-Za-z0-9]/g, "-"), sid + ".jsonl");
@@ -416,11 +418,11 @@ async function scheme(browser, name, opts, r, protocol) {
       return file;
     };
     const hasRepo = (page, repo) => appear(page, Date.now(), ([root, name]) => document.querySelector(root)?.semonSelect.options.some((o) => o.value.endsWith(name)), [ROOT, repo]);
-    const facetState = (page) => page.evaluate((root) => { const box = document.querySelector(root), api = box.semonSelect, t = box.querySelector(".sh-select-trigger"), bar = document.querySelector(".facet-filters");
-      return { kept: t.__kept === true, barKept: bar.__kept === true, focus: document.activeElement === t, open: api.isOpen, expanded: t.getAttribute("aria-expanded"), value: api.value, text: t.textContent.trim(), labels: api.options.map((o) => o.label), values: api.options.map((o) => o.value),
+    const facetState = (page) => page.evaluate((root) => { const box = document.querySelector(root), api = box.semonSelect, t = box.querySelector(".sh-select-trigger"), bar = document.querySelector(".facet-filters"), chip = bar.querySelector('.facet-chip[data-facet="repo"]');
+      return { kept: t.__kept === true, barKept: bar.__kept === true, focus: document.activeElement === bar.querySelector(".facet-btn"), triggerFocus: document.activeElement === t, chip: chip && chip.getClientRects().length ? chip.textContent.trim() : null, open: api.isOpen, expanded: t.getAttribute("aria-expanded"), value: api.value, text: t.textContent.trim(), labels: api.options.map((o) => o.label), values: api.options.map((o) => o.value),
         listed: [...box.querySelectorAll('[role="option"]')].filter((o) => o.getClientRects().length).map((o) => o.dataset.value), active: box.querySelector('[role="option"].sh-active')?.dataset.value ?? null }; }, ROOT);
-    const pick = async (page, value) => { await page.click(ROOT + " .sh-select-trigger"); await page.locator(ROOT + ' [role="option"][data-value="' + value + '"]').click(); await page.waitForFunction((root) => document.querySelector(root + " .sh-select-trigger").getAttribute("aria-expanded") === "false", ROOT); await sleep(300); };
-    const tag = (page) => page.evaluate((root) => { document.querySelector(".facet-filters").__kept = true; const t = document.querySelector(root + " .sh-select-trigger"); t.__kept = true; t.focus(); }, ROOT);
+    const pick = async (page, value) => { await pickFilter(page, "Repo", value); await sleep(300); };
+    const tag = (page) => page.evaluate((root) => { document.querySelector(".facet-filters").__kept = true; document.querySelector(root + " .sh-select-trigger").__kept = true; document.querySelector(".facet-filters .facet-btn").focus(); }, ROOT);
     // The Sessions search: same input, still focused, its text and its caret.
     await SP.evaluate(() => { const f = document.querySelector("#sq"); f.__kept = true; f.focus(); f.setSelectionRange(3, 3); });
     let uSp = SP.updates; repoLog("nova", "live-nova", at(12, 44, 10));
@@ -446,20 +448,25 @@ async function scheme(browser, name, opts, r, protocol) {
       r.expect(await hasRepo(page, "orbit") != null, name + ": " + key + ": the new repo isn't an option within 4 s");
       await sleep(700); R.facets[key].after = await facetState(page);
       const { before, after } = R.facets[key];
-      r.expect(before.kept && before.focus && after.kept && after.barKept && after.focus && after.value === first && before.value === first && after.text === "Repo: " + first, name + ": " + key + ": the filters were replaced, lost focus or changed their selection: " + JSON.stringify(R.facets[key]));
+      r.expect(before.kept && before.focus && after.kept && after.barKept && after.focus && after.value === first && before.value === first && after.text === "Repo: " + first && after.chip === "Repo: " + first && before.chip === after.chip, name + ": " + key + ": the filters were replaced, lost focus or changed their selection or chip: " + JSON.stringify(R.facets[key]));
       r.expect(after.values.some((v) => v.endsWith("orbit")) && !after.labels.some((l) => l.includes("(no sessions)")), name + ": " + key + ": the options after the update: " + JSON.stringify(after.labels));
     }
     r.expect(AN.updates > uFacets[0] && SP.updates > uFacets[1], name + ": a page got no update for the new repo");
     R.keptControls = { range: await AN.evaluate(() => document.querySelector("#topbar .analytics-range")?.__kept === true), measure: await AN.evaluate(() => document.querySelector(".analytics-bd-head")?.__kept === true), groupby: await SP.evaluate(() => document.querySelector(".groupby")?.__kept === true) };
     r.expect(R.keptControls.range && R.keptControls.measure && R.keptControls.groupby, name + ": the range, measure or group-by control was rebuilt by an update: " + JSON.stringify(R.keptControls));
-    // An open list stays open, with its highlight, while an update adds a repo to it; Escape then closes it and returns focus.
-    await AN.click(ROOT + " .sh-select-trigger"); await AN.waitForFunction((root) => document.querySelector(root).semonSelect.isOpen, ROOT);
+    // An open sheet with an open list is left as it is while an update adds a repo: the list stays open, with its highlight (the update
+    // is drawn when the sheet closes); Escape closes the list and returns focus to its button, Escape again closes the sheet and returns
+    // focus to the Filter button, and the new repo is an option then.
+    await filterSheet(AN); await AN.click(ROOT + " .sh-select-trigger"); await AN.waitForFunction((root) => document.querySelector(root).semonSelect.isOpen, ROOT);
     R.open = { before: await facetState(AN) }; uFacets[0] = AN.updates; repoLog("vega", "live-vega", at(12, 44, 30));
-    r.expect(await hasRepo(AN, "vega") != null, name + ": Analytics: the open list has no Vega option within 4 s");
-    await sleep(700); R.open.after = await facetState(AN);
-    r.expect(AN.updates > uFacets[0] && R.open.after.open && R.open.after.expanded === "true" && R.open.after.kept && R.open.after.active === R.open.before.active && R.open.after.listed.some((v) => v.endsWith("vega")) && R.open.after.value === first, name + ": the open list closed, lost its highlight or lacks the new repo: " + JSON.stringify(R.open));
+    r.expect(await updated(AN, uFacets[0], 6000), name + ": Analytics got no update for the new repo while the sheet was open");
+    R.open.after = await facetState(AN);
+    r.expect(R.open.after.open && R.open.after.expanded === "true" && R.open.after.kept && R.open.after.active === R.open.before.active && R.open.after.value === first && await AN.evaluate((sel) => document.querySelector(sel)?.open === true, ".facet-filters dialog.filters-sheet"), name + ": the open list or sheet closed or lost its highlight under an update: " + JSON.stringify(R.open));
     await AN.keyboard.press("Escape"); await sleep(200); R.open.closed = await facetState(AN);
-    r.expect(!R.open.closed.open && R.open.closed.focus && R.open.closed.kept, name + ": Escape didn't close the list and return focus: " + JSON.stringify(R.open.closed));
+    r.expect(!R.open.closed.open && R.open.closed.triggerFocus && R.open.closed.kept, name + ": Escape didn't close the list and return focus: " + JSON.stringify(R.open.closed));
+    await AN.keyboard.press("Escape"); await AN.waitForFunction(() => !document.querySelector(".facet-filters dialog.filters-sheet")?.open); R.open.shut = await facetState(AN);
+    r.expect(R.open.shut.focus && R.open.shut.kept && R.open.shut.barKept, name + ": Escape didn't close the sheet and return focus to the Filter button: " + JSON.stringify(R.open.shut));
+    r.expect(await hasRepo(AN, "vega") != null, name + ": Analytics: the filter has no Vega option within 4 s of the sheet closing");
     // A selected repo that no session has now stays selected, marked.
     const orbit = R.facets.analytics.after.values.find((v) => v.endsWith("orbit"));
     await pick(AN, orbit); await tag(AN);

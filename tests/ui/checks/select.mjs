@@ -1,4 +1,6 @@
-// The Analytics and Sessions filters are the shell's Select, not native selects (feat/select-component).
+// The Analytics and Sessions filters are the shell's Select, not native selects (feat/select-component). The four Selects sit in the
+// filters' sheet, which the Filter button opens (checks/filters.mjs covers the button, the chips and the sheet itself); here the
+// sheet is opened first and closed with "Done" after the choice.
 //
 // On each page, at 390×844 and 1280×860 in light and dark:
 //   - no <select> element is left on the page, and the four filters (Repo, Machine, Harness, Model) are comboboxes reading
@@ -11,7 +13,7 @@
 //     by taps at 390), and Escape closes the list and returns focus to the button.
 // Screenshots: select-<page>-<size>-<scheme>-{closed,open}.png.
 import path from "node:path";
-import { ENV, served, reporter, overflow, contrastOf } from "../lib.mjs";
+import { ENV, served, reporter, overflow, contrastOf, filterSheet, doneFilterSheet } from "../lib.mjs";
 
 const REPO = '.facet-filters .sh-select[data-label="Repo"]';
 
@@ -32,7 +34,7 @@ export default async function selectCheck(browser) {
     for (const screen of ["analytics", "sessions"]) {
       const key = screen + "-" + (phone ? "390" : "1280") + "-" + scheme, rec = (results[key] = {});
       const page = await served(browser, { size, dark, path: "/" + screen });
-      await page.waitForSelector(".facet-filters .sh-select-trigger");
+      await page.waitForSelector(".facet-filters .sh-select-trigger", { state: "attached" });
       const built = await page.evaluate(() => ({ selects: document.querySelectorAll("#page select").length, triggers: [...document.querySelectorAll(".facet-filters .sh-select-trigger")].map((t) => t.textContent.trim()), roles: [...document.querySelectorAll(".facet-filters .sh-select-trigger")].map((t) => t.getAttribute("role")) }));
       rec.built = built;
       r.expect(built.selects === 0, key + " native selects left on the page: " + built.selects);
@@ -57,7 +59,10 @@ export default async function selectCheck(browser) {
         await page.evaluate((y) => scrollTo(0, y), scrolledTo);
       }
 
-      // Open.
+      // Open the sheet, then the Repo list. The sheet doesn't move the page either.
+      await filterSheet(page);
+      const sheetY = await page.evaluate(() => scrollY); rec.sheetY = { before: scrolledTo, open: sheetY };
+      r.expect(sheetY === scrolledTo, key + " opening the filters' sheet moved the page: " + JSON.stringify(rec.sheetY));
       await page.click(REPO + " .sh-select-trigger"); await wait(page, true);
       let s = await state(page); rec.open = s;
       const count = s.options.length;
@@ -99,7 +104,7 @@ export default async function selectCheck(browser) {
       rec.escapeSameBar = await kept();
       r.expect(rec.escapeSameBar && !s.popOpen && !s.sheetOpen && s.focus && s.text === "Repo: All repos", key + " Escape didn't close the list, keep the choice and return focus: " + JSON.stringify({ text: s.text, focus: s.focus }));
 
-      // Choose harbor: the page filters as the native select did.
+      // Choose harbor: the page filters as the native select did, once the sheet is closed.
       const before = await page.evaluate((screen) => screen === "sessions" ? document.querySelectorAll("#page .nrow").length : document.querySelectorAll('[data-breakdown="repo"]').length, screen);
       if (phone) {
         await page.click(REPO + " .sh-select-trigger"); await wait(page, true);
@@ -110,13 +115,15 @@ export default async function selectCheck(browser) {
       }
       await wait(page, false);
       await page.waitForFunction(() => document.querySelector('.facet-filters .sh-select[data-label="Repo"] .sh-select-trigger').textContent.trim() === "Repo: harbor");
+      s = await state(page); rec.chosenState = { text: s.text, focus: s.focus };
+      await doneFilterSheet(page);
       // Analytics is answered by the server for the range and filters: wait until the figures drawn are for this repo.
       if (screen === "analytics") await page.waitForFunction(() => /(^|&)repo=harbor(&|$)/.test(document.querySelector(".analytics-metrics[data-analytics-ready]")?.dataset.query ?? ""));
       const after = await page.evaluate((screen) => screen === "sessions"
         ? { rows: document.querySelectorAll("#page .nrow").length, other: [...document.querySelectorAll("#page .nrow .for")].filter((f) => !f.textContent.includes("harbor")).length }
         : { rows: document.querySelectorAll('[data-breakdown="repo"]').length, other: [...document.querySelectorAll('[data-breakdown="repo"]')].filter((b) => b.dataset.key !== "harbor").length }, screen);
-      s = await state(page); rec.chosen = { before, after, text: s.text, focus: s.focus, sameBar: await kept(), path: await page.evaluate(() => location.pathname) };
-      r.expect(s.text === "Repo: harbor" && s.focus && after.rows > 0 && after.rows < before && after.other === 0, key + " choosing harbor: " + JSON.stringify(rec.chosen));
+      rec.chosen = { before, after, text: rec.chosenState.text, focus: rec.chosenState.focus, sameBar: await kept(), path: await page.evaluate(() => location.pathname) };
+      r.expect(rec.chosen.text === "Repo: harbor" && rec.chosen.focus && after.rows > 0 && after.rows < before && after.other === 0, key + " choosing harbor: " + JSON.stringify(rec.chosen));
       r.expect(rec.chosen.sameBar && rec.chosen.path === "/" + screen, key + " closing the list by hand re-routed the viewer: " + JSON.stringify(rec.chosen));
       if (screen === "analytics") r.expect(after.rows === 1, key + " Analytics still breaks down " + after.rows + " repos after filtering to one");
       r.expect(page.errors.length === 0, key + " page errors: " + page.errors.join(" | "));

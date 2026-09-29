@@ -26,6 +26,7 @@ import embedCheck from "./embed.mjs";
 import tooltipCheck from "./tooltip.mjs";
 import detailsCheck from "./details.mjs";
 import selectCheck from "./select.mjs";
+import filtersCheck from "./filters.mjs";
 
 const checks = [
   ["home", homeCheck],
@@ -48,6 +49,7 @@ const checks = [
   ["tooltip", tooltipCheck],
   ["details", detailsCheck],
   ["select", selectCheck],
+  ["filters", filtersCheck],
 ];
 
 const browser = await launch();
