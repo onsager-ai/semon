@@ -399,6 +399,11 @@
         if (!node()) { by(box.scrollHeight - h0); return; }
         const put = () => { const n = node(); if (n) { const d = n.getBoundingClientRect().top - anchor.top; if (Math.abs(d) > 0.5) by(d); } };
         put(); requestAnimationFrame(() => { put(); requestAnimationFrame(put); });
+        // Parts measured later (fonts, clamped text) can still change what is above: keep the turn in place while the list settles, until the reader moves.
+        const list = $("#page .turns"); if (!list) return;
+        const ro = new ResizeObserver(put), stop = () => { ro.disconnect(); clearTimeout(timer); };
+        const timer = setTimeout(stop, 1000); ro.observe(list);
+        for (const type of ["wheel", "pointerdown", "keydown", "touchstart"]) window.addEventListener(type, stop, { once: true, passive: true, capture: true });
       }, () => { b.disabled = false; });
     });
     return w;
