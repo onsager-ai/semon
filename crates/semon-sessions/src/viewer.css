@@ -538,7 +538,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .srow-meta svg { width: 14px; height: 14px; flex: none; color: var(--faint); }
 .tree-summary { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 1px 5px; border-radius: 8px; background: var(--sunken); color: var(--muted); font: 11px/1.4 var(--mono); }
 .tree-summary .dot { width: 6px; height: 6px; }
-.hname { flex: none; font-size: 11.5px; font-weight: 500; line-height: 1.2; letter-spacing: .01em; white-space: nowrap; color: color-mix(in srgb, var(--h) 60%, var(--ink-2)); }
+.hname { flex: none; font-size: 11.5px; font-weight: 500; line-height: 1.2; letter-spacing: .01em; white-space: nowrap; color: var(--muted); }
 .treeitem[aria-expanded="true"] > .tree-row .tree-summary { display: none; }
 .page.wide-mode { max-width: 1400px; }
 /* Wide mode widens the reading column, so the prose measure that keeps the normal column readable no longer applies. */
@@ -562,8 +562,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .topbar .l2.session-meta .meta-state .state-sep { color: var(--faint); }
 .topbar .l2.session-meta .meta-item svg { width: 15px; height: 15px; flex: none; color: var(--faint); }
 .topbar .l2.session-meta .meta-model { gap: 6px; align-items: baseline; }
-.topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, var(--h) 12%, transparent); color: var(--h); }
-.topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--h); }
+.topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; color: var(--muted); }
+.topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--muted); }
 .topbar .l2.session-meta .meta-item.meta-cost { gap: 4px; }
 .topbar .l2.session-meta .meta-cost .meta-value, .topbar .l2.session-meta .meta-tokens .meta-value { min-width: 0; max-width: 7ch; }
 .topbar .l2.session-meta .errs { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; margin: 0 -4px; border: 0; border-radius: 6px; background: none; padding: 0 4px; font: inherit; font-weight: 400; color: var(--muted); text-decoration: none; pointer-events: auto; cursor: pointer; }
@@ -718,13 +718,12 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .app.rail .nav-item .cnt { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; overflow: hidden; border-radius: 50%; background: var(--faint); color: transparent; font-size: 0; }
   .app.rail .nav-item .cnt.hot { background: var(--wait); }
   .app.rail .tree-row { grid-template-columns: minmax(0, 1fr); margin: 0 7px; }
-  .app.rail .tree-toggle, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta > :not(.hname), .app.rail .tree-group, .app.rail .tree-summary { display: none !important; }
+  .app.rail .tree-toggle, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta, .app.rail .tree-group, .app.rail .tree-summary { display: none !important; }
   .app.rail .srow { position: relative; display: flex; justify-content: center; min-height: 44px; padding: 0; }
   .app.rail .srow-main { justify-content: center; }
   .app.rail .srow.on-path { box-shadow: inset 0 0 0 1.5px var(--muted); }
-  .app.rail .srow-meta { padding: 0; }
-  .app.rail .srow .dot { position: absolute; top: 6px; right: 5px; width: 7px; height: 7px; }
-  .app.rail .srow .child-dot { position: absolute; top: auto; right: 5px; bottom: 6px; width: 6px; height: 6px; border: 1px solid var(--side); }
+  .app.rail .srow .dot { position: absolute; top: 50%; left: 50%; margin: -3.5px 0 0 -3.5px; width: 7px; height: 7px; }
+  .app.rail .srow .child-dot { position: absolute; top: auto; left: auto; right: 5px; bottom: 6px; margin: 0; width: 6px; height: 6px; border: 1px solid var(--side); }
   dialog.session-details { width: min(680px, calc(100vw - 48px)); max-height: 85vh; margin: auto; border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 20px 60px color-mix(in srgb, var(--ink) 25%, transparent); overflow: hidden; }
 }
 @media (max-width: 760px) {

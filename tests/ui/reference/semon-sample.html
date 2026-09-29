@@ -109,7 +109,7 @@ code { overflow-wrap: anywhere; }
 .srow-meta svg { width: 14px; height: 14px; flex: none; color: var(--faint); }
 .tree-summary { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 1px 5px; border-radius: 8px; background: var(--sunken); color: var(--muted); font: 11px/1.4 var(--mono); }
 .tree-summary .dot { width: 6px; height: 6px; }
-.hname { flex: none; font-size: 11.5px; font-weight: 500; line-height: 1.2; letter-spacing: .01em; white-space: nowrap; color: color-mix(in srgb, var(--h) 60%, var(--ink-2)); }
+.hname { flex: none; font-size: 11.5px; font-weight: 500; line-height: 1.2; letter-spacing: .01em; white-space: nowrap; color: var(--muted); }
 .treeitem[aria-expanded="true"] > .tree-row .tree-summary { display: none; }
 
 .topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 6px; min-height: 52px; padding: 8px 20px; background: color-mix(in srgb, var(--ground) 92%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid transparent; }
@@ -502,8 +502,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2.session-meta .meta-state .state-sep { color: var(--faint); }
 .topbar .l2.session-meta .meta-item svg { width: 15px; height: 15px; flex: none; color: var(--faint); }
 .topbar .l2.session-meta .meta-model { gap: 6px; align-items: baseline; }
-.topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, var(--h) 12%, transparent); color: var(--h); }
-.topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--h); }
+.topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; color: var(--muted); }
+.topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--muted); }
 .topbar .l2.session-meta .meta-item.meta-cost { gap: 4px; }
 .topbar .l2.session-meta .meta-cost .meta-value { min-width: 0; max-width: 7ch; }
 .topbar .l2.session-meta .meta-item.meta-tokens .meta-value { min-width: 0; max-width: 7ch; }
@@ -549,13 +549,12 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .app.rail .nav-item .cnt { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; overflow: hidden; border-radius: 50%; background: var(--faint); color: transparent; font-size: 0; }
   .app.rail .nav-item .cnt.hot { background: var(--wait); }
   .app.rail .tree-row { grid-template-columns: minmax(0, 1fr); margin: 0 7px; }
-  .app.rail .tree-toggle, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta > :not(.hname), .app.rail .tree-group, .app.rail .tree-summary { display: none !important; }
+  .app.rail .tree-toggle, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta, .app.rail .tree-group, .app.rail .tree-summary { display: none !important; }
   .app.rail .srow { position: relative; display: flex; justify-content: center; min-height: 44px; padding: 0; }
   .app.rail .srow-main { justify-content: center; }
   .app.rail .srow.on-path { box-shadow: inset 0 0 0 1.5px var(--muted); }
-  .app.rail .srow-meta { padding: 0; }
-  .app.rail .srow .dot { position: absolute; top: 6px; right: 5px; width: 7px; height: 7px; }
-  .app.rail .srow .child-dot { position: absolute; top: auto; right: 5px; bottom: 6px; width: 6px; height: 6px; border: 1px solid var(--side); }
+  .app.rail .srow .dot { position: absolute; top: 50%; left: 50%; margin: -3.5px 0 0 -3.5px; width: 7px; height: 7px; }
+  .app.rail .srow .child-dot { position: absolute; top: auto; left: auto; right: 5px; bottom: 6px; margin: 0; width: 6px; height: 6px; border: 1px solid var(--side); }
 }
 
 /* ---- Analytics ------------------------------------------------------------------ */
@@ -877,9 +876,9 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
   // A harness is named in plain text, never drawn: no logo and no vendor colour. "short" gives "Claude" where the line is tight.
-  // Colour and size live in .hname. `hidden` is for rows whose aria-label already names the harness.
+  // The harness is named in plain muted text (.hname); the word itself tells Claude and Codex apart, so its hue is not used here.
   const HARNESS_SHORT = { claude: "Claude", codex: "Codex" };
-  const harnessName = (harness, short = false, hidden = false) => { const name = el("span", "hname h-" + harness, (short ? HARNESS_SHORT : HARNESS)[harness] ?? harness); name.title = HARNESS[harness] ?? harness; if (hidden) name.setAttribute("aria-hidden", "true"); return name; };
+  const harnessName = (harness, short = false) => { const name = el("span", "hname h-" + harness, (short ? HARNESS_SHORT : HARNESS)[harness] ?? harness); name.title = HARNESS[harness] ?? harness; return name; };
   function childKindChip(s, meta = false) {
     const c = el("span", (meta ? "meta-item meta-kind" : "child-kind")); c.style.setProperty("--h", "var(--" + s.harness + ")");
     const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
@@ -1204,7 +1203,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const main = el("span", "srow-main"), ag = el("span", "ag", ago(s.last)); main.append(dot(s.state), el("span", "nm", s.name), ag);
     if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work"); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
     if (kids.length && !rail && allKids.length) { const summary = el("span", "tree-summary"); const state = urgentDescendant(s.id, children); if (state) summary.append(dot(state)); summary.append(String(allKids.length)); ag.before(summary); }
-    const meta = el("span", "srow-meta"); meta.append(harnessName(s.harness, true, true), icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").title = hostOf(s); meta.querySelector(".repo-short").title = branchOf(s);
+    const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").title = hostOf(s); meta.querySelector(".repo-short").title = branchOf(s);
     row.append(main, meta); row.addEventListener("click", () => goSession(s.id)); line.append(row); if (lineToggle) line.append(lineToggle); item.append(line);
     item.addEventListener("keydown", (e) => {
       if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { if (e.target !== item && e.target !== row && e.target !== lineToggle) return; const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); const toggle = item.querySelector(":scope > .tree-row .tree-toggle"); toggle?.click(); } }
