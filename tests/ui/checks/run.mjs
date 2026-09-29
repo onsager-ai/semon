@@ -23,6 +23,7 @@ import scrollbarsCheck from "./scrollbars.mjs";
 import switchCheck from "./switch.mjs";
 import embedCheck from "./embed.mjs";
 import tooltipCheck from "./tooltip.mjs";
+import detailsCheck from "./details.mjs";
 import selectCheck from "./select.mjs";
 
 const checks = [
@@ -43,6 +44,7 @@ const checks = [
   ["switch", switchCheck],
   ["embed", embedCheck],
   ["tooltip", tooltipCheck],
+  ["details", detailsCheck],
   ["select", selectCheck],
 ];
 

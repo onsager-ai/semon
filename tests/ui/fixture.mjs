@@ -90,10 +90,10 @@ export function write(out, { extras = false } = {}) {
       busy: (a, b) => { for (let t = a; t < b; t += 4 * 60000) s.filler(t); s.filler(b); },
     };
     // Token use: one usage record, as the model counts tokens by message id.
-    s.tokens = (t) => {
+    s.tokens = (t, { webSearches = 0 } = {}) => {
       const target = Object.values(SESS[sid]?.tokensByModel ?? {})[0] ?? { input: tokens[0] * 1e6, cacheWrite: 0, cacheRead: tokens[1] * 1e6, output: tokens[2] * 1e6 };
       const cacheWrite = target.cacheWrite ?? target.cache_write ?? 0, cacheWrite1h = target.cacheWrite1h ?? target.cache_write_1h ?? 0;
-      lines.push([t, { type: "assistant", timestamp: iso(t), sessionId: agent ? agent.parent : sid, cwd, uuid: "u-" + sid + "-usage", message: { id: "msg-" + sid + "-usage", model: models[model], role: "assistant", content: [], usage: { input_tokens: target.input, cache_creation_input_tokens: cacheWrite, cache_creation: { ephemeral_5m_input_tokens: cacheWrite - cacheWrite1h, ephemeral_1h_input_tokens: cacheWrite1h }, cache_read_input_tokens: target.cacheRead ?? target.cache_read ?? 0, output_tokens: target.output } } }]);
+      lines.push([t, { type: "assistant", timestamp: iso(t), sessionId: agent ? agent.parent : sid, cwd, uuid: "u-" + sid + "-usage", message: { id: "msg-" + sid + "-usage", model: models[model], role: "assistant", content: [], usage: { input_tokens: target.input, cache_creation_input_tokens: cacheWrite, cache_creation: { ephemeral_5m_input_tokens: cacheWrite - cacheWrite1h, ephemeral_1h_input_tokens: cacheWrite1h }, cache_read_input_tokens: target.cacheRead ?? target.cache_read ?? 0, output_tokens: target.output, ...(webSearches ? { server_tool_use: { web_search_requests: webSearches } } : {}) } } }]);
     };
     s.save = () => {
       if (agent) {
@@ -521,6 +521,15 @@ export function write(out, { extras = false } = {}) {
       c.ask(ms(T(8, 49)), "Give one compact answer");
       c.text(ms(T(8, 50)), "Unique result text for the transcript check.");
       c.save(); live("result-card", "idle", "Result card");
+    }
+    // web-search: a session that used four priced web searches (the model sends no token count for them, so that row's tokens cell is empty).
+    {
+      const c = claude("web-search", { cwd: role("web-search"), model: "sonnet-5", tokens: [0.002, 0, 0.003] });
+      c.title(ms(T(8, 52)), "Web search");
+      c.ask(ms(T(8, 52)), "Look something up");
+      c.text(ms(T(8, 53)), "Found it on the web.");
+      c.tokens(ms(T(8, 54)), { webSearches: 4 });
+      c.save(); live("web-search", "idle", "Web search");
     }
     // archive: a session five days before the sample's day, in its own repository. The model's 24 h window leaves it out;
     // Analytics' 7 d and 30 d count it (#102): an hour of work, one turn, no tool calls, and a cost on its day.
