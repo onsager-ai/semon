@@ -141,9 +141,10 @@ export default async function (browser) {
     r.expect(P.open.turns > 0 && P.open.turns < 10, "the last page holds some of the turns: " + P.open.turns);
     for (let k = 0; k < 5 && (await pager(page)).some((b) => b.text === "Load earlier"); k++) {
       // Bring the button into view first (the click would scroll to it), then note where the anchor is. The anchor is the
-      // second turn: the first may continue a turn whose start is on the page being loaded.
+      // first turn in view after the first: the first may continue a turn whose start is on the page being loaded, and a turn scrolled out of sight has
+      // no say in what is on screen.
       await page.locator(".turns > .list > button.more").scrollIntoViewIfNeeded(); await page.waitForTimeout(80);
-      const anchor = await page.evaluate(() => { const t = document.querySelectorAll(".turns > .turn")[1]; return { id: t.dataset.turn, top: t.getBoundingClientRect().top }; });
+      const anchor = await page.evaluate(() => { const bar = document.querySelector("#topbar").getBoundingClientRect().bottom, t = [...document.querySelectorAll(".turns > .turn")].slice(1).find((x) => x.getBoundingClientRect().bottom > bar + 1); return { id: t.dataset.turn, top: t.getBoundingClientRect().top }; });
       const before = await count();
       await page.click(".turns > .list > button.more"); await page.waitForFunction((n) => document.querySelectorAll(".turns > .turn").length > n || ![...document.querySelectorAll(".turns > .list > button.more")].some((b) => b.textContent === "Load earlier"), before.turns);
       await page.waitForTimeout(100);
@@ -152,7 +153,7 @@ export default async function (browser) {
     }
     P.done = { ...(await count()), pager: await pager(page) };
     r.expect(P.clicks.length > 0 && P.clicks.every((c) => c.after >= c.before), "Load earlier adds turns: " + JSON.stringify(P.clicks));
-    r.expect(P.clicks.every((c) => c.anchorMoved !== null && Math.abs(c.anchorMoved) <= 2), "what was on screen stays put after Load earlier: " + JSON.stringify({ clicks: P.clicks, dbg: await page.evaluate(() => window.__pager) }));
+    r.expect(P.clicks.every((c) => c.anchorMoved !== null && Math.abs(c.anchorMoved) <= 2), "what was on screen stays put after Load earlier: " + JSON.stringify(P.clicks));
     r.expect(P.done.turns === 10 && P.done.started && P.done.pager.length === 0, "the first page starts with the Started divider and holds all 10 turns: " + JSON.stringify(P.done));
     P.gaps = await page.evaluate(() => [...document.querySelectorAll(".turns > .divider")].filter((d) => d.textContent.startsWith("Some entries not included")).length);
     r.expect(P.gaps === 1, "the unreadable line shows as one gap divider between turns: " + P.gaps);

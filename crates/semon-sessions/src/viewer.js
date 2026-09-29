@@ -396,9 +396,8 @@
         if (where !== "before") return;
         const by = (d) => { if (phone.matches) window.scrollBy(0, d); else box.scrollTop += d; };
         const node = () => anchor && [...document.querySelectorAll("#page .turns > .turn")].find((t) => t.dataset.turn === anchor.id);
-        window.__pager = { seen: !!seen, id: anchor?.id?.slice(0, 8), idx: seen ? [...seen.parentElement.children].indexOf(seen) : null, found: !!node(), turns: document.querySelectorAll("#page .turns > .turn").length, phone: phone.matches };
         if (!node()) { by(box.scrollHeight - h0); return; }
-        const put = () => { const n = node(); if (n) { const d = n.getBoundingClientRect().top - anchor.top; (window.__pager.puts ??= []).push(Math.round(d)); if (Math.abs(d) > 0.5) by(d); } };
+        const put = () => { const n = node(); if (n) { const d = n.getBoundingClientRect().top - anchor.top; if (Math.abs(d) > 0.5) by(d); } };
         put(); requestAnimationFrame(() => { put(); requestAnimationFrame(put); });
         // Parts measured later (fonts, clamped text) can still change what is above: keep the turn in place while the list settles, until the reader moves.
         const list = $("#page .turns"); if (!list) return;
