@@ -288,11 +288,12 @@ impl Request {
         Some(request)
     }
 
-    /// The cache's key: the range and the filters, unambiguously.
+    /// The cache's key: the range and the filters, unambiguously (no repo
+    /// filter is `null`, the filter for no repo `[null]`).
     pub(crate) fn key(&self) -> String {
         serde_json::to_string(&json!([
             self.range.name(),
-            self.repo,
+            self.repo.as_ref().map(|repo| [repo]),
             self.machine,
             self.harness,
             self.model

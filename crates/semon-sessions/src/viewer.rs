@@ -4122,7 +4122,8 @@ mod tests {
 
     /// A machine whose model keeps its default day (`all` off), with a
     /// session per `(id, how long ago it started, minutes it ran)`: your
-    /// message, then a reply that many minutes later.
+    /// message, then a reply that many minutes later (at most five, or the
+    /// two lines are two busy intervals of no length).
     fn dated(host: &str, now: i64, sessions: &[(&str, i64, i64)]) -> Fixture {
         let mut fixture = Fixture::new();
         fixture.options.all = false;
@@ -4166,9 +4167,9 @@ mod tests {
             now,
             &[
                 ("today", 60 * MINUTE, 2),
-                ("older", 5 * DAY, 10),
+                ("older", 5 * DAY, 4),
                 ("before", 10 * DAY, 3),
-                ("month", 20 * DAY, 4),
+                ("month", 20 * DAY, 5),
             ],
         );
         let core = ViewerCore::new(fixture.options.clone());
@@ -4180,8 +4181,8 @@ mod tests {
         let month = analytics_of(&core, "range=30d");
         for (answer, range, started, minutes) in [
             (&day, "24h", 1, 2),
-            (&week, "7d", 2, 12),
-            (&month, "30d", 4, 19),
+            (&week, "7d", 2, 6),
+            (&month, "30d", 4, 14),
         ] {
             assert_eq!(answer["range"], range);
             assert_eq!(answer["version"], model["version"], "{range}");
@@ -4282,7 +4283,7 @@ mod tests {
     #[test]
     fn analytics_counts_every_machine_and_filters_by_one() {
         let now = model::now_ms();
-        let alpha = dated("alpha", now, &[("a-old", 5 * DAY, 6)]);
+        let alpha = dated("alpha", now, &[("a-old", 5 * DAY, 4)]);
         let bravo = dated("bravo", now, &[("b-new", 60 * MINUTE, 2)]);
         let core = ViewerCore::with_machines(vec![
             ("a".into(), alpha.options.clone()),
