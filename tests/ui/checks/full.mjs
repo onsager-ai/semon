@@ -13,6 +13,8 @@
 //  - zero overflow screens (T.overflowScreens === 0): nothing pokes past the 390px screen on any lane or trace.
 //  - every "Show more" on a handoff card fully un-clips its text (moreStillClipped === 0) and never navigates the
 //    page away (navigatedByMore === 0) — it is a text reveal, not a link.
+//  - a spawn card's brief, opened with "Show more" at 390 px, grows to its full text: its box is as tall as the text (clientHeight >= scrollHeight - 1),
+//    and the "Show less" button and the "Open" button sit below it, not under the spilled text; "Show less" clamps it again.
 //  - every "more" opened on a trace hop fully un-clips its text (hopMoreStillClipped === 0).
 //  - the walk actually visited screens and at least one trace (T.screens > 0, T.traces > 0), so a broken lane list
 //    or a missing Trace button would fail loudly instead of reporting an all-zero pass.
@@ -71,6 +73,36 @@ export default async function full(browser) {
   if (await st.count()) { await st.click(); await st.scrollIntoViewIfNeeded(); await page.evaluate(() => window.scrollBy(0, -120)); await page.waitForTimeout(400); await page.screenshot({ path: path.join(ENV.out, "full-step.png") }); }
   const mo = page.locator(".hcard .more:visible").first();
   if (await mo.count()) { await mo.click(); await mo.scrollIntoViewIfNeeded(); await page.evaluate(() => window.scrollBy(0, -300)); await page.waitForTimeout(400); await page.screenshot({ path: path.join(ENV.out, "full-relay.png") }); }
+
+  // A spawn card's brief opens to its full height and pushes what follows it down. Its text is replaced with a long one and its
+  // "Show more" is shown by hand (the clamp's ResizeObserver does not fire when only the text behind a fixed box changes).
+  {
+    let probe = null;
+    for (const id of lanes) {
+      await openLane(id);
+      probe = await page.evaluate(() => {
+        const c = document.querySelector(".hcard.child-card"); if (!c) return null;
+        const br = c.querySelector(".brief"), more = c.querySelector(".more"), actions = c.querySelector(".child-actions");
+        br.replaceChildren(...Array.from({ length: 14 }, (_, i) => { const p = document.createElement("p"); p.textContent = "Paragraph " + i + " of a long brief. " + "It wraps over several lines on a phone. ".repeat(3); return p; }));
+        more.hidden = false; br.classList.add("clipped");
+        const clamped = { client: br.clientHeight, scroll: br.scrollHeight };
+        more.click();
+        const b = br.getBoundingClientRect(), m = more.getBoundingClientRect(), a = actions?.getBoundingClientRect();
+        const open = { open: c.classList.contains("open"), client: br.clientHeight, scroll: br.scrollHeight, maxHeight: getComputedStyle(br).maxHeight, moreBelow: m.top >= b.bottom - 1, actionsBelow: !a || a.top >= b.bottom - 1, label: more.textContent };
+        more.click();
+        return { clamped, open, closed: { open: c.classList.contains("open"), client: br.clientHeight, scroll: br.scrollHeight, label: more.textContent } };
+      });
+      if (probe) break;
+    }
+    r.results.spawnBrief = probe;
+    r.expect(!!probe, "the fixture needs a spawn card on some session");
+    if (probe) {
+      r.expect(probe.clamped.scroll > probe.clamped.client + 1, "the spawn brief is clamped before Show more: " + JSON.stringify(probe.clamped));
+      r.expect(probe.open.open && probe.open.label === "Show less" && probe.open.maxHeight === "none" && probe.open.client >= probe.open.scroll - 1, "an open spawn brief grows to its text: " + JSON.stringify(probe.open));
+      r.expect(probe.open.moreBelow && probe.open.actionsBelow, "Show less and Open sit below an open spawn brief: " + JSON.stringify(probe.open));
+      r.expect(!probe.closed.open && probe.closed.label === "Show more" && probe.closed.scroll > probe.closed.client + 1, "Show less clamps the spawn brief again: " + JSON.stringify(probe.closed));
+    }
+  }
 
   r.results.tally = T;
   r.results.errors = page.errors;
