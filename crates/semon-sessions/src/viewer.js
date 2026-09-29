@@ -376,15 +376,20 @@
   let wideMode = false, railMode = false, treePrefs = {};
   try { wideMode = localStorage.getItem("semon.wide") === "1"; } catch {}
   try { railMode = localStorage.getItem("semon.rail") === "1"; } catch {}
-  try { const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = saved; } catch {}
+  try { const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = pruneTreePrefs(saved); } catch {}
   const app = $(".app");
   const syncLayoutPrefs = () => { app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
   function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); }
-  function setRailMode(on) { railMode = on; try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("title", on ? "Expand sidebar" : "Collapse sidebar"); }
-  // A parent's saved choices: `open` (expanded or collapsed) and `more` (its hidden children revealed). Older saves hold only `open`.
-  function saveTreePref(id, patch) {
-    const old = treePrefs[id] && typeof treePrefs[id] === "object" ? treePrefs[id] : {};
-    treePrefs[id] = { ...old, ...patch, at: Date.now() };
+  function setRailMode(on) { railMode = on; try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("title", on ? "Expand sidebar" : "Collapse sidebar"); }
+  // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
+  // it is dropped on load, along with any entry that has no `open`, and the next save writes the pruned list.
+  function pruneTreePrefs(saved) {
+    const kept = {};
+    for (const [id, pref] of Object.entries(saved)) if (pref && typeof pref === "object" && typeof pref.open === "boolean") kept[id] = { open: pref.open, at: Number(pref.at) || 0 };
+    return kept;
+  }
+  function saveTreePref(id, open) {
+    treePrefs[id] = { open, at: Date.now() };
     treePrefs = Object.fromEntries(Object.entries(treePrefs).sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0)).slice(0, 500));
     try { localStorage.setItem("semon.tree", JSON.stringify(treePrefs)); } catch {}
   }
@@ -596,11 +601,12 @@
     seen.add(sid);
     return sessMatch(SESS[sid], query) || (children.get(sid) ?? []).some((s) => matchesTree(s.id, children, seen));
   };
-  // A parent lists its five newest children; the rest fold into "Show N more". A child that is working or waiting, or has one
-  // below it, always shows. While a search is typed every child shows. The choice to reveal them is saved per parent.
-  const TREE_KIDS = 5;
+  // An open parent lists its waiting children, then its running ones (at most 8), then the newest finished ones until three rows are
+  // listed. "All N" opens the rest: a sheet on a phone, the whole list in the tree on a wide screen. While a search is typed, the
+  // children that match it are the ones listed.
+  const TREE_ACTIVE = 8, TREE_ROWS = 3;
   // The open session and the sessions above it. Only the open one is marked current; its ancestors are opened in the tree for this render
-  // (nothing is saved) and never fold into "Show N more", so the current row can always be found.
+  // (nothing is saved) and are always listed, so the current row can always be found.
   function routedPath() {
     const current = route.v === "session" ? route.id : route.v === "trace" ? route.sid : null, ancestors = new Set();
     for (let id = current && SESS[current] ? parentOf(current) : null; id && SESS[id] && id !== current && !ancestors.has(id); id = parentOf(id)) ancestors.add(id);
@@ -609,33 +615,103 @@
   // Those ancestors open once per navigation, held in memory: a parent collapsed after that stays collapsed until the next one.
   let forcedOpen = { route: null, ids: new Set() };
   function forcedOpenIds() { if (forcedOpen.route !== route) forcedOpen = { route, ids: routedPath().ancestors }; return forcedOpen.ids; }
+  // Waiting is 0, running 1, finished 2. A finished child with a waiting or running session below it ranks as that session does.
+  function kidRank(c, children) {
+    let rank = c.state === "wait" ? 0 : c.state === "work" ? 1 : 2;
+    if (rank) for (const d of descendantsOf(c.id, children)) { if (d.state === "wait") return 0; if (d.state === "work") rank = 1; }
+    return rank;
+  }
+  // The one parent whose whole list is open in the tree (wide screens only). Nothing saves it: a reload starts with the short lists.
+  // The parents above it stay listed and open (`expandedPath`) and everything below it is listed in full and open (`expandedUnder`), so
+  // its "All N" and the rows it reveals agree.
+  let expandedAll = null, revealedFor = null, expandedPath = new Set(), expandedUnder = new Set();
+  const ancestorsOf = (id) => { const out = new Set(); for (let p = id && SESS[id] ? parentOf(id) : null; p && SESS[p] && p !== id && !out.has(p); p = parentOf(p)) out.add(p); return out; };
+  // Fills a parent's group and says whether it holds the parent's whole list, which sticks the parent's row (stickRow).
   function treeGroupFill(group, parent, kids, children, depth, rail) {
-    const sorted = [...kids].sort((a, b) => b.last - a.last);
-    const { current, ancestors } = routedPath();
-    const capped = query ? sorted : sorted.filter((c, i) => i < TREE_KIDS || c.state === "work" || c.state === "wait" || defaultTreeOpen(c.id, children) || c.id === current || ancestors.has(c.id));
-    const hidden = sorted.length - capped.length;
-    const more = hidden > 0 && treePrefs[parent.id]?.more === true;
+    const { current, ancestors } = routedPath(), rank = new Map(kids.map((c) => [c.id, kidRank(c, children)]));
+    const sorted = [...kids].sort((a, b) => rank.get(a.id) - rank.get(b.id) || b.last - a.last), keep = new Set();
+    // With a search typed, the children that match it are the pool; the short-list rule caps them like any other list.
+    const matching = query ? sorted.filter((c) => matchesTree(c.id, children)) : [], pool = matching.length ? matching : sorted;
+    for (const c of pool) if (rank.get(c.id) < 2 && keep.size < TREE_ACTIVE) keep.add(c.id);
+    for (const c of sorted) if (c.id === current || ancestors.has(c.id) || expandedPath.has(c.id)) keep.add(c.id);
+    for (const c of pool) if (keep.size < TREE_ROWS) keep.add(c.id);
+    const listed = sorted.filter((c) => keep.has(c.id)), hidden = kids.length - listed.length;
+    if (!hidden && expandedAll === parent.id) expandedAll = null; // nothing is left to open: "Show fewer" would have nothing to fold
+    const full = hidden > 0 && !rail && (expandedAll === parent.id || expandedUnder.has(parent.id));
     group.replaceChildren();
-    for (const child of more ? sorted : capped) group.append(buildLaneItem(child, depth + 1, children, rail));
-    if (!hidden) return;
-    const button = el("button", "tree-more", more ? "Show fewer" : "Show " + hidden + " more");
-    button.type = "button"; button.setAttribute("role", "treeitem"); button.setAttribute("aria-expanded", String(more));
-    button.setAttribute("aria-label", (more ? "Show fewer sessions" : "Show " + hidden + " more " + (hidden === 1 ? "session" : "sessions")) + " spawned by " + parent.name);
-    button.addEventListener("click", (e) => { e.stopPropagation(); saveTreePref(parent.id, { more: !more }); treeGroupFill(group, parent, kids, children, depth, rail); group.querySelector(":scope > .tree-more")?.focus(); });
+    for (const child of full ? sorted : listed) group.append(buildLaneItem(child, depth + 1, children, rail));
+    if (!hidden || full) return full && expandedAll === parent.id;
+    const total = descendantsOf(parent.id, children).length, button = el("button", "tree-all");
+    button.type = "button"; button.dataset.id = parent.id; button.setAttribute("role", "treeitem"); if (phone.matches) button.setAttribute("aria-haspopup", "dialog");
+    button.setAttribute("aria-label", "All " + total + " sessions under " + parent.name);
+    button.append(el("span", null, "All " + total), icon(I.chev));
+    button.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (phone.matches) { openKidsSheet(parent, button); return; }
+      expandedAll = parent.id; renderLanes();
+      $('#lanes .treeitem[data-id="' + CSS.escape(parent.id) + '"] > .tree-row .tree-fewer')?.focus();
+    });
     group.append(button);
+    return false;
+  }
+  // While a parent's whole list is open its row sticks to the top of the sidebar and carries the control that folds the list again,
+  // so folding never needs a scroll: the row is scrolled back into view and keeps focus.
+  function stickRow(line, s) {
+    line.classList.add("stuck");
+    const fewer = el("button", "tree-fewer"); fewer.type = "button"; fewer.setAttribute("aria-label", "Show fewer sessions under " + s.name); fewer.append(el("span", null, "Show fewer"), icon(I.chev));
+    fewer.addEventListener("click", (e) => {
+      e.stopPropagation(); expandedAll = null; renderLanes();
+      const row = $('#lanes .srow[data-id="' + CSS.escape(s.id) + '"]'); row?.scrollIntoView({ block: "nearest" }); row?.focus({ preventScroll: true });
+    });
+    line.append(fewer);
+  }
+  // A phone's "All N": every session below the parent in one sheet, waiting first, then running, then finished, newest first in each.
+  function openKidsSheet(parent, trigger) {
+    const all = descendantsOf(parent.id, sessionChildren()), bucket = (s) => s.state === "wait" ? 0 : s.state === "work" ? 1 : 2;
+    const d = el("dialog", "viewer kids-sheet"), head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose");
+    d.setAttribute("aria-label", "All sessions under " + parent.name);
+    title.append(el("span", null, parent.name)); close.type = "button"; close.setAttribute("aria-label", "Close"); close.append(icon(I.x)); close.addEventListener("click", () => d.close());
+    head.append(title, el("div", "vm", all.length + (all.length === 1 ? " session" : " sessions")), close);
+    const search = el("label", "kids-search"), input = el("input"), body = el("div", "vb"), list = el("div", "kids-list"); let picked = null;
+    input.type = "search"; input.placeholder = "Search these sessions"; input.setAttribute("aria-label", "Search these sessions"); search.append(icon(I.search), input); body.append(list);
+    const draw = () => {
+      list.replaceChildren(); const q = input.value.trim(), rows = all.filter((s) => sessMatch(s, q));
+      if (!rows.length) list.append(el("p", "empty", "No sessions match “" + q + "”."));
+      ["Waiting for you", "Running", "Finished"].forEach((label, i) => {
+        const xs = rows.filter((s) => bucket(s) === i).sort((a, b) => b.last - a.last); if (!xs.length) return;
+        const sec = el("section", "kids-sec"); sec.append(el("h3", "kids-h", label + " (" + xs.length + ")"));
+        for (const s of xs) {
+          const row = el("button", "kids-row"); row.type = "button"; row.dataset.id = s.id; row.setAttribute("aria-label", s.name + ", " + (STATE[s.state] ?? s.state));
+          row.append(dot(s.state), el("span", "nm", s.name));
+          const above = parentOf(s.id); if (above && above !== parent.id && SESS[above]) row.append(el("span", "under", "under " + SESS[above].name));
+          row.append(el("span", "ag", ago(s.last)));
+          row.addEventListener("click", () => { picked = s.id; pendingSessionOpen = s.id; d.close(); }); sec.append(row);
+        }
+        list.append(sec);
+      });
+    };
+    input.addEventListener("input", draw); d.append(head, search, body); document.body.append(d); draw();
+    d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
+    d.addEventListener("close", () => {
+      d.remove(); document.documentElement.classList.remove("viewer-open");
+      if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } }
+      if (!picked) ($('#lanes .tree-all[data-id="' + CSS.escape(parent.id) + '"]') ?? trigger).focus();
+      if (LIVE.pending) refresh();
+    });
+    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
   }
   // The sidebar keeps the 8 most recently active top-level sessions, with children nested beneath their parent.
   function buildLaneItem(s, depth, children, rail) {
     const kids = children.get(s.id) ?? [], allKids = descendantsOf(s.id, children), item = el("div", "treeitem");
     item.dataset.id = s.id; item.setAttribute("role", "treeitem"); item.setAttribute("aria-label", s.name); item.tabIndex = 0;
     const { current, ancestors } = routedPath(), saved = treePrefs[s.id];
-    const open = forcedOpenIds().has(s.id) || (typeof saved?.open === "boolean" ? saved.open : defaultTreeOpen(s.id, children));
+    const open = forcedOpenIds().has(s.id) || expandedPath.has(s.id) || (typeof saved?.open === "boolean" ? saved.open : defaultTreeOpen(s.id, children) || expandedUnder.has(s.id));
     if (kids.length && !rail) item.setAttribute("aria-expanded", String(open));
     const line = el("div", "tree-row");
     let lineToggle = null;
     if (kids.length && !rail) {
       const toggle = el("button", "tree-toggle"); toggle.type = "button"; toggle.dataset.treeToggle = s.id; toggle.setAttribute("aria-label", (open ? "Collapse " : "Expand ") + s.name); toggle.setAttribute("aria-expanded", String(open)); toggle.append(icon(I.chev));
-      toggle.addEventListener("click", (e) => { e.stopPropagation(); const value = item.getAttribute("aria-expanded") !== "true"; item.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-label", (value ? "Collapse " : "Expand ") + s.name); if (!value) forcedOpenIds().delete(s.id); saveTreePref(s.id, { open: value }); });
+      toggle.addEventListener("click", (e) => { e.stopPropagation(); const value = item.getAttribute("aria-expanded") !== "true"; item.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-label", (value ? "Collapse " : "Expand ") + s.name); if (!value) forcedOpenIds().delete(s.id); saveTreePref(s.id, value); if (!value && (expandedAll === s.id || expandedPath.has(s.id))) { expandedAll = null; renderLanes(); $('#lanes .treeitem[data-id="' + CSS.escape(s.id) + '"] > .tree-row .tree-toggle')?.focus(); } });
       lineToggle = toggle; line.classList.add("has-toggle");
     }
     const row = el("button", "srow"); row.type = "button"; row.dataset.id = s.id; row.title = s.name;
@@ -652,16 +728,38 @@
       if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { if (e.target !== item && e.target !== row && e.target !== lineToggle) return; const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); item.querySelector(":scope > .tree-row .tree-toggle")?.click(); } }
       else if ((e.key === "Enter" || e.key === " ") && e.target === item) { e.preventDefault(); goSession(s.id); }
     });
-    if (kids.length && !rail) { const group = el("div", "tree-group"); group.dataset.depth = String(Math.min(depth + 1, 4)); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Sessions spawned by " + s.name); treeGroupFill(group, s, kids, children, depth, rail); item.append(group); }
+    if (kids.length && !rail) { const group = el("div", "tree-group"); group.dataset.depth = String(Math.min(depth + 1, 4)); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Sessions spawned by " + s.name); const full = treeGroupFill(group, s, kids, children, depth, rail); item.append(group); if (full && open) stickRow(line, s); }
     return item;
   }
+  // The focused control in the tree, so a redraw (a live update, a fold) can put focus back on it or, failing that, on its parent's row.
+  function laneFocus() {
+    const a = document.activeElement, item = a?.closest?.(".treeitem");
+    if (!a || !$("#lanes").contains(a)) return null;
+    const kind = ["srow", "tree-all", "tree-fewer", "tree-toggle"].find((c) => a.classList.contains(c)) ?? (a === item ? "treeitem" : null);
+    const id = kind === "tree-toggle" ? a.dataset.treeToggle : kind === "srow" || kind === "tree-all" ? a.dataset.id : item?.dataset.id;
+    return kind && id ? { kind, id } : null;
+  }
+  function restoreLaneFocus(f) {
+    if (!f || document.activeElement !== document.body) return;
+    const q = (sel) => $("#lanes " + sel), id = CSS.escape(f.id);
+    const target = f.kind === "srow" ? q('.srow[data-id="' + id + '"]') : f.kind === "tree-all" ? q('.tree-all[data-id="' + id + '"]') : f.kind === "tree-fewer" ? q('.treeitem[data-id="' + id + '"] > .tree-row .tree-fewer')
+      : f.kind === "tree-toggle" ? q('.tree-toggle[data-tree-toggle="' + id + '"]') : q('.treeitem[data-id="' + id + '"]');
+    (target ?? q('.srow[data-id="' + id + '"]'))?.focus({ preventScroll: true });
+  }
   function renderLanes() {
-    const children = sessionChildren(), lanes = Object.values(SESS).filter((s) => s.lane && !parentOf(s.id) && matchesTree(s.id, children)).sort((a, b) => b.last - a.last);
+    const focus = laneFocus(), children = sessionChildren(), lanes = Object.values(SESS).filter((s) => s.lane && !parentOf(s.id) && matchesTree(s.id, children)).sort((a, b) => b.last - a.last);
+    if (expandedAll && (phone.matches || railMode || !SESS[expandedAll])) expandedAll = null;
+    expandedPath = expandedAll ? ancestorsOf(expandedAll) : new Set(); expandedUnder = expandedAll ? new Set(descendantsOf(expandedAll, children).map((x) => x.id)) : new Set();
     const box = $("#lanes"), more = $("#lanes-all"); box.replaceChildren(); more.replaceChildren();
     for (const s of lanes.slice(0, 8)) box.append(buildLaneItem(s, 0, children, railMode && !phone.matches));
     if (!lanes.length) { const empty = el("p", "ghead", "No sessions match"); empty.setAttribute("role", "none"); box.append(empty); }
     const all = el("button", "side-all", query ? "All matching sessions ›" : "All sessions ›"); all.type = "button"; all.id = "all-sessions"; all.addEventListener("click", () => go({ v: "sessions" })); more.append(all);
     const q = $("#q"); if (document.activeElement !== q) q.value = query;
+    restoreLaneFocus(focus);
+    // A stuck row covers the top of the sidebar: what is scrolled into view (the open session, after a navigation) stays clear of it.
+    const stuck = box.querySelector(".tree-row.stuck"), navigated = revealedFor !== route; revealedFor = route;
+    $("#sidebar").style.scrollPaddingTop = stuck ? stuck.offsetHeight + "px" : "";
+    if (stuck && navigated) box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" });
   }
 
   // ---- Top bar ---------------------------------------------------------------------------------------
@@ -1606,7 +1704,7 @@
   function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); closeAccountMenu(); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); }
   $("#drawer-close").addEventListener("click", () => closeDrawer());
   $("#scrim").addEventListener("click", () => closeDrawer());
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
   let sx = null;
   sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
   sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });
@@ -1614,7 +1712,8 @@
   $("#q").addEventListener("input", (e) => { query = e.target.value.trim(); renderLanes(); });
   $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); query = e.target.value.trim(); go({ v: "sessions" }); } });
   phone.addEventListener("change", () => {
-    closeDrawer(true); syncLayoutPrefs();
+    closeDrawer(true); syncLayoutPrefs(); expandedAll = null; renderLanes();
+    if (!phone.matches && viewerEl?.classList.contains("kids-sheet")) viewerEl.close(); // a sheet is a phone's: a wide screen opens the list in the tree
     if (route.v === "session" || route.v === "analytics") { const top = currentScroll(); render(); restoreScroll(top); }
     else renderLanes();
     const l2 = $("#topbar .l2"); if (l2?.classList.contains("session-meta")) fitSessionLine(l2); syncJump();

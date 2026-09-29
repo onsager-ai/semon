@@ -606,7 +606,7 @@ export function write(out, { extras = false } = {}) {
     xs.text(ms(T(12, 35), 30), XSS);
     xs.save();
     // fan-out: a live parent with seven subagents. Reader 1, the oldest, is still running; the other six finished, so the
-    // sidebar shows the five newest and the running one, and folds Reader 2 into "Show 1 more".
+    // sidebar lists the running one first, then the two newest finished (three rows), and ends the list with "All 7".
     const fan = claude("fan-out", { cwd: role("fan-out"), model: "opus-5.5", tokens: [0, 0, 0] });
     fan.title(ms(T(11, 0)), "Fan-out");
     fan.ask(ms(T(11, 0)), "Read the seven audit shards in parallel");
@@ -622,6 +622,23 @@ export function write(out, { extras = false } = {}) {
     }
     fan.busy(ms(T(11, 0)), ms(T(12, 40)));
     fan.save(); live("fan-out", "busy", "Fan-out");
+    // swarm: a live parent with twelve subagents. Workers 1 to 10 are still running and the two newest, 11 and 12, finished, so the
+    // sidebar lists only the eight most recent running ones (its cap) and never the newer finished pair, and ends with "All 12".
+    const swarm = claude("swarm", { cwd: role("swarm"), model: "opus-5.5", tokens: [0, 0, 0] });
+    swarm.title(ms(T(11, 0)), "Swarm");
+    swarm.ask(ms(T(11, 0)), "Run the twelve shard checks in parallel");
+    for (let i = 1; i <= 12; i++) {
+      const at = T(12, 5 + i), id = "toolu-swarm" + i, name = "Worker " + i, running = i <= 10;
+      swarm.tool(ms(at), id, "Agent", { description: name, subagent_type: "general-purpose", prompt: "Check shard " + i, ...(running ? { run_in_background: true } : {}) });
+      if (running) swarm.result(ms(at, 1), id, "Async agent launched successfully.", { extra: { toolUseResult: { status: "async_launched", agentId: "swarm-worker-" + i } } });
+      else swarm.result(ms(at + 2), id, "Shard " + i + " checked.", { extra: { toolUseResult: { status: "completed", agentId: "swarm-worker-" + i } } });
+      const w = claude("swarm-worker-" + i, { cwd: role("swarm"), model: "haiku-4.5", tokens: [0, 0.01, 0], agent: { parent: "swarm", slug: slug(role("swarm")), tool: id, description: name } });
+      w.prompt(ms(at), "Check shard " + i);
+      if (!running) w.text(ms(at + 1), "Shard " + i + " is fine.");
+      w.save();
+    }
+    swarm.busy(ms(T(11, 0)), ms(T(12, 40)));
+    swarm.save(); live("swarm", "busy", "Swarm");
   }
   // Claude Code's own figure for a session's last run: principal's, and harbor's, which is far below the API-equivalent one.
   put(".claude.json", JSON.stringify({ projects: {
