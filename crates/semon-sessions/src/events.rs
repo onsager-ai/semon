@@ -42,7 +42,8 @@ thread_local! {
 /// v10: assistant billing splits, timestamps and Codex token-count deltas.
 /// v11: a Codex command that outlived its yield links its polls and its
 /// completion to the script that started it.
-const CACHE_VERSION: u32 = 11;
+/// v12: thinking extras and the thinking filters follow the viewer rewrite (#38).
+const CACHE_VERSION: u32 = 12;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
