@@ -483,7 +483,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .topbar { top: env(safe-area-inset-top, 0px); padding: 6px 10px; min-height: 50px; }
   .topbar.detail { min-height: 56px; }
   .lead { display: inline-grid; }
-  .page { padding: 2px 16px 56px; gap: 16px; }
+  /* The bottom padding is the jump button's offset, height and a 16px gap, so the last content scrolls clear of it. */
+  .page { padding: 2px 16px calc(72px + env(safe-area-inset-bottom, 0px)); gap: 16px; }
   .msg.user { max-width: 88%; }
   .step > button, .step.live { min-height: 36px; }
   .menu, .filters.pop { right: 10px; }
@@ -500,6 +501,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 
 /* A quiet note when the server stops answering this page's token. */
 .livenote { position: fixed; z-index: 6; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); margin: 0; padding: 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--sunken); color: var(--muted); font-size: 13px; text-align: center; }
+/* The jump button floats on the same axis: while it shows, the note sits above it (16px offset + 40px button + 12px). */
+.jump-bottom:not([hidden]) ~ .livenote { bottom: calc(68px + env(safe-area-inset-bottom, 0px)); }
 @media (min-width: 761px) { .livenote { left: calc(50% + 148px); max-width: calc(100vw - 296px - 32px); } }
 
 /* ---- Approved viewer UX: compact metadata, session tree and reading controls --------------------- */
@@ -679,7 +682,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .analytics-slice .vh, .runs-sheet .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); } .analytics-slice .vb, .runs-sheet .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
   .analytics-slice .vclose, .runs-sheet .vclose { width: 44px; height: 44px; }
 }
-.jump-bottom { position: fixed; right: 16px; bottom: 16px; z-index: 15; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 20px; background: var(--ground); padding: 0 10px; color: var(--ink-2); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 12%, transparent); }
+.jump-bottom { position: fixed; left: var(--jump-x, 50%); transform: translateX(-50%); bottom: 16px; z-index: 15; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 20px; background: var(--ground); padding: 0 10px; color: var(--ink-2); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 12%, transparent); }
 .jump-bottom[hidden] { display: none; }
 .jump-bottom svg { width: 18px; height: 18px; flex: none; }
 .jump-bottom .new-count { font-size: 12.5px; font-weight: 500; white-space: nowrap; }
@@ -740,7 +743,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .tree-more { min-height: 44px; margin-inline: 4px; }
   .srow { min-height: 44px; padding-block: 8px; }
   .think { min-height: 44px; }
-  .jump-bottom { right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  .jump-bottom { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
   dialog.session-details { position: fixed; inset: auto 0 0; width: 100%; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
   .session-details .vb { padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }
   .session-details .vclose { width: 44px; height: 44px; }

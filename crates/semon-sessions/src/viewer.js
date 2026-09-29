@@ -1906,6 +1906,9 @@
   }
 
   const jumpButton = el("button", "jump-bottom"); jumpButton.type = "button"; jumpButton.id = "jump-bottom"; jumpButton.setAttribute("aria-label", "Jump to bottom of transcript"); jumpButton.hidden = true; document.body.append(jumpButton);
+  // Centred over the transcript column (#page), not the viewport: the sidebar or rail takes the left, and #main has its own scrollbar.
+  const placeJump = () => { const r = $("#page").getBoundingClientRect(); if (r.width) jumpButton.style.setProperty("--jump-x", r.left + r.width / 2 + "px"); };
+  { const ro = new ResizeObserver(placeJump); ro.observe($("#page")); ro.observe($("#main")); }
   function scrollMetrics() {
     if (phone.matches) return { top: window.scrollY, height: document.documentElement.scrollHeight, viewport: window.innerHeight, gap: Math.max(0, document.documentElement.scrollHeight - window.innerHeight - window.scrollY) };
     const m = $("#main"); return { top: m.scrollTop, height: m.scrollHeight, viewport: m.clientHeight, gap: Math.max(0, m.scrollHeight - m.clientHeight - m.scrollTop) };
@@ -1915,7 +1918,7 @@
   let jumpKey = "";
   function syncJump() {
     if (route.v !== "session") { LIVE.fresh = 0; jumpButton.hidden = true; jumpKey = ""; return; }
-    const { gap } = scrollMetrics(); if (gap <= 80) LIVE.fresh = 0;
+    const { gap } = scrollMetrics(); if (gap <= 80) LIVE.fresh = 0; else placeJump();
     const key = (gap <= 80) + "|" + LIVE.fresh; if (key === jumpKey) return;
     jumpKey = key; jumpButton.hidden = gap <= 80; jumpButton.replaceChildren();
     if (LIVE.fresh) jumpButton.append(el("span", "new-count", LIVE.fresh + " new"));
