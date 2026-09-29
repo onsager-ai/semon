@@ -10,6 +10,8 @@ cd "$(dirname "$0")"
 ESBUILD_VERSION=0.28.2
 BUN_VERSION=1.4.2
 RUNTIMES=(h preact solid lit)
+# legacy: today's served script (tooltip.js, select.js and viewer.js, joined as shell::VIEWER_JS joins them), bundled as it is.
+TARGETS=(legacy "${RUNTIMES[@]}")
 BUNDLERS=(esbuild bun vite)
 RUNS=${RUNS:-10}
 FAILED=()
@@ -20,6 +22,7 @@ since_ms() { echo $((($(now_ns) - $1) / 1000000)); }
 bytes() { du -sb "$@" | awk '{ s += $1 } END { print s }'; }
 mb() { awk -v b="$1" 'BEGIN { printf "%.1f MB", b / 1048576 }'; }
 kb() { awk -v b="$1" 'BEGIN { printf "%.1f KB", b / 1024 }'; }
+noshell() { [[ $1 =~ ^[A-Z_]+= ]] || echo -N; } # hyperfine runs a command with no env prefix without a shell
 group() { echo "::group::$*"; }
 endgroup() { echo "::endgroup::"; }
 
@@ -44,16 +47,17 @@ got=$(npm_install pkg/ts) || exit 1; read -r ts_ms ts_bytes <<<"$got"
 TSC=pkg/ts/node_modules/.bin/tsc
 pkgver() { node -p "require('./$1/package.json').version"; }
 V_ESBUILD=$(bin/esbuild --version) V_BUN=$(bin/bun --version) V_VITE=$(pkgver pkg/vite/node_modules/vite) V_ROLLDOWN=$(pkgver pkg/vite/node_modules/rolldown)
-V_TS=$($TSC --version) V_NODE=$(node --version) V_PREACT=$(pkgver node_modules/preact) V_SOLID=$(pkgver node_modules/solid-js) V_LIT=$(pkgver node_modules/lit-html)
+V_TS=$($TSC --version | sed 's/^Version //') V_NODE=$(node --version) V_PREACT=$(pkgver node_modules/preact) V_SOLID=$(pkgver node_modules/solid-js) V_LIT=$(pkgver node_modules/lit-html)
 V_BABEL=$(pkgver pkg/babel/node_modules/@babel/core) V_BPS=$(pkgver pkg/babel/node_modules/babel-preset-solid) V_VPS=$(pkgver pkg/vite-solid/node_modules/vite-plugin-solid)
 endgroup
+group "probe bun"; bash probe-bun.sh; endgroup
 
 # ---- Type checks: tsc --noEmit per runtime (none of the bundlers type-check) -------------------------------------------
 declare -A TSC_MS
 for rt in "${RUNTIMES[@]}"; do
   group "tsc $rt"
   if $TSC -p "src/$rt/tsconfig.json"; then
-    hyperfine --style=none --warmup 1 --runs 3 --export-json "res/tsc-$rt.json" "$TSC -p src/$rt/tsconfig.json" >/dev/null
+    hyperfine --style=none -N --warmup 1 --runs 3 --export-json "res/tsc-$rt.json" "$TSC -p src/$rt/tsconfig.json" >/dev/null
     TSC_MS[$rt]=$(jq -r '.results[0].mean * 1000 | round' "res/tsc-$rt.json")
   else
     TSC_MS[$rt]="failed"; FAILED+=("tsc-$rt")
@@ -62,7 +66,9 @@ for rt in "${RUNTIMES[@]}"; do
 done
 
 # ---- Bundles ------------------------------------------------------------------------------------------------------------
-entry() { if [ "$1" = lit ]; then echo src/lit/main.ts; else echo "src/$1/main.tsx"; fi; }
+SRC=../../../crates/semon-sessions/src
+{ cat "$SRC/tooltip.js"; echo; cat "$SRC/select.js"; echo; cat "$SRC/viewer.js"; } > out/legacy-entry.js
+entry() { case "$1" in legacy) echo out/legacy-entry.js ;; lit) echo src/lit/main.ts ;; *) echo "src/$1/main.tsx" ;; esac; }
 build_cmd() { # bundler runtime min(1|0) out
   local b=$1 rt=$2 min=$3 out=$4 flag="" dir=vite
   [ "$min" = 1 ] && flag="--minify"
@@ -70,7 +76,7 @@ build_cmd() { # bundler runtime min(1|0) out
   case "$b" in
     esbuild) if [ "$rt" = solid ]; then echo "node pkg/babel/solid.mjs esbuild $min $out"; else echo "bin/esbuild $(entry "$rt") --bundle --format=iife --platform=browser --target=es2022 --log-level=warning $flag --outfile=$out"; fi ;;
     bun) if [ "$rt" = solid ]; then echo "bin/bun pkg/babel/solid.mjs bun $min $out"; else echo "bin/bun build $(entry "$rt") --target=browser --format=iife $flag --outfile=$out"; fi ;;
-    vite) echo "RT=$rt MIN=$min OUT=$out node pkg/$dir/node_modules/vite/bin/vite.js build --config pkg/$dir/vite.config.mjs --logLevel warn" ;;
+    vite) echo "RT=$rt ENTRY=$(entry "$rt") MIN=$min OUT=$out node pkg/$dir/node_modules/vite/bin/vite.js build --config pkg/$dir/vite.config.mjs --logLevel warn" ;;
   esac
 }
 # The needles crates/semon-sessions/src/viewer.rs bans from VIEWER_JS (the_page_has_no_inline_script_style_or_html_injection).
@@ -86,7 +92,7 @@ scan() { # file -> "needle×n, ..." or "none"
   if [ ${#hits[@]} -eq 0 ]; then echo "none"; else local IFS=","; echo "${hits[*]}" | sed 's/,/, /g'; fi
 }
 declare -A COLD WARM MIN GZ DEV HITS OPEN
-for rt in "${RUNTIMES[@]}"; do
+for rt in "${TARGETS[@]}"; do
   for b in "${BUNDLERS[@]}"; do
     id="$b-$rt" min="out/$b-$rt.min.js" dev="out/$b-$rt.js"
     cmd=$(build_cmd "$b" "$rt" 1 "$min")
@@ -94,7 +100,7 @@ for rt in "${RUNTIMES[@]}"; do
     t=$(now_ns)
     if bash -c "$cmd" && [ -s "$min" ]; then
       COLD[$id]=$(since_ms "$t")
-      hyperfine --style=none --warmup 2 --runs "$RUNS" --export-json "res/$id.json" "$cmd" >/dev/null
+      hyperfine --style=none $(noshell "$cmd") --warmup 2 --runs "$RUNS" --export-json "res/$id.json" "$cmd" >/dev/null
       WARM[$id]=$(jq -r '.results[0] | "\(.mean * 1000 | round) ± \(.stddev * 1000 | round)"' "res/$id.json")
       bash -c "$(build_cmd "$b" "$rt" 0 "$dev")" || FAILED+=("$id-dev")
       MIN[$id]=$(stat -c %s "$min") GZ[$id]=$(gzip -9c "$min" | wc -c) DEV[$id]=$(stat -c %s "$dev" 2>/dev/null || echo 0)
@@ -116,7 +122,7 @@ for f in src/preact/SessionTree.tsx src/solid/SessionTree.tsx src/shared/tooltip
     if [ "$b" = esbuild ]; then cmd="bin/esbuild $f --jsx=preserve --log-level=warning"; else cmd="bin/bun build --no-bundle $f"; fi
     key="$b $f"
     if bash -c "$cmd" >/dev/null; then
-      hyperfine --style=none --warmup 2 --runs "$RUNS" --export-json res/one.json "$cmd" >/dev/null
+      hyperfine --style=none -N --warmup 2 --runs "$RUNS" --export-json res/one.json "$cmd" >/dev/null
       ONE[$key]=$(jq -r '.results[0] | "\(.mean * 1000 | round) ± \(.stddev * 1000 | round)"' res/one.json)
     else
       ONE[$key]="failed"; FAILED+=("one-$b-$f")
@@ -148,15 +154,17 @@ done
   echo
   echo "| Runtime | esbuild cold | esbuild warm | Bun cold | Bun warm | Vite cold | Vite warm |"
   echo "|---|---|---|---|---|---|---|"
-  for rt in "${RUNTIMES[@]}"; do
+  for rt in "${TARGETS[@]}"; do
     echo "| $rt | ${COLD[esbuild-$rt]} | ${WARM[esbuild-$rt]} | ${COLD[bun-$rt]} | ${WARM[bun-$rt]} | ${COLD[vite-$rt]} | ${WARM[vite-$rt]} |"
   done
   echo
   echo "### Output size (minified / gzip -9 of minified / unminified)"
   echo
+  echo "legacy is today's served script, shell::VIEWER_JS (tooltip.js, select.js and viewer.js): $(kb "$(stat -c %s out/legacy-entry.js)") as served, $(kb "$(gzip -9c out/legacy-entry.js | wc -c)") gzipped. The other rows are the sample (the tooltip, the session tree, a clamped brief) for each runtime; h has no runtime, so each other row's excess over h is its runtime."
+  echo
   echo "| Runtime | esbuild | Bun | Vite |"
   echo "|---|---|---|---|"
-  for rt in "${RUNTIMES[@]}"; do
+  for rt in "${TARGETS[@]}"; do
     row="| $rt"
     for b in "${BUNDLERS[@]}"; do row+=" | $(kb "${MIN[$b-$rt]}") / $(kb "${GZ[$b-$rt]}") / $(kb "${DEV[$b-$rt]}")"; done
     echo "$row |"
@@ -166,7 +174,7 @@ done
   echo
   echo "| Runtime | esbuild | Bun | Vite |"
   echo "|---|---|---|---|"
-  for rt in "${RUNTIMES[@]}"; do
+  for rt in "${TARGETS[@]}"; do
     row="| $rt"
     for b in "${BUNDLERS[@]}"; do row+=" | ${HITS[$b-$rt]} (\`${OPEN[$b-$rt]}\`)"; done
     echo "$row |"
