@@ -430,6 +430,7 @@
   function boot() {
     api("/api/model").then((m) => {
       adopt(m); LIVE.version = m.version; remember(m); if (SIDEBAR_ONLY) { render(); schedule(2000); return; } route = routeOf(location);
+      if (route.v === "sessions") query = (new URLSearchParams(location.search).get("q") ?? "").trim(); // a search an embedding page's sidebar carried here
       if (route.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
       try { history.replaceState({ ...route, scrollTop: 0 }, "", urlOf(route) + (route.v === "session" ? location.hash : "")); } catch {}
       const done = () => {
@@ -451,7 +452,7 @@
   try { railMode = localStorage.getItem("semon.rail") === "1"; } catch {}
   try { const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = pruneTreePrefs(saved); } catch {}
   const app = $(".app");
-  const syncLayoutPrefs = () => { app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
+  const syncLayoutPrefs = () => { app.classList.toggle("rail", railMode && !phone.matches); if (!SIDEBAR_ONLY) $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
   function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); }
   function setRailMode(on) { railMode = on; ORD.delete("side"); try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
   // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
@@ -475,15 +476,14 @@
   let accountSheet = false;
   // What to do once the account menu's history entry has been stepped back over (leaving the page from one of its items).
   let afterPop = null;
-  try { history.scrollRestoration = "manual"; } catch {}
+  if (!SIDEBAR_ONLY) try { history.scrollRestoration = "manual"; } catch {}
   let show = { messages: true, tools: true, thinking: true }; let find = ""; let findOpen = false; let filterOpen = false;
   const currentScroll = () => phone.matches ? window.scrollY : $("#main").scrollTop;
   const restoreScroll = (top) => { if (phone.matches) window.scrollTo(0, top); else $("#main").scrollTop = top; };
   const saveHistoryScroll = () => { try { if (history.state?.v) history.replaceState({ ...history.state, scrollTop: currentScroll() }, ""); } catch {} };
   let scrollSaveFrame = false;
   const queueScrollSave = () => { if (scrollSaveFrame) return; scrollSaveFrame = true; requestAnimationFrame(() => { scrollSaveFrame = false; saveHistoryScroll(); }); };
-  window.addEventListener("scroll", queueScrollSave, { passive: true });
-  $("#main").addEventListener("scroll", queueScrollSave, { passive: true });
+  if (!SIDEBAR_ONLY) { window.addEventListener("scroll", queueScrollSave, { passive: true }); $("#main").addEventListener("scroll", queueScrollSave, { passive: true }); }
   const quietTop = () => { if (phone.matches) window.scrollTo(0, 0); else $("#main").scrollTop = 0; };
   function openSessionAtEnd() { if (location.hash) return; startOpeningEndPin(); }
   // Opening a session draws what the model already holds at once, before its transcript arrives: the sidebar row, the top bar,
@@ -540,7 +540,7 @@
   // A deep link to a turn the loaded transcript doesn't hold yet.
   const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
   function go(r, fromHistory) {
-    if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
+    if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : r.v === "sessions" && query ? "/sessions?q=" + enc(query) : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
     stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
@@ -581,7 +581,7 @@
     const signal = r.v === "session" ? (navAbort = new AbortController()).signal : undefined, p = load(r, signal);
     if (p) { if (r.v === "session") paintPending(r); p.then(done, (err) => failLoad(r, err)); } else done();
   }
-  window.addEventListener("popstate", (e) => {
+  if (!SIDEBAR_ONLY) window.addEventListener("popstate", (e) => {
     if (skipPop) { skipPop = false; if (afterPop) { const leave = afterPop; afterPop = null; leave(); return; } if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close a sheet before opening its session
     if (accountSheet) { accountSheet = false; closeAccountMenu(true); return; } // back gesture closes the phone's account menu
     if (viewerEl) { const d = viewerEl; viewerEl = null; d.close(); return; } // back gesture closes the viewer, page stays
@@ -790,7 +790,7 @@
   const sideRegion = () => $("#side-list") ?? $("#sidebar");
   const ordLive = el("div", "sr-only"); ordLive.id = "order-status"; ordLive.setAttribute("role", "status"); ordLive.setAttribute("aria-live", "polite");
   { const slot = el("div", "order-slot"); slot.append(makeOrderButton("side", "order-pill")); sideRegion()?.prepend(slot);
-    $("#page").before(makeOrderButton("page", "order-pill")); document.body.append(ordLive);
+    const pagePill = makeOrderButton("page", "order-pill"); if (SIDEBAR_ONLY) sideRegion().append(ordLive); else { $("#page").before(pagePill); document.body.append(ordLive); }
     makeOrderButton("side", "order-chip"); makeOrderButton("page", "order-chip"); } // the page's pill sits just before the page, so the tab order reaches it first
   function placeOrderPill() {
     const b = ordPills.get("page"); if (!b || b.hidden) return;
@@ -833,9 +833,7 @@
   function orderScroll() {
     for (const name of ["page", "side"]) if (ORD.get(name)?.n || !ordPills.get(name).hidden || !ordChips.get(name).hidden) syncOrderPill(name); // nothing held or shown: nothing to move
   }
-  window.addEventListener("resize", placeOrderPill, { passive: true });
-  window.addEventListener("scroll", orderScroll, { passive: true });
-  $("#main").addEventListener("scroll", orderScroll, { passive: true });
+  if (!SIDEBAR_ONLY) { window.addEventListener("resize", placeOrderPill, { passive: true }); window.addEventListener("scroll", orderScroll, { passive: true }); $("#main").addEventListener("scroll", orderScroll, { passive: true }); }
   sideRegion().addEventListener("scroll", orderScroll, { passive: true });
   // Tapping the pill re-sorts the list it belongs to and scrolls it to its top; a keyboard user lands on its first row. The chip
   // re-sorts where the list stands (its top is already in view).
@@ -1011,11 +1009,11 @@
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
     d.addEventListener("close", () => {
       d.remove(); document.documentElement.classList.remove("viewer-open");
-      if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } }
+      if (viewerEl === d) { viewerEl = null; if (!SIDEBAR_ONLY && history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } }
       if (!picked) ($('#lanes .tree-all[data-id="' + CSS.escape(parent.id) + '"]') ?? trigger).focus();
       if (LIVE.pending) refresh();
     });
-    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
+    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); if (!SIDEBAR_ONLY) try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} // an embedding page's history is its own
   }
   // The sidebar keeps the 8 most recently active top-level sessions, with children nested beneath their parent.
   function buildLaneItem(s, depth, children, rail) {
@@ -1205,7 +1203,7 @@
   // mode is its own controller, apart from find, so the two can become one mode later.
   const ERR = { on: false, sid: null, slots: [], listed: false, count: 0, version: null, k: -1, slot: null, saved: null, range: null, tools: true, chain: Promise.resolve(), gen: 0 };
   const ERR_NEAR = 400, ERR_AROUND = 40; // slots: a page (at most 200 entries) or two away is added; 40 entries of context above
-  const errLive = el("div", "sr-only"); errLive.setAttribute("role", "status"); errLive.setAttribute("aria-live", "polite"); document.body.append(errLive);
+  const errLive = el("div", "sr-only"); errLive.setAttribute("role", "status"); errLive.setAttribute("aria-live", "polite"); if (!SIDEBAR_ONLY) document.body.append(errLive);
   const errText = () => ERR.k < 0 ? (ERR.count ? "Finding errors…" : "No errors") : "Error " + (ERR.k + 1) + " of " + ERR.count;
   const errOn = (sid) => ERR.on && ERR.sid === sid;
   function errorsBar(bar) {
@@ -1329,7 +1327,7 @@
   }
   // Keys while the mode is on: n and p (and Enter, Shift+Enter in the bar) step, Escape closes. Not while typing, and not
   // under an open sheet.
-  document.addEventListener("keydown", (e) => {
+  if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => {
     if (!ERR.on || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || document.querySelector("dialog[open]")) return;
     // The drawer and an open menu have the keys first: Escape closes them and leaves the mode on.
     if (document.body.classList.contains("drawer-open") || document.querySelector(".menu, .lineage-menu")) return;
@@ -1400,9 +1398,8 @@
   function observeTitle() { syncBarLine(); }
   // The bar's divider shows only once the page has scrolled.
   function syncBarLine() { const y = phone.matches ? window.scrollY : $("#main").scrollTop; $("#topbar").classList.toggle("scrolled", y > 4); }
-  window.addEventListener("scroll", syncBarLine, { passive: true });
-  $("#main").addEventListener("scroll", syncBarLine, { passive: true });
-  window.addEventListener("resize", () => { const l2 = $("#topbar .l2.session-meta"); if (l2) fitSessionLine(l2); syncLayoutPrefs(); syncJump(); }, { passive: true });
+  if (!SIDEBAR_ONLY) { window.addEventListener("scroll", syncBarLine, { passive: true }); $("#main").addEventListener("scroll", syncBarLine, { passive: true }); }
+  if (!SIDEBAR_ONLY) window.addEventListener("resize", () => { const l2 = $("#topbar .l2.session-meta"); if (l2) fitSessionLine(l2); syncLayoutPrefs(); syncJump(); }, { passive: true });
   function toggleMenu(s, btn) {
     const ex = $(".session-menu"); if (ex) { ex.remove(); btn.setAttribute("aria-expanded", "false"); return; }
     const filterWasOpen = phone.matches && filterOpen;
@@ -1521,7 +1518,7 @@
       if (!leaving && (!document.activeElement || document.activeElement === document.body)) $("#more-btn")?.focus({ preventScroll: true }); });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
   }
-  document.addEventListener("click", (e) => {
+  if (!SIDEBAR_ONLY) document.addEventListener("click", (e) => {
     const account = $(".account-popover"); if (account && !account.parentElement.contains(e.target)) closeAccountMenu();
     const m = $(".session-menu"); if (m && !m.contains(e.target)) { m.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); }
     // A checkbox in the filter re-renders the bar, so its (now detached) target still sits inside the old popover.
@@ -2131,7 +2128,7 @@
       scheduleAnalytics();
     });
   }
-  document.addEventListener("visibilitychange", () => { if (visible() && route.v === "analytics") refreshAnalytics(); else if (!visible()) { clearTimeout(AN.timer); AN.timer = null; } });
+  if (!SIDEBAR_ONLY) document.addEventListener("visibilitychange", () => { if (visible() && route.v === "analytics") refreshAnalytics(); else if (!visible()) { clearTimeout(AN.timer); AN.timer = null; } });
   const nameOfSid = (A, sid) => SESS[sid]?.name ?? A.sessions[sid]?.name ?? sid;
   const harnessOfSid = (A, sid) => SESS[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
   // A session older than the model's window has no page to open: its row is text.
@@ -2379,12 +2376,13 @@
   const sidebar = $("#sidebar");
   function openDrawer() { if (!phone.matches) return; if (ORD.get("side")?.n) { ORD.delete("side"); renderLanes(); } document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
   function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); closeAccountMenu(); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); }
-  $("#drawer-close").addEventListener("click", () => closeDrawer());
-  $("#scrim").addEventListener("click", () => closeDrawer());
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
+  // On an embedding page shell.js opens and closes the drawer, and names its opening (semon:drawer-open); the viewer binds none of it, "/" included.
+  if (!SIDEBAR_ONLY) { $("#drawer-close").addEventListener("click", () => closeDrawer()); $("#scrim").addEventListener("click", () => closeDrawer()); }
+  else window.addEventListener("semon:drawer-open", () => { if (ORD.get("side")?.n) { ORD.delete("side"); renderLanes(); } }); // opening the drawer re-sorts what the list held, as openDrawer does
+    if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
   let sx = null;
-  sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
-  sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });
+  if (!SIDEBAR_ONLY) sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
+  if (!SIDEBAR_ONLY) sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });
   // The sidebar search narrows the Recent list as you type; Enter opens the Sessions page with the same query.
   $("#q").addEventListener("input", (e) => { query = e.target.value.trim(); renderLanes(); });
   $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); query = e.target.value.trim(); go({ v: "sessions" }); } });
@@ -2450,7 +2448,8 @@
   function ended(status) {
     LIVE.ended = true; clearTimeout(LIVE.timer); LIVE.timer = null; if ($(".livenote")) return;
     if (!window.dispatchEvent(new CustomEvent("semon:ended", { cancelable: true, detail: { status } }))) return;
-    const n = el("p", "livenote", "Session ended: reload with the printed URL"); n.setAttribute("role", "status"); document.body.append(n);
+    const n = el("p", SIDEBAR_ONLY ? "ghead livenote-side" : "livenote", SIDEBAR_ONLY ? "Sessions stopped updating: reload the page" : "Session ended: reload with the printed URL"); n.setAttribute("role", "status");
+    if (SIDEBAR_ONLY) $("#lanes").after(n); else document.body.append(n); // on an embedding page, under the list that stopped
   }
   // A 403 or a dropped connection fails the update (and backs off); anything else skips that one transcript.
   const soft = (p) => p.catch((e) => { if (e?.status === 403 || e?.status === 0) throw e; });
@@ -2698,10 +2697,10 @@
     });
   }
 
-  const jumpButton = el("button", "jump-bottom"); jumpButton.type = "button"; jumpButton.id = "jump-bottom"; jumpButton.setAttribute("aria-label", "Jump to bottom of transcript"); jumpButton.hidden = true; document.body.append(jumpButton);
+  const jumpButton = el("button", "jump-bottom"); jumpButton.type = "button"; jumpButton.id = "jump-bottom"; jumpButton.setAttribute("aria-label", "Jump to bottom of transcript"); jumpButton.hidden = true; if (!SIDEBAR_ONLY) document.body.append(jumpButton);
   // Centred over the transcript column (#page), not the viewport: the sidebar or rail takes the left, and #main has its own scrollbar.
   const placeJump = () => { const r = $("#page").getBoundingClientRect(); if (r.width) jumpButton.style.setProperty("--jump-x", r.left + r.width / 2 + "px"); };
-  { const ro = new ResizeObserver(placeJump); ro.observe($("#page")); ro.observe($("#main")); }
+  if (!SIDEBAR_ONLY) { const ro = new ResizeObserver(placeJump); ro.observe($("#page")); ro.observe($("#main")); }
   function scrollMetrics() {
     if (phone.matches) return { top: window.scrollY, height: document.documentElement.scrollHeight, viewport: window.innerHeight, gap: Math.max(0, document.documentElement.scrollHeight - window.innerHeight - window.scrollY) };
     const m = $("#main"); return { top: m.scrollTop, height: m.scrollHeight, viewport: m.clientHeight, gap: Math.max(0, m.scrollHeight - m.clientHeight - m.scrollTop) };
@@ -2720,13 +2719,10 @@
   }
   function clearNewEntries() { LIVE.fresh = 0; jumpButton.hidden = true; jumpKey = ""; }
   jumpButton.addEventListener("click", () => scrollToEnd("smooth"));
-  window.addEventListener("scroll", syncJump, { passive: true });
-  $("#main").addEventListener("scroll", syncJump, { passive: true });
+  if (!SIDEBAR_ONLY) { window.addEventListener("scroll", syncJump, { passive: true }); $("#main").addEventListener("scroll", syncJump, { passive: true }); }
   const cancelOpeningEndPin = () => { if (openingEndUntil) stopOpeningEndPin(); };
-  window.addEventListener("wheel", cancelOpeningEndPin, { passive: true });
-  window.addEventListener("touchmove", cancelOpeningEndPin, { passive: true });
-  window.addEventListener("pointerdown", cancelOpeningEndPin, { passive: true }); // a press anywhere, a scrollbar drag included
-  document.addEventListener("keydown", (e) => {
+  if (!SIDEBAR_ONLY) { window.addEventListener("wheel", cancelOpeningEndPin, { passive: true }); window.addEventListener("touchmove", cancelOpeningEndPin, { passive: true }); window.addEventListener("pointerdown", cancelOpeningEndPin, { passive: true }); } // a press anywhere, a scrollbar drag included
+  if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => {
     if (!e.defaultPrevented && !e.target.closest?.("input, textarea, select, [contenteditable='true']") && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) cancelOpeningEndPin();
   });
 
@@ -2745,8 +2741,7 @@
     for (const n of document.querySelectorAll(".nrow[data-id] .act .el")) { const a = SESS[n.closest(".nrow").dataset.id]?.activity; if (a) n.textContent = Math.max(0, a[2]) + "s"; }
   }
 
-  // An embedding page's sidebar: the row its data-viewer-nav names (home, sessions or machines) is current, and the wide page, a
-  // preference for the viewer's own pages, leaves the embedding page's alone. (Before anything is painted: this runs with the script.)
-  if (SIDEBAR_ONLY) { const nav = app.dataset.viewerNav; route = { v: ["home", "sessions", "machines"].includes(nav) ? nav : "" }; wideMode = false; syncLayoutPrefs(); }
+  // An embedding page's sidebar: the row its data-viewer-nav names (home, sessions or machines) is current.
+  if (SIDEBAR_ONLY) { const nav = app.dataset.viewerNav; route = { v: ["home", "sessions", "machines"].includes(nav) ? nav : "" }; }
   boot();
 })();
