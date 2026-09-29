@@ -1,4 +1,6 @@
-// Writes a synthetic ~/.claude, ~/.claude.json, ~/.codex and /proc whose session model reproduces the sample mockup's data: its sessions,
+// Writes a synthetic ~/.claude, ~/.claude.json, ~/.codex and /proc whose session model reproduces the overhaul mockup's data
+// (reference/overhaul.html, a superset of the previous reference/semon-sample.html: it adds the atlas ingest fan-out and harbor's
+// reported cost): its sessions,
 // handoffs, turns, answers, busy intervals and transcripts, as Claude Code and Codex log lines. The sample's data is made up,
 // and every line here is made from it: the texts are read from the committed mockup, never from real logs.
 //
@@ -20,8 +22,8 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 // The sample's data block, evaluated as the mockup evaluates it.
-export function sample() {
-  const html = fs.readFileSync(path.join(here, "reference/semon-sample.html"), "utf8");
+export function sample(file = "overhaul.html") {
+  const html = fs.readFileSync(path.join(here, "reference", file), "utf8");
   const start = html.indexOf("  const T = (h, m) => h * 60 + m;");
   const end = html.indexOf("  // ====================================================================================\n  const $ = ");
   if (start < 0 || end < start) throw new Error("the sample's data block moved");
@@ -405,6 +407,112 @@ export function write(out, { extras = false } = {}) {
     c.tokens(ms(T(12, 38)));
     c.save(); locked("deps");
   }
+  // atlas-ingest: the overhaul's fan-out (#51): a survey subagent, then two Codex runs in parallel and a third that fails, a docs
+  // subagent and a reviewer that spawns a grandchild of its own; a relay to harbor; and a result for you. Its process is idle.
+  {
+    const cwd = repo("atlas"), atlas = slug(cwd), t = tx("atlas-ingest");
+    const dur = (text) => { const m = /^(?:(\d+)m )?(\d+(?:\.\d+)?)s$/.exec(text); return Math.round((Number(m[1] ?? 0) * 60 + Number(m[2])) * 1000); };
+    const c = claude("atlas-ingest", { cwd, branch: "feat/ingest", model: "opus-5.5", tokens: SESS["atlas-ingest"].tokens });
+    c.title(ms(T(11, 10)), "atlas ingest");
+    c.ask(ms(T(11, 10)), brief("a-ask"));
+    c.text(ms(T(11, 11)), t[1].text);
+    // A subagent the parent waited on: its Agent call returns at the handoff's done time with the result text.
+    const agent = (sid, id, type, at, done) => {
+      c.tool(ms(at), "toolu-" + id, "Agent", { description: SESS[sid].name, subagent_type: type, prompt: brief(id) });
+      c.result(ms(done), "toolu-" + id, HB[id].result, { extra: { toolUseResult: { status: "completed", agentId: sid } } });
+    };
+    // A Codex run started with `codex exec`; the run's own log carries its parent.
+    const run = (id, at, done, file) => {
+      c.tool(ms(at), "toolu-" + id, "Bash", { command: "codex exec --full-auto < /tmp/" + file });
+      c.result(ms(done), "toolu-" + id, "codex exited.");
+    };
+    agent("a-scan", "a-h-scan", "Explore", T(11, 12), T(11, 20));
+    run("a-h-parse", T(11, 22), T(12, 5), "handoff-ingest-parser.md");
+    run("a-h-store", T(11, 22), T(11, 48), "handoff-ingest-store.md");
+    run("a-h-index", T(11, 23), T(12, 18), "handoff-ingest-index.md");
+    agent("a-docs", "a-h-docs", "general-purpose", T(11, 25), T(11, 40));
+    agent("a-review", "a-h-review", "general-purpose", T(12, 6), T(12, 26));
+    c.text(ms(T(12, 19)), t[8].text);
+    c.tool(ms(T(12, 20)), "toolu-a-relay", "SendMessage", { to: "harbor", message: brief("a-relay") });
+    c.result(ms(T(12, 20), 0, 200), "toolu-a-relay", "Message sent to harbor", { extra: { toolUseResult: { success: true } } });
+    c.busy(ms(T(11, 10)), ms(T(11, 24)));
+    c.busy(ms(T(12, 5)), ms(T(12, 8)));
+    c.busy(ms(T(12, 18)), ms(T(12, 31)));
+    c.text(ms(T(12, 30)), brief("a-result"));
+    c.tokens(ms(T(12, 30)));
+    c.save(); live("atlas-ingest", "idle");
+    const sub = (sid, model, tool) => claude(sid, { cwd, model, tokens: SESS[sid].tokens, agent: { parent: "atlas-ingest", slug: atlas, tool: "toolu-" + tool } });
+    // a-scan: the survey.
+    {
+      const s = sub("a-scan", "sonnet-5", "a-h-scan"), st = tx("a-scan");
+      s.prompt(ms(T(11, 12)), brief("a-h-scan"));
+      s.tool(ms(T(11, 14)), "toolu-as1", "Grep", { pattern: st[1].arg });
+      s.result(ms(T(11, 14)) + dur(st[1].secs), "toolu-as1", st[1].out);
+      s.busy(ms(T(11, 12)), ms(T(11, 17)));
+      s.text(ms(T(11, 19)), st[2].text);
+      s.tokens(ms(T(11, 20)));
+      s.save();
+    }
+    // a-docs: one edit, no closing words.
+    {
+      const s = sub("a-docs", "haiku-4.5", "a-h-docs"), st = tx("a-docs"), d = st[1].diff;
+      s.prompt(ms(T(11, 25)), brief("a-h-docs"));
+      s.tool(ms(T(11, 30)), "toolu-ad1", "Edit", { file_path: path.join(cwd, st[1].arg), old_string: d.filter(([k]) => k !== "add").map(([, x]) => x.slice(1)).join("\n"), new_string: d.filter(([k]) => k !== "del").map(([, x]) => x.slice(1)).join("\n") });
+      s.result(ms(T(11, 30)), "toolu-ad1", "The file " + st[1].arg + " has been updated.");
+      s.busy(ms(T(11, 25)), ms(T(11, 38)));
+      s.tokens(ms(T(11, 40)));
+      s.save();
+    }
+    // a-review: reads the parser diff and sends a grandchild to find callers.
+    {
+      const s = sub("a-review", "opus-5.5", "a-h-review"), st = tx("a-review");
+      s.prompt(ms(T(12, 6)), brief("a-h-review"));
+      s.tool(ms(T(12, 10)), "toolu-a-h-grep", "Agent", { description: SESS["a-review-grep"].name, subagent_type: "general-purpose", prompt: brief("a-h-grep") });
+      s.result(ms(T(12, 14)), "toolu-a-h-grep", HB["a-h-grep"].result, { extra: { toolUseResult: { status: "completed", agentId: "a-review-grep" } } });
+      s.busy(ms(T(12, 6)), ms(T(12, 13)));
+      s.busy(ms(T(12, 17)), ms(T(12, 26)));
+      s.text(ms(T(12, 25)), st[2].text);
+      s.tokens(ms(T(12, 26)));
+      s.save();
+    }
+    {
+      const s = sub("a-review-grep", "haiku-4.5", "a-h-grep"), st = tx("a-review-grep");
+      s.prompt(ms(T(12, 10)), brief("a-h-grep"));
+      s.tool(ms(T(12, 11)), "toolu-ag1", "Grep", { pattern: st[1].arg });
+      s.result(ms(T(12, 11)) + dur(st[1].secs), "toolu-ag1", st[1].out);
+      s.busy(ms(T(12, 10)), ms(T(12, 13)));
+      s.text(ms(T(12, 12)), st[2].text);
+      s.tokens(ms(T(12, 14)));
+      s.save();
+    }
+    // The three Codex runs: one command each, a closing line, and the hand-back the handoff's result reads.
+    const codexRun = (sid, handoff, branch, agentPath, at, cmdAt, doneAt, failed) => {
+      const st = tx(sid), r = codex(sid, ms(at), { cwd, branch, tokens: SESS[sid].tokens, agentPath });
+      r.user(ms(at), "Semon-Parent: claude:atlas-ingest:toolu-" + handoff + "\n" + brief(handoff));
+      r.shell(ms(cmdAt), "call-" + sid, st[1].arg);
+      r.output(ms(cmdAt) + dur(st[1].secs), "call-" + sid, st[1].out, st[1].ok ? 0 : 1);
+      r.text(ms(doneAt, -60), st[2].text);
+      r.handback(ms(doneAt), HB[handoff].result);
+      if (failed) r.failed(ms(doneAt));
+      r.tokens(ms(doneAt, -1));
+      return r;
+    };
+    {
+      const r = codexRun("a-parse", "a-h-parse", "feat/ingest-parser", "workers/ingest-parser", T(11, 22), T(11, 30), T(12, 5), false);
+      r.busy(ms(T(11, 22)), ms(T(11, 46))); r.busy(ms(T(11, 50)), ms(T(12, 5)));
+      r.save();
+    }
+    {
+      const r = codexRun("a-store", "a-h-store", "feat/ingest-store", "workers/ingest-store", T(11, 22), T(11, 30), T(11, 48), false);
+      r.busy(ms(T(11, 22)), ms(T(11, 36))); r.busy(ms(T(11, 40)), ms(T(11, 48)));
+      r.save();
+    }
+    {
+      const r = codexRun("a-index", "a-h-index", "feat/ingest-index", "workers/ingest-index", T(11, 23), T(11, 56), T(12, 18), true);
+      r.busy(ms(T(11, 23)), ms(T(11, 50))); r.busy(ms(T(11, 56)), ms(T(12, 18)));
+      r.save();
+    }
+  }
   if (extras) {
     // result-card: an idle session that replied to your own message.
     {
@@ -515,7 +623,11 @@ export function write(out, { extras = false } = {}) {
     fan.busy(ms(T(11, 0)), ms(T(12, 40)));
     fan.save(); live("fan-out", "busy", "Fan-out");
   }
-  put(".claude.json", JSON.stringify({ projects: { "/fixture/principal": { lastSessionId: "principal", lastStartTime: ms(T(9, 45)), lastCost: 40, lastDuration: 300000, lastAPIDuration: 260000, lastToolDuration: 40000, lastLinesAdded: 12, lastLinesRemoved: 3, lastModelUsage: {} } } }));
+  // Claude Code's own figure for a session's last run: principal's, and harbor's, which is far below the API-equivalent one.
+  put(".claude.json", JSON.stringify({ projects: {
+    "/fixture/principal": { lastSessionId: "principal", lastStartTime: ms(T(9, 45)), lastCost: 40, lastDuration: 300000, lastAPIDuration: 260000, lastToolDuration: 40000, lastLinesAdded: 12, lastLinesRemoved: 3, lastModelUsage: {} },
+    "/fixture/harbor": { lastSessionId: "harbor", lastStartTime: ms(T(11, 40)), lastCost: 8.41, lastDuration: 3600000, lastAPIDuration: 3000000, lastToolDuration: 500000, lastLinesAdded: 41, lastLinesRemoved: 9, lastModelUsage: {} },
+  } }));
   put("proc/locks", locks);
   return ms(NOW);
 }

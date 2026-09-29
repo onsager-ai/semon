@@ -27,7 +27,7 @@ const measure = (page, root) => page.evaluate((rootSelector) => {
 
 export default async function namesCheck(browser) {
   const D = await data(), r = reporter("names"), results = {};
-  const claude = Object.values(D.SESS).find((s) => s.harness === "claude" && s.lane), codex = Object.values(D.SESS).find((s) => s.harness === "codex");
+  const claude = Object.values(D.SESS).find((s) => s.harness === "claude" && s.lane), codex = Object.values(D.SESS).find((s) => s.harness === "codex" && s.lane);
   r.expect(!!claude && !!codex, "the fixture must hold a Claude and a Codex session");
   const seen = { "Claude Code": 0, Claude: 0, Codex: 0 };
 
@@ -51,7 +51,9 @@ export default async function namesCheck(browser) {
       await goto(page, { v: "session", id: s.id }, D);
       await page.waitForTimeout(200);
       const top = await measure(page, "#topbar");
-      if (top.length) audit("topbar-" + s.harness, top); else rec["topbar-" + s.harness] = "dropped by the line fitter";
+      // A session's top bar always shows its harness. If the line fitter dropped the label, nothing was audited, so fail.
+      r.expect(top.length > 0, tag + ": the top bar of " + s.name + " (" + s.harness + ") shows no harness label, so none was audited");
+      if (top.length) audit("topbar-" + s.harness, top);
       if (s === claude) await shot("session");
     }
     await goto(page, { v: "analytics" }, D);

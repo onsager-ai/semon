@@ -68,7 +68,15 @@ export default async function barCheck(browser) {
   const roots = allSessions.filter((s) => !parentOf(s.id) && s.lane).sort((a, b) => b.last - a.last);
   const shownRoots = new Set(roots.slice(0, 8).map((s) => s.id));
   const treeRoot = (sid) => { const seen = new Set(); while (parentOf(sid) && !seen.has(sid)) { seen.add(sid); sid = parentOf(sid); } return sid; };
-  const expectedTreeRows = allSessions.filter((s) => shownRoots.has(treeRoot(s.id))).length;
+  // A parent lists its five newest children, plus any that is working, waiting or has such a session below it; the rest fold
+  // into "Show N more" with everything below them (#56), so those rows aren't in the sidebar tree.
+  const kidsOf = (sid) => Object.values(D.SESS).filter((s) => s.id !== sid && s.parent === sid);
+  const activeIn = (sid, seen = new Set()) => { if (seen.has(sid)) return false; seen.add(sid); return D.SESS[sid].state === "work" || D.SESS[sid].state === "wait" || kidsOf(sid).some((k) => activeIn(k.id, seen)); };
+  const folded = new Set();
+  const foldAll = (sid) => { if (folded.has(sid)) return; folded.add(sid); kidsOf(sid).forEach((k) => foldAll(k.id)); };
+  const foldBelow = (sid, seen = new Set()) => { if (seen.has(sid)) return; seen.add(sid); kidsOf(sid).sort((a, b) => b.last - a.last).forEach((k, i) => { if (i >= 5 && !activeIn(k.id)) foldAll(k.id); else foldBelow(k.id, seen); }); };
+  Object.values(D.SESS).filter((s) => !s.parent).forEach((s) => foldBelow(s.id));
+  const expectedTreeRows = allSessions.filter((s) => shownRoots.has(treeRoot(s.id)) && !folded.has(s.id)).length;
   const treePair = D.H.find((h) => h.kind === "spawn" && roots.slice(0, 8).some((s) => s.id === h.from) && D.SESS[h.to]) ?? null;
   const X = { gapMarkers: 0, tableMessages: 0, fallbackTools: {} };
   for (const es of Object.values(D.TX)) for (const e of es) { if (isGap(e)) X.gapMarkers++; if ((e.k === "a" || e.k === "u") && TABLE.test(e.text)) X.tableMessages++; if (e.k === "tool" && !KNOWN.has(e.name) && !/^mcp__/.test(e.name)) X.fallbackTools[e.name] = (X.fallbackTools[e.name] ?? 0) + 1; }
