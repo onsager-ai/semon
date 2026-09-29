@@ -239,6 +239,7 @@
     for (const s of Object.values(SESS)) if (s.activity && s.activity[3] != null) s.activity[2] = Math.floor((NOW - s.activity[3]) / 1000);
   }
   function adopt(m) {
+    CHILDREN = null;
     serverNow = m.now; fetchedAt = Date.now(); TOK = m.tx ?? {};
     for (const k of Object.keys(MACHINE)) { delete MACHINE[k]; delete MACHINE_UP[k]; delete MACHINE_LAST[k]; }
     // Several machines come as `machines`; one comes as `machine` alone.
@@ -560,11 +561,14 @@
   }
   // Sessions match by name, repo, branch, machine, harness and the messages that started their turns.
   const sessMatch = (s, q) => !q || [s.name, s.repo, s.branch, MACHINE[s.machine], s.movedFrom ? MACHINE[s.movedFrom] : "", HARNESS[s.harness], s.role ? "role no repo" : "", ...(TURNS[s.id] ?? []).map((t) => t.start?.brief ?? t.u?.text ?? "")].join(" ").toLowerCase().includes(q.toLowerCase());
+  // Built once per model and per render (both drop it) and shared: callers copy an array before reordering it.
+  let CHILDREN = null;
   const sessionChildren = () => {
+    if (CHILDREN) return CHILDREN;
     const children = new Map();
     for (const s of Object.values(SESS)) { const parent = parentOf(s.id); if (parent && SESS[parent]) { if (!children.has(parent)) children.set(parent, []); children.get(parent).push(s); } }
     for (const xs of children.values()) xs.sort((a, b) => b.last - a.last);
-    return children;
+    return (CHILDREN = children);
   };
   // Sibling navigation follows the handoffs in their original order; the sidebar and Runs list stay newest-first.
   const childSessions = (sid) => [...(sessionChildren().get(sid) ?? [])].sort((a, b) => (originHandoff(a.id)?.at ?? a.last) - (originHandoff(b.id)?.at ?? b.last));
@@ -867,9 +871,9 @@
     row.setAttribute("aria-label", [s.name, s.kind, STATE[s.state], dur(s.start, s.state === "work" ? null : s.last), origin?.brief ? oneLine(origin.brief) : "", "API-equivalent cost " + costText(cost)].filter(Boolean).join(" · "));
     row.addEventListener("click", () => { if (sheet) { pendingSessionOpen = s.id; sheet.close(); } else { $(".runs-popover")?.remove(); goSession(s.id); } }); return row;
   }
-  function appendRunsTree(parent, box, sheet, seen = new Set([parent.id])) {
-    const children = [...(sessionChildren().get(parent.id) ?? [])].sort((a, b) => b.last - a.last);
-    for (const child of children) { if (seen.has(child.id)) continue; seen.add(child.id); box.append(runRow(child, 0, sheet)); const nested = sessionChildren().get(child.id) ?? []; if (nested.length) { const group = el("div", "runs-group"); appendRunsTree(child, group, sheet, seen); box.append(group); } }
+  function appendRunsTree(parent, box, sheet, seen = new Set([parent.id]), tree = sessionChildren()) {
+    const children = [...(tree.get(parent.id) ?? [])].sort((a, b) => b.last - a.last);
+    for (const child of children) { if (seen.has(child.id)) continue; seen.add(child.id); box.append(runRow(child, 0, sheet)); const nested = tree.get(child.id) ?? []; if (nested.length) { const group = el("div", "runs-group"); appendRunsTree(child, group, sheet, seen, tree); box.append(group); } }
   }
   function openRuns(s, anchor) {
     $(".runs-popover")?.remove(); if (viewerEl) return; const children = sessionChildren().get(s.id) ?? []; if (!children.length) return;
@@ -1314,7 +1318,7 @@
   // ---- Render --------------------------------------------------------------------------------------------------------
   function render() {
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
-    closeAccountMenu();
+    closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
     tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; page.replaceChildren(); page.classList.remove("child-page"); page.style.removeProperty("--h");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
@@ -1413,9 +1417,18 @@
     if (Math.abs(delta) < 1e-9) { note.textContent = "No change vs previous " + rangeName(); return note; }
     note.append(el("span", delta > 0 ? "up" : "down", (delta > 0 ? "+" : "−") + format(Math.abs(delta))), " vs previous " + rangeName()); return note;
   }
+  // The most sessions busy at one moment in [from, to): each session's intervals clipped and merged so it counts once, then
+  // a sweep over the sorted starts (+1) and ends (−1), ends first at a shared instant.
   function peakBusy(rows, from, to) {
-    const starts = rows.flatMap((r) => r.busy.filter(([a, b]) => a < to && b > from).map(([a]) => Math.max(a, from)));
-    return starts.reduce((best, at) => Math.max(best, rows.filter((r) => r.busy.some(([a, b]) => a <= at && at < b)).length), 0);
+    const events = [];
+    for (const r of rows) {
+      const iv = r.busy.map(([a, b]) => [Math.max(a, from), Math.min(b, to)]).filter(([a, b]) => a < b).sort((x, y) => x[0] - y[0]);
+      let cur = null;
+      for (const [a, b] of iv) { if (cur && a <= cur[1]) cur[1] = Math.max(cur[1], b); else { if (cur) events.push([cur[0], 1], [cur[1], -1]); cur = [a, b]; } }
+      if (cur) events.push([cur[0], 1], [cur[1], -1]);
+    }
+    events.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+    let now = 0, best = 0; for (const [, d] of events) { now += d; if (now > best) best = now; } return best;
   }
   function chartWidth() { const page = $("#page"), style = getComputedStyle(page); return Math.max(280, Math.round(page.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight))); }
   const niceStep = (max) => [.25, .5, 1, 2, 5, 10, 20, 50, 100, 200, 500].find((x) => x * 3 >= max) ?? 1000;
@@ -1517,7 +1530,8 @@
     metrics.dataset.counts = loading ? "loading" : "ready";
     if (unavailable) toolNote.append(" · — for " + unavailable + (unavailable === 1 ? " session" : " sessions"));
     addMetric("Tool calls", countText(now.tools), toolNote, countText(now.errors) + " failed (" + pct(now.errors, now.tools) + ") · previous " + rangeName() + ": " + countText(previous.errors) + " failed (" + pct(previous.errors, previous.tools) + ")" + (loading ? " · still counting" : ""));
-    addMetric("Peak concurrency", countText(peakBusy(all, from, to)), deltaNote(peakBusy(all, from, to), peakBusy(all, from - rangeMs(analyticsRange), from), countText), "The most sessions busy at the same moment.");
+    const peak = peakBusy(all, from, to), peakBefore = peakBusy(all, from - rangeMs(analyticsRange), from);
+    addMetric("Peak concurrency", countText(peak), deltaNote(peak, peakBefore, countText), "The most sessions busy at the same moment.");
     addMetric("Waited on you", timeText(now.waitsMs), deltaNote(now.waitsMs, previous.waitsMs, timeText), "Median wait " + timeText(now.medianWaitMs) + " · previous " + rangeName() + ": " + timeText(previous.medianWaitMs));
     const currentWait = now.longestCurrent; addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longestWaitMs, timeText), currentWait ? currentWait.s.name + " has waited on you for " + timeText(currentWait.ms) : "No session is waiting on you"); page.append(metrics);
     const breakdowns = el("div", "analytics-breakdowns"); breakdowns.append(analyticsBreakdown("By repo", all, from, to, "repo"), analyticsBreakdown("By machine", all, from, to, "machine"), analyticsBreakdown("By harness and model", all, from, to, "harness"));
@@ -1867,21 +1881,25 @@
     const m = $("#main"); return { top: m.scrollTop, height: m.scrollHeight, viewport: m.clientHeight, gap: Math.max(0, m.scrollHeight - m.clientHeight - m.scrollTop) };
   }
   function scrollToEnd(behavior = "smooth") { if (phone.matches) window.scrollTo({ top: document.documentElement.scrollHeight, behavior }); else { const m = $("#main"); m.scrollTo({ top: m.scrollHeight, behavior }); } }
+  // The button is rebuilt only when what it shows changes (hidden or not, and the new-entry count), not on every scroll.
+  let jumpKey = "";
   function syncJump() {
-    if (route.v !== "session") { LIVE.fresh = 0; jumpButton.hidden = true; return; }
+    if (route.v !== "session") { LIVE.fresh = 0; jumpButton.hidden = true; jumpKey = ""; return; }
     const { gap } = scrollMetrics(); if (gap <= 80) LIVE.fresh = 0;
-    jumpButton.hidden = gap <= 80; jumpButton.replaceChildren();
+    const key = (gap <= 80) + "|" + LIVE.fresh; if (key === jumpKey) return;
+    jumpKey = key; jumpButton.hidden = gap <= 80; jumpButton.replaceChildren();
     if (LIVE.fresh) jumpButton.append(el("span", "new-count", LIVE.fresh + " new"));
     jumpButton.append(icon(I.down));
     jumpButton.setAttribute("aria-label", LIVE.fresh ? "Jump to bottom; " + LIVE.fresh + " new entries" : "Jump to bottom of transcript");
   }
-  function clearNewEntries() { LIVE.fresh = 0; jumpButton.hidden = true; }
+  function clearNewEntries() { LIVE.fresh = 0; jumpButton.hidden = true; jumpKey = ""; }
   jumpButton.addEventListener("click", () => scrollToEnd("smooth"));
   window.addEventListener("scroll", syncJump, { passive: true });
   $("#main").addEventListener("scroll", syncJump, { passive: true });
   const cancelOpeningEndPin = () => { if (openingEndUntil) stopOpeningEndPin(); };
   window.addEventListener("wheel", cancelOpeningEndPin, { passive: true });
   window.addEventListener("touchmove", cancelOpeningEndPin, { passive: true });
+  window.addEventListener("pointerdown", cancelOpeningEndPin, { passive: true }); // a press anywhere, a scrollbar drag included
   document.addEventListener("keydown", (e) => {
     if (!e.defaultPrevented && !e.target.closest?.("input, textarea, select, [contenteditable='true']") && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) cancelOpeningEndPin();
   });

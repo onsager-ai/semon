@@ -153,6 +153,54 @@ async function checkLongSessionOpenEnd(page) {
   };
 }
 
+// The open-at-end pin holds the tail for 2 s while the page settles, yields at once to the reader (wheel, or a press such as a
+// scrollbar drag), and lets go for good after the window. Each case opens the long session afresh (`opened` is the page's
+// clock when its last message painted, which is when the pin began or just after) and, once the reader is placed, grows the
+// transcript by 1200 px the way settling fonts and clamped cards would. The reader must not be moved: not to the end
+// while the pin would still be running, and not by growth after the window.
+async function checkPinYields(page, how) {
+  const opened = await page.evaluate(() => {
+    window.__pinInput = null;
+    for (const type of ["wheel", "pointerdown"]) window.addEventListener(type, () => { window.__pinInput ??= performance.now(); }, { passive: true, capture: true });
+    return performance.now();
+  });
+  const scrolled = () => page.evaluate(() => {
+    const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+    return { top: sc.scrollTop, height: sc.scrollHeight, gap: sc.scrollHeight - sc.scrollTop - sc.clientHeight };
+  });
+  const main = await page.locator("#main").boundingBox(), x = main ? main.x + Math.min(main.width / 2, 200) : 195;
+  if (how === "wheel") {
+    await page.mouse.move(x, 300);
+    await page.mouse.wheel(0, await page.evaluate(() => -innerHeight * 1.5));
+  } else if (how === "press") {
+    await page.mouse.move(x, 300);
+    await page.mouse.down(); await page.mouse.up();
+    await page.evaluate(() => {
+      const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+      sc.scrollTop = Math.max(0, sc.scrollTop - innerHeight * 1.5); // where a scrollbar drag would have left the reader
+    });
+  } else {
+    await page.waitForFunction((t) => performance.now() - t > 2600, opened, { polling: 100 });
+  }
+  await page.waitForTimeout(600);
+  const before = await scrolled();
+  const inputAt = await page.evaluate(() => window.__pinInput);
+  await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.className = "pin-probe"; probe.style.height = "1200px";
+    document.querySelector("#page section[aria-label='Transcript'] .turns").append(probe);
+  });
+  await page.waitForTimeout(400);
+  const after = await scrolled();
+  const late = await page.evaluate((t) => performance.now() - t, opened);
+  await page.evaluate(() => document.querySelector(".pin-probe")?.remove());
+  const timely = how === "after" ? late > 2000 : inputAt != null && inputAt - opened < 1000;
+  return {
+    how, before, after, inputAfterMs: inputAt == null ? null : Math.round(inputAt - opened), lateMs: Math.round(late),
+    ok: timely && after.height - before.height >= 1000 && Math.abs(after.top - before.top) <= 1 && (how === "after" || before.gap > 80),
+  };
+}
+
 function liveRecords({ sid, cwd, branch, sample, now }) {
   const records = [];
   let seq = 0;
@@ -203,6 +251,7 @@ async function runScreen(browser, screen, server, fixture) {
   const metrics = {
     coldOpen: { samplesMs: [], medianMs: null },
     openAtEnd: null,
+    pinYields: [],
     switch: {
       marathonToRelay: { samplesMs: [], medianMs: null },
       relayToMarathon: { samplesMs: [], medianMs: null },
@@ -325,6 +374,15 @@ async function runScreen(browser, screen, server, fixture) {
       await waitPaint(page, PAINT_MARKERS[id]);
       return await page.evaluate((start) => performance.now() - start, started);
     };
+
+    for (const how of ["wheel", "press", "after"]) {
+      const managed = await makePage();
+      await openMarathon(managed);
+      const result = await checkPinYields(managed.page, how);
+      metrics.pinYields.push(result);
+      if (!result.ok) failures.push(`open-at-end pin (${how}) did not leave the reader where they were: ${JSON.stringify(result)}`);
+      await finishPage(managed);
+    }
 
     let switchPage = null;
     for (let i = 0; i < 3; i++) {
