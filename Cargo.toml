@@ -8,6 +8,9 @@ members = [
     "crates/semon-sessions",
     "crates/semon-store",
 ]
+# Patched in through [patch.crates-io] below, not a member: fmt, clippy and
+# tests leave its upstream code as published.
+exclude = ["vendor/tiny_http"]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,3 +31,8 @@ serde_json_canonicalizer = "0.3.2"
 sha2 = "0.10.9"
 thiserror = "2"
 tiny_http = { version = "=0.12.0", features = ["ssl-rustls"] }
+
+# tiny_http 0.12.0 with one fix to its connection pool; see
+# vendor/tiny_http/SEMON-PATCH.md.
+[patch.crates-io]
+tiny_http = { path = "vendor/tiny_http" }
