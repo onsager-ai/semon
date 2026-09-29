@@ -443,6 +443,7 @@
 
   // ---- State & navigation ---------------------------------------------------------------
   const phone = window.matchMedia("(max-width: 760px)");
+  let route = { v: "home" }; // (before the layout preferences, which read it)
   let wideMode = false, railMode = false, treePrefs = {};
   try { wideMode = localStorage.getItem("semon.wide") === "1"; } catch {}
   try { railMode = localStorage.getItem("semon.rail") === "1"; } catch {}
@@ -464,7 +465,7 @@
     try { localStorage.setItem("semon.tree", JSON.stringify(treePrefs)); } catch {}
   }
   const railToggle = $("#rail-toggle"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
-  let route = { v: "home" }; let groupBy = "recent"; let query = ""; let analyticsRange = 7, analyticsMeasure = "hours";
+  let groupBy = "recent"; let query = ""; let analyticsRange = 7, analyticsMeasure = "hours";
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
   let pendingSessionOpen = null, pendingFlashHandoff = null;
   let accountOpen = false;
