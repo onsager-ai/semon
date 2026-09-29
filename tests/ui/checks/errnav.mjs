@@ -1,6 +1,6 @@
 // Errors mode: the session's "N errors" steps through every failed step, on its own server and fixture (the other checks'
-// servers stay untouched). The fixture is the sample plus a `faults` lane: 520 Bash calls in four turns, seven of them
-// failed, spread over three pages of the transcript, so most failures are on pages the session page hasn't loaded.
+// servers stay untouched). The fixture is the sample plus a `faults` lane: 1300 Bash calls in four turns, seven of them
+// failed, spread over seven pages of the transcript, so most failures are on pages the session page hasn't loaded.
 //
 // Asserted, at 390×844 light and 1280×860 light (the dark schemes are drawn and looked at, not stepped through):
 //   - clicking "N errors" shows "Error 1 of N", N the badge's (and the model's) count, and says so in a polite live region;
@@ -24,7 +24,9 @@ import { ENV, launch, reporter, overflow } from "../lib.mjs";
 import { write } from "../fixture.mjs";
 import { serve, model, open, appear } from "./live.mjs";
 
-const CALLS = 520, TURN = 130, FAILED = [2, 60, 140, 240, 330, 470, 515];
+// The first three failures share the transcript's first page, far from the last page the session opens on; the fourth is
+// two pages past them, with a turn's worth of steps after it to centre in.
+const CALLS = 1300, TURN = 325, FAILED = [2, 60, 140, 520, 700, 1000, 1290];
 const iso = (t) => new Date(t).toISOString();
 const sleep = (n) => new Promise((r) => setTimeout(r, n));
 
