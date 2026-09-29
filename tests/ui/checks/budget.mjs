@@ -262,7 +262,7 @@ const scenarios = {
   }),
 
   analytics: (server, vp, browser) => open(browser, vp, async (page, rec) => {
-    const counted = () => softly(page.waitForFunction(() => document.querySelector(".analytics-metrics")?.dataset.counts === "ready", null, { timeout: 60_000, polling: 100 }));
+    const counted = () => softly(page.waitForFunction(() => document.querySelector(".analytics-metrics")?.dataset.counts === "ready", null, { timeout: 30_000, polling: 100 }));
     await page.goto(url(server, "/analytics"), { waitUntil: "load" });
     await settled(page);
     const ready = await counted();
@@ -408,6 +408,10 @@ function markdown(rows, over) {
       lines.push(`| ${name} | ${p} | ${e.count}${e.failed ? ` (+${e.failed} failed)` : ""} | ${Object.entries(e.statuses).map(([s, n]) => `${s}x${n}`).join(" ")} | ${kb(e.transferBytes)} | ${kb(e.decodedBytes)} |`);
     }
   }
+  // A row whose screen never finished loading (a tool-call count still outstanding after 30 s, the network not quiet, the
+  // first entry not drawn) measured a stuck page, not the screen: say so beside the numbers.
+  const unsettled = Object.entries(rows).filter(([, r]) => r.ready === false || r.quiet === false || r.drawn === false || r.stuck === true);
+  if (unsettled.length) lines.push("", `Did not settle (read those rows with care): ${unsettled.map(([name, r]) => `${name} (${["ready", "quiet", "drawn"].filter((k) => r[k] === false).concat(r.stuck ? ["stuck"] : []).join(", ")})`).join("; ")}.`);
   const overLines = over.filter((o) => o.metric);
   lines.push("", overLines.length ? "Over budget:" : "Over budget: none.", ...overLines.map((o) => `- ${o.scenario} ${o.metric}: ${o.value} > ${o.ceiling}`));
   const unbudgeted = over.filter((o) => o.note);
