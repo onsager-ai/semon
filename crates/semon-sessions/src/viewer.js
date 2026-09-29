@@ -1080,16 +1080,15 @@
     if (typeof e?.secs === "string") { const m = /^(\d+(?:\.\d+)?)s?$/.exec(e.secs.trim()); if (m) return Number(m[1]); }
     return null;
   }
+  // A masked thought (Claude redacts its thinking, leaving only "Thought for Ns") is kept in the list, so entry keys and turn
+  // starts still line up with the index, but the page draws nothing for it.
   function transcriptEntries(entries, sid) {
     const out = [];
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i]; if (e.k !== "think") { out.push(e); continue; }
       const pending = isPendingThought(e, entries, i, sid);
       const row = { ...e, ...(pending ? { pending: true } : {}), displaySecs: thoughtSeconds(e) };
-      if (!isMaskedThought(e, entries, i, sid)) { out.push(row); continue; }
-      let j = i, sum = 0, measured = true;
-      while (j < entries.length && isMaskedThought(entries[j], entries, j, sid)) { const secs = thoughtSeconds(entries[j]); if (secs == null) measured = false; else sum += secs; j++; }
-      out.push({ ...row, displaySecs: measured ? Math.round(sum) : null, grouped: j - i }); i = j - 1;
+      out.push(row);
     }
     return out;
   }
@@ -1142,8 +1141,11 @@
     const firsts = turnMode ? new Map((TURNS[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t])) : new Map(); let cur = null;
     // A live update draws only the turns that changed (opts.only, by turn id).
     const owner = opts.only ? new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : null;
-    const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
-      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .think, .think-masked, .think-pending")) { blk.remove(); return; }
+    const closeTurn = () => { flush(); if (!cur) return; const { t, blk, masked } = cur; cur = null; tx = box;
+      // A turn whose only thinking was masked is left with nothing to draw (no header, no rows): it goes, unless its end row still says something.
+      const bare = masked && !blk.querySelector(".tx > *, .turn-h");
+      if (bare && (opts.excludeH && t.last || !turnEnd(t) && !t.out.length)) { blk.remove(); return; }
+      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .think, .think-pending")) { blk.remove(); return; }
       if (opts.excludeH && t.last) return;
       const end = turnEnd(t); if (!end && !t.out.length) return;
       const d = el("div", "turn-end");
@@ -1163,6 +1165,7 @@
       if (opts.excludeH && e.k === "end" && /^Returned to /.test(e.text ?? "")) continue;
       // Entries that render nothing (empty thinking, hidden kinds) must not split a run of tool calls.
       if (e.k === "think" && (!show.thinking || find)) continue;
+      if (e.k === "think" && isMaskedThought(e)) { if (cur) cur.masked = true; continue; }
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
@@ -1199,7 +1202,6 @@
       else if (e.k === "a") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg assistant"), e); m.append(markdown(e.text)); tx.append(m); }
       else if (e.k === "think") {
         if (isPendingThought(e)) { const pending = keyed(el("div", "think-pending"), e); pending.append(el("span", "spin"), el("span", null, "Thinking…")); tx.append(pending); }
-        else if (isMaskedThought(e)) { const label = e.displaySecs == null ? "Thought" : "Thought for " + e.displaySecs + "s"; tx.append(keyed(el("div", "think-masked", label), e)); }
         else {
           const group = el("div", "thought"), b = keyed(el("button", "think"), e), text = markdown(thoughtText(e), "think-text");
           b.type = "button"; b.setAttribute("aria-expanded", "false"); b.append(el("span", null, e.displaySecs == null ? "Thought" : "Thought for " + Math.round(e.displaySecs) + "s"), icon(I.chev, "chev"));
@@ -1850,7 +1852,7 @@
   // are new.
   function patchSession(dirty) {
     tick(); const s = SESS[route.id], box = $("#page .turns");
-    const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .step, .hcard, .think, .think-masked, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
+    const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .step, .hcard, .think, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
     const before = keys();
     // Only the changed turns are drawn again, unless the turns shown no longer match the index or nothing was shown.
     const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some((b) => !TURN.has(b.dataset.turn));

@@ -308,11 +308,16 @@ export default async function barCheck(browser) {
   }
   r.expect(childAssertions.length === 2, "lineage, sibling, brief/return and Runs checks did not run on phone and desktop: " + childAssertions.length);
 
-  // Inject a deterministic thinking run through the served /api/tx path: two timed masked thoughts, a readable thought,
-  // and two untimed masked thoughts. The last two rows must merge and stay plain text with no disclosure chevron.
+  // Masked thinking (Claude redacts it, leaving only a duration) draws nothing. Injected through the served /api/tx path:
+  // a readable thought, two timed masked thoughts, another readable thought and two untimed masked thoughts. Only the two
+  // readable thoughts get a row, each with its disclosure control.
   const thoughtSid = Object.keys(D.SESS).find((sid) => (D.TX[sid] ?? []).length);
   let thoughts = null;
   if (thoughtSid) {
+    const plain = await served(browser, { size: "phone" });
+    await goto(plain, { v: "session", id: thoughtSid }, D);
+    const baseThoughts = await plain.evaluate(() => document.querySelectorAll(".turns .think").length);
+    await plain.context().close();
     const page = await served(browser, { size: "phone" });
     await page.route("**/api/tx*", async (route) => {
       const u = new URL(route.request().url()); if (u.searchParams.get("sid") !== thoughtSid) return route.continue();
@@ -321,9 +326,20 @@ export default async function barCheck(browser) {
       await route.fulfill({ response, json: body });
     });
     await goto(page, { v: "session", id: thoughtSid }, D);
-    await page.waitForFunction(() => document.querySelectorAll(".think-masked").length >= 2);
-    thoughts = await page.evaluate(() => { const masked = [...document.querySelectorAll(".think-masked")], tail = masked.slice(-2); return { tail: tail.map((x) => x.textContent), plain: masked.every((x) => x.tagName !== "BUTTON" && !x.querySelector(".chev, svg")), readable: [...document.querySelectorAll(".think")].some((x) => x.tagName === "BUTTON" && x.querySelector(".chev") && x.nextElementSibling?.hidden), errors: [] }; });
+    await page.waitForFunction((base) => document.querySelectorAll(".turns .think").length >= base + 2, baseThoughts);
+    thoughts = await page.evaluate((base) => { const rows = [...document.querySelectorAll(".turns .think")]; return { maskedRows: document.querySelectorAll(".think-masked").length, addedThoughts: rows.length - base, readable: rows.length > 0 && rows.every((x) => x.tagName === "BUTTON" && x.querySelector(".chev") && x.nextElementSibling?.hidden), emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] }; }, baseThoughts);
     thoughts.errors = page.errors;
+    await page.context().close();
+  }
+  // The fixture's principal session opens a turn with three masked thoughts before its first tool call: no thought rows,
+  // the tool call still there, and no turn block left empty.
+  let maskedTurn = null;
+  if (D.SESS.principal) {
+    const page = await served(browser, { size: "phone" });
+    await goto(page, { v: "session", id: "principal" }, D);
+    await page.waitForSelector(".turns .step", { state: "attached" });
+    maskedTurn = await page.evaluate(() => ({ maskedRows: document.querySelectorAll(".think-masked").length, thoughtRows: document.querySelectorAll(".turns .think, .turns .think-pending").length, steps: document.querySelectorAll(".turns .step").length, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] }));
+    maskedTurn.errors = page.errors;
     await page.context().close();
   }
 
@@ -341,13 +357,20 @@ export default async function barCheck(browser) {
     await page.context().close();
   }
 
-  r.results = { modes, expected: X, thoughts, extra, childAssertions };
+  r.results = { modes, expected: X, thoughts, maskedTurn, extra, childAssertions };
   r.expect(!!thoughtSid, "no session transcript was available for the masked-thinking check");
   if (thoughts) {
     r.expect(thoughts.errors.length === 0, "masked-thinking route: page errors: " + thoughts.errors.join(" | "));
-    r.expect(JSON.stringify(thoughts.tail) === JSON.stringify(["Thought for 5s", "Thought"]), "masked thoughts did not merge or only showed measurable duration: " + JSON.stringify(thoughts));
-    r.expect(thoughts.plain === true, "a masked thought rendered a disclosure control");
+    r.expect(thoughts.maskedRows === 0, "masked thoughts are still drawn: " + JSON.stringify(thoughts));
+    r.expect(thoughts.addedThoughts === 2, "the two readable injected thoughts should add exactly two thought rows, the four masked ones none: " + JSON.stringify(thoughts));
     r.expect(thoughts.readable === true, "readable thinking did not keep its disclosure control");
+    r.expect(thoughts.emptyBlocks === 0, "a turn block was left empty by masked thoughts: " + JSON.stringify(thoughts));
+  }
+  r.expect(!D.SESS.principal || !!maskedTurn, "the principal session's masked-thinking turn was not checked");
+  if (maskedTurn) {
+    r.expect(maskedTurn.errors.length === 0, "principal masked-thinking route: page errors: " + maskedTurn.errors.join(" | "));
+    r.expect(maskedTurn.maskedRows === 0 && maskedTurn.thoughtRows === 0, "a turn of masked thoughts still shows thought rows: " + JSON.stringify(maskedTurn));
+    r.expect(maskedTurn.steps > 0 && maskedTurn.emptyBlocks === 0, "hiding masked thoughts lost the turn's steps or left an empty block: " + JSON.stringify(maskedTurn));
   }
   r.expect(!!process.env.SEMON_EXTRA_BASE, "SEMON_EXTRA_BASE not set: the tables-render positive check did not run");
   if (extra) {

@@ -329,7 +329,7 @@ code { overflow-wrap: anywhere; }
 .think { justify-self: start; display: inline-flex; align-items: center; gap: 4px; min-height: 28px; border: 0; background: none; padding: 0; color: var(--muted); font-size: 13.5px; }
 .think .chev { transition: transform .15s; }
 .think[aria-expanded="true"] .chev { transform: rotate(90deg); }
-.think-masked, .think-pending { display: flex; align-items: center; gap: 6px; min-height: 28px; color: var(--muted); font-size: 13.5px; }
+.think-pending { display: flex; align-items: center; gap: 6px; min-height: 28px; color: var(--muted); font-size: 13.5px; }
 .think-text { margin: 2px 0 0 14px; padding: 4px 0 4px 12px; border-left: 1px solid var(--line); color: var(--ink-2); font: 15px/1.5 var(--serif); }
 .chev { width: 14px; height: 14px; flex: none; }
 .harness-note { font-size: 12.5px; color: var(--faint); font-style: italic; }
@@ -1021,10 +1021,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i]; if (!isThought(e)) { out.push(e); continue; }
       const row = { ...e, k: "think", displaySecs: thoughtSeconds(entries, i, sid) };
-      if (!isMaskedThought(e)) { out.push(row); continue; }
-      let j = i, sum = 0, measured = true;
-      while (j < entries.length && isMaskedThought(entries[j])) { const seconds = thoughtSeconds(entries, j, sid); if (!Number.isFinite(seconds)) measured = false; else sum += seconds; j++; }
-      out.push({ ...row, displaySecs: measured ? sum : null, grouped: j - i }); i = j - 1;
+      out.push(row);
     }
     return out;
   }
@@ -1612,8 +1609,11 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     };
     // A turn block: who started it, the work, and how it ended. While finding or filtering, a turn left with nothing drops out.
     const firsts = turnMode ? new Map((TURNS[sid] ?? []).map((t) => [t.entries[0], t])) : new Map(); let cur = null;
-    const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
-      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .think, .think-masked, .think-pending")) { blk.remove(); return; }
+    const closeTurn = () => { flush(); if (!cur) return; const { t, blk, masked } = cur; cur = null; tx = box;
+      // A turn whose only thinking was masked is left with nothing to draw (no header, no rows): it goes, unless its end row still says something.
+      const bare = masked && !blk.querySelector(".tx > *, .turn-h");
+      if (bare && (opts.excludeH && t.last || !turnEnd(t))) { blk.remove(); return; }
+      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .think, .think-pending")) { blk.remove(); return; }
       if (opts.excludeH && t.last) return;
       const end = turnEnd(t); if (!end) return;
       const d = el("div", "turn-end"); const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st), spaced(end.text)); d.append(st);
@@ -1631,6 +1631,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       if (opts.excludeH && e.k === "end" && /^Returned to /.test(e.text ?? "")) continue;
       // Entries that render nothing (empty thinking, hidden kinds) must not split a run of tool calls.
       if (isThought(e) && (!show.thinking || find)) continue;
+      if (isMaskedThought(e)) { if (cur) cur.masked = true; continue; }
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
@@ -1660,7 +1661,6 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
         if (isPendingThought(e)) { const pending = el("div", "think-pending"); pending.append(el("span", "spin"), el("span", null, "Thinking…")); tx.append(pending); }
         else if (thoughtText(e)) { const group = el("div", "thought"), b = el("button", "think"); b.type = "button"; b.setAttribute("aria-expanded", "false"); b.append(el("span", null, e.displaySecs == null ? "Thought" : "Thought for " + e.displaySecs + "s"), icon(I.chev, "chev"));
           const text = markdown(thoughtText(e), "think-text"); text.hidden = true; b.addEventListener("click", () => { text.hidden = !text.hidden; b.setAttribute("aria-expanded", String(!text.hidden)); }); group.append(b, text); tx.append(group); }
-        else tx.append(el("div", "think-masked", e.displaySecs == null ? "Thought" : "Thought for " + e.displaySecs + "s"));
       }
       else if (e.k === "harness") { if (!show.messages || find) continue; tx.append(el("div", "harness-note", "Harness text added before the prompt (" + e.label + ")")); }
       else if (e.k === "end") { if (find) continue; tx.append(el("div", "divider", e.text)); }
@@ -1677,7 +1677,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       }
     }
     closeTurn();
-    if (!box.querySelector(".msg, .step, .hcard, .think, .think-masked, .think-pending")) box.append(el("p", "empty", find ? "Nothing matches “" + find + "”." : "Nothing to show with these filters."));
+    if (!box.querySelector(".msg, .step, .hcard, .think, .think-pending")) box.append(el("p", "empty", find ? "Nothing matches “" + find + "”." : "Nothing to show with these filters."));
     sec.append(box); return sec;
   }
   const diffEl = (rows, cls) => { const d = el("div", "diff" + (cls ? " " + cls : "")); rows.forEach(([c, t]) => d.append(el("div", c, t))); return d; };
