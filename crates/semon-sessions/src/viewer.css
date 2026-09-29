@@ -378,7 +378,10 @@ code { overflow-wrap: anywhere; }
 .result-marker > svg { width: 15px; height: 15px; flex: none; color: var(--faint); }
 .result-marker .tm { margin-left: auto; font-family: var(--mono); font-size: var(--fs-cap); color: var(--muted); }
 .result-marker.new { color: var(--accent); }
-.think { justify-self: start; display: inline-flex; align-items: center; gap: 4px; min-height: 28px; border: 0; background: none; padding: 0; color: var(--muted); font-size: var(--fs-sm); }
+.thought { display: grid; gap: 3px; max-width: 68ch; padding-left: 12px; border-left: 1px solid var(--line-2); color: var(--muted); font-family: var(--sans); }
+.thought.masked { padding-block: 0; }
+.think-label { font-size: var(--fs-cap); font-weight: 600; letter-spacing: .04em; line-height: 1.4; color: var(--muted); }
+.thought.masked .think-label { font-weight: 400; letter-spacing: 0; font-size: var(--fs-sm); }
 .chev { width: 14px; height: 14px; flex: none; }
 .harness-note { font-size: var(--fs-sm); color: var(--muted); font-style: italic; }
 .steps { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; border-left: 2px solid var(--line); padding-left: 12px; margin-left: 2px; }
@@ -787,7 +790,9 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .jump-bottom .new-count { font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; }
 @media (hover: hover) { .jump-bottom:hover { background: var(--sunken); } }
 .think-pending { display: flex; align-items: center; gap: 6px; min-height: 28px; color: var(--muted); font-size: var(--fs-sm); }
-.think-text { margin: 2px 0 0 14px; padding: 4px 0 4px 12px; border-left: 1px solid var(--line); color: var(--ink-2); font: var(--fs-read)/1.5 var(--serif); }
+.think-text { min-width: 0; overflow-wrap: anywhere; color: var(--muted); font: calc(var(--fs-sm) + 1px)/1.55 var(--sans); }
+.think-text .mh { color: var(--ink-2); }
+.think-text code { font-size: .88em; background: var(--sunken); padding: 1px 5px; border-radius: 5px; }
 html.viewer-open, html.viewer-open body { overflow: hidden; }
 dialog.session-details { padding: 0; border: 0; color: var(--ink); background: var(--ground); }
 dialog.session-details[open] { display: flex; flex-direction: column; }
@@ -842,7 +847,6 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .tree-row { margin-inline: 4px; }
   .tree-all { min-height: 44px; margin-inline: 4px; }
   .srow { min-height: 44px; padding-block: 8px; }
-  .think { min-height: 44px; }
   .jump-bottom { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
   dialog.session-details { position: fixed; inset: auto 0 0; width: 100%; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
   .session-details .vb { padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }
