@@ -64,7 +64,9 @@ export default async function filtersCheck(browser) {
       await shot("closed");
 
       // ---- The sheet ----
-      const y0 = await page.evaluate(() => scrollY);
+      // A phone's page is scrolled first: opening the sheet must not send it back to the top.
+      const y0 = await page.evaluate(() => { if (matchMedia("(max-width: 760px)").matches) scrollTo(0, 40); return scrollY; });
+      if (phone) r.expect(y0 > 0, key + " the page isn't scrolled before the sheet opens: " + y0);
       await filterSheet(page);
       rec.sheet = await page.evaluate(({ sheetSel }) => {
         const d = document.querySelector(sheetSel), r = (n) => { const b = n.getBoundingClientRect(); return { left: b.left, top: b.top, right: b.right, bottom: b.bottom, width: b.width, height: b.height }; };

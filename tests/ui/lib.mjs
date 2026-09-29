@@ -106,7 +106,11 @@ export async function data({ extras = false } = {}) {
 // chooses one value (a Select's option: click its button, then the option) and closes the sheet.
 export const FILTER_BUTTON = ".facet-filters .facet-btn", FILTER_SHEET = ".facet-filters dialog.filters-sheet";
 export const filterSheet = async (page) => { await page.click(FILTER_BUTTON); await page.waitForFunction((sel) => document.querySelector(sel)?.open === true, FILTER_SHEET); };
-export const doneFilterSheet = async (page) => { await page.click(FILTER_SHEET + " .fdone"); await page.waitForFunction((sel) => document.querySelector(sel)?.open === false, FILTER_SHEET); };
+// The choices apply in the dialog's close event, a task after it closes: the helper waits two frames for the page to draw them.
+export const doneFilterSheet = async (page) => {
+  await page.click(FILTER_SHEET + " .fdone"); await page.waitForFunction((sel) => document.querySelector(sel)?.open === false, FILTER_SHEET);
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+};
 export async function pickFilter(page, label, value) {
   const root = FILTER_SHEET + ' .sh-select[data-label="' + label + '"]';
   await filterSheet(page);

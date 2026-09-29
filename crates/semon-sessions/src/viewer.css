@@ -782,6 +782,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .facet-chip svg { width: 14px; height: 14px; flex: none; }
 .facet-btn:focus-visible, .facet-chip:focus-visible, .filters-sheet .vf button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 @media (hover: hover) { .facet-btn:hover { background: var(--hover); } .facet-chip:hover { background: color-mix(in srgb, var(--accent-soft) 70%, var(--accent)); } }
+.filters-sheet .vclose { grid-row: auto; }
 .filters-sheet .vb { display: grid; align-content: start; gap: 12px; padding-top: 16px; padding-bottom: 16px; }
 .filters-sheet .vf { flex: none; display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); }
 .filters-sheet .vf button { min-height: var(--tap); padding: 0 16px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--ground); color: var(--ink); font-size: var(--fs-sm); font-weight: 500; }

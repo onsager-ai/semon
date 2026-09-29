@@ -2017,17 +2017,21 @@
         }
         count.hidden = !active; count.textContent = active ? String(active) : ""; btn.setAttribute("aria-label", active ? "Filter, " + active + " active" : "Filter");
       };
-      // Opening the sheet is a history entry, like the viewer's other sheets: Back closes it and the page stays.
+      // Opening the sheet is a history entry, like the viewer's other sheets: Back closes it and the page stays. The page behind it
+      // doesn't scroll: not by overflow: hidden on the page (that resets a phone's page to the top, as the Select's sheet found), but by
+      // refusing the wheel and touch moves that don't start in a list that can move (the Select's own sheet does the same for its list).
       let before = "";
+      const hold = (e) => { const t = e.target; if (t.closest?.(".sh-select-list") || (body.contains(t) && body.scrollHeight > body.clientHeight + 1)) return; e.preventDefault(); };
       btn.addEventListener("click", () => {
         if (viewerEl || d.open) return; ctx.sync(); before = JSON.stringify(sessionFilters);
-        viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); fields[0].select.focus(); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
+        viewerEl = d; d.showModal(); for (const type of ["wheel", "touchmove"]) document.addEventListener(type, hold, { capture: true, passive: false });
+        fields[0].select.focus(); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
       });
       clear.addEventListener("click", () => { for (const key of Object.keys(sessionFilters)) sessionFilters[key] = ""; d.close(); });
       done.addEventListener("click", () => d.close());
       d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
       d.addEventListener("close", () => {
-        document.documentElement.classList.remove("viewer-open");
+        for (const type of ["wheel", "touchmove"]) document.removeEventListener(type, hold, { capture: true });
         if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } }
         btn.focus({ preventScroll: true });
         if (JSON.stringify(sessionFilters) !== before) ctx.onChange(); else if (LIVE.pending) refresh();
