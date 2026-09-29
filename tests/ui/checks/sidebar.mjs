@@ -30,6 +30,7 @@
 //     "All sessions ›" stays fully inside the screen at 390 and 1280 whether the list overflows or not. A short list leaves
 //     the footer right after its last row; a row focused by keyboard scrolls into the list, never under the footer; the rail
 //     still toggles and shows no footer.
+//   - the nav runs Home, Sessions, Analytics, Machines top to bottom in the expanded sidebar, the rail and the phone drawer.
 //   - screenshots of the sidebar (and of the sheet, and of the sticky list) at 390 and 1280, light and dark, go to out/sidebar-*.png.
 import path from "node:path";
 import { ENV, served, goto, data, reporter, overflow, settled } from "../lib.mjs";
@@ -853,6 +854,40 @@ export default async function sidebarCheck(browser) {
     r.expect(rail.ringColor?.startsWith("rgb(93, 101, 97)"), "rail: the ring is --muted, not --faint: " + rail.ringColor);
     r.expect(page.errors.length === 0, "open: page errors " + page.errors.join("; "));
     await page.context().close();
+  }
+  // ---- The nav order: Home, Sessions, Analytics, Machines, in the sidebar, the rail and the drawer ------------------------
+  {
+    const order = (page) => page.evaluate(() => [...document.querySelectorAll("#nav .nav-item")].map((b) => ({ go: b.dataset.go, label: b.querySelector("span:not(.cnt)")?.textContent, shown: b.getClientRects().length > 0, top: Math.round(b.getBoundingClientRect().top) })));
+    const want = ["home", "sessions", "analytics", "machines"], labels = ["Home", "Sessions", "Analytics", "Machines"];
+    const ok = (o) => JSON.stringify(o.map((b) => b.go)) === JSON.stringify(want) && JSON.stringify(o.map((b) => b.label)) === JSON.stringify(labels) && o.every((b) => b.shown) && o.every((b, i) => i === 0 || b.top > o[i - 1].top);
+    const desktop = await served(browser, { extras: true, size: "desktop", dark: false });
+    await desktop.waitForSelector("#nav .nav-item");
+    const expanded = await order(desktop);
+    R.navExpanded = expanded;
+    r.expect(ok(expanded), "nav: the expanded sidebar lists Home, Sessions, Analytics, Machines top to bottom: " + JSON.stringify(expanded));
+    await desktop.click("#rail-toggle"); await desktop.waitForTimeout(300);
+    const rail = await order(desktop);
+    R.navRail = rail;
+    r.expect(rail.map((b) => b.go).join() === want.join() && rail.every((b) => b.shown) && rail.every((b, i) => i === 0 || b.top > rail[i - 1].top), "nav: the rail's icons run Home, Sessions, Analytics, Machines top to bottom: " + JSON.stringify(rail));
+    await desktop.screenshot({ path: path.join(ENV.out, "sidebar-nav-1280-light-rail.png") });
+    r.expect(desktop.errors.length === 0, "nav desktop: page errors " + desktop.errors.join("; "));
+    await desktop.context().close();
+    for (const dark of [false, true]) {
+      const tag = dark ? "dark" : "light", phone = await served(browser, { extras: true, size: "phone", dark });
+      await openDrawer(phone);
+      const drawer = await order(phone);
+      R["navDrawer" + tag] = drawer;
+      r.expect(ok(drawer), "nav: the phone drawer (" + tag + ") lists Home, Sessions, Analytics, Machines top to bottom: " + JSON.stringify(drawer));
+      await phone.screenshot({ path: path.join(ENV.out, "sidebar-nav-390-" + tag + ".png") });
+      await phone.context().close();
+    }
+    for (const dark of [false, true]) {
+      const page = await served(browser, { extras: true, size: "desktop", dark });
+      await page.waitForSelector("#nav .nav-item");
+      r.expect(ok(await order(page)), "nav: the 1280 sidebar (" + (dark ? "dark" : "light") + ") keeps the order");
+      await page.screenshot({ path: path.join(ENV.out, "sidebar-nav-1280-" + (dark ? "dark" : "light") + ".png") });
+      await page.context().close();
+    }
   }
   return r.done();
 }
