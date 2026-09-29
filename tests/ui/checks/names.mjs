@@ -63,8 +63,16 @@ export default async function namesCheck(browser) {
       const top = await measure(page, "#topbar", '.meta-line .lab[data-drop="2"]');
       // A session's top bar always shows its harness. If the line fitter dropped the label, nothing was audited, so fail.
       // A child's own top bar keeps its kind chip first, so its model label may be dropped there.
-      // (A phone's bar is one row and does not draw the line: there the harness is in the menu's Details, audited below.)
+      // (A phone's bar is one row and does not draw the line: there the harness is a row of the ⋯ menu's Details, audited here instead.)
       const lineShown = await page.evaluate(() => { const l = document.querySelector("#topbar .meta-line"); return !!l && getComputedStyle(l).display !== "none"; });
+      r.expect(lineShown === (size === "desktop"), tag + ": the line of labels is " + (lineShown ? "drawn" : "not drawn") + " on a " + size);
+      if (!lineShown) {
+        await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu[open]");
+        const row = await page.evaluate(() => { const dt = [...document.querySelectorAll("dialog.session-menu dl.kv dt")].find((x) => x.textContent === "Harness"); return dt ? dt.nextElementSibling?.textContent ?? null : null; });
+        rec["menu-harness-" + s.harness] = row;
+        r.expect(ALLOWED.has(row) && (row === "Codex") === (s.harness === "codex"), tag + ": the menu's Harness row for " + s.name + " reads " + JSON.stringify(row));
+        await page.keyboard.press("Escape"); await page.waitForTimeout(150);
+      }
       if (lineShown && (s !== kinded || s === claude || s === codex)) r.expect(top.length > 0, tag + ": the top bar of " + s.name + " (" + s.harness + ") shows no harness label, so none was audited");
       if (top.length) audit("topbar-" + s.harness, top);
       if (s === kinded) {
