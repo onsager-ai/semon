@@ -177,8 +177,10 @@ export default async function tapsCheck(browser) {
     const page = await served(browser, { size: "phone", account: true });
     await tally(page, "account home");
     await attempt("open the account menu", async () => {
-      const trigger = page.locator(".account-trigger:visible, .account-widget-phone .account-trigger").first();
-      await trigger.click(); await page.waitForTimeout(150); await tally(page, "account menu"); await closeOverlays(page);
+      // On a phone the account widget sits at the foot of the navigation drawer.
+      await page.click("#lead-btn"); await page.waitForFunction(() => document.body.classList.contains("drawer-open")); await page.waitForTimeout(350);
+      await tally(page, "account drawer");
+      await page.locator(".account-widget-phone .account-trigger").click(); await page.waitForTimeout(150); await tally(page, "account menu"); await closeOverlays(page);
     });
     await page.context().close();
   }
