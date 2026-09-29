@@ -6,8 +6,9 @@
 //   - "bare", the page docs/shell.md gives as the whole of such a page, with its comment replaced by the same sidebar markup: no
 //     #main, #page or #topbar.
 // On both, at 390 and 1280:
-//   - the viewer's script draws the navigation (its buttons, with every count pill the viewer's page has) and the Recent list from
-//     /api/model: the same rows, in the same order, with the same text, as the viewer's own page, and only Machines is current;
+//   - the viewer's script draws the navigation (its buttons, with Home's badge and no Sessions count, as the viewer's page has) and the
+//     Recent list from /api/model: the same rows, in the same order, with the same text and dots (state, and a parent's attention
+//     dot), as the viewer's own page, and only Machines is current;
 //   - nothing outside the sidebar's own parts (header, search, nav, Recent list) changes: the document, serialized without those
 //     parts, equals the page as served (so the body gets no new children and no element outside them a class, attribute or child),
 //     the address is the page's, and no page error is thrown; the same holds after a live poll.
@@ -64,7 +65,9 @@ const untouched = (page) => page.evaluate(({ html, at }) => {
 }, { html: page.html, at: page.at });
 
 const openDrawer = async (page) => { await page.click("#lead-btn"); await page.waitForTimeout(350); };
-const lanes = (page) => page.evaluate(() => [...document.querySelectorAll("#lanes .srow")].map((r) => ({ id: r.dataset.id, label: r.getAttribute("aria-label"), text: r.textContent })));
+// Each row: its id, label and text, and its dots (the state dot, and a parent's attention dot, amber or red), by class.
+const lanes = (page) => page.evaluate(() => [...document.querySelectorAll("#lanes .srow")].map((r) => ({ id: r.dataset.id, label: r.getAttribute("aria-label"), text: r.textContent,
+  dots: [...r.querySelectorAll(".dot, .kid-flag")].map((d) => d.className) })));
 const nav = (page) => page.evaluate(() => [...document.querySelectorAll("#nav .nav-item")].map((b) => ({
   tag: b.tagName, label: b.querySelector(":scope > span:not(.cnt)")?.textContent ?? null, cnt: b.querySelector(".cnt")?.textContent ?? null,
   hot: !!b.querySelector(".cnt.hot"), current: b.getAttribute("aria-current"),
@@ -79,7 +82,7 @@ const layout = (page) => page.evaluate(() => {
   return {
     sidebar: { width: side.width }, search: box(".side-search"), nav: box("#nav"), navRow: box("#nav .nav-item"), recent: box(".side-h"),
     list: list && { left: list.left, top: list.top, width: list.width }, row: box("#lanes .srow"), rowName: type("#lanes .srow .nm"),
-    rowMeta: type("#lanes .srow-meta"), recentType: type(".side-h"), pill: type("#nav .cnt"),
+    rowMeta: type("#lanes .srow-meta"), recentType: type(".side-h"), badge: type("#nav .cnt"),
   };
 });
 function differences(a, b, at = "") {
@@ -124,8 +127,11 @@ export default async function embedSidebarCheck(browser) {
     K.nav = ourNav;
     const plain = (xs) => JSON.stringify(xs.map(({ current, ...rest }) => rest));
     r.expect(plain(ourNav) === plain(theirNav), P + ": the navigation differs from the viewer's: " + plain(ourNav) + " vs " + plain(theirNav));
-    const pill = ourNav.find((x) => x.label === "Sessions")?.cnt;
-    r.expect(!!pill && pill === theirNav.find((x) => x.label === "Sessions")?.cnt, P + ": the Sessions count pill is missing or not the viewer's");
+    // As on the viewer's page: Home keeps its badge, Sessions has no count, and the parents' attention dots are the viewer's.
+    const home = ourNav.find((x) => x.label === "Home"), sessions = ourNav.find((x) => x.label === "Sessions");
+    K.badges = { home: home?.cnt ?? null, sessions: sessions?.cnt ?? null, flags: ours.filter((x) => x.dots.some((d) => d.startsWith("kid-flag"))).length };
+    r.expect(!!home?.cnt && home.cnt === theirNav.find((x) => x.label === "Home")?.cnt && !!sessions && sessions.cnt === null, P + ": the nav's badges are not the viewer's (Home's badge, no Sessions count): " + JSON.stringify(K.badges));
+    r.expect(ours.some((x) => x.dots.length), P + ": the Recent rows have no dots: " + JSON.stringify(ours.slice(0, 2)));
     r.expect(ourNav.every((x) => x.tag === "BUTTON"), P + ": the viewer's script did not draw its navigation: " + JSON.stringify(ourNav));
     r.expect(JSON.stringify(ourNav.map((x) => x.current)) === JSON.stringify([null, null, null, "page"]), P + ": only Machines should be current: " + JSON.stringify(ourNav));
 
