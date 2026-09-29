@@ -24,6 +24,7 @@ import switchCheck from "./switch.mjs";
 import embedCheck from "./embed.mjs";
 import tooltipCheck from "./tooltip.mjs";
 import detailsCheck from "./details.mjs";
+import selectCheck from "./select.mjs";
 
 const checks = [
   ["home", homeCheck],
@@ -44,6 +45,7 @@ const checks = [
   ["embed", embedCheck],
   ["tooltip", tooltipCheck],
   ["details", detailsCheck],
+  ["select", selectCheck],
 ];
 
 const browser = await launch();

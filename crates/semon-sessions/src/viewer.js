@@ -1885,23 +1885,17 @@
   ];
   function renderFacetFilters(box, onChange) {
     const s = slot("facets", box, (ctx) => {
-      const bar = el("div", "facet-filters"); bar.setAttribute("aria-label", "Filter sessions"); const fields = [];
+      const bar = el("div", "facet-filters"); bar.setAttribute("role", "group"); bar.setAttribute("aria-label", "Filter sessions"); const fields = [];
       for (const [key, label, allLabel, valuesOf, showValue] of FACETS) {
-        const field = el("label", "facet-field"); field.append(el("span", null, label)); const select = el("select"); select.setAttribute("aria-label", label);
-        select.addEventListener("change", () => { sessionFilters[key] = select.value; ctx.onChange(); }); field.append(select); bar.append(field);
-        fields.push({ key, select, allLabel, valuesOf, showValue, options: new Map() });
+        const select = SemonShell.select({ label, options: [{ value: "", label: allLabel }], value: sessionFilters[key], onChange: (value) => { sessionFilters[key] = value; ctx.onChange(); } });
+        bar.append(select.el); fields.push({ key, select, allLabel, valuesOf, showValue });
       }
       ctx.sync = () => {
         for (const f of fields) {
           const current = sessionFilters[f.key], values = f.valuesOf().filter((v) => v !== ""), gone = current !== "" && !values.includes(current);
           if (gone) values.push(current);
-          const wanted = [["", f.allLabel], ...values.map((v) => [v, f.showValue(v) + (gone && v === current ? " (no sessions)" : "")])], put = placer(f.select), next = new Map();
-          for (const [value, text] of wanted) {
-            let option = f.options.get(value); if (!option) { option = el("option"); option.value = value; }
-            if (option.textContent !== spaced(text)) option.textContent = spaced(text);
-            next.set(value, option); put(option);
-          }
-          put.done(); f.options = next; f.select.value = current;
+          f.select.setOptions([{ value: "", label: f.allLabel }, ...values.map((v) => ({ value: v, label: f.showValue(v) + (gone && v === current ? " (no sessions)" : "") }))]);
+          f.select.setValue(current);
         }
       };
       return bar;

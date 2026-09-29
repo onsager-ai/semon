@@ -127,3 +127,25 @@ export const overflow = (page) => page.evaluate(() => {
   for (const e of document.querySelectorAll(".page *, .topbar *")) { const r = e.getBoundingClientRect(); if (r.width && r.height && (r.right > vw + 0.5 || r.left < -0.5) && !clipped(e)) n++; }
   const sw = document.documentElement.scrollWidth; document.body.style.overflowX = ""; if (sw > vw) n += 1000; return n;
 });
+
+// The WCAG contrast ratio of the first element `selector` matches: its text colour over the background it is drawn on (its own
+// and its ancestors' backgrounds composited, over white), in the page's colour scheme. Null when a colour can't be read.
+export const contrastOf = (page, selector) => page.evaluate((selector) => {
+  const parse = (value) => {
+    let m = /^rgba?\(([^)]+)\)$/.exec(value);
+    if (m) { const p = m[1].split(/[ ,/]+/).filter(Boolean).map(Number); return [p[0], p[1], p[2], p[3] ?? 1]; }
+    m = /^color\(srgb ([^)]+)\)$/.exec(value);
+    if (m) { const p = m[1].split(/[ /]+/).filter(Boolean).map(Number); return [p[0] * 255, p[1] * 255, p[2] * 255, p[3] ?? 1]; }
+    return null;
+  };
+  const node = document.querySelector(selector); if (!node) return null;
+  const fg = parse(getComputedStyle(node).color); if (!fg) return null;
+  const layers = [];
+  for (let e = node; e; e = e.parentElement) { const c = parse(getComputedStyle(e).backgroundColor); if (c && c[3] > 0) { layers.push(c); if (c[3] >= 1) break; } }
+  let base = [255, 255, 255];
+  for (const [r, g, b, a] of layers.reverse()) base = [r * a + base[0] * (1 - a), g * a + base[1] * (1 - a), b * a + base[2] * (1 - a)];
+  const over = (c) => [0, 1, 2].map((i) => c[i] * (fg[3] ?? 1) + base[i] * (1 - (fg[3] ?? 1)));
+  const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+  const a = lum(over(fg)), b = lum(base);
+  return Math.round(((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)) * 100) / 100;
+}, selector);
