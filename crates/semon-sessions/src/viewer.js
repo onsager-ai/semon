@@ -1819,7 +1819,7 @@
           const changed = AN.error != null || kept?.etag !== etag; AN.error = null; return changed;
         });
       })
-      .catch((e) => { const changed = AN.error !== e.message; AN.error = e.message; AN.failedAt = Date.now(); return changed; });
+      .catch((e) => { const changed = AN.error !== e.message; AN.error = e.message; AN.failedAt = performance.now(); return changed; });
     AN.inflight = asked.then((changed) => {
       AN.inflight = null;
       if (!AN.again) return changed;
@@ -1829,12 +1829,12 @@
   }
   // Asks again in 10 s, or in a little over a second when the answer came from an older model than the page has. While
   // asking fails (a 409 or a 500), it asks 10 s after the last failure: the kept answer stays drawn, with the error above it.
-  const backingOff = () => AN.error != null && Date.now() - AN.failedAt < AN_EVERY;
+  const backingOff = () => AN.error != null && performance.now() - AN.failedAt < AN_EVERY; // a monotonic clock: a wall-clock jump neither stalls nor rushes it
   function scheduleAnalytics() {
     clearTimeout(AN.timer); AN.timer = null;
     if (route.v !== "analytics" || LIVE.ended || !visible()) return;
     const data = analyticsData(), behind = !AN.error && data && LIVE.version && data.version !== LIVE.version;
-    AN.timer = setTimeout(() => { AN.timer = null; refreshAnalytics(); }, AN.error ? Math.max(0, AN.failedAt + AN_EVERY - Date.now()) : behind ? 1200 : AN_EVERY);
+    AN.timer = setTimeout(() => { AN.timer = null; refreshAnalytics(); }, AN.error ? Math.max(0, AN.failedAt + AN_EVERY - performance.now()) : behind ? 1200 : AN_EVERY);
   }
   // `asked`: the reader changed the range or a filter, which asks at once. Anything else (a model update, the tab showing
   // again) waits out the backoff while asking fails, so failed asks keep 10 s apart however fast the model moves.
