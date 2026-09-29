@@ -7,7 +7,8 @@
 //! changes on disk, so a revoked token stops working without a restart.
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     sync::{Mutex, PoisonError},
 };
@@ -148,12 +149,37 @@ fn loose_mode(path: &Path, meta: &fs::Metadata, wanted: u32) -> Result<(), Strin
 
 /// The token file's entries, refused when its mode is loose.
 fn read_checked(path: &Path) -> Result<Vec<Entry>, String> {
-    match fs::metadata(path) {
-        Ok(meta) => loose_mode(path, &meta, 0o600)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("{}: {error}", path.display())),
+    read_opened(path, open_file(path)?)
+}
+
+/// The token file opened once, with what its descriptor says of it
+/// (`fstat`); `None` when there is none.
+fn open_file(path: &Path) -> Result<Option<(fs::File, fs::Metadata)>, String> {
+    let failed = |error: io::Error| format!("{}: {error}", path.display());
+    match fs::File::open(path) {
+        Ok(file) => {
+            let meta = file.metadata().map_err(failed)?;
+            Ok(Some((file, meta)))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(failed(error)),
     }
-    read_entries(path)
+}
+
+/// The entries of an opened token file, read through the same descriptor
+/// its mode was checked on; refused when that mode is loose.
+fn read_opened(
+    path: &Path,
+    opened: Option<(fs::File, fs::Metadata)>,
+) -> Result<Vec<Entry>, String> {
+    let Some((mut file, meta)) = opened else {
+        return Ok(Vec::new());
+    };
+    loose_mode(path, &meta, 0o600)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    parse_entries(path, &text)
 }
 
 /// What the token file looked like when it was last read.
@@ -202,8 +228,9 @@ impl Tokens {
     /// Reads `DIR/tokens` (a missing file is no tokens).
     pub fn open(dir: &Path) -> Result<Self, String> {
         let path = tokens_path(dir);
-        let stamp = fs::metadata(&path).ok().map(|meta| Stamp::of(&meta));
-        let entries = read_checked(&path)?;
+        let opened = open_file(&path)?;
+        let stamp = opened.as_ref().map(|(_, meta)| Stamp::of(meta));
+        let entries = read_opened(&path, opened)?;
         Ok(Self {
             path,
             loaded: Mutex::new(Loaded { stamp, entries }),
@@ -253,10 +280,16 @@ impl Tokens {
     /// logged once per change.
     fn refresh(&self) -> std::sync::MutexGuard<'_, Loaded> {
         let mut loaded = self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
-        let stamp = fs::metadata(&self.path).ok().map(|meta| Stamp::of(&meta));
+        // One open, one fstat: the stamp, the mode and the bytes read are
+        // all the same file's, even if it is replaced meanwhile.
+        let opened = open_file(&self.path);
+        let stamp = match &opened {
+            Ok(Some((_, meta))) => Some(Stamp::of(meta)),
+            _ => None,
+        };
         if stamp != loaded.stamp {
             loaded.stamp = stamp;
-            loaded.entries = match read_checked(&self.path) {
+            loaded.entries = match opened.and_then(|opened| read_opened(&self.path, opened)) {
                 Ok(entries) => entries,
                 Err(error) => {
                     eprintln!("semon receive: {error}; no token is accepted until it is fixed");
@@ -280,12 +313,7 @@ fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
     std::hint::black_box(difference) == 0
 }
 
-fn read_entries(path: &Path) -> Result<Vec<Entry>, String> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("{}: {error}", path.display())),
-    };
+fn parse_entries(path: &Path, text: &str) -> Result<Vec<Entry>, String> {
     let mut entries: Vec<Entry> = Vec::new();
     for (number, line) in text.lines().enumerate() {
         let line = line.trim();
