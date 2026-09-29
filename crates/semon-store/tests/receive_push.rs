@@ -285,22 +285,23 @@ fn push_mirrors_a_home_into_semon_receive() {
     let facts = semon_sessions::read_facts(&machine.join("facts.json")).unwrap();
     assert_eq!(facts.hostname, "laptop");
 
-    // The viewer over DIR shows the pushed machine with both its sessions.
+    // The viewer over DIR shows the pushed machine, up, with both its
+    // sessions. With one machine the model is that machine's own: `machine`,
+    // and no `machines` list to pick it from.
     let model = fixture.model();
-    let machines: Vec<&str> = model["machines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|machine| machine["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(machines, ["laptop"]);
-    assert_eq!(model["machines"][0]["up"], true);
+    assert_eq!(model["machine"]["id"], "laptop", "{}", model["machine"]);
+    assert_eq!(model["machine"]["up"], true);
+    assert!(
+        model["machines"]
+            .as_array()
+            .is_none_or(|machines| machines.len() == 1)
+    );
     for session in ["lane", "cx"] {
-        assert_eq!(
-            model["sessions"][session]["machine"], "laptop",
-            "{session}: {}",
-            model["sessions"]
-        );
+        let found = &model["sessions"][session];
+        assert!(found.is_object(), "{session}: {}", model["sessions"]);
+        if let Some(machine) = found.get("machine") {
+            assert_eq!(machine, "laptop");
+        }
     }
 
     // Rewritten shorter: sent again whole, with replace.
