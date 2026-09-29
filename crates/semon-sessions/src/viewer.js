@@ -450,7 +450,7 @@
   const app = $(".app");
   const syncLayoutPrefs = () => { app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
   function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); }
-  function setRailMode(on) { railMode = on; try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
+  function setRailMode(on) { railMode = on; ORD.delete("side"); try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
   // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
   // it is dropped on load, along with any entry that has no `open`, and the next save writes the pruned list.
   function pruneTreePrefs(saved) {
@@ -721,7 +721,7 @@
   // no control), a floating pill once the top is scrolled out of view. Tapping either re-sorts the list (the pill also scrolls to its
   // top). The list re-sorts, unasked, only when the reader changes what it is (the route, the search, the filters, the grouping) or
   // opens the phone's drawer. A session that leaves the list or the filter goes in place. Nothing re-sorts on a timer.
-  const ORD = new Map(), ordPills = new Map(), ordChips = new Map(), ordTouch = { down: false }, byLast = (a, b) => b.last - a.last;
+  const ORD = new Map(), ordPills = new Map(), ordChips = new Map(), ordTotal = { page: 0, side: 0 }, ordTouch = { down: false }, byLast = (a, b) => b.last - a.last;
   const pageSig = () => JSON.stringify([query, groupBy, sessionFilters]);
   document.addEventListener("pointerdown", () => { ordTouch.down = true; }, true);
   for (const t of ["pointerup", "pointercancel"]) document.addEventListener(t, () => { ordTouch.down = false; }, true);
@@ -742,7 +742,8 @@
   // list, a mouse only over one of its rows.
   function ordState(name) {
     const side = name === "side", rows = side ? "#lanes .treeitem" : "#page .nrow", a = document.activeElement;
-    const inView = side ? sideRegion().scrollTop <= 1 : !$(rows) || $(rows).getBoundingClientRect().top >= $("#topbar").getBoundingClientRect().bottom - 1;
+    const host = side ? null : chipHost("page"); // the header row the chip sits in: the list's top is in view while that row's bottom is below the bar
+    const inView = side ? sideRegion().scrollTop <= 1 : !host || host.getBoundingClientRect().bottom >= $("#topbar").getBoundingClientRect().bottom - 1;
     const touched = ordTouch.down || (!!a?.matches?.(":focus-visible") && !!a.closest(side ? "#lanes" : rows)) || (matchMedia("(hover: hover)").matches && !!$(rows + ":hover"));
     return { inView, touched };
   }
@@ -769,7 +770,8 @@
       const fresh = sorted.filter((s) => !have.has(s.id)), up = fresh.filter((s) => must?.has(s.id) || (scope.calm && existed));
       ids = [...up.map((s) => s.id), ...old];
       const shown = ids.slice(0, limit), inShown = new Set(shown);
-      scope.n += fresh.length - up.length + sorted.slice(0, limit).filter((s) => have.has(s.id) && !inShown.has(s.id)).length + ordMoves(shown.map((id) => by.get(id)), cmp);
+      const top = new Set(sorted.slice(0, limit).map((s) => s.id)), heldNew = fresh.filter((s) => top.has(s.id) && !up.includes(s)).length;
+      scope.n += heldNew + sorted.slice(0, limit).filter((s) => have.has(s.id) && !inShown.has(s.id)).length + ordMoves(shown.map((id) => by.get(id)), cmp);
     }
     scope.lists.set(key, ids);
     return ids.map((id) => by.get(id));
@@ -806,7 +808,7 @@
   // it is scrolled out of view.
   function syncOrderPill(name) {
     const pill = ordPills.get(name), chip = ordChips.get(name), sc = ORD.get(name); if (!pill) return;
-    const view = ordState(name), n = !sc || (name === "page" && sc.tie !== route) || (name === "side" && railMode && !phone.matches) ? 0 : sc.n, was = Number(pill.dataset.total || 0);
+    const view = ordState(name), n = !sc || (name === "page" && sc.tie !== route) || (name === "side" && railMode && !phone.matches) ? 0 : sc.n, was = ordTotal[name];
     const pn = view.inView ? 0 : n, cn = view.inView ? n : 0;
     if (pill.dataset.n !== String(pn)) { pill.dataset.n = String(pn); pill.hidden = !pn; labelOrder(pill, pn); }
     const host = cn ? chipHost(name) : null;
@@ -819,12 +821,14 @@
       const last = [...host.children].filter((x) => x !== chip && !x.hidden).at(-1), over = () => last && chip.getBoundingClientRect().left < last.getBoundingClientRect().right + 6;
       if (over()) { chip.classList.add("compact"); if (over()) chip.classList.add("tiny"); }
     } else { chip.hidden = true; chip.dataset.n = "0"; }
-    pill.dataset.total = String(n);
-    if (n && !was) ordLive.textContent = n + (n === 1 ? " session updated" : " sessions updated"); else if (!n) ordLive.textContent = "";
+    ordTotal[name] = n; // one status region serves both screens: it is cleared only when neither holds anything
+    if (n && !was) ordLive.textContent = n + (n === 1 ? " session updated" : " sessions updated"); else if (!ordTotal.page && !ordTotal.side) ordLive.textContent = "";
     if (pn) placeOrderPill();
   }
   // Scrolling moves what is held between the chip and the pill.
-  function orderScroll() { syncOrderPill("page"); syncOrderPill("side"); }
+  function orderScroll() {
+    for (const name of ["page", "side"]) if (ORD.get(name)?.n || !ordPills.get(name).hidden || !ordChips.get(name).hidden) syncOrderPill(name); // nothing held or shown: nothing to move
+  }
   window.addEventListener("resize", placeOrderPill, { passive: true });
   window.addEventListener("scroll", orderScroll, { passive: true });
   $("#main").addEventListener("scroll", orderScroll, { passive: true });
@@ -946,8 +950,8 @@
     // The rows keep the order they had (see "Stable order"); a child new to the list is held, unless it is the open session or leads to it.
     // A collapsed parent's children are nobody's to see: drawn sorted, not counted. A list new to a screen that has a snapshot is held
     // whole, with no "All N" row either, so that nothing appears in the tree.
-    const key = (full ? "a:" : "k:") + parent.id, unseen = !!sideOrder?.keep && open && !full && !sideOrder.reseed && !sideOrder.prev.has(key);
-    const shown = sideOrder ? orderList(sideOrder, key, full ? sorted : listed, byRank, { must: new Set([current, ...ancestors, ...expandedPath]), quiet: !open, seed: full || sideOrder.reseed }) : full ? sorted : listed;
+    const key = (full ? "a:" : "k:") + parent.id, unseen = !!sideOrder?.keep && open && !full && !sideOrder.reseed && sideOrder.seen.has(parent.id) && !sideOrder.prev.has(key);
+    const shown = sideOrder ? orderList(sideOrder, key, full ? sorted : listed, byRank, { must: new Set([current, ...ancestors, ...expandedPath]), quiet: !open, seed: full || sideOrder.reseed || !sideOrder.seen.has(parent.id) }) : full ? sorted : listed;
     for (const child of shown) group.append(buildLaneItem(child, depth + 1, children, rail));
     if (kids.length === shown.length || full || unseen) return full && expandedAll === parent.id;
     const total = descendantsOf(parent.id, children).length, button = el("button", "tree-all");
@@ -1056,13 +1060,19 @@
     (target ?? q('.srow[data-id="' + id + '"]'))?.focus({ preventScroll: true });
   }
   function renderLanes() {
+    const rail = railMode && !phone.matches, prevSide = ORD.get("side");
+    if (rail || prevSide?.rail !== rail) ORD.delete("side"); // the rail draws sorted, and so does a change into or out of it
     const sideState = ordState("side"), focus = laneFocus(), everyone = sessionChildren(), { current, ancestors } = routedPath();
-    sideOrder = orderScope("side", JSON.stringify([query]), null, sideState);
-    // A session with no children in the last draw, whose first child arrives while the tree is held, stays as it was: a toggle and a
-    // count on its row would move the rows below it. Its new children are held (and counted) as a whole.
+    sideOrder = orderScope("side", JSON.stringify([query]), null, sideState); sideOrder.rail = rail;
+    // The rows drawn now, before the list is emptied: which parents the reader can see, and which sessions were drawn at all.
+    const box = $("#lanes"), drawn = [...box.querySelectorAll(".treeitem")];
+    sideOrder.seen = new Set(drawn.map((r) => r.dataset.id)); const seeing = new Set(drawn.filter((r) => r.querySelector(":scope > .tree-row .srow")?.getClientRects().length).map((r) => r.dataset.id));
+    // A session the reader can see, with no children in the last draw, whose first child arrives while the tree is held, stays as it
+    // was: a toggle and a count on its row would move the rows below it. Its new children are held (and counted) as a whole. A parent
+    // nobody sees, or one just put in the tree, shows its children with it.
     let children = everyone;
     if (sideOrder.keep) {
-      const held = [...everyone.keys()].filter((p) => !sideOrder.prevKids.has(p) && p !== current && !ancestors.has(p));
+      const held = [...everyone.keys()].filter((p) => !sideOrder.prevKids.has(p) && seeing.has(p) && p !== current && !ancestors.has(p));
       if (held.length) { children = new Map([...everyone].filter(([p]) => !held.includes(p))); sideOrder.n += held.reduce((n, p) => n + everyone.get(p).length, 0); }
     }
     sideOrder.kids = new Set(children.keys());
@@ -1072,7 +1082,7 @@
     // just brought back are drawn sorted, not held as new.
     sideOrder.exp = JSON.stringify([expandedAll, railMode && !phone.matches]); sideOrder.reseed = sideOrder.keep && sideOrder.prevExp !== sideOrder.exp;
     expandedPath = expandedAll ? ancestorsOf(expandedAll) : new Set(); expandedUnder = expandedAll ? new Set(descendantsOf(expandedAll, children).map((x) => x.id)) : new Set();
-    const box = $("#lanes"); box.replaceChildren();
+    box.replaceChildren();
     for (const s of orderList(sideOrder, "lanes", lanes, byLast, { limit: 8, must: new Set([current, ...ancestors]) }).slice(0, 8)) box.append(buildLaneItem(s, 0, children, railMode && !phone.matches));
     syncOrderPill("side");
     if (!lanes.length) { const empty = el("p", "ghead", "No sessions match"); empty.setAttribute("role", "none"); box.append(empty); }

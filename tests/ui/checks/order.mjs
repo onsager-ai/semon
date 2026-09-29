@@ -20,7 +20,11 @@
 //   5. wide screen: after a mouse click on a tree control (focus stays there, but not as keyboard focus) a new session still goes in;
 //   6. Home's Working now and a machine page's Sessions, scrolled down: a session bumps, nothing moves, the pill counts the move, and
 //      tapping it sorts;
-//   7. on the phone, the drawer's list scrolled down: the same as 1. for the sidebar, with the drawer open.
+//   5b. wide screen: a first child under a session below the sidebar's top eight shows no chip and moves nothing; 5c. a new session that
+//      arrives with a subagent is put first with its child and no chip; 5d. a hovered row, and a row with keyboard focus, hold a new
+//      session (chip "1 updated") until the chip is tapped; 5e. in the rail a session that turns active enters the icons at once;
+//   7. on the phone, the drawer's list scrolled down: the same as 1. for the sidebar, with the drawer open. (The sidebar's count in 1. and
+//      7. is worked out from the served model.)
 // 0 page errors on every page.
 //
 //   SEMON_BIN   the semon binary built with the test-clock feature (default: target/debug/semon)
@@ -42,14 +46,14 @@ const PARENTS = ["principal", "sentinel", "advisor"]; // sessions with no child 
 
 // ---- Log lines ----------------------------------------------------------------------------------------------------------------
 function logs(dir) {
-  const projects = path.join(dir, "claude/projects"), files = fs.readdirSync(projects, { recursive: true });
-  const file = (sid) => { const f = files.find((p) => path.basename(p) === sid + ".jsonl" && !p.includes("subagents")); if (!f) throw new Error("no " + sid + ".jsonl"); return path.join(projects, f); };
+  const projects = path.join(dir, "claude/projects"), listing = () => fs.readdirSync(projects, { recursive: true }); // (read afresh: sessions come and go)
+  const file = (sid) => { const f = listing().find((p) => path.basename(p) === sid + ".jsonl" && !p.includes("subagents")); if (!f) throw new Error("no " + sid + ".jsonl"); return path.join(projects, f); };
   const cwdOf = (f) => fs.readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l).cwd; } catch { return null; } }).find(Boolean);
   const said = (sid, cwd, t, text) => JSON.stringify({ parentUuid: null, isSidechain: false, type: "assistant", timestamp: iso(t), sessionId: sid, cwd, version: "2.1.0", uuid: "u-order-" + sid + "-" + t,
     message: { id: "msg-order-" + sid + "-" + t, model: "claude-opus-5-5", role: "assistant", type: "message", content: [{ type: "text", text }] } }) + "\n";
   let n = 0;
   return {
-    has: (sid) => files.some((p) => path.basename(p) === sid + ".jsonl" && !p.includes("subagents")),
+    has: (sid) => listing().some((p) => path.basename(p) === sid + ".jsonl" && !p.includes("subagents")),
     // The session says something at `t`: it is the most recent one from then on.
     bump: (sid, t) => { const f = file(sid); fs.appendFileSync(f, said(sid, cwdOf(f), t, "Order check: more work " + n++)); },
     // The session starts a subagent (its Agent call and the subagent's own file), as live.mjs does.
@@ -111,7 +115,9 @@ const until = async (page, fn, arg, limit = 14000) => { try { await page.waitFor
 async function scheme(browser, name, opts, r) {
   const R = { name }, phone = opts.size === "phone", say = (ok, what) => r.expect(ok, name + ": " + what), minH = phone ? 44 : 40;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-order-")), now = write(dir);
-  const srv = await serve(dir, now + 30 * 60000), L = logs(dir), pages = [];
+  const L = logs(dir);
+  L.create("order-old", at(0, 5)); // an old session of its own, below the sidebar's top eight from the start
+  const srv = await serve(dir, now + 90 * 60000), pages = [];
   const saved = () => { try { localStorage.setItem("semon.tree", JSON.stringify(Object.fromEntries(["principal", "sentinel", "advisor"].map((id) => [id, { open: true, at: 1 }])))); } catch {} };
   try {
     const page = await open(browser, srv, "/sessions", opts, (p) => p.addInitScript(saved)); pages.push(page);
@@ -129,12 +135,19 @@ async function scheme(browser, name, opts, r) {
     let sideBefore = [];
     if (!phone) { R.sideScrolled = await setScroll(page, "side", 60); say(R.sideScrolled > 10, "the sidebar's list can't be scrolled down (" + R.sideScrolled + " px)"); sideBefore = await sideRows(page); }
     await sleep(300); const pageTops = await pageRows(page);
+    const modelPre = await model(srv);
     L.bump(targets[0], at(12, 50)); L.bump(targets[1], at(12, 51)); L.create("order-a", at(12, 52));
     const modelA = await modelWith(srv, (m) => m.sessions["order-a"] && m.sessions[targets[1]].last > m.sessions[targets[0]].last);
     say(!!modelA, "the served model has no new session and no new order within 8 s");
     const last = lastOf(modelA ?? { sessions: {} });
     R.expected = 1 + expectedMoves(oldIds, cmpLast(last));
     await until(page, (n) => document.querySelector('.order-pill[data-order="page"]:not([hidden])')?.textContent.trim() === n + " updated", R.expected);
+    // The sidebar's count, from the model: the new lanes that would show (of its top eight), the old lanes that would enter them, and the
+    // rows among the eight it shows that are out of order.
+    const lanesOf = (m) => Object.entries(m.sessions).filter(([, x]) => x.lane && !x.parent).map(([id]) => id);
+    const sideWant = (m0, m1, shown8, l1) => { const before = new Set(lanesOf(m0)), top8 = lanesOf(m1).sort((a, b) => l1[b] - l1[a]).slice(0, 8);
+      return top8.filter((id) => !before.has(id)).length + top8.filter((id) => before.has(id) && !shown8.includes(id)).length + expectedMoves(shown8, cmpLast(l1)); };
+    R.sideExpected = phone ? null : sideWant(modelPre, modelA ?? { sessions: {} }, ids(sideBefore), last);
     R.pill = await pillOf("page");
     say(R.pill?.text === R.expected + " updated", "the pill says " + JSON.stringify(R.pill?.text) + ", expected " + R.expected + " updated (1 new, " + (R.expected - 1) + " to move)");
     say(!!R.pill && R.pill.on && R.pill.h >= minH && R.pill.w >= 40, "the pill is off screen or under " + minH + " px: " + JSON.stringify(R.pill));
@@ -145,9 +158,9 @@ async function scheme(browser, name, opts, r) {
     say(Math.abs((await scrollOf(page, "page")) - R.scrolled) <= 1, "the scroll position changed");
     await page.screenshot({ path: path.join(ENV.out, "order-" + name + "-page.png") });
     if (!phone) {
-      await pillShown("side");
+      await pillShown("side"); await until(page, (n) => document.querySelector('.order-pill[data-order="side"]:not([hidden])')?.textContent.trim() === n + " updated", R.sideExpected);
       R.sidePill = await pillOf("side"); const sideAfter = await sideRows(page);
-      say(!!R.sidePill && /^[1-9]\d* updated$/.test(R.sidePill.text) && R.sidePill.on && R.sidePill.h >= minH, "the sidebar's pill: " + JSON.stringify(R.sidePill));
+      say(R.sidePill?.text === R.sideExpected + " updated" && R.sidePill.on && R.sidePill.h >= minH, "the sidebar's pill: " + JSON.stringify(R.sidePill) + ", expected " + R.sideExpected + " updated");
       say(same(ids(sideAfter), ids(sideBefore)) && still(sideBefore, sideAfter), "the sidebar's rows moved or changed under a scrolled list: " + ids(sideAfter).join(",") + " vs " + ids(sideBefore).join(","));
       say(Math.abs((await scrollOf(page, "side")) - R.sideScrolled) <= 1, "the sidebar's scroll position changed");
       await page.screenshot({ path: path.join(ENV.out, "order-" + name + "-side.png") });
@@ -243,13 +256,63 @@ async function scheme(browser, name, opts, r) {
       await page.mouse.move(640, 4); await page.evaluate(() => { document.querySelector("#side-list").scrollTop = 0; }); await sleep(300); // (the click may have scrolled the toggle into view)
       L.create("order-e", at(12, 59));
       say(await until(page, () => document.querySelector("#lanes > .treeitem")?.dataset.id === "order-e"), "a new session was held after a mouse click left focus on a tree control");
+
+      // What an earlier step left pending is applied by tapping the chips, so each case below starts from lists in recency order.
+      const settle = async () => { await page.mouse.move(640, 4); await sleep(2500); for (const n of ["page", "side"]) if (await chip(page, n)) { await page.click('.order-chip[data-order="' + n + '"]'); await sleep(500); } };
+
+      // ---- 5b. a first child under a session below the sidebar's top eight is nothing anyone can see: no chip, no pill ----
+      await settle();
+      const side5 = await sideRows(page);
+      say(!ids(side5).includes("order-old"), "the old session is among the sidebar's top eight, so the check below proves nothing: " + ids(side5).join(","));
+      L.spawn("order-old", "oldchild", at(0, 10));
+      await modelWith(srv, (m) => m.sessions.oldchild); await sleep(3500);
+      const side5b = await sideRows(page);
+      say(same(ids(side5b), ids(side5)) && still(side5, side5b) && !(await chip(page, "side")) && !(await pillOf("side")), "a first child under a session nobody sees showed a chip or pill or moved the tree: " + JSON.stringify(await chip(page, "side")));
+
+      // ---- 5c. a new session arriving with a subagent, at the top: put first (with its child), no chip ----
+      await settle();
+      L.create("order-f", at(13, 20)); L.spawn("order-f", "fchild", at(13, 21));
+      await modelWith(srv, (m) => m.sessions.fchild);
+      say(await until(page, () => document.querySelector("#lanes > .treeitem")?.dataset.id === "order-f"), "the new session with a subagent wasn't put first in the sidebar");
+      await sleep(3000);
+      say(!(await chip(page, "side")) && !(await pillOf("side")) && (await page.evaluate(() => !!document.querySelector('#lanes .treeitem[data-id="fchild"]'))), "the new session's own subagent was held, or a chip or pill shows for it: " + JSON.stringify(await chip(page, "side")));
+
+      // ---- 5d. holding while a row is hovered, and while a row has keyboard focus ----
+      await settle();
+      const first0 = (await pageRows(page))[0].id;
+      await page.hover("#page .nrow");
+      L.create("order-g", at(13, 30));
+      await modelWith(srv, (m) => m.sessions["order-g"]); await sleep(3000);
+      const c5 = await chip(page, "page");
+      say((await pageRows(page))[0].id === first0 && c5?.text === "1 updated", "a new session was put first over a hovered row, or the chip is missing: " + JSON.stringify(c5));
+      await page.mouse.move(640, 4); await page.click('.order-chip[data-order="page"]');
+      say(await until(page, () => document.querySelector("#page .nrow")?.dataset.id === "order-g", null, 5000), "tapping the chip didn't show the held session");
+      await settle();
+      const first1 = (await pageRows(page))[0].id;
+      await page.keyboard.press("Shift"); await page.locator("#page .nrow").first().focus();
+      say(await page.evaluate(() => document.activeElement?.matches(".nrow:focus-visible")), "the row's focus isn't keyboard focus, so the check below proves nothing");
+      L.create("order-h", at(13, 31));
+      await modelWith(srv, (m) => m.sessions["order-h"]); await sleep(3000);
+      const c5k = await chip(page, "page");
+      say((await pageRows(page))[0].id === first1 && c5k?.text === "1 updated", "a new session was put first over a row with keyboard focus, or the chip is missing: " + JSON.stringify(c5k));
+      await page.evaluate(() => document.activeElement.blur()); await page.click('.order-chip[data-order="page"]');
+      say(await until(page, () => document.querySelector("#page .nrow")?.dataset.id === "order-h", null, 5000), "tapping the chip didn't show the held session (keyboard)");
+
+      // ---- 5e. the rail: a session below its eight icons that turns active enters them at once, with nothing held ----
+      await settle();
+      await page.click("#rail-toggle"); await page.waitForFunction(() => document.querySelector(".app.rail")); await sleep(400);
+      L.bump("order-old", at(13, 40));
+      say(await until(page, () => document.querySelector("#lanes > .treeitem")?.dataset.id === "order-old"), "in the rail a session that turned active didn't enter the icons (the sidebar is frozen)");
+      say(!(await chip(page, "side")) && !(await pillOf("side")), "the rail shows a chip or pill");
+      await page.click("#rail-toggle"); await page.waitForFunction(() => !document.querySelector(".app.rail")); await sleep(400);
+      say((await sideRows(page))[0]?.id === "order-old", "leaving the rail didn't draw the sidebar sorted");
     }
 
     // ---- 6. Home's Working now, then a machine page: scrolled down, a session bumps ----
     const m0 = await model(srv);
     for (const [key, route, title, cmpOf, when] of [
-      ["home", { v: "home" }, "Home", null, at(13, 0)],
-      ["machine", null, null, null, at(13, 1)],
+      ["home", { v: "home" }, "Home", null, at(13, 50)],
+      ["machine", null, null, null, at(13, 55)],
     ]) {
       let rt = route, ti = title, cand;
       if (key === "home") {
@@ -287,12 +350,12 @@ async function scheme(browser, name, opts, r) {
       const drawerBefore = await sideRows(page), lanesOld = ids(drawerBefore);
       const t2 = OLD.filter((id) => lanesOld.includes(id)).sort((a, b) => lanesOld.indexOf(b) - lanesOld.indexOf(a)).slice(0, 2);
       say(t2.length === 2, "fewer than two of the sample's Claude sessions are in the drawer: " + lanesOld.join(","));
-      await sleep(300); const drawerTops = await sideRows(page);
-      L.bump(t2[0], at(13, 4)); L.bump(t2[1], at(13, 5)); L.create("order-c", at(13, 6));
-      await modelWith(srv, (m) => m.sessions["order-c"]);
-      await pillShown("side"); await sleep(600);
+      await sleep(300); const drawerTops = await sideRows(page), modelPre2 = await model(srv);
+      L.bump(t2[0], at(14, 0)); L.bump(t2[1], at(14, 1)); L.create("order-c", at(14, 2));
+      const modelC = await modelWith(srv, (m) => m.sessions["order-c"]), want7 = sideWant(modelPre2, modelC ?? { sessions: {} }, lanesOld, lastOf(modelC ?? { sessions: {} }));
+      await pillShown("side"); await until(page, (n) => document.querySelector('.order-pill[data-order="side"]:not([hidden])')?.textContent.trim() === n + " updated", want7); await sleep(300);
       R.sidePill = await pillOf("side"); const drawerAfter = await sideRows(page);
-      say(!!R.sidePill && /^[1-9]\d* updated$/.test(R.sidePill.text) && R.sidePill.on && R.sidePill.h >= minH, "the drawer's pill: " + JSON.stringify(R.sidePill));
+      say(R.sidePill?.text === want7 + " updated" && R.sidePill.on && R.sidePill.h >= minH, "the drawer's pill: " + JSON.stringify(R.sidePill) + ", expected " + want7 + " updated");
       say(same(ids(drawerAfter), lanesOld) && still(drawerTops, drawerAfter), "the drawer's rows moved or changed under a scrolled list: " + ids(drawerAfter).join(",") + " vs " + lanesOld.join(","));
       say(Math.abs((await scrollOf(page, "side")) - R.sideScrolled) <= 1, "the drawer's scroll position changed");
       await page.screenshot({ path: path.join(ENV.out, "order-" + name + "-side.png") });
