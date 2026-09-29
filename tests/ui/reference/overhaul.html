@@ -254,6 +254,10 @@ code, .mono { font-family: var(--mono); font-size: .88em; font-variant-numeric: 
 .bubble.in { justify-self: start; border-radius: 18px; background: none; border: 1px solid var(--line); max-width: min(92%, 640px); }
 .msg-tm { justify-self: end; margin-top: -10px; font-size: var(--fs-cap); color: var(--muted); font-variant-numeric: tabular-nums; }
 .msg.assistant { max-width: 68ch; }
+/* Wide mode is for reading with room: the prose caps lift, so replies and briefs use the whole column. */
+.page.wide .msg.assistant { max-width: none; }
+.page.wide .msg.user, .page.wide .bubble { max-width: 85%; }
+.page.wide .bubble.in { max-width: 92%; }
 .msg.assistant .body { font: var(--fs-read)/1.5 var(--serif); color: var(--ink); }
 .body p { margin: 0 0 8px; } .body > :last-child { margin-bottom: 0; }
 .body code, .cc-brief code, .ev-text code, .ib code { font-size: .86em; background: color-mix(in srgb, var(--ink) 6%, transparent); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }

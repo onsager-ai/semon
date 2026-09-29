@@ -216,7 +216,7 @@ Folded into Trace as "Timeline", because it answers what the transcript can't (w
 - **Jump.** Agrees with #62 (centred), and makes it sticky inside the transcript column so it centres on the text, not the window.
 - **Gap.** #63's missing gap goes away: the child page no longer has "Open in".
 - **Meta line.** Supersedes the in-flight meta-line fix: labels, not a button. Failed steps are a label; finding them is the Find chip, not a link in the bar.
-- **Wide mode.** Moved into the session menu (a switch, remembered per device). It only ever mattered on transcripts.
+- **Wide mode.** Moved into the session menu (a switch, remembered per device). It only ever mattered on transcripts. It lifts the prose caps too (an assistant message's 68 ch, the bubbles' 600 and 640 px), so replies use the whole 1200 px column; the normal width keeps its reading measure.
 - **Details and cost.** One menu, as Marvin suggested. The headline figure includes runs when there are runs, because that is what the work cost; "This session" and "Its runs" split it. The harness's own figure is a row, and a difference is a sentence, not an alarm.
 - **Sessions page.** Shows the sessions you started, with their runs beneath them, so the page and the sidebar agree.
 - **Analytics taps.** Phone buckets are wider (6–7 bars) so each bar is a 44 px target; desktop keeps the finer buckets.
