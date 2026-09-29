@@ -444,7 +444,7 @@ export function write(out, { extras = false } = {}) {
       c.save();
     }
     // codex-cut: outputs Codex cut before the model saw them. A plain call's whole output is short, cut in its middle under
-    // Codex's warning header (the JSON form: the header sits inside the output field); a code-mode command's output is
+    // Codex's warning header behind unified exec's frame; a code-mode command's output is
     // long, cut by the 1 MiB collection cap.
     {
       const cwd = repo("meridian"), start = ms(T(8, 20)), c = codex("codex-cut", start, { cwd, branch: "feat/codex-cut", tokens: [0, 0, 0] });
@@ -452,7 +452,8 @@ export function write(out, { extras = false } = {}) {
       const log = (from, to) => Array.from({ length: to - from }, (_, i) => "[" + String(from + i).padStart(4, "0") + "] compiled unit " + (from + i)).join("\n");
       c.user(start, "Run the whole suite, then show me the build log.");
       c.call(start + 1000, "cut-plain", "exec_command", { cmd: "cargo test --workspace" });
-      c.output(start + 2000, "cut-plain", "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\n" + cases(0, 4).join("\n") + "\n…19500 tokens truncated…" + cases(896, 900).join("\n") + "\ntest result: ok. 900 passed; 0 failed\n", 0);
+      // Unified exec's form (codex-rs core/src/tools/context.rs): a frame, `Output:`, then Codex's warning header and cut.
+      c.output(start + 2000, "cut-plain", "Chunk ID: 3f9a1c\nWall time: 4.2100 seconds\nProcess exited with code 0\nOriginal token count: 24000\nOutput:\nWarning: truncated output (original token count: 24000)\nTotal output lines: 900\n\n" + cases(0, 4).join("\n") + "\n…19500 tokens truncated…" + cases(896, 900).join("\n") + "\ntest result: ok. 900 passed; 0 failed\n", null);
       c.text(start + 3000, "The suite passed. Now the build log.");
       c.code(start + 4000, "cut-script", "const r = await tools.exec_command({cmd:\"cat build.log\",workdir:\"" + cwd + "\"});\ntext(r.output);");
       c.item(start + 4500, { type: "CommandExecution", id: "cut-item", command: ["/bin/zsh", "-lc", "cat build.log"], cwd: "file://" + cwd, exit_code: 0, duration: { secs: 2, nanos: 0 }, aggregated_output: log(0, 40) + "\n... 1048576 bytes omitted ...\n" + log(9960, 10000) + "\n" });

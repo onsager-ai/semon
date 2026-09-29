@@ -1222,7 +1222,7 @@
     const parts = e.cut?.parts;
     if (!parts?.length) return el("pre", cls, e.out);
     const box = el("div", "cutout" + (cls ? " " + cls : ""));
-    for (const p of parts) { if (p.gap) { const g = el("div", "cutgap", gapText(p.gap)); g.setAttribute("role", "separator"); box.append(g); } else box.append(el("pre", null, p.text)); }
+    for (const p of parts) { if (p.gap) box.append(el("div", "cutgap", gapText(p.gap))); else box.append(el("pre", null, p.text)); }
     return box;
   }
   const diffEl = (rows, cls) => { const d = el("div", "diff" + (cls ? " " + cls : "")); rows.forEach(([c, t]) => d.append(el("div", c, t))); return d; };
