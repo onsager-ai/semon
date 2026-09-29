@@ -468,7 +468,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .child-work .cw-toggle { min-height: 36px; }
 .child-work .cw-body { margin: 2px 0 2px 2px; padding-left: 12px; border-left: 1px solid var(--line); }
 .child-work .show-all { justify-self: start; min-height: 36px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; }
-.child-intro, .child-return { min-width: 0; border-left: 3px solid var(--h); padding: 8px 0 8px 12px; }
+.child-intro, .child-return { min-width: 0; padding: 8px 0; }
+.child-return { border-top: 1px solid var(--line); }
 .child-intro .intro-title { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--ink-2); font-weight: 600; }
 .child-intro .intro-title button, .child-return button { min-height: 36px; min-width: 0; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .child-intro .intro-title .tm { margin-left: auto; flex: none; color: var(--faint); font: 11.5px var(--mono); }
@@ -480,7 +481,6 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .child-intro .intro-open { min-height: 40px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; text-align: left; }
 .child-return { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 13px; }
 .child-return .stat { flex: none; }
-.child-page .transcript-linked { border-left: 3px solid var(--h); padding-left: 12px; }
 .flash.hcard, .child-card.flash { background: color-mix(in srgb, var(--h) 12%, var(--ground)); }
 @media (prefers-reduced-motion: reduce) { .cw-toggle .chev, .think .chev { transition: none; } }
 
@@ -1551,7 +1551,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   // ---- Session page --------------------------------------------------------------------------------------------------
   function renderSession(page, sid) {
     const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr"); const h1 = el("h1", null, s.name); head.append(h1); page.append(head); observeTitle(h1);
-    if (origin) { page.classList.add("child-page"); page.style.setProperty("--h", "var(--" + s.harness + ")"); page.append(childBriefBlock(origin)); }
+    if (origin) { page.classList.add("child-page"); page.append(childBriefBlock(origin)); }
     page.append(transcript(sid, origin ? { excludeH: origin.id } : {}));
     if (origin && (s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err")) page.append(childReturnBlock(s, origin));
   }
@@ -1588,7 +1588,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   const toolInfo = (name) => { if (TOOLS[name]) return TOOLS[name]; const m = /^mcp__(.+?)__/.exec(name); if (m) { const srv = m[1].replace(/^claude_ai_/, "").replace(/_/g, " "); return ["ext", "Used " + srv, "used " + srv, "time", "times"]; } return ["run", name, name, "step", "steps"]; };
   const verb = (name) => toolInfo(name).slice(0, 2);
   function transcript(sid, opts = {}) {
-    const sec = el("section", opts.nested ? "nested" : parentOf(sid) ? "transcript-linked" : null); sec.setAttribute("aria-label", opts.nested ? SESS[sid].name + " transcript" : "Transcript"); Object.assign(sec.style, { display: "grid", gap: "10px", gridTemplateColumns: "minmax(0, 1fr)" });
+    const sec = el("section", opts.nested ? "nested" : null); sec.setAttribute("aria-label", opts.nested ? SESS[sid].name + " transcript" : "Transcript"); Object.assign(sec.style, { display: "grid", gap: "10px", gridTemplateColumns: "minmax(0, 1fr)" });
     const turnMode = !opts.nested, entries = transcriptEntries(opts.entries ?? TX[sid] ?? [], sid);
     // On a session page the transcript is a list of turns, each with its own entries; a nested one is a plain list.
     const box = el("div", turnMode ? "turns" : "tx"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);
@@ -1815,7 +1815,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   // ---- Render --------------------------------------------------------------------------------------------------------
   function render() {
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
-    const page = $("#page"), r = route; page.replaceChildren(); page.classList.remove("child-page"); page.style.removeProperty("--h"); syncLayoutPrefs();
+    const page = $("#page"), r = route; page.replaceChildren(); page.classList.remove("child-page"); syncLayoutPrefs();
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
     else if (r.v === "sessions") { renderSessions(page); renderTopbar("Sessions"); }
