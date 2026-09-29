@@ -42,7 +42,7 @@
     menu: "M4 7h16M4 12h16M4 17h16", more: "M5 12h.01M12 12h.01M19 12h.01", back: "M15 6l-6 6 6 6", chev: "M9 6l6 6-6 6", search: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4", filter: "M4 6h16M7 12h10M10 18h4",
     home: "M4 11l8-7 8 7M6 9.5V20h12V9.5M10 20v-5h4v5", inbox: "M4 13l2.5-8h11L20 13v6H4zM4 13h5l1 2h4l1-2h5", now: "M3 12h4l2.5-6 5 12 2.5-6h4", trace: "M6 4v10a4 4 0 0 0 4 4h8M6 10h12M15 7l3 3-3 3M15 15l3 3-3 3", sessions: "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01",
     run: "M4 17l5-5-5-5M12 19h8", stack: "M12 3l9 5-9 5-9-5zM3 13l9 5 9-5", read: "M6 3h8l4 4v14H6zM14 3v4h4", edit: "M4 20h4L19 9l-4-4L4 16zM13 7l4 4", find: "M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4",
-    machine: "M3 5h18v11H3zM8 20h8M12 16v4", repo: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6", role: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6",
+    machine: "M3 5h18v11H3zM8 20h8M12 16v4", repo: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6", delegate: "M4 3h7v5H4zM7.5 8v9H13M13 14h7v6h-7z",
     out: "M7 17L17 7M9 7h8v8", in: "M17 7L7 17M15 17H7V9", move: "M4 8h13l-3-3M20 16H7l3 3", ask: "M5 18l-1 3 3-1 11-11-2-2zM14 6l4 4", you: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6", q: "M9 9a3 3 0 1 1 4 2.8c-.7.3-1 .9-1 1.7V14M12 18h.01", check: "M5 12l4 4 10-10", qc: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4M12 17h.01", decide: "M12 21v-6M12 15L6 9M12 15l6-6M6 9V4M18 9V4M4 6l2-2 2 2M16 6l2-2 2 2", result: "M14 3H6v18h12V7zM14 3v4h4M9 12h6M9 16h6", done: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12.5l2.7 2.7L16 9.8", x: "M6 6l12 12M18 6L6 18", expand: "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7", copy: "M9 9h11v11H9zM5 15H4V4h11v1", ext: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
     down: "M12 4v15M5 12l7 7 7-7", up: "M6 15l6-6 6 6", dn: "M6 9l6 6 6-6", branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
     wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z", wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", tokens: "M5 5h14M12 5v14M9 19h6", chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7", coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5", relay: "M4 7h13l-3-3M20 17H7l3 3M17 4l-3 3 3 3M7 14l3 3-3 3",
@@ -1156,7 +1156,7 @@
   }
   function childKindChip(s, meta = false) {
     const c = el("span", meta ? "meta-item meta-kind" : "child-kind"); c.style.setProperty("--h", "var(--" + s.harness + ")");
-    const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
+    const mark = s.kind === "Subagent" ? icon(I.delegate, "kind-delegate") : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
     if (mark) c.append(mark);
     const kindText = s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"); if (meta) c.dataset.tip = "Kind: " + kindText;
     c.append(el("span", meta ? "meta-value" : null, kindText)); return c;
@@ -1713,7 +1713,7 @@
     const answered = h.kind === "toyou" && h.status === "done" && (h.ask === "question" || h.ask === "decision");
     const c = el("div", "hcard " + (child ? "child-card " + hcls(h.to) : h.kind === "toyou" ? "toyou" + (h.status === "wait" ? " waiting" : "") + (answered ? " answered" : "") : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
     const [ic, parts] = sentence(h, viewer);
-    if (child) { c.append(childKindChip(child)); const ln = el("span", "ln", child.name); ln.append(el("span", "verb", " · " + (child.kind ?? HARNESS[child.harness]))); c.append(ln); }
+    if (child) { const head = el("div", "child-head"); head.append(childKindChip(child), el("span", "ln", child.name)); c.append(head); }
     else { c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln); }
     const shownState = child?.state ?? h.status, sw = el("span", "stat " + shownState); sw.append(shownState === "work" ? el("span", "spin") : dot(shownState === "done" ? "done" : shownState, false), child ? STATE[shownState] : statWord(h)); c.append(sw);
     if (child) { const meta = el("div", "child-meta"); meta.append(el("span", null, dur(child.start, child.state === "work" ? null : child.last)), el("span", null, callsText(countOf(child, "calls")))); c.append(meta); }
