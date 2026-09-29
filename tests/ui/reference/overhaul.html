@@ -66,7 +66,7 @@ button:disabled { cursor: default; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 dialog:focus-visible, .panel-b:focus-visible { outline: none; }
 svg { display: block; }
-code, .mono { font-family: var(--mono); font-size: .88em; font-variant-numeric: tabular-nums; }
+code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); font-variant-numeric: tabular-nums; }
 .sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .icon { width: 18px; height: 18px; flex: none; }
 .num { font-variant-numeric: tabular-nums; }
@@ -472,7 +472,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .list-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .list-tools .search { flex: 1 1 auto; }
 .filter-btn { position: relative; }
-.filter-btn .badge { position: absolute; top: 2px; right: 0; min-width: 16px; height: 16px; padding: 0 4px; font-size: 11px; line-height: 16px; background: var(--accent); color: var(--ground); }
+.filter-btn .badge { position: absolute; top: 2px; right: 0; min-width: 16px; height: 16px; padding: 0 4px; font-size: 12px; line-height: 16px; background: var(--accent); color: var(--ground); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -12px; }
 .chips .chip svg { color: var(--muted); }
 .group-h { margin: 0 0 -14px; font-size: var(--fs-sm); font-weight: 600; color: var(--ink-2); }

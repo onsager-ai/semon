@@ -1,17 +1,17 @@
-/* Buttons share the viewer's quiet surfaces, with clear primary and destructive actions. */
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 0 14px; border: 0; border-radius: 9px; background: var(--sunken); color: var(--ink); font: 500 14px/1.2 var(--sans); text-align: center; text-decoration: none; white-space: nowrap; }
-.btn.primary { background: var(--accent); color: #fff; }
-.btn.danger { background: var(--sunken); color: var(--err); }
-.btn.sh-quiet { background: transparent; color: var(--ink-2); }
+/* Buttons look like the viewer's: an outlined control, a solid ink primary, and a red word for a destructive one. */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: var(--tap); padding: 0 14px; border: 1px solid var(--line-2); border-radius: var(--r2); background: var(--ground); color: var(--ink); font: 500 var(--fs-ui)/1.2 var(--sans); text-align: center; text-decoration: none; white-space: nowrap; }
+.btn.primary { border-color: var(--ink); background: var(--ink); color: var(--ground); }
+.btn.danger { color: var(--err); }
+.btn.sh-quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
 .btn[disabled] { cursor: not-allowed; opacity: .55; }
 .btn svg { width: 18px; height: 18px; flex: none; }
 .btn-row { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
-.copy.copied { width: auto; padding-inline: 9px; background: var(--sunken); color: var(--codex); }
-.copy.copied::after { content: "Copied"; margin-left: 5px; font: 500 12px/1 var(--sans); }
+.copy.copied { width: auto; padding-inline: 9px; background: var(--sunken); color: var(--ink-2); }
+.copy.copied::after { content: "Copied"; margin-left: 5px; font: 500 var(--fs-cap)/1 var(--sans); }
 
 @media (hover: hover) {
-  .btn:hover { background: color-mix(in srgb, var(--sunken) 78%, var(--line)); }
-  .btn.primary:hover { background: color-mix(in srgb, var(--accent) 88%, var(--ink)); }
+  .btn:hover { background: var(--sunken); }
+  .btn.primary:hover { background: color-mix(in srgb, var(--ink) 88%, var(--ground)); }
 }
 
 /* Links inside shell content use the viewer's accent colour instead of the browser default, in both link and visited
@@ -23,10 +23,10 @@ a.nav-item { text-decoration: none; color: var(--ink-2); }
 a.nav-item[aria-current="page"] { color: var(--ink); }
 
 /* Fields keep captions, controls, and helper messages together. */
-.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--ink-2); font-size: 13px; font-weight: 500; }
-.field input { display: block; width: 100%; height: 40px; min-height: 40px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--sunken); color: var(--ink); font: 400 14px/1.3 var(--sans); }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--ink-2); font-size: var(--fs-sm); font-weight: 500; }
+.field input { display: block; width: 100%; height: 40px; min-height: 40px; padding: 0 11px; border: 1px solid var(--line); border-radius: var(--r2); background: var(--sunken); color: var(--ink); font: 400 var(--fs-ui)/1.3 var(--sans); }
 .field input:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
-.field .hint, .field .error { font-size: 12.5px; font-weight: 400; }
+.field .hint, .field .error { font-size: var(--fs-sm); font-weight: 400; }
 .field .hint { color: var(--muted); }
 .field .error { color: var(--err); }
 .field + .field, .field + .btn-row { margin-top: 14px; }
@@ -37,16 +37,16 @@ a.nav-item[aria-current="page"] { color: var(--ink); }
 .rows .row:last-child { border-bottom: 0; }
 .row-main { min-width: 0; }
 .row .sh-nm { display: block; min-width: 0; overflow: hidden; color: var(--ink); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-.row .sh-meta { display: block; min-width: 0; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.row .sh-meta { display: block; min-width: 0; color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .row .actions { display: flex; align-items: center; gap: 6px; margin-left: 8px; }
 
 /* Status text pairs with the viewer's colored dot states. */
-.status { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.status { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; }
 
 /* Code stays readable without forcing a horizontal scroll. */
 .code { position: relative; min-width: 0; padding: 14px 56px 14px 14px; border-radius: 10px; background: var(--sunken); color: var(--ink-2); }
 .code[data-secret] { background: var(--wait-soft); }
-.code pre { min-width: 0; margin: 0; font: 12.5px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.code pre { min-width: 0; margin: 0; font: var(--fs-sm)/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .code .copy { position: absolute; top: 7px; right: 7px; }
 
 /* Sheets float above the page and become bottom sheets on phones. */
@@ -57,10 +57,10 @@ dialog.sheet::backdrop { background: rgb(0 0 0 / .35); }
 .sheet-body { display: grid; gap: 14px; }
 dialog.sheet > .btn-row { margin-top: 20px; }
 
-/* Notices mark the message with a single colored edge and no card frame. */
-.notice { padding: 11px 14px; border-left: 3px solid var(--line); background: var(--sunken); color: var(--ink-2); }
-.notice.ok { border-left-color: var(--codex); }
-.notice.sh-err { border-left-color: var(--err); }
+/* Notices are a quiet fill; only an error takes a colour, on its words, never on a border. */
+.notice { padding: 11px 14px; border-radius: var(--r2); background: var(--sunken); color: var(--ink-2); }
+.notice.ok { color: var(--ink); }
+.notice.sh-err { background: var(--err-soft); color: var(--err); }
 .notice + .notice { margin-top: 8px; }
 
 /* The hero gives a first-run page a calm, centered starting point. */
@@ -77,11 +77,11 @@ dialog.sheet > .btn-row { margin-top: 20px; }
 .step-num { display: grid; place-items: center; width: 26px; height: 26px; border: 1px solid var(--line); border-radius: 50%; color: var(--muted); font: 500 12px/1 var(--mono); }
 .step-num::before { content: counter(shell-step); }
 .sh-step.sh-done .step-num::before { content: "✓"; }
-.sh-step.current .step-num { border-color: var(--accent); background: var(--accent); color: #fff; }
+.sh-step.current .step-num { border-color: var(--ink); background: var(--ink); color: var(--ground); }
 .step-title { min-width: 0; align-self: center; font-weight: 600; }
 .step-body { grid-column: 2; display: grid; gap: 8px; min-width: 0; margin-top: 5px; color: var(--muted); }
 .step-body .code { color: var(--ink-2); }
-.sh-step.pending .step-num { color: var(--faint); }
+.sh-step.pending .step-num { color: var(--muted); }
 
 /* Sign-in pages use a narrow column without the navigation shell. */
 .signin { display: flex; flex-direction: column; justify-content: center; gap: 18px; width: min(100%, 380px); min-height: 100vh; margin: 0 auto; padding: 40px 24px; }
@@ -92,7 +92,7 @@ dialog.sheet > .btn-row { margin-top: 20px; }
 
 /* Account actions sit after the flexible navigation content at the sidebar's base. */
 .account { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; margin-top: auto; padding: 16px 16px 4px; border-top: 1px solid var(--line); }
-.account-login { flex: 1 1 140px; min-width: 0; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.account-login { flex: 1 1 140px; min-width: 0; color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 
 @media (max-width: 760px) {
   .btn-row { flex-direction: column; align-items: stretch; }
