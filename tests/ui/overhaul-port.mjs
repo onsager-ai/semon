@@ -39,7 +39,7 @@ function convert(D) {
   const iso = (t) => new Date(t).toISOString();
   const hhmm = (t) => iso(t).slice(11, 16);
   const SESS = Object.fromEntries(Object.entries(D.SESS).map(([id, source]) => {
-    const s = { ...source, id, modelId: Object.keys(source.tokens_by_model ?? {})[0] ?? source.model };
+    const s = { ...source, id, modelId: source.model ?? Object.keys(source.tokens_by_model ?? {})[0] };
     s.start = minute(source.start); s.last = minute(source.last);
     s.busy = (source.busy ?? []).map(([a, b]) => [minute(a), minute(b)]);
     s.tokensByModel = Object.fromEntries(Object.entries(source.tokens_by_model ?? {}).map(([model, usage]) => [model, { input: usage.input, output: usage.output, cacheWrite: usage.cache_write, cacheRead: usage.cache_read }]));

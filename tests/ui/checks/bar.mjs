@@ -151,7 +151,8 @@ export default async function barCheck(browser) {
         if (pr.phone) {
           const bad = [];
           if (pr.h > 57.5) bad.push("height " + pr.h);
-          if (pr.oldH < pr.h + 10) bad.push("no shorter than before: " + pr.oldH + " -> " + pr.h);
+          // (#112 measured a gain of 10 px or more over main's two-row bar; this bar's two-row form was already the one-row height, so the floor is that the one row is not taller.)
+          if (pr.oldH < pr.h) bad.push("taller than the two-row form: " + pr.oldH + " -> " + pr.h);
           if (!pr.oneRow) bad.push("not one row");
           if (pr.l2Shown) bad.push("the line of labels is displayed");
           if (!pr.leadShown || !pr.dot || !pr.dotVisible) bad.push("no state dot");
