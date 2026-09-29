@@ -10,8 +10,11 @@
 //! - `DIR/machines/<name>/facts.json`: the machine's last facts.
 //!
 //! Every answer of 200 is durable: the file's data is on disk (fsync) before
-//! it is given. Appends to one file are serialized; different files proceed
-//! in parallel. The receiver never follows a symbolic link under `DIR`: it
+//! it is given, and an append that fails partway is cut back off, so the
+//! copy is as it was. Appends to one file are serialized; different files
+//! proceed in parallel. Each machine's copy may hold at most
+//! [`Receiver::with_max_bytes`] bytes (20 GiB by default): a request that
+//! would grow it past that gets 507. The receiver never follows a symbolic link under `DIR`: it
 //! creates the directories itself, and refuses a request whose path meets a
 //! link.
 
@@ -38,6 +41,9 @@ pub const FACTS_FILE: &str = "facts.json";
 /// The largest request body accepted: one append's 4 MiB of file bytes is
 /// 5.34 MiB as base64, plus the JSON around it, rounded up to 6 MiB.
 pub const MAX_BODY_BYTES: usize = 6 * 1024 * 1024;
+
+/// The most bytes one machine's copy may hold unless told otherwise.
+pub const DEFAULT_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 
 /// The longest machine name.
 const MACHINE_NAME_MAX: usize = 63;
@@ -97,6 +103,8 @@ enum Refusal {
     Invalid(String),
     /// 413: more file bytes than one request may carry.
     TooLarge(String),
+    /// 507: the machine's copy would grow past its cap.
+    Full(String),
     /// 500: the receiver's own storage failed.
     Storage(io::Error),
 }
@@ -112,25 +120,88 @@ impl Refusal {
         match self {
             Self::Invalid(message) => Reply::error(400, message),
             Self::TooLarge(message) => Reply::error(413, message),
+            Self::Full(message) => Reply::error(507, message),
             Self::Storage(error) => Reply::error(500, format!("the receiver's storage: {error}")),
         }
     }
 }
 
-/// A receiver's directory, and the per-file locks that give each file one
-/// writer at a time.
+/// A receiver's directory, the per-file locks that give each file one
+/// writer at a time, and how many bytes each machine's copy holds.
 pub struct Receiver {
     dir: PathBuf,
     locks: Locks,
+    max_bytes: u64,
+    usage: Mutex<HashMap<String, u64>>,
 }
 
 impl Receiver {
-    /// A receiver writing under `dir`, which must exist.
+    /// A receiver writing under `dir`, which must exist. What each machine's
+    /// copy already holds is counted now, by a walk of `DIR/machines/`.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        let usage = measure(&dir.join(MACHINES_DIR));
         Self {
-            dir: dir.into(),
+            dir,
             locks: Locks::default(),
+            max_bytes: DEFAULT_MAX_BYTES,
+            usage: Mutex::new(usage),
         }
+    }
+
+    /// Caps each machine's copy at `bytes`.
+    pub fn with_max_bytes(mut self, bytes: u64) -> Self {
+        self.max_bytes = bytes;
+        self
+    }
+
+    /// The bytes `machine`'s copy holds, as counted.
+    pub fn used_bytes(&self, machine: &str) -> u64 {
+        self.usage().get(machine).copied().unwrap_or(0)
+    }
+
+    fn usage(&self) -> MutexGuard<'_, HashMap<String, u64>> {
+        self.usage.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Counts `growth` more bytes for `machine`, or refuses (507) when that
+    /// would pass the cap.
+    fn reserve(&self, machine: &str, growth: u64) -> Result<(), Refusal> {
+        if growth == 0 {
+            return Ok(());
+        }
+        let mut usage = self.usage();
+        let used = usage.entry(machine.to_owned()).or_default();
+        if used.saturating_add(growth) > self.max_bytes {
+            return Err(Refusal::Full(format!(
+                "{machine}'s copy holds {used} bytes; {growth} more would pass its {}-byte cap",
+                self.max_bytes
+            )));
+        }
+        *used += growth;
+        Ok(())
+    }
+
+    /// Counts `bytes` fewer for `machine`.
+    fn release(&self, machine: &str, bytes: u64) {
+        if let Some(used) = self.usage().get_mut(machine) {
+            *used = used.saturating_sub(bytes);
+        }
+    }
+
+    /// Runs `write` with `grow` bytes reserved for `machine`: they stay
+    /// counted, and `shrink` bytes are released, only if it succeeds.
+    fn counted<T>(
+        &self,
+        machine: &str,
+        grow: u64,
+        shrink: u64,
+        write: impl FnOnce() -> Result<T, Refusal>,
+    ) -> Result<T, Refusal> {
+        self.reserve(machine, grow)?;
+        let result = write();
+        self.release(machine, if result.is_ok() { shrink } else { grow });
+        result
     }
 
     pub fn dir(&self) -> &Path {
@@ -252,24 +323,30 @@ impl Receiver {
             return Ok(conflict());
         }
 
-        let length = if request.replace {
-            replace_file(&parent, name, bytes)?;
-            bytes.len() as u64
-        } else {
-            let created = existing.is_none();
-            let mut file = match existing {
-                Some(file) => file,
-                None => create_new(&target)?,
-            };
-            file.seek(SeekFrom::Start(request.offset))?;
-            file.write_all(bytes)?;
-            file.sync_data()?;
-            if created {
-                sync_dir(&parent)?;
+        let new_length = bytes.len() as u64 + if request.replace { 0 } else { request.offset };
+        let (grow, shrink) = (
+            new_length.saturating_sub(length),
+            length.saturating_sub(new_length),
+        );
+        self.counted(machine, grow, shrink, || {
+            if request.replace {
+                replace_file(&parent, name, bytes)?;
+            } else {
+                let created = existing.is_none();
+                let mut file = match existing {
+                    Some(file) => file,
+                    None => create_new(&target)?,
+                };
+                append_durably(
+                    &mut file,
+                    request.offset,
+                    bytes,
+                    created.then_some(parent.as_path()),
+                )?;
             }
-            request.offset + bytes.len() as u64
-        };
-        Ok(Reply::new(200, json!({"length": length})))
+            Ok(())
+        })?;
+        Ok(Reply::new(200, json!({"length": new_length})))
     }
 
     fn try_facts(&self, machine: &str, facts: &Facts) -> Result<Reply, Refusal> {
@@ -291,8 +368,15 @@ impl Receiver {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        let old = fs::symlink_metadata(dir.join(FACTS_FILE)).map_or(0, |meta| meta.len());
+        let new = bytes.len() as u64;
         // A rename replaces a link at the name; it never writes through one.
-        replace_file(&dir, FACTS_FILE, bytes)?;
+        self.counted(
+            machine,
+            new.saturating_sub(old),
+            old.saturating_sub(new),
+            || Ok(replace_file(&dir, FACTS_FILE, bytes)?),
+        )?;
         Ok(Reply::new(200, json!({})))
     }
 
@@ -420,6 +504,90 @@ fn read_head(file: &File) -> io::Result<Vec<u8>> {
     reader.seek(SeekFrom::Start(0))?;
     reader.take(HEAD_BYTES as u64).read_to_end(&mut head)?;
     Ok(head)
+}
+
+/// Writes `bytes` at `offset` (the file's length) and syncs them, and the
+/// directory `created_in` when the file is new. On any failure the file is
+/// cut back to `offset`, so a partial write never stays.
+fn append_durably(
+    file: &mut File,
+    offset: u64,
+    bytes: &[u8],
+    created_in: Option<&Path>,
+) -> io::Result<()> {
+    let result = (|| {
+        file.seek(SeekFrom::Start(offset))?;
+        write_bytes(file, bytes)?;
+        file.sync_data()?;
+        if let Some(parent) = created_in {
+            sync_dir(parent)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = file.set_len(offset).and_then(|()| file.sync_data());
+    }
+    result
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes the next write stop after this many bytes and fail.
+    static FAIL_WRITE_AFTER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn write_bytes(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(limit) = FAIL_WRITE_AFTER.with(std::cell::Cell::take) {
+            file.write_all(&bytes[..limit.min(bytes.len())])?;
+            return Err(io::Error::other("an injected write failure"));
+        }
+    }
+    file.write_all(bytes)
+}
+
+/// Each machine's bytes under `machines`: its `claude/` and `codex/` trees
+/// and its facts, never following a link.
+fn measure(machines: &Path) -> HashMap<String, u64> {
+    let mut usage = HashMap::new();
+    let Ok(entries) = fs::read_dir(machines) else {
+        return usage;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !is_machine_name(&name) || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let dir = entry.path();
+        let bytes: u64 = ["claude", "codex", FACTS_FILE]
+            .iter()
+            .map(|part| tree_size(&dir.join(part), 0))
+            .sum();
+        usage.insert(name, bytes);
+    }
+    usage
+}
+
+fn tree_size(path: &Path, depth: usize) -> u64 {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if meta.is_file() {
+        return meta.len();
+    }
+    if !meta.is_dir() || depth > 32 {
+        return 0;
+    }
+    fs::read_dir(path).map_or(0, |entries| {
+        entries
+            .flatten()
+            .map(|entry| tree_size(&entry.path(), depth + 1))
+            .sum()
+    })
 }
 
 /// Replaces `parent/name` with `bytes`: a new file beside it, synced, then
@@ -833,6 +1001,78 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(leftovers, [FACTS_FILE], "no temporary file is left");
+    }
+
+    #[test]
+    fn a_write_that_fails_partway_leaves_the_copy_as_it_was() {
+        let (_dir, receiver) = receiver();
+        let path = format!("claude/{LOG}");
+        assert_eq!(
+            receiver
+                .append("laptop", &append(LOG, b"", 0, b"one\n", false))
+                .status,
+            200
+        );
+        // The next write stops after two bytes and fails.
+        FAIL_WRITE_AFTER.with(|limit| limit.set(Some(2)));
+        let reply = receiver.append("laptop", &append(LOG, b"one\n", 4, b"two\n", false));
+        assert_eq!(reply.status, 500, "{reply:?}");
+        assert_eq!(copy(&receiver, "laptop", &path), b"one\n", "cut back");
+        assert_eq!(receiver.used_bytes("laptop"), 4, "not counted");
+        // A new file that fails is left empty, which is length 0.
+        FAIL_WRITE_AFTER.with(|limit| limit.set(Some(1)));
+        let reply = receiver.append(
+            "laptop",
+            &append("projects/-w/new.jsonl", b"", 0, b"x\n", false),
+        );
+        assert_eq!(reply.status, 500);
+        assert_eq!(
+            copy(&receiver, "laptop", "claude/projects/-w/new.jsonl"),
+            b""
+        );
+        // The retry applies.
+        let reply = receiver.append("laptop", &append(LOG, b"one\n", 4, b"two\n", false));
+        assert_eq!(reply, Reply::new(200, json!({"length": 8})));
+        assert_eq!(copy(&receiver, "laptop", &path), b"one\ntwo\n");
+    }
+
+    #[test]
+    fn a_machine_past_its_cap_gets_507() {
+        let (dir, receiver) = receiver();
+        let receiver = receiver.with_max_bytes(10);
+        let path = format!("claude/{LOG}");
+        let reply = receiver.append("laptop", &append(LOG, b"", 0, b"12345678", false));
+        assert_eq!(reply.status, 200);
+        let reply = receiver.append("laptop", &append(LOG, b"12345678", 8, b"abcd", false));
+        assert_eq!(reply.status, 507, "{reply:?}");
+        assert!(reply.body["error"].as_str().unwrap().contains("cap"));
+        assert_eq!(copy(&receiver, "laptop", &path), b"12345678");
+        // Another machine has its own cap.
+        assert_eq!(
+            receiver
+                .append("desk", &append(LOG, b"", 0, b"12345678", false))
+                .status,
+            200
+        );
+        // A replace that shrinks the copy is always taken, and frees room.
+        let reply = receiver.append("laptop", &append(LOG, b"", 0, b"12", true));
+        assert_eq!(reply.status, 200);
+        assert_eq!(receiver.used_bytes("laptop"), 2);
+        let reply = receiver.append("laptop", &append(LOG, b"12", 2, b"abcdefgh", false));
+        assert_eq!(reply, Reply::new(200, json!({"length": 10})));
+        // A new receiver counts what is already there.
+        let again = Receiver::new(&dir.0).with_max_bytes(10);
+        assert_eq!(again.used_bytes("laptop"), 10);
+        assert_eq!(again.used_bytes("desk"), 8);
+        let reply = again.append("laptop", &append(LOG, b"12abcdefgh", 10, b"!", false));
+        assert_eq!(reply.status, 507);
+        // Facts count too.
+        let facts = Facts {
+            version: 2,
+            hostname: "x".repeat(64),
+            ..Facts::default()
+        };
+        assert_eq!(again.facts("desk", &facts).status, 507);
     }
 
     #[test]
