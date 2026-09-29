@@ -1516,6 +1516,16 @@ impl MachineView {
                 include_str!("viewer.css").into(),
             )),
             "/mark.svg" => Ok((200, "image/svg+xml", include_str!("mark.svg").into())),
+            _ if crate::HARNESS_ICONS
+                .iter()
+                .any(|(icon_path, _)| *icon_path == path) =>
+            {
+                let svg = crate::HARNESS_ICONS
+                    .iter()
+                    .find_map(|(icon_path, svg)| (*icon_path == path).then_some(*svg))
+                    .expect("icon path was matched in HARNESS_ICONS");
+                Ok((200, "image/svg+xml", svg.as_bytes().to_vec()))
+            }
             "/favicon.svg" => Ok((200, "image/svg+xml", include_str!("favicon.svg").into())),
             "/shell.js" => Ok((
                 200,
@@ -3165,6 +3175,11 @@ mod tests {
             ("/shell.js", "text/javascript; charset=utf-8"),
             ("/shell.css", "text/css; charset=utf-8"),
             ("/mark.svg", "image/svg+xml"),
+            ("/harness/claude-code.svg", "image/svg+xml"),
+            ("/harness/codex.svg", "image/svg+xml"),
+            ("/harness/codex-black.svg", "image/svg+xml"),
+            ("/harness/opencode-light.svg", "image/svg+xml"),
+            ("/harness/opencode-dark.svg", "image/svg+xml"),
             ("/favicon.svg", "image/svg+xml"),
             ("/fonts/instrument-sans-latin.woff2", "font/woff2"),
             ("/fonts/instrument-sans-latin-ext.woff2", "font/woff2"),
@@ -3204,6 +3219,31 @@ mod tests {
         }
         for (_, bytes) in FONTS {
             assert_eq!(&bytes[..4], b"wOF2");
+        }
+    }
+
+    #[test]
+    fn harness_icon_routes_serve_exact_bytes_and_unknown_paths_404() {
+        let fixture = lane_fixture();
+        for (path, svg) in crate::HARNESS_ICONS {
+            let wire = get(&fixture, path);
+            assert!(wire.starts_with("HTTP/1.1 200"), "{path}");
+            assert!(
+                wire.contains("Content-Type: image/svg+xml"),
+                "{path}: wrong content type"
+            );
+            let body = wire.split_once("\r\n\r\n").unwrap().1;
+            assert_eq!(body.as_bytes(), svg.as_bytes(), "{path}: body changed");
+            for header in HEADERS {
+                assert!(wire.contains(header), "{path}: missing {header}");
+            }
+        }
+        for path in ["/harness/nope.svg", "/harness/../viewer.js"] {
+            let wire = get(&fixture, path);
+            assert!(wire.starts_with("HTTP/1.1 404"), "{path}");
+            for header in HEADERS {
+                assert!(wire.contains(header), "{path}: missing {header}");
+            }
         }
     }
 

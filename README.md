@@ -683,3 +683,11 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 sh -n scripts/install-user-timer.sh
 ```
+
+## Harness icons
+
+Semon shows each harness's official icon to identify where a session came from. The unmodified files are in
+`assets/harnesses/`, with their sources listed in `assets/harnesses/NOTICE.md`. They are not covered by this
+repository's Apache-2.0 license.
+
+Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.

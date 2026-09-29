@@ -15,6 +15,7 @@ use serde_json::Value;
 mod analytics;
 mod events;
 mod facts;
+pub mod harness;
 mod inputs;
 mod mcp;
 mod model;
@@ -30,6 +31,7 @@ pub use facts::{
     FACTS_VERSION, Facts, FactsSource, RUN_VARIABLES, ReportedModelUsage, ReportedRunSnapshot,
     local_facts, read_facts, write_facts,
 };
+pub use harness::{HARNESS_ICONS, HARNESSES, HarnessDefinition, harness};
 pub use inputs::{Input, InputRoot, inputs, is_input_path};
 pub use mcp::serve_mcp;
 pub use model::{MODEL_API, model_json, model_json_at};
