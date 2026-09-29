@@ -20,6 +20,7 @@ import namesCheck from "./names.mjs";
 import sidebarCheck from "./sidebar.mjs";
 import tokensCheck from "./tokens.mjs";
 import scrollbarsCheck from "./scrollbars.mjs";
+import embedCheck from "./embed.mjs";
 
 const checks = [
   ["home", homeCheck],
@@ -36,6 +37,7 @@ const checks = [
   ["sidebar", sidebarCheck],
   ["tokens", tokensCheck],
   ["scrollbars", scrollbarsCheck],
+  ["embed", embedCheck],
 ];
 
 const browser = await launch();

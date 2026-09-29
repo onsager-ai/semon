@@ -253,7 +253,8 @@
     // Several machines come as `machines`; one comes as `machine` alone.
     for (const x of m.machines ?? [m.machine]) { MACHINE[x.id] = x.name; MACHINE_UP[x.id] = x.up; if (x.last != null) MACHINE_LAST[x.id] = x.last; }
     ADMIN = m.admin && safePath(m.admin.href) ? m.admin : null;
-    ACCOUNT = accountOf(m.account);
+    // A server-provided menu wins; otherwise an embedding page may set `window.semonEmbed.account`, held to the same rules.
+    ACCOUNT = accountOf(m.account) ?? accountOf(window.semonEmbed?.account);
     NAV_MACHINES = m.nav && safePath(m.nav.machines) ? m.nav.machines : null;
     for (const k of Object.keys(SESS)) delete SESS[k];
     for (const [id, s] of Object.entries(m.sessions)) { s.id = id; SESS[id] = s; }
@@ -1883,7 +1884,7 @@
   // again with its view state kept: the scroll position, anchored to the first visible block; what is open, by stable keys;
   // focus, find and filters; the drawer. A session page follows its transcript's tail
   // with /api/tx?after= and replaces only the turns that changed. An open View all sheet holds the redraw until it closes.
-  const LIVE = { version: null, timer: null, busy: false, delay: 2000, ended: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
+  const LIVE = { version: null, timer: null, busy: false, delay: 2000, ended: false, again: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
   // The turn index as last drawn, to tell which turns an update changed.
   const remember = (m) => { LIVE.turns = new Map(m.turns.map((x) => [x.id, turnKey(x)])); };
   // What an update can change in a turn record or a handoff, cheaply (not the text, which a record never rewrites).
@@ -1894,20 +1895,33 @@
   function schedule(ms) { clearTimeout(LIVE.timer); LIVE.timer = null; if (!LIVE.ended && visible()) LIVE.timer = setTimeout(poll, ms); }
   document.addEventListener("visibilitychange", () => {
     if (!visible()) { clearTimeout(LIVE.timer); LIVE.timer = null; } else if (LIVE.version && !LIVE.busy && !LIVE.timer) schedule(LIVE.delay > 2000 ? LIVE.delay : 0); }); // a backoff in progress holds
+  // An embedding page can ask for a poll now (it knows something changed): any backoff resets to 2 s. A poll in flight
+  // is followed by another at once, since its request may have left before the change.
+  window.addEventListener("semon:refresh", () => {
+    if (!LIVE.version || LIVE.ended) return;
+    LIVE.delay = 2000;
+    if (LIVE.busy) LIVE.again = true; else schedule(0);
+  });
   function poll() {
     LIVE.timer = null; if (LIVE.busy || LIVE.ended || !visible()) return; LIVE.busy = true;
+    let ok = false;
     fetch("/api/model?since=" + enc(LIVE.version ?? ""), { credentials: "same-origin" })
       .then((r) => r.status === 304 ? null : r.ok ? r.json() : Promise.reject(Object.assign(new Error(r.status + " " + r.statusText), { status: r.status })), (e) => Promise.reject(Object.assign(e, { status: 0 })))
       .then((m) => (m ? update(m) : null))
-      .then(() => { LIVE.delay = 2000; }, (err) => {
-        if (err?.status === 403) return ended();
+      .then(() => { LIVE.delay = 2000; ok = true; }, (err) => {
+        if (err?.status === 403) return ended(403);
         LIVE.delay = Math.min(30000, LIVE.delay * 2);
         if (err?.status == null) setTimeout(() => { throw err; }); // not the network: a fault on the page, reported as one
       })
-      .finally(() => { LIVE.busy = false; schedule(LIVE.delay); });
+      .finally(() => {
+        LIVE.busy = false; schedule(LIVE.again ? 0 : LIVE.delay); LIVE.again = false;
+        window.dispatchEvent(new CustomEvent("semon:polled", { detail: { ok } })); // ok: the server answered 200 or 304
+      });
   }
-  function ended() {
+  // An embedding page can cancel `semon:ended` to draw its own note in place of this one.
+  function ended(status) {
     LIVE.ended = true; clearTimeout(LIVE.timer); LIVE.timer = null; if ($(".livenote")) return;
+    if (!window.dispatchEvent(new CustomEvent("semon:ended", { cancelable: true, detail: { status } }))) return;
     const n = el("p", "livenote", "Session ended: reload with the printed URL"); n.setAttribute("role", "status"); document.body.append(n);
   }
   // A 403 or a dropped connection fails the update (and backs off); anything else skips that one transcript.
