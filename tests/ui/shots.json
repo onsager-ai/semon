@@ -55,6 +55,11 @@
         "eval": "document.querySelector('.wide-toggle').click()"
       },
       {
+        "name": "wide-mode-session",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"harbor\"]').click(); document.querySelector('.wide-toggle').click();",
+        "wait": 1500
+      },
+      {
         "name": "sidebar-tree",
         "eval": "document.querySelector('#lead-btn').click(); document.querySelector('[data-tree-toggle=\"ledger\"]').click();"
       },
