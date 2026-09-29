@@ -3065,6 +3065,7 @@ impl<'a> Builder<'a> {
                                 .and_then(|found| found.n.clone())
                                 .unwrap_or_else(|| "tool".into()),
                             reply: found.and_then(|found| found.r.clone()),
+                            item: found.and_then(|found| found.item),
                         },
                     }
                 }
@@ -3617,6 +3618,9 @@ pub(crate) enum SlotKind {
         shown: Shown,
         name: String,
         reply: Option<events::Reply>,
+        /// A plain Codex call's `CommandExecution` item line, when the logs
+        /// have one: its output is the whole copy.
+        item: Option<u64>,
     },
     /// A Codex code-mode command or file change, drawn in place of its
     /// wrapper when exactly one code-mode call owns it.

@@ -349,7 +349,7 @@
     const part = (as) => api("/api/entry?sid=" + enc(e.sid) + "&slot=" + e.slot + "&as=" + as).then((r) => [as, r]);
     return Promise.all((e.more ?? []).map(part)).then((rs) => {
       const f = { fullCut: [] };
-      for (const [k, r] of rs) { f[k] = k === "diff" ? r.diff : r.text; if (k === "diff" && r.changes) f.changes = r.changes; if (r.truncated) f.fullCut.push(k); }
+      for (const [k, r] of rs) { f[k] = k === "diff" ? r.diff : r.text; if (k === "diff" && r.changes) f.changes = r.changes; if (k === "out") f.cut = r.cut ?? null; if (r.truncated) f.fullCut.push(k); }
       return f;
     });
   }
@@ -1166,7 +1166,7 @@
             if (change.diff?.length) out.append(diffEl(change.diff, "clip")); else out.append(el("div", "noout", "No diff recorded"));
           }
           if (!e.changes.length) out.append(el("div", "noout", "No changes recorded"));
-        } else if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) out.append(el("pre", "clip", e.out)); else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
+        } else if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) { out.append(outEl(e, "clip")); if (e.cut) out.append(el("div", "cutnote", cutNoteText(e.cut))); } else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
         const actions = el("div", "step-actions");
         if (e.script != null) { const script = el("button", "viewscript", "View script"); script.type = "button"; script.addEventListener("click", () => openScript(e)); actions.append(script); }
         const all = el("button", "viewall"); all.type = "button"; all.hidden = true; all.append(icon(I.expand), el("span", null, "View all"));
@@ -1174,7 +1174,7 @@
         b.addEventListener("click", () => { out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden));
           if (!out.hidden) { let cut = !!e.more?.length; out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; }); all.hidden = !cut; actions.hidden = e.script == null && !cut;
             // Text cut when this copy was made, with nothing more to show: say so instead of ending on "…".
-            if (!cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs")); } });
+            if (!cut && !e.cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs")); } });
         box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key }); continue;
       }
       flush();
@@ -1213,6 +1213,18 @@
     if (!box.querySelector(".msg, .step, .hcard")) box.append(el("p", "empty", find ? "Nothing matches “" + find + "”." : "Nothing to show with these filters."));
     sec.append(box); return sec;
   }
+  // Codex cuts some outputs before the model sees them and says where and how much. An output cut that way is drawn as its
+  // head, a divider with the count, then its tail; without a found gap it is one block with the note alone.
+  const num = (n) => n.toLocaleString("en-US");
+  const gapText = (g) => (g.unit === "tokens" ? "About " : "") + (g.unit === "lines" && g.of != null ? num(g.n) + " of " + num(g.of) + " lines" : num(g.n) + " " + (g.unit === "chars" ? "characters" : g.unit)) + " cut here by Codex";
+  const cutNoteText = (cut) => "Codex cut this output before the model saw it" + (cut.original_tokens ? " (about " + num(cut.original_tokens) + " tokens in all)" : "") + ".";
+  function outEl(e, cls) {
+    const parts = e.cut?.parts;
+    if (!parts?.length) return el("pre", cls, e.out);
+    const box = el("div", "cutout" + (cls ? " " + cls : ""));
+    for (const p of parts) { if (p.gap) { const g = el("div", "cutgap", gapText(p.gap)); g.setAttribute("role", "separator"); box.append(g); } else box.append(el("pre", null, p.text)); }
+    return box;
+  }
   const diffEl = (rows, cls) => { const d = el("div", "diff" + (cls ? " " + cls : "")); rows.forEach(([c, t]) => d.append(el("div", c, t))); return d; };
   // The whole tool call. A phone gets a full-screen sheet and a wider screen a dialog; either way it is a history entry,
   // so the back gesture closes it without leaving the page.
@@ -1228,7 +1240,7 @@
       if (text) { const c = el("button", "vcopy"); c.type = "button"; c.append(icon(I.copy), el("span", null, "Copy"));
         c.addEventListener("click", () => navigator.clipboard?.writeText(text).then(() => { c.lastChild.textContent = "Copied"; }, () => { c.lastChild.textContent = "Copy failed"; })); s.append(c); }
       body.append(s); };
-    const cutNote = (text) => { if (!e.fullFailed && /…(\(truncated\))?\s*$/.test(text ?? "")) body.append(el("p", "vnote", "Cut short in this copy of the logs.")); };
+    const cutNote = (text) => { if (e.cut) { body.append(el("p", "vnote", cutNoteText(e.cut))); return; } if (!e.fullFailed && /…(\(truncated\))?\s*$/.test(text ?? "")) body.append(el("p", "vnote", "Cut short in this copy of the logs.")); };
     if (e.scriptText !== undefined) {
       section("Script", e.scriptText); body.append(el("pre", "script", e.scriptText));
       if (e.scriptTruncated) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));
@@ -1239,7 +1251,7 @@
         for (const change of e.changes) { section("Change · " + change.path + (change.move ? " → " + change.move : ""), null); body.append(diffEl(change.diff ?? [])); }
         if (!e.changes.length) body.append(el("p", "vnote", "No changes recorded."));
       } else if (e.diff) { section("Change", null); body.append(diffEl(e.diff)); }
-      else { section("Output", e.out); if (e.out) { body.append(el("pre", null, e.out)); cutNote(e.out); } else body.append(el("p", "vnote", e.unfinished ? "No result recorded." : "No output.")); }
+      else { section("Output", e.out); if (e.out) { body.append(outEl(e)); cutNote(e.out); } else body.append(el("p", "vnote", e.unfinished ? "No result recorded." : "No output.")); }
     }
     if (e.fullFailed) body.append(el("p", "vnote", "Couldn't load the full text: this is the preview."));
     if (e.fullCut?.length) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));

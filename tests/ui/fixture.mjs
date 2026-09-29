@@ -443,6 +443,23 @@ export function write(out, { extras = false } = {}) {
       c.text(start + 7000, "The long command accepted input and finished.");
       c.save();
     }
+    // codex-cut: outputs Codex cut before the model saw them. A plain call's whole output is short, cut in its middle under
+    // Codex's warning header (the JSON form: the header sits inside the output field); a code-mode command's output is
+    // long, cut by the 1 MiB collection cap.
+    {
+      const cwd = repo("meridian"), start = ms(T(8, 20)), c = codex("codex-cut", start, { cwd, branch: "feat/codex-cut", tokens: [0, 0, 0] });
+      const cases = (from, to) => Array.from({ length: to - from }, (_, i) => "test suite::case_" + String(from + i).padStart(3, "0") + " ... ok");
+      const log = (from, to) => Array.from({ length: to - from }, (_, i) => "[" + String(from + i).padStart(4, "0") + "] compiled unit " + (from + i)).join("\n");
+      c.user(start, "Run the whole suite, then show me the build log.");
+      c.call(start + 1000, "cut-plain", "exec_command", { cmd: "cargo test --workspace" });
+      c.output(start + 2000, "cut-plain", "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\n" + cases(0, 4).join("\n") + "\n…19500 tokens truncated…" + cases(896, 900).join("\n") + "\ntest result: ok. 900 passed; 0 failed\n", 0);
+      c.text(start + 3000, "The suite passed. Now the build log.");
+      c.code(start + 4000, "cut-script", "const r = await tools.exec_command({cmd:\"cat build.log\",workdir:\"" + cwd + "\"});\ntext(r.output);");
+      c.item(start + 4500, { type: "CommandExecution", id: "cut-item", command: ["/bin/zsh", "-lc", "cat build.log"], cwd: "file://" + cwd, exit_code: 0, duration: { secs: 2, nanos: 0 }, aggregated_output: log(0, 40) + "\n... 1048576 bytes omitted ...\n" + log(9960, 10000) + "\n" });
+      c.output(start + 5000, "cut-script", "Script completed", null, true);
+      c.text(start + 6000, "The build log ran to the end.");
+      c.save();
+    }
     // backlog: a long transcript, two and a half pages of tool calls in ten turns, with one unreadable line.
     const b = claude("backlog", { cwd: role("backlog"), model: "sonnet-5", tokens: [0.01, 0.2, 0.01] });
     b.title(ms(T(5, 0)), "backlog");
