@@ -4367,8 +4367,11 @@ mod tests {
         assert!(!legacy.exists());
         drop(cache);
 
-        // A claim a crash left is imported, then removed.
-        let leftover = root.join("index.events.json.importing.4242.0");
+        // A claim a crash left is imported, then removed; a file that only
+        // looks like one is left alone.
+        let unrelated = root.join("index.events.json.importing.notes");
+        fs::write(&unrelated, b"notes").unwrap();
+        let leftover = root.join("index.events.json.importing.4242.0.0123456789abcdef");
         fs::write(
             &leftover,
             legacy_json(&["run-a", "run-b", "run-c", "run-d", "run-e"]).to_string(),
@@ -4377,6 +4380,63 @@ mod tests {
         let cache = EventCache::open(&v1);
         assert_eq!(ran(&cache), ["run-a", "run-b", "run-c", "run-d", "run-e"]);
         assert!(!leftover.exists());
+        assert_eq!(fs::read(&unrelated).unwrap(), b"notes");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Opens the index on another thread, failing (not hanging) if it
+    /// doesn't return within 10 s.
+    #[cfg(unix)]
+    fn open_promptly(v1: &Path) -> EventCache {
+        let (sent, opened) = std::sync::mpsc::channel();
+        let v1 = v1.to_owned();
+        std::thread::spawn(move || {
+            let _ = sent.send(EventCache::open(&v1));
+        });
+        opened
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the index opens promptly")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_or_fifo_at_the_json_cache_or_a_claim_is_never_read() {
+        let root = scratch("import-special");
+        let target = root.join("elsewhere.json");
+        let target_json = legacy_json(&["run-x"]).to_string();
+        fs::write(&target, &target_json).unwrap();
+        let claim_suffix = ".importing.4242.0.0123456789abcdef";
+        for case in ["legacy symlink", "claim symlink", "legacy fifo"] {
+            let dir = root.join(case.replace(' ', "-"));
+            fs::create_dir(&dir).unwrap();
+            let v1 = dir.join("index.json");
+            let legacy = EventCache::legacy_path(&v1);
+            let special = match case {
+                "claim symlink" => {
+                    let mut name = legacy.clone().into_os_string();
+                    name.push(claim_suffix);
+                    PathBuf::from(name)
+                }
+                _ => legacy.clone(),
+            };
+            if case == "legacy fifo" {
+                let made = std::process::Command::new("mkfifo").arg(&special).status();
+                if !made.is_ok_and(|status| status.success()) {
+                    // No mkfifo here: nothing to test for this case.
+                    continue;
+                }
+            } else {
+                std::os::unix::fs::symlink(&target, &special).unwrap();
+            }
+            let cache = open_promptly(&v1);
+            assert!(cache.store.is_some(), "{case}: the store opens");
+            assert!(ran(&cache).is_empty(), "{case}: the target isn't imported");
+            assert!(
+                fs::symlink_metadata(&special).is_ok(),
+                "{case}: left where it is"
+            );
+            assert_eq!(fs::read_to_string(&target).unwrap(), target_json, "{case}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

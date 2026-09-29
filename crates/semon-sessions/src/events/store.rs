@@ -353,7 +353,7 @@ fn identity(file: &fs::File) -> io::Result<Identity> {
 }
 
 /// A JSON cache read from an open handle: which file it was, and what it
-/// held. `None` when it couldn't be read to its end (an I/O error): it is
+/// held. An error when it couldn't be read to its end (an I/O error): it is
 /// then left for the next open.
 fn read_legacy(file: &fs::File) -> io::Result<(Identity, Result<Legacy, serde_json::Error>)> {
     let read_as = identity(file)?;
@@ -393,13 +393,8 @@ fn import_legacy(connection: &mut Connection, legacy: &Path) -> rusqlite::Result
     for claimed in claims(legacy) {
         finish(connection, legacy, &claimed, None)?;
     }
-    let file = match fs::File::open(legacy) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            warn_import(legacy, &error);
-            return Ok(());
-        }
+    let Some(file) = open_regular(legacy) else {
+        return Ok(());
     };
     let (read_as, parsed) = match read_legacy(&file) {
         Ok(read) => read,
@@ -408,20 +403,14 @@ fn import_legacy(connection: &mut Connection, legacy: &Path) -> rusqlite::Result
             return Ok(());
         }
     };
-    drop(file);
+    // The handle stays open until the claim is checked, so its inode can't
+    // be reused by another file meanwhile.
     #[cfg(test)]
     hook(&BEFORE_IMPORT);
     if let Ok(found) = &parsed {
         import_rows(connection, legacy, Some(found))?;
     }
-    // Unique to this call, so no two claims, even in one process, share
-    // a name (a rename would replace the other).
-    static CLAIMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let claim = CLAIMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let claimed = sibling(
-        legacy,
-        &format!(".importing.{}.{claim}", std::process::id()),
-    );
+    let claimed = sibling(legacy, &claim_suffix());
     match fs::rename(legacy, &claimed) {
         Ok(()) => {}
         // Claimed or removed by another process meanwhile: its import is
@@ -434,7 +423,91 @@ fn import_legacy(connection: &mut Connection, legacy: &Path) -> rusqlite::Result
     }
     #[cfg(test)]
     hook(&AFTER_CLAIM);
-    finish(connection, legacy, &claimed, Some((read_as, parsed)))
+    let finished = finish(connection, legacy, &claimed, Some((read_as, parsed)));
+    drop(file);
+    finished
+}
+
+/// A claim's suffix, unique to this call: the pid, a counter, and 64
+/// random bits, so no two claims share a name (a rename would replace the
+/// other), whichever processes make them.
+fn claim_suffix() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    static CLAIMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let claim = CLAIMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut random = std::collections::hash_map::RandomState::new().build_hasher();
+    random.write_u64(claim);
+    random.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos()),
+    );
+    format!(
+        ".importing.{}.{claim}.{:016x}",
+        std::process::id(),
+        random.finish()
+    )
+}
+
+/// Whether `suffix` (after `<name>`) is a claim's: `.importing.<pid>.<n>.
+/// <16 hex digits>`, exactly as [`claim_suffix`] makes it.
+fn is_claim(suffix: &str) -> bool {
+    let Some(rest) = suffix.strip_prefix(".importing.") else {
+        return false;
+    };
+    fn digits(part: &str) -> bool {
+        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+    }
+    let parts: Vec<&str> = rest.split('.').collect();
+    matches!(
+        parts.as_slice(),
+        [pid, n, random]
+            if digits(pid)
+                && digits(n)
+                && random.len() == 16
+                && random.bytes().all(|byte| byte.is_ascii_hexdigit())
+    )
+}
+
+/// `O_NONBLOCK`, which `std` doesn't name: a FIFO at the path opens at
+/// once instead of waiting for a writer, and is then skipped.
+#[cfg(unix)]
+const O_NONBLOCK: i32 = if cfg!(any(target_os = "macos", target_os = "ios")) {
+    0x0004
+} else if cfg!(target_os = "linux") {
+    0o4000
+} else {
+    0
+};
+
+/// Opens a JSON cache or claim for reading only if it is a regular file:
+/// never through a symlink, and never waiting on a FIFO. Anything else is
+/// left where it is and reported once; `None` too when it is gone or can't
+/// be opened.
+fn open_regular(path: &Path) -> Option<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            warn_import(path, &error);
+            return None;
+        }
+    };
+    match file.metadata() {
+        Ok(metadata) if metadata.is_file() => Some(file),
+        Ok(_) => {
+            warn_import(path, &"it isn't a regular file");
+            None
+        }
+        Err(error) => {
+            warn_import(path, &error);
+            None
+        }
+    }
 }
 
 /// The claims (`<name>.importing.…`) a crash or another process left.
@@ -447,12 +520,18 @@ fn claims(legacy: &Path) -> Vec<PathBuf> {
     } else {
         dir
     };
-    let prefix = format!("{}.importing.", name.to_string_lossy());
+    let name = name.to_string_lossy();
     fs::read_dir(dir)
         .map(|entries| {
             entries
                 .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .strip_prefix(&*name)
+                        .is_some_and(is_claim)
+                })
                 .map(|entry| entry.path())
                 .collect()
         })
@@ -468,14 +547,9 @@ fn finish(
     claimed: &Path,
     read: Option<(Identity, Result<Legacy, serde_json::Error>)>,
 ) -> rusqlite::Result<()> {
-    let file = match fs::File::open(claimed) {
-        Ok(file) => file,
-        // Finished by another process.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            warn_import(legacy, &error);
-            return Ok(());
-        }
+    // Gone (finished by another process), or not a regular file.
+    let Some(file) = open_regular(claimed) else {
+        return Ok(());
     };
     let parsed = match (identity(&file), read) {
         (Ok(now), Some((read_as, parsed))) if now == read_as => parsed,
@@ -503,39 +577,64 @@ fn finish(
                 legacy.display()
             );
         }
-        Err(error) => {
-            import_rows(connection, legacy, None)?;
-            match set_aside_legacy(legacy, claimed) {
-                Ok(aside) => eprintln!(
+        // Recorded only once it is set aside, so a claim that can't be is
+        // tried again rather than recorded as done.
+        Err(error) => match set_aside_legacy(legacy, claimed) {
+            Ok(Some(aside)) => {
+                import_rows(connection, legacy, None)?;
+                eprintln!(
                     "semon: {} couldn't be read ({error}); it was set aside as {} and not imported",
                     legacy.display(),
                     aside.display()
-                ),
-                Err(rename) => warn_import(legacy, &rename),
+                );
             }
-        }
+            // Set aside by another process meanwhile.
+            Ok(None) => {}
+            Err(rename) => warn_import(legacy, &rename),
+        },
     }
     Ok(())
 }
 
 /// Moves an unreadable claimed file to the first free name of
-/// `<legacy>.corrupt`, `<legacy>.corrupt.1`, …: linked there, which fails
-/// rather than replaces an existing file, then unlinked from its claim.
-fn set_aside_legacy(legacy: &Path, claimed: &Path) -> io::Result<PathBuf> {
+/// `<legacy>.corrupt`, `<legacy>.corrupt.1`, …, never over an existing
+/// file: hard-linked there (a link fails rather than replaces), then
+/// unlinked from its claim. Where the filesystem has no hard links, it is
+/// renamed to the first name that doesn't exist. `None` when the claim is
+/// already gone: another process set it aside.
+fn set_aside_legacy(legacy: &Path, claimed: &Path) -> io::Result<Option<PathBuf>> {
+    let mut linking = true;
     for n in 0..1000 {
         let aside = if n == 0 {
             sibling(legacy, ".corrupt")
         } else {
             sibling(legacy, &format!(".corrupt.{n}"))
         };
-        match fs::hard_link(claimed, &aside) {
-            Ok(()) => {
-                fs::remove_file(claimed)?;
-                return Ok(aside);
+        if linking {
+            match fs::hard_link(claimed, &aside) {
+                Ok(()) => {
+                    match fs::remove_file(claimed) {
+                        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                            return Err(error);
+                        }
+                        _ => {}
+                    }
+                    return Ok(Some(aside));
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                // No hard links here (EPERM, unsupported): rename instead.
+                Err(_) => linking = false,
             }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
         }
+        if fs::symlink_metadata(&aside).is_ok() {
+            continue;
+        }
+        return match fs::rename(claimed, &aside) {
+            Ok(()) => Ok(Some(aside)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        };
     }
     Err(io::Error::other("no free .corrupt name"))
 }
