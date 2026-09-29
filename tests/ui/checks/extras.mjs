@@ -333,6 +333,7 @@ export default async function (browser) {
       r.expect(sheet.first === 40 && sheet.last === "[9999] compiled unit 9999", tag + ": View all shows the whole head: " + JSON.stringify(sheet));
       r.expect(sheet.notes.some((n) => n.startsWith("Codex cut this output before the model saw it")) && !sheet.notes.some((n) => n.includes("Cut short in this copy")), tag + ": View all says Codex cut it: " + JSON.stringify(sheet.notes));
       r.expect((await overflow(page)) === 0, tag + ": nothing overflows with View all open");
+      await page.locator("dialog.viewer[open] .cutgap").scrollIntoViewIfNeeded(); await page.waitForTimeout(150);
       await page.screenshot({ path: path.join(ENV.out, "codex-cut-sheet-" + tag + ".png") });
       R.codexCut[tag] = { plain, sheet };
       r.expect(page.errors.length === 0, tag + ": codex-cut page errors: " + page.errors.join(" | "));
