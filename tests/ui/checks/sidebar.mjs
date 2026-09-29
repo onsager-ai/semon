@@ -15,6 +15,7 @@
 //     without saving that, and its saved choice is unchanged after navigating away; a collapse made while the child is open
 //     stays collapsed through redraws; the open child is never folded into 'Show N more'; in the rail the ancestor keeps a
 //     ring, no highlight, and aria-current="true".
+//   - a collapsed parent's count pill is the bare total, with no state dot: its title and the row's aria-label break it down (running, waiting), and its text meets AA in both themes.
 //   - screenshots of the sidebar at 390 and 1280, light and dark, go to out/sidebar-*.png.
 import path from "node:path";
 import { ENV, served, goto, data, reporter, overflow } from "../lib.mjs";
@@ -178,7 +179,7 @@ export default async function sidebarCheck(browser) {
       r.expect(g.spacers === 0 && g.mixed >= 1 && g.groups.every((x) => x.lefts.length === 1 && x.ends.length === 1), "desktop: names in a group start at one x and times end at one x: " + JSON.stringify(g));
       const first = await groupOf(page, fan.id);
       r.expect(first && JSON.stringify(first.ids) === JSON.stringify(shownIds) && first.more?.text === "Show " + hidden + " more", "desktop: the cap and the button: " + JSON.stringify(first));
-      // Open, the child count is hidden; collapsed, the count and state dot sit inside the row, clear of the toggle.
+      // Open, the child count is hidden; collapsed, the count pill sits inside the row, clear of the toggle.
       const summaryShown = () => page.evaluate((id) => { const s = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-summary"); return !!s && getComputedStyle(s).display !== "none"; }, fan.id);
       r.expect(!(await summaryShown()), "desktop: an open parent shows no child count");
       await page.evaluate((id) => [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelector(":scope > .tree-row .tree-toggle").click(), fan.id);
@@ -197,6 +198,35 @@ export default async function sidebarCheck(browser) {
       r.expect(!(await summaryShown()), "desktop: expanding hides the child count again");
     }
     await page.screenshot({ path: path.join(ENV.out, "sidebar-1280-" + tag + ".png") });
+    // The count pill is a neutral total: no state dot beside the number (a dot next to "53" read as 53 running), a title and an
+    // accessible label that break the total down, and AA contrast in both themes. Collapsed, then put back as it was.
+    {
+      const running = kids.filter((c) => c.state === "work").length, waiting = kids.filter((c) => c.state === "wait").length;
+      const expected = kids.length + " sub-sessions" + (running ? " · " + running + " running" : "") + (waiting ? " · " + waiting + " waiting for you" : "");
+      const pill = await page.evaluate((id) => {
+        const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id), wasOpen = item.getAttribute("aria-expanded") === "true";
+        if (wasOpen) item.querySelector(":scope > .tree-row .tree-toggle").click();
+        const s = item.querySelector(":scope > .tree-row .tree-summary"), row = item.querySelector(":scope > .tree-row .srow");
+        if (!s) return null;
+        const canvas = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+        const rgba = (css) => { canvas.clearRect(0, 0, 1, 1); canvas.fillStyle = "#000"; canvas.fillStyle = css; canvas.fillRect(0, 0, 1, 1); const [r, g, b, a] = canvas.getImageData(0, 0, 1, 1).data; return [r, g, b, a / 255]; };
+        const over = (top, under) => { const a = top[3] + under[3] * (1 - top[3]); return a ? [0, 1, 2].map((i) => (top[i] * top[3] + under[i] * under[3] * (1 - top[3])) / a).concat(a) : [0, 0, 0, 0]; };
+        const layers = []; for (let e = s; e; e = e.parentElement) layers.push(rgba(getComputedStyle(e).backgroundColor));
+        let bg = [255, 255, 255, 1]; for (const layer of layers.reverse()) bg = over(layer, bg);
+        const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+        const x = lum(rgba(getComputedStyle(s).color)), y = lum(bg), cs = getComputedStyle(s);
+        const out = { text: s.textContent, dots: s.querySelectorAll(".dot").length, title: s.title, label: row.getAttribute("aria-label"), ratio: Math.round((Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) * 100) / 100, radius: cs.borderRadius, height: s.getBoundingClientRect().height };
+        if (wasOpen) item.querySelector(":scope > .tree-row .tree-toggle").click();
+        return out;
+      }, fan.id);
+      (R.desktopPill ??= {})[tag] = pill;
+      r.expect(pill && pill.dots === 0 && pill.text === String(kids.length), "desktop " + tag + ": the count pill is the bare total, with no state dot: " + JSON.stringify(pill));
+      r.expect(pill?.title === expected, "desktop " + tag + ": the pill's title breaks the total down as " + JSON.stringify(expected) + ": " + JSON.stringify(pill?.title));
+      r.expect(!running || /\d+ running/.test(pill?.title ?? ""), "desktop " + tag + ": a running descendant is named in the pill's title");
+      r.expect(pill?.label?.endsWith(", " + expected.replaceAll(" · ", ", ")), "desktop " + tag + ": the row's aria-label carries the breakdown: " + JSON.stringify(pill?.label));
+      r.expect(pill?.ratio >= 4.5, "desktop " + tag + ": the pill's text has contrast " + pill?.ratio + ", under 4.5");
+      r.expect(pill && parseFloat(pill.radius) >= pill.height / 2, "desktop " + tag + ": the pill is fully round: radius " + pill?.radius + " for height " + pill?.height);
+    }
     r.expect(page.errors.length === 0, "desktop " + tag + ": page errors " + page.errors.join("; "));
     await page.context().close();
   }

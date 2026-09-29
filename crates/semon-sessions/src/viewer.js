@@ -588,6 +588,8 @@
   function costInfoTip() { const b = el("span", "cost-info"); b.title = COST_TIP; b.setAttribute("role", "img"); b.setAttribute("aria-label", COST_TIP); b.append(icon(I.q)); return b; }
   const TREE_RANK = { wait: 0, work: 1, err: 2, idle: 3, done: 4 };
   const urgentDescendant = (sid, children) => descendantsOf(sid, children).filter((s) => s.state in TREE_RANK).sort((a, b) => TREE_RANK[a.state] - TREE_RANK[b.state] || b.last - a.last)[0]?.state;
+  // What a parent's descendants are doing, as parts to join: the total, then only the non-zero running and waiting counts.
+  const childParts = (all) => { const run = all.filter((x) => x.state === "work").length, wait = all.filter((x) => x.state === "wait").length; return [all.length + (all.length === 1 ? " sub-session" : " sub-sessions"), run && run + " running", wait && wait + " waiting for you"].filter(Boolean); };
   const defaultTreeOpen = (sid, children) => descendantsOf(sid, children).some((s) => s.state === "wait" || s.state === "work");
   const matchesTree = (sid, children, seen = new Set()) => {
     if (seen.has(sid)) return false;
@@ -638,11 +640,12 @@
     }
     const row = el("button", "srow"); row.type = "button"; row.dataset.id = s.id; row.title = s.name;
     row.setAttribute("aria-label", s.name + ", " + (STATE[s.state] ?? s.state) + ", " + (HARNESS[s.harness] ?? s.harness) + ", " + shortHost(s));
+    const parts = allKids.length ? childParts(allKids) : []; if (parts.length) row.setAttribute("aria-label", row.getAttribute("aria-label") + ", " + parts.join(", "));
     if (current === s.id) row.setAttribute("aria-current", "page");
     if (rail && ancestors.has(s.id)) { row.classList.add("on-path"); row.setAttribute("aria-current", "true"); }
     const main = el("span", "srow-main"), ag = el("span", "ag", ago(s.last)); main.append(dot(s.state), el("span", "nm", s.name), ag);
     if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work"); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
-    if (kids.length && !rail && allKids.length) { const summary = el("span", "tree-summary"); const state = urgentDescendant(s.id, children); if (state) summary.append(dot(state)); summary.append(String(allKids.length)); ag.before(summary); }
+    if (kids.length && !rail && allKids.length) { const summary = el("span", "tree-summary", String(allKids.length)); summary.title = parts.join(" · "); ag.before(summary); }
     const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").title = hostOf(s); meta.querySelector(".repo-short").title = branchOf(s);
     row.append(main, meta); row.addEventListener("click", () => goSession(s.id)); line.append(row); if (lineToggle) line.append(lineToggle); item.append(line);
     item.addEventListener("keydown", (e) => {
