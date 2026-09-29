@@ -642,3 +642,158 @@ fn a_post_without_a_length_is_411() {
     );
     assert_eq!(exchange(receiving.address, request.as_bytes()).status, 411);
 }
+
+/// Reads one answer off a kept-alive connection: its head, then
+/// Content-Length bytes.
+fn read_one(stream: &mut TcpStream) -> Answer {
+    let mut raw = Vec::new();
+    let mut byte = [0u8];
+    while !raw.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).unwrap();
+        raw.push(byte[0]);
+    }
+    let length: usize = String::from_utf8_lossy(&raw)
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: ").map(str::to_owned))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut body = vec![0u8; length];
+    stream.read_exact(&mut body).unwrap();
+    raw.extend_from_slice(&body);
+    parse(&raw)
+}
+
+/// Whether a small request on a new connection gets any answer (401 here),
+/// rather than the connection being closed at once.
+fn served(address: SocketAddr) -> bool {
+    let mut socket = TcpStream::connect(address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let _ =
+        socket.write_all(format!("POST {APPEND} HTTP/1.1\r\nContent-Length: 0\r\n\r\n").as_bytes());
+    let mut raw = Vec::new();
+    let _ = socket.read_to_end(&mut raw);
+    !raw.is_empty()
+}
+
+#[test]
+fn authenticated_connections_stop_counting_against_their_address() {
+    // Machines behind one SSH tunnel all come from 127.0.0.1, each keeping
+    // its connection alive.
+    let limits = Limits {
+        head: Duration::from_secs(5),
+        linger: Duration::from_millis(200),
+        ..Limits::default()
+    };
+    assert_eq!(limits.connections_per_ip, 4);
+    let (receiving, tokens) = receiving_with(&["laptop"], limits, false);
+    let keep_alive = |path: &str, before: &[u8], line: &[u8]| {
+        let body = append_body(path, before, before.len() as u64, line);
+        let mut request = format!(
+            "POST {APPEND} HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n",
+            tokens[0],
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&body);
+        request
+    };
+    let mut kept = Vec::new();
+    for index in 0..5 {
+        let mut stream = TcpStream::connect(receiving.address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        let path = format!("projects/-work/lane-{index}.jsonl");
+        stream.write_all(&keep_alive(&path, b"", b"one\n")).unwrap();
+        let answer = read_one(&mut stream);
+        assert_eq!(answer.status, 200, "connection {index}: {}", answer.head);
+        kept.push((stream, path));
+    }
+    // Each is still served on its own connection.
+    for (stream, path) in &mut kept {
+        stream
+            .write_all(&keep_alive(path.as_str(), b"one\n", b"two\n"))
+            .unwrap();
+        assert_eq!(read_one(stream).body, json!({"length": 8}));
+    }
+    // Connections that never authenticate still count: 4 get in, and the
+    // 5th is closed at once.
+    let idle: Vec<TcpStream> = (0..4)
+        .map(|_| TcpStream::connect(receiving.address).unwrap())
+        .collect();
+    let started = Instant::now();
+    let fifth = TcpStream::connect(receiving.address).unwrap();
+    let elapsed = time_to_close(fifth, started);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the 5th unauthenticated connection was closed after {elapsed:?}, not at once"
+    );
+    drop(idle);
+}
+
+#[test]
+fn a_connection_that_sends_nothing_is_closed_at_the_head_deadline() {
+    let (receiving, _tokens) = receiving_with(&["laptop"], short(), false);
+    let started = Instant::now();
+    let socket = TcpStream::connect(receiving.address).unwrap();
+    let elapsed = time_to_close(socket, started);
+    assert!(
+        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(3),
+        "closed after {elapsed:?}; the head deadline is 1 s after accept"
+    );
+}
+
+#[test]
+fn a_peer_that_never_reads_its_answer_is_closed_at_the_write_deadline() {
+    // One connection at a time, so whether the stuck one still holds its
+    // place shows in whether another is served.
+    let limits = Limits {
+        connections: 1,
+        head: Duration::from_secs(5),
+        write: Duration::from_secs(1),
+        linger: Duration::from_millis(200),
+        ..Limits::default()
+    };
+    let (receiving, tokens) = receiving_with(&["laptop"], limits, false);
+    // A path the 400 echoes back: an answer of about 5.5 MiB, more than
+    // the socket buffers hold while the peer reads nothing.
+    let body = serde_json::to_vec(&Append {
+        root: "claude".into(),
+        path: format!("projects/{}.jsonl", "a".repeat(5_500_000)),
+        offset: 0,
+        head_sha256: head_sha256(b""),
+        bytes: String::new(),
+        replace: false,
+    })
+    .unwrap();
+    assert!(body.len() <= MAX_BODY_BYTES);
+    let mut stuck = TcpStream::connect(receiving.address).unwrap();
+    stuck
+        .write_all(&request(receiving.address, APPEND, Some(&tokens[0]), &body))
+        .unwrap();
+    let started = Instant::now();
+    assert!(
+        !served(receiving.address),
+        "the stuck connection holds the only place"
+    );
+    loop {
+        if served(receiving.address) {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "the stuck connection was never closed"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(800) && elapsed < Duration::from_secs(4),
+        "freed after {elapsed:?}; the write deadline is 1 s"
+    );
+    drop(stuck);
+}

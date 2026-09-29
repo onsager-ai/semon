@@ -4,8 +4,12 @@
 //! nothing else.
 //!
 //! Each connection has its own thread, up to [`Limits::connections`] in
-//! all and [`Limits::connections_per_ip`] from one address; one more is
-//! closed as soon as it is accepted. A request's token is checked, and its
+//! all. Until one of its requests passes the token check, a connection also
+//! counts against its address (an IPv6 address by its /64), which may hold
+//! [`Limits::connections_per_ip`]; one more over either is closed as soon
+//! as it is accepted. Once authenticated, it counts only in the total, so
+//! several machines behind one address (an SSH tunnel, a NAT) each keep
+//! their connection. A request's token is checked, and its
 //! declared length against [`MAX_BODY_BYTES`], before any of its body is
 //! read. Every read and write of the socket, the TLS handshake's included,
 //! runs against a deadline (see [`Limits`]), so a client that trickles bytes
@@ -16,7 +20,7 @@ use std::{
     collections::HashMap,
     fs,
     io::{self, Read, Write},
-    net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream},
+    net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
     thread,
@@ -45,7 +49,8 @@ const LINGER_BYTES: usize = 256 * 1024;
 pub struct Limits {
     /// Connections served at once (32).
     pub connections: usize,
-    /// Connections served at once from one IP address (4).
+    /// Connections not yet authenticated from one IP address (an IPv6
+    /// address by its /64) at once (4).
     pub connections_per_ip: usize,
     /// From accepting a connection to the end of its first request's head,
     /// the TLS handshake included; for a later request, from its first byte
@@ -77,6 +82,38 @@ impl Default for Limits {
             write: Duration::from_secs(30),
             linger: Duration::from_secs(2),
         }
+    }
+}
+
+impl Limits {
+    /// These limits with no zero in them: a count is at least 1 and a
+    /// duration at least 1 ms (a zero timeout can't be set on a socket).
+    /// [`Limits::linger`] may be zero.
+    pub fn clamped(self) -> Self {
+        let at_least = |duration: Duration| duration.max(Duration::from_millis(1));
+        Self {
+            connections: self.connections.max(1),
+            connections_per_ip: self.connections_per_ip.max(1),
+            head: at_least(self.head),
+            idle: at_least(self.idle),
+            gap: at_least(self.gap),
+            body: at_least(self.body),
+            write: at_least(self.write),
+            linger: self.linger,
+        }
+    }
+}
+
+/// What a connection counts against: its IPv4 address, or its IPv6
+/// address's /64 (one host usually holds a whole /64). An IPv4-mapped IPv6
+/// address counts as the IPv4 one.
+fn ip_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & (u128::MAX << 64))),
+        },
     }
 }
 
@@ -137,7 +174,7 @@ pub fn check_listen(
     Ok(())
 }
 
-/// Who is connected: in all, and from each address.
+/// Who is connected: in all, and, not yet authenticated, from each address.
 #[derive(Default)]
 struct Admission {
     open: usize,
@@ -163,11 +200,22 @@ impl Shared {
 /// A connection's place under the limits, given back when it is dropped.
 struct Slot {
     shared: Arc<Shared>,
-    ip: IpAddr,
+    /// The address it counts against, until it authenticates.
+    ip: Option<IpAddr>,
+}
+
+fn release_ip(admission: &mut Admission, ip: IpAddr) {
+    if let Some(count) = admission.per_ip.get_mut(&ip) {
+        *count -= 1;
+        if *count == 0 {
+            admission.per_ip.remove(&ip);
+        }
+    }
 }
 
 impl Slot {
     fn admit(shared: &Arc<Shared>, ip: IpAddr) -> Option<Self> {
+        let ip = ip_key(ip);
         let mut admission = shared.admission();
         let from_ip = admission.per_ip.get(&ip).copied().unwrap_or(0);
         if admission.open >= shared.limits.connections
@@ -179,8 +227,16 @@ impl Slot {
         admission.per_ip.insert(ip, from_ip + 1);
         Some(Self {
             shared: Arc::clone(shared),
-            ip,
+            ip: Some(ip),
         })
+    }
+
+    /// A request on this connection passed the token check: from now on it
+    /// counts in the total only, not against its address.
+    fn authenticated(&mut self) {
+        if let Some(ip) = self.ip.take() {
+            release_ip(&mut self.shared.admission(), ip);
+        }
     }
 }
 
@@ -188,11 +244,8 @@ impl Drop for Slot {
     fn drop(&mut self) {
         let mut admission = self.shared.admission();
         admission.open = admission.open.saturating_sub(1);
-        if let Some(count) = admission.per_ip.get_mut(&self.ip) {
-            *count -= 1;
-            if *count == 0 {
-                admission.per_ip.remove(&self.ip);
-            }
+        if let Some(ip) = self.ip.take() {
+            release_ip(&mut admission, ip);
         }
     }
 }
@@ -232,9 +285,10 @@ impl Server {
         })
     }
 
-    /// Other limits than the defaults (tests use short ones).
+    /// Other limits than the defaults (tests use short ones), with any
+    /// zero raised to the least usable value ([`Limits::clamped`]).
     pub fn with_limits(mut self, limits: Limits) -> Self {
-        self.limits = limits;
+        self.limits = limits.clamped();
         self
     }
 
@@ -286,8 +340,8 @@ impl Server {
             let spawned = thread::Builder::new()
                 .name("semon-receive".into())
                 .spawn(move || {
-                    serve_connection(&slot.shared, socket, accepted);
-                    drop(slot);
+                    let mut slot = slot;
+                    serve_connection(&mut slot, socket, accepted);
                 });
             if let Err(error) = spawned {
                 eprintln!("semon receive: cannot start a connection thread: {error}");
@@ -707,7 +761,9 @@ fn parse_head(bytes: &[u8]) -> Result<Head, (u16, &'static str)> {
     Ok(head)
 }
 
-fn serve_connection(shared: &Shared, socket: TcpStream, accepted: Instant) {
+fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
+    let owner = Arc::clone(&slot.shared);
+    let shared = &*owner;
     let _ = socket.set_nodelay(true);
     let limits = shared.limits;
     let timed = Timed {
@@ -741,7 +797,7 @@ fn serve_connection(shared: &Shared, socket: TcpStream, accepted: Instant) {
                 return connection.close();
             }
         };
-        match answer(shared, &mut connection, &head) {
+        match answer(shared, slot, &mut connection, &head) {
             Next::Continue if !head.close => {}
             Next::Continue | Next::Close => return connection.close(),
             Next::Refuse(status, message, headers) => {
@@ -763,7 +819,7 @@ enum Next {
 
 /// Checks a request in order (endpoint, method, framing, token, size) and,
 /// only once all pass, reads its body and answers it.
-fn answer(shared: &Shared, connection: &mut Connection, head: &Head) -> Next {
+fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
     let Some(endpoint) = Endpoint::from_path(&head.target) else {
         return Next::Refuse(404, "no such endpoint", &[]);
     };
@@ -794,6 +850,7 @@ fn answer(shared: &Shared, connection: &mut Connection, head: &Head) -> Next {
             &[("WWW-Authenticate", "Bearer")],
         );
     };
+    slot.authenticated();
     if length > MAX_BODY_BYTES as u64 {
         return Next::Refuse(413, "the body is over the 6 MiB limit", &[]);
     }
@@ -862,6 +919,37 @@ mod tests {
         let many: String = (0..=MAX_HEADERS).map(|n| format!("X-{n}: 1\r\n")).collect();
         let many = format!("POST / HTTP/1.1\r\n{many}\r\n");
         assert_eq!(parse_head(many.as_bytes()).unwrap_err().0, 431);
+    }
+
+    #[test]
+    fn an_ipv6_peer_counts_by_its_64() {
+        let key = |text: &str| ip_key(text.parse().unwrap());
+        assert_eq!(key("2001:db8::1"), key("2001:db8::ffff:ffff:1"));
+        assert_eq!(key("2001:db8::1"), key("2001:db8:0:0:1234::"));
+        assert_ne!(key("2001:db8::1"), key("2001:db8:0:1::1"));
+        assert_eq!(key("::ffff:192.0.2.7"), key("192.0.2.7"));
+        assert_ne!(key("192.0.2.7"), key("192.0.2.8"));
+    }
+
+    #[test]
+    fn zero_limits_are_raised_to_usable_ones() {
+        let zero = Limits {
+            connections: 0,
+            connections_per_ip: 0,
+            head: Duration::ZERO,
+            idle: Duration::ZERO,
+            gap: Duration::ZERO,
+            body: Duration::ZERO,
+            write: Duration::ZERO,
+            linger: Duration::ZERO,
+        }
+        .clamped();
+        assert_eq!(zero.connections, 1);
+        assert_eq!(zero.connections_per_ip, 1);
+        for duration in [zero.head, zero.idle, zero.gap, zero.body, zero.write] {
+            assert!(!duration.is_zero());
+        }
+        assert_eq!(Limits::default().clamped(), Limits::default());
     }
 
     #[test]
