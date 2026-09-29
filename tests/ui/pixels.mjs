@@ -339,6 +339,29 @@ async function nav(page, route, D, mockup) {
 }
 
 const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name + ".png"), PNG.sync.write(img)); };
+// The ratchet: a pending screen may not drift away from the overhaul. tests/ui/pixel-baseline.json holds, per screen and scheme, its
+// ratio of differing pixels and the size of both pictures (served, reference). A screen fails when its ratio rises by more than half
+// a point, or when either size changes. A port PR moves the baselines it changes in its own diff (out/pixel-baseline.<section>.json,
+// written by every run, holds the current values), and its body says which and why. SEMON_PIXEL_BASELINE names the section
+// ("main" by default; the two-machines step uses "two-machines").
+const SECTION = process.env.SEMON_PIXEL_BASELINE ?? "main";
+const BASELINE_FILE = path.join(here, "pixel-baseline.json");
+const BASELINE = fs.existsSync(BASELINE_FILE) ? JSON.parse(fs.readFileSync(BASELINE_FILE, "utf8"))[SECTION] : undefined;
+const RISE = 0.005;
+const CURRENT = {};
+function ratchet(row, p) {
+  const key = row.scheme + "|" + row.screen, d = p.A.width + "×" + p.A.height, size = p.size ?? [d, d];
+  CURRENT[key] = { ratio: Math.round(p.ratio * 1e5) / 1e5, size };
+  const was = BASELINE?.[key];
+  if (!BASELINE) return "no baseline section " + SECTION + " in pixel-baseline.json";
+  if (!was) return "no baseline for " + key;
+  if (p.ratio > was.ratio + RISE) return "rose from " + (was.ratio * 100).toFixed(2) + "% to " + (p.ratio * 100).toFixed(2) + "%";
+  if (was.size[0] !== size[0] || was.size[1] !== size[1]) return "size changed from " + was.size.join(" vs ") + " to " + size.join(" vs ");
+  return null;
+}
+// Served against served: the same viewer built over the same data, compared with itself. SEMON_REF_BASE/SEMON_REF_TOKEN name the
+// second server (the pushed-data step compares the received copy with the machine's own). No mockup and no ratchet is involved.
+const REF_BASE = (process.env.SEMON_REF_BASE ?? "").replace(/\/$/, ""), REF_TOKEN = process.env.SEMON_REF_TOKEN ?? "";
 // Both pictures and the diff of an enforced mismatch. A pending screen differs by design until its port PR, so only the diff is kept,
 // with the pictures for the screens that show the most (Home, the lists, one session, one trace).
 const SHOWN = ["home", "sessions", "machines", "analytics", "session-harbor", "session-h-codex", "drawer"];
@@ -364,16 +387,19 @@ function saveMismatch(row, name, scheme, p) {
     // One port reference per mockup a screen is mapped to, opened on first use.
     const ports = new Map();
     const portFor = async (ref) => { if (!ports.has(ref)) ports.set(ref, await referencePage(browser, size, dark, portReference(D, ref))); return ports.get(ref); };
-    const orig = await referencePage(browser, size, dark, MOCKUP);
-    for (const s of list.filter((x) => referenceOf(x.name) !== null)) {
-      const mapped = referenceOf(s.name), enforced = mapped !== "pending", ref = enforced ? mapped : "overhaul";
-      const port = await portFor(ref);
+    const other = REF_BASE ? await served(browser, { size, dark, base: REF_BASE, token: REF_TOKEN }) : null;
+    const orig = other ? null : await referencePage(browser, size, dark, MOCKUP);
+    for (const s of list.filter((x) => other || referenceOf(x.name) !== null)) {
+      const mapped = other ? "served" : referenceOf(s.name), enforced = mapped !== "pending", ref = other ? "served" : enforced ? mapped : "overhaul";
+      const port = other ?? await portFor(ref);
       await nav(page, s.served, D, false); const a = await shot(page, size);
-      await nav(port, s.port, D, true); const b = await shot(port, size);
+      if (other) await nav(port, s.served, D, false); else await nav(port, s.port, D, true);
+      const b = await shot(port, size);
       const p = compare(a, b);
       const row = { scheme, screen: s.name, reference: ref, port: { pixels: p.pixels, ratio: p.ratio, size: p.size, enforced, pass: !enforced || (p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size) } };
+      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; row.port.pass = false; } }
       saveMismatch(row, s.name, scheme, p);
-      if (s.sample) {
+      if (s.sample && !other) {
         await nav(orig, s.sample, D, true); const c = await shot(orig, size);
         const q = compare(a, c);
         row.sample = { pixels: q.pixels, ratio: q.ratio, size: q.size };
@@ -382,30 +408,35 @@ function saveMismatch(row, name, scheme, p) {
       results.push(row);
     }
     // The phone's navigation drawer, open on Home.
-    if (size === "phone" && !ONLY.length && referenceOf("drawer") !== null) {
-      const port = await portFor(referenceOf("drawer") === "pending" ? "overhaul" : referenceOf("drawer"));
+    if (size === "phone" && !ONLY.length && (other || referenceOf("drawer") !== null)) {
+      const port = other ?? await portFor(referenceOf("drawer") === "pending" ? "overhaul" : referenceOf("drawer"));
       // Each session screenshot can mark result handoffs read. Start the drawer comparison in a fresh served context,
       // matching the reference page reload below, so both drawers show the fixture's initial unread count.
       const drawerPage = await served(browser, { size, dark });
       await drawerPage.click("#lead-btn"); await drawerPage.waitForTimeout(350);
-      await port.goto("http://reference.test/", { waitUntil: "load" }); await port.waitForSelector("#lead-btn"); await port.click("#lead-btn"); await port.waitForTimeout(350);
-      const p = compare(await shot(drawerPage, "desktop"), await shot(port, "desktop"));
-      const enforced = referenceOf("drawer") !== "pending";
-      const row = { scheme, screen: "drawer", reference: enforced ? referenceOf("drawer") : "overhaul", port: { pixels: p.pixels, ratio: p.ratio, size: p.size, enforced, pass: !enforced || (p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size) } };
+      let side;
+      if (other) { side = await served(browser, { size, dark, base: REF_BASE, token: REF_TOKEN }); await side.click("#lead-btn"); await side.waitForTimeout(350); }
+      else { await port.goto("http://reference.test/", { waitUntil: "load" }); await port.waitForSelector("#lead-btn"); await port.click("#lead-btn"); await port.waitForTimeout(350); side = port; }
+      const p = compare(await shot(drawerPage, "desktop"), await shot(side, "desktop"));
+      const enforced = other ? true : referenceOf("drawer") !== "pending";
+      const row = { scheme, screen: "drawer", reference: other ? "served" : enforced ? referenceOf("drawer") : "overhaul", port: { pixels: p.pixels, ratio: p.ratio, size: p.size, enforced, pass: !enforced || (p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size) } };
+      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; row.port.pass = false; } }
       saveMismatch(row, "drawer", scheme, p);
       results.push(row);
       errors.push(...drawerPage.errors.map((e) => scheme + " served drawer: " + e));
-      await drawerPage.context().close();
+      await drawerPage.context().close(); if (other) await side.context().close();
     }
-    errors.push(...page.errors.map((e) => scheme + " served: " + e), ...[...ports].flatMap(([ref, p]) => p.errors.map((e) => scheme + " " + ref + " port reference: " + e)), ...orig.errors.map((e) => scheme + " sample: " + e));
-    await page.context().close(); await orig.context().close();
+    errors.push(...page.errors.map((e) => scheme + " served: " + e), ...[...ports].flatMap(([ref, p]) => p.errors.map((e) => scheme + " " + ref + " port reference: " + e)), ...(orig?.errors ?? []).map((e) => scheme + " sample: " + e), ...(other?.errors ?? []).map((e) => scheme + " second server: " + e));
+    await page.context().close(); await orig?.context().close(); await other?.context().close();
     for (const p of ports.values()) await p.context().close();
   }
   await browser.close();
   const failed = results.filter((r) => !r.port.pass), pending = results.filter((r) => !r.port.enforced);
+  // The current baselines, for a PR that moves them: written every run, never read back.
+  fs.writeFileSync(path.join(ENV.out, "pixel-baseline." + SECTION + ".json"), J({ [SECTION]: Object.fromEntries(Object.entries(CURRENT).sort(([a], [b]) => (a < b ? -1 : 1))) }, null, 1) + "\n");
   const pct = (x) => (x * 100).toFixed(3) + "%";
   const md = ["| Screen | Scheme | vs port reference | vs sample mockup |", "|---|---|---|---|",
-    ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.enforced ? (r.port.pass ? "✓ " : "✗ ") : "pending · ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
+    ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.enforced ? (r.port.pass ? "✓ " : "✗ ") : r.port.ratchet ? "✗ ratchet (" + r.port.ratchet + ") · " : "pending · ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
   fs.writeFileSync(path.join(ENV.out, "pixels.json"), J({ threshold: THRESHOLD, maxRatio: MAX_RATIO, results, errors }, null, 1));
   const note = skipped.length ? "\nNot compared (unmapped in reference-map.json, not drawn by the viewer yet): " + skipped.join(", ") + "\n" : "";
   fs.writeFileSync(path.join(ENV.out, "pixels.md"), md + "\n" + note);
