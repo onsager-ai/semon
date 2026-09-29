@@ -577,6 +577,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .lineage-menu { position: absolute; left: 16px; top: calc(100% + 4px); z-index: 22; width: min(260px, calc(100vw - 32px)); padding: 5px; background: var(--ground); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 32px color-mix(in srgb, var(--ink) 14%, transparent); }
 .lineage-menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 40px; border: 0; border-radius: 7px; background: none; padding: 7px 9px; text-align: left; }
 .lineage-menu button[aria-current="page"] { background: var(--sunken); }
+.lineage-menu button[aria-current="page"] .hname { color: var(--ink-2); }
 .lineage-menu button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lineage-menu button span:first-child { flex: 1 1 auto; }
 .lineage-menu button .hname { flex: none; overflow: visible; }
@@ -723,7 +724,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .app.rail .srow-main { justify-content: center; }
   .app.rail .srow.on-path { box-shadow: inset 0 0 0 1.5px var(--muted); }
   .app.rail .srow .dot { position: absolute; top: 50%; left: 50%; margin: -3.5px 0 0 -3.5px; width: 7px; height: 7px; }
-  .app.rail .srow .child-dot { position: absolute; top: auto; left: auto; right: 5px; bottom: 6px; margin: 0; width: 6px; height: 6px; border: 1px solid var(--side); }
+  .app.rail .srow .child-dot { position: absolute; top: calc(50% + 2px); left: calc(50% + 2px); right: auto; bottom: auto; margin: 0; width: 6px; height: 6px; border: 1px solid var(--side); }
   dialog.session-details { width: min(680px, calc(100vw - 48px)); max-height: 85vh; margin: auto; border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 20px 60px color-mix(in srgb, var(--ink) 25%, transparent); overflow: hidden; }
 }
 @media (max-width: 760px) {
