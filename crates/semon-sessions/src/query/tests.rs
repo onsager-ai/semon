@@ -844,10 +844,11 @@ fn ids_of(answer: &Value) -> Vec<&str> {
         .collect()
 }
 
-/// Whether the event cache holds a file's index: whether a build read it.
+/// Whether the event index holds a file's index: whether a build read it.
 fn indexed(home: &Home, file: &str) -> bool {
-    let cache = crate::events::EventCache::path(&home.options.cache);
-    fs::read_to_string(cache).is_ok_and(|cache| cache.contains(file))
+    crate::events::EventCache::open(&home.options.cache)
+        .paths()
+        .any(|path| path.ends_with(file))
 }
 
 #[test]

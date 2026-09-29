@@ -383,7 +383,8 @@ pub(crate) fn is_ask(id: &str) -> bool {
         .is_some_and(|hash| hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-/// Writes the model for `options` as JSON, and saves the metadata cache.
+/// Writes the model for `options` as JSON. Each file's change to the event
+/// index is committed as it is read.
 pub fn model_json(options: &Options) -> io::Result<String> {
     model_json_at(options, now_ms())
 }
@@ -391,17 +392,13 @@ pub fn model_json(options: &Options) -> io::Result<String> {
 /// [`model_json`] at a fixed `now` (epoch ms), for fixtures.
 #[doc(hidden)]
 pub fn model_json_at(options: &Options, now: i64) -> io::Result<String> {
-    let path = EventCache::path(&options.cache);
-    let mut cache = EventCache::read(&path);
+    let mut cache = EventCache::open(&options.cache);
     let mut dirty = false;
     if options.facts.is_none() {
         cache.refresh_reported_runs(&options.claude_json, now, &mut dirty);
     }
     let mut texts = Texts::default();
     let built = build(options, &mut cache, &mut dirty, &mut texts, now)?;
-    if dirty {
-        cache.save(&path)?;
-    }
     Ok(built.json(now))
 }
 
@@ -1055,6 +1052,7 @@ fn scan(
     texts: &mut Texts,
     cutoff: Option<i64>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>)> {
+    cache.begin_scan();
     let projects = options.claude_home.join("projects");
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1184,6 +1182,7 @@ fn scan(
         });
     }
     cache.retain(&seen, dirty);
+    cache.end_scan();
     // Metadata of files that are gone is dropped with them.
     texts.metas.retain(|path, _| {
         let file = if path.extension().is_some_and(|ext| ext == "json") {

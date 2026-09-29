@@ -10,7 +10,6 @@ use std::{
     env, fs,
     io::{self, Read},
     path::Path,
-    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +27,6 @@ pub const RUN_VARIABLES: [&str; 2] = ["OSTROM_RUN_ID", "OSTROM_WORK_ORDER_ID"];
 /// The most of `/proc/<pid>/environ` that is read. A larger environment
 /// isn't read at all: a cut one could hold a cut value.
 const ENVIRON_MAX: u64 = 256 * 1024;
-const CACHE_SAVE_EVERY: Duration = Duration::from_secs(300);
 
 /// The machine's side of a model, as JSON.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -119,28 +117,21 @@ pub fn local_facts(options: &Options) -> io::Result<Facts> {
     Ok(facts)
 }
 
-/// Computes local facts while keeping the event cache in memory between
-/// calls. Dirty cache changes are saved at most every five minutes; call
-/// [`FactsSource::flush`] when the source is finished.
+/// Computes local facts while keeping the event index open between calls.
+/// The index commits each file's change as it reads it.
 pub struct FactsSource {
     options: crate::Options,
-    cache_path: std::path::PathBuf,
     cache: EventCache,
     dirty: bool,
-    last_saved: Option<Instant>,
 }
 
 impl FactsSource {
-    /// Loads the event cache once for repeated facts collection.
+    /// Opens the event index once for repeated facts collection.
     pub fn new(options: &crate::Options) -> Self {
-        let cache_path = EventCache::path(&options.cache);
-        let cache = EventCache::read(&cache_path);
         Self {
             options: options.clone(),
-            cache_path,
-            cache,
+            cache: EventCache::open(&options.cache),
             dirty: false,
-            last_saved: None,
         }
     }
 
@@ -151,29 +142,13 @@ impl FactsSource {
             model::now_ms(),
             &mut self.dirty,
         );
-        let facts = collect_facts(&self.options, &mut self.cache, &mut self.dirty)?;
-        self.save_if_due()?;
-        Ok(facts)
+        collect_facts(&self.options, &mut self.cache, &mut self.dirty)
     }
 
-    /// Saves pending cache changes atomically.
+    /// Nothing is left to save: the event index commits each file's change
+    /// as it reads it. Kept so callers that flush at the end still build.
     pub fn flush(&mut self) -> io::Result<()> {
-        if self.dirty {
-            self.cache.save(&self.cache_path)?;
-            self.dirty = false;
-            self.last_saved = Some(Instant::now());
-        }
-        Ok(())
-    }
-
-    fn save_if_due(&mut self) -> io::Result<()> {
-        if self.dirty
-            && self
-                .last_saved
-                .is_none_or(|last| last.elapsed() >= CACHE_SAVE_EVERY)
-        {
-            self.flush()?;
-        }
+        self.dirty = false;
         Ok(())
     }
 }
@@ -493,7 +468,10 @@ pub fn write_facts(path: &Path, facts: &Facts) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
+    };
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -555,8 +533,6 @@ mod tests {
         fs::write(options.proc_root.join("sys/kernel/hostname"), "test-host\n").unwrap();
         fs::create_dir_all(&options.claude_home).unwrap();
         fs::create_dir_all(&options.codex_home).unwrap();
-        fs::write(EventCache::path(&options.cache), b"{}").unwrap();
-
         crate::events::CACHE_READS.with(|reads| reads.set(0));
         let mut source = FactsSource::new(&options);
         let first = source.facts().unwrap();
