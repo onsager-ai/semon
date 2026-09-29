@@ -506,10 +506,16 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .rail-toggle { display: inline-grid; }
 .treeitem { min-width: 0; outline: none; }
 .treeitem:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 9px; }
-.tree-row { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 0 2px; align-items: center; min-width: 0; margin: 0 8px; }
-.tree-toggle, .tree-spacer { width: 28px; height: 36px; display: grid; place-items: center; border: 0; background: none; color: var(--muted); padding: 0; }
-.tree-toggle { border-radius: 8px; }
-.tree-toggle svg { width: 20px; height: 20px; transition: transform .18s ease; }
+.tree-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; margin: 0 4px 0 8px; }
+/* The toggle sits over the meta line's right end, so every row's time stays at the same right edge. */
+.tree-toggle { position: absolute; right: 0; bottom: 0; width: 28px; height: 36px; display: grid; place-items: center; border: 0; background: none; color: var(--muted); padding: 0; border-radius: 8px; }
+.tree-row.has-toggle .srow-meta { padding-right: 28px; }
+.tree-toggle svg { width: 16px; height: 16px; transition: transform .18s ease; }
+@media (hover: hover) { .tree-toggle:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); color: var(--ink); } }
+.tree-toggle:focus-visible { background: var(--sunken); color: var(--ink); outline: 2px solid var(--accent); outline-offset: -2px; }
+.tree-more { display: block; width: calc(100% - 12px); min-height: 30px; margin: 1px 4px 3px 8px; padding: 4px 8px; border: 0; border-radius: 8px; background: none; color: var(--muted); font: 12px/1.4 var(--sans); text-align: left; }
+@media (hover: hover) { .tree-more:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); color: var(--ink); } }
+.tree-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .treeitem[aria-expanded="true"] > .tree-row .tree-toggle svg { transform: rotate(90deg); }
 .tree-group { min-width: 0; margin-left: 14px; padding-left: 0; border-left: 1px solid var(--line); }
 .tree-group[data-depth="4"], .tree-group[data-depth="5"], .tree-group[data-depth="6"], .tree-group[data-depth="7"] { margin-left: 0; border-left-color: transparent; }
@@ -526,6 +532,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .tree-summary { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 1px 5px; border-radius: 8px; background: var(--sunken); color: var(--muted); font: 11px/1.4 var(--mono); }
 .tree-summary .dot { width: 6px; height: 6px; }
 .hname { flex: none; font-size: 11.5px; font-weight: 500; line-height: 1.2; letter-spacing: .01em; white-space: nowrap; color: color-mix(in srgb, var(--h) 60%, var(--ink-2)); }
+.treeitem[aria-expanded="true"] > .tree-row .tree-summary { display: none; }
 .page.wide-mode { max-width: 1400px; }
 
 .topbar .l2.session-meta { position: relative; gap: 12px; width: 100%; min-height: 30px; overflow: hidden; border: 0; border-radius: 8px; background: none; padding: 0; text-align: left; pointer-events: none; }
@@ -697,9 +704,10 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .app.rail .nav-item .cnt { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; overflow: hidden; border-radius: 50%; background: var(--faint); color: transparent; font-size: 0; }
   .app.rail .nav-item .cnt.hot { background: var(--wait); }
   .app.rail .tree-row { grid-template-columns: minmax(0, 1fr); margin: 0 7px; }
-  .app.rail .tree-toggle, .app.rail .tree-spacer, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta > :not(.hname), .app.rail .tree-group, .app.rail .tree-summary { display: none !important; }
+  .app.rail .tree-toggle, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta > :not(.hname), .app.rail .tree-group, .app.rail .tree-summary { display: none !important; }
   .app.rail .srow { position: relative; display: flex; justify-content: center; min-height: 44px; padding: 0; }
   .app.rail .srow-main { justify-content: center; }
+  .app.rail .srow.on-path { box-shadow: inset 0 0 0 1.5px var(--muted); }
   .app.rail .srow-meta { padding: 0; }
   .app.rail .srow .dot { position: absolute; top: 6px; right: 5px; width: 7px; height: 7px; }
   .app.rail .srow .child-dot { position: absolute; top: auto; right: 5px; bottom: 6px; width: 6px; height: 6px; border: 1px solid var(--side); }
@@ -714,8 +722,11 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .topbar .l2.session-meta { min-height: 44px; }
   .topbar .l2.session-meta .errs { min-height: 40px; }
   .menu button, .filters.pop label { min-height: 44px; }
-  .tree-toggle, .tree-spacer { width: 44px; height: 44px; }
-  .tree-row { grid-template-columns: 44px minmax(0, 1fr); gap: 0; margin-inline: 4px; }
+  .tree-toggle { width: 44px; height: 44px; }
+  .tree-row.has-toggle .srow-meta { padding-right: 44px; }
+  .tree-toggle svg { width: 20px; height: 20px; }
+  .tree-row { margin-inline: 4px; }
+  .tree-more { min-height: 44px; margin-inline: 4px; }
   .srow { min-height: 44px; padding-block: 8px; }
   .think { min-height: 44px; }
   .jump-bottom { right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
