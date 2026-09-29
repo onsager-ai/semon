@@ -289,6 +289,52 @@ async function selectChecks(page, key, mobile, r, results) {
   await page.keyboard.press("Escape"); await wait(device, false);
 }
 
+// The drawer's header row and first nav row, placed relative to the sidebar, with their type: what a shell page (whose
+// header is shell::sidebar_head and whose rows are shell::NAV's markup) and the viewer must draw alike. Widths that
+// follow the text (the brand name, a row's label) and, on desktop, the brand row's width (the viewer's collapse toggle
+// sits beside it) are left out.
+const drawerChrome = (page, mobile) => page.evaluate((mobile) => {
+  const side = document.querySelector("#sidebar")?.getBoundingClientRect();
+  const box = (element, origin = side) => {
+    if (!element || !origin) return null;
+    const b = element.getBoundingClientRect();
+    return { left: b.left - origin.left, top: b.top - origin.top, width: b.width, height: b.height };
+  };
+  const type = (element) => {
+    if (!element) return null;
+    const style = getComputedStyle(element);
+    return { size: style.fontSize, weight: style.fontWeight, line: style.lineHeight, family: style.fontFamily };
+  };
+  const pick = (object, keys) => object && Object.fromEntries(keys.map((key) => [key, object[key]]));
+  const head = document.querySelector(".sidebar-head"), row = document.querySelector(".brandrow");
+  const close = document.querySelector("#drawer-close"), item = document.querySelector("#nav .nav-item");
+  const itemRect = item?.getBoundingClientRect();
+  const label = item?.querySelector(":scope > span");
+  return {
+    head: mobile ? getComputedStyle(head ?? document.body).display : pick(box(head), ["top", "height"]),
+    row: pick(box(row), mobile ? ["left", "top", "width", "height"] : ["left", "top", "height"]),
+    rowType: type(row),
+    mark: box(row?.querySelector(".mark")),
+    name: pick(box(row?.querySelector(".brandname")), ["left", "top", "height"]),
+    nameType: type(row?.querySelector(".brandname")),
+    close: close && getComputedStyle(close).display !== "none" ? box(close) : "hidden",
+    item: pick(box(item), ["left", "width", "height"]),
+    itemType: type(item),
+    icon: box(item?.querySelector(".icon"), itemRect),
+    label: pick(box(label, itemRect), ["left", "top", "height"]),
+    labelType: type(label),
+  };
+}, mobile);
+
+// Every path where two drawerChrome readings differ: numbers by more than half a pixel, anything else at all.
+function chromeDifferences(a, b, at = "") {
+  if (typeof a === "number" && typeof b === "number") return Math.abs(a - b) <= 0.5 ? [] : [at + ": " + a + " vs " + b];
+  if (a && b && typeof a === "object" && typeof b === "object") {
+    return [...new Set([...Object.keys(a), ...Object.keys(b)])].flatMap((key) => chromeDifferences(a[key], b[key], at ? at + "." + key : key));
+  }
+  return a === b ? [] : [at + ": " + JSON.stringify(a) + " vs " + JSON.stringify(b)];
+}
+
 export default async function shellCheck(browser) {
   const r = reporter("shell");
   const results = {};
@@ -317,12 +363,20 @@ export default async function shellCheck(browser) {
           results[key].linkButton = linkButton;
           r.expect(linkButton.line === "none", key + " a.btn is underlined: " + JSON.stringify(linkButton));
           r.expect(linkButton.color === linkButton.buttonColor, key + " a.btn colour differs from a button's: " + JSON.stringify(linkButton));
-          // The brand row is a direct child of the sidebar column here: it must not grow, so the nav sits right under it.
+          // The header is a direct child of the sidebar column here: it must not grow, so the nav sits right under it.
           if (!mobile) {
-            const head = await page.evaluate(() => { const b = document.querySelector(".sidebar > .brandrow"), n = document.querySelector(".sidebar .nav-item"); if (!b || !n) return null; const x = b.getBoundingClientRect(), y = n.getBoundingClientRect(); return { brandTop: Math.round(x.top), brandBottom: Math.round(x.bottom), navTop: Math.round(y.top), gap: Math.round((y.top - x.bottom) * 10) / 10 }; });
+            const head = await page.evaluate(() => { const b = document.querySelector(".sidebar > .sidebar-head"), n = document.querySelector(".sidebar .nav-item"); if (!b || !n) return null; const x = b.getBoundingClientRect(), y = n.getBoundingClientRect(); return { brandTop: Math.round(x.top), brandBottom: Math.round(x.bottom), navTop: Math.round(y.top), gap: Math.round((y.top - x.bottom) * 10) / 10 }; });
             results[key].brandToNav = head;
-            r.expect(!!head && head.gap >= 0 && head.gap <= 24 && head.brandBottom - head.brandTop <= 64, key + " the first nav item is not directly under the brand row: " + JSON.stringify(head));
+            r.expect(!!head && head.gap >= 0 && head.gap <= 24 && head.brandBottom - head.brandTop <= 64, key + " the first nav item is not directly under the header: " + JSON.stringify(head));
           }
+          // The drawer's header row and nav rows are the viewer's own, at both widths and in both schemes.
+          const viewerPage = await served(browser, { size: mobile ? "phone" : "desktop", dark: scheme === "dark", path: "/" });
+          await viewerPage.waitForSelector("#nav .nav-item", { state: "attached" });
+          const [galleryDrawer, viewerDrawer] = await Promise.all([drawerChrome(page, mobile), drawerChrome(viewerPage, mobile)]);
+          await viewerPage.context().close();
+          const drawerDiff = chromeDifferences(galleryDrawer, viewerDrawer);
+          results[key].drawerChrome = { gallery: galleryDrawer, viewer: viewerDrawer, differences: drawerDiff };
+          r.expect(drawerDiff.length === 0, key + " the drawer's header or nav rows differ from the viewer's: " + drawerDiff.join("; "));
         }
         r.expect(audit.scrollWidth <= audit.innerWidth, key + " document scrollWidth=" + audit.scrollWidth + " innerWidth=" + audit.innerWidth);
         r.expect(audit.right.length === 0, key + " elements past the right edge: " + JSON.stringify(audit.right));
