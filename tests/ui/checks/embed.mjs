@@ -22,7 +22,9 @@
 //     back gesture each close it and leave the drawer open on the same page, and a tap outside it does not reach the drawer;
 //     focus goes to its first row on open and back to its button on close; a live update while it is open leaves it open
 //     (and is drawn once it closes); swiping the drawer shut closes it and leaves no history entry behind; and Back from a
-//     page one of its items opened lands on this page with the menu closed, not on a dead entry for the menu.
+//     page one of its items opened lands on this page with the menu closed, not on a dead entry for the menu;
+//   - on desktop, a redraw of the top bar with the menu open ("N errors" on a session) closes the menu properly: the next
+//     click on the avatar opens it (a menu only detached would leave it counted open, and every live update waiting).
 // Screenshots of the open menu, at 1280 and 390 in light and dark, are written to out/embed/.
 import fs from "node:fs";
 import path from "node:path";
@@ -45,7 +47,7 @@ const sleep = (n) => new Promise((resolve) => setTimeout(resolve, n));
 // through, with `serverAccount` added to the model when given (null: an invalid account, to test the fallback).
 // `state.mode` "hold" keeps a poll open until `state.gate` resolves; `state.bootGate`, when set, holds the boot request the same
 // way (and `open` returns before the page has drawn). `embed: "throw"` sets a `semonEmbed` whose `account` getter throws.
-async function open(browser, { embed, state = { mode: "pass" }, serverAccount, size = "desktop", dark = false } = {}) {
+async function open(browser, { embed, state = { mode: "pass" }, serverAccount, size = "desktop", dark = false, at = "/" } = {}) {
   const ctx = await context(browser, { size, dark });
   await ctx.addInitScript((embedded) => {
     if (embedded === "throw") Object.defineProperty(window, "semonEmbed", { value: { get account() { throw new Error("embed getter"); } } });
@@ -77,7 +79,7 @@ async function open(browser, { embed, state = { mode: "pass" }, serverAccount, s
     if (state.mode === "full") { url.searchParams.delete("since"); return route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: await (await route.fetch({ url: url.toString() })).text() }); }
     return route.continue();
   });
-  await page.goto(ENV.base + "/?t=" + ENV.token, { waitUntil: "load" });
+  await page.goto(ENV.base + at + "?t=" + ENV.token, { waitUntil: "load" });
   if (!state.bootGate) await settled(page);
   return page;
 }
@@ -317,6 +319,22 @@ export default async function embedCheck(browser) {
     const returned = await state();
     r.expect(returned.path === path0 && !returned.sheet && !returned.open, "Back from a page a menu item opened lands on this page, menu closed (" + tag + "): " + JSON.stringify(returned));
     r.expect(page.errors.length === 0, "page errors (phone menu " + tag + "): " + page.errors.join("; "));
+    await page.context().close();
+  }
+  // A top bar redrawn with the desktop menu open ("N errors" stops its click there and redraws the bar) closes the menu
+  // properly: the next click on the avatar opens it at once.
+  {
+    const page = await open(browser, { embed: { account: account() }, at: "/s/claude/harbor" });
+    await page.waitForSelector("#topbar .errs");
+    await page.locator("#topbar .account-avatar-button").click(); await page.waitForSelector("#topbar .account-popover");
+    await page.locator("#topbar .errs").click();
+    await page.waitForSelector("#topbar .errnav-count");
+    const gone = await page.evaluate(() => !document.querySelector(".account-popover"));
+    await page.locator("#topbar .account-avatar-button").click(); await page.waitForTimeout(200);
+    const reopened = await page.evaluate(() => !!document.querySelector("#topbar .account-popover"));
+    R.menuAfterBarRedraw = { gone, reopened };
+    r.expect(gone && reopened, "a top bar redrawn with the menu open closes it, and the avatar opens it again with one click: " + JSON.stringify(R.menuAfterBarRedraw));
+    r.expect(page.errors.length === 0, "page errors (menu and N errors): " + page.errors.join("; "));
     await page.context().close();
   }
   // The menu is a copy: changing the embedding page's object after it was read changes nothing on screen.

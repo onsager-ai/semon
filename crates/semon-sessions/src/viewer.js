@@ -541,7 +541,7 @@
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
-    closeAccountMenu(true);
+    closeAccountMenu(true, true);
     dropErrors(true); // (first: it drops a range the error stepper moved, and that is not kept)
     // The session left is kept for opening it again; weighing it waits until the frame the click drew has been painted.
     if (route.v === "session" && (r.v !== "session" || r.id !== route.id) && TX[route.id] && TXM[route.id]) { const sid = route.id, entries = TX[sid], meta = { ...TXM[sid] }; requestAnimationFrame(() => setTimeout(() => cacheTx(sid, entries, meta), 0)); }
@@ -652,16 +652,16 @@
   // Every close takes the phone menu's history entry with it, so no Back press is spent on a menu that is gone. Only a
   // navigation (`go`) and the back gesture itself (`keepEntry`) leave it: stepping back then would undo the navigation, or the
   // entry is already gone. Focus that was in the menu (or fell to the page when it closed) returns to the menu's button, and an
-  // update that waited for the menu to close is drawn.
-  function closeAccountMenu(keepEntry) {
+  // update that waited for the menu to close is drawn, unless a navigation (`navigating`) is about to draw the page anyway.
+  function closeAccountMenu(keepEntry, navigating) {
     const menu = $(".account-popover"), trigger = $('.account-trigger[aria-expanded="true"]'), active = document.activeElement;
     const refocus = !!menu && (menu.contains(active) || !active || active === document.body);
     document.querySelectorAll(".account-popover, .account-backdrop").forEach((node) => node.remove());
     document.querySelectorAll(".account-trigger").forEach((button) => button.setAttribute("aria-expanded", "false"));
     accountOpen = false;
     if (accountSheet) { accountSheet = false; if (!keepEntry && history.state?.sheet) { skipPop = true; history.back(); } }
-    if (refocus && trigger?.isConnected) trigger.focus({ focusVisible: false });
-    if (LIVE.pending) setTimeout(() => { if (LIVE.pending && !viewerEl && !accountOpen) refresh(); }, 0);
+    if (refocus && trigger?.isConnected) trigger.focus({ focusVisible: false, preventScroll: true });
+    if (LIVE.pending && !navigating) setTimeout(() => { if (LIVE.pending && !viewerEl && !accountOpen) refresh(); }, 0);
   }
   // Leaving the page from a phone menu item steps back over the menu's entry first, so Back from the next page lands on this
   // one, not on a menu that is no longer there.
@@ -946,6 +946,7 @@
   // after a crumb up a level, then a one-line summary that ellipsizes. On a session, search takes over the bar and the
   // filter drops down from it; the ⋯ menu holds the session's details.
   function renderTopbar(title, crumb, opts = {}) {
+    closeAccountMenu(); // the bar is redrawn from scratch, the desktop menu with it: close it properly, not by detaching it
     const bar = $("#topbar"), s = opts.session; clearBox(bar, route); bar.classList.remove("scrolled");
     // What the bar holds is added through `put`, so the range control on Analytics (a persistent control) stays where it is.
     const put = placer(bar), sink = { append: put };
@@ -2258,6 +2259,7 @@
   // Draws the new model on the screen shown, unless a navigation is still loading (it draws when done), the sheet is open
   // (it draws when the sheet closes), or what the screen shows left the model (it stays as it was).
   function refresh(dirty) {
+    if (accountOpen && !$(".account-popover")?.isConnected) closeAccountMenu(); // a menu some redraw took away is closed
     if (viewerEl || accountOpen) { LIVE.pending = true; return; } // drawn whole when the sheet or the account menu closes
     LIVE.pending = false; const r = route;
     if (rendered !== r || (r.v === "session" && !SESS[r.id]) || (r.v === "trace" && !SESS[r.sid]) || (r.v === "machine" && !MACHINE[r.id])) return;
