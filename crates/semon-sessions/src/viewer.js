@@ -785,7 +785,7 @@
     restoreLaneFocus(focus);
     // A stuck row covers the top of the sidebar: what is scrolled into view (the open session, after a navigation) stays clear of it.
     const stuck = box.querySelector(".tree-row.stuck"), navigated = revealedFor !== route; revealedFor = route;
-    $("#sidebar").style.scrollPaddingTop = stuck ? stuck.offsetHeight + "px" : "";
+    ($("#side-list") ?? $("#sidebar")).style.scrollPaddingTop = stuck ? stuck.offsetHeight + 8 + "px" : "";
     if (stuck && navigated) box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" });
   }
 

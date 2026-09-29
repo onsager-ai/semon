@@ -58,6 +58,13 @@ code { overflow-wrap: anywhere; }
 /* ---- Shell ----------------------------------------------------------------- */
 .app { display: grid; grid-template-columns: 296px minmax(0, 1fr); height: 100%; transition: grid-template-columns .18s ease; }
 .sidebar { background: var(--side); border-right: 1px solid var(--line); overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; min-height: 0; padding-bottom: 12px; min-width: 0; }
+/* The sidebar never scrolls as a whole: the header, search and nav stay put, "Recent" is the one scroller, and "All sessions"
+   is pinned below it. The list is as tall as its rows and shrinks only when they overflow, so a short list leaves the footer
+   right after its last row. The hairline at the list's foot shows only while rows remain below: a scrolling-with-content
+   cover of the sidebar's colour sits over it once the list is scrolled to its end. */
+.side-search, .side-foot { flex: none; }
+.side-list { flex: 0 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 8px;
+  background: linear-gradient(var(--side), var(--side)) 0 100% / 100% 1px no-repeat local, linear-gradient(var(--line), var(--line)) 0 100% / 100% 1px no-repeat scroll; }
 .main { overflow-y: auto; min-width: 0; position: relative; }
 .scrim { display: none; }
 .sidebar-head { display: flex; align-items: center; gap: 2px; padding: 10px 12px 2px; }
@@ -540,7 +547,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .app.rail .sidebar { overflow-x: hidden; }
   .app.rail .sidebar-head { flex-direction: column; gap: 2px; padding: 10px 0 6px; }
   .app.rail .brandrow { justify-content: center; padding: 7px 0; }
-  .app.rail .brandrow .brandname, .app.rail .side-search, .app.rail .side-h, .app.rail .side-all { display: none; }
+  .app.rail .brandrow .brandname, .app.rail .side-search, .app.rail .side-h, .app.rail .side-foot { display: none; }
   .app.rail .rail-toggle { width: 40px; height: 40px; }
   .app.rail .nav-item { width: 48px; height: 44px; margin: 2px auto; justify-content: center; padding: 0; }
   .app.rail .nav-item > span:not(.cnt) { display: none; }
@@ -694,9 +701,11 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     </div>
     <label class="side-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4"/></svg><input id="q" type="search" placeholder="Search" autocomplete="off"></label>
     <div id="nav"></div>
-    <div class="side-h">Recent</div>
-    <div id="lanes" role="tree" aria-label="Recent sessions"></div>
-    <div id="lanes-all"></div>
+    <div class="side-list" id="side-list">
+      <div class="side-h">Recent</div>
+      <div id="lanes" role="tree" aria-label="Recent sessions"></div>
+    </div>
+    <div class="side-foot" id="lanes-all"></div>
   </aside>
   <div class="scrim" id="scrim"></div>
   <div class="main" id="main">
