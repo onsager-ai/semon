@@ -82,10 +82,10 @@ async function stopServer(proc) {
 
 // ---- Requests ---------------------------------------------------------------------------------------------------------------
 // Every request of the context (its pages and their workers): grouped by path without the query, /api/* by path and
-// everything else as "static". A request counts where it ended, finished or failed. A bare 304 answer to
-// a fetch as a failed request (seen in the first CI run, as many failures as polls), so the status comes from the response event: a failed
-// request with a status counts as an answered one, and only one with none counts as failed. The browser cannot size such
-// an answer, so it adds no bytes. Transfer bytes are the browser's own (headers plus body as sent); decoded bytes are the
+// everything else as "static". A request counts where it ended, finished or failed. A bare 304 answer to a fetch arrived
+// as a failed request (seen in the first CI run: as many failures as polls), so the status comes from the response event:
+// a failed request with a status counts as an answered one, and only one with none counts as failed. The browser cannot
+// size such an answer, so it adds no bytes. Transfer bytes are the browser's own (headers plus body as sent); decoded bytes are the
 // body's length, read from the body when the response is compressed and equal to the sent body otherwise (the served
 // responses are never compressed: reading the body back is unreliable for `Cache-Control: no-store` responses).
 function recorder(ctx) {
