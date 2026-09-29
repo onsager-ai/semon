@@ -112,14 +112,19 @@ impl RefreshPool {
     }
 
     /// Queues `view`'s check at `at`, in place of its entry `replacing` if
-    /// it has one (so a view is never queued twice), and starts a thread if
-    /// none is free and the pool has room. The caller holds the view's
-    /// `live` lock, which is always taken before this pool's.
+    /// it has one (so a view is never queued twice). With no worker
+    /// waiting, a thread starts if the pool has room, unless the caller is
+    /// a worker queueing the view it just checked (`by_worker`: it is free
+    /// again at once); otherwise the waiting workers are woken when the
+    /// entry is due now or comes first (each times its wait by the first
+    /// entry). The caller holds the view's `live` lock, which is always
+    /// taken before this pool's.
     pub(crate) fn queue(
         self: &Arc<Self>,
         replacing: Option<Key>,
         at: Instant,
         view: Weak<MachineView>,
+        by_worker: bool,
     ) -> Key {
         let mut state = lock(&self.state);
         if let Some(old) = replacing {
@@ -132,11 +137,17 @@ impl RefreshPool {
             .first_key_value()
             .is_none_or(|(head, _)| key < *head);
         state.queue.insert(key, view);
-        if state.waiting == 0 && state.threads < self.size {
-            self.start(&mut state);
-        } else if first {
-            // A waiting worker times its wait by the first entry.
-            self.wake.notify_one();
+        let start = if state.waiting == 0 {
+            !by_worker && self.reserve(&mut state)
+        } else {
+            if first || at <= Instant::now() {
+                self.wake.notify_all();
+            }
+            false
+        };
+        drop(state);
+        if start {
+            self.start();
         }
         key
     }
@@ -147,20 +158,29 @@ impl RefreshPool {
         lock(&self.state).queue.remove(&key);
     }
 
-    /// Starts a worker. Without one (the system refused a thread), queued
+    /// Counts a thread about to start, if the pool has room for one: the
+    /// caller then calls [`RefreshPool::start`] once the lock is released.
+    fn reserve(&self, state: &mut PoolState) -> bool {
+        if state.threads >= self.size {
+            return false;
+        }
+        state.threads += 1;
+        #[cfg(test)]
+        state.note_start();
+        true
+    }
+
+    /// Starts the worker [`RefreshPool::reserve`] counted, without the
+    /// pool's lock held. Without it (the system refused a thread), queued
     /// views are refreshed by their reads once their checks are overdue.
-    fn start(self: &Arc<Self>, state: &mut PoolState) {
+    fn start(self: &Arc<Self>) {
         let pool = self.clone();
         let started = thread::Builder::new()
             .name("semon-refresh".into())
             .spawn(move || worker(pool));
-        match started {
-            Ok(_) => {
-                state.threads += 1;
-                #[cfg(test)]
-                state.note_start();
-            }
-            Err(error) => eprintln!("semon sessions viewer: no refresh thread: {error}"),
+        if let Err(error) = started {
+            lock(&self.state).threads -= 1;
+            eprintln!("semon sessions viewer: no refresh thread: {error}");
         }
     }
 
@@ -173,6 +193,12 @@ impl RefreshPool {
             .values()
             .filter(|queued| queued.ptr_eq(&view))
             .count()
+    }
+
+    /// How many of its threads wait for an entry to come due.
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> usize {
+        lock(&self.state).waiting
     }
 
     /// The most threads alive at once so far, and how many were started.
@@ -189,6 +215,9 @@ impl RefreshPool {
 fn worker(pool: Arc<RefreshPool>) {
     /// A worker whose entry panicked is replaced, so the pool keeps its
     /// size: the view it ran keeps its last model, and is queued again.
+    /// The replacement starts while this thread still unwinds, so for that
+    /// moment one OS thread more than the pool's size is alive; the count
+    /// never is.
     struct Replace(Arc<RefreshPool>);
     impl Drop for Replace {
         fn drop(&mut self) {
@@ -197,8 +226,10 @@ fn worker(pool: Arc<RefreshPool>) {
             }
             let mut state = lock(&self.0.state);
             state.threads -= 1;
-            if !state.queue.is_empty() && state.threads < self.0.size {
-                self.0.start(&mut state);
+            let start = !state.queue.is_empty() && self.0.reserve(&mut state);
+            drop(state);
+            if start {
+                self.0.start();
             }
         }
     }
@@ -206,14 +237,31 @@ fn worker(pool: Arc<RefreshPool>) {
     let pool = &replace.0;
     let mut worked = Instant::now();
     loop {
-        let (key, view) = {
+        let (key, view, start) = {
             let mut state = lock(&pool.state);
             loop {
                 let now = Instant::now();
                 if let Some(entry) = state.queue.first_entry()
                     && entry.key().0 <= now
                 {
-                    break entry.remove_entry();
+                    let (key, view) = entry.remove_entry();
+                    // A burst: the next entry is due too. The wake that
+                    // brought this worker passes on to the waiting ones
+                    // (each takes one, and passes it on again), and once
+                    // none waits, the pool grows to its size.
+                    let more = state
+                        .queue
+                        .first_key_value()
+                        .is_some_and(|(next, _)| next.0 <= now);
+                    let mut start = false;
+                    if more {
+                        if state.waiting > 0 {
+                            pool.wake.notify_all();
+                        } else {
+                            start = pool.reserve(&mut state);
+                        }
+                    }
+                    break (key, view, start);
                 }
                 let idle = now.saturating_duration_since(worked);
                 let head = state.queue.first_key_value().map(|(key, _)| key.0);
@@ -236,6 +284,9 @@ fn worker(pool: Arc<RefreshPool>) {
                 state.waiting -= 1;
             }
         };
+        if start {
+            pool.start();
+        }
         if let Some(view) = view.upgrade() {
             view.run_queued(key);
         }

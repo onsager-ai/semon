@@ -1141,6 +1141,8 @@ impl MachineView {
     /// that is shown, after which the view's next background check is
     /// queued. Only the wanted kind's error is the read's.
     fn refresh_first(&self, kind: Kind) -> io::Result<()> {
+        #[cfg(test)]
+        self.hooks.refreshes_first.fetch_add(1, Ordering::SeqCst);
         let mut work = lock(&self.work);
         // Logs invalidated before this refresh starts, it sees.
         let invalidated = std::mem::take(&mut lock(&self.live.state).invalidated);
@@ -1192,6 +1194,13 @@ impl MachineView {
     /// most, and never while a worker checks it (the worker queues the
     /// next), once it is closed, or while it is refreshed on read.
     fn queue(&self, state: &mut LiveState, at: Instant, exact: bool) {
+        self.queue_by(state, at, exact, false);
+    }
+
+    /// [`MachineView::queue`], from the worker that just checked this view
+    /// when `by_worker`: that worker is free again at once, so it never
+    /// counts as a busy one the pool must start another thread for.
+    fn queue_by(&self, state: &mut LiveState, at: Instant, exact: bool, by_worker: bool) {
         if state.closed || self.refresh() == Refresh::OnRead {
             return;
         }
@@ -1201,7 +1210,7 @@ impl MachineView {
             Slot::Queued(key) => Some(key),
             Slot::Idle => None,
         };
-        state.slot = Slot::Queued(state.pool.queue(replacing, at, self.me.clone()));
+        state.slot = Slot::Queued(state.pool.queue(replacing, at, self.me.clone(), by_worker));
     }
 
     /// The embedding server's word that this machine's logs changed. Its
@@ -1302,7 +1311,7 @@ impl MachineView {
     fn checked(&self, state: &mut LiveState, due: Instant) {
         state.slot = Slot::Idle;
         if state.active() {
-            self.queue(state, due, true);
+            self.queue_by(state, due, true, true);
         }
         self.live.changed.notify_all();
     }
@@ -2500,6 +2509,8 @@ mod tests {
         builds: AtomicU64,
         /// How many stat passes were taken over its logs.
         pub(super) stats: AtomicU64,
+        /// How many times a read refreshed it itself (outside OnRead).
+        pub(super) refreshes_first: AtomicU64,
         /// Runs in each build, after the files are stamped.
         building: Mutex<Option<Hook>>,
         /// Builds fail while set.
@@ -5190,8 +5201,9 @@ mod tests {
     }
 
     /// Fifty views read at once are checked by the pool's three threads,
-    /// never more, and each is queued once at most; every one of them
-    /// serves the new line.
+    /// never more, and each is queued once at most. With no read after the
+    /// first, each is rebuilt by the pool alone (a read can't do it for
+    /// them), and serves the new line.
     #[test]
     fn fifty_views_are_checked_by_the_pools_threads_alone() {
         let fixture = lane_fixture();
@@ -5203,25 +5215,83 @@ mod tests {
                 view
             })
             .collect();
+        let builds: Vec<_> = views.iter().map(|view| view.hooks.builds()).collect();
         say(&fixture, "lane", 1, "seen by fifty views");
-        eventually("the line in every view", || {
+        eventually("a rebuild of every view, with no read", || {
             assert!(pool.threads() <= 3, "{} threads", pool.threads());
             assert!(pool.queued() <= views.len());
             for view in &views {
                 assert!(pool.entries_for(view) <= 1);
             }
-            let served = views
+            views
                 .iter()
-                .filter(|view| serves(view, "seen by fifty views"))
-                .count();
-            (served == views.len()).then_some(())
+                .zip(&builds)
+                .all(|(view, builds)| view.hooks.builds() > *builds)
+                .then_some(())
         });
+        for view in &views {
+            assert!(serves(view, "seen by fifty views"));
+        }
         let (peak, _) = pool.peak_and_started();
         assert!((1..=3).contains(&peak), "{peak} threads at once");
         for view in &views {
             view.close();
         }
         assert_eq!(pool.queued(), 0);
+    }
+
+    /// A burst of due checks is spread over the pool's workers. With a pool
+    /// of two and two views invalidated at once, the first one's build
+    /// held, the other is rebuilt by the other worker with no read in
+    /// between: first with one thread waiting (the pool grows), then with
+    /// both waiting on the views' 30 s safety checks (the wake reaches the
+    /// second).
+    #[test]
+    fn a_burst_of_due_checks_uses_every_worker() {
+        let (held_logs, free_logs) = (lane_fixture(), lane_fixture());
+        let pool = RefreshPool::new(2);
+        let held = pooled(&held_logs, Refresh::OnInvalidate, &pool);
+        let free = pooled(&free_logs, Refresh::OnInvalidate, &pool);
+        warm(&held);
+        warm(&free);
+        for round in 1..=2 {
+            eventually("every worker waiting", || {
+                (pool.threads() == round && pool.waiting() == round).then_some(())
+            });
+            let (starts, release) = held.hooks.hold();
+            let builds = free.hooks.builds();
+            let reads = free.hooks.refreshes_first.load(Ordering::SeqCst);
+            say(&held_logs, "lane", round, "held");
+            say(&free_logs, "lane", round, "free");
+            let invalidated = Instant::now();
+            held.invalidate();
+            free.invalidate();
+            starts
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a worker rebuilds the held view");
+            eventually("the free view, rebuilt by the other worker", || {
+                (free.hooks.builds() > builds).then_some(())
+            });
+            let took = invalidated.elapsed();
+            assert!(
+                took < Duration::from_millis(900),
+                "round {round}: rebuilt {took:?} after its invalidation"
+            );
+            assert_eq!(
+                free.hooks.refreshes_first.load(Ordering::SeqCst),
+                reads,
+                "a read rebuilt it"
+            );
+            drop(release);
+            eventually("the held view's check done", || {
+                (lock(&held.live.state).slot != Slot::Running).then_some(())
+            });
+            // Past the spacing, so the next round's checks are due at once.
+            thread::sleep(REBUILD_SPACING + CHECK_EVERY);
+        }
+        assert_eq!(pool.peak_and_started().0, 2);
+        held.close();
+        free.close();
     }
 
     /// A view is queued once however often it is read or invalidated
@@ -5360,6 +5430,7 @@ mod tests {
         let view = pooled(&lane, Refresh::Background, &pool);
         warm(&busy);
         warm(&view);
+        let inline = view.hooks.refreshes_first.load(Ordering::SeqCst);
         let (starts, release) = busy.hooks.hold();
         say(&blocker, "lane", 1, "holds the only worker");
         starts
@@ -5382,6 +5453,10 @@ mod tests {
         let took = written.elapsed();
         let bound = REBUILD_SPACING + CHECK_EVERY + Duration::from_millis(750);
         assert!(took < bound, "served after {took:?}, over {bound:?}");
+        assert!(
+            view.hooks.refreshes_first.load(Ordering::SeqCst) > inline,
+            "not a read's own refresh"
+        );
         assert_eq!(pool.threads(), 1);
         assert_eq!(pool.peak_and_started().0, 1);
         drop(release);
@@ -5458,6 +5533,7 @@ mod tests {
                 .then_some(())
         });
         core.close();
+        assert!(!core.invalidate("a"), "a closed core invalidates nothing");
     }
 
     /// Background builds that keep failing aren't hidden forever behind

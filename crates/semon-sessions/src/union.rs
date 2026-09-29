@@ -210,6 +210,7 @@ impl AccountMenu {
 ///
 /// [`RefreshPool`]: crate::RefreshPool
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Refresh {
     /// Before each read: every answer reflects the logs as they are. A read
     /// that finds a log changed rebuilds before it answers (185–303 ms for
@@ -232,8 +233,10 @@ pub enum Refresh {
     /// it. As a safety net for a writer that doesn't invalidate, a machine
     /// that is read is still checked every 30 s. The first read after the
     /// machine went idle refreshes first only if it was invalidated
-    /// meanwhile; otherwise it answers at once and queues a check. For
-    /// servers that receive the logs themselves.
+    /// meanwhile; otherwise it answers at once, and the machine is checked
+    /// at its next safety check (at once if none is queued), so a writer
+    /// that doesn't invalidate is seen within 30 s. For servers that
+    /// receive the logs themselves.
     OnInvalidate,
 }
 
@@ -394,6 +397,11 @@ impl Gate {
         }
         state.1 += 1;
         Some(Entered(self))
+    }
+
+    /// Whether [`Gate::close`] was called.
+    fn is_closed(&self) -> bool {
+        lock(&self.state).0
     }
 
     /// No call starts again; waits for those in progress.
@@ -974,10 +982,13 @@ impl ViewerCore {
     /// [`Refresh::Background`] it is checked sooner than its next 250 ms
     /// check; refreshed on read, nothing needs it. It never blocks on a
     /// build or touches a file, so it can be called from an async task.
-    /// Returns whether a machine is served under that key; a received
-    /// machine that is new since the last request isn't yet, and is read
-    /// in full when it is.
+    /// Returns whether a machine is served under that key: false once the
+    /// core is closed, and for a received machine that is new since the
+    /// last request, which is read in full when it is.
     pub fn invalidate(&self, machine: &str) -> bool {
+        if self.open.is_closed() {
+            return false;
+        }
         let views = self.views();
         let Some((_, view)) = views.iter().find(|(key, _)| key == machine) else {
             return false;
