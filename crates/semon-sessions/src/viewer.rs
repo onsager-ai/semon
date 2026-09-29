@@ -5073,6 +5073,11 @@ mod tests {
                 "{id} cost days"
             );
             assert_eq!(row.waits.capacity(), row.waits.len(), "{id} waits");
+            assert_eq!(
+                row.answered.capacity(),
+                row.answered.len(),
+                "{id} answered waits"
+            );
         }
     }
 
