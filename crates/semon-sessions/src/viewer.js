@@ -768,11 +768,13 @@
   // after a crumb up a level, then a one-line summary that ellipsizes. On a session, search takes over the bar and the
   // filter drops down from it; the ⋯ menu holds the session's details.
   function renderTopbar(title, crumb, opts = {}) {
-    const bar = $("#topbar"), s = opts.session; bar.replaceChildren(); bar.classList.remove("scrolled");
+    const bar = $("#topbar"), s = opts.session; clearBox(bar, route); bar.classList.remove("scrolled");
+    // What the bar holds is added through `put`, so the range control on Analytics (a persistent control) stays where it is.
+    const put = placer(bar), sink = { append: put };
     bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("searching", !!(s && (findOpen || errOn(s.id))));
-    if (s && errOn(s.id)) { errorsBar(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
-    if (s && findOpen) { searchBar(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
-    const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); bar.append(m);
+    if (s && errOn(s.id)) { errorsBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
+    if (s && findOpen) { searchBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
+    const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); put(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
     if (opts.lineage?.length) {
       if (phone.matches) { const parent = opts.lineage.at(-1), c = el("button", "crumb lineage-parent", parent.name); c.type = "button"; c.setAttribute("aria-label", "Open session path through " + parent.name); c.addEventListener("click", () => showLineageMenu(s.id, bar)); l1.append(c, el("span", "sep", "›")); }
@@ -784,9 +786,9 @@
       opts.line2(l2); t.append(l2);
       if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); });
     }
-    bar.append(t);
-    if (opts.analytics) { appendAnalyticsRange(bar); appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
-    if (!s) { appendWideToggle(bar); const account = accountWidget(false); if (account) bar.append(account); return; }
+    put(t);
+    if (opts.analytics) { put(rangeControl(bar)); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
+    if (!s) { appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
     const fb = el("button", "ibtn"); fb.type = "button"; fb.setAttribute("aria-label", "Find in transcript"); fb.append(icon(I.search));
     fb.addEventListener("click", () => { findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
     const pop = el("div", "filters pop"); pop.hidden = !filterOpen;
@@ -798,21 +800,27 @@
     // On phones search and filter live in the ⋯ menu, and the filter hangs from that button.
     const place = () => { const anchor = phone.matches ? more : tb; pop.style.right = Math.max(0, bar.getBoundingClientRect().right - anchor.getBoundingClientRect().right) + "px"; };
     tb.addEventListener("click", place);
-    if (phone.matches) bar.append(more, pop); else bar.append(fb, tb, more, pop);
-    appendWideToggle(bar); if (filterOpen) place();
-    const account = accountWidget(false); if (account) bar.append(account);
+    if (phone.matches) put(more, pop); else put(fb, tb, more, pop);
+    appendWideToggle(sink); if (filterOpen) place();
+    const account = accountWidget(false); if (account) put(account);
+    put.done();
   }
   function appendWideToggle(bar) {
     const b = el("button", "ibtn wide-toggle"); b.type = "button"; b.setAttribute("aria-label", "Wide reading mode"); b.setAttribute("aria-pressed", String(wideMode)); b.title = "Wide reading mode"; b.append(icon(I.wide));
     b.addEventListener("click", () => setWideMode(!wideMode)); bar.append(b);
   }
-  function appendAnalyticsRange(bar) {
-    const group = el("div", "analytics-range"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Analytics range");
-    for (const [days, label] of [[1, "24 h"], [7, "7 d"], [30, "30 d"]]) {
-      const b = el("button", null, label); b.type = "button"; b.dataset.e = "analytics-range:" + days; b.setAttribute("aria-pressed", String(analyticsRange === days));
-      b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); }); group.append(b);
-    }
-    bar.append(group);
+  // The Analytics range control, a persistent control of the bar: each redraw keeps it and only sets which button is pressed.
+  function rangeControl(bar) {
+    const group = slot("range", bar, () => {
+      const g = el("div", "analytics-range"); g.setAttribute("role", "group"); g.setAttribute("aria-label", "Analytics range");
+      for (const [days, label] of [[1, "24 h"], [7, "7 d"], [30, "30 d"]]) {
+        const b = el("button", null, label); b.type = "button"; b.dataset.e = "analytics-range:" + days;
+        b.addEventListener("click", () => { if (analyticsRange === days) return; const top = currentScroll(); analyticsRange = days; render(); restoreScroll(top); }); g.append(b);
+      }
+      return g;
+    }).el;
+    for (const b of group.children) b.setAttribute("aria-pressed", String(analyticsRange === Number(b.dataset.e.split(":")[1])));
+    return group;
   }
   function lineageOf(sid) {
     const path = [], seen = new Set(); let id = sid;
@@ -1596,10 +1604,35 @@
   }
 
   // ---- Render --------------------------------------------------------------------------------------------------------
+  // Persistent controls. A control the reader may be operating (a filter, the search field, a toggle group) is built once for
+  // the page shown and kept by every redraw of that page: it is never taken out of the document, so its focus, an open
+  // dropdown and the caret in a text field survive. `slot` finds or builds it in its box; the caller then hands it the
+  // page's current data and handlers through `ctx` (a handler is read from `ctx` when the control fires, so it never calls
+  // the closure of an earlier draw). A navigation to another route drops every slot.
+  const SLOTS = new Map();
+  function slot(key, box, build) {
+    let s = SLOTS.get(key);
+    if (!s || s.route !== route || s.box !== box || s.el.parentNode !== box) { s = { route, box, ctx: {}, el: null }; s.el = build(s.ctx); SLOTS.set(key, s); }
+    return s;
+  }
+  // Empties `box` of everything but the slots the route being drawn already holds in it.
+  function clearBox(box, r) {
+    for (const [key, s] of SLOTS) if (s.route !== r) SLOTS.delete(key);
+    const kept = new Set([...SLOTS.values()].filter((s) => s.box === box).map((s) => s.el));
+    for (const n of [...box.childNodes]) if (!kept.has(n)) n.remove();
+  }
+  // Adds nodes to `box` in order, after `clearBox`: a node already at the next place stays where it is, and any other
+  // goes in before it. `put.done()` drops what is left over.
+  function placer(box) {
+    let cur = box.firstChild;
+    const put = (...nodes) => { for (const n of nodes) { if (n === cur) cur = cur.nextSibling; else box.insertBefore(n, cur); } };
+    put.done = () => { while (cur) { const next = cur.nextSibling; cur.remove(); cur = next; } };
+    return put;
+  }
   function render() {
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
     closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
-    tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; page.replaceChildren(); page.classList.remove("child-page");
+    tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; clearBox(page, r); page.classList.remove("child-page");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
     else if (r.v === "sessions") { renderSessions(page); renderTopbar("Sessions"); }
@@ -1660,21 +1693,39 @@
   }
   const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
   function matchesSessionFacets(s) { return Object.keys(sessionFilters).every((key) => !sessionFilters[key] || sessionFacetValue(s, key) === sessionFilters[key]); }
-  function renderFacetFilters(onChange) {
-    const box = el("div", "facet-filters"); box.setAttribute("aria-label", "Filter sessions");
-    const specs = [
-      ["repo", "Repo", "All repos", [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "repo")))].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
-      ["machine", "Machine", "All machines", [...new Set(Object.values(SESS).map((s) => s.machine ?? ""))].sort(), (v) => MACHINE[v] ?? v],
-      ["harness", "Harness", "All harnesses", [...new Set(Object.values(SESS).map((s) => s.harness ?? ""))].sort(), (v) => HARNESS[v] ?? v],
-      ["model", "Model", "All models", [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "model")))].sort(), shortModel],
-    ];
-    for (const [key, label, allLabel, values, showValue] of specs) {
-      const field = el("label", "facet-field"); field.append(el("span", null, label)); const select = el("select"); select.setAttribute("aria-label", label);
-      const all = el("option", null, allLabel); all.value = ""; select.append(all);
-      for (const value of values) { const option = el("option", null, showValue(value)); option.value = value; select.append(option); }
-      select.value = sessionFilters[key]; select.addEventListener("change", () => { sessionFilters[key] = select.value; onChange(); }); field.append(select); box.append(field);
-    }
-    return box;
+  // The four filters (Repo, Machine, Harness, Model) of Analytics and Sessions: one persistent control per page. A redraw
+  // (`sync`) brings its option lists and selections up to date in place. A selected value that no session has now stays
+  // selected, marked "(no sessions)", until the reader changes it.
+  const FACETS = [
+    ["repo", "Repo", "All repos", () => [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "repo")))].sort((a, b) => a === "__none__" ? 1 : b === "__none__" ? -1 : a.localeCompare(b)), (v) => v === "__none__" ? "No repo" : v],
+    ["machine", "Machine", "All machines", () => [...new Set(Object.values(SESS).map((s) => s.machine ?? ""))].sort(), (v) => MACHINE[v] ?? v],
+    ["harness", "Harness", "All harnesses", () => [...new Set(Object.values(SESS).map((s) => s.harness ?? ""))].sort(), (v) => HARNESS[v] ?? v],
+    ["model", "Model", "All models", () => [...new Set(Object.values(SESS).map((s) => sessionFacetValue(s, "model")))].sort(), shortModel],
+  ];
+  function renderFacetFilters(box, onChange) {
+    const s = slot("facets", box, (ctx) => {
+      const bar = el("div", "facet-filters"); bar.setAttribute("aria-label", "Filter sessions"); const fields = [];
+      for (const [key, label, allLabel, valuesOf, showValue] of FACETS) {
+        const field = el("label", "facet-field"); field.append(el("span", null, label)); const select = el("select"); select.setAttribute("aria-label", label);
+        select.addEventListener("change", () => { sessionFilters[key] = select.value; ctx.onChange(); }); field.append(select); bar.append(field);
+        fields.push({ key, select, allLabel, valuesOf, showValue, options: new Map() });
+      }
+      ctx.sync = () => {
+        for (const f of fields) {
+          const current = sessionFilters[f.key], values = f.valuesOf().filter((v) => v !== ""), gone = current !== "" && !values.includes(current);
+          if (gone) values.push(current);
+          const wanted = [["", f.allLabel], ...values.map((v) => [v, f.showValue(v) + (gone && v === current ? " (no sessions)" : "")])], put = placer(f.select), next = new Map();
+          for (const [value, text] of wanted) {
+            let option = f.options.get(value); if (!option) { option = el("option"); option.value = value; }
+            if (option.textContent !== spaced(text)) option.textContent = spaced(text);
+            next.set(value, option); put(option);
+          }
+          put.done(); f.options = next; f.select.value = current;
+        }
+      };
+      return bar;
+    });
+    s.ctx.onChange = onChange; s.ctx.sync(); return s.el;
   }
   function analyticsStats(rows, from, to) {
     const relevant = rows.filter((r) => inRange(r.startedAt, from, to) || r.busy.some(([a, b]) => a < to && b > from));
@@ -1799,9 +1850,8 @@
   }
   function renderAnalytics(page) {
     const all = analyticsSessions().filter((row) => matchesSessionFacets(row.s)), to = NOW, from = to - rangeMs(analyticsRange), now = analyticsStats(all, from, to), previous = analyticsStats(all, from - rangeMs(analyticsRange), from);
-    const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days"))); page.append(head); observeTitle(h1); page.append(renderFacetFilters(() => render()));
-    const measure = el("div", "analytics-measure"); measure.setAttribute("role", "group"); measure.setAttribute("aria-label", "Breakdown bar measure");
-    for (const [key, label] of [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]]) { const b = el("button", null, label); b.type = "button"; b.setAttribute("aria-pressed", String(analyticsMeasure === key)); b.addEventListener("click", () => { if (analyticsMeasure === key) return; const top = currentScroll(); analyticsMeasure = key; render(); restoreScroll(top); }); measure.append(b); }
+    const head = el("div", "ph"), h1 = el("h1", null, "Analytics"); head.append(h1, el("div", "sub", "Measured activity · Last " + (analyticsRange === 1 ? "24 hours" : analyticsRange + " days")));
+    const put = placer(page); put(head); observeTitle(h1); put(renderFacetFilters(page, () => render()));
     const metrics = el("div", "analytics-metrics"), addMetric = (label, value, note, more, tip = false) => { const m = el("div", "analytics-metric"), l = el("div", "label"); l.append(el("span", null, label)); if (tip) l.append(costInfoTip()); if (more) { m.dataset.more = ""; m.title = more; } m.append(l, el("div", "value", value), note); metrics.append(m); }, pct = (errors, tools) => tools ? Math.round(errors / tools * 100) + "%" : "0%";
     addMetric("Agent-hours", hoursText(now.agentMs), deltaNote(now.agentMs, previous.agentMs, hoursText), "Busy time summed across sessions; two sessions busy for an hour count two hours.");
     const costNote = now.apiCost == null || previous.apiCost == null ? el("div", "note", "no price for " + [...new Set([...now.costUnknown, ...previous.costUnknown])].join(", ")) : deltaNote(now.apiCost, previous.apiCost, asMoney);
@@ -1813,13 +1863,21 @@
     const peak = peakBusy(all, from, to), peakBefore = peakBusy(all, from - rangeMs(analyticsRange), from);
     addMetric("Peak concurrency", countText(peak), deltaNote(peak, peakBefore, countText), "The most sessions busy at the same moment.");
     addMetric("Waited on you", timeText(now.waitsMs), deltaNote(now.waitsMs, previous.waitsMs, timeText), "Median wait " + timeText(now.medianWaitMs) + " · previous " + rangeName() + ": " + timeText(previous.medianWaitMs));
-    const currentWait = now.longestCurrent; addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longestWaitMs, timeText), currentWait ? currentWait.s.name + " has waited on you for " + timeText(currentWait.ms) : "No session is waiting on you"); page.append(metrics);
+    const currentWait = now.longestCurrent; addMetric("Longest current wait", currentWait ? timeText(currentWait.ms) : "—", deltaNote(currentWait ? currentWait.ms : 0, previous.longestWaitMs, timeText), currentWait ? currentWait.s.name + " has waited on you for " + timeText(currentWait.ms) : "No session is waiting on you"); put(metrics);
     const breakdowns = el("div", "analytics-breakdowns"); breakdowns.append(analyticsBreakdown("By repo", all, from, to, "repo"), analyticsBreakdown("By machine", all, from, to, "machine"), analyticsBreakdown("By harness and model", all, from, to, "harness"));
-    const bdHead = el("div", "analytics-bd-head"), bdTitle = el("div"); bdTitle.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Agent-hours and API-equivalent cost; bars follow the toggle")); bdHead.append(bdTitle, measure);
+    // The breakdown's heading and its measure toggle: a persistent control (the toggle's state is the page's).
+    const bdHead = slot("measure", page, () => {
+      const bar = el("div", "analytics-bd-head"), title = el("div"), toggle = el("div", "analytics-measure"); title.append(el("h2", null, "Breakdown"), el("div", "panel-sub", "Agent-hours and API-equivalent cost; bars follow the toggle"));
+      toggle.setAttribute("role", "group"); toggle.setAttribute("aria-label", "Breakdown bar measure");
+      for (const [key, label] of [["hours", "Agent-hours"], ["cost", "API-equivalent cost"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.measure = key; b.addEventListener("click", () => { if (analyticsMeasure === key) return; const top = currentScroll(); analyticsMeasure = key; render(); restoreScroll(top); }); toggle.append(b); }
+      bar.append(title, toggle); return bar;
+    }).el;
+    for (const b of bdHead.querySelectorAll(".analytics-measure button")) b.setAttribute("aria-pressed", String(analyticsMeasure === b.dataset.measure));
     const busyTop = [...all].map((r) => ({ ...r, value: busyMsIn(r, from, to) })).filter((r) => r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5), waitTop = [...now.waitBy].map(([id, ms]) => ({ s: SESS[id], id, value: ms })).filter((r) => r.s && r.value > 0).sort((a, b) => b.value - a.value).slice(0, 5);
     const costTop = all.map((r) => { const cost = sessionCostInRange(r.s, from, to); return { ...r, cost, value: cost.usd }; }).filter((r) => r.cost.hasData).sort((a, b) => (b.value ?? -1) - (a.value ?? -1)).slice(0, 5), bottom = el("div", "analytics-split");
     bottom.append(analyticsList("Top sessions · busy time", busyTop, (x) => timeText(x.value)), analyticsList("Top sessions · waited on", waitTop, (x) => timeText(x.value)), analyticsList("Most expensive sessions · API-equivalent cost", costTop, (x) => x.value == null ? "—" : asMoney(x.value)));
-    page.append(renderAgentsChart(all, from, to), renderCostChart(all, from, to), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(); if (allowance) page.append(allowance); metrics.dataset.analyticsReady = ""; // data-analytics-ready: the figures and charts are drawn (a stable hook for the budget check);
+    put(renderAgentsChart(all, from, to), renderCostChart(all, from, to), bdHead, breakdowns, bottom); const allowance = renderCodexAllowance(); if (allowance) put(allowance); metrics.dataset.analyticsReady = ""; // data-analytics-ready: the figures and charts are drawn (a stable hook for the budget check);
+    put.done();
   }
 
   // ---- Sessions: every top-level session and its child runs ---------------------------------------------------------------
@@ -1832,10 +1890,18 @@
     const all = Object.values(SESS).filter(matchesSessionFacets);
     const head = el("div", "ph"); const h1 = el("h1", null, "Sessions"); head.append(h1);
     const sub = el("div", "sub"); for (const [v, l] of [[all.length, all.length === 1 ? "session" : "sessions"], [all.filter((s) => s.state === "work").length, "working"], [all.filter((s) => s.state === "wait").length, "waiting on you"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
-    head.append(sub); page.append(head); observeTitle(h1);
-    const fr = el("label", "find"); const fi = el("input"); fi.id = "sq"; fi.type = "search"; fi.placeholder = "Search sessions"; fi.setAttribute("aria-label", "Search sessions"); fi.value = query; fr.append(icon(I.search), fi);
-    const gb = el("div", "groupby"); gb.setAttribute("role", "group"); gb.setAttribute("aria-label", "Group by");
-    for (const [g, label] of [["recent", "Recent"], ["project", "Project"], ["machine", "Machine"], ["harness", "Harness"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.g = g; b.addEventListener("click", () => { groupBy = g; draw(); }); gb.append(b); }
+    head.append(sub); const put = placer(page); put(head); observeTitle(h1);
+    // The search field and the group-by buttons are persistent controls: the page's redraws keep them, and the field's focus, text and caret.
+    const found = slot("find", page, (ctx) => {
+      const fr = el("label", "find"), fi = el("input"); fi.id = "sq"; fi.type = "search"; fi.placeholder = "Search sessions"; fi.setAttribute("aria-label", "Search sessions"); fi.value = query; fr.append(icon(I.search), fi);
+      fi.addEventListener("input", () => { query = fi.value.trim(); ctx.draw(); }); return fr;
+    }), fr = found.el, fi = fr.querySelector("input");
+    if (fi.value.trim() !== query) fi.value = query; // the sidebar's search can have changed it
+    const grouped = slot("groupby", page, (ctx) => {
+      const gb = el("div", "groupby"); gb.setAttribute("role", "group"); gb.setAttribute("aria-label", "Group by");
+      for (const [g, label] of [["recent", "Recent"], ["project", "Project"], ["machine", "Machine"], ["harness", "Harness"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.g = g; b.addEventListener("click", () => { groupBy = g; ctx.draw(); }); gb.append(b); }
+      return gb;
+    }), gb = grouped.el;
     const out = el("div", "sess"); out.style.display = "grid"; out.style.gap = "16px";
     const draw = () => {
       out.replaceChildren(); const lanes = all.filter((s) => sessMatch(s, query));
@@ -1852,8 +1918,8 @@
       for (const b of gb.children) b.setAttribute("aria-pressed", String(b.dataset.g === groupBy));
       renderLanes();
     };
-    fi.addEventListener("input", () => { query = fi.value.trim(); draw(); });
-    page.append(renderFacetFilters(() => draw()), fr, gb, out); draw();
+    found.ctx.draw = grouped.ctx.draw = draw;
+    put(renderFacetFilters(page, () => render()), fr, gb, out); put.done(); draw();
   }
 
   // ---- Drawer (phone) ---------------------------------------------------------------------------------------------------------
