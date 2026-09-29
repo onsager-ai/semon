@@ -16,6 +16,7 @@ import analyticsCheck from "./analytics.mjs";
 import checkReal from "./check-real.mjs";
 import extras from "./extras.mjs";
 import shellCheck from "./shell.mjs";
+import namesCheck from "./names.mjs";
 
 const checks = [
   ["home", homeCheck],
@@ -28,6 +29,7 @@ const checks = [
   ["check-real", checkReal],
   ["extras", extras],
   ["shell", shellCheck],
+  ["names", namesCheck],
 ];
 
 const browser = await launch();

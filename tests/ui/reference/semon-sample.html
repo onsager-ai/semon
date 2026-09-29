@@ -103,9 +103,7 @@ code { overflow-wrap: anywhere; }
 .srow-meta svg { width: 14px; height: 14px; flex: none; color: var(--faint); }
 .tree-summary { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 1px 5px; border-radius: 8px; background: var(--sunken); color: var(--muted); font: 11px/1.4 var(--mono); }
 .tree-summary .dot { width: 6px; height: 6px; }
-.hmark { width: 16px; height: 16px; display: inline-grid; place-items: center; flex: none; color: var(--h); font-size: 14px; font-weight: 600; line-height: 1; }
-.hmark.h-claude { font-size: 17px; }
-.hmark.h-codex { font-size: 15px; }
+.hname { flex: none; font-size: 11.5px; font-weight: 500; line-height: 1.2; letter-spacing: .01em; white-space: nowrap; color: color-mix(in srgb, var(--h) 60%, var(--ink-2)); }
 
 .topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 6px; min-height: 52px; padding: 8px 20px; background: color-mix(in srgb, var(--ground) 92%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid transparent; }
 .topbar.scrolled { border-bottom-color: var(--line); }
@@ -126,6 +124,8 @@ code { overflow-wrap: anywhere; }
 .lineage-menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 40px; border: 0; border-radius: 7px; background: none; padding: 7px 9px; text-align: left; }
 .lineage-menu button[aria-current="page"] { background: var(--sunken); }
 .lineage-menu button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lineage-menu button span:first-child { flex: 1 1 auto; }
+.lineage-menu button .hname { flex: none; overflow: visible; }
 .sibling-nav { display: inline-flex; align-items: center; gap: 2px; flex: none; }
 .sibling-nav .sibling-count { min-width: 4ch; color: var(--muted); font: 11.5px var(--mono); text-align: center; white-space: nowrap; }
 .sibling-nav .ibtn { width: 36px; height: 36px; }
@@ -450,7 +450,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .hcard.child-card .ln { color: var(--ink); }
 .hcard.child-card .brief { max-height: 5.8em; }
 .child-kind { display: inline-flex; align-items: center; gap: 5px; width: fit-content; max-width: 100%; color: var(--h); font-size: 12px; }
-.child-kind svg, .child-kind .hmark { width: 15px; height: 15px; flex: none; color: var(--h); }
+.child-kind svg { width: 15px; height: 15px; flex: none; color: var(--h); }
 .child-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 12px; }
 .child-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
 .child-actions button { min-height: 36px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: 13px; text-align: left; }
@@ -491,8 +491,8 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .topbar .l2.session-meta .meta-state { gap: 5px; }
 .topbar .l2.session-meta .meta-state .meta-value { max-width: none; }
 .topbar .l2.session-meta .meta-state .state-sep { color: var(--faint); }
-.topbar .l2.session-meta .meta-item svg, .topbar .l2.session-meta .meta-item .hmark { width: 15px; height: 15px; flex: none; color: var(--faint); }
-.topbar .l2.session-meta .meta-item .hmark { color: var(--h); }
+.topbar .l2.session-meta .meta-item svg { width: 15px; height: 15px; flex: none; color: var(--faint); }
+.topbar .l2.session-meta .meta-model { gap: 6px; }
 .topbar .l2.session-meta .meta-item.meta-kind { gap: 5px; padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, var(--h) 12%, transparent); color: var(--h); }
 .topbar .l2.session-meta .meta-kind .meta-value { min-width: 0; max-width: 12ch; color: var(--h); }
 .topbar .l2.session-meta .meta-item.meta-cost { gap: 4px; }
@@ -538,11 +538,12 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .app.rail .nav-item .cnt { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; overflow: hidden; border-radius: 50%; background: var(--faint); color: transparent; font-size: 0; }
   .app.rail .nav-item .cnt.hot { background: var(--wait); }
   .app.rail .tree-row { grid-template-columns: minmax(0, 1fr); margin: 0 7px; }
-  .app.rail .tree-toggle, .app.rail .tree-spacer, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta, .app.rail .tree-group, .app.rail .tree-summary { display: none !important; }
-  .app.rail .srow { display: flex; justify-content: center; min-height: 44px; padding: 0; }
-  .app.rail .srow-main { position: relative; justify-content: center; }
-  .app.rail .srow .dot { position: absolute; top: -3px; right: -4px; width: 7px; height: 7px; }
-  .app.rail .srow .child-dot { position: absolute; top: auto; right: -5px; bottom: -3px; width: 6px; height: 6px; border: 1px solid var(--side); }
+  .app.rail .tree-toggle, .app.rail .tree-spacer, .app.rail .srow .nm, .app.rail .srow .ag, .app.rail .srow-meta > :not(.hname), .app.rail .tree-group, .app.rail .tree-summary { display: none !important; }
+  .app.rail .srow { position: relative; display: flex; justify-content: center; min-height: 44px; padding: 0; }
+  .app.rail .srow-main { justify-content: center; }
+  .app.rail .srow-meta { padding: 0; }
+  .app.rail .srow .dot { position: absolute; top: 6px; right: 5px; width: 7px; height: 7px; }
+  .app.rail .srow .child-dot { position: absolute; top: auto; right: 5px; bottom: 6px; width: 6px; height: 6px; border: 1px solid var(--side); }
 }
 
 /* ---- Analytics ------------------------------------------------------------------ */
@@ -601,10 +602,10 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .analytics-row .row-hours { grid-column: 2; }
 .analytics-row .row-cost { grid-column: 3; }
 .analytics-split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
-.analytics-session { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 44px; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 5px 0; text-align: left; }
+.analytics-session { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 44px; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 5px 0; text-align: left; }
 .analytics-session .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-size: 12.5px; color: var(--ink-2); }
 .analytics-session .session-value { color: var(--muted); font: 11px var(--mono); white-space: nowrap; }
-.analytics-session .no-price { grid-column: 2 / -1; margin-top: -3px; }
+.analytics-session .no-price { grid-column: 1 / -1; margin-top: -3px; }
 .analytics-slice .session-name { white-space: normal; overflow-wrap: anywhere; }
 @media (min-width: 761px) {
   .analytics-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 20px; }
@@ -858,11 +859,15 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   const STATE = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed" };
   const nameOf = (id) => id === "you" ? "You" : SESS[id].name;
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
-  const harnessMark = (harness) => { const m = el("span", "hmark h-" + harness, harness === "claude" ? "✳" : "⌘"); m.setAttribute("aria-hidden", "true"); m.title = HARNESS[harness]; return m; };
+  // A harness is named in plain text, never drawn: no logo and no vendor colour. "short" gives "Claude" where the line is tight.
+  // Colour and size live in .hname. `hidden` is for rows whose aria-label already names the harness.
+  const HARNESS_SHORT = { claude: "Claude", codex: "Codex" };
+  const harnessName = (harness, short = false, hidden = false) => { const name = el("span", "hname h-" + harness, (short ? HARNESS_SHORT : HARNESS)[harness] ?? harness); name.title = HARNESS[harness] ?? harness; if (hidden) name.setAttribute("aria-hidden", "true"); return name; };
   function childKindChip(s, meta = false) {
     const c = el("span", (meta ? "meta-item meta-kind" : "child-kind")); c.style.setProperty("--h", "var(--" + s.harness + ")");
-    const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : harnessMark(s.harness);
-    c.append(mark, el("span", meta ? "meta-value" : null, s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"))); return c;
+    const mark = s.kind === "Subagent" ? icon(I.role) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
+    if (mark) c.append(mark);
+    c.append(el("span", meta ? "meta-value" : null, s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"))); return c;
   }
   const HOST = { laptop: "marvin-mbp.local", studio: "studio.onsager.dev", buildbox: "buildbox.onsager.ai", cloud: "claude.ai-cloud.onsager.dev" };
   const hostOf = (s) => s.host ?? HOST[s.machine] ?? MACHINE[s.machine] ?? "Unknown host";
@@ -1150,10 +1155,10 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const target = route.v === "session" ? route.id : route.v === "trace" ? route.sid : null;
     let ancestor = target, selected = false; while (ancestor && SESS[ancestor]) { if (ancestor === s.id) { selected = true; break; } ancestor = parentOf(ancestor); }
     if (selected) row.setAttribute("aria-current", "page");
-    const main = el("span", "srow-main"); main.append(dot(s.state), harnessMark(s.harness), el("span", "nm", s.name), el("span", "ag", ago(s.last)));
+    const main = el("span", "srow-main"); main.append(dot(s.state), el("span", "nm", s.name), el("span", "ag", ago(s.last)));
     if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work"); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
     if (kids.length && !rail && !open && allKids.length) { const summary = el("span", "tree-summary"); const state = urgentDescendant(s.id, children); if (state) summary.append(dot(state)); summary.append(String(allKids.length)); main.append(summary); }
-    const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").title = hostOf(s); meta.querySelector(".repo-short").title = branchOf(s);
+    const meta = el("span", "srow-meta"); meta.append(harnessName(s.harness, true, true), icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").title = hostOf(s); meta.querySelector(".repo-short").title = branchOf(s);
     row.append(main, meta); row.addEventListener("click", () => goSession(s.id)); line.append(row); item.append(line);
     item.addEventListener("keydown", (e) => {
       if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); const toggle = item.querySelector(":scope > .tree-row .tree-toggle"); toggle?.click(); } }
@@ -1211,7 +1216,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   function lineageOf(sid) { const path = [], seen = new Set(); let id = sid; while (id && SESS[id] && !seen.has(id)) { seen.add(id); path.push(SESS[id]); id = parentOf(id); } return path.reverse(); }
   function showLineageMenu(sid, bar) {
     bar.querySelector(".lineage-menu")?.remove(); const path = lineageOf(sid), menu = el("div", "lineage-menu"); menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", "Session path");
-    path.forEach((s, i) => { const b = el("button"); b.type = "button"; b.setAttribute("role", "menuitem"); if (i === path.length - 1) b.setAttribute("aria-current", "page"); b.append(harnessMark(s.harness), el("span", null, s.name)); b.addEventListener("click", () => { menu.remove(); goSession(s.id); }); menu.append(b); });
+    path.forEach((s, i) => { const b = el("button"); b.type = "button"; b.setAttribute("role", "menuitem"); if (i === path.length - 1) b.setAttribute("aria-current", "page"); b.append(el("span", null, s.name), harnessName(s.harness)); b.addEventListener("click", () => { menu.remove(); goSession(s.id); }); menu.append(b); });
     bar.append(menu); const close = (e) => { if (!menu.contains(e.target) && !e.target.closest?.(".lineage-parent")) { menu.remove(); document.removeEventListener("click", close); } }; setTimeout(() => document.addEventListener("click", close), 0);
   }
   function siblingNav(s) {
@@ -1274,7 +1279,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       j.addEventListener("click", (ev) => { ev.stopPropagation(); const e = $(".step.err"); const gs = e?.closest(".tgroup")?.querySelector(".tsum"); if (gs?.getAttribute("aria-expanded") === "false") gs.click(); if (e) { e.scrollIntoView({ behavior: "smooth", block: "center" }); const t = e.querySelector("button"); if (t?.getAttribute("aria-expanded") === "false") t.click(); } });
       st.append(j); }
     const kind = s.kind ? childKindChip(s, true) : null;
-    const model = el("span", "meta-item meta-model"); model.append(harnessMark(s.harness), el("span", "meta-value", shortModel(s.model)));
+    const model = el("span", "meta-item meta-model"); model.append(harnessName(s.harness), el("span", "meta-value", shortModel(s.model)));
     const machine = el("span", "meta-item meta-machine"); machine.append(icon(I.machine), el("span", "meta-value", shortHost(s))); machine.title = hostOf(s);
     const branch = el("span", "meta-item meta-branch"); branch.append(icon(I.branch), el("span", "meta-value", branchOf(s))); branch.title = branchOf(s);
     const tools = el("span", "meta-item meta-tools"); tools.append(icon(I.wrench), el("span", "meta-value", String(calls))); tools.setAttribute("aria-label", calls + (calls === 1 ? " tool call" : " tool calls"));
@@ -1939,7 +1944,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     const body = el("div", "vb"), list = el("div", "analytics-list");
     if (!active.length) body.append(el("p", "empty", "No sessions were busy then."));
     for (const row of active.map((r) => ({ r, ms: busyMsIn(r, a, b) })).sort((x, y) => y.ms - x.ms || x.r.s.name.localeCompare(y.r.s.name))) {
-      const s = row.r.s, item = el("button", "analytics-session analytics-slice"); item.type = "button"; item.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", timeText(row.ms) + " busy"));
+      const s = row.r.s, item = el("button", "analytics-session analytics-slice"); item.type = "button"; item.append(el("span", "session-name", s.name), harnessName(s.harness, true), el("span", "session-value", timeText(row.ms) + " busy"));
       item.addEventListener("click", () => { pendingSessionOpen = s.id; d.close(); }); list.append(item);
     }
     if (active.length) body.append(list); d.append(head, body); document.body.append(d);
@@ -1974,7 +1979,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   function analyticsList(title, items, value) {
     const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title)); const list = el("div", "analytics-list");
     if (!items.length) list.append(el("p", "empty", "No sessions in this range."));
-    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(harnessMark(s.harness), el("span", "session-name", s.name), el("span", "session-value", value(item))); if (item.cost?.unknown.length) b.append(el("span", "no-price", "no price for " + item.cost.unknown.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); }
+    for (const item of items) { const s = item.s, b = el("button", "analytics-session"); b.type = "button"; b.append(el("span", "session-name", s.name), harnessName(s.harness, true), el("span", "session-value", value(item))); if (item.cost?.unknown.length) b.append(el("span", "no-price", "no price for " + item.cost.unknown.join(", "))); b.addEventListener("click", () => goSession(s.id)); list.append(b); }
     panel.append(list); return panel;
   }
   function renderAnalytics(page) {
