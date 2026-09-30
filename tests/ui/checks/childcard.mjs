@@ -14,11 +14,11 @@ function paintFixture(D) {
   for (const h of D.H) {
     if (h.kind !== "spawn" || !D.SESS[h.from] || !D.SESS[h.to]) continue;
     const childTurn = D.turns.find((t) => t.sid === h.to && t.start === h.id), parentTurns = D.turns.filter((t) => t.sid === h.from);
-    const parentTurn = parentTurns.find((t) => t.sent.includes(h.id)), parentRank = parentTurns.indexOf(parentTurn);
-    if (!childTurn || !parentTurn || parentRank < 1) continue;
+    const spawnTurn = parentTurns.find((t) => t.sent.includes(h.id)), spawnRank = parentTurns.indexOf(spawnTurn), deepTurn = parentTurns.at(-1);
+    if (!childTurn || !spawnTurn || !deepTurn || parentTurns.indexOf(deepTurn) <= spawnRank) continue;
     const activity = (D.TX[h.to] ?? []).filter((e) => e.turn === childTurn.id && !(e.k === "h" && e.id === h.id));
     const handoffAt = (D.TX[h.from] ?? []).findIndex((e) => e.k === "h" && e.id === h.id);
-    if (activity.length && handoffAt >= 0) candidates.push({ parent: h.from, child: h.to, spawn: h.id, childTurn: childTurn.id, parentTurn: parentTurn.id, rank: handoffAt });
+    if (activity.length && handoffAt >= 0) candidates.push({ parent: h.from, child: h.to, spawn: h.id, childTurn: childTurn.id, deepTurn: deepTurn.id, rank: handoffAt });
   }
   return candidates.sort((a, b) => b.rank - a.rank)[0] ?? null;
 }
@@ -105,7 +105,7 @@ export default async function childcard(browser) {
   }
 
   const fixture = paintFixture(D);
-  r.expect(!!fixture, "paint first: the fixture needs a spawned child with activity in a later parent turn");
+  r.expect(!!fixture, "paint first: the fixture needs a spawned child with activity and a later parent turn");
   if (fixture) {
     for (const [size, suffix] of [["phone", "390-light"], ["desktop", "1280-light"]]) {
       const page = await served(browser, { size, dark: false });
@@ -136,28 +136,39 @@ export default async function childcard(browser) {
         const after = await page.evaluate(() => window.scrollY);
         r.expect(filled, "390-light: the child card's activity appears after release");
         r.expect(Math.abs(after - place.y) <= 2, "390-light: window.scrollY stays put when activity below the viewport arrives: " + place.y + " then " + after);
-      } else release();
+      } else {
+        release();
+        const filled = await page.waitForFunction((id) => [...document.querySelectorAll("#page .turns .hcard.child-card")].find((c) => c.dataset.h === id)?.querySelector(".child-work"), fixture.spawn, { timeout: 5000 }).then(() => true, () => false);
+        r.expect(filled, "1280-light: the child card's activity appears after release");
+      }
       await page.context().close();
     }
 
     const deep = await served(browser, { size: "desktop", dark: true });
     let releaseDeep;
     const deepGate = new Promise((resolve) => { releaseDeep = resolve; });
-    let deepRequested;
-    const deepRequestSeen = new Promise((resolve) => { deepRequested = resolve; });
-    await deep.route(childTurnRoute(fixture), async (route) => { deepRequested(); await deepGate; await route.continue(); });
+    let deepRequested, deepAgain;
+    const deepRequestSeen = new Promise((resolve) => { deepRequested = resolve; }), deepAgainSeen = new Promise((resolve) => { deepAgain = resolve; });
+    let deepRequests = 0;
+    await deep.route(childTurnRoute(fixture), async (route) => { deepRequests++; if (deepRequests === 1) deepRequested(); if (deepRequests === 2) deepAgain(); await deepGate; await route.continue().catch(() => {}); });
     const deepStarted = Date.now();
-    await goto(deep, { v: "session", id: fixture.parent, turn: fixture.parentTurn }, D);
-    const deepRemaining = 3000 - (Date.now() - deepStarted), deepDrawn = deepRemaining > 0 && await drawnWithoutChildWork(deep, D, fixture, fixture.parentTurn, deepRemaining);
-    r.expect(deepDrawn, "1280-dark: the deep-linked parent turn draws with its child card unfilled within 3 s");
+    await goto(deep, { v: "session", id: fixture.parent }, D);
+    const initialRemaining = 3000 - (Date.now() - deepStarted), initialDrawn = initialRemaining > 0 && await drawnWithoutChildWork(deep, D, fixture, null, initialRemaining);
+    r.expect(initialDrawn, "1280-dark: the parent title and turns draw with the child card unfilled within 3 s");
     const deepHeld = await Promise.race([deepRequestSeen.then(() => true), deep.waitForTimeout(3000).then(() => false)]);
-    r.expect(deepHeld, "1280-dark: the deep-linked child turn request was held");
-    const anchor = deep.locator('.turn[data-turn="' + fixture.parentTurn + '"]');
+    r.expect(deepHeld, "1280-dark: the child turn request was held");
+    const linkedAt = Date.now();
+    await goto(deep, { v: "session", id: fixture.parent, turn: fixture.deepTurn }, D);
+    const linkedRemaining = 3000 - (Date.now() - linkedAt), deepDrawn = linkedRemaining > 0 && await drawnWithoutChildWork(deep, D, fixture, fixture.deepTurn, linkedRemaining);
+    r.expect(deepDrawn, "1280-dark: a deep link to a later parent turn stays drawn while its child is held");
+    const deepHeldAgain = await Promise.race([deepAgainSeen.then(() => true), deep.waitForTimeout(3000).then(() => false)]);
+    r.expect(deepHeldAgain, "1280-dark: the deep-linked route keeps the child's turn request pending");
+    const anchor = deep.locator('.turn[data-turn="' + fixture.deepTurn + '"]');
     const topBefore = await anchor.evaluate((n) => n.getBoundingClientRect().top);
     releaseDeep();
     const deepFilled = await deep.waitForFunction((id) => [...document.querySelectorAll("#page .turns .hcard.child-card")].find((c) => c.dataset.h === id)?.querySelector(".child-work"), fixture.spawn, { timeout: 5000 }).then(() => true, () => false);
     await frames(deep);
-    const tops = await deep.evaluate((id) => ({ turn: document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]')?.getBoundingClientRect().top ?? null, bar: document.querySelector("#topbar").getBoundingClientRect().bottom }), fixture.parentTurn);
+    const tops = await deep.evaluate((id) => ({ turn: document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]')?.getBoundingClientRect().top ?? null, bar: document.querySelector("#topbar").getBoundingClientRect().bottom }), fixture.deepTurn);
     r.expect(deepFilled, "1280-dark: the child card's activity appears after release");
     r.expect(tops.turn != null && Math.abs(tops.turn - topBefore) <= 8 && Math.abs(tops.turn - tops.bar - 8) <= 8, "1280-dark: the deep-linked parent turn stays at the top after its child fills: " + JSON.stringify({ before: topBefore, ...tops }));
     if (deepFilled) {

@@ -141,10 +141,10 @@ export async function open(browser, srv, where, scheme, before = null) {
   const ctx = await context(browser, scheme);
   await ctx.addInitScript(counter);
   const page = await ctx.newPage();
-  page.errors = []; page.models = []; page.updates = 0; page.txs = [];
+  page.errors = []; page.models = []; page.updates = 0; page.txs = []; page.txResponses = [];
   page.on("pageerror", (e) => page.errors.push(e.message.split("\n")[0]));
   page.on("request", (q) => { if (q.url().includes("/api/model")) page.models.push(Date.now()); if (q.url().includes("/api/tx")) page.txs.push(q.url()); });
-  page.on("response", (r) => { if (r.url().includes("/api/model") && r.status() === 200) page.updates++; });
+  page.on("response", (r) => { if (r.url().includes("/api/model") && r.status() === 200) page.updates++; if (r.url().includes("/api/tx")) { const u = new URL(r.url()); page.txResponses.push({ sid: u.searchParams.get("sid"), turn: u.searchParams.get("turn"), status: r.status() }); } });
   page.setDefaultTimeout(8000);
   await page.route(/.*/, (r) => (r.request().url().startsWith(srv.base + "/") ? r.continue() : r.abort()));
   await before?.(page); // routes added here run before the one above
@@ -180,7 +180,8 @@ async function scheme(browser, name, opts, r, protocol) {
   const pages = [];
   try {
     const S = await open(browser, srv, "/s/claude/harbor", opts); pages.push(S);
-    await S.waitForFunction(() => document.querySelectorAll("#page .turns .hcard.child-card .child-work").length >= 2, null, { timeout: 8000 });
+    const initialChildWork = await S.waitForFunction(() => document.querySelectorAll("#page .turns .hcard.child-card .child-work").length >= 2, null, { timeout: 8000 }).then(() => true, () => false);
+    if (!initialChildWork) throw new Error(name + ": child activity did not arrive; transcript responses=" + JSON.stringify(S.txResponses));
     const AN = await open(browser, srv, "/analytics", opts); pages.push(AN);
     const Hm = await open(browser, srv, "/", opts); pages.push(Hm);
     const SP = await open(browser, srv, "/sessions", opts); pages.push(SP);
