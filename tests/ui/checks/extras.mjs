@@ -359,7 +359,10 @@ export default async function (browser) {
     });
     r.expect(R.shortCommand?.command === "cargo metadata --format-version 1 --no-deps" && R.shortCommand.labels.indexOf("Command") === 0 && R.shortCommand.labels.indexOf("Output") > R.shortCommand.labels.indexOf("Command") && R.shortCommand.cwd === null, "a short shell detail shows Command then Output and hides the session-root directory: " + JSON.stringify(R.shortCommand));
 
-    await page.goto(ENV.extraBase + "/s/claude/harbor", { waitUntil: "load" }); await page.waitForFunction(() => !!document.querySelector(".turns"));
+    const childRequestsSettled = trackChildRequests(page);
+    await page.goto(ENV.extraBase + "/s/claude/harbor", { waitUntil: "load" });
+    await page.waitForFunction(() => !!document.querySelector(".turns"));
+    await childRequestsSettled();
     await page.evaluate(() => document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click()));
     R.command = await page.evaluate(() => {
       const b = [...document.querySelectorAll(".step > button")].find((x) => x.querySelector(".sa")?.textContent.endsWith("…"));
