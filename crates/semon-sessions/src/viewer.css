@@ -1048,7 +1048,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .ib .ctx .tracebtn { margin: -12px -10px -12px auto; }
   .turn-h { min-height: 44px; margin-bottom: -12px; }
   .turn-h .from { min-height: 44px; min-width: 44px; }
-  .hop .open { min-height: 44px; min-width: 44px; margin: -4px 0; }
+  .hop button.open { min-height: 44px; min-width: 44px; margin: -4px 0; }
   .hop .more { position: relative; z-index: 1; min-height: 44px; min-width: 44px; margin: -12px 0; }
   .hcard:not(.child-card) .more { position: relative; z-index: 1; display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 0; margin: -12px 0 -10px; }
   .list .more { display: flex; align-items: center; min-height: 44px; padding: 0; }
