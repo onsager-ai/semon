@@ -271,6 +271,8 @@ async function referencePage(browser, size, dark, html) {
   await page.route(/.*/, async (r) => {
     const url = new URL(r.request().url());
     if (url.href === "http://reference.test/") return r.fulfill({ contentType: "text/html; charset=utf-8", body: stableMockup(html) });
+    const harness = url.host === "reference.test" ? /^\/harness\/([\w.-]+\.svg)$/.exec(url.pathname) : null; // the harness marks the viewer serves at /harness/*.svg
+    if (harness && fs.existsSync(path.join(here, "../../assets/harnesses", harness[1]))) return r.fulfill({ contentType: "image/svg+xml", body: fs.readFileSync(path.join(here, "../../assets/harnesses", harness[1])) });
     if (url.href === "http://reference.test/mark.svg") return r.fulfill({ contentType: "image/svg+xml", body: MARK_SVG });
     if (url.host === "fonts.googleapis.com") return r.fulfill({ contentType: "text/css", body: FACES.replaceAll('url("/fonts/', 'url("http://reference.test/fonts/') });
     const font = /^\/fonts\/(instrument-sans|jetbrains-mono|source-serif-4)-(latin-ext|latin)\.woff2$/.exec(url.pathname);
@@ -341,13 +343,15 @@ async function nav(page, route, D, mockup) {
 const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name + ".png"), PNG.sync.write(img)); };
 // The ratchet: a pending screen may not drift away from the overhaul. tests/ui/pixel-baseline.json holds, per screen and scheme, its
 // ratio of differing pixels and the size of both pictures (served, reference). A screen fails when its ratio rises by more than half
-// a point, or when either size changes. A port PR moves the baselines it changes in its own diff (out/pixel-baseline.<section>.json,
-// written by every run, holds the current values), and its body says which and why. SEMON_PIXEL_BASELINE names the section
+// a tenth of a point (the run-to-run drift seen so far is 0.013), or when either size changes. A fall is reported ("fell", in the
+// table) but does not fail, so improving a screen never makes the baseline a conflict for the next PR; a PR that ports a screen
+// refreshes the baselines it touches in its own diff (out/pixel-baseline.<section>.json, written by every run, holds the current
+// values), and its body says which and why. SEMON_PIXEL_BASELINE names the section
 // ("main" by default; the two-machines step uses "two-machines").
 const SECTION = process.env.SEMON_PIXEL_BASELINE ?? "main";
 const BASELINE_FILE = path.join(here, "pixel-baseline.json");
 const BASELINE = fs.existsSync(BASELINE_FILE) ? JSON.parse(fs.readFileSync(BASELINE_FILE, "utf8"))[SECTION] : undefined;
-const RISE = 0.005;
+const RISE = 0.001;
 const CURRENT = {};
 function ratchet(row, p) {
   const key = row.scheme + "|" + row.screen, d = p.A.width + "×" + p.A.height, size = p.size ?? [d, d];
@@ -357,11 +361,29 @@ function ratchet(row, p) {
   if (!was) return "no baseline for " + key;
   if (p.ratio > was.ratio + RISE) return "rose from " + (was.ratio * 100).toFixed(2) + "% to " + (p.ratio * 100).toFixed(2) + "%";
   if (was.size[0] !== size[0] || was.size[1] !== size[1]) return "size changed from " + was.size.join(" vs ") + " to " + size.join(" vs ");
+  if (p.ratio < was.ratio - RISE) return "~fell from " + (was.ratio * 100).toFixed(2) + "% to " + (p.ratio * 100).toFixed(2) + "%"; // reported, never a failure
   return null;
 }
 // Served against served: the same viewer built over the same data, compared with itself. SEMON_REF_BASE/SEMON_REF_TOKEN name the
 // second server (the pushed-data step compares the received copy with the machine's own). No mockup and no ratchet is involved.
 const REF_BASE = (process.env.SEMON_REF_BASE ?? "").replace(/\/$/, ""), REF_TOKEN = process.env.SEMON_REF_TOKEN ?? "";
+// Regions: parts of a screen that are already ported (the top bar, an open menu), compared with the overhaul and enforced, while the
+// rest of the screen is still pending. reference-map.json lists each region's selector, the screens it applies to (a name ending in
+// "-" covers every screen with that prefix) and, for a panel, the button that opens it. A region is compared after the screen's
+// full-page comparison, on the same two pages.
+const REGIONS = MAP.regions ?? [];
+const regionsOf = (name) => REGIONS.filter((r) => r.screens.some((x) => (x.endsWith("-") ? name.startsWith(x) : name === x)));
+async function regionShot(page, region) {
+  // A region that does not depend on how far the page is scrolled (the bar, whose border shows once it is) is taken at the top, so a
+  // pending page that happens to be a few pixels taller on one side cannot change it.
+  if (region.top) { await page.evaluate(() => { window.scrollTo(0, 0); const main = document.querySelector("#main"); if (main) main.scrollTop = 0; }); await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))); await page.waitForTimeout(120); }
+  if (region.open) { await page.click(region.open); await page.waitForTimeout(200); }
+  const target = page.locator(region.selector).first();
+  await target.waitFor({ state: "visible", timeout: 3000 });
+  const png = PNG.sync.read(await target.screenshot({ animations: "disabled", caret: "hide" }));
+  if (region.open) { await page.keyboard.press("Escape"); await page.waitForTimeout(150); }
+  return png;
+}
 // Both pictures and the diff of an enforced mismatch. A pending screen differs by design until its port PR, so only the diff is kept,
 // with the pictures for the screens that show the most (Home, the lists, one session, one trace).
 const SHOWN = ["home", "sessions", "machines", "analytics", "session-harbor", "session-h-codex", "drawer"];
@@ -380,7 +402,7 @@ function saveMismatch(row, name, scheme, p) {
   if (referenceOf("drawer") === undefined) throw new Error("reference-map.json has no entry for: drawer");
   const skipped = Object.entries(MAP.screens).filter(([, ref]) => ref === null).map(([name]) => name);
   const browser = await launch();
-  const results = [], errors = [];
+  const results = [], errors = [], regions = [];
   for (const [size, dark] of SCHEMES) {
     const scheme = size + "-" + (dark ? "dark" : "light");
     const page = await served(browser, { size, dark });
@@ -397,8 +419,27 @@ function saveMismatch(row, name, scheme, p) {
       const b = await shot(port, size);
       const p = compare(a, b);
       const row = { scheme, screen: s.name, reference: ref, port: { pixels: p.pixels, ratio: p.ratio, size: p.size, enforced, pass: !enforced || (p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size) } };
-      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; row.port.pass = false; } }
+      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; if (!problem.startsWith("~")) row.port.pass = false; } }
       saveMismatch(row, s.name, scheme, p);
+      for (const region of regionsOf(s.name)) {
+        const name = s.name + "#" + region.name, rrow = { scheme, screen: name, reference: "overhaul", port: { enforced: true, pass: false } };
+        const except = region.except?.[scheme + "|" + s.name];
+        if (except) {
+          // A named, reasoned exception, held only while its cause holds: the served page scrolls and the mockup's does not (a sticky bar is drawn in its
+          // own layer only when the page scrolls). Once that is no longer so, the exception fails until it is removed from reference-map.json.
+          const scrolls = (pg) => pg.evaluate(() => { const el = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main"); return el.scrollHeight > el.clientHeight + 1; });
+          const [servedScrolls, portScrolls] = [await scrolls(page), await scrolls(port)];
+          if (servedScrolls && !portScrolls) rrow.port = { pixels: 0, ratio: 0, enforced: true, pass: true, skipped: except };
+          else { rrow.error = "the exception's cause is gone (served scrolls: " + servedScrolls + ", the mockup's: " + portScrolls + "): remove " + scheme + "|" + s.name + " from reference-map.json"; }
+          regions.push(rrow); continue;
+        }
+        try {
+          const q = compare(await regionShot(page, region), await regionShot(port, region));
+          rrow.port = { pixels: q.pixels, ratio: q.ratio, size: q.size, enforced: true, pass: q.pixels <= MAX_RATIO * q.diff.width * q.diff.height && !q.size };
+          saveMismatch(rrow, name.replace("#", "-"), scheme, q);
+        } catch (e) { rrow.error = String(e.message ?? e).split("\n")[0]; }
+        regions.push(rrow);
+      }
       if (s.sample && !other) {
         await nav(orig, s.sample, D, true); const c = await shot(orig, size);
         const q = compare(a, c);
@@ -420,7 +461,7 @@ function saveMismatch(row, name, scheme, p) {
       const p = compare(await shot(drawerPage, "desktop"), await shot(side, "desktop"));
       const enforced = other ? true : referenceOf("drawer") !== "pending";
       const row = { scheme, screen: "drawer", reference: other ? "served" : enforced ? referenceOf("drawer") : "overhaul", port: { pixels: p.pixels, ratio: p.ratio, size: p.size, enforced, pass: !enforced || (p.pixels <= MAX_RATIO * p.diff.width * p.diff.height && !p.size) } };
-      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; row.port.pass = false; } }
+      if (!enforced) { const problem = ratchet(row, p); if (problem) { row.port.ratchet = problem; if (!problem.startsWith("~")) row.port.pass = false; } }
       saveMismatch(row, "drawer", scheme, p);
       results.push(row);
       errors.push(...drawerPage.errors.map((e) => scheme + " served drawer: " + e));
@@ -431,19 +472,21 @@ function saveMismatch(row, name, scheme, p) {
     for (const p of ports.values()) await p.context().close();
   }
   await browser.close();
-  const failed = results.filter((r) => !r.port.pass), pending = results.filter((r) => !r.port.enforced);
+  const failed = [...results, ...regions].filter((r) => !r.port.pass), pending = results.filter((r) => !r.port.enforced);
   // The current baselines, for a PR that moves them: written every run, never read back.
   fs.writeFileSync(path.join(ENV.out, "pixel-baseline." + SECTION + ".json"), J({ [SECTION]: Object.fromEntries(Object.entries(CURRENT).sort(([a], [b]) => (a < b ? -1 : 1))) }, null, 1) + "\n");
   const pct = (x) => (x * 100).toFixed(3) + "%";
   const md = ["| Screen | Scheme | vs port reference | vs sample mockup |", "|---|---|---|---|",
-    ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.enforced ? (r.port.pass ? "✓ " : "✗ ") : r.port.ratchet ? "✗ ratchet (" + r.port.ratchet + ") · " : "pending · ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
-  fs.writeFileSync(path.join(ENV.out, "pixels.json"), J({ threshold: THRESHOLD, maxRatio: MAX_RATIO, results, errors }, null, 1));
+    ...results.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.port.enforced ? (r.port.pass ? "✓ " : "✗ ") : r.port.ratchet ? (r.port.ratchet.startsWith("~") ? "pending (" + r.port.ratchet.slice(1) + ") · " : "✗ ratchet (" + r.port.ratchet + ") · ") : "pending · ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "") + " | " + (r.sample ? r.sample.pixels + " px (" + pct(r.sample.ratio) + ")" + (r.sample.size ? " size " + r.sample.size.join(" vs ") : "") : "n/a") + " |")].join("\n");
+  const regionMd = regions.length ? "\n\n| Region | Scheme | vs overhaul |\n|---|---|---|\n" + regions.map((r) => "| " + r.screen + " | " + r.scheme + " | " + (r.error ? "✗ " + r.error : r.port.skipped ? "skipped: " + r.port.skipped : (r.port.pass ? "✓ " : "✗ ") + r.port.pixels + " px (" + pct(r.port.ratio) + ")" + (r.port.size ? " size " + r.port.size.join(" vs ") : "")) + " |").join("\n") : "";
+  fs.writeFileSync(path.join(ENV.out, "pixels.json"), J({ threshold: THRESHOLD, maxRatio: MAX_RATIO, results, regions, errors }, null, 1));
   const note = skipped.length ? "\nNot compared (unmapped in reference-map.json, not drawn by the viewer yet): " + skipped.join(", ") + "\n" : "";
-  fs.writeFileSync(path.join(ENV.out, "pixels.md"), md + "\n" + note);
-  console.log(md);
+  fs.writeFileSync(path.join(ENV.out, "pixels.md"), md + regionMd + "\n" + note);
+  console.log(md + regionMd);
+  console.log("regions: " + regions.length + ", failing: " + regions.filter((r) => !r.port.pass).length);
   console.log("screens: " + results.length + ", port mismatches: " + failed.length + ", page errors: " + errors.length + (pending.length ? ", pending (reported, not enforced): " + pending.length : ""));
   if (skipped.length) console.log("unmapped, not compared: " + skipped.join(", "));
   for (const e of errors) console.log("  page error: " + e);
-  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Pixel comparison\n\n" + md + "\n" + note);
+  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Pixel comparison\n\n" + md + regionMd + "\n" + note);
   process.exit(failed.length || errors.length ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(2); });

@@ -18,7 +18,7 @@
 //     "Codex cut this output before the model saw it" and none of the warning header; a code-mode command cut by the collection cap
 //     shows the same in View all. Neither says "Cut short in this copy of the logs". Screenshots at 390 and 1280, light and dark.
 //   - spawn cards: the kind badge and the title share one row (phone and desktop, light and dark, also with a long title, and never sideways),
-//     the title does not repeat the kind its badge shows, and the Subagent badge in the top bar carries the delegation icon, not the person icon, and the one on a card carries the harness mark and its word, with neither glyph.
+//     the title does not repeat the kind its badge shows, the Subagent badge on a card carries the harness mark and its word, with neither glyph (#146), and the top bar names the kind as a plain label.
 //   - no page errors.
 import path from "node:path";
 import { ENV, served, goto, data, reporter, overflow } from "../lib.mjs";
@@ -187,7 +187,7 @@ export default async function (browser) {
     const servedAccount = await desktop.evaluate(async () => (await (await fetch("/api/model")).json()).account);
     const servedNav = await desktop.evaluate(async () => (await (await fetch("/api/model")).json()).nav);
     r.expect(servedAccount?.name === name && servedAccount.links?.map((link) => link.method).join(",") === "get,get,post" && servedNav?.machines === "/account/workspaces", "the embedding fixture serves account methods and nav model values");
-    r.expect(topbarAvatar.width === 32 && topbarAvatar.height === 32 && topbarAvatar.visible && topbarAvatar.right === 20, "desktop has a 32px avatar button at the top bar's right end: " + JSON.stringify(topbarAvatar));
+    r.expect(topbarAvatar.width === 32 && topbarAvatar.height === 32 && topbarAvatar.visible && topbarAvatar.right === 12, "desktop has a 32px avatar button at the top bar's right end: " + JSON.stringify(topbarAvatar));
     await desktop.locator("#topbar .account-avatar-button").click();
     const desktopMenu = await desktop.locator("#topbar .account-popover").evaluate((menu) => ({
       name: menu.querySelector(".account-name")?.textContent,
@@ -653,8 +653,9 @@ export default async function (browser) {
         await page.screenshot({ path: path.join(ENV.out, "spawn-card-" + tag + ".png") });
         if (size === "desktop") {
           await goto(page, { v: "session", id: kid.id }, D);
-          const meta = await page.evaluate(() => { const svg = document.querySelector("#topbar .meta-kind svg"); return { present: !!svg, delegate: svg?.classList.contains("kind-delegate") ?? false, person: !!svg && [...svg.querySelectorAll("path")].some((p) => p.getAttribute("d").includes("a4 4 0 1 0 0-8")) }; });
-          r.expect(meta.present && meta.delegate && !meta.person, tag + ": the subagent's top bar meta line should carry the delegation icon: " + JSON.stringify(meta));
+          // The overhaul's bar names the kind in its line of labels, as plain text with no icon: the person icon is never used for it.
+          const meta = await page.evaluate(() => { const labs = [...document.querySelectorAll("#topbar .meta-line > .lab")]; return { present: labs.some((x) => x.textContent === "Subagent"), person: !!document.querySelector("#topbar .meta-line svg path[d*='a4 4 0 1 0 0-8']") }; });
+          r.expect(meta.present && !meta.person, tag + ": the subagent's top bar line should name the kind as a plain label, without the person icon: " + JSON.stringify(meta));
         }
         r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join(" | "));
         await page.context().close();

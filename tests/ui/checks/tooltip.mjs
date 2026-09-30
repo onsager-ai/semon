@@ -255,14 +255,18 @@ export default async function tooltipCheck(browser) {
     await guard(r, tag, page, async () => {
       await goto(page, { v: "session", id: parent.id }, D);
       await page.waitForTimeout(250);
-      // The state badge holds the errors control, so it is reached by its dot; the rest are the line's own children.
-      const items = await page.evaluate(() => [...document.querySelectorAll("#topbar .l2.session-meta > [data-tip]")].filter((n) => !n.classList.contains("meta-state") && n.getClientRects().length && n.getBoundingClientRect().width > 0).map((n, i) => { n.dataset.probe = String(i); return { i, tip: n.dataset.tip, cls: n.className, tag: n.tagName }; }));
-      rec.items = items.map((x) => x.cls.replace(/meta-item ?/, "") || x.tag + ":" + x.tip.slice(0, 20));
-      r.expect(items.length >= (size === "desktop" ? 4 : 0), tag + ": only " + items.length + " tipped items in the session line: " + JSON.stringify(rec.items));
+      // The line's labels that carry a tip (the state's word is its own name, and has none).
+      const items = await page.evaluate(() => [...document.querySelectorAll("#topbar .meta-line > .lab[data-tip], #topbar .l1-state[data-tip]")].filter((n) => n.getClientRects().length && n.getBoundingClientRect().width > 0).map((n, i) => { n.dataset.probe = String(i); return { i, tip: n.dataset.tip, cls: n.className, tag: n.tagName }; }));
+      rec.items = items.map((x) => x.cls.replace(/^lab ?/, "") || x.tag + ":" + x.tip.slice(0, 20));
+      r.expect(items.length >= (size === "desktop" ? 4 : 1), tag + ": only " + items.length + " tipped items in the session line: " + JSON.stringify(rec.items));
       const at = (i) => box(page, '#topbar [data-probe="' + i + '"]');
-      // On a phone the state is the small dot before the title (line 2 is not drawn there).
-      const stateDot = size === "phone" ? "#topbar .l1-state > .dot" : "#topbar .meta-state > .dot", dotBox = await box(page, stateDot), reach = [dotBox, ...(await Promise.all(items.slice(0, 3).map((x) => at(x.i))))];
-      if (reach.length >= 2) await behaviour(page, tag, r, rec, { first: reach[0], second: reach[1] });
+      // The hover behaviour (delay, a neighbour at once, a gap) is measured on two of the line's labels on a desktop. A phone's bar holds one
+      // static tipped item (its state dot: a tap on a phone runs a control, so buttons are no use for the tap behaviour), so there the same
+      // behaviours are measured on the gallery's phone elements (the "gallery phone-*" passes above, built for that purpose) and this bar's own
+      // part is the touch test below, which must find its dot: no skip.
+      const reach = await Promise.all(items.slice(0, 3).map((x) => at(x.i)));
+      if (size === "desktop") { r.expect(reach.length >= 2, tag + ": the line holds fewer than two tipped labels to measure the hover behaviour on"); if (reach.length >= 2) await behaviour(page, tag, r, rec, { first: reach[0], second: reach[1] }); }
+      else r.expect(items.some((x) => x.tag === "SPAN"), tag + ": the phone bar holds no static tipped item (the state dot) to tap");
       // Every visible tipped item in the bar and the sidebar stays inside the margin and off its target.
       const spots = await page.evaluate(() => { const list = [...document.querySelectorAll("#topbar [data-tip], #sidebar [data-tip]")].filter((n) => { const b = n.getBoundingClientRect(); return n.getClientRects().length && b.width > 0 && b.left >= 0 && b.right <= innerWidth && b.top >= 0 && b.bottom <= innerHeight && (() => { const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return !!hit && (n === hit || n.contains(hit)); })() && (!n.hasAttribute("data-tip-clipped") || n.scrollWidth > n.clientWidth + 1); }); return list.slice(0, 40).map((n, i) => { n.dataset.spot = String(i); return { i, tip: n.dataset.tip, clipped: n.hasAttribute("data-tip-clipped") }; }); });
       let checked = 0;
@@ -281,7 +285,7 @@ export default async function tooltipCheck(browser) {
       r.expect(checked >= (size === "desktop" ? 5 : 1), tag + ": only " + checked + " tooltips were placed");
       // A long tip (the cost badge, or the state), for the contrast, the size and the screenshot.
       await away(page); await page.waitForTimeout(450);
-      const shot = (await page.locator("#topbar .meta-cost").count()) && await page.locator("#topbar .meta-cost").first().isVisible() ? "#topbar .meta-cost" : size === "phone" ? "#topbar .l1-state" : "#topbar .meta-state";
+      const shot = size === "phone" ? "#topbar .l1-state[data-tip]" : "#topbar .meta-line > .lab[data-tip]:not([hidden])";
       await hover(page, shot, 1500);
       const c = await contrast(page); rec.contrast = c.ratio;
       appearance(tag, c, r);
@@ -291,20 +295,24 @@ export default async function tooltipCheck(browser) {
       await away(page); await page.waitForTimeout(450);
 
       if (size === "phone") {
-        // Touch: a static badge toggles its tip; elsewhere closes it; a control runs and shows none.
-        const state0 = await box(page, stateDot), blank = [4, 400];
-        await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
-        const opened = await state(page);
-        r.expect(opened.open && /^Status: /.test(opened.text), tag + ": tapping the state badge did not show its tooltip " + JSON.stringify(opened));
-        await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
-        r.expect(!(await state(page)).open, tag + ": tapping the badge again did not close its tooltip");
-        await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
-        await page.touchscreen.tap(...blank); await page.waitForTimeout(120);
-        r.expect(!(await state(page)).open, tag + ": tapping elsewhere did not close the tooltip");
-        const runs = page.locator("#topbar .meta-runs");
+        // Touch: a static label toggles its tip; elsewhere closes it; a control runs and shows none.
+        const stat = page.locator("#topbar .l1-state[data-tip], #topbar .meta-line > span.lab[data-tip]:not([hidden])");
+        r.expect(await stat.count() > 0, tag + ": the phone bar's state dot was not found for the touch test");
+        if (await stat.count()) {
+          const state0 = await box(page, await stat.first().evaluate((n) => { n.dataset.probe = "touch"; return '#topbar [data-probe="touch"]'; })), blank = [4, 400];
+          await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
+          const opened = await state(page);
+          r.expect(opened.open && /^Status: /.test(opened.text ?? ""), tag + ": tapping the state dot did not show its Status tooltip " + JSON.stringify(opened));
+          await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
+          r.expect(!(await state(page)).open, tag + ": tapping the label again did not close its tooltip");
+          await page.touchscreen.tap(...centre(state0)); await page.waitForTimeout(120);
+          await page.touchscreen.tap(...blank); await page.waitForTimeout(120);
+          r.expect(!(await state(page)).open, tag + ": tapping elsewhere did not close the tooltip");
+        }
+        const runs = page.locator("#topbar .lab-runs");
         if (await runs.count() && await runs.first().isVisible()) {
-          await page.touchscreen.tap(...centre(await box(page, "#topbar .meta-runs"))); await page.waitForTimeout(250);
-          const s = await state(page), dialog = await page.evaluate(() => !!document.querySelector("dialog.runs-sheet[open]"));
+          await page.touchscreen.tap(...centre(await box(page, "#topbar .lab-runs"))); await page.waitForTimeout(250);
+          const s = await state(page), dialog = await page.evaluate(() => !!document.querySelector("dialog.session-menu[open]"));
           r.expect(!s.open && dialog, tag + ": tapping the runs control showed a tooltip or did not run: " + JSON.stringify({ open: s.open, dialog }));
           await escape(page);
         }
@@ -353,7 +361,7 @@ export default async function tooltipCheck(browser) {
         await route.fulfill({ response, json: body });
       });
       results[tag] = {};
-      for (const [name, selector] of [["a badge in the top bar", "#topbar .meta-tokens"], ["a row's host in the sidebar", "#lanes .srow-meta .host"]]) {
+      for (const [name, selector] of [["a badge in the top bar", "#topbar .meta-line > span.lab[data-tip]"], ["a row's host in the sidebar", "#lanes .srow-meta .host"]]) {
         await away(page); await page.waitForTimeout(450);
         const t = await hover(page, selector, 1500);
         r.expect(t != null, tag + ": " + name + " never showed a tooltip");
@@ -375,12 +383,15 @@ export default async function tooltipCheck(browser) {
       // Esc closes the tip, and a rebuild under the resting pointer does not bring it back, even when the pointer moves on
       // the spot or is put back on it.
       await away(page); await page.waitForTimeout(450);
-      const spot = await box(page, "#topbar .meta-tokens"), [px, py] = centre(spot);
-      r.expect((await hover(page, spot, 1500)) != null, tag + ": the Tokens badge never showed a tooltip before Esc");
+      // The spot is the line's first static tipped label: the Model label, whose tip took the place of main's Tokens badge (this bar has no such badge).
+      const spotTip = await page.evaluate(() => document.querySelector("#topbar .meta-line > span.lab[data-tip]").dataset.tip);
+      r.expect(/^Model: \S/.test(spotTip), tag + ": the spot's tip is not the Model label's: " + JSON.stringify(spotTip));
+      const spot = await box(page, "#topbar .meta-line > span.lab[data-tip]"), [px, py] = centre(spot);
+      r.expect((await hover(page, spot, 1500)) != null && (await state(page)).text === spotTip, tag + ": the label never showed its own tip before Esc");
       await page.keyboard.press("Escape"); await page.waitForTimeout(100);
       r.expect(!(await state(page)).open, tag + ": Esc did not close the tooltip");
       await page.mouse.move(px + 2, py + 1); // a nudge inside the badge
-      await page.evaluate(() => { window.__was = document.querySelector("#topbar .meta-tokens"); });
+      await page.evaluate(() => { window.__was = document.querySelector("#topbar .meta-line > span.lab[data-tip]"); });
       await page.waitForFunction(() => !window.__was.isConnected, null, { timeout: 12000 }).catch(() => {});
       await page.waitForTimeout(300);
       await page.mouse.move(px + 2, py + 1); // and put back on the same coordinates after the rebuild
@@ -391,7 +402,7 @@ export default async function tooltipCheck(browser) {
       // The positive control: off the badge and back on it, the tip shows again.
       await away(page); await page.waitForTimeout(450);
       const again = await hover(page, spot, 1500);
-      r.expect(again != null && /^Tokens: /.test((await state(page)).text ?? ""), tag + ": the tooltip did not show again after the pointer left and returned");
+      r.expect(again != null && (await state(page)).text === spotTip, tag + ": the tooltip did not show the same tip again (" + JSON.stringify(spotTip) + ") after the pointer left and returned");
       r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join("; "));
     });
   }
@@ -401,18 +412,16 @@ export default async function tooltipCheck(browser) {
     const tag = "dialog esc " + size, page = await served(browser, { size });
     await guard(r, tag, page, async () => {
       await goto(page, { v: "session", id: parent.id }, D); await page.waitForTimeout(200);
-      await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
-      await page.waitForSelector("dialog.session-details[open]");
-      // The dialog's own tipped element: the "?" icon by its API-equivalent cost row (costInfoTip).
-      // On a phone the sheet has more rows (Kind, Status, Tool calls), so the cost row can lie below the fold.
-      await page.locator("dialog.session-details .cost-info").scrollIntoViewIfNeeded(); await page.waitForTimeout(100);
-      const shownAt = await hover(page, "dialog.session-details .cost-info", 1500), open = await state(page);
-      r.expect(shownAt != null && /^What these tokens would cost/.test(open.text ?? ""), tag + ": the tooltip did not open on the cost icon inside the modal dialog " + JSON.stringify(open.text));
+      await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu[open]"); await page.waitForTimeout(200);
+      // The dialog's own tipped element: the first one the menu holds (a run's state dot).
+      await page.evaluate(() => document.querySelector("dialog.session-menu [data-tip]")?.scrollIntoView({ block: "center" })); await page.waitForTimeout(150);
+      const shownAt = await hover(page, "dialog.session-menu [data-tip]", 1500), open = await state(page);
+      r.expect(shownAt != null && /^(Working|Needs you|Idle|Done|Failed)$/.test(open.text ?? ""), tag + ": the tooltip did not open on a run's state dot inside the modal dialog with its state word " + JSON.stringify(open.text));
       await page.keyboard.press("Escape"); await page.waitForTimeout(150);
-      const first = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-details[open]"), tip: !document.getElementById("sh-tooltip").hidden }));
+      const first = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-menu[open]"), tip: !document.getElementById("sh-tooltip").hidden }));
       r.expect(first.dialog && !first.tip, tag + ": the first Esc should close only the tooltip " + JSON.stringify(first));
       await page.keyboard.press("Escape"); await page.waitForTimeout(200);
-      const second = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-details[open]") }));
+      const second = await page.evaluate(() => ({ dialog: !!document.querySelector("dialog.session-menu[open]") }));
       r.expect(!second.dialog, tag + ": the second Esc did not close the dialog " + JSON.stringify(second));
       results[tag] = { first, second };
     });
@@ -464,16 +473,14 @@ export default async function tooltipCheck(browser) {
         if (traces.length < 3) { const t = await page.evaluate(() => document.querySelector(".turn-end .tracebtn")?.closest(".turn")?.dataset.turn ?? null); if (t) traces.push([s.id, t]); }
       }
       for (const [sid, turn] of traces) { await goto(page, { v: "trace", sid, turn }, D); await page.waitForTimeout(100); await scan("trace-" + turn); }
-      // The states around a session: the ⋯ menu, the details sheet, the runs sheet.
+      // The states around a session: the ⋯ menu, and the same menu opened at its runs.
       await goto(page, { v: "session", id: parent.id }, D); await page.waitForTimeout(150);
       await page.click("#more-btn"); await page.waitForSelector(".session-menu"); await scan("session-menu");
-      await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click(); await page.waitForSelector("dialog.session-details[open]"); await scan("session-details");
       await escape(page);
-      if (await page.locator("#topbar .meta-runs").count() && await page.locator("#topbar .meta-runs").first().isVisible()) {
-        await page.locator("#topbar .meta-runs").first().click();
-        // A sheet on a phone; a popover in the bar on a desktop.
-        const runs = size === "phone" ? "dialog.runs-sheet[open]" : ".runs-popover";
-        await page.waitForSelector(runs); await scan("runs-" + (size === "phone" ? "sheet" : "popover"));
+      if (await page.locator("#topbar .lab-runs").count() && await page.locator("#topbar .lab-runs").first().isVisible()) {
+        await page.locator("#topbar .lab-runs").first().click();
+        // The session menu, scrolled to its runs: a sheet on a phone, a panel on a desktop.
+        await page.waitForSelector("dialog.session-menu[open]"); await scan("runs-menu");
         await escape(page);
         await goto(page, { v: "session", id: parent.id }, D); await page.waitForTimeout(150);
       }

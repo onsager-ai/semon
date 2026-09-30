@@ -172,7 +172,6 @@ const secsOf = (t) => { const m = /^(?:(\d+)m )?(\d+)s$/.exec(t ?? ""); return m
 async function scheme(browser, name, opts, r, protocol) {
   const R = { name };
   const phone = opts.size === "phone";
-  const menuAction = async (page, label) => { await page.click("#more-btn"); await page.locator('.menu [role="menuitem"]').filter({ hasText: label }).click(); };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-live-"));
   const now = write(dir);
   // The server's clock stands 10 minutes after the sample's now, so the appended lines (12:41–12:46) are in its past.
@@ -431,10 +430,9 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.childTx === 1, name + ": an update to one child asked for " + R.childTx + " transcripts: " + S.txs.slice(txs).join(" "));
     await S.setViewportSize(opts.size === "phone" ? { width: 390, height: 844 } : { width: 1280, height: 860 }); await sleep(200);
 
-    // ---- 4. a relay, with harbor's filter dropdown open and Thinking off ----
-    if (phone) await menuAction(S, "Filter transcript"); else await S.click("#filter-btn");
-    await S.waitForFunction(() => document.querySelector(".filters.pop")?.hidden === false);
-    await S.click("#f-thinking"); await S.waitForFunction(() => document.querySelector("#f-thinking")?.checked === false && document.querySelector(".filters.pop")?.hidden === false);
+    // ---- 4. a relay, with harbor's find mode open and its "Messages" chip chosen ----
+    await S.click("#find-btn"); await S.waitForSelector("#find");
+    await S.click('.chip[data-filter="messages"]'); await S.waitForFunction(() => document.querySelector('.chip[data-filter="messages"]')?.getAttribute("aria-pressed") === "true");
     await AN.locator('.analytics-range button:has-text("30 d")').focus();
     let u = S.updates; t0 = Date.now();
     sentinel.append(sentinel.tool(at(12, 44), "toolu-live3", "SendMessage", { to: "Principal", message: RELAY }),
@@ -451,15 +449,15 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.analyticsAfterRelay.focus === "30 d", name + ": Analytics range focus did not survive redraw: " + JSON.stringify(R.analyticsAfterRelay));
     r.expect(await updated(S, u), name + ": harbor's page got no update for the relay");
     R.homeTrail.push(await homeState());
-    R.filters = await S.evaluate((phone) => ({ pop: document.querySelector(".filters.pop")?.hidden === false, expanded: document.querySelector(phone ? "#more-btn" : "#filter-btn")?.getAttribute("aria-expanded"), thinking: document.querySelector("#f-thinking")?.checked, tools: document.querySelector("#f-tools")?.checked }), phone);
-    r.expect(R.filters.pop && R.filters.expanded === (phone ? "false" : "true") && R.filters.thinking === false && R.filters.tools === true, name + ": the filters changed: " + JSON.stringify(R.filters));
-    await S.keyboard.press("Escape");
+    R.filters = await S.evaluate(() => ({ find: !!document.querySelector("#find"), messages: document.querySelector('.chip[data-filter="messages"]')?.getAttribute("aria-pressed"), all: document.querySelector('.chip[data-filter="all"]')?.getAttribute("aria-pressed") }));
+    r.expect(R.filters.find && R.filters.messages === "true" && R.filters.all === "false", name + ": find mode or its chip changed: " + JSON.stringify(R.filters));
+    await S.click('button[aria-label="Close find"]');
     R.analytics = await analyticsState();
     r.expect(R.analytics.range === "30 d" && R.analytics.metrics === 8 && R.analytics.charts === 2,
       name + ": Analytics range, figures or charts changed during a live update: " + JSON.stringify({ before: analytics0, after: R.analytics }));
 
     // ---- 5. a question for you, and one more message while find is open; the drawer open on the phone ----
-    if (phone) await menuAction(S, "Find in transcript"); else await S.click('#topbar button[aria-label="Find in transcript"]');
+    await S.click("#find-btn");
     await S.waitForSelector("#find");
     await S.fill("#find", "Live check"); await S.waitForFunction(() => /^\d+ match/.test(document.querySelector("#topbar .fcount")?.textContent ?? ""));
     const find0 = await S.evaluate(() => { const f = document.querySelector("#find"); return { value: f.value, focus: document.activeElement === f, caret: f.selectionStart, count: document.querySelector("#topbar .fcount").textContent }; });
@@ -581,7 +579,7 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.sessionsList.reset > R.sessionsList.filtered.n, name + ": the Sessions list didn't widen when the filter was cleared: " + JSON.stringify(R.sessionsList));
 
     // ---- 7. harbor's process dies mid-call: the step stops running, though no line is written ----
-    await S.click('#topbar button[aria-label="Close search"]'); await S.waitForFunction(() => !document.querySelector("#find")); // find from step 5 would hide the call
+    await S.click('#topbar button[aria-label="Close find"]'); await S.waitForFunction(() => !document.querySelector("#find")); // find from step 5 would hide the call
     t0 = Date.now();
     harbor.append(harbor.tool(at(12, 46), "toolu-live5", "Bash", { command: "sleep 99 && echo gone" }));
     R.lastCall = await appear(S, t0, () => [...document.querySelectorAll(".step.live code.sa")].some((x) => x.textContent.includes("sleep 99")));
@@ -704,25 +702,26 @@ async function analyticsCounts(browser, r) {
 }
 
 // A transcript loaded only part of the way (a deep link to a middle turn) isn't tailed, so the totals it was fetched with go
-// stale. The meta line's tool-call count follows the model there: it is the model's before, and grows with the session.
+// stale. The meta line's failed-step count follows the model there: it is the model's before, and grows with the session.
 async function middleCounts(browser, r) {
   const R = { name: "middle-counts" }, dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-live-middle-")), now = write(dir, { extras: true });
   const srv = await serve(dir, now + 10 * 60000), L = logs(dir), backlog = L.lane("backlog"), pages = [];
-  const count = (page) => page.evaluate(() => { const n = document.querySelector(".meta-tools .meta-value"); return n ? Number(n.textContent.replace(/,/g, "")) : null; });
+  const count = (page) => page.evaluate(() => { const n = [...document.querySelectorAll("#topbar .meta-line .lab")].map((x) => /^(\d[\d,]*) failed$/.exec(x.textContent)).find(Boolean); return n ? Number(n[1].replace(/,/g, "")) : 0; });
   try {
     const m0 = await model(srv), turn = m0.turns.filter((t) => t.sid === "backlog")[1];
     r.expect(!!turn && m0.sessions.backlog.calls > 200, "middle-counts: the backlog fixture is not long enough: " + JSON.stringify({ turn: turn?.id, calls: m0.sessions.backlog?.calls }));
+    const failedNow = m0.sessions.backlog.errors ?? 0;
     const page = await open(browser, srv, "/s/claude/backlog?turn=" + encodeURIComponent(turn.id), { size: "desktop", dark: false }); pages.push(page);
     await page.waitForFunction((id) => !!document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]'), turn.id);
     R.later = await page.evaluate(() => [...document.querySelectorAll("#page button.more")].some((b) => b.textContent === "Load later"));
     r.expect(R.later, "middle-counts: the deep link did not stop short of the end (no Load later)");
     R.before = await count(page);
-    r.expect(R.before === m0.sessions.backlog.calls, "middle-counts: the meta line shows " + R.before + " tool calls, the model " + m0.sessions.backlog.calls);
+    r.expect(R.before === failedNow, "middle-counts: the meta line shows " + R.before + " failed steps, the model " + failedNow);
     const t0 = Date.now();
-    for (let i = 0; i < 3; i++) backlog.append(backlog.tool(at(12, 43 + i), "toolu-mid" + i, "Bash", { command: "true" }), backlog.result(at(12, 43 + i, 5), "toolu-mid" + i, "ok"));
-    R.grew = await appear(page, t0, (want) => Number(document.querySelector(".meta-tools .meta-value")?.textContent.replace(/,/g, "")) === want, R.before + 3, 8000);
+    for (let i = 0; i < 3; i++) backlog.append(backlog.tool(at(12, 43 + i), "toolu-mid" + i, "Bash", { command: "true" }), { ...backlog.result(at(12, 43 + i, 5), "toolu-mid" + i, "boom"), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu-mid" + i, content: "boom", is_error: true }] } });
+    R.grew = await appear(page, t0, (want) => { const n = [...document.querySelectorAll("#topbar .meta-line .lab")].map((x) => /^(\d[\d,]*) failed$/.exec(x.textContent)).find(Boolean); return n && Number(n[1].replace(/,/g, "")) === want; }, R.before + 3, 8000);
     R.after = await count(page);
-    r.expect(R.grew != null, "middle-counts: the meta line stayed at " + R.after + " after the session made 3 more calls (model " + (await model(srv)).sessions.backlog.calls + ")");
+    r.expect(R.grew != null, "middle-counts: the meta line stayed at " + R.after + " failed steps after the session failed 3 more calls (model " + (await model(srv)).sessions.backlog.errors + ")");
     R.stillMiddle = await page.evaluate(() => [...document.querySelectorAll("#page button.more")].some((b) => b.textContent === "Load later"));
     r.expect(R.stillMiddle, "middle-counts: the page reached the end, so it isn't a middle page any more");
     R.errors = pages.flatMap((p) => p.errors);

@@ -9,12 +9,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { ENV, served, data, reporter, goto, overflow } from "../lib.mjs";
 
-const ALLOWED = new Set(["Claude Code", "Claude", "Codex"]);
+// A Codex session started directly is a "Codex run" in the model, so its top bar says so; every other place says "Codex".
+const ALLOWED = new Set(["Claude Code", "Claude", "Codex", "Codex run", "Subagent"]);
 const OUT = path.join(ENV.out, "names");
 fs.mkdirSync(OUT, { recursive: true });
 
 // Reads every visible label in `root`: its text, whether it holds a graphic, its lines, and its contrast ratio.
-const measure = (page, root) => page.evaluate((rootSelector) => {
+const measure = (page, root, label = ".hname") => page.evaluate(([rootSelector, labelSelector]) => {
   const canvas = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
   const token = (name) => { const probe = document.createElement("span"); probe.style.color = "var(--" + name + ")"; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; };
   const muted = token("muted");
@@ -23,12 +24,12 @@ const measure = (page, root) => page.evaluate((rootSelector) => {
   const backdrop = (node) => { const layers = []; for (let e = node; e; e = e.parentElement) layers.push(rgba(getComputedStyle(e).backgroundColor)); let c = rgba(getComputedStyle(document.documentElement).getPropertyValue("--ground") || "#fff"); if (c[3] < 1) c = [255, 255, 255, 1]; for (const layer of layers.reverse()) c = over(layer, c); return c; };
   const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
   const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
-  return [...document.querySelectorAll(rootSelector + " .hname")].filter((n) => n.getClientRects().length).map((n) => {
+  return [...document.querySelectorAll(rootSelector + " " + labelSelector)].filter((n) => n.getClientRects().length).map((n) => {
     const cs = getComputedStyle(n), box = n.getBoundingClientRect(), lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.2;
     const fg = rgba(cs.color), bg = backdrop(n.parentElement);
     return { text: n.textContent, harness: [...n.classList].find((c) => c.startsWith("h-")), graphics: n.querySelectorAll("svg,img").length + n.children.length, tag: n.tagName, mark: n.parentElement?.classList.contains("hlabel") ? n.previousElementSibling?.dataset?.harness ?? null : undefined, lines: Math.round(box.height / lh), fontSize: parseFloat(cs.fontSize), weight: cs.fontWeight, ratio: Math.round(ratio(fg, bg) * 100) / 100, color: cs.color, muted };
   });
-}, root);
+}, [root, label]);
 
 export default async function namesCheck(browser) {
   const D = await data(), r = reporter("names"), results = {};
@@ -49,7 +50,7 @@ export default async function namesCheck(browser) {
         r.expect(l.ratio >= 4.5, tag + " " + where + ": " + l.text + " has contrast " + l.ratio + ", under 4.5");
         r.expect(l.color === l.muted, tag + " " + where + ": " + l.text + " is painted " + l.color + ", not the neutral --muted " + l.muted);
         if (seen[l.text] !== undefined) seen[l.text]++;
-        r.expect((l.harness === "h-codex") === (l.text === "Codex"), tag + " " + where + ": " + l.text + " carries " + l.harness);
+        if (l.harness) r.expect((l.harness === "h-codex") === (l.text === "Codex"), tag + " " + where + ": " + l.text + " carries " + l.harness);
         if (l.mark !== undefined) r.expect(l.mark === (l.text === "Codex" ? "codex" : "claude"), tag + " " + where + ": " + l.text + " has the mark of " + l.mark);
       }
     };
@@ -58,19 +59,28 @@ export default async function namesCheck(browser) {
     for (const s of [claude, codex, ...(kinded ? [kinded] : [])]) {
       await goto(page, { v: "session", id: s.id }, D);
       await page.waitForTimeout(200);
-      const top = await measure(page, "#topbar");
+      // A session bar names its harness in the kind label of its meta line: plain text, no glyph.
+      const top = await measure(page, "#topbar", '.meta-line .lab[data-drop="2"]');
       // A session's top bar always shows its harness. If the line fitter dropped the label, nothing was audited, so fail.
       // A child's own top bar keeps its kind chip first, so its model label may be dropped there.
-      // On a phone the session bar is one row with no line 2, so it holds no harness label (Session details has it).
-      if (size === "phone") r.expect(top.length === 0, tag + ": the phone session bar of " + s.name + " still shows a harness label");
-      else if (s !== kinded || s === claude || s === codex) r.expect(top.length > 0, tag + ": the top bar of " + s.name + " (" + s.harness + ") shows no harness label, so none was audited");
+      // (A phone's bar is one row and does not draw the line: there the harness is a row of the ⋯ menu's Details, audited here instead.)
+      const lineShown = await page.evaluate(() => { const l = document.querySelector("#topbar .meta-line"); return !!l && getComputedStyle(l).display !== "none"; });
+      r.expect(lineShown === (size === "desktop"), tag + ": the line of labels is " + (lineShown ? "drawn" : "not drawn") + " on a " + size);
+      if (!lineShown) {
+        await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu[open]");
+        const row = await page.evaluate(() => { const dt = [...document.querySelectorAll("dialog.session-menu dl.kv dt")].find((x) => x.textContent === "Harness"); return dt ? dt.nextElementSibling?.textContent ?? null : null; });
+        rec["menu-harness-" + s.harness] = row;
+        r.expect(ALLOWED.has(row) && (row === "Codex") === (s.harness === "codex"), tag + ": the menu's Harness row for " + s.name + " reads " + JSON.stringify(row));
+        await page.keyboard.press("Escape"); await page.waitForTimeout(150);
+      }
+      if (lineShown && (s !== kinded || s === claude || s === codex)) r.expect(top.length > 0, tag + ": the top bar of " + s.name + " (" + s.harness + ") shows no harness label, so none was audited");
       if (top.length) audit("topbar-" + s.harness, top);
       if (s === kinded) {
-        // A child's kind chip in the top bar is neutral: no tinted fill, and the neutral ink.
-        const chip = await page.evaluate(() => { const c = document.querySelector("#topbar .meta-kind"); if (!c) return null; const probe = document.createElement("span"); probe.style.color = "var(--muted)"; document.body.append(probe); const muted = getComputedStyle(probe).color; probe.remove(); const cs = getComputedStyle(c), v = getComputedStyle(c.querySelector(".meta-value")); return { bg: cs.backgroundColor, color: cs.color, valueColor: v.color, muted }; });
-        rec["kind-chip"] = chip ?? "dropped by the line fitter";
-        if (size === "desktop") r.expect(!!chip, tag + ": the kind chip is missing from a child's top bar at 1280 px");
-        if (chip) r.expect(chip.bg === "rgba(0, 0, 0, 0)" && chip.color === chip.muted && chip.valueColor === chip.muted, tag + ": the kind chip is tinted: " + JSON.stringify(chip));
+        // A child's kind ("Subagent", "Codex run") is a plain label of the meta line: no fill, the neutral ink.
+        const chip = await page.evaluate(() => { const c = document.querySelector('#topbar .meta-line .lab[data-drop="2"]'); if (!c) return null; const probe = document.createElement("span"); probe.style.color = "var(--muted)"; document.body.append(probe); const muted = getComputedStyle(probe).color; probe.remove(); const cs = getComputedStyle(c); return { text: c.textContent, bg: cs.backgroundColor, color: cs.color, muted }; });
+        rec["kind-label"] = chip ?? "dropped by the line fitter";
+        if (size === "desktop") r.expect(!!chip, tag + ": the kind label is missing from a child's top bar at 1280 px");
+        if (chip) r.expect(chip.bg === "rgba(0, 0, 0, 0)" && chip.color === chip.muted, tag + ": the kind label is tinted: " + JSON.stringify(chip));
       }
       if (s === claude) await shot("session");
     }
@@ -85,6 +95,7 @@ export default async function namesCheck(browser) {
         r.expect(menu.length > 0, tag + ": Session path shows no ancestor harness label");
         audit("session-path", menu);
         await shot("session-path");
+        await page.keyboard.press("Escape"); await page.waitForFunction(() => !document.querySelector("dialog.session-menu[open]") && !history.state?.sheet); // the menu is a modal dialog here, with a history entry of its own: close it, and let its back step land, before the next page is opened by history
       }
     }
     await goto(page, { v: "analytics" }, D);

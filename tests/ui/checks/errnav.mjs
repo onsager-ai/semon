@@ -3,7 +3,7 @@
 // failed, spread over seven pages of the transcript, so most failures are on pages the session page hasn't loaded.
 //
 // Asserted, at 390×844 light and 1280×860 light (the dark schemes are drawn and looked at, not stepped through):
-//   - clicking "N errors" shows "Error 1 of N", N the badge's (and the model's) count, and says so in a polite live region;
+//   - choosing Find, then "Failed steps" shows "Error 1 of N", N the chip's count (and the model's), and says so in a polite live region;
 //   - the first failure, on a page not loaded, is loaded and marked; stepping to one on another unloaded page loads it and
 //     centres it between the bar and the bottom of the view (within 2 px);
 //   - n and p, the Next button, Enter and Shift+Enter step; focus stays in the bar; each current step is the expected one;
@@ -53,6 +53,16 @@ function faults(dir, now) {
   return { append: (i) => fs.appendFileSync(file, call(now + 60000, i, true).map((l) => JSON.stringify(l) + "\n").join("")) };
 }
 
+// Errors mode is entered from Find: its "Failed steps" chip (the meta line's "N failed" is a label, not a control).
+// From the bar's own line: the "N failed" label (a control that looks like the others), or on a phone, where the line is not drawn, the ⋯ menu's item.
+// Returns the count the control itself claims ("N failed"), which the mode's "Error 1 of N" must then repeat.
+const enterFromLine = async (page, opts) => {
+  const claim = (sel) => page.evaluate((q) => Number(/\d+/.exec(document.querySelector(q)?.textContent ?? "")?.[0] ?? NaN), sel);
+  if (opts.size === "phone") { await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu .menu-errors"); const n = await claim("dialog.session-menu .menu-errors"); await page.click("dialog.session-menu .menu-errors"); return n; }
+  const n = await claim("#topbar .lab-errs"); await page.click("#topbar .lab-errs"); return n;
+};
+const enter = (page) => page.click('.find-chips .chip[data-filter="failures"]');
+
 // What the page shows of the mode and the transcript.
 const state = (page) => page.evaluate(() => {
   const norm = (s) => String(s ?? "").replace(/ /g, " ").replace(/\s+/g, " ").trim();
@@ -67,16 +77,12 @@ const state = (page) => page.evaluate(() => {
     below: b ? b.top >= bar.bottom - 0.5 : null, clear: b ? !jr || b.bottom <= jr.top + 0.5 : null,
     top: sc.scrollTop, max: sc.scrollHeight - sc.clientHeight,
     expanded: document.querySelectorAll("#page .step > button[aria-expanded='true']").length,
-    focus: !!document.activeElement?.closest("#topbar .errnav-bar"), focusId: document.activeElement?.id ?? null,
-    badge: norm(document.querySelector("#topbar .errs")?.textContent) || null,
+    focus: !!document.activeElement?.closest("#topbar .errnav-bar"), focusId: document.activeElement?.id ?? null, focusLab: document.activeElement?.classList.contains("lab-errs") === true,
+    bar: !!document.querySelector("#topbar .find-row"),
+    badge: (() => { const n = norm(document.querySelector('#topbar .find-chips .chip[data-filter="failures"] .n')?.textContent); return n ? n + " errors" : null; })(),
     groups: [...document.querySelectorAll("#page .tgroup")].map((g) => g.querySelector(":scope > .tsum")?.getAttribute("aria-expanded") === "true"),
   };
 });
-
-// On a phone the bar's line 2 is not drawn, so the errors are stepped through from the ⋯ menu.
-async function openErrors(page, opts) {
-  if (opts.size === "phone") { await page.click("#more-btn"); await page.click(".session-menu .menu-errors"); } else await page.click("#topbar .errs");
-}
 
 async function scheme(browser, srv, lane, name, opts, r, full) {
   const R = { name }, tag = name + ": ";
@@ -89,6 +95,9 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     r.expect(N >= FAILED.length && list.errors === N && list.slots.length === N, tag + "the list and the model disagree: " + JSON.stringify({ N, list }));
     r.expect(list.slots[0] < last.from && list.slots[3] < last.from, tag + "the first failures should be on pages not loaded: " + JSON.stringify({ slots: list.slots, from: last.from }));
     await sleep(2300); // past the opening pin to the end
+    // Errors mode is entered from Find (its "Failed steps" chip), and leaving it returns to Find. Find redraws the transcript with
+    // its groups closed, so the "before" below is made in Find.
+    await page.click("#find-btn"); await sleep(300);
     // Before: the last group opened, and the view scrolled to the middle of it (away from both ends, so putting it back is
     // a real test).
     // The group holding the last batch's last step, not the last group: earlier schemes' late calls make a small one after it.
@@ -97,16 +106,16 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     const before = await state(page);
     R.before = { top: before.top, max: before.max, badge: before.badge, groups: before.groups };
     r.expect(before.top > 200 && before.top < before.max - 200, tag + "the view before is not away from both ends: " + JSON.stringify(R.before));
-    r.expect(before.badge === N + " errors", tag + "the badge reads " + before.badge + ", the model " + N);
+    r.expect(before.badge === N + " errors", tag + "the Failed steps chip counts " + before.badge + ", the model " + N);
     r.expect(before.groups.filter(Boolean).length === 1, tag + "exactly one group should be open before: " + JSON.stringify(before.groups));
 
-    await openErrors(page, opts);
+    await enter(page);
     const t0 = Date.now();
     R.entered = await appear(page, t0, (want) => document.querySelector("#topbar .errnav-count")?.textContent === want, "Error 1 of " + N, 6000);
     await page.waitForFunction(() => document.querySelector("#page .step.err-current"), null, { timeout: 6000 }).catch(() => {});
     await sleep(250);
     const first = await state(page); R.first = first;
-    r.expect(R.entered != null, tag + "clicking the badge did not show Error 1 of " + N + ": " + first.label);
+    r.expect(R.entered != null, tag + "the Failed steps chip did not show Error 1 of " + N + ": " + first.label);
     r.expect(first.current === 1 && first.command === "step " + FAILED[0], tag + "the first failed step (on a page not loaded) is not the one marked: " + JSON.stringify(first));
     r.expect(first.live.includes("Error 1 of " + N), tag + "the live region did not announce it: " + first.live);
     r.expect(first.expanded === 0, tag + "a step expanded on entering");
@@ -154,28 +163,37 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
       r.expect(grown.command === "step " + FAILED[3], tag + "the current step moved on the update: " + grown.command);
     }
     await page.keyboard.press("Escape");
-    await page.waitForFunction(() => !!document.querySelector("#topbar .errs"), null, { timeout: 6000 }).catch(() => {});
+    await page.waitForFunction(() => !!document.querySelector("#topbar .find-row"), null, { timeout: 6000 }).catch(() => {});
     await sleep(400);
-    const after = await state(page); R.after = { top: after.top, badge: after.badge, groups: after.groups, current: after.current, label: after.label };
-    r.expect(after.label === null && after.badge !== null, tag + "Escape did not bring the bar back: " + JSON.stringify(R.after));
-    // On a phone line 2 is not drawn, so the errors item lives in ⋯ and focus comes back there.
-    if (opts.size === "phone") { R.after.focusId = after.focusId; r.expect(after.focusId === "more-btn", tag + "after Escape on a phone, focus is on " + after.focusId + ", not ⋯"); }
+    const after = await state(page); R.after = { top: after.top, badge: after.badge, bar: after.bar, groups: after.groups, current: after.current, label: after.label };
+    r.expect(after.label === null && after.bar, tag + "Escape did not bring the bar back: " + JSON.stringify(R.after));
     r.expect(Math.abs(after.top - before.top) <= 2, tag + "the scroll position moved by " + (after.top - before.top) + " px after Escape");
     // A group the late calls made at the end is new, and closed.
     r.expect(after.groups.length >= before.groups.length && after.groups.every((x, i) => x === (before.groups[i] ?? false)), tag + "what was open before is not what is open after: " + JSON.stringify({ before: before.groups, after: after.groups }));
     r.expect(after.current === 0 && after.expanded === 0, tag + "a step stayed marked or expanded after Escape");
     // Leaving the mode by navigation while it holds a page far from the end: coming back opens at the end, tailed, not on
     // that middle page.
-    await openErrors(page, opts);
+    await enter(page);
     await appear(page, Date.now(), (want) => document.querySelector("#page .step.err-current .sa")?.textContent === want, "step " + FAILED[0], 6000);
     R.farRange = await page.evaluate(() => [...document.querySelectorAll("#page button.more")].map((b) => b.textContent));
     const nav = (v) => page.evaluate((r) => { history.pushState(r, ""); dispatchEvent(new PopStateEvent("popstate", { state: r })); }, v);
     await nav({ v: "home" }); await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "Home");
-    await nav({ v: "session", id: "faults" }); await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']") && !!document.querySelector("#topbar .errs"));
+    await nav({ v: "session", id: "faults" }); await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']") && !!document.querySelector("#topbar .meta-line"));
     await sleep(400);
     R.back = await page.evaluate(() => ({ pagers: [...document.querySelectorAll("#page button.more")].map((b) => b.textContent), mode: !!document.querySelector("#topbar .errnav-bar"), end: [...document.querySelectorAll("#page .msg.assistant")].some((m) => m.textContent.includes("All batches ran.")) }));
     r.expect(R.farRange.includes("Load later"), tag + "stepping to the first failure did not replace the range with a middle page: " + JSON.stringify(R.farRange));
     r.expect(!R.back.mode && !R.back.pagers.includes("Load later") && R.back.end, tag + "after leaving errors mode by navigation, the session did not open at its end: " + JSON.stringify(R.back));
+    // Entered from the bar's line (its "N failed" label, or ⋯'s item on a phone) instead of Find: it says the model's count, Escape leaves it,
+    // and focus is on what entered it (the label, or ⋯ where the phone's bar draws no line).
+    const claimed = await enterFromLine(page, opts); // (late calls made the count grow since Find's, so it is the control's own claim that is repeated)
+    r.expect(Number.isInteger(claimed) && claimed >= N, tag + "the line's failed control claims " + claimed + " failed steps, fewer than the " + N + " seen before");
+    const viaLine = await appear(page, Date.now(), (want) => document.querySelector("#topbar .errnav-count")?.textContent === want, "Error 1 of " + claimed, 6000);
+    r.expect(viaLine != null, tag + "the line's failed control did not open errors mode at Error 1 of " + claimed + ": " + JSON.stringify(await page.evaluate(() => ({ bar: document.querySelector("#topbar")?.textContent.slice(0, 120), errs: !!document.querySelector("#topbar .lab-errs"), menu: !!document.querySelector("dialog.session-menu[open]") }))));
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !!document.querySelector("#topbar .meta-line"), null, { timeout: 6000 }).catch(() => {});
+    await sleep(400);
+    const lineAfter = await state(page);
+    r.expect(opts.size === "phone" ? lineAfter.focusId === "more-btn" : lineAfter.focusLab === true, tag + "after Escape, focus is on " + lineAfter.focusId + " (line label: " + lineAfter.focusLab + "), not on what entered the mode");
     R.errors = page.errors;
     r.expect(page.errors.length === 0, tag + "page errors: " + page.errors.join(" | "));
   } finally {

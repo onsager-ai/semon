@@ -137,6 +137,14 @@ export async function pickFilter(page, label, value) {
   await doneFilterSheet(page);
 }
 
+// The wide-transcript switch lives in the session menu: open it on the current session, set it, close the menu.
+export async function wide(page, on) {
+  await page.click("#more-btn");
+  const sw = page.locator('dialog.session-menu [role="menuitemcheckbox"]');
+  if ((await sw.getAttribute("aria-checked")) !== String(on)) await sw.click();
+  await page.keyboard.press("Escape"); await page.waitForTimeout(150);
+}
+
 // Each check writes out/<name>.json and fails when any of its assertions failed.
 export function reporter(name) {
   const failures = [];
