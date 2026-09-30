@@ -318,10 +318,6 @@ export default async function turnsCheck(browser) {
       interaction.links.relayTarget = { labels, ownIsButton, target: recipient, turn: started };
       r.expect(labels.some((b) => b.text === recipient && b.label === "Open " + recipient + " at the turn this started"), tag + ": relay target button or aria-label is missing: " + JSON.stringify(labels));
       r.expect(!ownIsButton, tag + ": the viewer's own name became a button");
-      await target.filter({ hasText: recipient }).press("Enter"); await page.waitForTimeout(100);
-      interaction.links.relayTargetEnter = await routeState(page);
-      r.expect(interaction.links.relayTargetEnter.id === h.to && (!started || interaction.links.relayTargetEnter.turn === started), tag + ": Enter did not open the relay target at its started turn: " + JSON.stringify(interaction.links.relayTargetEnter));
-      await goto(page, { v: "session", id: sentRelay.sid }, D0);
       await target.filter({ hasText: recipient }).click(); await waitRoute(page, { v: "session", id: h.to, turn: started });
       interaction.links.relayTargetOpens = await routeState(page);
       r.expect(interaction.links.relayTargetOpens.id === h.to && (!started || interaction.links.relayTargetOpens.turn === started), tag + ": relay target did not open its started turn: " + JSON.stringify(interaction.links.relayTargetOpens));
@@ -374,6 +370,14 @@ export default async function turnsCheck(browser) {
       interaction.links.showMore = { before, state, expanded, label };
       r.expect(JSON.stringify(state) === before && expanded === "true" && label === "Show less", tag + ": Show more navigated or failed to expand: " + JSON.stringify(interaction.links.showMore));
     } else if (width === 390) r.expect(false, tag + ": fixture has no visible Show more handoff control");
+
+    if (sentRelay) {
+      const h = handoffs.get(sentRelay.id), recipient = D0.SESS[h.to]?.name ?? h.to, started = D.starts.get(h.id)?.id ?? null;
+      await goto(page, { v: "session", id: sentRelay.sid }, D0);
+      await page.locator(cardSelector(h.id) + " .ln button.who").filter({ hasText: recipient }).press("Enter"); await page.waitForTimeout(100);
+      interaction.links.relayTargetEnter = await routeState(page);
+      r.expect(interaction.links.relayTargetEnter.id === h.to && (!started || interaction.links.relayTargetEnter.turn === started), tag + ": Enter did not open the relay target at its started turn: " + JSON.stringify(interaction.links.relayTargetEnter));
+    }
 
     // The ingest session has both an outgoing relay and spawn child cards close together in the same transcript.
     const captureRelay = D0.H.find((h) => h.kind === "relay" && D0.H.some((x) => x.kind === "spawn" && x.from === h.from && D0.SESS[x.to]));
