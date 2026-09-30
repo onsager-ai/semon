@@ -36,11 +36,11 @@
 //     that adds a repo: the same elements stay in the document, the focused one keeps focus (and the search field its text and
 //     caret), an open list stays open with its highlight, the new repo is an option, and the selection is unchanged; a selected
 //     repo that leaves the data stays, marked "(no sessions)";
-//   - a running subagent's page shows its brief once, in the intro block, on opening and after a live update redraws its turn;
+//   - a running subagent's page shows its brief once, as the incoming bubble under its sender's header, on opening and after a live update redraws its turn;
 //   - a running subagent's page ends in a status line that follows it: "Working" with a tool-call count and a cost that advance,
 //     then "Returned to <parent> · Done" when it finishes, without a reload; each item (calls, time, cost) has a plain-text
 //     breakdown tip that follows the numbers, and a tap on it shows the tip on a phone; and when its origin only appears after
-//     the page is open, the intro block is added (once) and the brief is in it alone; the focus stays on the same kind of footer
+//     the page is open, the incoming bubble is drawn (once) and the brief is in it alone; the focus stays on the same kind of footer
 //     item (cost, "Open in") while the items change around it;
 //   - a page whose origin arrived late retries a failed reload of its transcript on the next poll (which asks for the whole
 //     model), keeps polling when hidden and shown in between, and gives up after 4 tries spaced 4 s, 8 s, 16 s;
@@ -163,7 +163,7 @@ async function updated(page, before, limit = 4000) {
   await sleep(700); return page.updates > before;
 }
 const openKeys = (page) => page.evaluate(() => [...document.querySelectorAll("#page [data-e]")].filter((n) => {
-  const t = n.matches(".step") ? n.querySelector(":scope > button") : n.matches(".tgroup") ? n.querySelector(":scope > .tsum") : n.matches(".child-work") ? n.querySelector(":scope > .cw-toggle") : null;
+  const t = n.matches(".step") ? n.querySelector(":scope > button") : n.matches(".tgroup") ? n.querySelector(":scope > .tsum") : null;
   return t?.getAttribute("aria-expanded") === "true"; }).map((n) => n.dataset.e));
 const topOf = (page, sel) => page.evaluate((sel) => document.querySelector(sel)?.getBoundingClientRect().top ?? null, sel);
 const byKey = (k) => '[data-e="' + k.replace(/["\\]/g, "\\$&") + '"]';
@@ -186,12 +186,12 @@ async function scheme(browser, name, opts, r, protocol) {
 
     // ---- Set up the views ----
     // harbor: every group, every step and the first child work open; scrolled to 40%.
-    await S.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll('.cw-toggle[aria-expanded="false"]').forEach((x) => x.click()); });
+    await S.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); });
     await S.evaluate(() => document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()));
     await S.evaluate(() => document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => x.click()));
     const open0 = await openKeys(S);
-    R.opened = { steps: open0.filter((k) => !k.startsWith("g:") && !k.startsWith("cw:")).length, groups: open0.filter((k) => k.startsWith("g:")).length, childWork: open0.filter((k) => k.startsWith("cw:")).length };
-    r.expect(R.opened.steps >= 3 && R.opened.groups >= 1 && R.opened.childWork >= 2, name + ": harbor didn't open steps, a group and child work to watch: " + JSON.stringify(R.opened));
+    R.opened = { steps: open0.filter((k) => !k.startsWith("g:")).length, groups: open0.filter((k) => k.startsWith("g:")).length };
+    r.expect(R.opened.steps >= 3 && R.opened.groups >= 1, name + ": harbor didn't open steps and a group to watch: " + JSON.stringify(R.opened));
     const live0 = await S.evaluate(() => document.querySelector('.step.live[data-live="harbor"]')?.dataset.e ?? null);
     r.expect(!!live0, name + ": harbor shows no running step");
     const mainBox = await S.locator("#main").boundingBox();
@@ -200,7 +200,7 @@ async function scheme(browser, name, opts, r, protocol) {
     R.room = await S.evaluate(() => { const s = window.__sc(); s.scrollTop = Math.round((s.scrollHeight - s.clientHeight) * 0.4); return window.__left(); });
     r.expect(R.room > 200, name + ": harbor isn't long enough to scroll up from its end: " + R.room);
     await sleep(150);
-    const anchor = await S.evaluate(() => { const line = window.__line(); const n = [...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .divider, .thought)[data-e]")].find((x) => { const b = x.getBoundingClientRect(); return b.height && b.top >= line; }); return n ? { e: n.dataset.e, top: n.getBoundingClientRect().top } : null; });
+    const anchor = await S.evaluate(() => { const line = window.__line(); const n = [...document.querySelectorAll("#page .turns :is(.msg, .step, .event, .child-card, .bubble, .divider, .thought, .think)[data-e]")].find((x) => { const b = x.getBoundingClientRect(); return b.height && b.top >= line; }); return n ? { e: n.dataset.e, top: n.getBoundingClientRect().top } : null; });
     r.expect(!!anchor, name + ": no block in view on harbor");
     // Analytics: select a range and keep its figures present while the other live views change.
     await AN.click('.analytics-range button:has-text("30 d")');
@@ -222,7 +222,7 @@ async function scheme(browser, name, opts, r, protocol) {
     for (const p of pages) await p.evaluate(() => window.__live.reset());
 
     // ---- 1. harbor's running call returns, and it says something; the reader is scrolled up ----
-    const beforeEntries = await S.evaluate(() => [...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .thought, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
+    const beforeEntries = await S.evaluate(() => [...document.querySelectorAll("#page .turns :is(.msg, .step, .event, .child-card, .bubble, .thought, .think-pending)[data-e]")].map((n) => n.dataset.e));
     let t0 = Date.now();
     harbor.append(harbor.result(at(12, 41), "toolu-b3", "test result: ok. 214 passed; 0 failed"), harbor.think(at(12, 41, 2), THOUGHT), harbor.text(at(12, 41, 5), MESSAGE));
     R.message = await appear(S, t0, (m) => [...document.querySelectorAll("#page .msg.assistant")].some((x) => x.textContent.includes(m)), MESSAGE);
@@ -236,7 +236,7 @@ async function scheme(browser, name, opts, r, protocol) {
     const open1 = new Set(await openKeys(S));
     R.stillOpen1 = open0.filter((k) => !open1.has(k));
     r.expect(R.stillOpen1.length === 0, name + ": closed by the update: " + R.stillOpen1.join(", "));
-    R.jump = await S.evaluate((before) => { const p = document.querySelector(".jump-bottom"); if (!p || p.hidden) return null; const b = p.getBoundingClientRect(), keys = new Set([...document.querySelectorAll("#page .turns :is(.msg, .step, .hcard, .thought, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e)); return { text: p.textContent.trim(), added: [...keys].filter((key) => !before.includes(key)).length, w: b.width, h: b.height, top: b.top, left: b.left, right: b.right, bottom: b.bottom, vw: document.documentElement.clientWidth, vh: innerHeight }; }, beforeEntries);
+    R.jump = await S.evaluate((before) => { const p = document.querySelector("#jump-bottom"); if (!p || p.closest(".jump-wrap")?.hidden) return null; const b = p.getBoundingClientRect(), keys = new Set([...document.querySelectorAll("#page .turns :is(.msg, .step, .event, .child-card, .bubble, .thought, .think-pending)[data-e]")].map((n) => n.dataset.e)); return { text: p.textContent.trim(), added: [...keys].filter((key) => !before.includes(key)).length, w: b.width, h: b.height, top: b.top, left: b.left, right: b.right, bottom: b.bottom, vw: document.documentElement.clientWidth, vh: innerHeight }; }, beforeEntries);
     // The new thought is an entry like any other: it counts toward "N new" (the message and the thought make at least two).
     R.thought = await S.evaluate((t) => { const n = [...document.querySelectorAll("#page .turns .thought[data-e]")].find((x) => x.querySelector(".think-text")?.textContent.includes(t)); return n ? { key: n.dataset.e, open: !n.querySelector("button, [hidden]") } : null; }, THOUGHT);
     r.expect(!!R.thought && R.thought.open && !beforeEntries.includes(R.thought.key), name + ": harbor's new thought did not appear in full, or was already counted: " + JSON.stringify(R.thought));
@@ -245,15 +245,16 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(!!jumpCount && Number(jumpCount[1]) === R.jump.added, name + ": jump button count didn't match newly rendered entries: " + JSON.stringify(R.jump));
     if (R.jump) r.expect(R.jump.w >= 40 && R.jump.h >= 40 && R.jump.top >= 0 && R.jump.left >= 0 && R.jump.right <= R.jump.vw + 0.5 && R.jump.bottom <= R.jump.vh, name + ": the jump button is off screen or under 40 px: " + JSON.stringify(R.jump));
     await S.screenshot({ path: path.join(ENV.out, "live-" + name + "-jump.png") });
-    await S.click(".jump-bottom"); await S.waitForFunction(() => window.__left() <= 1, null, { timeout: 5000 });
-    R.afterJump = await S.evaluate(() => ({ hidden: document.querySelector(".jump-bottom")?.hidden, left: window.__left() }));
+    await S.click("#jump-bottom"); await S.waitForFunction(() => window.__left() <= 1, null, { timeout: 5000 });
+    R.afterJump = await S.evaluate(() => ({ hidden: document.querySelector(".jump-wrap")?.hidden, left: window.__left() }));
     r.expect(R.afterJump.hidden && R.afterJump.left <= 1, name + ": tapping the jump button didn't go to the end: " + JSON.stringify(R.afterJump));
 
     // ---- 2. a new call while the reader is at the end: pinned, ticking, then finished ----
-    // Child work closed with steps open inside it keeps them through a redraw of its turn.
-    const inner0 = await S.evaluate(() => { const w = document.querySelector('.child-work[data-e] > .cw-toggle[aria-expanded="true"]').parentElement;
-      const keys = [...w.querySelectorAll('.step[data-e] > button[aria-expanded="true"]')].map((b) => b.parentElement.dataset.e); w.querySelector(":scope > .cw-toggle").click(); return { cw: w.dataset.e, keys }; });
-    r.expect(inner0.keys.length >= 1, name + ": no step open inside child work to close it over");
+    // A group closed with steps open inside it keeps them through a redraw of its turn.
+    const inner0 = await S.evaluate(() => { const w = [...document.querySelectorAll('.tgroup[data-e]')].find((g) => g.querySelector(':scope > .steps .step[data-e] > button[aria-expanded="true"]') && g.querySelector(':scope > .tsum[aria-expanded="true"]'));
+      if (!w) return { cw: null, keys: [] };
+      const keys = [...w.querySelectorAll('.step[data-e] > button[aria-expanded="true"]')].map((b) => b.parentElement.dataset.e); w.querySelector(":scope > .tsum").click(); return { cw: w.dataset.e, keys }; });
+    r.expect(inner0.keys.length >= 1, name + ": no step open inside a group to close it over");
     await sleep(200); const top1 = await S.evaluate(() => window.__sc().scrollTop);
     t0 = Date.now();
     const clipCommand = ["sleep 90 && echo line 01", ...Array.from({ length: 13 }, (_, i) => "echo line " + String(i + 2).padStart(2, "0"))].join("\n");
@@ -277,7 +278,7 @@ async function scheme(browser, name, opts, r, protocol) {
     const untitledLive = liveKeys.find((x) => x.key === live1), titledLive = liveKeys.find((x) => x.key === live2);
     r.expect(untitledLive?.verb === "Running" && untitledLive.title === null, name + ": the untitled live call didn't keep its Running label: " + JSON.stringify(untitledLive));
     r.expect(titledLive?.title === "Wait", name + ": the titled live call didn't show its description: " + JSON.stringify(titledLive));
-    R.pinned = await S.evaluate(() => ({ hidden: document.querySelector(".jump-bottom")?.hidden, left: window.__left(), top: window.__sc().scrollTop }));
+    R.pinned = await S.evaluate(() => ({ hidden: document.querySelector(".jump-wrap")?.hidden, left: window.__left(), top: window.__sc().scrollTop }));
     R.pinned.before = top1;
     r.expect(R.pinned.hidden && R.pinned.left <= 1 && R.pinned.top > top1, name + ": not kept at the end: " + JSON.stringify(R.pinned));
     if (phone) await S.setViewportSize({ width: 390, height: 844 });
@@ -324,9 +325,9 @@ async function scheme(browser, name, opts, r, protocol) {
       R.clipDone = await appear(S, t0, (k) => { const n = document.querySelector('.step[data-e="' + k + '"]'); return !!n && !n.classList.contains("live"); }, liveClip);
       r.expect(R.clipDone != null, name + ": the clipping check's live call didn't finish within 4 s");
     } else r.expect(false, name + ": the clipping check's live call has no entry key");
-    R.innerKept = await S.evaluate(({ cw, keys }) => { const w = document.querySelector('.child-work[data-e="' + cw + '"]'), t = w.querySelector(":scope > .cw-toggle"), closed = t.getAttribute("aria-expanded") === "false"; t.click();
+    R.innerKept = await S.evaluate(({ cw, keys }) => { const w = [...document.querySelectorAll('.tgroup[data-e]')].find((g) => g.dataset.e === cw), t = w.querySelector(":scope > .tsum"), closed = t.getAttribute("aria-expanded") === "false"; t.click();
       return { closed, open: keys.filter((k) => w.querySelector('.step[data-e="' + k + '"] > button')?.getAttribute("aria-expanded") === "true").length, of: keys.length }; }, inner0);
-    r.expect(R.innerKept.closed && R.innerKept.open === R.innerKept.of, name + ": steps open inside closed child work didn't survive the redraw: " + JSON.stringify(R.innerKept));
+    r.expect(R.innerKept.closed && R.innerKept.open === R.innerKept.of, name + ": steps open inside a closed group didn't survive the redraw: " + JSON.stringify(R.innerKept));
     const timerState = () => S.evaluate((keys) => {
       const steps = keys.map((key) => [...document.querySelectorAll(".step.live")].find((n) => n.dataset.e === key));
       return { texts: steps.map((n) => n?.querySelector(".sd")?.textContent ?? null),
@@ -376,8 +377,8 @@ async function scheme(browser, name, opts, r, protocol) {
 
     // ---- 3. a subagent starts while View all is open ----
     await S.locator(".viewall:visible").first().click();
-    await S.waitForFunction(() => document.querySelector("dialog.viewer")?.open === true);
-    const sheet0 = await S.evaluate(() => document.querySelector("dialog.viewer").textContent);
+    await S.waitForFunction(() => document.querySelector("dialog.panel.full")?.open === true);
+    const sheet0 = await S.evaluate(() => document.querySelector("dialog.panel.full").textContent);
     t0 = Date.now();
     harbor.append(harbor.tool(at(12, 43), "toolu-live2", "Agent", { description: "Live reviewer", subagent_type: "general-purpose", prompt: BRIEF, run_in_background: true }),
       harbor.result(at(12, 43, 0, 500), "toolu-live2", "Async agent launched successfully.", { toolUseResult: { status: "async_launched", agentId: "live-sub" } }));
@@ -399,35 +400,36 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(!!spawn, name + ": the model has no spawn to live-sub within 4 s");
     r.expect(R.spawnMs != null && R.spawnMs <= 2500, name + ": the spawn reached the served model after " + R.spawnMs + " ms, over the server's bound (2.5 s)");
     await sleep(Math.max(0, 4500 - (Date.now() - t0)));
-    R.underSheet = await S.evaluate((id) => ({ open: document.querySelector("dialog.viewer")?.open === true, text: document.querySelector("dialog.viewer")?.textContent, card: !!document.querySelector('.hcard[data-h="' + id + '"]') }), spawn?.id ?? "");
+    R.underSheet = await S.evaluate((id) => ({ open: document.querySelector("dialog.panel.full")?.open === true, text: document.querySelector("dialog.panel.full")?.textContent, card: !!document.querySelector('.child-card[data-h="' + id + '"]') }), spawn?.id ?? "");
     r.expect(R.underSheet.open && R.underSheet.text === sheet0, name + ": the View all sheet changed while open");
     r.expect(!R.underSheet.card, name + ": the page under the View all sheet was redrawn while it was open");
     delete R.underSheet.text;
-    t0 = Date.now(); await S.click(".viewer .vclose");
-    R.afterSheet = await appear(S, t0, (id) => { const c = document.querySelector('.hcard[data-h="' + id + '"]'); return !!c?.querySelector(".child-work"); }, spawn?.id ?? "", 2000);
-    r.expect(R.afterSheet != null, name + ": the subagent's card and child work didn't appear once the sheet closed");
+    t0 = Date.now(); await S.click("dialog.panel.full .panel-h .ibtn");
+    R.afterSheet = await appear(S, t0, (id) => !!document.querySelector('.child-card[data-h="' + id + '"]'), spawn?.id ?? "", 2000);
+    r.expect(R.afterSheet != null, name + ": the subagent's card didn't appear once the sheet closed");
     const open3 = new Set(await openKeys(S));
     R.stillOpen3 = open0.filter((k) => k !== live0 && !open3.has(k));
     r.expect(R.stillOpen3.length === 0, name + ": closed by the updates: " + R.stillOpen3.join(", "));
 
-    // ---- 3b. open child work grows above the view: the new message shows in it, the view stays, one transcript is asked for ----
-    // The first block in view is the card after h-codex's open child work (h-review's), its top 10 px under the bar; the
-    // Codex run then says something, so its child work grows above the view. Plenty of the turn is below it.
+    // ---- 3b. a child card above the view changes: the card shows it, the view stays, no transcript is asked for ----
+    // The first block in view is the second child card (h-review's), its top 10 px under the bar; the Codex run above it then
+    // makes a call, so its card (steps, current call) changes above the view. Plenty of the turn is below it.
     await S.setViewportSize({ width: opts.size === "phone" ? 390 : 1280, height: 480 }); await sleep(200);
-    const above = await S.evaluate(() => { const cards = [...document.querySelectorAll("#page .turns .hcard.child-card")].filter((x) => !x.closest(".cw-body")), cws = cards.map((x) => x.querySelector(":scope .child-work")).filter(Boolean), n = cards[1];
+    const cardsText = () => S.evaluate(() => [...document.querySelectorAll("#page .turns .child-card")].map((x) => x.textContent).join("|"));
+    const above = await S.evaluate(() => { const cards = [...document.querySelectorAll("#page .turns .child-card")], n = cards[1];
       const s = window.__sc(); s.scrollTop += n.getBoundingClientRect().top - window.__line() + 10;
-      return { e: n.dataset.e, card: n.matches(".hcard"), off: n.getBoundingClientRect().top - window.__line(), left: window.__left(), cw: cws[0].querySelector(":scope > .cw-toggle").getAttribute("aria-expanded") === "true" }; });
-    r.expect(above.card && Math.abs(above.off + 10) < 1.5 && above.left > 80 && above.cw, name + ": couldn't put the card under open child work at the top, away from the end: " + JSON.stringify(above));
-    await sleep(200); const aboveTop = await topOf(S, byKey(above.e)); txs = S.txs.length;
+      return { e: n.dataset.e, card: n.matches(".child-card"), off: n.getBoundingClientRect().top - window.__line(), left: window.__left(), cards: cards.length }; });
+    r.expect(above.card && above.cards >= 2 && Math.abs(above.off + 10) < 1.5 && above.left > 80, name + ": couldn't put the second child card at the top, away from the end: " + JSON.stringify(above));
+    await sleep(200); const aboveTop = await topOf(S, byKey(above.e)); txs = S.txs.length; const cards0 = await cardsText();
     const rollout = path.join(dir, "codex/sessions/2026/09/28", fs.readdirSync(path.join(dir, "codex/sessions/2026/09/28")).find((f) => f.endsWith("-h-codex.jsonl")));
     t0 = Date.now();
-    fs.appendFileSync(rollout, JSON.stringify({ timestamp: iso(at(12, 43, 30)), type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Live check: the child's new note." }] } }) + "\n");
-    R.childNote = await appear(S, t0, () => [...document.querySelectorAll("#page .cw-body .msg")].some((x) => x.textContent.includes("the child's new note")));
-    r.expect(R.childNote != null, name + ": the child's new message didn't appear in its open child work within 4 s");
+    fs.appendFileSync(rollout, JSON.stringify({ timestamp: iso(at(12, 43, 30)), type: "response_item", payload: { type: "function_call", name: "shell", arguments: JSON.stringify({ command: ["echo", "child-live"] }), call_id: "call-child-live" } }) + "\n");
+    R.childNote = await appear(S, t0, (was) => [...document.querySelectorAll("#page .turns .child-card")].map((x) => x.textContent).join("|") !== was, cards0);
+    r.expect(R.childNote != null, name + ": the child card didn't change after its run made a call, within 4 s");
     await sleep(500);
     R.aboveMoved = (await topOf(S, byKey(above.e))) - aboveTop; R.childTx = S.txs.length - txs;
-    r.expect(Math.abs(R.aboveMoved) <= 1, name + ": harbor's view moved " + R.aboveMoved + " px when child work above it grew");
-    r.expect(R.childTx === 1, name + ": an update to one child asked for " + R.childTx + " transcripts: " + S.txs.slice(txs).join(" "));
+    r.expect(Math.abs(R.aboveMoved) <= 1, name + ": harbor's view moved " + R.aboveMoved + " px when a child card above it changed");
+    r.expect(R.childTx === 0, name + ": an update to one child asked for " + R.childTx + " transcripts: " + S.txs.slice(txs).join(" "));
     await S.setViewportSize(opts.size === "phone" ? { width: 390, height: 844 } : { width: 1280, height: 860 }); await sleep(200);
 
     // ---- 4. a relay, with harbor's find mode open and its "Messages" chip chosen ----
@@ -587,7 +589,7 @@ async function scheme(browser, name, opts, r, protocol) {
     const live5 = await S.evaluate(() => [...document.querySelectorAll(".step.live")].find((x) => x.querySelector("code.sa")?.textContent.includes("sleep 99"))?.dataset.e ?? null);
     const pidFile = fs.readdirSync(path.join(dir, "claude/sessions")).find((f) => JSON.parse(fs.readFileSync(path.join(dir, "claude/sessions", f), "utf8")).sessionId === "harbor");
     t0 = Date.now(); fs.rmSync(path.join(dir, "proc", path.basename(pidFile, ".json"), "stat"));
-    R.died = await appear(S, t0, (k) => { const n = document.querySelector('.step[data-e="' + k + '"]'); return !!n && !n.classList.contains("live") && n.querySelector(".sd")?.textContent === "no result"; }, live5);
+    R.died = await appear(S, t0, (k) => { const n = document.querySelector('.step[data-e="' + k + '"]'); return !!n && !n.classList.contains("live") && n.querySelector(".sd")?.textContent === "No result"; }, live5);
     r.expect(R.died != null, name + ": the step kept running after its process died");
 
     // ---- Overflow at the screen's own size ----
@@ -633,11 +635,11 @@ async function scheme(browser, name, opts, r, protocol) {
 
     // The same ending on a session page scrolled up, where the jump button shows: the note sits above it, not under it.
     await S.evaluate(() => { window.__sc().scrollTop = 0; });
-    await S.waitForFunction(() => { const b = document.querySelector(".jump-bottom"); return !!b && !b.hidden; }, null, { timeout: 5000 });
+    await S.waitForFunction(() => { const b = document.querySelector(".jump-wrap"); return !!b && !b.hidden; }, null, { timeout: 5000 });
     await S.route("**/api/model**", (q) => q.fulfill({ status: 403, contentType: "text/plain", body: "Forbidden" }));
     R.endedOnSession = await appear(S, Date.now(), (t) => document.querySelector(".livenote")?.textContent === t, ENDED, 8000);
     r.expect(R.endedOnSession != null, name + ": no \"" + ENDED + "\" note on the session page after a 403");
-    R.noteVsJump = await S.evaluate(() => { const n = document.querySelector(".livenote")?.getBoundingClientRect(), j = document.querySelector(".jump-bottom"), b = j?.getBoundingClientRect(); return n && b ? { jumpShown: !j.hidden, noteTop: n.top, noteBottom: n.bottom, noteLeft: n.left, noteRight: n.right, jumpTop: b.top, jumpBottom: b.bottom, jumpLeft: b.left, jumpRight: b.right, overlaps: n.left < b.right && n.right > b.left && n.top < b.bottom && n.bottom > b.top } : null; });
+    R.noteVsJump = await S.evaluate(() => { const n = document.querySelector(".livenote")?.getBoundingClientRect(), j = document.querySelector("#jump-bottom"), b = j?.getBoundingClientRect(); return n && b ? { jumpShown: !j.closest(".jump-wrap").hidden, noteTop: n.top, noteBottom: n.bottom, noteLeft: n.left, noteRight: n.right, jumpTop: b.top, jumpBottom: b.bottom, jumpLeft: b.left, jumpRight: b.right, overlaps: n.left < b.right && n.right > b.left && n.top < b.bottom && n.bottom > b.top } : null; });
     r.expect(!!R.noteVsJump && R.noteVsJump.jumpShown && !R.noteVsJump.overlaps, name + ": the ended note and the jump button overlap or the button was gone: " + JSON.stringify(R.noteVsJump));
     await S.screenshot({ path: path.join(ENV.out, "live-" + name + "-ended-session.png") });
 
@@ -734,17 +736,17 @@ async function middleCounts(browser, r) {
   return R;
 }
 
-// A subagent's page shows its brief once, in the intro block at the top. The transcript leaves out the handoff that started it,
+// A subagent's page shows its brief once, as the incoming bubble of its first turn. The transcript leaves out the handoff that started it,
 // and a live update (the subagent is still running) redraws its turns the same way: it must not bring the brief back as a turn
 // header and a quoted copy under the "Started" divider.
 async function childBriefOnce(browser, r) {
   const R = { name: "child-brief-once" }, dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-live-brief-")), now = write(dir);
   const srv = await serve(dir, now + 10 * 60000), L = logs(dir), harbor = L.lane("harbor"), pages = [];
   const NOTE = "Live check: the brief-once note, written while the page is open.";
-  // The elements whose own text holds the brief (the deepest ones), and whether each sits in the intro block.
+  // The elements whose own text holds the brief (the deepest ones), and whether each sits in the incoming bubble.
   const copies = (page) => page.evaluate((brief) => [...document.querySelectorAll("#page *")]
     .filter((n) => n.textContent.includes(brief) && ![...n.children].some((c) => c.textContent.includes(brief)))
-    .map((n) => ({ tag: n.tagName.toLowerCase(), cls: n.className, intro: !!n.closest(".child-intro") })), BRIEF);
+    .map((n) => ({ tag: n.tagName.toLowerCase(), cls: n.className, intro: !!n.closest(".bubble.in") })), BRIEF);
   try {
     harbor.append(harbor.tool(at(12, 43), "toolu-brief1", "Agent", { description: "Live reviewer", subagent_type: "general-purpose", prompt: BRIEF, run_in_background: true }),
       harbor.result(at(12, 43, 0, 500), "toolu-brief1", "Async agent launched successfully.", { toolUseResult: { status: "async_launched", agentId: "brief-sub" } }));
@@ -755,9 +757,9 @@ async function childBriefOnce(browser, r) {
     const t0 = Date.now();
     while (Date.now() - t0 < 8000 && !(await model(srv)).handoffs.some((h) => h.kind === "spawn" && h.to === "brief-sub")) await sleep(50);
     const page = await open(browser, srv, "/s/claude/brief-sub", { size: "phone", dark: false }); pages.push(page);
-    await page.waitForFunction(() => !!document.querySelector("#page .child-intro"));
+    await page.waitForFunction(() => !!document.querySelector("#page .bubble.in"));
     R.opened = await copies(page);
-    r.expect(R.opened.length === 1 && R.opened[0].intro, "child-brief-once: on opening, the brief is in " + R.opened.length + " elements, not only in the intro block: " + JSON.stringify(R.opened));
+    r.expect(R.opened.length === 1 && R.opened[0].intro, "child-brief-once: on opening, the brief is in " + R.opened.length + " elements, not only in the incoming bubble: " + JSON.stringify(R.opened));
     // The subagent goes on working: a live update draws its turn again.
     const updates = page.updates, t1 = Date.now();
     sub.append(sub.text(at(12, 44), NOTE));
@@ -765,9 +767,9 @@ async function childBriefOnce(browser, r) {
     r.expect(R.followed != null && page.updates > updates, "child-brief-once: the live update never drew the subagent's new message");
     await sleep(300);
     R.live = await copies(page);
-    r.expect(R.live.length === 1 && R.live[0].intro, "child-brief-once: after a live update the brief is in " + R.live.length + " elements, not only in the intro block: " + JSON.stringify(R.live));
+    r.expect(R.live.length === 1 && R.live[0].intro, "child-brief-once: after a live update the brief is in " + R.live.length + " elements, not only in the incoming bubble: " + JSON.stringify(R.live));
     R.turnHeads = await page.evaluate(() => [...document.querySelectorAll("#page .turn-h")].map((h) => h.textContent));
-    r.expect(R.turnHeads.every((t) => !t.includes("Brief from")), "child-brief-once: a turn header repeats the brief's sender: " + JSON.stringify(R.turnHeads));
+    r.expect(R.turnHeads.filter((t) => t.includes("Brief from")).length === 1, "child-brief-once: the page does not name the brief's sender exactly once in a turn header: " + JSON.stringify(R.turnHeads));
     R.errors = pages.flatMap((p) => p.errors);
     r.expect(R.errors.length === 0, "child-brief-once: page errors: " + R.errors.join(" | "));
   } finally {
@@ -888,7 +890,7 @@ async function sessionFooterLive(browser, r) {
   const srv = await serve(dir, now + 10 * 60000), L = logs(dir), harbor = L.lane("harbor"), pages = [];
   const foot = (page) => page.evaluate(() => { const n = document.querySelector("#page .session-foot"); return n ? { n: document.querySelectorAll("#page .session-foot").length, text: n.querySelector(".stat")?.textContent ?? "", state: n.querySelector(".stat")?.className ?? "", open: !!n.querySelector("button"),
     calls: Number(/(\d+) tool call/.exec(n.textContent)?.[1] ?? NaN), tips: [...n.querySelectorAll(".cr-item")].map((x) => x.dataset.tip ?? null),
-    still: [...document.querySelectorAll("#page .turn-end")].filter((x) => x.textContent.includes("Still working")).length, intro: document.querySelectorAll("#page .child-intro").length } : null; });
+    still: [...document.querySelectorAll("#page .turn-end")].filter((x) => x.textContent.includes("Still working")).length, intro: [...document.querySelectorAll("#page .turn-h")].filter((x) => x.textContent.includes("Brief from")).length } : null; });
   const WORDS = { done: "Done", err: "Failed", idle: "Idle", wait: "Needs you" };
   try {
     // A running session: harbor, which starts a subagent in its last turn (that turn sent something, so it has a trace button).
@@ -941,7 +943,7 @@ async function sessionFooterLive(browser, r) {
 }
 
 // A subagent's page opened before its parent's log exists: its own transcript, and the parent's log to write once the page is
-// open (the subagent then has an origin). `shown` reads the intro blocks, the child-page class and where the brief is drawn.
+// open (the subagent then has an origin). `shown` reads the incoming bubbles and where the brief is drawn.
 async function lateFixture(browser, prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)), now = write(dir);
   const srv = await serve(dir, now + 10 * 60000), L = logs(dir), pages = [];
@@ -950,8 +952,8 @@ async function lateFixture(browser, prefix) {
   const say = (sub, t, text) => line(sub, t, "assistant", { message: { id: "msg-late-" + t, model: "claude-opus-5-5", role: "assistant", type: "message", content: [{ type: "text", text }] } });
   const ask = (sub, t, text) => line(sub, t, "user", { message: { role: "user", content: text } });
   const put = (f, lines) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, lines.map((l) => JSON.stringify(l) + "\n").join("")); };
-  const shown = (page) => page.evaluate((note) => ({ intros: document.querySelectorAll("#page .child-intro").length, child: document.querySelector("#page").classList.contains("child-page"), foot: document.querySelectorAll("#page .session-foot").length,
-    copies: [...document.querySelectorAll("#page *")].filter((n) => n.textContent.includes(note) && ![...n.children].some((c) => c.textContent.includes(note))).map((n) => ({ tag: n.tagName.toLowerCase(), intro: !!n.closest(".child-intro") })) }), NOTE);
+  const shown = (page) => page.evaluate((note) => ({ intros: document.querySelectorAll("#page .bubble.in").length, foot: document.querySelectorAll("#page .session-foot").length,
+    copies: [...document.querySelectorAll("#page *")].filter((n) => n.textContent.includes(note) && ![...n.children].some((c) => c.textContent.includes(note))).map((n) => ({ tag: n.tagName.toLowerCase(), intro: !!n.closest(".bubble.in") })) }), NOTE);
   const close = async () => { for (const p of pages) await p.context().close(); srv.proc.kill("SIGTERM"); fs.rmSync(dir, { recursive: true, force: true }); };
   try {
     const subFile = path.join(projects, "late-par", "subagents", "agent-late-sub.jsonl");
@@ -971,14 +973,14 @@ const LATE_TRIES = 4;
 const setVisible = (page, state) => page.evaluate((state) => { Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state }); document.dispatchEvent(new Event("visibilitychange")); }, state);
 
 // A subagent's page opened before its parent's log exists has no origin and no intro. When the parent's log appears, the live
-// update adds the intro (once) and marks the page a child's, and the brief is in that intro alone (the transcript loads again, so
+// update draws the incoming bubble (once), and the brief is in that bubble alone (the transcript loads again, so
 // the prompt it drew as a message is gone). The first request to load it again fails, and the page is hidden and shown again
 // before the retry: polling resumes (asking for the whole model), the retry loads it, and it is not asked for again.
 async function childIntroLate(browser, r) {
   const R = { name: "child-intro-late" }, F = await lateFixture(browser, "semon-live-late-"), { page, pages, shown, NOTE } = F;
   try {
     R.before = await shown(page);
-    r.expect(R.before.intros === 0 && !R.before.child, "child-intro-late: before its parent's log exists the page already has an intro or the child-page class: " + JSON.stringify(R.before));
+    r.expect(R.before.intros === 0, "child-intro-late: before its parent's log exists the page already has an incoming bubble: " + JSON.stringify(R.before));
     const base = page.txs.length, reloads = () => page.txs.slice(base).filter((u) => RELOAD.test(u)).length;
     let asked = 0;
     await page.route(RELOAD, (route) => (asked++ === 0 ? route.fulfill({ status: 500, body: "no" }) : route.continue()));
@@ -986,7 +988,7 @@ async function childIntroLate(browser, r) {
     // The parent's log appears: the subagent now has an origin.
     const u0 = page.updates, t1 = Date.now();
     F.parent();
-    R.added = await appear(page, t1, () => document.querySelectorAll("#page .child-intro").length > 0, null, 8000);
+    R.added = await appear(page, t1, () => document.querySelectorAll("#page .bubble.in").length > 0, null, 8000);
     R.failedFirst = await failed;
     r.expect(R.failedFirst, "child-intro-late: the first reload of the transcript was never made (or didn't fail)");
     // The phone is locked before the retry, and unlocked: the page polls again (a poll that asks for the whole model), at the
@@ -1001,7 +1003,7 @@ async function childIntroLate(browser, r) {
     r.expect(R.hiddenPolls === 0, "child-intro-late: polled " + R.hiddenPolls + " times while hidden");
     r.expect(R.resumedIn != null, "child-intro-late: shown again after a failed reload of its transcript, the page never polled again");
     r.expect(R.resumed?.since === "", "child-intro-late: the poll after the failed reload asked for " + JSON.stringify(R.resumed) + " (want since=\"\": the whole model)");
-    R.fixed = await appear(page, t2, (note) => { const c = [...document.querySelectorAll("#page *")].filter((n) => n.textContent.includes(note) && ![...n.children].some((k) => k.textContent.includes(note))); return c.length === 1 && !!c[0].closest(".child-intro"); }, NOTE, 12000);
+    R.fixed = await appear(page, t2, (note) => { const c = [...document.querySelectorAll("#page *")].filter((n) => n.textContent.includes(note) && ![...n.children].some((k) => k.textContent.includes(note))); return c.length === 1 && !!c[0].closest(".bubble.in"); }, NOTE, 12000);
     n = page.polls.length; const t3 = Date.now();
     while (page.polls.length < n + 2 && Date.now() - t3 < 8000) await sleep(50); // two more polls: a transcript that loaded is not loaded again
     R.reloads = reloads(); R.later = page.polls.slice(n).map((p) => p.since);
@@ -1010,8 +1012,8 @@ async function childIntroLate(browser, r) {
     r.expect(R.later.length >= 2 && R.later.every((x) => !!x), "child-intro-late: the polls after the transcript loaded sent " + JSON.stringify(R.later) + " (want the model's version)");
     r.expect(R.fixed != null, "child-intro-late: the brief was not in the intro alone after the retry: " + JSON.stringify(R.after.copies));
     r.expect(R.added != null && page.updates > u0, "child-intro-late: the intro never appeared after the parent's log did: " + JSON.stringify(R.after));
-    r.expect(R.after.intros === 1 && R.after.child, "child-intro-late: after the origin appeared the page has " + R.after.intros + " intro blocks (child-page " + R.after.child + ")");
-    r.expect(R.after.copies.length === 1 && R.after.copies[0].intro, "child-intro-late: after the origin appeared the brief is in " + R.after.copies.length + " elements, not only in the intro block: " + JSON.stringify(R.after.copies));
+    r.expect(R.after.intros === 1, "child-intro-late: after the origin appeared the page has " + R.after.intros + " incoming bubbles");
+    r.expect(R.after.copies.length === 1 && R.after.copies[0].intro, "child-intro-late: after the origin appeared the brief is in " + R.after.copies.length + " elements, not only in the incoming bubble: " + JSON.stringify(R.after.copies));
     R.errors = pages.flatMap((p) => p.errors);
     r.expect(R.errors.length === 0, "child-intro-late: page errors: " + R.errors.join(" | "));
   } finally {
@@ -1044,7 +1046,7 @@ async function childIntroLateGivesUp(browser, r) {
     r.expect(R.gaps.length === 3 && R.gaps[0] >= 3500 && R.gaps[1] >= 7000 && R.gaps[2] >= 14000 && R.gaps[2] < 24000 && R.gaps[0] < R.gaps[1] && R.gaps[1] < R.gaps[2], "child-intro-late-gives-up: the retries didn't back off 4 s, 8 s, 16 s: " + JSON.stringify(R.gaps));
     r.expect(R.between.length === LATE_TRIES - 1 && R.between.every((x) => x === ""), "child-intro-late-gives-up: the polls that retried sent " + JSON.stringify(R.between) + " (want " + (LATE_TRIES - 1) + " asking for the whole model)");
     r.expect(R.after.length >= 3 && R.after.every((p) => !!p.since) && R.after[0].at < 5000, "child-intro-late-gives-up: after giving up, the polls are " + JSON.stringify(R.after) + " (want the model's version, every 2 s)");
-    r.expect(R.shown.intros === 1 && R.shown.child, "child-intro-late-gives-up: after giving up the page shows " + JSON.stringify(R.shown));
+    r.expect(R.shown.intros === 1, "child-intro-late-gives-up: after giving up the page shows " + JSON.stringify(R.shown));
     R.errors = pages.flatMap((p) => p.errors);
     r.expect(R.errors.length === 0, "child-intro-late-gives-up: page errors: " + R.errors.join(" | "));
   } finally {
@@ -1063,7 +1065,7 @@ async function childIntroLateAway(browser, r) {
     const failed = page.waitForResponse((q) => RELOAD.test(q.url()) && q.status() === 500, { timeout: 10000 }).then(() => true, () => false);
     const t1 = Date.now();
     F.parent();
-    R.origin = await appear(page, t1, () => !!document.querySelector("#page .child-intro"), null, 8000);
+    R.origin = await appear(page, t1, () => !!document.querySelector("#page .bubble.in"), null, 8000);
     R.failedFirst = await failed;
     r.expect(R.origin != null && R.failedFirst, "child-intro-late-away: the origin did not appear with its first transcript reload failing");
 
@@ -1089,10 +1091,10 @@ async function childIntroLateAway(browser, r) {
     const returnedTx = page.waitForResponse((q) => RELOAD.test(q.url()) && q.status() === 200, { timeout: 10000 }).then(() => true, () => false);
     await goto(page, { v: "session", id: "late-sub" }, { SESS: { "late-sub": { name: "Late reviewer" } } });
     R.returnedReload = await returnedTx;
-    await page.waitForFunction(() => !!document.querySelector("#page .child-intro") && !!document.querySelector('#page section[aria-label="Transcript"]') && !document.querySelector("#page").hasAttribute("aria-busy"));
+    await page.waitForFunction(() => !!document.querySelector("#page .bubble.in") && !!document.querySelector('#page section[aria-label="Transcript"]') && !document.querySelector("#page").hasAttribute("aria-busy"));
     R.after = await shown(page);
     r.expect(R.returnedReload, "child-intro-late-away: returning to the subagent reused cached transcript entries");
-    r.expect(R.after.copies.length === 1 && R.after.copies[0].intro, "child-intro-late-away: after returning the brief is in " + R.after.copies.length + " elements, not only in the intro block: " + JSON.stringify(R.after.copies));
+    r.expect(R.after.copies.length === 1 && R.after.copies[0].intro, "child-intro-late-away: after returning the brief is in " + R.after.copies.length + " elements, not only in the incoming bubble: " + JSON.stringify(R.after.copies));
     R.errors = pages.flatMap((p) => p.errors);
     r.expect(R.errors.length === 0, "child-intro-late-away: page errors: " + R.errors.join(" | "));
   } finally {

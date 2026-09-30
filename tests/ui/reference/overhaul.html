@@ -174,7 +174,8 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .meta-line .lab.state { color: var(--ink-2); }
 .meta-line .lab.state.wait { color: var(--wait); } .meta-line .lab.state.err { color: var(--err); }
 .meta-line .lab[hidden] { display: none; }
-.meta-line .meta-effort { white-space: nowrap; }
+.meta-line .meta-effort { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.meta-line .meta-effort .meta-sep { color: var(--faint); }
 /* A label that leads somewhere looks like the others. Its hit area is padded to the tap size inside the line, whose own box grows by the same amount (the margins cancel it), and only the buttons take clicks. */
 .topbar .l1-state { display: none; }
 .menu-item .dot { margin: 0 4px; }
@@ -232,6 +233,9 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .notice .btn { grid-row: 1 / 3; grid-column: 3; align-self: center; }
 .divider { display: flex; align-items: center; gap: 10px; font-size: var(--fs-cap); color: var(--muted); }
 .divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); min-width: 16px; }
+.divider .dv-text { display: flex; flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+.divider .dv-lead { flex: none; }
+.divider .dv-machine { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- Rows in lists: two lines, the name first, the whole row is the link ------------------------------------- */
 .nrow { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; column-gap: 12px; row-gap: 2px; align-items: center; width: 100%; min-width: 0; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 11px 8px; margin: 0; text-align: left; border-radius: 0; }
@@ -307,10 +311,14 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .md th { font-weight: 600; background: var(--sunken); }
 .answer ol { margin: 2px 0 0; padding-left: 20px; } .answer.none { color: var(--muted); }
 .harness-note { font-size: var(--fs-cap); color: var(--muted); }
-.thought { display: grid; justify-items: start; }
-.think { display: inline-flex; align-items: center; gap: 4px; min-height: var(--tap); margin: -8px 0; border: 0; background: none; padding: 0; color: var(--muted); font-size: var(--fs-sm); }
+.thought { display: grid; gap: 3px; max-width: 68ch; padding-left: 12px; border-left: 1px solid var(--line-2); color: var(--muted); font-family: var(--sans); }
+.thought.masked { padding-block: 0; }
+.think-label { font-size: var(--fs-cap); font-weight: 600; letter-spacing: .04em; line-height: 1.4; color: var(--muted); }
+.thought.masked .think-label { font-weight: 400; letter-spacing: 0; font-size: var(--fs-sm); }
 .think-pending { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--fs-sm); }
-.think-text { margin: 8px 0 0; padding: 2px 0 2px 14px; border-left: 2px solid var(--line); color: var(--ink-2); font: 15px/1.5 var(--serif); }
+.think-text { min-width: 0; overflow-wrap: anywhere; color: var(--muted); font: calc(var(--fs-sm) + 1px)/1.55 var(--sans); }
+.think-text .mh { color: var(--ink-2); }
+.think-text code { font-size: .88em; background: var(--sunken); padding: 1px 5px; border-radius: 5px; }
 
 /* ---- Session: steps. A run of calls folds into one line; a step opens in place, command first --------------- */
 .tgroup { display: grid; grid-template-columns: minmax(0, 1fr); }
@@ -956,6 +964,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   // A masked thought (redacted, encrypted, or an empty summary) has nothing to read, so it isn't drawn at all.
   // 739,682 reads "740k" and 12,422,228 "12.4M"; the exact figure is the cell's tooltip.
   const compactCount = (n) => { if (n < 1e3) return String(n); if (n < 1e4) return +(n / 1e3).toFixed(1) + "k"; const k = Math.round(n / 1e3); return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M"; };
+  const thoughtLabel = (secs) => { const n = Number.isFinite(secs) ? Math.round(secs) : 0; return n < 1 ? "Thinking" : "Thinking · " + (n >= 60 ? Math.floor(n / 60) + "m " + (n % 60) + "s" : n + "s"); };
   const isMaskedThought = (e) => isThought(e) && !isPendingThought(e) && !thoughtText(e);
   function entryTimeMs(e) { if (e?.k === "h") return Number.isFinite(HID.get(e.id)?.at) ? HID.get(e.id).at * 60000 : null; return Number.isFinite(e?.atMs) ? e.atMs : null; }
   function thoughtSeconds(entries, i, sid) {
@@ -1135,7 +1144,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const es = TX[s.id] ?? [], failed = es.filter((e) => e.k === "tool" && e.ok === false).length;
     const st = el("span", "lab state " + s.state); st.append(dot(s.state), el("span", null, STATE[s.state])); l2.append(st);
     l2.append(lab(kindText(s), s.kind ? s.kind + " · " + HARNESS[s.harness] : null, 2));
-    const model = lab(shortModel(s.model), "Model: " + s.modelId + (s.effort ? ". Reasoning effort: " + s.effort : ""), 3, "meta-model"); if (s.effort) model.append(el("span", "meta-effort", " · " + s.effort)); l2.append(model);
+    const model = lab(shortModel(s.model), "Model: " + s.modelId + (s.effort ? ". Reasoning effort: " + s.effort : ""), 3, "meta-model"); if (s.effort) { const eff = el("span", "meta-effort"); eff.append(el("span", "meta-sep", "·"), s.effort); model.append(eff); } l2.append(model);
     // Failed steps and runs are the two labels that lead somewhere, so they are the last two the fitter drops.
     const runs = descendantsOf(s.id, sessionChildren());
     if (failed) l2.append(lab(failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ": step through them", 0, "lab-errs", () => { findOpen = true; show = { messages: false, tools: false, thinking: false, failures: true }; render(); }));
@@ -1557,11 +1566,13 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   }
 
   // ---- Session page --------------------------------------------------------------------------------------------------
+  // "Started 21:57 on <machine>" stays on one line: a long machine name ellipsises, and its tip (only while it is cut off) has the whole name.
+  const startedDivider = (sid) => { const d = el("div", "divider started"), name = MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine], line = el("span", "dv-text"), m = el("span", "dv-machine", name); m.dataset.tip = name; m.dataset.tipClipped = ""; line.append(el("span", "dv-lead", "Started " + clock(SESS[sid].start) + " on\u00a0"), m); d.append(line); return d; };
   function renderSession(page, sid) {
     errorNotice(page);
     if (!SESS[sid]) { page.append(emptyState("This session isn't here", "It isn't in the logs on this machine. It may have ended before the scan window, or run on a machine that isn't sending its logs.", (() => { const b = btn("btn", "All sessions"); b.addEventListener("click", () => go({ v: "sessions" })); return b; })())); return; }
-    page.append(transcript(sid));
-    page.append(jumpWrap);
+    // The jump button sits in the transcript's own grid, so its row adds no page gap when it appears.
+    const t = transcript(sid); t.append(jumpWrap); page.append(t);
   }
 
   // What a tool call did: an icon and verb for its step row, and a phrase and nouns for a group summary.
@@ -1612,10 +1623,10 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const entries = TX[sid] ?? [], box = el("div", "turns"); let tx = box;
     const q = find.trim().toLowerCase(), hit = (s) => !q || String(s).toLowerCase().includes(q);
     const filtering = !!q || show.failures || !show.messages || !show.tools || !show.thinking;
-    if (!filtering) box.append(el("div", "divider", "Started " + clock(SESS[sid].start) + " on " + MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine]));
+    if (!filtering) box.append(startedDivider(sid));
     // Adjacent tool calls fold into one summary line, expandable to the steps. A lone call stays a single line; while
     // finding or filtering, matches show directly.
-    let run = [];
+    let run = []; const maskedIn = new WeakSet();
     const flush = () => {
       if (!run.length) return;
       const steps = el("div", "steps"); run.forEach((r) => steps.append(r.node));
@@ -1646,7 +1657,13 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
       const e = entries[i];
       if (isGap(e)) { closeTurn(); if (!filtering) box.append(el("div", "divider", e.text)); continue; }
       if (firsts.has(e)) openTurn(firsts.get(e));
-      if (isThought(e) && (isMaskedThought(e) || !show.thinking || q || show.failures)) continue;
+      if (isThought(e) && (!show.thinking || q || show.failures)) continue;
+      // Masked thinking is one quiet line per turn, at the first masked thought's place; later ones draw nothing.
+      if (isThought(e) && isMaskedThought(e)) {
+        const scope = cur ?? box;
+        if (!maskedIn.has(scope)) { maskedIn.add(scope); const m = el("div", "thought masked"); m.append(el("div", "think-label", "Thinking hidden by the harness")); tx.append(m); }
+        continue;
+      }
       if (e.k === "tool") {
         if (show.failures ? e.ok !== false || e.live : !show.tools) continue;
         if (!hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
@@ -1663,8 +1680,9 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
       else if (e.k === "a") { if (!show.messages || !hit(e.text)) continue; const m = el("div", "msg assistant"); m.append(markdown(e.text)); tx.append(m); }
       else if (isThought(e)) {
         if (isPendingThought(e)) { const p = el("div", "think-pending"); p.append(el("span", "spin"), el("span", null, "Thinking…")); tx.append(p); continue; }
-        const secs = thoughtSeconds(entries, i, sid), g = el("div", "thought"), b = btn("think"); b.setAttribute("aria-expanded", "false"); b.append(el("span", null, secs == null ? "Thought" : "Thought for " + secs + "s"), icon(I.chev, "chev"));
-        const text = markdown(thoughtText(e), "think-text"); text.hidden = true; b.addEventListener("click", () => { text.hidden = !text.hidden; b.setAttribute("aria-expanded", String(!text.hidden)); }); g.append(b, text); tx.append(g);
+        // Readable thinking sits in the flow, in full and quietly styled, with nothing to open.
+        const secs = thoughtSeconds(entries, i, sid), g = el("div", "thought");
+        g.append(el("div", "think-label", thoughtLabel(secs)), markdown(thoughtText(e), "think-text")); tx.append(g);
       }
       else if (e.k === "harness") { if (!show.messages || q) continue; tx.append(el("div", "harness-note", "Harness text added before the prompt (" + e.label + ")")); }
       else if (e.k === "end") { if (filtering) continue; tx.append(el("div", "divider", e.text)); }

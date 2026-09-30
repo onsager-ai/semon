@@ -51,7 +51,7 @@
     machine: "M3 5h18v11H3zM8 20h8M12 16v4", repo: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6", delegate: "M4 3h7v5H4zM7.5 8v9H13M13 14h7v6h-7z",
     out: "M7 17L17 7M9 7h8v8", in: "M17 7L7 17M15 17H7V9", move: "M4 8h13l-3-3M20 16H7l3 3", ask: "M5 18l-1 3 3-1 11-11-2-2zM14 6l4 4", you: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6", q: "M9 9a3 3 0 1 1 4 2.8c-.7.3-1 .9-1 1.7V14M12 18h.01", check: "M5 12l4 4 10-10", qc: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4M12 17h.01", decide: "M12 21v-6M12 15L6 9M12 15l6-6M6 9V4M18 9V4M4 6l2-2 2 2M16 6l2-2 2 2", result: "M14 3H6v18h12V7zM14 3v4h4M9 12h6M9 16h6", done: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12.5l2.7 2.7L16 9.8", x: "M6 6l12 12M18 6L6 18", expand: "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7", copy: "M9 9h11v11H9zM5 15H4V4h11v1", ext: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
     down: "M12 4v15M5 12l7 7 7-7", up: "M6 15l6-6 6 6", dn: "M6 9l6 6 6-6", branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
-    wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z", wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", tokens: "M5 5h14M12 5v14M9 19h6", chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7", coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5", relay: "M4 7h13l-3-3M20 17H7l3 3M17 4l-3 3 3 3M7 14l3 3-3 3",
+    wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z", wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", tokens: "M5 5h14M12 5v14M9 19h6", chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7", coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5", relay: "M4 7h13l-3-3M20 17H7l3 3",
   };
   const clock = (t) => { const d = new Date(t), n = new Date(NOW); const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(undefined, { weekday: "short" }) + " " + hm; };
   const ago = (t) => { const d = Math.floor((NOW - t) / 60000); return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d"; };
@@ -203,20 +203,28 @@
   const rich = (tag, cls, text) => { const n = el(tag, cls); inline(n, text); return n; };
 
   // What a handoff says, from a viewpoint. Returns [icon, [parts...]].
-  function sentence(h, viewer) {
-    const W = (id) => { const s = el("span", "who", nameOf(id)); return s; };
+  // A handoff as a sentence: who did what to whom. With `links`, each name (other than the viewed session and you) opens that
+  // session, at the turn the handoff sits in there.
+  function sentence(h, viewer, links = false) {
+    const W = (id, turn) => {
+      if (links && id !== "you" && id !== viewer && SESS[id]) { const b = btn("who-link", nameOf(id), "Open " + nameOf(id)); b.addEventListener("click", (e) => { e.stopPropagation(); goSession(id, turn); }); return b; }
+      return el("span", "who", nameOf(id));
+    };
+    const from = () => W(h.from, HOLDS.get(h.id)?.id), to = () => W(h.to, STARTS.get(h.id)?.id);
     const kindOf = (id) => SESS[id]?.kind === "Subagent" ? "subagent" : SESS[id]?.kind ?? "";
-    if (h.kind === "ask") return [I.ask, [W("you"), el("span", "verb", " asked "), W(h.to)]];
-    if (h.kind === "spawn") return viewer === h.to ? [I.in, [el("span", "verb", "Brief from "), W(h.from)]] : [I.out, [W(h.from), el("span", "verb", " handed off to " + kindOf(h.to) + " "), W(h.to)]];
-    if (h.kind === "relay") return viewer === h.to ? [I.in, [el("span", "verb", "Relay from "), W(h.from)]] : [I.out, [W(h.from), el("span", "verb", " relayed to "), W(h.to)]];
+    if (h.kind === "ask") return [I.ask, [W("you"), el("span", "verb", " asked "), to()]];
+    if (h.kind === "spawn") return viewer === h.to ? [I.in, [el("span", "verb", "Brief from "), from()]] : [I.out, [from(), el("span", "verb", " handed off to " + kindOf(h.to) + " "), to()]];
+    if (h.kind === "relay") return viewer === h.to ? [I.in, [el("span", "verb", "Relay from "), from()]] : [I.relay, [from(), el("span", "verb", " relayed to "), to()]];
     if (h.kind === "move") {
-      const ends = [h.fromMachine, h.toMachine], short = machineShorts(ends.map((id) => [id, MACHINE[id] ?? id]));
-      const M = (id) => { const n = el("span", "verb mach", short.get(id)); n.dataset.tip = "Machine: " + (MACHINE[id] ?? id); return n; };
-      return [I.move, [el("span", "verb", "Semon moved "), W(h.to), el("span", "verb", " from "), M(h.fromMachine), el("span", "verb", " to "), M(h.toMachine)]];
+      // Machines are named short (colliding names keep enough to tell them apart), each with its whole name as a tip.
+      const ends = [h.fromMachine, h.toMachine], short = machineShorts(ends.map((id) => [id, MACHINE[id] ?? id])), tipped = (n, id) => { n.dataset.tip = "Machine: " + (MACHINE[id] ?? id); return n; };
+      const mb = links ? btn("who-link mach", short.get(h.fromMachine), "Open " + (MACHINE[h.fromMachine] ?? h.fromMachine)) : el("span", "who mach", short.get(h.fromMachine));
+      if (links) mb.addEventListener("click", (e) => { e.stopPropagation(); go({ v: "machine", id: h.fromMachine }); });
+      return [I.move, [el("span", "verb", "Semon moved "), el("span", "who", nameOf(h.to)), el("span", "verb", " from "), tipped(mb, h.fromMachine), el("span", "verb", " to "), tipped(el("span", "verb mach", short.get(h.toMachine)), h.toMachine)]];
     }
     const what = { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h.ask];
     const answered = h.status === "done" && (h.ask === "question" || h.ask === "decision");
-    return [answered ? I.done : h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from), el("span", "verb", what)]];
+    return [answered ? I.done : h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [viewer === h.from ? el("span", "who", nameOf(h.from)) : from(), el("span", "verb", what)]];
   }
   const statWord = (h) => isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
 
@@ -379,26 +387,15 @@
       Object.assign(TXM[sid], { total: p.total, calls: p.calls, errors: p.errors }); if (where !== "before" && p.to >= p.total) TXM[sid].tok = tok; spread(sid);
     });
   }
-  // A spawn's child work opens inline under its card: load the turn each brief started, when its session isn't loaded.
-  function kids(sid, signal) {
-    const jobs = [];
-    for (const e of TX[sid] ?? []) {
-      const h = e.k === "h" ? HID.get(e.id) : null, c = h && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id) : null;
-      if (c && !TX[c.sid]) jobs.push(fetchTx(c.sid, "turn=" + enc(c.id), undefined, signal));
-    }
-    return jobs.length ? Promise.all(jobs) : null;
-  }
-  // What a route needs before it can draw: a session's page (the one holding a deep-linked turn), and its child work.
+  // What a route needs before it can draw: a session's page (the one holding a deep-linked turn).
   // `signal` cancels what a navigation asked for when the reader goes elsewhere first.
   function load(r, signal) {
     if (r.v === "analytics") return fetchAnalytics().then(() => { scheduleAnalytics(); }); // the range's answer, from the server
     if (r.v !== "session" || !SESS[r.id]) return null;
     const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
-    if (TX[r.id] && !deep) return lenient(kids(r.id, signal));
-    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal).then(() => lenient(kids(r.id, signal)));
+    if (TX[r.id] && !deep) return null;
+    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal);
   }
-  // Child work that fails to load leaves its cards as they were: only the session's own transcript failing fails the route.
-  const lenient = (p) => (p ? p.catch(() => {}) : p);
   // The last few transcripts opened, kept when the reader leaves them, so opening one again draws it at once. (A transcript
   // still in TX, which only a model update prunes, draws from there just the same.) A transcript is kept only when it was
   // loaded to its end, and the cache is bounded by entries and by estimated memory: two bytes for each character of an entry's
@@ -431,7 +428,7 @@
   // for when the mark is the same. The page is drawn again, keeping the reader's place, once something arrived.
   function revalidate(r) {
     const sid = r.id, m = TXM[sid], moved = m && m.to >= m.total && m.tok != null && TOK[sid] != null && m.tok !== TOK[sid];
-    const job = moved ? (shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid)) : null, work = job ? job.then(() => kids(sid)) : kids(sid);
+    const job = moved ? (shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid)) : null, work = job;
     if (work) work.then(() => { if (route === r && rendered === r) refresh(null); }, () => {});
   }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
@@ -440,8 +437,25 @@
     b.addEventListener("click", () => {
       stopOpeningEndPin();
       const m = TXM[sid], box = phone.matches ? document.documentElement : $("#main"), h0 = box.scrollHeight; b.disabled = true;
-      fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where).then(() => kids(sid)).then(() => {
-        render(); if (where === "before") { const d = box.scrollHeight - h0; if (phone.matches) window.scrollBy(0, d); else box.scrollTop += d; } }, () => { b.disabled = false; });
+      // What is on screen stays where it is: the first turn in view is found again after the redraw and put back at its old top, at once
+      // and again after the frame in which measured parts (clamped text, its "Show more") have settled.
+      // (Not the first turn on the page: an earlier page can continue it, growing it from inside.)
+      const seen = where === "before" ? [...document.querySelectorAll("#page .turns > .turn")].slice(1).find((t) => t.getBoundingClientRect().bottom > edge() + 1) : null;
+      const anchor = seen ? { id: seen.dataset.turn, top: seen.getBoundingClientRect().top } : null;
+      fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where).then(() => {
+        render();
+        if (where !== "before") return;
+        const by = (d) => { if (phone.matches) window.scrollBy(0, d); else box.scrollTop += d; };
+        const node = () => anchor && [...document.querySelectorAll("#page .turns > .turn")].find((t) => t.dataset.turn === anchor.id);
+        if (!node()) { by(box.scrollHeight - h0); return; }
+        const put = () => { const n = node(); if (n) { const d = n.getBoundingClientRect().top - anchor.top; if (Math.abs(d) > 0.5) by(d); } };
+        put(); requestAnimationFrame(() => { put(); requestAnimationFrame(put); });
+        // Parts measured later (fonts, clamped text) can still change what is above: keep the turn in place while the list settles, until the reader moves.
+        const list = $("#page .turns"); if (!list) return;
+        const ro = new ResizeObserver(put), stop = () => { ro.disconnect(); clearTimeout(timer); };
+        const timer = setTimeout(stop, 1000); ro.observe(list);
+        for (const type of ["wheel", "pointerdown", "keydown", "touchstart"]) window.addEventListener(type, stop, { once: true, passive: true, capture: true });
+      }, () => { b.disabled = false; });
     });
     return w;
   }
@@ -522,7 +536,7 @@
   const railToggle = $("#rail-toggle") ?? el("button"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
   let groupBy = "recent"; let query = ""; let focusSessionsSearchOnRender = null; let analyticsRange = 7, analyticsMeasure = "hours";
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
-  let pendingSessionOpen = null, pendingFlashHandoff = null;
+  let pendingSessionOpen = null;
   let accountOpen = false;
   // The phone's account menu adds a history entry, so the back gesture closes it.
   let accountSheet = false;
@@ -615,10 +629,6 @@
       else if (r.v === "session") openSessionAtEnd();
       else quietTop();
       syncJump();
-      if (pendingFlashHandoff && r.v === "session" && HID.get(pendingFlashHandoff)?.from === r.id) {
-        const id = pendingFlashHandoff; pendingFlashHandoff = null;
-        requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1500); });
-      }
     };
     // A transcript already in memory, still in TX or kept in the cache, needs no network: the top bar and the sidebar are drawn
     // from the model at once, the page itself on the next frame (so the first two are on screen before a long transcript is
@@ -1272,12 +1282,12 @@
     let tries = 0;
     const extend = () => hasSlot(sid, slot) || tries++ >= 3 ? null : fetchTx(sid, up ? "before=" + TXM[sid].from : "after=" + TXM[sid].to, up ? "before" : "after").then(extend);
     const around = () => hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + Math.max(0, slot - ERR_AROUND)).then(() => (hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + slot)));
-    return Promise.resolve(near ? extend() : null).then(around).then(() => kids(sid)).then(() => true);
+    return Promise.resolve(near ? extend() : null).then(around).then(() => true);
   }
   // The session's own step for a slot: not one in a child run's work drawn inside it.
   function errNode(sid, slot) {
     const e = (TX[sid] ?? []).find((x) => x.k === "tool" && x.slot === slot); if (!e?.key) return null;
-    return [...$("#page").querySelectorAll(".turns .step[data-e]")].find((n) => n.dataset.e === e.key && !n.closest(".cw-body")) ?? null;
+    return [...$("#page").querySelectorAll(".turns .step[data-e]")].find((n) => n.dataset.e === e.key) ?? null;
   }
   // Marks the current step (its group opened so it shows); with `ring`, rings it for a moment and centres it under the bar.
   function markError(ring) {
@@ -1359,15 +1369,6 @@
       errLabel(ERR.count !== was); markError(false);
     });
   }
-  function childKindChip(s, meta = false) {
-    const c = el("span", meta ? "meta-item meta-kind" : "child-kind"); c.style.setProperty("--h", "var(--" + s.harness + ")");
-    // The top bar's badge (meta) keeps the delegation glyph for a Subagent. The card's badge names the harness by its mark and the kind by its word, so it has no glyph for one.
-    const mark = s.kind === "Subagent" ? (meta ? icon(I.delegate, "kind-delegate") : null) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
-    if (!meta) { const source = harnessIcon(s.harness, { size: 14 }); if (source) c.append(source); } // the top bar's badge (meta) is left to the session bar's own change
-    if (mark) c.append(mark);
-    const kindText = s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"); if (meta) c.dataset.tip = "Kind: " + kindText;
-    c.append(el("span", meta ? "meta-value" : null, kindText)); return c;
-  }
   // Labels drop from the end, least important first, until the line fits. State always stays.
   function fitMeta(l2) {
     const labs = [...l2.querySelectorAll(".lab")]; labs.forEach((n) => { n.hidden = false; });
@@ -1388,7 +1389,7 @@
     const failed = countOf(s, "errors") ?? 0;
     const st = el("span", "lab state " + s.state); st.append(dot(s.state, false), el("span", null, STATE[s.state])); l2.append(st);
     l2.append(lab(kindText(s), s.kind ? s.kind + " · " + HARNESS[s.harness] : null, 2));
-    const model = lab(shortModel(s.model), "Model: " + modelIdOf(s) + (s.effort ? ". Reasoning effort: " + s.effort : ""), 3, "meta-model"); if (s.effort) model.append(el("span", "meta-effort", " · " + s.effort)); l2.append(model);
+    const model = lab(shortModel(s.model), "Model: " + modelIdOf(s) + (s.effort ? ". Reasoning effort: " + s.effort : ""), 3, "meta-model"); if (s.effort) { const eff = el("span", "meta-effort"); eff.append(el("span", "meta-sep", "·"), s.effort); model.append(eff); } l2.append(model);
     // Failed steps and runs are the two labels that lead somewhere, so they are the last two the fitter drops.
     if (failed) l2.append(lab(failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ": step through them", 0, "lab-errs", () => openErrors(s.id)));
     const runs = descendantsOf(s.id, sessionChildren());
@@ -1403,7 +1404,7 @@
     const sessions = here.length + (here.length === 1 ? " session" : " sessions");
     l2.append(lab(up ? w + " working · " + sessions : movedOff(m).length ? movedOff(m).length + " moved off" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, sessions].filter(Boolean).join(" · "), null, 1)); };
   // What Find counts: the matches on the page when there is a search or a filter, else nothing.
-  const matchCount = () => find || !show.messages || !show.tools || !show.thinking ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : null;
+  const matchCount = () => find || !show.messages || !show.tools || !show.thinking ? $("#page").querySelectorAll(".turns .msg, .turns .bubble, .turns .step, .turns .event, .turns .child-card").length : null;
   const matchText = (n) => n == null ? "" : n ? n + (n === 1 ? " match" : " matches") : "No matches";
   // Find and filter: one mode. Search takes over the bar and the filters sit under it as chips, one choice at a time.
   function findBar(bar, s, account) {
@@ -1692,16 +1693,11 @@
   }
 
   // ---- Session page --------------------------------------------------------------------------------------------------
-  // A child's brief is drawn once, in its intro block, so its transcript leaves out the handoff that started it. Every draw of
-  // that transcript takes these options: a live update redraws turns too, and one drawn without them shows the brief again.
-  // A page that ends in a footer leaves the last turn's "Still working" line to it; one without a footer (a stub, a session with
-  // no repo) keeps that line.
-  const transcriptOpts = (sid) => { const origin = originHandoff(sid); return origin ? { excludeH: origin.id } : { footer: !!SESS[sid] && showsFooter(SESS[sid], null) }; };
   function renderSession(page, sid) {
     markSeenResults(H.filter((h) => isResult(h) && h.from === sid));
     const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr"); const h1 = el("h1", null, s.name); head.append(h1); page.append(head); observeTitle(h1);
-    if (origin) { page.classList.add("child-page"); page.append(childBriefBlock(origin)); }
-    page.append(transcript(sid, transcriptOpts(sid)));
+    // The jump button sits in the transcript's own grid, so its row adds no page gap when it appears.
+    const t = transcript(sid); t.append(jumpWrap); page.append(t);
     if (showsFooter(s, origin)) page.append(sessionFooter(s, origin));
   }
   // Whether a session page ends in its status line: a child's when it is running or has returned, any other session's always.
@@ -1747,23 +1743,27 @@
     Skill: ["stack", "Used skill", "used", "skill", "skills"] };
   const toolInfo = (name) => { if (TOOLS[name]) return TOOLS[name]; const m = /^mcp__(.+?)__/.exec(name); if (m) { const srv = m[1].replace(/^claude_ai_/, "").replace(/_/g, " "); return ["ext", "Used " + srv, "used " + srv, "time", "times"]; } return ["run", name, name, "step", "steps"]; };
   const verb = (name) => toolInfo(name).slice(0, 2);
+  const NOW_VERB = { Ran: "Running", Read: "Reading", Edited: "Editing", Patched: "Patching", Wrote: "Writing", "Searched for": "Searching for" };
+  const verbNow = (name) => NOW_VERB[verb(name)[1]] ?? verb(name)[1];
+  const isCmd = (name) => /^(Bash|shell|exec_command|local_shell)$/.test(name);
   function transcript(sid, opts = {}) {
-    const sec = el("section", opts.nested ? "nested" : null); sec.setAttribute("aria-label", opts.nested ? SESS[sid].name + " transcript" : "Transcript"); Object.assign(sec.style, { display: "grid", gap: "10px", gridTemplateColumns: "minmax(0, 1fr)" });
-    const entries = transcriptEntries(opts.entries ?? TX[sid] ?? [], sid);
-    const turnMode = !opts.nested;
-    // On a session page the transcript is a list of turns, each with its own entries; a nested one is a plain list.
-    const box = el("div", turnMode ? "turns" : "tx"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);
+    const sec = el("section", "transcript"); sec.setAttribute("aria-label", "Transcript");
+    const entries = transcriptEntries(TX[sid] ?? [], sid);
+    const turnMode = true;
+    // The transcript is a list of turns, each with its own entries.
+    const box = el("div", "turns"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);
+    const filtering = !!find || !show.messages || !show.tools || !show.thinking;
     const keyed = (n, e) => { if (e.key) n.dataset.e = e.key; return n; };
     const range = turnMode ? TXM[sid] : null;
     if (range?.from > 0) box.append(pager(sid, "before", "Load earlier"));
-    else if (!find && turnMode) box.append(startedDivider(sid));
+    else if (!filtering) box.append(startedDivider(sid));
     // Adjacent tool calls collapse into one summary line ("Ran 2 commands, read 1 file · 1 failed"),
     // expandable to the individual steps. A lone call stays a single line; while finding, matches show directly.
     let run = []; const maskedIn = new WeakSet();
     const flush = () => {
       if (!run.length) return;
       const steps = el("div", "steps"); run.forEach((r) => steps.append(r.node));
-      if (run.length === 1 || find) { tx.append(steps); run = []; return; }
+      if (run.length === 1 || filtering) { tx.append(steps); run = []; return; }
       const counts = new Map(); for (const r of run) { const [, , p, one, many] = toolInfo(r.k), c = counts.get(p) ?? { n: 0, one, many }; c.n++; counts.set(p, c); }
       let text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
       text = text[0].toUpperCase() + text.slice(1);
@@ -1782,76 +1782,33 @@
     const firsts = turnMode ? new Map((TURNS[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t])) : new Map(); let cur = null;
     // A live update draws only the turns that changed (opts.only, by turn id).
     const owner = opts.only ? new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : null;
-    const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
-      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .tgroup, .hcard, .thought, .think-pending")) { blk.remove(); return; }
-      if (opts.excludeH && t.last) return;
-      // The page's footer says the session is working, so the last turn doesn't say it too (its trace button stays).
-      const shown = turnEnd(t), end = opts.footer && t.last && shown?.st === "work" ? null : shown; if (!end && !t.out.length) return;
-      const d = el("div", "turn-end");
-      if (end) { const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st, false), spaced(end.text)); d.append(st); }
-      if (t.out.length) d.append(traceBtn(t)); blk.append(d); };
+    const CONTENT = ".msg, .bubble, .step, .event, .child-card, .thought, .think-pending, .harness-note, .tgroup";
+    const closeTurn = () => { flush(); if (!cur) return; const { t, blk, masked } = cur; cur = null; tx = box;
+      // A turn whose only thinking was masked is left with nothing to draw (no header, no rows): it goes, unless its foot still says something.
+      const bare = masked && !blk.querySelector(".tx > *, .turn-h");
+      const end = turnEnd(t), returned = t.entries.some((e) => e.k === "end" && /^Returned to /.test(e.text ?? ""));
+      const foot = !filtering && ((end && end.st === "err" && !returned) || t.out.length);
+      if (bare && !foot) { blk.remove(); return; }
+      if (bare) blk.querySelector(":scope > .tx")?.remove(); // its foot stays alone, with no empty space above it
+      if (filtering && !blk.querySelector(CONTENT)) { blk.remove(); return; }
+      // A turn's foot only says what the rows above don't: that it stopped on a failure, and where its trace is.
+      if (foot) {
+        const d = el("div", "turn-end");
+        if (end?.st === "err" && !returned) d.append(stateLabel("err", end.text));
+        if (t.out.length) { const tb = btn("link", null, "Trace what this turn set off"); tb.append(icon(I.trace), el("span", null, "Trace")); tb.addEventListener("click", () => goTrace(t.id)); d.append(tb); }
+        blk.append(d);
+      } };
     const openTurn = (t) => { closeTurn(); const blk = el("section", "turn"); blk.dataset.turn = t.id;
       // Your own message needs no header: the bubble is yours and its time sits under it. A relay or brief says who sent it.
       const h = t.start;
       if (t.u || h?.kind === "ask") blk.setAttribute("aria-label", "Your message" + (h ? " at " + clock(h.at) : ""));
-      else if (h && h.id !== opts.excludeH) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in)); const sender = SESS[h.from] && harnessIcon(SESS[h.from].harness, { size: 16 }); if (sender) hd.append(sender); hd.append(l, el("span", "tm", clock(h.at))); blk.append(hd); }
+      else if (h) { const hd = el("div", "turn-h"); const [, parts] = sentence(h, sid, true); const sender = SESS[h.from] && harnessIcon(SESS[h.from].harness, { size: 16 }); if (sender) hd.append(sender); hd.append(...parts, el("span", "tm", clock(h.at))); blk.append(hd); }
       tx = el("div", "tx"); blk.append(tx); box.append(blk); cur = { t, blk }; };
-    const toolStep = (e, v, ic, live) => {
-      const box = keyed(el("div", "step" + (live ? " live" : e.ok || e.ok === null ? "" : " err")), e);
-      if (live) { box.dataset.live = sid; if (e.since != null) box.dataset.since = e.since; }
-      const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
-      const status = live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
-      const title = e.title ? String(e.title) : null;
-      const command = e.in ?? e.arg;
-      const firstNonemptyLine = typeof command === "string" ? command.split(/\r\n|\n|\r/).find((line) => line.trim()) : null;
-      const label = title ? el("span", "sa st", title) : el("code", "sa", e.arg);
-      if (title) {
-        b.setAttribute("aria-label", "Ran: " + title);
-        if (firstNonemptyLine != null) label.setAttribute("data-tip", firstNonemptyLine.slice(0, 200));
-      }
-      b.append(live ? el("span", "spin") : icon(I[ic]));
-      if (!title) b.append(el("span", "sv", live && v === "Ran" ? "Running" : v));
-      b.append(label, el("span", "sd" + (live ? " tick" : ""), status), icon(I.chev, "chev"));
-      const out = el("div", "out"); out.hidden = true;
-      // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
-      // eleven lines. When either is cut, "View all" opens the whole call in a sheet.
-      const shell = /^(Bash|shell|exec_command|local_shell)$/.test(e.name), inLabel = shell ? "Command" : "Input";
-      const input = shell ? (e.in ?? e.arg) : e.in;
-      if (input != null) out.append(el("div", "io", inLabel), el("pre", "in clip", input));
-      if (e.cwd && e.cwd !== ".") out.append(el("div", "io", "Working directory · " + e.cwd));
-      if (live) out.append(el("div", "noout", "Running · no output yet"));
-      else {
-        if (e.out != null && e.out !== "") out.append(el("div", "io", "Output"));
-        if (e.changes) {
-          for (const change of e.changes) {
-            out.append(el("div", "io", "Change · " + change.path + (change.move ? " → " + change.move : "")));
-            if (change.diff?.length) out.append(diffEl(change.diff, "clip")); else out.append(el("div", "noout", "No diff recorded"));
-          }
-          if (!e.changes.length) out.append(el("div", "noout", "No changes recorded"));
-        } else if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) { out.append(outEl(e, "clip")); if (e.cut) out.append(el("div", "cutnote", cutNoteText(e.cut))); } else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
-      }
-      const actions = el("div", "step-actions");
-      if (!live && e.script != null) { const script = el("button", "viewscript", "View script"); script.type = "button"; script.addEventListener("click", () => openScript(e)); actions.append(script); }
-      const all = el("button", "viewall"); all.type = "button"; all.hidden = true; all.append(icon(I.expand), el("span", null, "View all"));
-      all.addEventListener("click", () => openViewer(e, v, ic, inLabel)); actions.append(all); actions.hidden = e.script == null; out.append(actions);
-      b.addEventListener("click", () => { out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden));
-        if (!out.hidden) {
-          let cut = !!e.more?.length;
-          out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; });
-          all.hidden = !cut; actions.hidden = e.script == null && !cut;
-          // Text cut when this copy was made, with nothing more to show: say so instead of ending on "…".
-          if (!cut && !e.cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs"));
-        }
-      });
-      box.append(b, out); return box;
-    };
     for (const e of entries) {
       if (owner && !opts.only.has(owner.get(e.key))) continue;
-      if (turnMode && isGap(e)) { closeTurn(); if (!find) box.append(el("div", "divider", e.text)); continue; }
+      if (turnMode && isGap(e)) { closeTurn(); if (!filtering) box.append(el("div", "divider", e.text)); continue; }
       if (turnMode && firsts.has(e.key)) openTurn(firsts.get(e.key));
-      if (opts.excludeH && e.k === "h" && e.id === opts.excludeH) continue;
-      if (opts.excludeH && e.k === "end" && /^Returned to /.test(e.text ?? "")) continue;
-      // Entries that render nothing (hidden kinds) must not split a run of tool calls.
+      // Entries that render nothing (empty thinking, hidden kinds) must not split a run of tool calls.
       if (e.k === "think" && (!show.thinking || find)) continue;
       // Masked thinking is one quiet line per turn (per list, when nested), at the first masked thought's place. Later ones draw
       // nothing, and the line never splits a run of steps: drawn before flush(), it lands ahead of a run still being gathered.
@@ -1863,10 +1820,19 @@
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + (e.title ?? "") + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
-        const box = toolStep(e, v, ic, !!e.live);
-        if (e.live) run.push({ node: box, v, k: e.name, live: true, secs: e.secs, key: e.key });
-        else run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key });
-        continue;
+        const box2 = keyed(el("div", "step" + (e.live ? " live" : e.ok || e.ok === null ? "" : " err")), e), b = btn(); b.setAttribute("aria-expanded", "false");
+        if (e.live) { box2.dataset.live = sid; if (e.since != null) box2.dataset.since = e.since; }
+        const status = e.live ? e.secs : e.unfinished ? "No result" : e.exit != null ? "Exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "Exit unknown · " + e.secs : "Failed · " + e.secs;
+        // A step with a description is titled by it, with the command's first line as its tip (#182); a running step opens like the others (#183).
+        const title = e.title ? String(e.title) : null, command = e.in ?? e.arg, firstLine = typeof command === "string" ? command.split(/\r\n|\n|\r/).find((l) => l.trim()) : null;
+        const label = title ? el("span", "sa st", title) : el("code", "sa", e.arg);
+        if (title) { b.setAttribute("aria-label", "Ran: " + title); if (firstLine != null) label.setAttribute("data-tip", firstLine.slice(0, 200)); }
+        b.append(e.live ? el("span", "spin") : icon(I[ic]));
+        if (!title) b.append(el("span", "sv", e.live ? verbNow(e.name) : v));
+        b.append(label, el("span", "sd" + (e.live ? " tick" : ""), status), icon(I.chev, "chev"));
+        // The detail is built when the step is first opened: what was asked first, then what came back.
+        let out = null; b.addEventListener("click", () => { if (!out) { out = stepDetail(e, v, ic); out.hidden = true; box2.append(out); } out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden)); });
+        box2.append(b); run.push({ node: box2, v, k: e.name, ...(e.live ? { live: true, secs: e.secs } : { err: e.ok === false }), key: e.key }); continue;
       }
       flush();
       if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg user"), e); userBody(m, e, e.text); tx.append(m); }
@@ -1881,27 +1847,23 @@
         }
       }
       else if (e.k === "harness") { if (!show.messages || find) continue; tx.append(keyed(el("div", "harness-note", "Harness text added before the prompt (" + e.label + ")"), e)); }
-      else if (e.k === "end") { if (find) continue; tx.append(keyed(el("div", "divider", e.text), e)); }
+      else if (e.k === "end") { if (filtering) continue; tx.append(keyed(el("div", "divider", e.text), e)); }
       else if (e.k === "h") {
         const h = H.find((x) => x.id === e.id); if (!hit(h.brief + " " + (h.result ?? ""))) continue;
         // Your own ask is simply your message.
         if (h.kind === "ask") { if (!show.messages) continue; const m = keyed(el("div", "msg user"), e); userBody(m, e, h.brief); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
-        if (h.kind === "toyou" && h.ask === "result") {
-          const marker = el("div", "result-marker " + (SEEN_RESULTS.has(h.id) ? "read" : "new"));
-          marker.append(icon(I.result), el("span", "word", statWord(h)), el("span", "tm", clock(h.at)));
-          tx.append(keyed(marker, e)); continue;
-        }
-        // A relay or brief that starts a turn is that turn's message.
-        if (cur && cur.t.start === h && e === cur.t.entries[0]) { if (!show.messages) continue; tx.append(keyed(handoffCard(h, sid, true), e)); continue; }
-        if (h.kind === "move") { if (find) continue; tx.append(keyed(handoffCard(h, sid), e)); continue; }
-        if (!show.tools && h.kind !== "toyou") continue;
-        if (opts.nested && h.kind === "spawn" && h.to === sid) continue; // the parent's card already shows this brief
-        tx.append(keyed(handoffCard(h, sid), e));
+        // A relay or brief that starts a turn is that turn's incoming message, under the header that names its sender.
+        if (cur && cur.t.start === h && e === cur.t.entries[0]) { if (!show.messages) continue; const m = keyed(el("div", "bubble in"), e); m.dataset.h = h.id; m.append(markdown(h.brief)); tx.append(m); continue; }
+        // A session this one started is a card that opens it.
+        if (h.kind === "spawn" && h.from === sid && SESS[h.to]) { if (!show.tools) continue; tx.append(keyed(childCard(h, SESS[h.to]), e)); continue; }
+        if (find && h.kind === "move") continue;
+        if (!show.messages && h.kind !== "move") continue;
+        tx.append(keyed(eventRow(h, sid), e));
       }
     }
     closeTurn();
     if (range && range.to < range.total) box.append(pager(sid, "after", "Load later"));
-    if (!box.querySelector(".msg, .step, .hcard")) box.append(el("p", "empty", find ? "Nothing matches “" + find + "”." : "Nothing to show with these filters."));
+    if (!box.querySelector(CONTENT)) box.append(el("p", "empty", find ? "Nothing matches “" + find + "”." : "Nothing to show with these filters."));
     sec.append(box); return sec;
   }
   // Codex cuts some outputs before the model sees them and says where and how much. An output cut that way is drawn as its
@@ -1920,18 +1882,46 @@
   // The whole tool call. A phone gets a full-screen sheet and a wider screen a dialog; either way it is a history entry,
   // so the back gesture closes it without leaving the page.
   let viewerEl = null, skipPop = false;
-  function openViewer(e, verb, ic, inLabel) {
-    if (e.more?.length && e.slot != null && !e.full) { const open = (f) => openViewer({ ...e, ...f, full: true }, verb, ic, inLabel); fullOf(e).then(open, () => open({ fullFailed: true })); return; }
-    const d = el("dialog", "viewer"); d.setAttribute("aria-label", verb + " " + e.arg);
-    const head = el("div", "vh"); const t = el("div", "vt"); t.append(icon(I[ic]), el("span", null, verb + " " + e.arg));
-    const close = el("button", "vclose"); close.type = "button"; close.setAttribute("aria-label", "Close"); close.append(icon(I.x)); close.addEventListener("click", () => d.close());
-    const resultStatus = e.live ? "Running · " + e.secs : e.unfinished ? "no result" : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
-    head.append(t, close, el("div", "vm" + (!e.live && !(e.ok || e.ok === null) ? " err" : ""), e.name + " · " + resultStatus));
-    const body = el("div", "vb");
-    const section = (label, text) => { const s = el("div", "vs"); s.append(el("span", null, label));
-      if (text) { const c = el("button", "vcopy"); c.type = "button"; c.append(icon(I.copy), el("span", null, "Copy"));
-        c.addEventListener("click", () => navigator.clipboard?.writeText(text).then(() => { c.lastChild.textContent = "Copied"; }, () => { c.lastChild.textContent = "Copy failed"; })); s.append(c); }
-      body.append(s); };
+  // What a step shows opened: what was asked first (the command, the file, the input), then what came back. A failed command
+  // shows the end of its output, where the failure is; anything else shows the start. "View all" opens the whole call.
+  const PREVIEW_LINES = 12;
+  const stateLabel = (st, text) => { const x = el("span", "state " + st); x.append(st === "work" && text !== STATE.work ? el("span", "spin") : dot(st), el("span", null, text ?? STATE[st] ?? st)); return x; };
+  function copyBtn(text) { const c = btn("link copy", null, "Copy"); c.append(icon(I.copy), el("span", null, "Copy")); c.addEventListener("click", () => navigator.clipboard?.writeText(text).then(() => { c.lastChild.textContent = "Copied"; }, () => { c.lastChild.textContent = "Copy failed"; })); return c; }
+  function stepDetail(e, v, ic) {
+    const out = el("div", "out"), ioHead = (label, text) => { const h = el("div", "io"); h.append(el("span", null, label)); if (text) h.append(copyBtn(text)); return h; };
+    const cmd = e.in ?? (isCmd(e.name) ? e.arg : null);
+    // A long command stops at the preview height and fades (the text stays whole in the page); "View all" opens the whole call (#178).
+    const cmdLines = typeof cmd === "string" ? cmd.split("\n") : [], inCut = cmdLines.length > PREVIEW_LINES, inLabel = cmd ? (isCmd(e.name) ? "Command" : "Input") : "Input";
+    const viewAll = (label) => { const all = btn("viewall"); all.append(icon(I.expand), el("span", null, label)); all.addEventListener("click", () => openStepViewer(e, v, ic, inLabel)); out.append(all); };
+    if (cmd) out.append(ioHead(isCmd(e.name) ? "Command" : "Input", cmd), el("pre", "in" + (inCut ? " clip clipped" : ""), cmd));
+    else if (!e.diff && !e.changes) out.append(ioHead(/^(Read|Grep|Glob)$/.test(e.name) ? (e.name === "Read" ? "File" : "Pattern") : "Input"), el("pre", "in", e.arg));
+    if (e.cwd && e.cwd !== ".") out.append(ioHead("Working directory · " + e.cwd));
+    const actions = () => {
+      if (e.script != null) { const sv = btn("viewall viewscript"); sv.append(icon(I.expand), el("span", null, "View script")); sv.addEventListener("click", () => openScript(e)); out.append(sv); }
+    };
+    if (e.changes) {
+      for (const change of e.changes) { out.append(ioHead("Change · " + change.path + (change.move ? " → " + change.move : ""))); if (change.diff?.length) out.append(diffEl(change.diff)); else out.append(el("div", "noout", "No diff recorded")); }
+      if (!e.changes.length) out.append(el("div", "noout", "No changes recorded"));
+      if (inCut) viewAll("View all"); actions(); return out;
+    }
+    if (e.diff) { out.append(ioHead("Change · " + e.arg), diffEl(e.diff)); if (inCut) viewAll("View all"); actions(); return out; }
+    if (!e.out) { out.append(ioHead("Output"), el("div", "noout", e.live ? "Running · no output yet" : e.unfinished ? "No result recorded: the machine stopped responding while this ran." : "No output")); if (inCut) viewAll("View all"); actions(); return out; }
+    const lines = e.out.split("\n"), cut = lines.length > PREVIEW_LINES, tail = e.ok === false, parts = !!e.cut?.parts?.length;
+    const shown = !cut || parts ? lines : tail ? lines.slice(-PREVIEW_LINES) : lines.slice(0, PREVIEW_LINES), more = !!e.more?.length;
+    out.append(ioHead(parts || !cut ? "Output" : (tail ? "Output · last " : "Output · first ") + PREVIEW_LINES + (more ? "" : " of " + lines.length) + " lines"));
+    if (parts) out.append(outEl(e)); else out.append(el("pre", null, shown.join("\n")));
+    if (e.cut) out.append(el("div", "cutnote", cutNoteText(e.cut)));
+    else if ([e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs"));
+    if ((cut && !parts) || more || inCut) viewAll(more || parts || inCut ? "View all" : "View all " + lines.length + " lines");
+    actions(); return out;
+  }
+  // The whole call, in a full sheet: what the preview cut, fetched from the server when it is longer than the preview.
+  function openStepViewer(e, v, ic, inLabel) {
+    if (e.more?.length && e.slot != null && !e.full) { const open = (f) => openStepViewer({ ...e, ...f, full: true }, v, ic, inLabel); fullOf(e).then(open, () => open({ fullFailed: true })); return; }
+    const status = e.live ? "Running · " + e.secs : e.unfinished ? "No result" : e.ok ? "Done · " + e.secs : e.ok === null ? "Exit unknown · " + e.secs : "Failed · " + e.secs;
+    const { body, show: open } = panel(v + " " + e.arg, { cls: "full", sub: e.name + " · " + status, label: v + " " + e.arg });
+    body.classList.add("viewer-b");
+    const section = (label, text) => { const x = el("div", "vs"); x.append(el("span", null, label)); if (text) x.append(copyBtn(text)); body.append(x); };
     const cutNote = (text) => { if (e.cut) { body.append(el("p", "vnote", cutNoteText(e.cut))); return; } if (!e.fullFailed && /…(\(truncated\))?\s*$/.test(text ?? "")) body.append(el("p", "vnote", "Cut short in this copy of the logs.")); };
     if (e.scriptText !== undefined) {
       section("Script", e.scriptText); body.append(el("pre", "script", e.scriptText));
@@ -1947,11 +1937,7 @@
     }
     if (e.fullFailed) body.append(el("p", "vnote", "Couldn't load the full text: this is the preview."));
     if (e.fullCut?.length) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));
-    d.append(head, body); document.body.append(d);
-    d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); }); // a tap on the backdrop (wide screens)
-    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); });
-    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
-    try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
+    open();
   }
 
   // Images a prompt attached: thumbnails above its text, each opening the image whole in the viewer sheet. The page never holds
@@ -2002,23 +1988,44 @@
   }
 
   function openScript(e) {
-    const done = (fields) => openViewer({ ...e, ...fields, full: true }, "View script", "run", "Script");
+    const done = (fields) => openStepViewer({ ...e, ...fields, full: true }, "View script", "run", "Script");
     api("/api/entry?sid=" + enc(e.sid) + "&slot=" + e.slot + "&as=script")
       .then((result) => done({ scriptText: result.text, scriptTruncated: result.truncated }))
       .catch(() => done({ scriptFailed: true }));
   }
 
-  function openParentAtHandoff(h) { pendingFlashHandoff = h.id; const turn = HOLDS.get(h.id); goSession(h.from, turn?.id); }
-  function childBriefBlock(h) {
-    const parent = SESS[h.from], block = el("section", "child-intro"); block.setAttribute("aria-label", "Brief from " + parent.name);
-    const title = el("div", "intro-title"), open = el("button", null, parent.name); open.type = "button"; open.addEventListener("click", () => openParentAtHandoff(h));
-    title.append("Brief from ", open, el("span", "tm", clock(h.at)));
-    block.append(title);
-    const brief = markdown(h.brief, "brief"), more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
-    more.addEventListener("click", () => { const expanded = brief.classList.toggle("open"); more.textContent = expanded ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(expanded)); });
-    new ResizeObserver(() => { if (brief.classList.contains("open") || !brief.clientHeight) return; const clipped = brief.scrollHeight > brief.clientHeight + 1; more.hidden = !clipped; brief.classList.toggle("clipped", clipped); }).observe(brief);
-    const parentLink = el("button", "intro-open", "Open in " + parent.name); parentLink.type = "button"; parentLink.addEventListener("click", () => openParentAtHandoff(h)); const actions = el("div", "intro-actions"); actions.append(more, parentLink); block.append(brief, actions); return block;
+  // A brief or message clamped to three lines; "Show more" opens it in place, and only appears when it is cut.
+  function clampText(parent, text, cls) {
+    const t = rich("div", "ev-text" + (cls ? " " + cls : ""), preview(text)); parent.append(t);
+    const more = btn("link ev-more", "Show more"); more.hidden = true; more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", (ev) => { ev.stopPropagation(); const o = t.classList.toggle("open"); more.textContent = o ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(o)); });
+    new ResizeObserver(() => { if (t.classList.contains("open") || !t.clientHeight) return; const x = t.scrollHeight > t.clientHeight + 1; more.hidden = !x; t.classList.toggle("clipped", x); }).observe(t);
+    parent.append(more); return t;
   }
+  // A session this one started: a card that opens it. Its state, what it is, the brief, and what it is doing or returned.
+  function childCard(h, c) {
+    const b = btn("child-card"); b.dataset.h = h.id;
+    const calls = countOf(c, "calls");
+    const head = el("span", "cc-head"); head.append(el("span", "cc-name", c.name), stateLabel(c.state), icon(I.chev, "chev"));
+    // The harness mark leads the kind line (#146); the kind stays a word, with no glyph.
+    b.append(head, withHarnessIcon(el("span", "cc-meta", [kindText(c), shortModel(c.model), dur(c.start, c.state === "work" ? null : c.last), (calls ?? "—") + (calls === 1 ? " step" : " steps")].join(" · ")), c.harness, { size: 14 }));
+    b.append(rich("span", "cc-brief", preview(h.brief)));
+    if (h.result) { const r = el("span", "cc-result" + (h.status === "err" ? " err" : "")); r.append(el("span", "rl", h.status === "err" ? "Result: " : "Returned: ")); inline(r, h.result); b.append(r); }
+    else if (c.state === "work" && c.activity) { const n = el("span", "cc-now"); n.append(el("span", "spin"), el("span", null, verbNow(c.activity[0])), el("code", null, c.activity[1])); b.append(n); }
+    b.setAttribute("aria-label", "Open " + c.name + ": " + kindText(c) + ", " + STATE[c.state]);
+    b.addEventListener("click", () => goSession(c.id));
+    return b;
+  }
+  // A relay, a message to you, or a machine move: who, when, the text, and what came back.
+  function eventRow(h, sid) {
+    const r = el("div", "event" + (h.kind === "toyou" && h.status === "wait" ? " waiting" : "") + (h.kind === "move" ? " move" : "")); r.dataset.h = h.id;
+    const [ic, parts] = sentence(h, sid, true); const head = el("div", "ev-head"); const ln = el("span", "ln"); ln.append(...parts); head.append(icon(ic), ln, el("span", "tm", clock(h.at))); r.append(head);
+    clampText(r, h.brief);
+    if (h.result) { const x = el("div", "ev-result"); x.append(el("span", "rl", h.kind === "relay" ? "Reply: " : "Returned: ")); inline(x, h.result); r.append(x); }
+    const an = answerEl(h, "ev-result"); if (an) r.append(an);
+    if (h.kind === "toyou" && h.status === "wait") r.append(stateLabel("wait", "Waiting on you"));
+    return r;
+  function openParentAtHandoff(h) { const turn = HOLDS.get(h.id); goSession(h.from, turn?.id); }
   // The tips on a session footer's items, as plain text (the tooltip sets it with textContent): calls by tool, times, cost by kind.
   const callsTip = (s) => { const parts = Object.entries(s.tool_calls ?? {}).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([name, n]) => name + " " + n), failed = countOf(s, "errors"); if (failed) parts.push(failed + " failed"); return parts.join(" · "); };
   const timeTip = (s, h, finished) => "Started " + clock(s.start) + " · last activity " + clock(s.last) + (finished ? " · finished " + clock(h?.done ?? s.last) : "");
@@ -2045,41 +2052,6 @@
     return block;
   }
 
-  function handoffCard(h, viewer, start) {
-    const other = h.kind === "move" ? null : viewer === h.from ? h.to : h.from;
-    const child = h.kind === "spawn" && viewer === h.from ? SESS[h.to] : null;
-    const answered = h.kind === "toyou" && h.status === "done" && (h.ask === "question" || h.ask === "decision");
-    const c = el("div", "hcard " + (child ? "child-card " + hcls(h.to) : h.kind === "toyou" ? "toyou" + (h.status === "wait" ? " waiting" : "") + (answered ? " answered" : "") : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
-    const [ic, parts] = sentence(h, viewer);
-    if (child) { const head = el("div", "child-head"); head.append(childKindChip(child), el("span", "ln", child.name)); c.append(head); }
-    else { c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln); }
-    const shownState = child?.state ?? h.status, sw = el("span", "stat " + shownState); sw.append(shownState === "work" ? el("span", "spin") : dot(shownState === "done" ? "done" : shownState, false), child ? STATE[shownState] : statWord(h)); c.append(sw);
-    if (child) { const meta = el("div", "child-meta"); meta.append(el("span", null, dur(child.start, child.state === "work" ? null : child.last)), el("span", null, callsText(countOf(child, "calls")))); c.append(meta); }
-    const br = markdown(h.brief, "brief"); c.append(br);
-    // Long messages open in place; the rest of the card still goes to the other session.
-    const more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
-    more.addEventListener("click", (ev) => { ev.stopPropagation(); const open = c.classList.toggle("open"); more.textContent = open ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(open)); });
-    new ResizeObserver(() => { if (c.classList.contains("open") || !br.clientHeight) return; const x = br.scrollHeight > br.clientHeight + 1; more.hidden = !x; br.classList.toggle("clipped", x); }).observe(br);
-    c.append(more);
-    if (h.result) { const r = el("span", "result"); r.append(el("b", null, (h.status === "err" ? "Failed" : "Returned") + ": ")); inline(r, h.result); c.append(r); }
-    const an = answerEl(h, "result"); if (an) c.append(an);
-    if (child) {
-      const actions = el("div", "child-actions"), openChild = el("button", null, "Open"); openChild.type = "button"; openChild.addEventListener("click", (e) => { e.stopPropagation(); goSession(child.id); }); actions.append(openChild);
-      const entries = (STARTS.get(h.id)?.entries ?? TX[child.id] ?? []).filter((e) => !(e.k === "h" && e.id === h.id));
-      if (entries.length) {
-        const group = el("div", "child-work"); group.dataset.e = "cw:" + h.id; group.addEventListener("click", (e) => e.stopPropagation()); const toggle = el("button", "cw-toggle"); toggle.type = "button"; toggle.setAttribute("aria-expanded", "false"); toggle.setAttribute("aria-label", "Activity of " + child.name); const label = el("span", null, "Activity"); label.append(el("span", "cw-count", " · " + entries.length)); toggle.append(icon(I.chev, "chev"), label);
-        const inner = el("div", "cw-body"); inner.hidden = true; let showAll = false;
-        const paint = () => { inner.replaceChildren(transcript(child.id, { nested: true, entries: showAll ? entries : entries.slice(-5) })); if (!showAll && entries.length > 5) { const all = el("button", "show-all", "Show all " + entries.length); all.type = "button"; all.addEventListener("click", (e) => { e.stopPropagation(); showAll = true; paint(); }); inner.append(all); } };
-        toggle.addEventListener("click", (e) => { e.stopPropagation(); if (inner.hidden && !inner.childElementCount) paint(); inner.hidden = !inner.hidden; toggle.setAttribute("aria-expanded", String(!inner.hidden)); });
-        group.append(toggle, inner); actions.append(group);
-      }
-      c.append(actions);
-    }
-    // Received: the sender's turn that sent it. Sent on: the turn it started there. To you: this turn's trace. A move: the machine it left.
-    const open = () => { if (h.kind === "move") go({ v: "machine", id: h.fromMachine }); else if (h.kind === "toyou") { const t = HOLDS.get(h.id); if (t) goTrace(t.id); } else if (viewer === h.to) openSender(h); else if (SESS[other]) goSession(other, STARTS.get(h.id)?.id); };
-    c.addEventListener("click", (ev) => { if (!getSelection().isCollapsed) return; open(); });
-    c.addEventListener("keydown", (ev) => { if (ev.target === c && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); open(); } });
-    return c;
   }
 
   // ---- Render --------------------------------------------------------------------------------------------------------
@@ -2543,11 +2515,13 @@
   }
   // A 403 or a dropped connection fails the update (and backs off); anything else skips that one transcript.
   const soft = (p) => p.catch((e) => { if (e?.status === 403 || e?.status === 0) throw e; });
-  // The transcripts on screen: a session page's own, and its child runs'. Any other loaded transcript is dropped from TX (the
-  // last few opened are kept in TXCACHE, and brought up to date when opened again).
-  const viewed = () => { const v = new Set(); if (route.v !== "session") return v; v.add(route.id); for (const h of H) if (h.kind === "spawn" && h.from === route.id && h.to) v.add(h.to); return v; };
+  // The transcript on screen: a session page's own. Any other loaded transcript is dropped from TX (the last few opened are kept in
+  // TXCACHE, and brought up to date when opened again). A child run's card is drawn from the model, so its transcript is not loaded.
+  const viewed = () => { const v = new Set(); if (route.v === "session") v.add(route.id); return v; };
+  // What a child card shows, so an update knows which cards changed: the run's name, state, kind, model, steps and current call.
+  const cardKeys = () => new Map(H.filter((h) => h.kind === "spawn" && SESS[h.to]).map((h) => { const c = SESS[h.to]; return [h.id, [c.name, c.state, c.kind, c.model, countOf(c, "calls"), c.activity?.join("|"), h.status, h.result].join("\u0001")]; }));
   function update(m) {
-    const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
+    const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, oldCards = cardKeys(), names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
     const hadOrigins = new Set([...TXCACHE.keys()].filter((sid) => !!originHandoff(sid)));
     const hadOrigin = route.v === "session" && !!SESS[route.id] && !!originHandoff(route.id);
     adopt(m); remember(m);
@@ -2559,6 +2533,7 @@
     if (route.v === "session" && !hadOrigin && !!SESS[route.id] && !!originHandoff(route.id)) { LIVE.late = route.id; LIVE.lateTries = 0; }
     if (LIVE.late && !TX[LIVE.late]) LIVE.late = null; // nothing loaded to load again: the page loads it with its origin
     const changedH = new Set(H.filter((h) => oldH.get(h.id) !== handKey(h)).map((h) => h.id));
+    const newCards = cardKeys(), changedCards = new Set([...newCards].filter(([id, k]) => oldCards.has(id) && oldCards.get(id) !== k).map(([id]) => id));
     const view = viewed(), grown = new Set(), cuts = new Map();
     let full = Object.values(SESS).some((x) => names.has(x.id) && names.get(x.id) !== x.name); // a new name shows in every turn
     for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
@@ -2567,19 +2542,18 @@
     for (const sid of view) if (TX[sid] && LIVE.late === sid) chain = chain.then(() => soft(reloadLate(sid).then(() => { grown.add(sid); full = true; })));
     else if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
     else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.reload) full = true; })));
-    if (route.v === "session" && TX[route.id]) chain = chain.then(() => newKids(route.id, grown));
-    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
+    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT, changedCards)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
   }
   // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), those
-  // whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw them all.
-  function dirtyTurns(cuts, grown, changedH, oldT) {
+  // whose record or handoffs changed, and those holding the card of a child run that changed. Null: draw them all.
+  function dirtyTurns(cuts, grown, changedH, oldT, changedCards) {
     if (route.v !== "session" || !TX[route.id]) return null;
     const sid = route.id, dirty = new Set(), owner = new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id])));
     if (cuts.has(sid)) for (const e of TX[sid].slice(cuts.get(sid))) { if (isGap(e)) return null; if (owner.has(e)) dirty.add(owner.get(e)); }
     for (const t of TURNS[sid] ?? []) {
       if (oldT.get(t.id) !== LIVE.turns.get(t.id) || [t.start, ...t.sent].some((h) => h && changedH.has(h.id)) || t.entries.some((e) => e.k === "h" && changedH.has(e.id))) dirty.add(t.id);
     }
-    for (const h of H) if (h.kind === "spawn" && h.from === sid && grown.has(h.to) && HOLDS.get(h.id)) dirty.add(HOLDS.get(h.id).id);
+    for (const h of H) if (h.kind === "spawn" && h.from === sid && changedCards.has(h.id) && HOLDS.get(h.id)) dirty.add(HOLDS.get(h.id).id);
     return dirty;
   }
   // The tail of a transcript loaded to its end: from its first call still running (anywhere), or the last turn's first call
@@ -2670,7 +2644,7 @@
     return [n.classList[0], ...keys, keys.some((x) => x != null) ? "" : n.firstChild?.nodeType === 3 ? n.firstChild.data : ""].map((x) => x ?? "").join("|"); };
   // Each anchor candidate on the page, in order, with its identity made unique by how many came before it.
   function anchors(fn) { const seen = new Map(); for (const n of $("#page").querySelectorAll(ANCHORS)) { const id = identOf(n), k = seen.get(id) ?? 0; seen.set(id, k + 1); if (fn(n, id + "#" + k)) return; } }
-  const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : n.classList.contains("child-work") ? n.querySelector(":scope > .cw-toggle") : null;
+  const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : null;
   function capture() {
     const sc = scroller(), line = edge();
     const st = { top: sc.scrollTop, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80, anchor: null, open: new Set(), groups: new Set(), focus: null, drawer: document.body.classList.contains("drawer-open") };
@@ -2684,11 +2658,9 @@
     else anchors((n, id) => { if (n.querySelector(ANCHORS)) return false; const b = n.getBoundingClientRect(); if (!b.height || b.bottom <= line) return false; st.anchor = { id, off: b.top - line }; return true; });
     for (const n of $("#page").querySelectorAll("[data-e]")) {
       if (n.classList.contains("tgroup")) st.groups.add(n.dataset.e);
-      if (opener(n)?.getAttribute("aria-expanded") === "true" || (n.classList.contains("hcard") && n.classList.contains("open"))) st.open.add(n.dataset.e);
+      if (opener(n)?.getAttribute("aria-expanded") === "true" || (n.classList.contains("event") && n.querySelector(":scope > .ev-text.open"))) st.open.add(n.dataset.e);
     }
     for (const n of $("#page").querySelectorAll(".hop")) if (n.querySelector(".brief.open")) st.open.add("hop:" + identOf(n));
-    // Child work opened and then closed keeps what was open inside it, for when it opens again.
-    st.shut = new Set([...$("#page").querySelectorAll(".child-work[data-e]")].filter((n) => opener(n).getAttribute("aria-expanded") === "false" && n.querySelector(":scope > .cw-body").childElementCount).map((n) => n.dataset.e));
     const a = document.activeElement;
     if (a && a !== document.body && !a.closest("dialog")) {
       const host = a.id ? null : a.closest(HOSTS), sel = host && host !== a ? a.tagName.toLowerCase() + [...a.classList].map((c) => "." + CSS.escape(c)).join("") : null;
@@ -2705,21 +2677,16 @@
     // A new card or brief measures its "Show more" now, as its ResizeObserver would a frame later, so nothing moves after the
     // scroll position is set.
     const clamp = (br, more) => { if (!br || !more || !br.clientHeight) return; const x = br.scrollHeight > br.clientHeight + 1; more.hidden = !x; br.classList.toggle("clipped", x); };
-    for (const c of all(".hcard:not(.open)")) clamp(c.querySelector(":scope > .brief"), c.querySelector(":scope > .more"));
+    for (const c of all(".event")) clamp(c.querySelector(":scope > .ev-text"), c.querySelector(":scope > .ev-more"));
     for (const br of all(".hop .body > .brief:not(.open)")) clamp(br, br.parentElement.querySelector(":scope > .more"));
-    // Child work first (opening it draws its steps), then groups (a new one opens if it holds an open step), then steps and cards.
-    // Child work that was closed with something open inside is opened for the restore (so its steps measure as shown) and
-    // closed again below, in the same task: it is never drawn open.
-    const shut = all(".child-work[data-e]").filter((n) => st.shut.has(n.dataset.e) && opener(n).getAttribute("aria-expanded") === "false");
-    for (const n of all(".child-work[data-e]")) if ((st.open.has(n.dataset.e) || shut.includes(n)) && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
+    // Groups first (a new one opens if it holds an open step), then steps and events.
     for (const n of all(".tgroup[data-e]")) {
       const want = st.groups.has(n.dataset.e) ? st.open.has(n.dataset.e) : [...n.querySelectorAll(".step[data-e]")].some((x) => st.open.has(x.dataset.e));
       if (want && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
     }
     for (const n of all(".step[data-e]")) if (st.open.has(n.dataset.e) && opener(n)?.getAttribute("aria-expanded") === "false") opener(n).click();
-    for (const n of shut) opener(n).click();
-    // A card or brief opened before its size was measured: its "Show less" is shown by hand.
-    for (const n of all(".hcard[data-e]")) if (st.open.has(n.dataset.e) && !n.classList.contains("open")) { const m = n.querySelector(":scope > .more"); m.hidden = false; m.click(); }
+    // An event opened before its size was measured: its "Show less" is shown by hand.
+    for (const n of all(".event[data-e]")) if (st.open.has(n.dataset.e) && !n.querySelector(":scope > .ev-text.open")) { const m = n.querySelector(":scope > .ev-more"); m.hidden = false; m.click(); }
     for (const n of all(".hop")) if (st.open.has("hop:" + identOf(n)) && !n.querySelector(".brief.open")) { const m = n.querySelector(".body > .more"); m.hidden = false; m.click(); }
     if (st.drawer) { document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
     if (st.focus) {
@@ -2760,16 +2727,15 @@
   // are new.
   function patchSession(dirty) {
     tick(); const s = SESS[route.id], box = $("#page .turns");
-    const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .step, .hcard, .thought, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
+    const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .bubble, .step, .event, .child-card, .thought, .think-pending)[data-e]")].map((n) => n.dataset.e));
     const before = keys();
     // Only the changed turns are drawn again, unless the turns shown no longer match the index or nothing was shown.
     const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some((b) => !TURN.has(b.dataset.turn));
-    if (whole) morph(box, transcript(route.id, transcriptOpts(route.id)).querySelector(".turns"));
-    else if (dirty.size) morphTurns(box, transcript(route.id, { ...transcriptOpts(route.id), only: dirty }).querySelector(".turns"), dirty);
-    // A page follows its origin and status: a child's intro that only now has an origin, and the footer redrawn when its text,
+    if (whole) morph(box, transcript(route.id).querySelector(".turns"));
+    else if (dirty.size) morphTurns(box, transcript(route.id, { only: dirty }).querySelector(".turns"), dirty);
+    // A page follows its status: the footer is redrawn when its text,
     // tips or state changed (in place, so a focused "Open in" button stays while nothing changes).
     const page = $("#page"), origin = originHandoff(s.id), foot = page.querySelector(":scope > .session-foot");
-    if (origin && !page.querySelector(":scope > .child-intro")) { page.classList.add("child-page"); page.querySelector(":scope > .ph")?.after(childBriefBlock(origin)); }
     if (!showsFooter(s, origin)) foot?.remove();
     else {
       const next = sessionFooter(s, origin);
@@ -2802,7 +2768,7 @@
     const walk = (x) => { for (const c of x.childNodes) {
       if (c.nodeType === 3) { s += c.data; continue; }
       // A running time (the clock rewrites it every second) is left out: it isn't a change.
-      if (c.nodeType !== 1 || c.classList.contains("cw-body") || c.classList.contains("cutnote") || c.classList.contains("more") || c.classList.contains("tick")) continue;
+      if (c.nodeType !== 1 || c.classList.contains("cutnote") || c.classList.contains("more") || c.classList.contains("ev-more") || c.classList.contains("tick")) continue;
       s += "<" + c.tagName + " " + [...c.classList].filter((k) => !VIEW.has(k)).join(" ") + " " + (c.dataset?.e ?? "") + " " + (c.dataset?.h ?? "") + " " + (c.dataset?.sum ?? "") + " " + (c.getAttribute("d") ?? "") + ">"; walk(c); s += "</>"; } };
     walk(root); return s;
   }
@@ -2833,10 +2799,8 @@
     });
   }
 
-  const jumpButton = el("button", "jump-bottom"); jumpButton.type = "button"; jumpButton.id = "jump-bottom"; jumpButton.setAttribute("aria-label", "Jump to bottom of transcript"); jumpButton.hidden = true; if (!SIDEBAR_ONLY) document.body.append(jumpButton);
-  // Centred over the transcript column (#page), not the viewport: the sidebar or rail takes the left, and #main has its own scrollbar.
-  const placeJump = () => { const r = $("#page").getBoundingClientRect(); if (r.width) jumpButton.style.setProperty("--jump-x", r.left + r.width / 2 + "px"); };
-  if (!SIDEBAR_ONLY) { const ro = new ResizeObserver(placeJump); ro.observe($("#page")); ro.observe($("#main")); }
+  // Jump to the latest: centred at the transcript column's foot, sticky, with the count of what arrived while the reader was away.
+  const jumpWrap = el("div", "jump-wrap"), jumpButton = el("button", "jump"); jumpButton.type = "button"; jumpButton.id = "jump-bottom"; jumpButton.setAttribute("aria-label", "Jump to bottom of transcript"); jumpWrap.hidden = true; jumpWrap.append(jumpButton);
   function scrollMetrics() {
     if (phone.matches) return { top: window.scrollY, height: document.documentElement.scrollHeight, viewport: window.innerHeight, gap: Math.max(0, document.documentElement.scrollHeight - window.innerHeight - window.scrollY) };
     const m = $("#main"); return { top: m.scrollTop, height: m.scrollHeight, viewport: m.clientHeight, gap: Math.max(0, m.scrollHeight - m.clientHeight - m.scrollTop) };
@@ -2845,15 +2809,15 @@
   // The button is rebuilt only when what it shows changes (hidden or not, and the new-entry count), not on every scroll.
   let jumpKey = "";
   function syncJump() {
-    if (route.v !== "session") { LIVE.fresh = 0; jumpButton.hidden = true; jumpKey = ""; return; }
-    const { gap } = scrollMetrics(); if (gap <= 80) LIVE.fresh = 0; else placeJump();
-    const key = (gap <= 80) + "|" + LIVE.fresh; if (key === jumpKey) return;
-    jumpKey = key; jumpButton.hidden = gap <= 80; jumpButton.replaceChildren();
+    if (route.v !== "session") { LIVE.fresh = 0; jumpWrap.hidden = true; jumpKey = ""; return; }
+    const { gap } = scrollMetrics(); if (gap <= 80) LIVE.fresh = 0;
+    const key = (gap <= 80) + "|" + LIVE.fresh; if (key === jumpKey && jumpWrap.isConnected) return;
+    jumpKey = key; jumpWrap.hidden = gap <= 80; jumpButton.replaceChildren();
     if (LIVE.fresh) jumpButton.append(el("span", "new-count", LIVE.fresh + " new"));
     jumpButton.append(icon(I.down));
     jumpButton.setAttribute("aria-label", LIVE.fresh ? "Jump to bottom; " + LIVE.fresh + " new entries" : "Jump to bottom of transcript");
   }
-  function clearNewEntries() { LIVE.fresh = 0; jumpButton.hidden = true; jumpKey = ""; }
+  function clearNewEntries() { LIVE.fresh = 0; jumpWrap.hidden = true; jumpKey = ""; }
   jumpButton.addEventListener("click", () => scrollToEnd("smooth"));
   if (!SIDEBAR_ONLY) { window.addEventListener("scroll", syncJump, { passive: true }); $("#main").addEventListener("scroll", syncJump, { passive: true }); }
   const cancelOpeningEndPin = () => { if (openingEndUntil) stopOpeningEndPin(); };
