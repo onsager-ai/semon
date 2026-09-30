@@ -4,16 +4,17 @@
 use std::{
     collections::BTreeMap,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    thread,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use semon_push::{
-    Client, PushOptions, read_token,
+    Client, Credential, PushOptions, StateLock, Stop, Token, read_token,
     wire::{Append, HEAD_BYTES, Length, base64_decode, head_sha256},
 };
 use semon_sessions::{Facts, Options, is_input_path};
@@ -32,6 +33,20 @@ struct Received {
     conflicts: u64,
     /// Answer 500 after this many successful appends.
     fail_after: Option<u64>,
+    /// Never answer an append after this many successful ones: the push is
+    /// left waiting mid-upload.
+    hang_after: Option<u64>,
+    /// Appends left unanswered so far.
+    held: u64,
+    /// The unanswered appends themselves: dropping them ends their
+    /// connections.
+    held_requests: Vec<tiny_http::Request>,
+    /// Stop this push once this many appends have succeeded, before
+    /// answering the last of them.
+    stop_after: Option<(u64, Stop)>,
+    /// Refuse the token (401) for any append after this many successful
+    /// ones.
+    refuse_after: Option<u64>,
 }
 
 struct Receiver {
@@ -66,6 +81,25 @@ fn receiver() -> Receiver {
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
             let url = request.url().to_owned();
+            if authorized && url == "/v1/mirror/append" {
+                let mut received = shared.lock().unwrap();
+                if received
+                    .hang_after
+                    .is_some_and(|limit| received.appends >= limit)
+                {
+                    received.held += 1;
+                    received.held_requests.push(request);
+                    continue;
+                }
+                if received
+                    .refuse_after
+                    .is_some_and(|limit| received.appends >= limit)
+                {
+                    drop(received);
+                    let _ = request.respond(json_response(401, json!({"error":"revoked"})));
+                    continue;
+                }
+            }
             let response = if !authorized {
                 json_response(401, json!({"error":"unauthorized"}))
             } else if url == "/v1/mirror/facts" {
@@ -135,6 +169,11 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
     received.replaces += u64::from(append.replace);
     let length = next.len() as u64;
     received.files.insert(key, next);
+    if let Some((after, stop)) = &received.stop_after
+        && received.appends >= *after
+    {
+        stop.stop();
+    }
     json_response(200, json!({"length": length}))
 }
 
@@ -196,7 +235,7 @@ impl Home {
     fn push_options(&self, url: &str) -> PushOptions {
         PushOptions {
             url: url.to_owned(),
-            token_file: self.root.join("token"),
+            credential: Credential::File(self.root.join("token")),
             sessions: self.options.clone(),
             state: self.root.join("state/push.json"),
         }
@@ -453,4 +492,344 @@ fn only_https_or_loopback_http() {
     ] {
         assert!(semon_push::check_url(bad).is_err(), "{bad}");
     }
+}
+
+/// A stop is waited on for at most this long; a push that waited out its
+/// 2 s sleep or its 120 s request timeout would miss it.
+const STOP_BOUND: Duration = Duration::from_secs(1);
+
+fn watch_in_background(options: &PushOptions, stop: &Stop) -> JoinHandle<Result<(), String>> {
+    let (options, stop) = (options.clone(), stop.clone());
+    thread::spawn(move || semon_push::push_until(&options, true, &stop))
+}
+
+fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Stops the push and returns what it returned, failing unless it returned
+/// within [`STOP_BOUND`].
+fn stop_and_join(stop: &Stop, push: JoinHandle<Result<(), String>>) -> Result<(), String> {
+    let stopped = Instant::now();
+    stop.stop();
+    while !push.is_finished() {
+        assert!(
+            stopped.elapsed() < STOP_BOUND,
+            "the push was still running {:?} after the stop",
+            stopped.elapsed()
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    push.join().unwrap()
+}
+
+/// After a stop: the state file, if any, is whole; no temporary file is
+/// left beside it; and its lock is free again once the push's threads have
+/// let go. Returns the state.
+fn assert_stopped_cleanly(options: &PushOptions) -> serde_json::Value {
+    let value = state_after_stop(options);
+    assert_lock_freed(options);
+    value
+}
+
+/// The lock can be taken again within a moment: nothing of the stopped
+/// push is left running.
+fn assert_lock_freed(options: &PushOptions) {
+    let deadline = Instant::now() + STOP_BOUND * 2;
+    loop {
+        match StateLock::acquire(&options.state) {
+            Ok(_lock) => return,
+            Err(error) => assert!(Instant::now() < deadline, "still locked: {error}"),
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The state file, if any, is whole, and no temporary file is left beside
+/// it. Returns the state.
+fn state_after_stop(options: &PushOptions) -> serde_json::Value {
+    let state = &options.state;
+    let value = if state.exists() {
+        serde_json::from_slice(&fs::read(state).unwrap()).expect("a whole state file")
+    } else {
+        json!({"files": {}})
+    };
+    let leftovers: Vec<String> = fs::read_dir(state.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    value
+}
+
+/// A later push brings the receiver's copies level with the originals,
+/// without sending any file again whole.
+fn assert_resumes(home: &Home, receiver: &Receiver, logs: &[(&str, String)]) {
+    {
+        let mut received = receiver.state.lock().unwrap();
+        received.hang_after = None;
+        received.stop_after = None;
+        received.refuse_after = None;
+    }
+    semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+    for (relative, text) in logs {
+        assert_eq!(copy(receiver, relative), redacted(text), "{relative}");
+    }
+    assert_eq!(receiver.state.lock().unwrap().replaces, 0);
+}
+
+fn two_logs(home: &Home) -> Vec<(&'static str, String)> {
+    let logs = vec![
+        ("claude/projects/-work/first.jsonl", line("first")),
+        ("claude/projects/-work/second.jsonl", line("second")),
+    ];
+    for (relative, text) in &logs {
+        home.write(relative, text);
+    }
+    logs
+}
+
+#[test]
+fn a_stop_ends_the_sleep_between_passes() {
+    let home = Home::new();
+    let receiver = receiver();
+    let logs = two_logs(&home);
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let push = watch_in_background(&options, &stop);
+    // Facts go after the first pass; then the watch sleeps for 2 s.
+    wait_for("the first facts", || {
+        receiver.state.lock().unwrap().facts.is_some()
+    });
+    thread::sleep(Duration::from_millis(100));
+    stop_and_join(&stop, push).unwrap();
+    let state = assert_stopped_cleanly(&options);
+    assert_eq!(state["files"].as_object().unwrap().len(), logs.len());
+    assert_resumes(&home, &receiver, &logs);
+}
+
+#[test]
+fn a_stop_midway_through_a_pass_leaves_the_rest_for_the_next_push() {
+    let home = Home::new();
+    let receiver = receiver();
+    let logs = two_logs(&home);
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    receiver.state.lock().unwrap().stop_after = Some((1, stop.clone()));
+    let push = watch_in_background(&options, &stop);
+    wait_for("the stop", || stop.is_stopped());
+    stop_and_join(&stop, push).unwrap();
+    {
+        let received = receiver.state.lock().unwrap();
+        assert_eq!(received.appends, 1, "nothing is sent after the stop");
+        assert!(received.facts.is_none(), "nor facts");
+    }
+    // The first file is recorded when its answer came before the stop was
+    // seen, and not otherwise; either way the next push resumes.
+    let state = assert_stopped_cleanly(&options);
+    assert!(state["files"].as_object().unwrap().len() <= 1);
+    assert_resumes(&home, &receiver, &logs);
+}
+
+#[test]
+fn a_stop_mid_upload_returns_at_once_and_keeps_the_lock_until_the_request_ends() {
+    let home = Home::new();
+    let receiver = receiver();
+    let logs = two_logs(&home);
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    receiver.state.lock().unwrap().hang_after = Some(1);
+    let push = watch_in_background(&options, &stop);
+    wait_for("an unanswered append", || {
+        receiver.state.lock().unwrap().held == 1
+    });
+    stop_and_join(&stop, push).unwrap();
+
+    // The request is still out: no other push may start and overlap it,
+    // and the refusal says why.
+    let started = Instant::now();
+    let error = semon_push::push(&options, false).unwrap_err();
+    assert!(started.elapsed() < STOP_BOUND, "{:?}", started.elapsed());
+    assert!(error.contains("still finishing"), "{error}");
+    let error = StateLock::acquire(&options.state).unwrap_err();
+    assert!(error.contains("still finishing"), "{error}");
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        StateLock::acquire(&options.state).is_err(),
+        "held while out"
+    );
+
+    // The receiver lets the request go unanswered: it ends, and so does
+    // the lock.
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
+
+    // The answered file is recorded; the unanswered one isn't.
+    let state = state_after_stop(&options);
+    let files = state["files"].as_object().unwrap();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let (key, file) = files.iter().next().unwrap();
+    let text = &logs
+        .iter()
+        .find(|(relative, _)| *relative == key.as_str())
+        .unwrap()
+        .1;
+    assert_eq!(file["sent"], text.len());
+    assert_resumes(&home, &receiver, &logs);
+}
+
+#[test]
+fn a_second_push_on_the_same_state_fails_at_once_until_the_first_stops() {
+    let home = Home::new();
+    let receiver = receiver();
+    let logs = two_logs(&home);
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let push = watch_in_background(&options, &stop);
+    wait_for("the first facts", || {
+        receiver.state.lock().unwrap().facts.is_some()
+    });
+
+    let started = Instant::now();
+    let error = semon_push::push(&options, false).unwrap_err();
+    assert!(started.elapsed() < STOP_BOUND, "{:?}", started.elapsed());
+    assert!(error.contains("already running"), "{error}");
+    let lock = StateLock::path_for(&options.state);
+    assert!(error.contains(&lock.display().to_string()), "{error}");
+    let error = semon_push::push_until(&options, true, &Stop::new()).unwrap_err();
+    assert!(error.contains("already running"), "{error}");
+    assert!(StateLock::acquire(&options.state).is_err());
+
+    stop_and_join(&stop, push).unwrap();
+    assert_stopped_cleanly(&options);
+    assert_resumes(&home, &receiver, &logs);
+}
+
+/// The stop comes once the push has read the 401: a refused pass saves
+/// the state file (replacing it, so its inode changes) before it returns,
+/// and only after the answer is in. Which of the refusal and the stop the
+/// watch sees first is then up to it, and either way the refusal is the
+/// result (the ordering itself is `after_pass`'s unit test).
+#[cfg(unix)]
+#[test]
+fn a_refused_token_is_reported_even_when_a_stop_comes_with_it() {
+    use std::os::unix::fs::MetadataExt;
+
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("one"));
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    receiver.state.lock().unwrap().refuse_after = Some(1);
+    let push = watch_in_background(&options, &stop);
+    wait_for("the first facts", || {
+        receiver.state.lock().unwrap().facts.is_some()
+    });
+    let inode = || {
+        fs::metadata(&options.state)
+            .map(|metadata| metadata.ino())
+            .ok()
+    };
+    let before = inode();
+    assert!(before.is_some(), "the first pass saved its state");
+    // The next pass is refused; the stop follows the save that refusal makes.
+    home.append(LOG, &line("two"));
+    wait_for("the refused pass's save", || inode() != before);
+    let error = stop_and_join(&stop, push).unwrap_err();
+    assert!(error.contains("refused the token"), "{error}");
+    assert_stopped_cleanly(&options);
+}
+
+#[test]
+fn spellings_of_one_receiver_share_one_state_file_and_lock() {
+    assert_eq!(
+        semon_push::check_url("HTTPS://Mirror.Example/api/Push/").unwrap(),
+        "https://mirror.example/api/Push"
+    );
+    assert_eq!(
+        semon_push::check_url("http://LOCALHOST:8735").unwrap(),
+        "http://localhost:8735"
+    );
+    let state = semon_push::default_state_path("https://mirror.example");
+    for spelling in [
+        "https://mirror.example/",
+        "HTTPS://MIRROR.EXAMPLE",
+        "https://Mirror.Example//",
+    ] {
+        assert_eq!(
+            semon_push::default_state_path(spelling),
+            state,
+            "{spelling}"
+        );
+    }
+    assert_ne!(
+        semon_push::default_state_path("https://mirror.example/other"),
+        state
+    );
+}
+
+#[test]
+fn an_in_memory_token_is_used_and_never_written_or_shown() {
+    let home = Home::new();
+    fs::remove_file(home.root.join("token")).unwrap();
+    let receiver = receiver();
+    home.write(LOG, &line("hello"));
+    let token = Token::new(&format!(" {TOKEN}\n")).unwrap();
+    let options = PushOptions {
+        credential: Credential::Memory(token.clone()),
+        ..home.push_options(&receiver.url)
+    };
+    semon_push::push(&options, false).unwrap();
+    assert!(receiver.state.lock().unwrap().facts.is_some());
+    assert_eq!(copy(&receiver, LOG), redacted(&line("hello")));
+
+    for path in files_under(&home.root) {
+        let bytes = fs::read(&path).unwrap();
+        assert!(
+            !bytes
+                .windows(TOKEN.len())
+                .any(|window| window == TOKEN.as_bytes()),
+            "{} holds the token",
+            path.display()
+        );
+    }
+    for shown in [
+        format!("{token:?}"),
+        format!("{:?}", options.credential),
+        format!("{options:?}"),
+        format!("{options:#?}"),
+    ] {
+        assert!(!shown.contains(TOKEN), "{shown}");
+        assert!(shown.contains("Token(<redacted>)"), "{shown}");
+    }
+
+    let wrong = PushOptions {
+        credential: Credential::Memory(Token::new("wrong-token").unwrap()),
+        ..home.push_options(&receiver.url)
+    };
+    home.append(LOG, &line("more"));
+    let error = semon_push::push(&wrong, false).unwrap_err();
+    assert!(error.contains("refused the token"), "{error}");
+    assert!(!error.contains("wrong-token"), "{error}");
+    for bad in ["", "  ", "two words", "a\tb", "line\nbreak"] {
+        assert!(Token::new(bad).is_err(), "{bad:?}");
+    }
+}
+
+fn files_under(directory: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
 }
