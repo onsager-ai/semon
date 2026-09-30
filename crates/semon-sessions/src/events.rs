@@ -56,7 +56,8 @@ thread_local! {
 /// v15: a prompt that attaches only images, and no text, is indexed.
 /// v16: run settings, hook runs and permission denials are indexed as `signals`
 /// (PR 2 of the dropped-signals plan).
-const CACHE_VERSION: u32 = 16;
+/// v17: Claude assistant lines index their reasoning effort (`effort`, or `perTurnEffort` when set) as an `Effort` signal.
+const CACHE_VERSION: u32 = 17;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,7 +197,7 @@ pub(crate) enum SignalKind {
     Interrupt,
     /// A Codex turn's model, when it changes (`n` is the model id).
     Model,
-    /// A Codex turn's reasoning effort, when it changes.
+    /// A reported reasoning effort, when it changes.
     Effort,
     /// A Codex turn's approval policy, when it changes.
     Approval,
@@ -2699,6 +2700,15 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
     {
         summary.last_model = Some(model.to_owned());
     }
+    if role == Some("assistant") {
+        setting(
+            summary,
+            SignalKind::Effort,
+            offset,
+            time,
+            field(record, "perTurnEffort").or_else(|| field(record, "effort")),
+        );
+    }
     if record.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
         signal(summary, SignalKind::Compact, offset, time, None, None);
         return;
@@ -3693,6 +3703,46 @@ mod tests {
             signal_tags(&index, SignalKind::Sandbox),
             ["danger-full-access"]
         );
+    }
+
+    #[test]
+    fn claude_assistant_records_effort_and_per_turn_overrides() {
+        let assistant = |settings: Value| {
+            let mut record = serde_json::json!({
+                "type":"assistant",
+                "timestamp":"2026-09-29T00:00:01Z",
+                "message":{"role":"assistant","model":"claude-opus-5-5","content":[]}
+            });
+            record
+                .as_object_mut()
+                .unwrap()
+                .extend(settings.as_object().unwrap().clone());
+            record
+        };
+        let mut index = FileIndex::default();
+        for (offset, settings) in [
+            serde_json::json!({"effort":"high","perTurnEffort":null}),
+            serde_json::json!({"effort":"high","perTurnEffort":"max"}),
+            serde_json::json!({"effort":"high","perTurnEffort":"max"}),
+        ]
+        .iter()
+        .enumerate()
+        {
+            claude(&mut index, &assistant(settings.clone()), offset as u64);
+        }
+        assert_eq!(signal_tags(&index, SignalKind::Effort), ["high", "max"]);
+        assert_eq!(
+            index
+                .signals
+                .iter()
+                .map(|signal| signal.o)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+
+        let mut missing = FileIndex::default();
+        claude(&mut missing, &assistant(serde_json::json!({})), 0);
+        assert!(signal_tags(&missing, SignalKind::Effort).is_empty());
     }
 
     #[test]
