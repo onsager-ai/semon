@@ -32,6 +32,84 @@ export default async function (browser) {
   const R = r.results;
   const D = await data({ extras: true });
 
+  // ---- Command descriptions title Bash steps while the command stays in its details -----------------------------
+  {
+    const titleText = "DescriptionOnlySearchWord " + "x".repeat(120);
+    const page = await served(browser, { extras: true, path: "/s/claude/harbor" });
+    let titled;
+    let untitled;
+    await page.route("**/api/tx**", async (route) => {
+      const url = new URL(route.request().url());
+      const response = await route.fetch();
+      if (url.searchParams.get("sid") !== "harbor") return route.fulfill({ response });
+      const tx = await response.json();
+      const entry = tx.entries.find((item) => item.k === "tool" && item.name === "Bash" && item.in);
+      const plain = tx.entries.find((item) => item.k === "tool" && item.name === "Read");
+      if (!entry || !plain) throw new Error("harbor needs a long Bash call and a Read step for the title check");
+      entry.title = titleText;
+      const command = entry.in ?? entry.arg;
+      const rawFirstLine = command.split(/[\r\n]/, 1)[0];
+      titled = { command, rawFirstLine, firstLine: rawFirstLine.slice(0, 200) };
+      untitled = { arg: plain.arg };
+      return route.fulfill({ response, json: tx });
+    });
+    await page.reload({ waitUntil: "load" });
+    await page.waitForFunction((value) => [...document.querySelectorAll(".step .sa.st")].some((title) => title.textContent === value), titleText);
+    const rows = await page.evaluate(({ titleText, plainArg }) => {
+      document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click());
+      const titleStep = [...document.querySelectorAll(".step")].find((step) => step.querySelector(".sa.st")?.textContent === titleText);
+      const titleButton = titleStep?.querySelector(":scope > button");
+      const title = titleButton?.querySelector(".sa.st");
+      const plainStep = [...document.querySelectorAll(".step")].find((step) => step.querySelector(":scope > button code.sa")?.textContent === plainArg);
+      return {
+        titleText: title?.textContent ?? null,
+        titleTip: title?.getAttribute("data-tip") ?? null,
+        titleVerb: titleButton?.querySelector(".sv")?.textContent ?? null,
+        titleCode: !!titleButton?.querySelector("code.sa"),
+        titleRow: titleButton?.textContent ?? null,
+        plainCode: plainStep?.querySelector(":scope > button code.sa")?.textContent ?? null,
+        plainVerb: plainStep?.querySelector(":scope > button .sv")?.textContent ?? null,
+        plainMatches: plainStep?.querySelector(":scope > button code.sa")?.textContent === plainArg,
+      };
+    }, { titleText, plainArg: untitled.arg });
+    R.stepTitle = rows;
+    r.expect(rows.titleText === titleText && rows.titleVerb === null && !rows.titleCode && !(rows.titleRow ?? "").includes("Ran") && !(rows.titleRow ?? "").includes(titled.command), "a titled command step shows only its title as plain text: " + JSON.stringify(rows));
+    r.expect(rows.titleTip === titled.firstLine, "the title tooltip holds the command's first line: " + JSON.stringify(rows));
+    r.expect(titled.firstLine.length <= 200 && titled.firstLine === titled.rawFirstLine.slice(0, 200), "the title tooltip is clipped to the command's first 200 characters");
+    r.expect(rows.plainCode === untitled.arg && rows.plainVerb === "Read" && rows.plainMatches, "a step without a title keeps its verb and command code: " + JSON.stringify(rows));
+
+    await page.locator(".step .sa.st").click();
+    const detail = await page.evaluate(() => {
+      const step = [...document.querySelectorAll(".step")].find((item) => item.querySelector(".sa.st"));
+      const out = step?.querySelector(":scope > .out");
+      return { labels: [...(out?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.textContent), command: out?.querySelector("pre.in")?.textContent ?? null };
+    });
+    r.expect(detail.labels[0] === "Command" && detail.command === titled.command, "expanding a titled step shows the full command under Command: " + JSON.stringify(detail));
+    await page.locator(".step .sa.st").hover();
+    await page.waitForFunction((text) => document.querySelector("#sh-tooltip:not([hidden])")?.textContent === text, titled.firstLine);
+    const tooltip = await page.locator("#sh-tooltip").textContent();
+    r.expect(tooltip === titled.firstLine, "hovering the title shows the command's first line: " + JSON.stringify(tooltip));
+
+    const layout = await page.evaluate(() => {
+      const title = document.querySelector(".step .sa.st"), button = title?.closest("button");
+      return { width: innerWidth, document: document.documentElement.scrollWidth, buttonWidth: button?.clientWidth ?? 0, buttonScroll: button?.scrollWidth ?? 0, titleWidth: title?.clientWidth ?? 0, titleScroll: title?.scrollWidth ?? 0, whiteSpace: title ? getComputedStyle(title).whiteSpace : null, textOverflow: title ? getComputedStyle(title).textOverflow : null };
+    });
+    r.expect(layout.width === 390 && layout.document <= layout.width && layout.buttonScroll <= layout.buttonWidth + 1 && layout.titleScroll > layout.titleWidth && layout.whiteSpace === "nowrap" && layout.textOverflow === "ellipsis", "the title row stays on one line with ellipsis and no horizontal scrolling at 390 px: " + JSON.stringify(layout));
+
+    await page.click("#more-btn");
+    await page.locator('.menu [role="menuitem"]').filter({ hasText: "Find in transcript" }).click();
+    await page.fill("#find", "DescriptionOnlySearchWord");
+    await page.waitForFunction(() => document.querySelector("#topbar .fcount")?.textContent === "1 match");
+    const found = await page.evaluate(() => ({
+      count: document.querySelectorAll(".turns .step").length,
+      title: document.querySelector(".turns .step .sa.st")?.textContent ?? null,
+    }));
+    R.stepTitle.find = found;
+    r.expect(found.count === 1 && found.title === titleText, "find-in-transcript matches the title word: " + JSON.stringify(found));
+    r.expect(page.errors.length === 0, "step-title page errors: " + page.errors.join(" | "));
+    await page.context().close();
+  }
+
   // ---- Embedding server account menu and Machines destination -----------------------------------------------------
   {
     const name = '<img src=x onerror="window.__accountXss=1">';

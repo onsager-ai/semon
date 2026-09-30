@@ -415,6 +415,7 @@ code { overflow-wrap: anywhere; }
 .step > button > svg:first-child { width: 16px; height: 16px; flex: none; }
 .step .sv { flex: none; }
 .step .sa { font-family: var(--mono); font-size: var(--fs-sm); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; overflow-wrap: normal; }
+.step .sa.st { font: inherit; color: var(--ink-2); }
 .step .sd { margin-left: auto; font-family: var(--mono); font-size: var(--fs-cap); color: var(--muted); flex: none; padding-left: 8px; }
 .step .chev { color: var(--faint); transition: transform .15s; }
 .step > button[aria-expanded="true"] .chev { transform: rotate(90deg); }
