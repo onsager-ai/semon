@@ -87,6 +87,11 @@ pub fn is_input_path(root: &str, rel: &str) -> bool {
         || parts
             .iter()
             .any(|part| part.is_empty() || *part == "." || *part == "..")
+        // A sealed log's segments live in `<log>.seal/`: nothing under one
+        // is an input.
+        || parts[..parts.len() - 1]
+            .iter()
+            .any(|part| crate::sealed::is_seal_dir_name(part))
     {
         return false;
     }

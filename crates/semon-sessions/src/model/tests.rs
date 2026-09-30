@@ -3017,6 +3017,12 @@ fn input_paths_are_the_builders_and_nothing_else() {
         ("codex", "auth.json"),
         ("codex", "thread-writer-locks/x.lock"),
         ("codex", "sessions/.jsonl"),
+        ("claude", "projects/p/x.jsonl.seal/y.jsonl"),
+        (
+            "claude",
+            "projects/p/x.jsonl.seal/subagents/agent-a.meta.json",
+        ),
+        ("codex", "sessions/2026/r.jsonl.seal/r.jsonl"),
         ("elsewhere", "sessions/1.json"),
     ] {
         assert!(!crate::is_input_path(root, path), "{root}/{path:?}");

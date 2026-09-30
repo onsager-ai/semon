@@ -16,9 +16,12 @@
 //!   `zstd -d` reads it back.
 //!
 //! [`LogFile`] reads a sealed range from its segment whenever the manifest
-//! is *bound*: recorded from this very inode. A NUL byte read from the plain
-//! file is only a hint that a seal happened after the file was opened: the
-//! manifest is read again and, if it changed, the read is retried. A manifest
+//! is *bound*: recorded from this very file, by its inode number and birth
+//! time (an inode number alone is handed out again as soon as it is freed).
+//! A NUL byte read from the plain file is only a hint that a seal happened
+//! after the file was opened: the manifest is read again and, if it
+//! changed, the read is retried; a manifest there but unreadable is an
+//! error, never zeros passed off as the log's bytes. A manifest
 //! recorded from another inode (the log was copied, or replaced by a new
 //! file) is *unbound*: the plain file is read, and only its NUL bytes inside
 //! a sealed range are filled from the segments. JSON never holds a raw NUL,
@@ -71,8 +74,12 @@ pub struct Manifest {
     /// Names this manifest's segment files; a new one starts when the log
     /// was replaced by other content.
     pub generation: String,
-    /// The log's inode when the manifest was last written (0 off Unix).
+    /// The log's inode number (0 off Unix) and birth time (ns since the
+    /// epoch; 0 where the filesystem records none) when the manifest was
+    /// last written.
     pub ino: u64,
+    #[serde(default)]
+    pub born_ns: u64,
     /// The log's length and modified time (ns since the epoch) when last
     /// sealed: a seal interrupted after its punch restores that time.
     pub sealed_len: u64,
@@ -93,6 +100,10 @@ pub struct Segment {
 }
 
 impl Manifest {
+    fn binds(&self, birth: Birth) -> bool {
+        self.ino == birth.ino && self.born_ns == birth.born_ns
+    }
+
     /// Where the sealed range ends: 0 with no segment.
     pub fn end(&self) -> u64 {
         self.segments.last().map_or(0, |segment| segment.end)
@@ -156,44 +167,36 @@ pub fn is_seal_dir_name(name: &str) -> bool {
     name.len() > ".jsonl.seal".len() && name.ends_with(".jsonl.seal")
 }
 
-/// A file as last stat'ed: enough to tell a changed or replaced file.
+/// Which file a manifest was recorded from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Stamp {
-    dev: u64,
+struct Birth {
     ino: u64,
-    len: u64,
-    modified_ns: i128,
+    born_ns: u64,
 }
 
-impl Stamp {
+impl Birth {
     fn of(meta: &fs::Metadata) -> Self {
-        let modified_ns =
-            meta.modified()
-                .ok()
-                .map_or(0, |time| match time.duration_since(UNIX_EPOCH) {
-                    Ok(after) => i128::try_from(after.as_nanos()).unwrap_or(i128::MAX),
-                    Err(before) => {
-                        -i128::try_from(before.duration().as_nanos()).unwrap_or(i128::MAX)
-                    }
-                });
-        let (dev, ino) = identity(meta);
         Self {
-            dev,
-            ino,
-            len: meta.len(),
-            modified_ns,
+            ino: ino(meta),
+            born_ns: meta
+                .created()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |since| {
+                    u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
+                }),
         }
     }
 }
 
 #[cfg(unix)]
-fn identity(meta: &fs::Metadata) -> (u64, u64) {
-    (meta.dev(), meta.ino())
+fn ino(meta: &fs::Metadata) -> u64 {
+    meta.ino()
 }
 
 #[cfg(not(unix))]
-fn identity(_meta: &fs::Metadata) -> (u64, u64) {
-    (0, 0)
+fn ino(_meta: &fs::Metadata) -> u64 {
+    0
 }
 
 /// Bytes a file holds on disk.
@@ -255,9 +258,9 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// The manifest in `dir` and its stamp: `None` when there is none. One that
-/// doesn't parse or doesn't hold together is an error.
-fn read_manifest(dir: &Path) -> io::Result<Option<(Manifest, Stamp)>> {
+/// The manifest in `dir`: `None` when there is none. One that doesn't parse
+/// or doesn't hold together is an error.
+fn read_manifest(dir: &Path) -> io::Result<Option<Manifest>> {
     let file = match fs::File::open(dir.join(MANIFEST)) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -274,7 +277,7 @@ fn read_manifest(dir: &Path) -> io::Result<Option<(Manifest, Stamp)>> {
     if !manifest.valid() {
         return Err(invalid("inconsistent seal manifest"));
     }
-    Ok(Some((manifest, Stamp::of(&meta))))
+    Ok(Some(manifest))
 }
 
 /// Writes `manifest` to a temporary file, syncs it and renames it over the
@@ -392,21 +395,30 @@ fn seek_table(entries: &[(u32, u32)]) -> io::Result<Vec<u8>> {
 
 struct OpenSegment {
     file: fs::File,
-    stamp: Stamp,
     table: Table,
+    /// The segment file's SHA-256: the frame cache's key.
+    sha256: String,
 }
 
 fn open_segment(dir: &Path, generation: &str, segment: &Segment) -> io::Result<OpenSegment> {
     let file = fs::File::open(dir.join(segment.file_name(generation)))?;
-    let stamp = Stamp::of(&file.metadata()?);
+    if file.metadata()?.len() != segment.bytes {
+        return Err(invalid("segment size differs from its manifest"));
+    }
     let table = read_table(&file)?;
     if table.plain != segment.end - segment.start {
         return Err(invalid("segment length differs from its manifest"));
     }
-    Ok(OpenSegment { file, stamp, table })
+    Ok(OpenSegment {
+        file,
+        table,
+        sha256: segment.zst_sha256.clone(),
+    })
 }
 
-type FrameKey = (Stamp, usize);
+/// A frame by its segment file's content hash, so a segment file replaced
+/// by another never serves the other's frames.
+type FrameKey = (String, usize);
 
 /// Decompressed frames, most recent last, shared by every reader.
 static FRAMES: Mutex<VecDeque<(FrameKey, Arc<[u8]>)>> = Mutex::new(VecDeque::new());
@@ -424,7 +436,7 @@ fn decompress(segment: &OpenSegment, index: usize) -> io::Result<Vec<u8>> {
 
 /// Frame `index` of `segment`, from the shared cache or decompressed.
 fn frame_bytes(segment: &OpenSegment, index: usize) -> io::Result<Arc<[u8]>> {
-    let key = (segment.stamp, index);
+    let key = (segment.sha256.clone(), index);
     let cached = FRAMES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -456,11 +468,9 @@ struct Loaded {
 pub struct LogFile {
     file: fs::File,
     dir: PathBuf,
-    ino: u64,
+    birth: Birth,
     pos: u64,
     seal: Option<Loaded>,
-    /// The manifest's stamp when last read: `None` when there was none.
-    seen: Option<Stamp>,
     /// The last frame read: segment, frame, bytes.
     frame: Option<(usize, usize, Arc<[u8]>)>,
 }
@@ -468,17 +478,18 @@ pub struct LogFile {
 impl LogFile {
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = fs::File::open(path)?;
-        let ino = identity(&file.metadata()?).1;
+        let birth = Birth::of(&file.metadata()?);
         let mut log = Self {
             file,
             dir: seal_dir(path),
-            ino,
+            birth,
             pos: 0,
             seal: None,
-            seen: None,
             frame: None,
         };
-        log.reload();
+        // A manifest that can't be read yet counts as none: the sealed range
+        // reads as NULs, which reads it again and fails then.
+        log.install(read_manifest(&log.dir).ok().flatten());
         Ok(log)
     }
 
@@ -487,27 +498,30 @@ impl LogFile {
         self.file.metadata()
     }
 
-    /// Reads the manifest again if it changed since last read; returns
-    /// whether it did. A manifest that can't be read counts as none: its
-    /// sealed range then reads as the plain file does.
-    fn reload(&mut self) -> bool {
-        let stamp = fs::metadata(self.dir.join(MANIFEST))
-            .ok()
-            .map(|meta| Stamp::of(&meta));
-        if stamp == self.seen && (stamp.is_none() || self.seal.is_some()) {
-            return false;
-        }
-        let read = read_manifest(&self.dir).ok().flatten();
-        self.seen = read.as_ref().map(|(_, stamp)| *stamp);
+    fn install(&mut self, manifest: Option<Manifest>) {
         self.frame = None;
-        self.seal = read.map(|(manifest, _)| Loaded {
-            bound: manifest.ino == self.ino,
+        self.seal = manifest.map(|manifest| Loaded {
+            bound: manifest.binds(self.birth),
             segments: std::iter::repeat_with(|| None)
                 .take(manifest.segments.len())
                 .collect(),
             manifest,
         });
-        true
+    }
+
+    /// Reads the manifest again, on a NUL hint; returns whether it
+    /// changed. One that is there but can't be read is an error.
+    fn refresh(&mut self) -> io::Result<bool> {
+        let read = read_manifest(&self.dir)?;
+        let same = match (&read, &self.seal) {
+            (None, None) => true,
+            (Some(manifest), Some(loaded)) => *manifest == loaded.manifest,
+            _ => false,
+        };
+        if !same {
+            self.install(read);
+        }
+        Ok(!same)
     }
 
     /// The segment and frame holding `at`, which the sealed range holds,
@@ -609,9 +623,11 @@ impl Read for LogFile {
             if count > 0 && buf[..count].contains(&0) {
                 // A seal may have punched these bytes after the manifest
                 // was last read.
-                if !reloaded && self.reload() {
+                if !reloaded {
                     reloaded = true;
-                    continue;
+                    if self.refresh()? {
+                        continue;
+                    }
                 }
                 // Best effort: a segment that can't be read leaves the
                 // plain bytes.
@@ -668,14 +684,17 @@ impl Status {
 /// hold on disk once it has: the rest, in whole blocks.
 fn punch_plan(len: u64, sealed_end: u64) -> (u64, u64) {
     let punch_to = sealed_end / BLOCK * BLOCK;
-    (punch_to, (len - punch_to).div_ceil(BLOCK) * BLOCK)
+    (
+        punch_to,
+        len.saturating_sub(punch_to).div_ceil(BLOCK) * BLOCK,
+    )
 }
 
 /// A log's size on disk and how far it is sealed. Reads the manifest, not
 /// the segments. A manifest that can't be read is an error.
 pub fn status(log: &Path) -> io::Result<Status> {
     let meta = fs::metadata(log)?;
-    let manifest = read_manifest(&seal_dir(log))?.map(|(manifest, _)| manifest);
+    let manifest = read_manifest(&seal_dir(log))?;
     let sealed_end = manifest.as_ref().map_or(0, Manifest::end).min(meta.len());
     let (punch_to, plain) = punch_plan(meta.len(), sealed_end);
     Ok(Status {
@@ -688,7 +707,7 @@ pub fn status(log: &Path) -> io::Result<Status> {
         }),
         bound: manifest
             .as_ref()
-            .is_some_and(|manifest| manifest.ino == identity(&meta).1),
+            .is_some_and(|manifest| manifest.binds(Birth::of(&meta))),
         needs_punch: punch_to > 0 && allocated(&meta) > plain + PUNCH_SLACK,
     })
 }
@@ -725,31 +744,32 @@ fn crash_before_punch() -> bool {
 }
 
 /// Seals `log`: writes its bytes past the sealed range, up to the last
-/// complete line, as a new segment when there are at least `min_new` of
-/// them; then punches the whole sealed range out of the plain file and
-/// restores its modified time. Also finishes an interrupted seal, rebinds a
-/// copied log's manifest, and retires a replaced log's.
+/// complete line within `max_new` of them, as a new segment when there are
+/// at least `min_new`; then punches the whole sealed range out of the plain
+/// file and restores its modified time. Also finishes an interrupted seal,
+/// rebinds a copied log's manifest, and retires a replaced log's.
 ///
 /// The caller is the log's only writer and holds its write lock throughout.
 /// Nothing is punched before its segment and the manifest naming it are
-/// verified and durable. Punching needs Linux and a filesystem that
-/// supports it; elsewhere the error is `Unsupported`, after the segment is
-/// written.
-pub fn seal(log: &Path, min_new: u64) -> io::Result<Sealed> {
+/// verified and durable, and a punch that only finishes an earlier seal
+/// first checks the segments against the log again. Punching needs Linux
+/// and a filesystem that supports it; elsewhere the error is
+/// `Unsupported`, after the segment is written.
+pub fn seal(log: &Path, min_new: u64, max_new: u64) -> io::Result<Sealed> {
     let file = fs::OpenOptions::new().read(true).write(true).open(log)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    let ino = identity(&meta).1;
+    let birth = Birth::of(&meta);
     let len = meta.len();
     let modified = mtime_ns(&meta)?;
     let dir = seal_dir(log);
     remove_temporaries(&dir)?;
     let mut done = Sealed::default();
-    let mut manifest = read_manifest(&dir)?.map(|(manifest, _)| manifest);
+    let mut manifest = read_manifest(&dir)?;
     if let Some(found) = &manifest
-        && found.ino != ino
+        && !found.binds(birth)
     {
         if agrees(&file, len, &dir, found)? {
             done.rebound = true;
@@ -758,11 +778,24 @@ pub fn seal(log: &Path, min_new: u64) -> io::Result<Sealed> {
             manifest = None;
             done.retired = true;
         }
+    } else if manifest.as_ref().is_some_and(|found| found.end() > len) {
+        return Err(invalid("a log shorter than its own sealed range"));
     }
     let start = manifest.as_ref().map_or(0, Manifest::end);
     if len > start {
-        let end = line_end(&file, start, len)?;
+        let limit = len.min(start.saturating_add(max_new.max(1)));
+        let mut end = line_end(&file, start, limit)?;
+        if end == start && limit < len {
+            // One line longer than `max_new`: sealed whole.
+            end = line_end(&file, start, len)?;
+        }
         if end - start >= min_new.max(1) {
+            if !dir.exists() {
+                fs::create_dir_all(&dir)?;
+                if let Some(parent) = log.parent() {
+                    sync_dir(parent)?;
+                }
+            }
             let generation = manifest
                 .as_ref()
                 .map_or_else(|| new_generation(log), |found| found.generation.clone());
@@ -771,7 +804,8 @@ pub fn seal(log: &Path, min_new: u64) -> io::Result<Sealed> {
                 .get_or_insert_with(|| Manifest {
                     version: VERSION,
                     generation,
-                    ino,
+                    ino: birth.ino,
+                    born_ns: birth.born_ns,
                     sealed_len: len,
                     sealed_mtime_ns: modified,
                     segments: Vec::new(),
@@ -791,8 +825,16 @@ pub fn seal(log: &Path, min_new: u64) -> io::Result<Sealed> {
     } else {
         modified
     };
-    if done.added.is_some() || done.rebound {
-        manifest.ino = ino;
+    let (punch_to, plain) = punch_plan(len, manifest.end());
+    let punching = punch_to > 0 && allocated(&meta) > plain + PUNCH_SLACK;
+    // Recorded before any punch, so a crash between the punch and the time
+    // restored leaves the time to restore.
+    if done.added.is_some()
+        || done.rebound
+        || (punching && (manifest.sealed_len, manifest.sealed_mtime_ns) != (len, target))
+    {
+        manifest.ino = birth.ino;
+        manifest.born_ns = birth.born_ns;
         manifest.sealed_len = len;
         manifest.sealed_mtime_ns = target;
         write_manifest(&dir, manifest)?;
@@ -800,8 +842,18 @@ pub fn seal(log: &Path, min_new: u64) -> io::Result<Sealed> {
     if crash_before_punch() {
         return Ok(done);
     }
-    let (punch_to, plain) = punch_plan(len, manifest.end());
-    if punch_to > 0 && allocated(&meta) > plain + PUNCH_SLACK {
+    if punching {
+        if done.added.is_none() && !done.rebound {
+            // Only finishing an earlier seal: the segments must still hold
+            // what the log holds, byte for byte where it isn't a hole yet.
+            if !agrees(&file, len, &dir, manifest)? {
+                return Err(invalid("a log's segments differ from its bytes"));
+            }
+        } else {
+            for segment in &manifest.segments {
+                open_segment(&dir, &manifest.generation, segment)?;
+            }
+        }
         punch(&file, 0, punch_to)?;
         done.punched = true;
     }
@@ -814,19 +866,19 @@ pub fn seal(log: &Path, min_new: u64) -> io::Result<Sealed> {
 
 /// Removes what an interrupted seal left in `log`'s seal directory: its
 /// temporary files and, when the manifest reads, segment files it doesn't
-/// name. Retires a manifest recorded from another inode whose bytes the
-/// log no longer holds (a replace interrupted before its cleanup). Returns
-/// how many files went. Never touches the log, nor a segment while the
+/// name. Retires a manifest recorded from another file whose bytes the log
+/// no longer holds (a replace interrupted before its cleanup). Returns how
+/// many files went. Never touches the log, nor a segment while the
 /// manifest can't be read.
 pub fn tidy(log: &Path) -> io::Result<usize> {
     let dir = seal_dir(log);
     let mut removed = remove_temporaries(&dir)?;
-    let Some((manifest, _)) = read_manifest(&dir)? else {
+    let Some(manifest) = read_manifest(&dir)? else {
         return Ok(removed);
     };
     if let Ok(file) = fs::File::open(log) {
         let meta = file.metadata()?;
-        if identity(&meta).1 != manifest.ino && !agrees(&file, meta.len(), &dir, &manifest)? {
+        if !manifest.binds(Birth::of(&meta)) && !agrees(&file, meta.len(), &dir, &manifest)? {
             retire(&dir, &manifest)?;
             return Ok(removed + manifest.segments.len() + 1);
         }
@@ -845,6 +897,24 @@ pub fn tidy(log: &Path) -> io::Result<usize> {
         }
     }
     Ok(removed)
+}
+
+/// Removes `log`'s seal directory whatever it holds: for a writer about to
+/// replace the log with other content, which the old segments don't
+/// describe. The manifest goes first, so a crash midway leaves only
+/// segment files no manifest names. Call it before the replacing rename:
+/// a new file could otherwise take the old one's inode number.
+pub fn forget(log: &Path) -> io::Result<()> {
+    let dir = seal_dir(log);
+    match fs::remove_file(dir.join(MANIFEST)) {
+        Ok(()) => sync_dir(&dir)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    match fs::remove_dir_all(&dir) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 fn remove_temporaries(dir: &Path) -> io::Result<usize> {
@@ -878,30 +948,62 @@ fn retire(dir: &Path, manifest: &Manifest) -> io::Result<()> {
     Ok(())
 }
 
-/// Whether the plain file agrees with every segment wherever it holds a
-/// byte other than NUL: the manifest describes this content. A segment that
-/// can't be read is an error, never a disagreement.
+/// Whether the manifest describes the log's bytes: `true` when the plain
+/// file agrees with every segment wherever it holds a byte other than NUL
+/// and is at least as long as the sealed range; `false` when it disagrees
+/// somewhere, or is shorter and holds every one of its own bytes (no NUL).
+/// An error when it can't tell: a segment that can't be read, or a shorter
+/// log with NULs, which may be the only trace of sealed bytes.
 fn agrees(file: &fs::File, len: u64, dir: &Path, manifest: &Manifest) -> io::Result<bool> {
-    if manifest.end() > len {
-        return Ok(false);
-    }
     let mut plain = Vec::new();
     for segment in &manifest.segments {
+        if segment.start >= len {
+            break;
+        }
         let open = open_segment(dir, &manifest.generation, segment)?;
         for (index, frame) in open.table.frames.iter().enumerate() {
+            let at = segment.start + frame.plain_at;
+            if at >= len {
+                break;
+            }
             let sealed = decompress(&open, index)?;
-            plain.resize(sealed.len(), 0);
-            read_exact_at(file, &mut plain, segment.start + frame.plain_at)?;
+            let count = (len - at).min(sealed.len() as u64) as usize;
+            plain.resize(count, 0);
+            read_exact_at(file, &mut plain, at)?;
             if plain
                 .iter()
-                .zip(&sealed)
+                .zip(&sealed[..count])
                 .any(|(held, expected)| *held != 0 && held != expected)
             {
                 return Ok(false);
             }
         }
     }
-    Ok(true)
+    if manifest.end() <= len {
+        return Ok(true);
+    }
+    if holds_nul(file, len)? {
+        return Err(invalid(
+            "a log shorter than its sealed range, with holes in it",
+        ));
+    }
+    Ok(false)
+}
+
+/// Whether `[0, len)` of `file` holds a NUL byte.
+fn holds_nul(file: &fs::File, len: u64) -> io::Result<bool> {
+    const CHUNK: u64 = 1 << 20;
+    let mut buffer = vec![0; CHUNK as usize];
+    let mut at = 0;
+    while at < len {
+        let chunk = &mut buffer[..(len - at).min(CHUNK) as usize];
+        read_exact_at(file, chunk, at)?;
+        if chunk.contains(&0) {
+            return Ok(true);
+        }
+        at += chunk.len() as u64;
+    }
+    Ok(false)
 }
 
 /// The offset just past the last newline in `[start, len)`, or `start`.
@@ -1004,9 +1106,9 @@ fn write_segment(
 fn verify(path: &Path, plain: u64, plain_sha256: &str) -> io::Result<()> {
     let file = fs::File::open(path)?;
     let open = OpenSegment {
-        stamp: Stamp::of(&file.metadata()?),
         table: read_table(&file)?,
         file,
+        sha256: String::new(),
     };
     if open.table.plain != plain {
         return Err(invalid("segment length differs after writing"));
