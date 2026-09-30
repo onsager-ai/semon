@@ -1,0 +1,16 @@
+[package]
+name = "semon-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Two-way control, step 1: the pending-request model, its canonical payload hash and the answer journal."
+
+[dependencies]
+hex.workspace = true
+serde_json.workspace = true
+# Already in the workspace for semon-store; RFC 8785 with UTF-16 key order
+# and ECMAScript number formatting.
+serde_json_canonicalizer.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

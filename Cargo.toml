@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/semon-claude",
     "crates/semon-codex",
+    "crates/semon-control",
     "crates/semon-push",
     "crates/semon-relay",
     "crates/semon-sessions",
