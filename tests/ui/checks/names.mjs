@@ -17,7 +17,7 @@ fs.mkdirSync(OUT, { recursive: true });
 const measure = (page, root) => page.evaluate((rootSelector) => {
   const canvas = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
   const token = (name) => { const probe = document.createElement("span"); probe.style.color = "var(--" + name + ")"; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; };
-  const muted = token("muted"), ink2 = token("ink-2");
+  const muted = token("muted");
   const rgba = (css) => { canvas.clearRect(0, 0, 1, 1); canvas.fillStyle = "#000"; canvas.fillStyle = css; canvas.fillRect(0, 0, 1, 1); const [r, g, b, a] = canvas.getImageData(0, 0, 1, 1).data; return [r, g, b, a / 255]; };
   const over = (top, under) => { const a = top[3] + under[3] * (1 - top[3]); return a ? [0, 1, 2].map((i) => (top[i] * top[3] + under[i] * under[3] * (1 - top[3])) / a).concat(a) : [0, 0, 0, 0]; };
   const backdrop = (node) => { const layers = []; for (let e = node; e; e = e.parentElement) layers.push(rgba(getComputedStyle(e).backgroundColor)); let c = rgba(getComputedStyle(document.documentElement).getPropertyValue("--ground") || "#fff"); if (c[3] < 1) c = [255, 255, 255, 1]; for (const layer of layers.reverse()) c = over(layer, c); return c; };
@@ -26,7 +26,7 @@ const measure = (page, root) => page.evaluate((rootSelector) => {
   return [...document.querySelectorAll(rootSelector + " .hname")].filter((n) => n.getClientRects().length).map((n) => {
     const cs = getComputedStyle(n), box = n.getBoundingClientRect(), lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.2;
     const fg = rgba(cs.color), bg = backdrop(n.parentElement);
-    return { text: n.textContent, harness: [...n.classList].find((c) => c.startsWith("h-")), graphics: n.querySelectorAll("svg,img").length + n.children.length, tag: n.tagName, mark: n.parentElement?.classList.contains("hlabel") ? n.previousElementSibling?.dataset?.harness ?? null : undefined, lines: Math.round(box.height / lh), fontSize: parseFloat(cs.fontSize), weight: cs.fontWeight, ratio: Math.round(ratio(fg, bg) * 100) / 100, color: cs.color, muted: n.closest('.lineage-menu button[aria-current="page"]') ? ink2 : muted, current: !!n.closest('.lineage-menu button[aria-current="page"]') };
+    return { text: n.textContent, harness: [...n.classList].find((c) => c.startsWith("h-")), graphics: n.querySelectorAll("svg,img").length + n.children.length, tag: n.tagName, mark: n.parentElement?.classList.contains("hlabel") ? n.previousElementSibling?.dataset?.harness ?? null : undefined, lines: Math.round(box.height / lh), fontSize: parseFloat(cs.fontSize), weight: cs.fontWeight, ratio: Math.round(ratio(fg, bg) * 100) / 100, color: cs.color, muted };
   });
 }, root);
 
@@ -47,7 +47,7 @@ export default async function namesCheck(browser) {
         r.expect(l.lines <= 1, tag + " " + where + ": " + l.text + " wraps onto " + l.lines + " lines");
         r.expect(l.fontSize >= 11 && l.fontSize <= 12 && Number(l.weight) <= 500, tag + " " + where + ": " + l.text + " is " + l.fontSize + "px weight " + l.weight);
         r.expect(l.ratio >= 4.5, tag + " " + where + ": " + l.text + " has contrast " + l.ratio + ", under 4.5");
-        r.expect(l.color === l.muted, tag + " " + where + ": " + l.text + " is painted " + l.color + ", not the neutral " + (l.current ? "--ink-2 (the lineage menu's current row sits on --sunken, where --muted is under AA)" : "--muted") + " " + l.muted);
+        r.expect(l.color === l.muted, tag + " " + where + ": " + l.text + " is painted " + l.color + ", not the neutral --muted " + l.muted);
         if (seen[l.text] !== undefined) seen[l.text]++;
         r.expect((l.harness === "h-codex") === (l.text === "Codex"), tag + " " + where + ": " + l.text + " carries " + l.harness);
         if (l.mark !== undefined) r.expect(l.mark === (l.text === "Codex" ? "codex" : "claude"), tag + " " + where + ": " + l.text + " has the mark of " + l.mark);
@@ -75,16 +75,16 @@ export default async function namesCheck(browser) {
       if (s === claude) await shot("session");
     }
     if (size === "phone") {
-      // The phone's lineage menu lists the path to the open child; its current row sits on --sunken.
+      // A child's ⋯ menu lists its ancestors in Session path; the current session is the title, not a path row.
       const child = Object.values(D.SESS).find((x) => x.parent ?? D.H.some((h) => h.kind === "spawn" && h.to === x.id));
-      r.expect(!!child, "the fixture must hold a child session for the lineage menu");
+      r.expect(!!child, "the fixture must hold a child session for Session path");
       if (child) {
         await goto(page, { v: "session", id: child.id }, D); await page.waitForTimeout(200);
-        await page.click(".topbar .lineage-parent"); await page.waitForSelector(".lineage-menu");
-        const menu = await measure(page, ".lineage-menu");
-        r.expect(menu.length > 0 && menu.some((l) => l.current), tag + ": the lineage menu shows no harness label on its current row");
-        audit("lineage-menu", menu);
-        await shot("lineage");
+        await page.click("#more-btn"); await page.waitForSelector(".session-menu .menu-path-item");
+        const menu = await measure(page, ".session-menu .menu-path-group");
+        r.expect(menu.length > 0, tag + ": Session path shows no ancestor harness label");
+        audit("session-path", menu);
+        await shot("session-path");
       }
     }
     await goto(page, { v: "analytics" }, D);
