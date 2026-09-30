@@ -27,8 +27,8 @@ use crate::{
     received::{Listing, ReceivedMachines},
     refresh::RefreshPool,
     viewer::{
-        MachineView, Reading, ViewerReply, decoded, has_session_page, has_trace_page, lock,
-        percent_encode, query_value, read_lock, write_lock,
+        MachineView, Reading, ViewerReply, decoded, has_page, has_session_page, has_trace_page,
+        is_named_page, lock, page_parts, percent_encode, query_value, read_lock, write_lock,
     },
 };
 
@@ -844,6 +844,12 @@ impl ViewerCore {
         read_lock(&self.views).clone()
     }
 
+    /// Each machine's view, in order: for tests that read its hooks.
+    #[cfg(test)]
+    pub(crate) fn machine_views(&self) -> Vec<Arc<MachineView>> {
+        self.views().iter().map(|(_, view)| view.clone()).collect()
+    }
+
     /// A view of a machine, in this core's refresh mode.
     fn view(&self, options: Options) -> Arc<MachineView> {
         let view = MachineView::new(options);
@@ -1056,7 +1062,10 @@ impl ViewerCore {
     /// answered (405 otherwise); every URL the viewer uses is a GET. The
     /// caller authenticates first: the core serves whoever it is handed.
     /// Any number of threads may call it at once. The model carries the
-    /// [`Extras`] the core's setters set.
+    /// [`Extras`] the core's setters set. Outside [`Refresh::OnRead`] only
+    /// the API routes refresh a model: a page, including one that names a
+    /// machine, session or trace, is answered from the models already built
+    /// and never waits for a build.
     pub fn respond(
         &self,
         method: &str,
@@ -1094,6 +1103,10 @@ impl ViewerCore {
                 .analytics(&views, query, if_none_match)
                 .unwrap_or_else(|error| failed(&error));
         }
+        // A page never waits for a build: only the API routes refresh.
+        if let Some(reply) = self.page_at_once(&views, path) {
+            return reply;
+        }
         // With received machines the tree always names each node's machine.
         if views.len() == 1 && !(self.received.is_some() && path == "/api/tree") {
             let mut reply = views[0].1.respond(method, path, query, if_none_match);
@@ -1112,12 +1125,7 @@ impl ViewerCore {
                 self.by_transcript(&views, path, query, if_none_match)
             }
             "/api/tree" => self.tree(&views),
-            _ if path.starts_with("/machines/")
-                || path.starts_with("/s/")
-                || path.starts_with("/trace/") =>
-            {
-                self.page(&views, path)
-            }
+            _ if is_named_page(path) => self.page(&views, path),
             _ => Ok(views[0].1.respond(method, path, query, if_none_match)),
         };
         answer.unwrap_or_else(|error| failed(&error))
@@ -1434,37 +1442,100 @@ impl ViewerCore {
     /// A page URL that names something in the union: a machine, a session
     /// or a trace.
     fn page(&self, views: &Views, path: &str) -> io::Result<ViewerReply> {
-        let parts: Option<Vec<String>> = path
-            .trim_start_matches('/')
-            .split('/')
-            .map(decoded)
-            .collect();
-        let Some(parts) = parts else {
+        let Some(parts) = page_parts(path) else {
             return Ok(text(400, "Invalid request"));
         };
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
         let (models, plan) = self.refresh_at(views, Reading::Served)?;
-        let built = |id: &str| {
-            plan.owners
-                .get(id)
-                .filter(|_| !plan.conflicts.contains(id))
-                .map(|(index, own)| (&*models[*index], own.clone()))
-        };
-        let exists = match parts.as_slice() {
-            ["machines", id] => plan.machine_ids.iter().any(|machine| machine == id),
-            ["s", harness, id] => {
-                built(id).is_some_and(|(built, own)| has_session_page(built, harness, &own))
-            }
-            ["trace", harness, id, turn] => {
-                built(id).is_some_and(|(built, own)| has_trace_page(built, harness, &own, turn))
-            }
-            _ => false,
-        };
-        Ok(if exists {
+        Ok(if union_has_page(&plan, &models, &parts) {
             views[0].1.respond("GET", "/", "", None)
         } else {
             text(404, "Not found")
         })
+    }
+
+    /// A page URL that names something (`/machines/…`, `/s/…`, `/trace/…`),
+    /// answered from the models already built, without refreshing one,
+    /// outside [`Refresh::OnRead`]. The page is the same shell whatever it
+    /// names, and it asks for the model itself, so it never waits for a
+    /// build: it is served when the models built so far have what it names,
+    /// and when a machine has no model yet (the page's own `/api/model`
+    /// builds it, and a URL that names nothing there shows the home screen).
+    /// `None` leaves the answer to the usual route, which is exact:
+    /// refreshed on read, a URL the built models lack (a session newer than
+    /// them, or nothing at all: 404), and one that doesn't decode (400).
+    fn page_at_once(&self, views: &Views, path: &str) -> Option<ViewerReply> {
+        if self.refresh == Refresh::OnRead || !is_named_page(path) {
+            return None;
+        }
+        let segments = page_parts(path)?;
+        let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+        let models: Option<Vec<Arc<Built>>> =
+            views.iter().map(|(_, view)| view.shown_built()).collect();
+        let named = match models {
+            None => true,
+            // One machine is served as the machine itself, no id renamed.
+            Some(models) if views.len() == 1 => has_page(&models[0], &segments),
+            Some(models) => {
+                let plan = plan(&parts(views, &models), self.droppable());
+                union_has_page(&plan, &models, &segments)
+            }
+        };
+        named.then(|| views[0].1.respond("GET", "/", "", None))
+    }
+
+    /// Brings every machine's model up to date now, on the calling thread,
+    /// so that the reads that come later find it built: a machine with no
+    /// model yet is built, and one whose logs changed (invalidated or not;
+    /// a stat pass tells) is rebuilt. It is for an embedding server that
+    /// wants models warm before anyone reads them, for example once at
+    /// start and again, spaced out, after it writes a machine's logs.
+    ///
+    /// It is not a read: in [`Refresh::Background`] or
+    /// [`Refresh::OnInvalidate`] it starts no background checks, and it
+    /// clears the invalidations it covers, so the first read after an idle
+    /// spell answers at once from what it built. It blocks for as long as
+    /// the builds take (a machine's first build reads all its logs): call
+    /// it off an async runtime, and bound how many run at once. A read that
+    /// answers from the last model never waits for it; one that must
+    /// refresh first waits for the machine it is building, then finds it
+    /// built. Every machine is tried; the first error is returned. Once the
+    /// core is closed it does nothing.
+    pub fn warm(&self) -> io::Result<()> {
+        let Some(_entered) = self.open.enter() else {
+            return Ok(());
+        };
+        self.follow();
+        let mut first = Ok(());
+        for (_, view) in self.views().iter() {
+            if let Err(error) = view.warm()
+                && first.is_ok()
+            {
+                first = Err(error);
+            }
+        }
+        first
+    }
+}
+
+/// Whether the union these models and plan serve has the page the decoded
+/// path segments name: a machine, a session or a trace.
+fn union_has_page(plan: &Plan, models: &[Arc<Built>], parts: &[&str]) -> bool {
+    let built = |id: &str| {
+        plan.owners
+            .get(id)
+            .filter(|_| !plan.conflicts.contains(id))
+            .map(|(index, own)| (&*models[*index], own.clone()))
+    };
+    match parts {
+        ["machines", id] => plan.machine_ids.iter().any(|machine| machine == id),
+        ["s", harness, id] => {
+            built(id).is_some_and(|(built, own)| has_session_page(built, harness, &own))
+        }
+        ["trace", harness, id, turn] => {
+            built(id).is_some_and(|(built, own)| has_trace_page(built, harness, &own, turn))
+        }
+        _ => false,
     }
 }
 

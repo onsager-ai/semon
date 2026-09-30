@@ -1544,21 +1544,10 @@ impl MachineView {
     /// Whether a page URL names something in the model: `/machines/<id>`,
     /// `/s/<harness>/<id>` and `/trace/<harness>/<id>/<turn>`.
     fn page_exists(&self, path: &str) -> io::Result<bool> {
-        let parts: Option<Vec<String>> = path
-            .trim_start_matches('/')
-            .split('/')
-            .map(decoded)
-            .collect();
-        let parts = parts.ok_or_else(|| invalid_input("path"))?;
+        let parts = page_parts(path).ok_or_else(|| invalid_input("path"))?;
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
         let cache = self.served_model()?;
-        let built = &cache.built;
-        Ok(match parts.as_slice() {
-            ["machines", id] => *id == built.machine_id,
-            ["s", harness, id] => has_session_page(built, harness, id),
-            ["trace", harness, id, turn] => has_trace_page(built, harness, id, turn),
-            _ => false,
-        })
+        Ok(has_page(&cache.built, &parts))
     }
 
     fn route(&self, path: &str, query: &str) -> io::Result<(u16, &'static str, Vec<u8>)> {
@@ -1611,10 +1600,7 @@ impl MachineView {
                     .map(|(_, bytes)| (200, "font/woff2", bytes.to_vec()))
                     .ok_or_else(|| io::ErrorKind::NotFound.into())
             }
-            _ if path.starts_with("/machines/")
-                || path.starts_with("/s/")
-                || path.starts_with("/trace/") =>
-            {
+            _ if is_named_page(path) => {
                 if self.page_exists(path)? {
                     Ok((200, html, PAGE.into()))
                 } else {
@@ -1851,6 +1837,47 @@ impl MachineView {
         Ok(cache.built.clone())
     }
 
+    /// The model built last, as it is: no stat pass, no build, no lock but
+    /// the one that clones the `Arc`. `None` before the first build.
+    pub(crate) fn shown_built(&self) -> Option<Arc<Built>> {
+        self.shown_model().map(|model| model.built.clone())
+    }
+
+    /// Brings the model up to date now, on the calling thread: built if
+    /// there is none, rebuilt if its logs or facts changed (a stat pass
+    /// tells), and the V1 tree with it if one is shown. It clears an
+    /// invalidation it covers, as a background check does, so the next read
+    /// after an idle spell answers at once. It is not a read: the view isn't
+    /// marked read, so it starts no background checks. A closed view is left
+    /// as it is. It holds `work` while it builds, as any rebuild does: a
+    /// read that must refresh first waits for it, then finds it done; a
+    /// read that answers from the shown model never waits.
+    pub(crate) fn warm(&self) -> io::Result<()> {
+        if lock(&self.live.state).closed {
+            return Ok(());
+        }
+        let mut work = lock(&self.work);
+        // Logs invalidated before this refresh starts, it sees.
+        let invalidated = std::mem::take(&mut lock(&self.live.state).invalidated);
+        let started = Instant::now();
+        let model = self.refresh_kind(&mut work, Kind::Model);
+        let tree = self
+            .is_shown(Kind::Tree)
+            .then(|| self.refresh_kind(&mut work, Kind::Tree));
+        let built_at = work.built_at;
+        drop(work);
+        let mut state = lock(&self.live.state);
+        state.built_at = built_at;
+        state.record(Kind::Model, started, &model);
+        if let Some(result) = &tree {
+            state.record(Kind::Tree, started, result);
+        }
+        if model.is_err() {
+            state.invalidated |= invalidated;
+        }
+        model
+    }
+
     /// The V1 tree's roots, as a request is answered.
     pub(crate) fn tree_roots(&self) -> io::Result<Vec<Node>> {
         Ok(self.served_tree()?.roots.clone())
@@ -1859,6 +1886,31 @@ impl MachineView {
     /// Whether this machine has a transcript file for a V1 tree node.
     pub(crate) fn has_transcript(&self, harness: &str, id: &str) -> io::Result<bool> {
         Ok(self.transcript_path(harness, id)?.is_some())
+    }
+}
+
+/// Whether `path` is a page URL that names something: `/machines/<id>`,
+/// `/s/<harness>/<id>` or `/trace/<harness>/<id>/<turn>`, by its prefix.
+pub(crate) fn is_named_page(path: &str) -> bool {
+    path.starts_with("/machines/") || path.starts_with("/s/") || path.starts_with("/trace/")
+}
+
+/// A page URL's path segments, decoded; `None` when one doesn't decode.
+pub(crate) fn page_parts(path: &str) -> Option<Vec<String>> {
+    path.trim_start_matches('/')
+        .split('/')
+        .map(decoded)
+        .collect()
+}
+
+/// Whether one machine's `built` model has the page these decoded path
+/// segments name (see [`page_parts`]).
+pub(crate) fn has_page(built: &Built, parts: &[&str]) -> bool {
+    match parts {
+        ["machines", id] => *id == built.machine_id,
+        ["s", harness, id] => has_session_page(built, harness, id),
+        ["trace", harness, id, turn] => has_trace_page(built, harness, id, turn),
+        _ => false,
     }
 }
 
@@ -6417,6 +6469,221 @@ mod tests {
         });
         core.close();
         assert!(!core.invalidate("a"), "a closed core invalidates nothing");
+    }
+
+    /// Builds, stat passes and reads' own refreshes of a view so far: what a
+    /// request that refreshes nothing leaves as it was.
+    fn refresh_counts(view: &MachineView) -> (u64, u64, u64) {
+        (
+            view.hooks.builds(),
+            view.hooks.stats.load(Ordering::SeqCst),
+            view.hooks.refreshes_first.load(Ordering::SeqCst),
+        )
+    }
+
+    /// Makes `view` go idle quickly: no read for 300 ms and it is no longer
+    /// checked, and a read one is checked every 200 ms until then.
+    fn quick_idle(view: &MachineView) {
+        let mut state = lock(&view.live.state);
+        state.idle_after = Duration::from_millis(300);
+        state.safety_every = Duration::from_millis(200);
+    }
+
+    /// Waits until no background check of `view` is queued or running.
+    fn until_idle(view: &MachineView) {
+        eventually("the view's checks stop", || {
+            (lock(&view.live.state).slot == Slot::Idle).then_some(())
+        });
+    }
+
+    fn tx_has(core: &ViewerCore, sid: &str, text: &str) -> bool {
+        let page = core.respond("GET", "/api/tx", &format!("sid={sid}"), None);
+        String::from_utf8_lossy(&page.body).contains(text)
+    }
+
+    /// Outside OnRead a page never waits for a build, nor takes a stat pass:
+    /// before the first model it is the shell (its own /api/model builds
+    /// the model), and once a model is built it answers from that one even
+    /// when an announced change would make the next API read refresh first.
+    /// Only the API routes refresh. A URL the built model lacks takes the
+    /// exact route: a fresh check, then 404.
+    #[test]
+    fn a_page_never_waits_for_a_build_only_the_api_refreshes() {
+        let fixture = lane_fixture();
+        let mut core = ViewerCore::new(fixture.options.clone());
+        core.set_refresh_pool(RefreshPool::new(1));
+        core.set_refresh(Refresh::OnInvalidate);
+        let view = core.machine_views().remove(0);
+        quick_idle(&view);
+        let page = |path: &str| {
+            let reply = core.respond("GET", path, "", None);
+            assert_eq!(reply.status, 200, "{path}");
+            assert_eq!(reply.content_type, "text/html; charset=utf-8", "{path}");
+            assert_eq!(reply.body, PAGE.as_bytes(), "{path}");
+        };
+        // No model yet: every page is the shell, and nothing is read.
+        for path in [
+            "/",
+            "/timeline",
+            "/s/claude/lane",
+            "/s/claude/nobody",
+            "/machines/testbox",
+            "/trace/claude/lane/some-turn",
+        ] {
+            page(path);
+        }
+        assert_eq!(core.respond("GET", "/viewer.js", "", None).status, 200);
+        assert_eq!(refresh_counts(&view), (0, 0, 0), "a page read the logs");
+
+        // The page's own model read builds it.
+        let model = core.respond("GET", "/api/model", "", None);
+        assert_eq!(model.status, 200);
+        let turn = body_of(&model)["turns"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(view.hooks.builds(), 1);
+
+        // Idle, then a change announced: the next API read refreshes first.
+        until_idle(&view);
+        say(&fixture, "lane", 1, "announced while idle");
+        assert!(core.invalidate(""));
+        let before = refresh_counts(&view);
+        for path in [
+            "/s/claude/lane".to_owned(),
+            "/machines/testbox".into(),
+            format!("/trace/claude/lane/{turn}"),
+            "/timeline".into(),
+        ] {
+            page(&path);
+        }
+        assert_eq!(core.respond("GET", "/viewer.css", "", None).status, 200);
+        assert_eq!(
+            refresh_counts(&view),
+            before,
+            "a page refreshed a model whose logs changed"
+        );
+        assert!(lock(&view.live.state).invalidated, "a page took the change");
+
+        // The API read does refresh, before it answers.
+        assert!(tx_has(&core, "lane", "announced while idle"));
+        assert_eq!(view.hooks.builds(), before.0 + 1);
+        assert_eq!(
+            view.hooks.refreshes_first.load(Ordering::SeqCst),
+            before.2 + 1
+        );
+        // A URL the built model lacks: checked against a fresh one, 404.
+        for path in ["/s/claude/nobody", "/machines/elsewhere", "/s/codex/lane"] {
+            assert_eq!(core.respond("GET", path, "", None).status, 404, "{path}");
+        }
+        core.close();
+    }
+
+    /// The same across several machines: a page named in the union of the
+    /// built models, or asked before a machine has one, is the shell at
+    /// once; neither machine is built or checked for it.
+    #[test]
+    fn a_page_across_machines_never_waits_for_a_build() {
+        let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
+        let mut core = ViewerCore::with_machines(vec![
+            ("a".into(), alpha.options.clone()),
+            ("b".into(), bravo.options.clone()),
+        ]);
+        core.set_refresh_pool(RefreshPool::new(1));
+        core.set_refresh(Refresh::OnInvalidate);
+        let views = core.machine_views();
+        for view in &views {
+            quick_idle(view);
+        }
+        let shell = |path: &str| {
+            let reply = core.respond("GET", path, "", None);
+            assert_eq!(
+                (reply.status, reply.body.as_slice()),
+                (200, PAGE.as_bytes()),
+                "{path}"
+            );
+        };
+        for path in ["/s/claude/lane-b", "/machines/alpha", "/s/claude/nobody"] {
+            shell(path);
+        }
+        for view in &views {
+            assert_eq!(refresh_counts(view), (0, 0, 0), "a page read the logs");
+        }
+        assert_eq!(core.respond("GET", "/api/model", "", None).status, 200);
+        for view in &views {
+            until_idle(view);
+        }
+        say(&alpha, "lane-a", 1, "announced while idle");
+        say(&bravo, "lane-b", 1, "announced while idle");
+        assert!(core.invalidate("a") && core.invalidate("b"));
+        let before: Vec<_> = views.iter().map(|view| refresh_counts(view)).collect();
+        for path in ["/s/claude/lane-a", "/s/claude/lane-b", "/machines/bravo"] {
+            shell(path);
+        }
+        let after: Vec<_> = views.iter().map(|view| refresh_counts(view)).collect();
+        assert_eq!(after, before, "a page refreshed a machine");
+        assert!(tx_has(&core, "lane-b", "announced while idle"));
+        assert_eq!(core.respond("GET", "/machines/gamma", "", None).status, 404);
+        core.close();
+    }
+
+    /// `warm` builds every machine's model on the calling thread without
+    /// counting as a read (no background check starts), and the first read
+    /// answers from it at once. After an idle spell it rebuilds only the
+    /// machine whose logs changed, and clears that machine's invalidation,
+    /// so the next read answers at once with the change. Closed, it builds
+    /// nothing.
+    #[test]
+    fn warm_builds_every_machine_without_a_read_and_the_first_read_answers_at_once() {
+        let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
+        let mut core = ViewerCore::with_machines(vec![
+            ("a".into(), alpha.options.clone()),
+            ("b".into(), bravo.options.clone()),
+        ]);
+        core.set_refresh_pool(RefreshPool::new(1));
+        core.set_refresh(Refresh::OnInvalidate);
+        let views = core.machine_views();
+        for view in &views {
+            quick_idle(view);
+        }
+        core.warm().expect("both machines build");
+        for view in &views {
+            assert_eq!(view.hooks.builds(), 1);
+            let state = lock(&view.live.state);
+            assert_eq!(state.slot, Slot::Idle, "a warm started background checks");
+            assert!(state.read_at.is_none(), "a warm counted as a read");
+        }
+        assert_eq!(core.respond("GET", "/api/model", "", None).status, 200);
+        for view in &views {
+            assert_eq!(view.hooks.builds(), 1, "the first read rebuilt");
+            assert_eq!(view.hooks.refreshes_first.load(Ordering::SeqCst), 0);
+        }
+
+        for view in &views {
+            until_idle(view);
+        }
+        say(&alpha, "lane-a", 1, "warmed while idle");
+        assert!(core.invalidate("a"));
+        core.warm().expect("alpha rebuilds");
+        assert_eq!(views[0].hooks.builds(), 2, "alpha's change, one rebuild");
+        assert_eq!(views[1].hooks.builds(), 1, "bravo didn't change");
+        assert!(
+            !lock(&views[0].live.state).invalidated,
+            "the warm covered it"
+        );
+        let reads = views[0].hooks.refreshes_first.load(Ordering::SeqCst);
+        assert!(tx_has(&core, "lane-a", "warmed while idle"));
+        assert_eq!(
+            views[0].hooks.refreshes_first.load(Ordering::SeqCst),
+            reads,
+            "the read after the warm refreshed first"
+        );
+        assert_eq!(views[0].hooks.builds(), 2);
+
+        core.close();
+        say(&alpha, "lane-a", 2, "after close");
+        core.warm().expect("a closed core warms nothing");
+        assert_eq!(views[0].hooks.builds(), 2, "a closed core built");
     }
 
     /// Background builds that keep failing aren't hidden forever behind
