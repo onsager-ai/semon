@@ -126,7 +126,7 @@ async function scheme(browser, name, opts, r) {
     // The Sessions page draws again for a new route: Home and back applies what it held.
     const hop = async () => { await go(page, { v: "home" }, "Home"); await go(page, { v: "sessions" }, "Sessions"); };
     // What every earlier step held is applied: the page by a route change; the wide screen's sidebar by leaving it alone for IDLE.
-    const applyAll = async () => { await hop(); if (!phone) { await page.mouse.move(640, 4); await sleep(IDLE + 1500); } };
+    const applyAll = async () => { await hop(); await page.evaluate(() => document.activeElement?.blur?.()); /* (a click in the tree leaves focus there, which blocks the timer) */ if (!phone) { await page.mouse.move(640, 4); await sleep(IDLE + 1500); } };
 
     // ---- 1. scrolled down: nothing moves; the held order applies when the list is out of sight ----
     const pageBefore = await pageRows(page), oldIds = ids(pageBefore), targets = OLD.filter((id) => oldIds.includes(id)).sort((a, b) => oldIds.indexOf(b) - oldIds.indexOf(a)).slice(0, 2);
