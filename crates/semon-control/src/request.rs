@@ -175,6 +175,40 @@ impl Answer {
             Self::Questions(answers) => json!({"answers": answers}),
         }
     }
+
+    /// The answer for a refusal's journal line, which anyone who reaches the
+    /// route can fill: the message cut to 1 KiB, and at most 16 answers with
+    /// each text and label cut to 256 bytes, plus how many there were.
+    pub(crate) fn to_capped_json(&self) -> Value {
+        match self {
+            Self::Allow => json!({"decision": "allow"}),
+            Self::Deny { message } => json!({
+                "decision": "deny",
+                "message": message.as_deref().map(|text| truncated(text, 1024)),
+            }),
+            Self::Questions(answers) => {
+                let kept: serde_json::Map<String, Value> = answers
+                    .iter()
+                    .take(16)
+                    .map(|(text, label)| (truncated(text, 256), json!(truncated(label, 256))))
+                    .collect();
+                json!({"answers": kept, "answer_count": answers.len()})
+            }
+        }
+    }
+}
+
+/// `text` cut to at most `max` bytes on a character boundary, marked with
+/// an ellipsis when cut.
+pub(crate) fn truncated(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\u{2026}", &text[..end])
 }
 
 /// One single-choice question of a question request.
@@ -361,11 +395,14 @@ pub struct NewRequest {
     pub payload: Value,
     /// The adapter's reason the request can't be answered here, if any.
     pub read_only: Option<String>,
-    /// Claude: how a later tool-run report finds this request.
+    /// Claude: how a later tool-run report finds this request. Present
+    /// exactly for Claude requests; its tool is `AskUserQuestion` exactly
+    /// when `kind` is `Question`.
     pub match_key: Option<MatchKey>,
     /// Whether a Claude hook connection waits on this request.
     pub hook_wait: bool,
-    /// The earliest of the harness's deadline and Semon's.
+    /// The earliest of the harness's deadline and Semon's, on the monotonic
+    /// clock ([`crate::monotonic_ms`]).
     pub expires_ms: u64,
 }
 
@@ -389,6 +426,12 @@ pub struct PendingRequest {
     /// The SHA-256 of the payload's canonical encoding; `None` when it has
     /// none, in which case the request is read-only.
     pub payload_sha256: Option<String>,
+    /// The bytes the payload counts against the store's budget; 0 once it
+    /// has been dropped.
+    pub payload_bytes: usize,
+    /// Whether the payload of this final request was dropped (replaced by
+    /// `null`) to make room under the store's payload budget.
+    pub payload_dropped: bool,
     /// Claude: how a later tool-run report finds it.
     pub match_key: Option<MatchKey>,
     /// Whether a Claude hook connection waits on it.
@@ -407,7 +450,9 @@ pub struct PendingRequest {
     /// registered after this one ended unmatched, so tool runs are no longer
     /// matched to this one.
     pub superseded: bool,
-    /// Whether the tool ran although a deny from the viewer was delivered:
-    /// the terminal allowed it first.
+    /// Whether the answer claimed for it from the viewer was a deny.
+    pub viewer_denied: bool,
+    /// Whether the tool ran although a deny from the viewer was delivered
+    /// (or its delivery was left unknown): the terminal allowed it first.
     pub tool_ran_after_deny: bool,
 }

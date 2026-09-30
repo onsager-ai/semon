@@ -17,7 +17,7 @@ use crate::{
     journal::Journal,
     request::{
         Answer, Answerable, Kind, LeftReason, MatchKey, NewRequest, PendingRequest, RequestId,
-        ResolvedReason, Source, State, single_choice_questions,
+        ResolvedReason, Source, State, single_choice_questions, truncated,
     },
 };
 
@@ -29,6 +29,11 @@ pub const MAX_HOOK_WAITS: usize = 64;
 pub const MAX_HOOK_WAITS_PER_SESSION: usize = 4;
 /// A payload whose canonical encoding is larger is not registered.
 pub const MAX_PAYLOAD_BYTES: usize = 1 << 20;
+/// The payloads the store holds, open and final together, take at most
+/// this many bytes (counted in the canonical encoding). The payloads of the
+/// oldest final requests are dropped first to make room; a registration
+/// that still doesn't fit is refused.
+pub const MAX_HELD_PAYLOAD_BYTES: usize = 64 << 20;
 /// A session key, tool name or harness reference longer than this is not
 /// registered.
 pub const MAX_ID_BYTES: usize = 256;
@@ -96,6 +101,14 @@ pub enum RegisterError {
     /// No random id could be made.
     #[error("no random id: {0}")]
     Randomness(String),
+    /// The payload doesn't fit under [`MAX_HELD_PAYLOAD_BYTES`] even after
+    /// dropping every final request's payload.
+    #[error("the held payloads are at their budget")]
+    OverBudget,
+    /// A Claude request whose tool is `AskUserQuestion` must be a question,
+    /// and a question must come from `AskUserQuestion`.
+    #[error("the request's kind doesn't match its tool")]
+    KindMismatch,
 }
 
 /// Why an answer was refused. Checked in this order.
@@ -161,6 +174,9 @@ pub struct Snapshot {
     pub dropped: u64,
     /// Journal lines that couldn't be written since the store started.
     pub journal_failures: u64,
+    /// The bytes the held payloads count against
+    /// [`MAX_HELD_PAYLOAD_BYTES`].
+    pub held_payload_bytes: usize,
 }
 
 /// The pending requests of one controlling process.
@@ -174,6 +190,8 @@ struct Inner {
     /// In registration order, so the first match is the oldest.
     requests: Vec<PendingRequest>,
     journal: Journal,
+    /// The wall clock for journal lines.
+    wall: fn() -> u64,
     dropped: u64,
     journal_failures: u64,
     refusal_windows: Vec<RefusalWindow>,
@@ -190,10 +208,16 @@ struct RefusalWindow {
 impl RequestStore {
     /// An empty store that journals to `journal`.
     pub fn new(journal: Journal) -> Self {
+        Self::with_wall_clock(journal, crate::wall_ms)
+    }
+
+    /// An empty store whose journal lines carry `wall` as their time.
+    pub fn with_wall_clock(journal: Journal, wall: fn() -> u64) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 requests: Vec::new(),
                 journal,
+                wall,
                 dropped: 0,
                 journal_failures: 0,
                 refusal_windows: Vec::new(),
@@ -212,12 +236,17 @@ impl RequestStore {
         let id = RequestId::random().map_err(|error| RegisterError::Randomness(error.to_string()));
         let mut inner = self.lock();
         inner.expire(now_ms);
-        let admitted = hashed.and_then(|hashed| {
-            inner.check_caps(&new)?;
-            Ok((id?, hashed))
-        });
+        let admitted = hashed
+            .and_then(|hashed| {
+                inner.check_caps(&new)?;
+                Ok((id?, hashed))
+            })
+            .and_then(|(id, hashed)| {
+                inner.make_room(hashed.2)?;
+                Ok((id, hashed))
+            });
         let result = match admitted {
-            Ok((id, (payload_sha256, problem))) => {
+            Ok((id, (payload_sha256, problem, payload_bytes))) => {
                 if let Some(key) = &new.match_key {
                     inner.supersede(&new.session, key);
                 }
@@ -239,6 +268,8 @@ impl RequestStore {
                     payload: new.payload,
                     answerable,
                     payload_sha256,
+                    payload_bytes,
+                    payload_dropped: false,
                     match_key: new.match_key,
                     hook_wait: new.hook_wait,
                     created_ms: now_ms,
@@ -247,6 +278,7 @@ impl RequestStore {
                     ended_ms: None,
                     tool_run_matched: false,
                     superseded: false,
+                    viewer_denied: false,
                     tool_ran_after_deny: false,
                 });
                 Ok(id)
@@ -263,9 +295,10 @@ impl RequestStore {
     /// The driver's answer operation: checks and claims the request, has
     /// `adapter` deliver the answer, and returns the state that ends in
     /// (`claimed` while a Codex confirmation is awaited). Every answer and
-    /// every refusal is journalled. `clock` is read before the claim and
-    /// again after delivery, so a delivery that outlasts the deadline ends as
-    /// `left`, delivery unknown.
+    /// every refusal is journalled. `clock` gives monotonic milliseconds
+    /// ([`crate::monotonic_ms`]); it is read under the lock before the claim
+    /// and again after delivery, so a delivery that outlasts the deadline
+    /// ends as `left`, delivery unknown.
     pub fn answer(
         &self,
         adapter: &dyn Adapter,
@@ -276,14 +309,14 @@ impl RequestStore {
         clock: &dyn Fn() -> u64,
     ) -> Result<State, AnswerError> {
         let claimed = {
-            let now_ms = clock();
             let mut inner = self.lock();
+            let now_ms = clock();
             inner.expire(now_ms);
             inner.claim(id, &answer, payload_sha256, &source, now_ms)?
         };
         let delivery = adapter.deliver(&claimed, &answer);
-        let now_ms = clock();
         let mut inner = self.lock();
+        let now_ms = clock();
         inner.expire(now_ms);
         let Some(index) = inner.position(id) else {
             return Ok(State::Gone);
@@ -389,11 +422,13 @@ impl RequestStore {
     }
 
     /// Applies the deadlines due at `now_ms`: expired open requests become
-    /// `left`, timed out; overdue claims become `left`, delivery unknown.
+    /// `left`, timed out; overdue claims become `left`, delivery unknown;
+    /// lapsed refusal windows are flushed to the journal.
     pub fn tick(&self, now_ms: u64) {
         let mut inner = self.lock();
         inner.expire(now_ms);
         inner.prune(now_ms);
+        inner.flush_lapsed_windows(now_ms);
     }
 
     /// One request, if it is still held.
@@ -405,6 +440,12 @@ impl RequestStore {
         Some(inner.requests[index].clone())
     }
 
+    /// The bytes the held payloads count against
+    /// [`MAX_HELD_PAYLOAD_BYTES`].
+    pub fn held_payload_bytes(&self) -> usize {
+        self.lock().held_payload_bytes()
+    }
+
     /// Everything the store holds at `now_ms`.
     pub fn snapshot(&self, now_ms: u64) -> Snapshot {
         let mut inner = self.lock();
@@ -414,13 +455,14 @@ impl RequestStore {
             requests: inner.requests.clone(),
             dropped: inner.dropped,
             journal_failures: inner.journal_failures,
+            held_payload_bytes: inner.held_payload_bytes(),
         }
     }
 }
 
-/// The payload's hash and, when it has no canonical encoding, why; or a
-/// refusal for a size cap.
-type Hashed = (Option<String>, Option<String>);
+/// The payload's hash and, when it has no canonical encoding, why, and the
+/// bytes it counts against the budget; or a refusal.
+type Hashed = (Option<String>, Option<String>, usize);
 
 fn hash_payload(new: &NewRequest) -> Result<Hashed, RegisterError> {
     let tool_name_len = new.match_key.as_ref().map_or(0, |key| key.tool_name.len());
@@ -430,6 +472,11 @@ fn hash_payload(new: &NewRequest) -> Result<Hashed, RegisterError> {
     {
         return Err(RegisterError::IdTooLong);
     }
+    if let Some(key) = &new.match_key
+        && (key.tool_name == "AskUserQuestion") != (new.kind == Kind::Question)
+    {
+        return Err(RegisterError::KindMismatch);
+    }
     // Refuse a payload that is too large before encoding it, from a cheap
     // lower bound on its size; the exact check follows the encoding.
     if encoded_len_floor(&new.payload, MAX_PAYLOAD_BYTES) > MAX_PAYLOAD_BYTES {
@@ -437,11 +484,19 @@ fn hash_payload(new: &NewRequest) -> Result<Hashed, RegisterError> {
     }
     match canonical::canonical_bytes(&new.payload) {
         Ok(bytes) if bytes.len() > MAX_PAYLOAD_BYTES => Err(RegisterError::PayloadTooLarge),
-        Ok(bytes) => Ok((Some(canonical::sha256_of(&bytes)), None)),
-        Err(error) => Ok((
-            None,
-            Some(format!("Semon can't hash this request exactly ({error})")),
-        )),
+        Ok(bytes) => Ok((Some(canonical::sha256_of(&bytes)), None, bytes.len())),
+        Err(error) => {
+            let bytes =
+                serde_json::to_vec(&new.payload).map_or(MAX_PAYLOAD_BYTES, |bytes| bytes.len());
+            if bytes > MAX_PAYLOAD_BYTES {
+                return Err(RegisterError::PayloadTooLarge);
+            }
+            Ok((
+                None,
+                Some(format!("Semon can't hash this request exactly ({error})")),
+                bytes,
+            ))
+        }
     }
 }
 
@@ -497,19 +552,6 @@ fn answer_fits(request: &PendingRequest, answer: &Answer) -> bool {
     }
 }
 
-/// `text` cut to at most `max` bytes on a character boundary, marked with
-/// an ellipsis when cut.
-fn truncated(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_owned();
-    }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\u{2026}", &text[..end])
-}
-
 /// Moves `request` to `state`, stamping the end time when it is final.
 fn set_state(request: &mut PendingRequest, state: State, now_ms: u64) {
     request.ended_ms = state.is_final().then_some(now_ms);
@@ -521,8 +563,11 @@ impl Inner {
         self.requests.iter().position(|request| request.id == id)
     }
 
+    /// Journals `line`, stamped with the wall-clock time.
     fn write(&mut self, line: &Value) {
-        if let Err(error) = self.journal.append(line) {
+        let mut line = line.clone();
+        line["time_ms"] = json!((self.wall)());
+        if let Err(error) = self.journal.append(&line) {
             self.journal_failures += 1;
             eprintln!("semon control: the journal write failed: {error}");
         }
@@ -547,6 +592,50 @@ impl Inner {
             if for_session >= MAX_HOOK_WAITS_PER_SESSION {
                 return Err(RegisterError::TooManyHookWaitsForSession);
             }
+        }
+        Ok(())
+    }
+
+    /// The bytes the held payloads count against the budget.
+    fn held_payload_bytes(&self) -> usize {
+        self.requests
+            .iter()
+            .map(|request| request.payload_bytes)
+            .sum()
+    }
+
+    /// Makes room for a payload of `bytes` under [`MAX_HELD_PAYLOAD_BYTES`]
+    /// by dropping the payloads of the oldest-ended final requests, or
+    /// refuses without dropping anything if even that wouldn't be enough.
+    fn make_room(&mut self, bytes: usize) -> Result<(), RegisterError> {
+        let mut excess = (self.held_payload_bytes() + bytes).saturating_sub(MAX_HELD_PAYLOAD_BYTES);
+        if excess == 0 {
+            return Ok(());
+        }
+        let mut finals: Vec<(u64, usize)> = self
+            .requests
+            .iter()
+            .enumerate()
+            .filter(|(_, request)| request.payload_bytes > 0)
+            .filter_map(|(index, request)| request.ended_ms.map(|ended| (ended, index)))
+            .collect();
+        let droppable: usize = finals
+            .iter()
+            .map(|&(_, index)| self.requests[index].payload_bytes)
+            .sum();
+        if droppable < excess {
+            return Err(RegisterError::OverBudget);
+        }
+        finals.sort_unstable();
+        for (_, index) in finals {
+            if excess == 0 {
+                break;
+            }
+            let request = &mut self.requests[index];
+            excess = excess.saturating_sub(request.payload_bytes);
+            request.payload = Value::Null;
+            request.payload_bytes = 0;
+            request.payload_dropped = true;
         }
         Ok(())
     }
@@ -597,7 +686,8 @@ impl Inner {
                         .enumerate()
                         .min_by_key(|(_, window)| window.started_ms)
                         .map_or(0, |(index, _)| index);
-                    self.refusal_windows.swap_remove(oldest);
+                    let evicted = self.refusal_windows.swap_remove(oldest);
+                    self.flush_window(&evicted);
                 }
                 self.refusal_windows.push(RefusalWindow {
                     session: session.clone(),
@@ -608,7 +698,6 @@ impl Inner {
             }
         };
         let line = json!({
-            "time_ms": now_ms,
             "event": "refused_registration",
             "session": session,
             "harness": new.harness.as_str(),
@@ -617,6 +706,30 @@ impl Inner {
             "suppressed_before": suppressed_before,
         });
         self.write(&line);
+    }
+
+    /// Journals the refusals a window suppressed, if any.
+    fn flush_window(&mut self, window: &RefusalWindow) {
+        if window.suppressed > 0 {
+            let line = json!({
+                "event": "refused_registrations_suppressed",
+                "session": window.session,
+                "count": window.suppressed,
+            });
+            self.write(&line);
+        }
+    }
+
+    /// Flushes and forgets the refusal windows that have lapsed at `now_ms`.
+    fn flush_lapsed_windows(&mut self, now_ms: u64) {
+        let (lapsed, current): (Vec<RefusalWindow>, Vec<RefusalWindow>) =
+            std::mem::take(&mut self.refusal_windows)
+                .into_iter()
+                .partition(|window| now_ms >= window.started_ms.saturating_add(REFUSAL_WINDOW_MS));
+        self.refusal_windows = current;
+        for window in &lapsed {
+            self.flush_window(window);
+        }
     }
 
     /// Checks an answer in order (unknown, not open, read-only, hash, shape)
@@ -654,16 +767,16 @@ impl Inner {
                     source: source.clone(),
                     at_ms: now_ms,
                 };
+                request.viewer_denied = answer.is_deny();
                 Ok(request.clone())
             }
             (index, refusal) => {
                 let error = refusal.unwrap_or(AnswerError::UnknownId);
                 let mut line = json!({
-                    "time_ms": now_ms,
                     "event": "refused_answer",
                     "request": id.to_string(),
                     "source": source.to_json(),
-                    "answer": answer.to_json(),
+                    "answer": answer.to_capped_json(),
                     "payload_sha256": payload_sha256,
                     "status": error.http_status(),
                     "reason": error.to_string(),
@@ -689,13 +802,10 @@ impl Inner {
         let State::Claimed { answer, source, .. } = previous else {
             return request.state.clone();
         };
-        let mut lines = vec![answer_line(request, &answer, &source, now_ms)];
-        if request.tool_run_matched
-            && answer.is_deny()
-            && matches!(request.state, State::Answered { .. })
-        {
+        let mut lines = vec![answer_line(request, &answer, &source)];
+        if request.tool_run_matched && answer.is_deny() && deny_may_have_landed(&request.state) {
             request.tool_ran_after_deny = true;
-            lines.push(tool_ran_after_deny_line(request, now_ms));
+            lines.push(tool_ran_after_deny_line(request));
         }
         let state = request.state.clone();
         for line in &lines {
@@ -774,7 +884,7 @@ impl Inner {
         request.tool_run_matched = true;
         let id = request.id;
         let open = request.state == State::Open;
-        let denied = matches!(&request.state, State::Answered { answer, .. } if answer.is_deny());
+        let denied = request.viewer_denied && deny_may_have_landed(&request.state);
         if open {
             set_state(
                 request,
@@ -784,7 +894,7 @@ impl Inner {
             ToolRun::ResolvedOpen(id)
         } else if denied {
             request.tool_ran_after_deny = true;
-            let line = tool_ran_after_deny_line(request, now_ms);
+            let line = tool_ran_after_deny_line(request);
             self.write(&line);
             ToolRun::AfterDeny(id)
         } else {
@@ -793,9 +903,17 @@ impl Inner {
     }
 }
 
-fn answer_line(request: &PendingRequest, answer: &Answer, source: &Source, now_ms: u64) -> Value {
+/// Whether a claimed deny may have reached Claude: it was written, or its
+/// delivery was left unknown at the deadline.
+fn deny_may_have_landed(state: &State) -> bool {
+    matches!(
+        state,
+        State::Answered { .. } | State::Left(LeftReason::DeliveryUnknown)
+    )
+}
+
+fn answer_line(request: &PendingRequest, answer: &Answer, source: &Source) -> Value {
     json!({
-        "time_ms": now_ms,
         "event": "answer",
         "request": request.id.to_string(),
         "session": request.session,
@@ -808,9 +926,8 @@ fn answer_line(request: &PendingRequest, answer: &Answer, source: &Source, now_m
     })
 }
 
-fn tool_ran_after_deny_line(request: &PendingRequest, now_ms: u64) -> Value {
+fn tool_ran_after_deny_line(request: &PendingRequest) -> Value {
     json!({
-        "time_ms": now_ms,
         "event": "tool_ran_after_deny",
         "request": request.id.to_string(),
         "session": request.session,

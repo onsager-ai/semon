@@ -10,9 +10,10 @@
 //!   the caps; an [`Adapter`] delivers an answer to its harness.
 //! - [`Journal`] is the plain append-only record of answers and refusals.
 //!
-//! Every operation takes the current time in milliseconds since the Unix
-//! epoch, so the transitions are deterministic under test; [`now_ms`] gives
-//! the real clock.
+//! Every operation takes the current time as monotonic milliseconds
+//! ([`monotonic_ms`]), so the deadlines are deterministic under test and
+//! don't move when the wall clock is stepped. Journal lines carry wall time
+//! ([`wall_ms`]) only as a record.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -28,18 +29,41 @@ pub use request::{
     ResolvedReason, Source, State,
 };
 pub use store::{
-    Adapter, AnswerError, DELIVERY_DEADLINE_MS, Delivery, MAX_HOOK_WAITS,
+    Adapter, AnswerError, DELIVERY_DEADLINE_MS, Delivery, MAX_HELD_PAYLOAD_BYTES, MAX_HOOK_WAITS,
     MAX_HOOK_WAITS_PER_SESSION, MAX_ID_BYTES, MAX_OPEN, MAX_PAYLOAD_BYTES, MAX_RETAINED_FINAL,
     REFUSAL_WINDOW_MS, RETAIN_FINAL_MS, RegisterError, RequestStore, Snapshot, ToolRun,
 };
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::OnceLock,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
-/// The current time in milliseconds since the Unix epoch (0 if the clock is
-/// before it).
-pub fn now_ms() -> u64 {
+/// Milliseconds on a monotonic clock that starts at the first call in this
+/// process. Every deadline (`expires_ms`, the delivery deadline, retention,
+/// refusal windows) is on this clock.
+pub fn monotonic_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    let start = *START.get_or_init(Instant::now);
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The wall-clock time in milliseconds since the Unix epoch (0 if the clock
+/// is before it). Used only for journal lines.
+pub fn wall_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_monotonic_clock_never_goes_back() {
+        let first = super::monotonic_ms();
+        let second = super::monotonic_ms();
+        assert!(second >= first);
+        assert!(super::wall_ms() > 1_600_000_000_000);
+    }
 }

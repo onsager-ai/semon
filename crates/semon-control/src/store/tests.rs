@@ -12,7 +12,7 @@ use std::{
 use serde_json::{Value, json};
 
 use super::{
-    Adapter, AnswerError, DELIVERY_DEADLINE_MS, Delivery, MAX_HOOK_WAITS,
+    Adapter, AnswerError, DELIVERY_DEADLINE_MS, Delivery, MAX_HELD_PAYLOAD_BYTES, MAX_HOOK_WAITS,
     MAX_HOOK_WAITS_PER_SESSION, MAX_ID_BYTES, MAX_OPEN, MAX_PAYLOAD_BYTES, MAX_RETAINED_FINAL,
     REFUSAL_WINDOW_MS, RETAIN_FINAL_MS, RegisterError, RequestStore, ToolRun,
 };
@@ -28,6 +28,8 @@ use crate::{
 };
 
 const T0: u64 = 1_000_000;
+/// The wall-clock time the test stores stamp on journal lines.
+const WALL: u64 = 1_700_000_000_000;
 const EXPIRES: u64 = T0 + 120_000;
 
 /// The fake adapter: every delivery ends the same way, after an optional
@@ -71,7 +73,10 @@ impl Adapter for Fake {
 
 fn new_store(name: &str) -> (RequestStore, PathBuf) {
     let path = scratch(name).join("journal.jsonl");
-    (RequestStore::new(Journal::open(&path).unwrap()), path)
+    (
+        RequestStore::with_wall_clock(Journal::open(&path).unwrap(), || WALL),
+        path,
+    )
 }
 
 fn bash_input(command: &str) -> Value {
@@ -971,7 +976,7 @@ fn the_journal_gets_one_line_per_answer_and_per_refusal() {
     assert_eq!(
         journal[0],
         json!({
-            "time_ms": T0 + 1,
+            "time_ms": WALL,
             "event": "answer",
             "request": id.to_string(),
             "session": "s1",
@@ -1150,8 +1155,6 @@ fn a_retry_after_a_timed_out_request_takes_the_next_tool_run() {
         store.tool_ran("s1", &key("cargo test"), T0 + 3),
         ToolRun::ResolvedOpen(retry)
     );
-    // A request with another key, or in another session, is not superseded.
-    assert!(!store.get(retry, T0 + 3).unwrap().superseded);
 }
 
 #[test]
@@ -1236,4 +1239,298 @@ fn the_size_floor_never_exceeds_the_encoding() {
     }
     let big = json!({"s": "x".repeat(MAX_PAYLOAD_BYTES)});
     assert!(super::encoded_len_floor(&big, MAX_PAYLOAD_BYTES) > MAX_PAYLOAD_BYTES);
+}
+
+#[test]
+fn superseding_needs_the_same_session_and_key_and_an_ended_request() {
+    let (store, _) = new_store("supersede-scope");
+    let ended = store
+        .register(
+            NewRequest {
+                expires_ms: T0 + 1,
+                ..permission("s1", "ls")
+            },
+            T0,
+        )
+        .unwrap();
+    store.tick(T0 + 1);
+    store.register(permission("s1", "pwd"), T0 + 2).unwrap();
+    store.register(permission("s2", "ls"), T0 + 2).unwrap();
+    assert!(
+        !store.get(ended, T0 + 2).unwrap().superseded,
+        "another key or session"
+    );
+
+    let open = store.register(permission("s3", "ls"), T0 + 2).unwrap();
+    let claimed = store.register(permission("s4", "ls"), T0 + 2).unwrap();
+    store
+        .answer(
+            &Fake::new(Delivery::AwaitConfirmation),
+            claimed,
+            Answer::Allow,
+            &digest(&store, claimed),
+            source("w"),
+            &|| T0 + 2,
+        )
+        .unwrap();
+    store.register(permission("s3", "ls"), T0 + 3).unwrap();
+    store.register(permission("s4", "ls"), T0 + 3).unwrap();
+    assert!(
+        !store.get(open, T0 + 3).unwrap().superseded,
+        "an open duplicate"
+    );
+    assert!(
+        !store.get(claimed, T0 + 3).unwrap().superseded,
+        "a claimed duplicate"
+    );
+    assert!(store.get(ended, T0 + 3).unwrap().state.is_final());
+}
+
+#[test]
+fn a_duplicate_registered_while_an_allowed_run_is_still_running_takes_that_run() {
+    // Pinned, not wanted: the first request's tool is still running when an
+    // identical second one registers (a parallel subagent in the same
+    // session), so the first run's report resolves the second request and
+    // the second's own run later matches nothing. Telling the two apart
+    // needs an agent id in the hook input (docs/design/two-way.md, S10).
+    let (store, _) = new_store("interleave");
+    let first = store.register(permission("s1", "cargo test"), T0).unwrap();
+    store
+        .answer(
+            &Fake::new(Delivery::Written),
+            first,
+            Answer::Allow,
+            &digest(&store, first),
+            source("w"),
+            &|| T0 + 1,
+        )
+        .unwrap();
+    let second = store
+        .register(permission("s1", "cargo test"), T0 + 2)
+        .unwrap();
+    assert!(store.get(first, T0 + 2).unwrap().superseded);
+
+    assert_eq!(
+        store.tool_ran("s1", &key("cargo test"), T0 + 3),
+        ToolRun::ResolvedOpen(second)
+    );
+    assert_eq!(
+        store.tool_ran("s1", &key("cargo test"), T0 + 4),
+        ToolRun::Unmatched
+    );
+}
+
+#[test]
+fn held_payloads_stay_within_their_byte_budget() {
+    let (store, _) = new_store("budget");
+    let big = |session: &str| NewRequest {
+        payload: json!({"s": "x".repeat(MAX_PAYLOAD_BYTES - 8)}),
+        ..unhooked(session)
+    };
+    let slots = MAX_HELD_PAYLOAD_BYTES / MAX_PAYLOAD_BYTES;
+    let mut finals = Vec::new();
+    for number in 0..slots {
+        let at = T0 + number as u64;
+        let id = store.register(big(&format!("f{number}")), at).unwrap();
+        store.resolve(id, ResolvedReason::OtherClient, at);
+        finals.push(id);
+    }
+    assert_eq!(store.held_payload_bytes(), MAX_HELD_PAYLOAD_BYTES);
+
+    // Room is made by dropping the oldest final payloads first.
+    store.register(big("o0"), T0 + 1000).unwrap();
+    assert!(store.held_payload_bytes() <= MAX_HELD_PAYLOAD_BYTES);
+    let oldest = store.get(finals[0], T0 + 1000).unwrap();
+    assert!(oldest.payload_dropped);
+    assert_eq!(oldest.payload, Value::Null);
+    assert_eq!(oldest.payload_bytes, 0);
+    assert!(!store.get(finals[1], T0 + 1000).unwrap().payload_dropped);
+
+    for number in 1..slots {
+        store
+            .register(big(&format!("o{number}")), T0 + 1000)
+            .unwrap();
+        assert!(store.held_payload_bytes() <= MAX_HELD_PAYLOAD_BYTES);
+    }
+    assert!(
+        finals
+            .iter()
+            .all(|id| store.get(*id, T0 + 1000).unwrap().payload_dropped)
+    );
+    // Open payloads are never dropped, so a registration that can't fit is
+    // refused, however small.
+    assert_eq!(
+        store.register(big("over"), T0 + 1000),
+        Err(RegisterError::OverBudget)
+    );
+    assert_eq!(
+        store.register(unhooked("small"), T0 + 1000),
+        Err(RegisterError::OverBudget)
+    );
+    assert_eq!(store.held_payload_bytes(), MAX_HELD_PAYLOAD_BYTES);
+}
+
+#[test]
+fn a_lapsed_refusal_window_is_flushed_on_tick() {
+    let (store, path) = new_store("flush-tick");
+    for _ in 0..MAX_HOOK_WAITS_PER_SESSION {
+        store.register(permission("s1", "ls"), T0).unwrap();
+    }
+    for offset in 0..3 {
+        store
+            .register(permission("s1", "ls"), T0 + offset)
+            .unwrap_err();
+    }
+    store.tick(T0 + REFUSAL_WINDOW_MS - 1);
+    assert_eq!(events(&path), ["refused_registration"]);
+    store.tick(T0 + REFUSAL_WINDOW_MS);
+    assert_eq!(
+        events(&path),
+        ["refused_registration", "refused_registrations_suppressed"]
+    );
+    let journal = lines(&path);
+    assert_eq!(journal[1]["session"], "s1");
+    assert_eq!(journal[1]["count"], 2);
+
+    // The flushed window is gone: the next refusal starts a new one.
+    store
+        .register(permission("s1", "ls"), T0 + REFUSAL_WINDOW_MS + 1)
+        .unwrap_err();
+    assert_eq!(lines(&path)[2]["suppressed_before"], 0);
+}
+
+#[test]
+fn an_evicted_refusal_window_is_flushed() {
+    let (store, path) = new_store("flush-evict");
+    let long = |number: usize| format!("{number:03}{}", "x".repeat(MAX_ID_BYTES));
+    let windows = 64;
+    for number in 0..windows {
+        for _ in 0..2 {
+            store
+                .register(unhooked(&long(number)), T0 + number as u64)
+                .unwrap_err();
+        }
+    }
+    let flushed = |path: &Path| {
+        lines(path)
+            .into_iter()
+            .filter(|line| line["event"] == "refused_registrations_suppressed")
+            .collect::<Vec<_>>()
+    };
+    assert!(flushed(&path).is_empty());
+
+    store
+        .register(unhooked(&long(windows)), T0 + windows as u64)
+        .unwrap_err();
+    let flushed = flushed(&path);
+    assert_eq!(flushed.len(), 1);
+    assert!(flushed[0]["session"].as_str().unwrap().starts_with("000"));
+    assert_eq!(flushed[0]["count"], 1);
+    assert_eq!(store.snapshot(T0 + 100).dropped, 2 * windows as u64 + 1);
+}
+
+#[test]
+fn a_deny_whose_delivery_was_left_unknown_still_flags_a_later_run() {
+    let (store, path) = new_store("deny-left");
+    let id = store.register(permission("s1", "make"), T0).unwrap();
+    store
+        .answer(
+            &Fake::new(Delivery::AwaitConfirmation),
+            id,
+            deny(),
+            &digest(&store, id),
+            source("w"),
+            &|| T0 + 1,
+        )
+        .unwrap();
+    store.tick(T0 + 1 + DELIVERY_DEADLINE_MS);
+    assert_eq!(
+        state(&store, id, T0 + 1 + DELIVERY_DEADLINE_MS),
+        State::Left(LeftReason::DeliveryUnknown)
+    );
+    assert_eq!(
+        store.tool_ran("s1", &key("make"), T0 + 2 + DELIVERY_DEADLINE_MS),
+        ToolRun::AfterDeny(id)
+    );
+    assert!(
+        store
+            .get(id, T0 + 2 + DELIVERY_DEADLINE_MS)
+            .unwrap()
+            .tool_ran_after_deny
+    );
+    assert_eq!(events(&path), ["answer", "tool_ran_after_deny"]);
+}
+
+#[test]
+fn a_claude_request_kind_must_match_its_tool() {
+    let (store, _) = new_store("kind");
+    assert_eq!(
+        store.register(
+            NewRequest {
+                kind: Kind::Question,
+                ..permission("s1", "ls")
+            },
+            T0
+        ),
+        Err(RegisterError::KindMismatch)
+    );
+    assert_eq!(
+        store.register(
+            NewRequest {
+                kind: Kind::Permission,
+                ..question("s2")
+            },
+            T0
+        ),
+        Err(RegisterError::KindMismatch)
+    );
+}
+
+#[test]
+fn a_refused_answer_is_journalled_capped() {
+    let (store, path) = new_store("capped");
+    let id = store.register(permission("s1", "ls"), T0).unwrap();
+    let hash = digest(&store, id);
+    let adapter = Fake::new(Delivery::Written);
+    store
+        .answer(
+            &adapter,
+            id,
+            Answer::Deny {
+                message: Some("m".repeat(5000)),
+            },
+            "stale",
+            source("w"),
+            &|| T0 + 1,
+        )
+        .unwrap_err();
+    let many: BTreeMap<String, String> = (0..40)
+        .map(|number| (format!("{number:02}{}", "q".repeat(300)), "l".repeat(300)))
+        .collect();
+    store
+        .answer(
+            &adapter,
+            id,
+            Answer::Questions(many),
+            &hash,
+            source("w"),
+            &|| T0 + 1,
+        )
+        .unwrap_err();
+
+    let journal = lines(&path);
+    let message = journal[0]["answer"]["message"].as_str().unwrap();
+    assert!(
+        message.len() <= 1024 + '\u{2026}'.len_utf8(),
+        "{}",
+        message.len()
+    );
+    let answers = journal[1]["answer"]["answers"].as_object().unwrap();
+    assert_eq!(answers.len(), 16);
+    assert!(answers.iter().all(|(text, label)| {
+        text.len() <= 256 + '\u{2026}'.len_utf8()
+            && label.as_str().unwrap().len() <= 256 + '\u{2026}'.len_utf8()
+    }));
+    assert_eq!(journal[1]["answer"]["answer_count"], 40);
+    assert_eq!(adapter.calls(), 0);
 }
