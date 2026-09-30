@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{Tokens, attachments, field};
+use crate::{Tokens, attachments, field, sealed::LogFile};
 
 mod store;
 
@@ -606,7 +606,7 @@ impl Ledger {
     /// offset: the same identity, at least as long, and both hashed windows
     /// unchanged. That covers a file that grew and one only touched; any
     /// other change (a rewrite, a truncation, a new inode) rereads it.
-    fn resumes(&self, stat: &Stat, file: &fs::File) -> bool {
+    fn resumes(&self, stat: &Stat, file: &mut LogFile) -> bool {
         self.stat.dev == stat.dev
             && self.stat.ino == stat.ino
             && self.offset <= stat.size
@@ -617,7 +617,7 @@ impl Ledger {
 
 /// The hashes a [`Ledger`] keeps for `offset`: two reads of at most
 /// [`WINDOW`] bytes.
-fn window_hashes(mut file: &fs::File, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
+fn window_hashes(file: &mut LogFile, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
     let width = offset.min(WINDOW);
     let mut hash = |start: u64| -> io::Result<[u8; 32]> {
         let mut bytes = vec![0; width as usize];
@@ -1223,11 +1223,11 @@ pub(crate) fn scan_file(
         // Stat'ed before reading: a line that lands during the read makes
         // the next check see a change.
         let stat = Stat::of(path)?;
-        let file = fs::File::open(path)?;
+        let mut file = LogFile::open(path)?;
         let recorded = cache.recorded(&key);
         let mut base = None;
         if let Some(ledger) = &recorded
-            && (ledger.stat == stat || ledger.resumes(&stat, &file))
+            && (ledger.stat == stat || ledger.resumes(&stat, &mut file))
         {
             match cache.base(&key, ledger) {
                 Base::Found(index) => base = Some(index),
@@ -1259,8 +1259,8 @@ pub(crate) fn scan_file(
         let clone_started = Instant::now();
         let mut index = base.as_deref().cloned().unwrap_or_default();
         cache.index_clone += clone_started.elapsed();
-        let offset = parse(&file, from, harness, &mut index)?;
-        let (head, tail) = window_hashes(&file, offset)?;
+        let offset = parse(&mut file, from, harness, &mut index)?;
+        let (head, tail) = window_hashes(&mut file, offset)?;
         let ledger = Ledger {
             stat,
             offset,
@@ -1292,7 +1292,7 @@ pub(crate) fn scan_file(
 /// Folds the complete lines of `file` from `from` into `index`, and returns
 /// the offset they end at. A last line without its newline is left for the
 /// next read.
-fn parse(file: &fs::File, from: u64, harness: &str, index: &mut FileIndex) -> io::Result<u64> {
+fn parse(file: &mut LogFile, from: u64, harness: &str, index: &mut FileIndex) -> io::Result<u64> {
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from))?;
     let mut offset = from;
@@ -4737,20 +4737,77 @@ mod tests {
         let path = root.join("big.jsonl");
         let bytes: Vec<u8> = (0..10_000u32).map(|n| (n % 251) as u8).collect();
         fs::write(&path, &bytes).unwrap();
-        let file = fs::File::open(&path).unwrap();
+        let mut file = LogFile::open(&path).unwrap();
+        let file = &mut file;
         let digest = |bytes: &[u8]| -> [u8; 32] { Sha256::digest(bytes).into() };
         // Past 4 KiB: the first 4 KiB, and the 4 KiB before the offset.
-        let (head, tail) = window_hashes(&file, 9_000).unwrap();
+        let (head, tail) = window_hashes(file, 9_000).unwrap();
         assert_eq!(head, digest(&bytes[..4096]));
         assert_eq!(tail, digest(&bytes[9_000 - 4096..9_000]));
         // Within the first 4 KiB both cover everything before the offset.
-        let (head, tail) = window_hashes(&file, 100).unwrap();
+        let (head, tail) = window_hashes(file, 100).unwrap();
         assert_eq!(head, digest(&bytes[..100]));
         assert_eq!(tail, head);
-        let (head, tail) = window_hashes(&file, 0).unwrap();
+        let (head, tail) = window_hashes(file, 0).unwrap();
         assert_eq!((head, tail), (digest(&[]), digest(&[])));
         // An offset past the end is an error, never a short hash.
-        assert!(window_hashes(&file, 20_000).is_err());
+        assert!(window_hashes(file, 20_000).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Sealing keeps the log's stat and bytes: the ledger shares or resumes
+    /// as before, reading the sealed range through its segments.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_ledger_resumes_across_a_seal() {
+        let root = scratch("ledger-seal");
+        let v1 = root.join("index.json");
+        let log = root.join("session.jsonl");
+        let text = "x".repeat(300);
+        let lines: Vec<Value> = (0..400)
+            .flat_map(|n| {
+                [
+                    said(&format!("m{n}"), &[text.as_str()]),
+                    claude_tool(&format!("t{n}")),
+                ]
+            })
+            .collect();
+        write_lines(&log, &lines);
+        touch(&log, 1);
+        let mut cache = EventCache::open(&v1);
+        let scan = |cache: &mut EventCache| scan_file(&log, "claude", cache, &mut false).unwrap();
+        ledger_trace();
+        scan(&mut cache);
+        assert_eq!(ledger_trace(), ["replace"]);
+        let unsealed = cold(&log);
+
+        // Sealed: the same stat, so shared as it is, in this process or a
+        // new one, and a cold read finds the same index.
+        assert!(crate::sealed::seal(&log, 1).unwrap().punched);
+        ledger_trace();
+        let before = parsed();
+        scan(&mut cache);
+        scan(&mut EventCache::open(&v1));
+        assert_eq!(ledger_trace(), ["unchanged", "unchanged"]);
+        assert_eq!(parsed(), before);
+        assert_eq!(cold(&log), unsealed);
+
+        // Grown past the seal: it resumes at the offset, its hashed windows
+        // read back from the segment, and only the new lines are parsed.
+        append_lines(&log, &[claude_result("t399"), said("m-last", &["bb"])]);
+        touch(&log, 2);
+        ledger_trace();
+        let before = parsed();
+        scan(&mut cache);
+        assert_eq!(ledger_trace(), ["append"]);
+        assert_eq!(parsed(), before + 2);
+        assert_eq!(stored(&v1, &log), cold(&log));
+
+        // Sealed again, the new lines too: still unchanged.
+        assert!(crate::sealed::seal(&log, 1).unwrap().added.is_some());
+        ledger_trace();
+        scan(&mut cache);
+        assert_eq!(ledger_trace(), ["unchanged"]);
         fs::remove_dir_all(root).unwrap();
     }
 

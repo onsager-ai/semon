@@ -1828,7 +1828,7 @@ impl MachineView {
         let path = self
             .transcript_path(&harness, &id)?
             .ok_or(io::ErrorKind::NotFound)?;
-        let mut file = fs::File::open(path)?;
+        let mut file = crate::sealed::LogFile::open(path)?;
         file.seek(SeekFrom::Start(offset))?;
         let mut reader = io::BufReader::new(file).take((MAX_LINE + 1) as u64);
         let mut bytes = Vec::new();
@@ -2009,7 +2009,7 @@ pub(crate) fn percent_encode(value: &str) -> String {
 
 fn harness_offsets(path: &Path) -> io::Result<BTreeSet<u64>> {
     use io::BufRead;
-    let mut reader = io::BufReader::new(fs::File::open(path)?);
+    let mut reader = io::BufReader::new(crate::sealed::LogFile::open(path)?);
     let mut offsets = BTreeSet::new();
     let mut offset = 0;
     let mut line = Vec::new();
@@ -2344,7 +2344,7 @@ fn entries(
 const READ_CHUNK: u64 = 64 * 1024;
 
 struct ReverseReader {
-    file: fs::File,
+    file: crate::sealed::LogFile,
     length: u64,
     cursor: u64,
     buffer_start: u64,
@@ -2354,7 +2354,7 @@ struct ReverseReader {
 
 impl ReverseReader {
     fn open(path: &Path, cursor: u64) -> io::Result<Self> {
-        let file = fs::File::open(path)?;
+        let file = crate::sealed::LogFile::open(path)?;
         let length = file.metadata()?.len();
         if cursor > length {
             return Err(invalid_input("before beyond end"));
@@ -2562,7 +2562,7 @@ fn read_after(
     links: &BTreeMap<String, Vec<String>>,
     harness_messages: &BTreeSet<u64>,
 ) -> io::Result<(TranscriptPage, usize)> {
-    let mut file = fs::File::open(path)?;
+    let mut file = crate::sealed::LogFile::open(path)?;
     let length = file.metadata()?.len();
     if after > length {
         return Err(invalid_input("after beyond end"));

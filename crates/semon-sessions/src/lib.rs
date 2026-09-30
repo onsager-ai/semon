@@ -26,6 +26,7 @@ mod query;
 mod received;
 mod refresh;
 mod repo;
+pub mod sealed;
 pub mod shell;
 mod tx;
 mod union;
@@ -432,7 +433,7 @@ fn summarize(
         }
     }
     *dirty = true;
-    let mut file = fs::File::open(path)?;
+    let mut file = sealed::LogFile::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
@@ -656,7 +657,7 @@ fn update_codex(summary: &mut Summary, record: &Value) {
 }
 
 fn read_first_marker(path: &Path) -> io::Result<Option<Marker>> {
-    let mut reader = BufReader::new(fs::File::open(path)?);
+    let mut reader = BufReader::new(sealed::LogFile::open(path)?);
     let mut line = Vec::new();
     while reader.read_until(b'\n', &mut line)? != 0 {
         if let Ok(record) = serde_json::from_slice::<Value>(&line)
@@ -677,7 +678,7 @@ fn read_first_marker(path: &Path) -> io::Result<Option<Marker>> {
 }
 
 fn codex_meta(path: &Path) -> io::Result<Option<Value>> {
-    let mut reader = BufReader::new(fs::File::open(path)?);
+    let mut reader = BufReader::new(sealed::LogFile::open(path)?);
     let mut line = Vec::new();
     reader.read_until(b'\n', &mut line)?;
     let meta = serde_json::from_slice::<Value>(&line).ok().filter(|value| {
