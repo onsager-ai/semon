@@ -1058,7 +1058,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .viewscript { min-height: 44px; min-width: 44px; }
   .step .out .step-actions { min-height: 45px; padding-block: 0; }
   .step .out .step-actions > button { min-height: 44px; min-width: 44px; }
-  .child-actions button, .child-intro .intro-title button, .child-return button, .child-work .cw-toggle, .child-work .show-all, .child-intro .more, .hcard.child-card .more, .child-intro .intro-open { min-width: 44px; min-height: 44px; }
+  .child-actions button, .child-intro .intro-title button, .session-foot button, .child-work .cw-toggle, .child-work .show-all, .child-intro .more, .hcard.child-card .more, .child-intro .intro-open { min-width: 44px; min-height: 44px; }
   /* The list-order chips are 24 or 28px: their reach makes up the rest, sideways too when the chip is down to its count. */
   .order-chip::before, .side-h .order-chip::before { inset: min(0px, calc((100% - 44px) / 2)); }
 }
