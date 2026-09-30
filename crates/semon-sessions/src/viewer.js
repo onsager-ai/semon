@@ -388,17 +388,22 @@
     }
     return jobs.length ? Promise.all(jobs) : null;
   }
-  // What a route needs before it can draw: a session's page (the one holding a deep-linked turn), and its child work.
+  // What a route needs before it can draw: a session's page (the one holding a deep-linked turn).
   // `signal` cancels what a navigation asked for when the reader goes elsewhere first.
   function load(r, signal) {
     if (r.v === "analytics") return fetchAnalytics().then(() => { scheduleAnalytics(); }); // the range's answer, from the server
     if (r.v !== "session" || !SESS[r.id]) return null;
     const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
-    if (TX[r.id] && !deep) return lenient(kids(r.id, signal));
-    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal).then(() => lenient(kids(r.id, signal)));
+    if (TX[r.id] && !deep) return null;
+    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal);
   }
   // Child work that fails to load leaves its cards as they were: only the session's own transcript failing fails the route.
   const lenient = (p) => (p ? p.catch(() => {}) : p);
+  function fillKids(r, signal) {
+    if (r.v !== "session") return;
+    const work = kids(r.id, signal);
+    if (work) lenient(work).then(() => { if (route === r && rendered === r) refresh(null); });
+  }
   // The last few transcripts opened, kept when the reader leaves them, so opening one again draws it at once. (A transcript
   // still in TX, which only a model update prunes, draws from there just the same.) A transcript is kept only when it was
   // loaded to its end, and the cache is bounded by entries and by estimated memory: two bytes for each character of an entry's
@@ -634,7 +639,7 @@
       }
     }
     const signal = r.v === "session" ? (navAbort = new AbortController()).signal : undefined, p = load(r, signal);
-    if (p) { if (r.v === "session") paintPending(r); p.then(done, (err) => failLoad(r, err)); } else done();
+    if (p) { if (r.v === "session") paintPending(r); p.then(() => { done(); fillKids(r, signal); }, (err) => failLoad(r, err)); } else done();
   }
   if (!SIDEBAR_ONLY) window.addEventListener("popstate", (e) => {
     if (skipPop) { skipPop = false; if (afterPop) { const leave = afterPop; afterPop = null; leave(); return; } if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close a sheet before opening its session
