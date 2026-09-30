@@ -133,15 +133,19 @@ export default async function tokensCheck(browser) {
         const from = await styledText(page, ".turn-h .from");
         r.expect(!!from && from.color === tokens.ink && from.weight >= 500, tag + ": .turn-h .from is missing, not ink, or below weight 500: " + JSON.stringify(from));
       }
+      if (name === "trace") {
+        const crumb = await styledText(page, ".topbar .crumb");
+        r.expect(!!crumb && crumb.color === tokens.ink && crumb.weight >= 500, tag + ": Trace breadcrumb is missing, not ink, or below weight 500: " + JSON.stringify(crumb));
+        await page.screenshot({ path: path.join(ENV.out, "inkaccent-" + width + "-" + scheme + "-trace.png"), fullPage: true });
+      }
       if (name === "inkaccent-brief") {
         const facts = await page.evaluate(() => {
-          const crumb = document.querySelector(".topbar .crumb"), more = document.querySelector(".child-intro .more"), open = document.querySelector(".child-intro .intro-open");
+          const more = document.querySelector(".child-intro .more"), open = document.querySelector(".child-intro .intro-open");
           const drawn = (el) => !!el && !el.hidden && el.getClientRects().length > 0;
-          return { crumb: !!crumb, more: drawn(more), moreText: more?.textContent.trim() ?? null, open: drawn(open), openText: open?.textContent.trim() ?? null };
+          return { more: drawn(more), moreText: more?.textContent.trim() ?? null, open: drawn(open), openText: open?.textContent.trim() ?? null };
         });
-        r.expect(facts.crumb && facts.more && facts.moreText === "Show more" && facts.open && facts.openText.startsWith("Open in "), tag + ": received brief card must show Show more, Open in, and a breadcrumb: " + JSON.stringify(facts));
-        const crumb = await styledText(page, ".topbar .crumb"), more = await styledText(page, ".child-intro .more");
-        r.expect(crumb?.color === tokens.ink && crumb.weight >= 500, tag + ": breadcrumb is not ink at weight 500: " + JSON.stringify(crumb));
+        r.expect(facts.more && facts.moreText === "Show more" && facts.open && facts.openText.startsWith("Open in "), tag + ": received brief card must show Show more and Open in: " + JSON.stringify(facts));
+        const more = await styledText(page, ".child-intro .more");
         r.expect(more?.color === tokens.ink && more.weight >= 500, tag + ": handoff Show more is not ink at weight 500: " + JSON.stringify(more));
         rec.briefSession = introHandoff.to;
         await page.screenshot({ path: path.join(ENV.out, "inkaccent-" + width + "-" + scheme + "-session.png"), fullPage: true });
