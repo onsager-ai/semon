@@ -1682,14 +1682,17 @@
   // ---- Session page --------------------------------------------------------------------------------------------------
   // A child's brief is drawn once, in its intro block, so its transcript leaves out the handoff that started it. Every draw of
   // that transcript takes these options: a live update redraws turns too, and one drawn without them shows the brief again.
-  const transcriptOpts = (sid) => { const origin = originHandoff(sid); return origin ? { excludeH: origin.id } : {}; };
+  const transcriptOpts = (sid) => { const origin = originHandoff(sid); return origin ? { excludeH: origin.id } : { footer: true }; };
   function renderSession(page, sid) {
     markSeenResults(H.filter((h) => isResult(h) && h.from === sid));
     const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr"); const h1 = el("h1", null, s.name); head.append(h1); page.append(head); observeTitle(h1);
     if (origin) { page.classList.add("child-page"); page.append(childBriefBlock(origin)); }
     page.append(transcript(sid, transcriptOpts(sid)));
-    if (origin && (s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err")) page.append(childReturnBlock(s, origin));
+    if (showsFooter(s, origin)) page.append(sessionFooter(s, origin));
   }
+  // Whether a session page ends in its status line: a child's when it is running or has returned, any other session's always.
+  // renderSession and patchSession share it.
+  const showsFooter = (s, origin) => origin ? s.state === "work" || s.state === "done" || s.state === "err" || origin.status === "done" || origin.status === "err" : !s.stub && !s.role && s.state in STATE;
 
   const thoughtText = (e) => String(e.text ?? "").trim();
   const isPendingThought = (e, entries, i, sid) => !!(e.pending || e.status === "thinking") ||
@@ -1768,7 +1771,8 @@
     const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
       if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .hcard, .thought, .think-pending")) { blk.remove(); return; }
       if (opts.excludeH && t.last) return;
-      const end = turnEnd(t); if (!end && !t.out.length) return;
+      // The page's footer says the session is working, so the last turn doesn't say it too (its trace button stays).
+      const shown = turnEnd(t), end = opts.footer && t.last && shown?.st === "work" ? null : shown; if (!end && !t.out.length) return;
       const d = el("div", "turn-end");
       if (end) { const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st, false), spaced(end.text)); d.append(st); }
       if (t.out.length) d.append(traceBtn(t)); blk.append(d); };
@@ -1974,12 +1978,28 @@
     new ResizeObserver(() => { if (brief.classList.contains("open") || !brief.clientHeight) return; const clipped = brief.scrollHeight > brief.clientHeight + 1; more.hidden = !clipped; brief.classList.toggle("clipped", clipped); }).observe(brief);
     const parentLink = el("button", "intro-open", "Open in " + parent.name); parentLink.type = "button"; parentLink.addEventListener("click", () => openParentAtHandoff(h)); const actions = el("div", "intro-actions"); actions.append(more, parentLink); block.append(brief, actions); return block;
   }
-  function childReturnBlock(s, h) {
-    const block = el("div", "child-return"), finished = s.state === "done" || s.state === "err" || h.status === "done" || h.status === "err";
-    const status = finished ? (s.state === "err" || h.status === "err" ? "err" : "done") : "work";
-    const text = finished ? (status === "err" ? "Failed" : "Done") : "Working · " + callsText(countOf(s, "calls")) + " · " + dur(s.start, null);
-    const state = el("span", "stat " + status); state.append(status === "work" ? el("span", "spin") : dot(status, false), el("span", null, finished ? "Returned to " + nameOf(h.from) + " · " + text + " · " + dur(s.start, s.last) : text)); block.append(state);
-    if (finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
+  // The tips on a session footer's items, as plain text (the tooltip sets it with textContent): calls by tool, times, cost by kind.
+  const callsTip = (s) => { const parts = Object.entries(s.tool_calls ?? {}).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([name, n]) => name + " " + n), failed = countOf(s, "errors"); if (failed) parts.push(failed + " failed"); return parts.join(" · "); };
+  const timeTip = (s, h, finished) => "Started " + clock(s.start) + " · last activity " + clock(s.last) + (finished ? " · finished " + clock(h?.done ?? s.last) : "");
+  function costTip(cost) {
+    const groups = Object.entries(cost.by_model).map(([id, m]) => { const k = m.usd_by_kind ?? {}, kinds = [["Input", k.input], ["Output", k.output], ["Cache read", k.cache_read], ["Cache write", (Number(k.cache_write_5m) || 0) + (Number(k.cache_write_1h) || 0)]]; if (Number(k.web_search) >= 0.005) kinds.push(["Web search", k.web_search]); return { id, text: kinds.map(([label, usd]) => label + " " + asMoney(Number(usd) || 0)).join(" · ") }; });
+    return (groups.length > 1 ? groups.map((g) => g.id + ": " + g.text).join("; ") : groups.map((g) => g.text).join("")) + (groups.length ? ". " : "") + COST_TIP;
+  }
+  // What a footer shows: its text, its tips, its state, and whether it has the button to the parent.
+  const footerSig = (n) => [n.textContent, n.firstChild.className, !!n.querySelector("button"), ...[...n.querySelectorAll("[data-tip]")].map((x) => x.dataset.tip)].join("\n");
+  // The line a session page ends in, for a child (h: its origin) and any other session alike: the state, the calls, the time and
+  // the API-equivalent cost, each with its breakdown as a tip. A returned child keeps "Returned to <parent>" and its button.
+  function sessionFooter(s, h) {
+    const block = el("div", "session-foot"), done = s.state === "done" || s.state === "err", finished = h ? done || h.status === "done" || h.status === "err" : done;
+    const status = h ? (finished ? (s.state === "err" || h.status === "err" ? "err" : "done") : "work") : s.state;
+    const item = (text, tip) => { const n = el("span", "cr-item", text); if (tip) { n.dataset.tip = tip; n.tabIndex = 0; } return n; };
+    const line = el("span"), cost = costForSession(s.id), priced = cost.usd != null && !costMissing(cost).length && cost.usd >= 0.005, running = status === "work";
+    line.append(spaced(h && finished ? "Returned to " + nameOf(h.from) + " · " + STATE[status] : STATE[status]));
+    if (!h || !finished) line.append(spaced(" · "), item(callsText(countOf(s, "calls")), callsTip(s)));
+    line.append(spaced(" · "), item(dur(s.start, running ? null : s.last), timeTip(s, h, finished)));
+    if (priced) line.append(spaced(" · "), item(asMoney(cost.usd), costTip(cost)));
+    const state = el("span", "stat " + status); state.append(running ? el("span", "spin") : dot(status, false), line); block.append(state);
+    if (h && finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
     return block;
   }
 
@@ -2397,7 +2417,7 @@
   // again with its view state kept: the scroll position, anchored to the first visible block; what is open, by stable keys;
   // focus, find and filters; the drawer. A session page follows its transcript's tail
   // with /api/tx?after= and replaces only the turns that changed. An open View all sheet holds the redraw until it closes.
-  const LIVE = { version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2000, ended: false, again: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
+  const LIVE = { late: null, version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2000, ended: false, again: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
   // The turn index as last drawn, to tell which turns an update changed.
   const remember = (m) => { LIVE.turns = new Map(m.turns.map((x) => [x.id, turnKey(x)])); };
   // What an update can change in a turn record or a handoff, cheaply (not the text, which a record never rewrites).
@@ -2454,17 +2474,24 @@
   const viewed = () => { const v = new Set(); if (route.v !== "session") return v; v.add(route.id); for (const h of H) if (h.kind === "spawn" && h.from === route.id && h.to) v.add(h.to); return v; };
   function update(m) {
     const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
+    const hadOrigin = route.v === "session" && !!SESS[route.id] && !!originHandoff(route.id);
     adopt(m); remember(m);
+    // A page that had no origin and now has one (its parent's spawn arrived) loads its transcript again: the first prompt it drew as
+    // a message is the brief, which the intro now shows. It is asked for until it loads, so a failed request can't leave the brief
+    // twice on the page: the next update asks again.
+    if (LIVE.late !== route.id) LIVE.late = null;
+    if (route.v === "session" && !hadOrigin && !!SESS[route.id] && !!originHandoff(route.id)) LIVE.late = route.id;
+    if (LIVE.late && !TX[LIVE.late]) LIVE.late = null; // nothing loaded to load again: the page loads it with its origin
     const changedH = new Set(H.filter((h) => oldH.get(h.id) !== handKey(h)).map((h) => h.id));
     const view = viewed(), grown = new Set(), cuts = new Map();
     let full = Object.values(SESS).some((x) => names.has(x.id) && names.get(x.id) !== x.name); // a new name shows in every turn
     for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
     // Only transcripts whose mark in the model moved are asked for, one at a time.
     let chain = Promise.resolve();
-    for (const sid of view) if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
+    for (const sid of view) if (TX[sid] && ((LIVE.late === sid) || (TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])))) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; if (LIVE.late === sid) LIVE.late = null; })));
     else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.reload) full = true; })));
     if (route.v === "session" && TX[route.id]) chain = chain.then(() => newKids(route.id, grown));
-    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
+    return chain.then(() => { LIVE.version = LIVE.late ? null : m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
   }
   // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), those
   // whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw them all.
@@ -2645,6 +2672,20 @@
     const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some((b) => !TURN.has(b.dataset.turn));
     if (whole) morph(box, transcript(route.id, transcriptOpts(route.id)).querySelector(".turns"));
     else if (dirty.size) morphTurns(box, transcript(route.id, { ...transcriptOpts(route.id), only: dirty }).querySelector(".turns"), dirty);
+    // A page follows its origin and status: a child's intro that only now has an origin, and the footer redrawn when its text,
+    // tips or state changed (in place, so a focused "Open in" button stays while nothing changes).
+    const page = $("#page"), origin = originHandoff(s.id), foot = page.querySelector(":scope > .session-foot");
+    if (origin && !page.querySelector(":scope > .child-intro")) { page.classList.add("child-page"); page.querySelector(":scope > .ph")?.after(childBriefBlock(origin)); }
+    if (!showsFooter(s, origin)) foot?.remove();
+    else {
+      const next = sessionFooter(s, origin);
+      if (!foot) page.append(next);
+      else if (footerSig(foot) !== footerSig(next)) {
+        // Focus stays on the same control (the button, or a tipped item) of the footer that replaces this one.
+        const controls = (n) => [...n.querySelectorAll("button, [tabindex]")], held = controls(foot).indexOf(document.activeElement);
+        foot.replaceWith(next); if (held >= 0) controls(next)[held]?.focus({ preventScroll: true });
+      }
+    }
     const h1 = $("#page .ph h1"); if (h1) h1.textContent = s.name;
     const t = $("#topbar .t"); if (t) { t.textContent = s.name; t.dataset.tip = s.name; }
     const lead = $("#topbar .l1-state"); if (lead) lead.replaceWith(stateLead(s));
