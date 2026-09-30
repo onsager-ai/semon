@@ -2524,10 +2524,10 @@
   const viewed = () => { const v = new Set(); if (route.v !== "session") return v; v.add(route.id); for (const h of H) if (h.kind === "spawn" && h.from === route.id && h.to) v.add(h.to); return v; };
   function update(m) {
     const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
-    const hadOrigins = new Set(Object.keys(SESS).filter((sid) => !!originHandoff(sid)));
-    const hadOrigin = route.v === "session" && hadOrigins.has(route.id);
+    const hadOrigins = new Set([...TXCACHE.keys()].filter((sid) => !!originHandoff(sid)));
+    const hadOrigin = route.v === "session" && !!SESS[route.id] && !!originHandoff(route.id);
     adopt(m); remember(m);
-    for (const sid of Object.keys(SESS)) if (!hadOrigins.has(sid) && originHandoff(sid)) TXCACHE.delete(sid);
+    for (const sid of [...TXCACHE.keys()]) if (!hadOrigins.has(sid) && originHandoff(sid)) TXCACHE.delete(sid);
     // A page that had no origin and now has one (its parent's spawn arrived) loads its transcript again: the first prompt it drew as
     // a message is the brief, which the intro now shows. A failed request is retried on the next poll, which backs off, up to
     // LATE_TRIES requests in all; after that the page stays as drawn (the brief shows twice until a reload) and polls as usual.
