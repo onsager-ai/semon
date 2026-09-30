@@ -272,6 +272,7 @@ code { overflow-wrap: anywhere; }
 /* An opaque bar: content scrolls under it without showing through. */
 .topbar { background: var(--ground); backdrop-filter: none; -webkit-backdrop-filter: none; }
 .list .more { border: 0; background: none; padding: 10px 0; text-align: left; color: var(--accent); font-size: var(--fs-ui); }
+.list .more[data-pager-where] { display: inline-flex; align-items: center; gap: 6px; }
 /* A turn: one stretch of a transcript, from what came in (your message, a relay, a brief) to how it ended. */
 .turns { display: grid; grid-template-columns: minmax(0, 1fr); }
 .turns > * { min-width: 0; }
