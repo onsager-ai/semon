@@ -131,14 +131,16 @@ impl Home {
             cache.refresh_reported_runs(&options.claude_json, now, &mut dirty);
         }
         let built = build(options, &mut cache, &mut dirty, &mut Texts::default(), now).unwrap();
-        invariants(&built);
+        invariants(&built, options.all || options.scan_window);
         built
     }
 }
 
 /// Holds for every model: handoff and turn ids are unique, and every id and
-/// session a handoff or turn names exists.
-fn invariants(built: &Built) {
+/// session a handoff or turn names exists. Every handoff a stub's transcript
+/// names is served; when nothing was trimmed (`whole`), every handoff any
+/// transcript names is.
+fn invariants(built: &Built, whole: bool) {
     let mut ids = BTreeSet::new();
     for handoff in &built.handoffs {
         assert!(
@@ -166,6 +168,20 @@ fn invariants(built: &Built) {
                 "turn {} names missing handoff {id}",
                 turn.id
             );
+        }
+    }
+    for (sid, transcript) in &built.tx {
+        let stub = sid.starts_with("unsent:") || built.sessions.get(sid).is_some_and(|s| s.stub);
+        if !(whole || stub) {
+            continue;
+        }
+        for slot in &transcript.slots {
+            if let SlotKind::H(id) = &slot.kind {
+                assert!(
+                    ids.contains(id),
+                    "{sid}'s transcript names unserved handoff {id}"
+                );
+            }
         }
     }
 }
@@ -3302,4 +3318,184 @@ fn top_sessions_waited_on_list_the_longest_first() {
             { "sid": "brief", "ms": MINUTE },
         ])
     );
+}
+
+/// A subagent's `SendMessage` to `main` is Claude Code's address for its own
+/// parent conversation: a relay to the session that spawned it, not a peer
+/// named "main". A top-level session's send to `main` still resolves by name,
+/// else stands in a stub.
+#[test]
+fn a_subagent_send_to_main_is_a_relay_to_its_parent() {
+    let home = Home::new();
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(19, 0), "Start a worker"),
+            assistant(
+                "lead",
+                ts(19, 1),
+                vec![tool("tw", "Agent", json!({"prompt":"worker brief"}))],
+            ),
+            result(
+                "lead",
+                ts(19, 1),
+                "tw",
+                "launched",
+                false,
+                json!({"status":"async_launched"}),
+            ),
+            assistant(
+                "lead",
+                ts(19, 5),
+                vec![tool(
+                    "lead-main",
+                    "SendMessage",
+                    json!({"to":"main","message":"lead to a peer called main"}),
+                )],
+            ),
+            result(
+                "lead",
+                ts(19, 5),
+                "lead-main",
+                "sent",
+                false,
+                json!({"success":true,"message":"sent"}),
+            ),
+        ],
+    );
+    home.agent(
+        "lead",
+        "aw",
+        "tw",
+        &[
+            user("lead", ts(19, 1), "worker brief"),
+            assistant(
+                "lead",
+                ts(19, 2),
+                vec![tool(
+                    "to-main",
+                    "SendMessage",
+                    json!({"to":"main","summary":"progress","message":"halfway there","type":"message","recipient":"main"}),
+                )],
+            ),
+            result(
+                "lead",
+                ts(19, 2),
+                "to-main",
+                "queued",
+                false,
+                json!({"success":true,"message":"Message queued for the main conversation's next turn."}),
+            ),
+            assistant("lead", ts(19, 3), vec![text("worker done")]),
+        ],
+    );
+    let built = home.build();
+    let relay = only(&built, "relay", "aw", "lead");
+    assert_eq!(
+        (
+            relay.brief.as_str(),
+            relay.status,
+            relay.unmatched,
+            relay.at
+        ),
+        ("halfway there", "done", false, at(19, 2))
+    );
+    assert_eq!(relay.target, None);
+    // The subagent's turn sent it; the subagent is still the lead's child.
+    assert!(
+        turns_of(&built, "aw")
+            .iter()
+            .any(|turn| turn.sent.contains(&relay.id))
+    );
+    assert_eq!(built.sessions["aw"].parent.as_deref(), Some("lead"));
+    // The lead's own send to "main" names a peer: no session has that name,
+    // so a stub stands in, as before.
+    let peer = by_brief(&built, "lead to a peer called main");
+    assert!(peer.unmatched);
+    let stub = &built.sessions[peer.to.as_ref().unwrap()];
+    assert_eq!((stub.stub, stub.name.as_str()), (true, "main"));
+    assert_eq!(
+        built
+            .sessions
+            .values()
+            .filter(|session| session.stub)
+            .count(),
+        1
+    );
+    assert!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.from == "aw")
+            .all(|handoff| handoff.to.as_deref() != peer.to.as_deref())
+    );
+}
+
+/// A stub's transcript lists only the handoffs the windowed model serves:
+/// an older send to the same stub doesn't leave the page an entry it has
+/// no handoff for.
+#[test]
+fn a_stubs_transcript_names_only_served_handoffs() {
+    let mut home = Home::new();
+    let send = |id: &str, hour: i64, message: &str| {
+        [
+            assistant(
+                "sender",
+                ts(hour, 0),
+                vec![tool(
+                    id,
+                    "SendMessage",
+                    json!({"to":"nobody-7c","message":message}),
+                )],
+            ),
+            result(
+                "sender",
+                ts(hour, 0),
+                id,
+                "sent",
+                false,
+                json!({"success":true,"message":"sent"}),
+            ),
+        ]
+    };
+    let mut records = vec![human("sender", ts(1, 0), "Tell nobody")];
+    records.extend(send("old", 1, "an old note"));
+    // A turn of its own: the window keeps the last turn's links whole.
+    records.push(human("sender", ts(4, 59), "Tell nobody again"));
+    records.extend(send("new", 5, "a new note"));
+    home.top("sender", &records);
+    home.options.all = false;
+    home.options.since = Duration::from_secs(3600);
+    let built = home.build_at(&home.options, at(5, 30));
+    let new = by_brief(&built, "a new note");
+    assert!(
+        built
+            .handoffs
+            .iter()
+            .all(|handoff| handoff.brief != "an old note")
+    );
+    let stub = new.to.clone().unwrap();
+    assert!(built.sessions[&stub].stub);
+    let named: Vec<&str> = built.tx[&stub]
+        .slots
+        .iter()
+        .filter_map(|slot| match &slot.kind {
+            SlotKind::H(id) => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(named, [new.id.as_str()]);
+    // The page the viewer gets holds that one handoff entry.
+    let page: Value = serde_json::from_str(
+        &crate::tx::page(&built, &stub, &crate::tx::Anchor::Last, at(5, 30)).unwrap(),
+    )
+    .unwrap();
+    let entries: Vec<&Value> = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["k"] == "h")
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], new.id.as_str());
 }

@@ -850,6 +850,10 @@ fn pretty_model(model: &str) -> Option<String> {
     Some(model)
 }
 
+/// What a subagent's `SendMessage` names as `to` for its own parent
+/// conversation ("Message queued for the main conversation's next turn").
+const PARENT_ADDRESS: &str = "main";
+
 /// A relay recipient or sender name without the harness's ` [..]` suffix.
 fn plain_name(name: &str) -> String {
     name.split_once(" [")
@@ -2407,6 +2411,10 @@ impl<'a> Builder<'a> {
             let (to, receiver) = if let Some(receiver) = joined_at {
                 joined.extend(reply.m.clone());
                 (Some(self.of_file[receiver.0]), Some(receiver))
+            } else if let Some(parent) = self.parent_addressed(from, at) {
+                // Its receipt in the parent carries no id to join on: the
+                // relay is placed at the send only, like a send by name.
+                (Some(parent), None)
             } else if failed {
                 // A failed or denied send reached no one: no receiver.
                 target = Some(self.send_target(at));
@@ -2509,6 +2517,18 @@ impl<'a> Builder<'a> {
             let handoff = self.add_handoff(handoff, Some(from), Some(to));
             self.place(at, handoff, Place::In);
         }
+    }
+
+    /// A subagent's send addressed to [`PARENT_ADDRESS`] goes to the
+    /// session that spawned it: Claude Code's name for a subagent's own
+    /// parent conversation, never a peer. `None` for any other send, and
+    /// for a subagent whose spawner isn't in these logs.
+    fn parent_addressed(&mut self, from: usize, at: Ref) -> Option<usize> {
+        if self.sessions[from].kind != SessKind::Agent {
+            return None;
+        }
+        let parent = self.sessions[from].parent?;
+        (plain_name(&self.send_target(at)) == PARENT_ADDRESS).then_some(parent)
     }
 
     fn send_target(&mut self, at: Ref) -> String {
@@ -4401,6 +4421,18 @@ pub(crate) fn build(
             }
         }
         tx.retain(|key, _| sessions.contains_key(key));
+        // A stub's transcript is the handoffs that name it, so it lists only
+        // the ones served: the page draws a handoff from the model's list.
+        // A real session's transcript stays whole, and its pages before the
+        // window can name handoffs the window left out.
+        for (key, transcript) in &mut tx {
+            if sessions.get(key).is_some_and(|session| session.stub) {
+                transcript.slots.retain(|slot| match &slot.kind {
+                    SlotKind::H(id) => kept.contains(id),
+                    _ => true,
+                });
+            }
+        }
         for session in sessions.values_mut() {
             session.busy.retain(|interval| interval.1 >= cutoff);
             if let Some(first) = session.busy.first_mut() {
