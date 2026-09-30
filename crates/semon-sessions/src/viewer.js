@@ -2025,6 +2025,7 @@
     const an = answerEl(h, "ev-result"); if (an) r.append(an);
     if (h.kind === "toyou" && h.status === "wait") r.append(stateLabel("wait", "Waiting on you"));
     return r;
+  }
   function openParentAtHandoff(h) { const turn = HOLDS.get(h.id); goSession(h.from, turn?.id); }
   // The tips on a session footer's items, as plain text (the tooltip sets it with textContent): calls by tool, times, cost by kind.
   const callsTip = (s) => { const parts = Object.entries(s.tool_calls ?? {}).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([name, n]) => name + " " + n), failed = countOf(s, "errors"); if (failed) parts.push(failed + " failed"); return parts.join(" · "); };
@@ -2050,8 +2051,6 @@
     const state = el("span", "stat " + status); state.append(running ? el("span", "spin") : dot(status, false), line); block.append(state);
     if (h && finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.dataset.foot = "open"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
     return block;
-  }
-
   }
 
   // ---- Render --------------------------------------------------------------------------------------------------------
