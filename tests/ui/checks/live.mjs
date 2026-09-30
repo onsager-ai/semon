@@ -58,7 +58,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { ENV, launch, context, settled, reporter, overflow, filterSheet, doneFilterSheet, pickFilter } from "../lib.mjs";
+import { ENV, launch, context, settled, goto, reporter, overflow, filterSheet, doneFilterSheet, pickFilter } from "../lib.mjs";
 import { write, ms } from "../fixture.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -967,6 +967,54 @@ async function childIntroLateGivesUp(browser, r) {
   return R;
 }
 
+// A failed late-origin reload leaves the original brief in the transcript. Leaving the page caches those entries, so when the
+// route change clears the retry state, that cache must be dropped before the session is opened again.
+async function childIntroLateAway(browser, r) {
+  const R = { name: "child-intro-late-away" }, F = await lateFixture(browser, "semon-live-late-away-"), { page, pages, shown } = F;
+  try {
+    let asked = 0;
+    await page.route(RELOAD, (route) => (asked++ === 0 ? route.fulfill({ status: 500, body: "no" }) : route.continue()));
+    const failed = page.waitForResponse((q) => RELOAD.test(q.url()) && q.status() === 500, { timeout: 10000 }).then(() => true, () => false);
+    const t1 = Date.now();
+    F.parent();
+    R.origin = await appear(page, t1, () => !!document.querySelector("#page .child-intro"), null, 8000);
+    R.failedFirst = await failed;
+    r.expect(R.origin != null && R.failedFirst, "child-intro-late-away: the origin did not appear with its first transcript reload failing");
+
+    await goto(page, { v: "home" }, {});
+    R.home = await page.evaluate(() => document.querySelector("#page .ph h1")?.textContent);
+    const redraws = await page.evaluate(() => {
+      const box = document.querySelector("#page");
+      window.__lateAwayHomeRedraws = 0;
+      new MutationObserver(() => { window.__lateAwayHomeRedraws++; }).observe(box, { childList: true, subtree: true });
+      return window.__lateAwayHomeRedraws;
+    });
+    let homeHandoff = false;
+    const homePoll = page.waitForResponse((q) => {
+      if (!q.url().includes("/api/model") || q.status() !== 200) return false;
+      const u = new URL(q.url()); if (u.searchParams.get("since") !== "") return false;
+      return q.json().then((m) => homeHandoff = m.handoffs.some((h) => h.kind === "spawn" && h.to === "late-sub"));
+    }, { timeout: 12000 }).then(() => true, () => false);
+    R.homePoll = await homePoll;
+    if (R.homePoll) await page.waitForFunction((n) => window.__lateAwayHomeRedraws > n, redraws, { timeout: 12000 });
+    R.homeHandoff = homeHandoff;
+    r.expect(R.home === "Home" && R.homePoll && R.homeHandoff, "child-intro-late-away: Home did not settle on the model update with the child's origin");
+
+    const returnedTx = page.waitForResponse((q) => RELOAD.test(q.url()) && q.status() === 200, { timeout: 10000 }).then(() => true, () => false);
+    await goto(page, { v: "session", id: "late-sub" }, { SESS: { "late-sub": { name: "Late reviewer" } } });
+    R.returnedReload = await returnedTx;
+    await page.waitForFunction(() => !!document.querySelector("#page .child-intro") && !!document.querySelector('#page section[aria-label="Transcript"]') && !document.querySelector("#page").hasAttribute("aria-busy"));
+    R.after = await shown(page);
+    r.expect(R.returnedReload, "child-intro-late-away: returning to the subagent reused cached transcript entries");
+    r.expect(R.after.copies.length === 1 && R.after.copies[0].intro, "child-intro-late-away: after returning the brief is in " + R.after.copies.length + " elements, not only in the intro block: " + JSON.stringify(R.after.copies));
+    R.errors = pages.flatMap((p) => p.errors);
+    r.expect(R.errors.length === 0, "child-intro-late-away: page errors: " + R.errors.join(" | "));
+  } finally {
+    await F.close();
+  }
+  return R;
+}
+
 export default async function liveCheck(browser) {
   const r = reporter("live");
   const out = {};
@@ -988,6 +1036,8 @@ export default async function liveCheck(browser) {
   catch (e) { r.expect(false, "child-intro-late: threw " + (e?.stack ?? e)); }
   try { out.childIntroLateGivesUp = await childIntroLateGivesUp(browser, r); }
   catch (e) { r.expect(false, "child-intro-late-gives-up: threw " + (e?.stack ?? e)); }
+  try { out.childIntroLateAway = await childIntroLateAway(browser, r); }
+  catch (e) { r.expect(false, "child-intro-late-away: threw " + (e?.stack ?? e)); }
   r.results = out;
   return r.done();
 }
