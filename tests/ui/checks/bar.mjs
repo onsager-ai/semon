@@ -779,7 +779,7 @@ export default async function barCheck(browser) {
     }
   }
 
-  // Reasoning effort is shown beside the model on desktop, stays in Session details on phones, and
+  // Reasoning effort is shown beside the model on desktop, stays in the ⋯ menu's Details on phones, and
   // does not make the 390px session bar wrap or scroll sideways.
   {
     const sessions = lanes.filter((s) => !parentOf(s.id) && s.name && s.model), withEffort = sessions[0], withoutEffort = sessions.find((s) => s.id !== withEffort?.id);
@@ -798,7 +798,7 @@ export default async function barCheck(browser) {
         await page.reload({ waitUntil: "load" }); await settled(page);
         return page;
       };
-      const waitForDetailsClose = (page) => page.waitForFunction(() => !document.querySelector("dialog.session-details") && !history.state?.sheet);
+      const waitForDetailsClose = (page) => page.waitForFunction(() => !document.querySelector("dialog.session-menu[open]") && !history.state?.sheet);
       const page = await effortPage("desktop", false);
 
       await goto(page, { v: "session", id: withEffort.id }, D);
@@ -810,12 +810,11 @@ export default async function barCheck(browser) {
       r.expect(effortBar.tip.includes("Reasoning effort: max"), "model tooltip omitted the reasoning effort: " + JSON.stringify(effortBar));
       await page.screenshot({ path: path.join(ENV.out, "bar-effort-1280-light.png") });
       await page.click("#more-btn");
-      await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
-      await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
-      let detailLabels = await page.locator("dialog.session-details .detail-label").allTextContents();
+      await page.waitForFunction(() => document.querySelector("dialog.session-menu")?.open === true);
+      let detailLabels = await page.locator("dialog.session-menu dl.kv dt").allTextContents();
       r.expect(detailLabels.includes("Model") && detailLabels.includes("Effort"), "Session details omitted the Effort row: " + JSON.stringify(detailLabels));
-      await page.screenshot({ path: path.join(ENV.out, "bar-effort-details-1280-light.png") });
-      await page.locator("dialog.session-details .vclose").click();
+      await page.screenshot({ path: path.join(ENV.out, "bar-effort-menu-1280-light.png") });
+      await page.keyboard.press("Escape");
       await waitForDetailsClose(page);
 
       await goto(page, { v: "session", id: withoutEffort.id }, D);
@@ -825,11 +824,10 @@ export default async function barCheck(browser) {
       }));
       r.expect(plainBar.suffix === null && !plainBar.tip.includes("Reasoning effort:"), "session without effort gained extra model text: " + JSON.stringify(plainBar));
       await page.click("#more-btn");
-      await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
-      await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
-      detailLabels = await page.locator("dialog.session-details .detail-label").allTextContents();
+      await page.waitForFunction(() => document.querySelector("dialog.session-menu")?.open === true);
+      detailLabels = await page.locator("dialog.session-menu dl.kv dt").allTextContents();
       r.expect(!detailLabels.includes("Effort"), "Session details showed an Effort row without a value: " + JSON.stringify(detailLabels));
-      await page.locator("dialog.session-details .vclose").click();
+      await page.keyboard.press("Escape");
       await waitForDetailsClose(page);
       r.expect(page.errors.length === 0, "light desktop effort display page errors: " + page.errors.join(" | "));
       await page.context().close();
