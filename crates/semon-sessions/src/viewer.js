@@ -1427,7 +1427,9 @@
       j.addEventListener("click", (ev) => { ev.stopPropagation(); openErrors(s.id); });
       st.append(sep, j); }
     const kind = s.kind ? childKindChip(s, true) : null;
-    const model = el("span", "meta-item meta-model"); model.append(metaSr("Model"), harnessName(s.harness), el("span", "meta-value", shortModel(s.model))); model.dataset.tip = "Model: " + (s.model ?? "Unknown model");
+    const model = el("span", "meta-item meta-model"); model.append(metaSr("Model"), harnessName(s.harness), el("span", "meta-value", shortModel(s.model)));
+    if (s.effort) model.append(el("span", "meta-effort", " · " + s.effort));
+    model.dataset.tip = "Model: " + (s.model ?? "Unknown model") + (s.effort ? ". Reasoning effort: " + s.effort : "");
     const machine = el("span", "meta-item meta-machine"); machine.append(metaSr("Machine"), icon(I.machine), el("span", "meta-value", shortHost(s))); machine.dataset.tip = "Machine: " + hostOf(s);
     const branch = el("span", "meta-item meta-branch"); branch.append(metaSr(s.worktree ? "Worktree" : "Branch"), icon(I.branch), el("span", "meta-value", branchOf(s))); branch.dataset.tip = (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s);
     const tools = el("span", "meta-item meta-tools"); tools.append(metaSr("Tool calls"), icon(I.wrench), el("span", "meta-value", calls == null ? "—" : String(calls))); tools.dataset.tip = "Tool calls: " + (calls ?? "—");
@@ -1490,7 +1492,7 @@
     m.append(copy);
     if (s.harness === "claude") { const a = el("button"); a.type = "button"; a.append(icon(I.ext, "icon"), el("span", null, "Open in claude.ai")); m.append(a); }
     const dl = el("dl");
-    for (const [k, v] of [["Model", s.model], ["Machine", MACHINE[s.machine] + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Input + cache write", tok(s.tokens[0])], ["Output", tok(s.tokens[2])], ["Cache read", tok(s.tokens[1])], ["Session id", s.id]]) dl.append(el("dt", null, k), el("dd", "mono", v));
+    for (const [k, v] of [["Model", s.model], ...(s.effort ? [["Effort", s.effort]] : []), ["Machine", MACHINE[s.machine] + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Input + cache write", tok(s.tokens[0])], ["Output", tok(s.tokens[2])], ["Cache read", tok(s.tokens[1])], ["Session id", s.id]]) dl.append(el("dt", null, k), el("dd", "mono", v));
     m.append(dl); closeFilter(); $("#topbar").append(m); btn.setAttribute("aria-expanded", "true");
   }
   // Shown once in the UI, in Session details' footer; NOTICE.md and the README carry it too. The harness marks are the property of their owners.
@@ -1506,6 +1508,7 @@
     const rows = [
       ...(s.kind ? [["Kind", s.kind]] : []), ["Status", STATE[s.state] + " · " + turnsLabel(s)],
       ["Harness", withHarnessIcon(el("span", null, HARNESS[s.harness] ?? s.harness), s.harness, { size: 16 })], ["Model", s.model ?? s.modelId ?? "Unknown model"],
+      ...(s.effort ? [["Effort", s.effort]] : []),
       ["Machine", (MACHINE[s.machine] ?? s.machine ?? "Unknown machine") + (hostOf(s) !== (MACHINE[s.machine] ?? s.machine) ? " · " + hostOf(s) : "") + moved],
     ];
     const directory = s.cwd ?? s.dir ?? s.directory;

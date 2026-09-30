@@ -66,7 +66,24 @@ export async function goto(page, route, D) {
   await page.evaluate((r) => { history.pushState(r, ""); dispatchEvent(new PopStateEvent("popstate", { state: r })); }, route);
   const title = titleOf(route, D);
   // A session's title is in the bar as soon as it is opened; its page is ready once it is no longer aria-busy.
-  if (title) await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t && !document.querySelector("#page").hasAttribute("aria-busy"), title);
+  if (title) {
+    try {
+      await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t && !document.querySelector("#page").hasAttribute("aria-busy"), title);
+    } catch (error) {
+      let state;
+      try {
+        state = await page.evaluate(() => ({
+          title: document.querySelector("#topbar .t")?.textContent ?? null,
+          busy: document.querySelector("#page")?.hasAttribute("aria-busy") ?? null,
+          pathname: location.pathname,
+        }));
+      } catch (diagnosticError) {
+        state = { diagnosticError: diagnosticError.message };
+      }
+      const pageErrors = "errors" in page ? `; page.errors=${JSON.stringify(page.errors)}` : "";
+      throw new Error(`goto timed out waiting for title ${JSON.stringify(title)}; actual #topbar .t=${JSON.stringify(state.title ?? null)}; #page has aria-busy=${state.busy ?? "unavailable"}; location.pathname=${state.pathname ?? "unavailable"}${pageErrors}; wait error=${error.message}`);
+    }
+  }
   if (route.v === "session") await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']"));
   // Analytics draws whole once the server's answer for its range is in (/api/analytics).
   if (route.v === "analytics") await page.waitForFunction(() => document.querySelector(".analytics-metrics[data-analytics-ready]"));

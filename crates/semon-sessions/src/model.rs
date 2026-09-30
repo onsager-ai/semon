@@ -63,6 +63,8 @@ pub(crate) struct Session {
     pub(crate) machine: String,
     pub(crate) state: &'static str,
     pub(crate) model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effort: Option<String>,
     pub(crate) tokens: [f64; 3],
     pub(crate) tokens_by_model: BTreeMap<String, events::ModelTokens>,
     pub(crate) cost: crate::pricing::Cost,
@@ -1385,6 +1387,7 @@ impl<'a> Builder<'a> {
             machine: self.machine.clone(),
             state: "done",
             model: "—".into(),
+            effort: None,
             tokens: [0.0; 3],
             tokens_by_model: BTreeMap::new(),
             cost: crate::pricing::Cost::default(),
@@ -1727,7 +1730,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Name, model, tokens, repo, branch, start, last and busy.
+    /// Name, model, effort, tokens, repo, branch, start, last and busy.
     fn describe(&mut self, index: usize) {
         let files: Vec<&SourceFile> = self.sessions[index]
             .files
@@ -1741,6 +1744,18 @@ impl<'a> Builder<'a> {
         let mut tokens = crate::Tokens::default();
         let mut busy = Vec::new();
         let mut model = None;
+        let effort = files.iter().rev().find_map(|file| {
+            file.summary
+                .signals
+                .iter()
+                .filter(|signal| signal.k == events::SignalKind::Effort)
+                .max_by_key(|signal| signal.o)
+                .and_then(|signal| signal.n.as_deref())
+        });
+        let effort = effort
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase);
         let mut start = i64::MAX;
         let mut last = 0;
         let mut names = BTreeSet::new();
@@ -1913,6 +1928,7 @@ impl<'a> Builder<'a> {
             .and_then(pretty_model)
             .or_else(|| fallback_model.as_deref().and_then(pretty_model))
             .unwrap_or_else(|| "—".into());
+        out.effort = effort;
         out.start = if start == i64::MAX { self.now } else { start };
         out.last = if last == 0 { out.start } else { last };
         out.busy = events::busy_merge(busy);
