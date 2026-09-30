@@ -4016,11 +4016,17 @@ enum EquivalenceStep {
     PidRemove {
         pid: u32,
     },
+    PidDies {
+        pid: u32,
+    },
     CopyResume {
         source: String,
         target: String,
         continued: Value,
         records: Vec<Value>,
+    },
+    LockReleased {
+        id: String,
     },
 }
 
@@ -4039,6 +4045,7 @@ impl SplitMix64 {
 
 const EQUIVALENCE_STEPS: usize = 20;
 const EQUIVALENCE_FILES: usize = 10;
+const EQUIVALENCE_KINDS: usize = if cfg!(unix) { 11 } else { 10 };
 
 fn equivalence_root(seed: u64) -> Value {
     uuid(
@@ -4087,6 +4094,8 @@ fn note_generated_step(
     step: &EquivalenceStep,
     histories: &mut BTreeMap<String, Vec<Value>>,
     log_files: &mut usize,
+    live_pids: &mut BTreeSet<u32>,
+    lock_held: &mut bool,
 ) {
     match step {
         EquivalenceStep::Append { sid, records }
@@ -4120,9 +4129,14 @@ fn note_generated_step(
             histories.insert(target.clone(), records.clone());
             *log_files += 1;
         }
-        EquivalenceStep::PartialStart { .. }
-        | EquivalenceStep::PidWrite { .. }
-        | EquivalenceStep::PidRemove { .. } => {}
+        EquivalenceStep::PidWrite { pid, .. } => {
+            live_pids.insert(*pid);
+        }
+        EquivalenceStep::PidRemove { pid } | EquivalenceStep::PidDies { pid } => {
+            live_pids.remove(pid);
+        }
+        EquivalenceStep::LockReleased { .. } => *lock_held = false,
+        EquivalenceStep::PartialStart { .. } => {}
     }
 }
 
@@ -4131,22 +4145,30 @@ fn generated_steps(seed: u64) -> Vec<EquivalenceStep> {
     let mut next_record = 0;
     let mut next_top = 0;
     let mut next_agent = 0;
-    let mut log_files = 1;
+    let mut log_files = if cfg!(unix) { 2 } else { 1 };
     let mut histories = BTreeMap::from([("root".to_owned(), vec![equivalence_root(seed)])]);
+    let mut live_pids = BTreeSet::new();
+    let mut lock_held = cfg!(unix);
     let mut steps = Vec::with_capacity(EQUIVALENCE_STEPS);
     let mut pending = None;
 
     for index in 0..EQUIVALENCE_STEPS {
         if let Some(step) = pending.take() {
-            note_generated_step(&step, &mut histories, &mut log_files);
+            note_generated_step(
+                &step,
+                &mut histories,
+                &mut log_files,
+                &mut live_pids,
+                &mut lock_held,
+            );
             steps.push(step);
             continue;
         }
 
-        let first_kind = (rng.next() % 8) as usize;
+        let first_kind = (rng.next() % EQUIVALENCE_KINDS as u64) as usize;
         let mut selected = None;
-        for offset in 0..8 {
-            let kind = (first_kind + offset) % 8;
+        for offset in 0..EQUIVALENCE_KINDS {
+            let kind = (first_kind + offset) % EQUIVALENCE_KINDS;
             let paired_step_fits = index + 1 < EQUIVALENCE_STEPS;
             let candidate = match kind {
                 0 => {
@@ -4209,7 +4231,7 @@ fn generated_steps(seed: u64) -> Vec<EquivalenceStep> {
                 }
                 3 if log_files < EQUIVALENCE_FILES && paired_step_fits => {
                     let parent = choose_sid(&mut rng, &histories);
-                    let agent = format!("agent-{next_agent}");
+                    let agent = format!("a{next_agent}");
                     next_agent += 1;
                     let tool_id = format!("spawn-{seed}-{index}");
                     let records = vec![identified(
@@ -4319,15 +4341,30 @@ fn generated_steps(seed: u64) -> Vec<EquivalenceStep> {
                         ))
                     }
                 }
-                6 if paired_step_fits => {
+                6 => {
                     let sid = choose_sid(&mut rng, &histories);
                     let pid = 10_000 + (rng.next() % 50_000) as u32;
+                    Some((EquivalenceStep::PidWrite { pid, sid }, None))
+                }
+                7 if !live_pids.is_empty() => {
+                    let pids: Vec<u32> = live_pids.iter().copied().collect();
                     Some((
-                        EquivalenceStep::PidWrite { pid, sid },
-                        Some(EquivalenceStep::PidRemove { pid }),
+                        EquivalenceStep::PidRemove {
+                            pid: pids[(rng.next() as usize) % pids.len()],
+                        },
+                        None,
                     ))
                 }
-                7 if log_files < EQUIVALENCE_FILES => {
+                8 if !live_pids.is_empty() => {
+                    let pids: Vec<u32> = live_pids.iter().copied().collect();
+                    Some((
+                        EquivalenceStep::PidDies {
+                            pid: pids[(rng.next() as usize) % pids.len()],
+                        },
+                        None,
+                    ))
+                }
+                9 if log_files < EQUIVALENCE_FILES => {
                     let source = choose_sid(&mut rng, &histories);
                     let target = format!("copy-{next_top}");
                     next_top += 1;
@@ -4356,6 +4393,12 @@ fn generated_steps(seed: u64) -> Vec<EquivalenceStep> {
                         None,
                     ))
                 }
+                10 if cfg!(unix) && lock_held => Some((
+                    EquivalenceStep::LockReleased {
+                        id: "lock".to_owned(),
+                    },
+                    None,
+                )),
                 _ => None,
             };
             if let Some((step, next)) = candidate {
@@ -4374,7 +4417,13 @@ fn generated_steps(seed: u64) -> Vec<EquivalenceStep> {
                 None,
             )
         });
-        note_generated_step(&step, &mut histories, &mut log_files);
+        note_generated_step(
+            &step,
+            &mut histories,
+            &mut log_files,
+            &mut live_pids,
+            &mut lock_held,
+        );
         steps.push(step);
         pending = next;
     }
@@ -4440,6 +4489,9 @@ fn apply_equivalence_step(home: &Home, step: &EquivalenceStep) {
             fs::remove_file(home.root.join(format!("claude/sessions/{pid}.json"))).unwrap();
             fs::remove_file(home.root.join(format!("proc/{pid}/stat"))).unwrap();
         }
+        EquivalenceStep::PidDies { pid } => {
+            fs::remove_file(home.root.join(format!("proc/{pid}/stat"))).unwrap();
+        }
         EquivalenceStep::CopyResume {
             source,
             target,
@@ -4449,50 +4501,62 @@ fn apply_equivalence_step(home: &Home, step: &EquivalenceStep) {
             append_records(home, source, std::slice::from_ref(continued));
             home.top(target, records);
         }
+        EquivalenceStep::LockReleased { id } => {
+            #[cfg(unix)]
+            {
+                let lock_path = home
+                    .root
+                    .join(format!("codex/thread-writer-locks/{id}.lock"));
+                assert!(lock_path.exists());
+                // The writer-lock file may remain after the process releases its flock.
+                home.write("proc/locks", "");
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = id;
+                unreachable!("Codex writer locks are only generated on Unix");
+            }
+        }
     }
 }
 
-fn assert_equivalent(
+fn assert_equivalent(resumed: &Built, fresh: &Built, now: i64) {
+    assert_eq!(resumed.json(now), fresh.json(now));
+    assert_eq!(format!("{:?}", resumed.tx), format!("{:?}", fresh.tx));
+    assert_eq!(format!("{:?}", resumed.facts), format!("{:?}", fresh.facts));
+    assert_eq!(
+        format!("{:?}", resumed.activity),
+        format!("{:?}", fresh.activity)
+    );
+    assert_eq!(resumed.version, fresh.version);
+    assert_eq!(resumed.texts, fresh.texts);
+}
+
+fn build_with_cache(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+) -> Built {
+    if options.facts.is_none() {
+        cache.refresh_reported_runs(&options.claude_json, now, dirty);
+    }
+    let built = build(options, cache, dirty, texts, now).unwrap();
+    invariants(&built);
+    built
+}
+
+fn with_equivalence_context<T>(
     seed: u64,
     index: usize,
     steps: &[EquivalenceStep],
-    resumed: &Built,
-    fresh: &Built,
-) {
-    let context = format!("seed={seed}, step={index}, steps={steps:#?}");
-    assert_eq!(resumed.json(NOW), fresh.json(NOW), "{context}");
-    assert_eq!(
-        format!("{:?}", resumed.tx),
-        format!("{:?}", fresh.tx),
-        "{context}"
-    );
-    assert_eq!(
-        format!("{:?}", resumed.facts),
-        format!("{:?}", fresh.facts),
-        "{context}"
-    );
-    assert_eq!(
-        format!("{:?}", resumed.activity),
-        format!("{:?}", fresh.activity),
-        "{context}"
-    );
-    assert_eq!(resumed.version, fresh.version, "{context}");
-}
-
-fn replay(seed: u64) {
-    let home = Home::new();
-    home.top("root", &[equivalence_root(seed)]);
-    let steps = generated_steps(seed);
-    for (index, step) in steps.iter().enumerate() {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            apply_equivalence_step(&home, step);
-            let resumed = home.build_at(&home.options, NOW);
-            let mut fresh_options = home.options.clone();
-            fresh_options.cache = home.root.join(format!("fresh-{index}.json"));
-            let fresh = home.build_at(&fresh_options, NOW);
-            assert_equivalent(seed, index, &steps, &resumed, &fresh);
-        }));
-        if let Err(payload) = outcome {
+    action: impl FnOnce() -> T,
+) -> T {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action));
+    match outcome {
+        Ok(value) => value,
+        Err(payload) => {
             let detail = payload
                 .downcast_ref::<String>()
                 .map(String::as_str)
@@ -4500,6 +4564,45 @@ fn replay(seed: u64) {
                 .unwrap_or("non-string panic");
             panic!("seed={seed}, step={index}, steps={steps:#?}\n{detail}");
         }
+    }
+}
+
+fn replay(seed: u64) {
+    let home = Home::new();
+    home.top("root", &[equivalence_root(seed)]);
+    #[cfg(unix)]
+    {
+        home.codex("lock", json!({}), &[codex_user(ts(0, 0), "locked fixture")]);
+        hold_lock(&home, "lock");
+    }
+    let steps = generated_steps(seed);
+    let mut cache = EventCache::open(&home.options.cache);
+    let mut dirty = false;
+    let mut texts = Texts::default();
+
+    // Seed the long-lived event cache before the first append, so step zero
+    // reads the persisted ledger's offsets in its restarted-cache build.
+    with_equivalence_context(seed, 0, &steps, || {
+        build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+    });
+
+    for (index, step) in steps.iter().enumerate() {
+        with_equivalence_context(seed, index, &steps, || {
+            apply_equivalence_step(&home, step);
+            let resumed = home.build_at(&home.options, NOW);
+            let long_lived =
+                build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+            let mut fresh_options = home.options.clone();
+            fresh_options.cache = home.root.join(format!("fresh-{index}.json"));
+            let fresh = home.build_at(&fresh_options, NOW);
+
+            assert_equivalent(&resumed, &fresh, NOW);
+            assert_equivalent(&long_lived, &fresh, NOW);
+
+            let unchanged =
+                build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+            assert_equivalent(&long_lived, &unchanged, NOW);
+        });
     }
 }
 
@@ -4516,6 +4619,16 @@ fn append_resumed_build_matches_fresh_build_for_1000_seeds() {
     for seed in 0..1000 {
         replay(seed);
     }
+}
+
+#[test]
+#[ignore = "set SEMON_EQUIV_SEED=<n> to replay one generated case"]
+fn replay_equivalence_seed_from_env() {
+    let seed = std::env::var("SEMON_EQUIV_SEED")
+        .expect("set SEMON_EQUIV_SEED to the seed to replay")
+        .parse()
+        .expect("SEMON_EQUIV_SEED must be an unsigned integer");
+    replay(seed);
 }
 
 fn mask_clock_fields(mut value: Value) -> Value {
@@ -4556,12 +4669,38 @@ fn unchanged_resumed_builds_only_change_clock_dependent_json_fields() {
     let mut options = home.options.clone();
     options.all = false;
     options.since = Duration::from_secs(30 * 24 * 60 * 60);
-    let first = home.build_at(&options, NOW).json(NOW);
-    let same_now = home.build_at(&options, NOW).json(NOW);
-    assert_eq!(first, same_now);
-    let one_minute_later = home.build_at(&options, NOW + 60_000).json(NOW + 60_000);
-    let first_value: Value = serde_json::from_str(&first).unwrap();
-    let later_value: Value = serde_json::from_str(&one_minute_later).unwrap();
+    let first = home.build_at(&options, NOW);
+    let same_now = home.build_at(&options, NOW);
+    assert_eq!(first.json(NOW), same_now.json(NOW));
+    assert_eq!(format!("{:?}", first.tx), format!("{:?}", same_now.tx));
+    assert_eq!(
+        format!("{:?}", first.facts),
+        format!("{:?}", same_now.facts)
+    );
+    assert_eq!(
+        format!("{:?}", first.activity),
+        format!("{:?}", same_now.activity)
+    );
+
+    let one_minute_later = home.build_at(&options, NOW + 60_000);
+    assert_eq!(
+        format!("{:?}", first.tx),
+        format!("{:?}", one_minute_later.tx)
+    );
+    assert_eq!(
+        format!("{:?}", first.facts),
+        format!("{:?}", one_minute_later.facts)
+    );
+    // Analytics `activity` is windowed by `now - KEEP_MS`: rows and their
+    // busy, turns, cost_by_day, waits and answered values can cross that
+    // cutoff. No fixture event crosses it in this one-minute interval.
+    assert_eq!(
+        format!("{:?}", first.activity),
+        format!("{:?}", one_minute_later.activity)
+    );
+
+    let first_value: Value = serde_json::from_str(&first.json(NOW)).unwrap();
+    let later_value: Value = serde_json::from_str(&one_minute_later.json(NOW + 60_000)).unwrap();
     assert!(
         first_value["sessions"]
             .as_object()
