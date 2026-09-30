@@ -2,8 +2,8 @@
 // at 390 wide, and the check fails listing each one that isn't. It walks Home, Sessions, Machines, Analytics (and its
 // slice sheet), every session (collapsed, scrolled up to show the jump button, and with everything expanded), every
 // trace, and the overlays a phone reaches from them: the navigation drawer with its tree open, the details menu, the
-// filters popover, Find, the session-details sheet with its cost breakdown, the runs sheet, the lineage menu and the
-// View script sheet. It runs on the sample fixture and on the extras fixture (code mode, markdown, the payload lane).
+// filters popover, Find, the session-details sheet with its cost breakdown, the runs sheet, the session path in a child's
+// details menu and the View script sheet. It runs on the sample fixture and on the extras fixture (code mode, markdown, the payload lane).
 //
 // A tap target is more than a box, so each control's target (its box and its ::before reach) is hit-tested too: the point 1 px
 // inside the midpoint of each of its four edges must land on the control, on something inside it, on the label around it, or on
@@ -17,8 +17,11 @@
 //
 // Allow-list (each entry a reason; only what a design change, not padding, would be needed to fix):
 //   - inline text links and tip anchors inside running text (an inline a[href], or the .cr-item runs of a session's status line
-//     (#133), whose parent also holds text of its own): their box is a text line by nature, and the runs sit a thin space from
-//     each other. A link that stands alone in its element is measured like any control.
+//     (#133), whose parent also holds text of its own): their box is a text line by nature. The runs are 17-30 px wide and a
+//     thin space apart, so no inline reach makes them 44 px wide; each is a secondary affordance whose data (tool calls, times,
+//     the cost and its breakdown) is in the Session details sheet, where every row and the breakdown are measured. A link that
+//     stands alone in its element is measured like any control. The allowed controls are counted per signature in taps.json
+//     (results.allowed), so a new allowed signature shows.
 //   - chart columns (rect.chart-hit): a column's slot is (chart width - axis) / bins wide, 8-15 px at 390 for 24-30
 //     bins, so 44 px wide is not possible without changing the chart's interaction (a scrub or a list beside it).
 //     They are 140 px tall. Named in the PR body of #54's tap-target point.
@@ -70,7 +73,9 @@ function measure({ selector, min }) {
   // The hit-test. Scroll positions are noted first and restored after: a screen is measured where it stands.
   const saved = [[document.scrollingElement, document.scrollingElement.scrollTop]];
   for (const x of document.body.querySelectorAll("*")) if (x.scrollHeight > x.clientHeight + 1 || x.scrollTop > 0) saved.push([x, x.scrollTop]);
-  const chrome = (n) => { for (; n && n !== document.documentElement; n = n.parentElement) { const p = getComputedStyle(n).position; if (p === "fixed" || p === "sticky") return true; } return false; };
+  // A bar or a sheet the page scrolls from under: forgiven only when it does not hold the control itself (the drawer, a dialog and
+  // a menu inside the sticky top bar hold theirs, so a hit inside them is judged like any other).
+  const chrome = (n, e) => { for (; n && n !== document.documentElement; n = n.parentElement) { const p = getComputedStyle(n).position; if ((p === "fixed" || p === "sticky") && !n.contains(e)) return true; } return false; };
   const misses = [];
   for (const it of items) {
     if (it.allowed || it.short) continue;
@@ -83,7 +88,7 @@ function measure({ selector, min }) {
       // Another control (one with no control inside it) takes the tap: rows that stack share their edge. So does the label around this one. A card that holds controls does not: tapping it is not tapping this.
       const ctl = hit.closest(selector);
       if (ctl && (ctl.contains(it.e) ? ctl.matches("label") : !ctl.querySelector(selector))) continue;
-      if (chrome(hit)) continue;
+      if (chrome(hit, it.e)) continue;
       misses.push({ sig: it.sig, text: it.text, side, by: sigOf(hit), byText: (hit.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40) });
     }
   }
@@ -97,6 +102,7 @@ export default async function tapsCheck(browser) {
   const problems = [];
   let measured = 0, screens = 0;
   const bySignature = {};
+  const allowedBy = {}; // allow-listed signature -> { reason, n }
   const covered = new Map(); // signature | side | what is there instead -> { text, byText, n, screens }
 
   const tally = async (page, where) => {
@@ -110,6 +116,7 @@ export default async function tapsCheck(browser) {
     }
     for (const e of els) {
       bySignature[e.sig] = (bySignature[e.sig] ?? 0) + 1;
+      if (e.allowed) { const g = (allowedBy[e.sig] ??= { reason: e.allowed, n: 0 }); g.n++; }
       if (!e.short || e.allowed) continue;
       const g = seen.get(e.sig) ?? { minW: e.w, minH: e.h, n: 0, screens: new Set(), text: e.text };
       g.minW = Math.min(g.minW, e.w); g.minH = Math.min(g.minH, e.h); g.n++; g.screens.add(where);
@@ -122,7 +129,7 @@ export default async function tapsCheck(browser) {
   };
   const closeOverlays = async (page) => {
     for (let i = 0; i < 3; i++) {
-      const open = await page.evaluate(() => !!document.querySelector("dialog[open], .menu:not([hidden]), .filters.pop:not([hidden]), .lineage-menu, body.drawer-open"));
+      const open = await page.evaluate(() => !!document.querySelector("dialog[open], .menu:not([hidden]), .filters.pop:not([hidden]), body.drawer-open"));
       if (!open) return;
       await page.keyboard.press("Escape"); await page.waitForTimeout(120);
     }
@@ -241,9 +248,6 @@ export default async function tapsCheck(browser) {
       if (await page.locator("#topbar .meta-runs").isVisible()) await attempt("open the runs sheet of " + short, async () => {
         await page.click("#topbar .meta-runs"); await page.waitForSelector("dialog.runs-sheet[open]"); await tally(page, at("runs sheet " + short)); await closeOverlays(page);
       });
-      if (await page.locator(".topbar .lineage-parent").count()) await attempt("open the lineage menu of " + short, async () => {
-        await page.click(".topbar .lineage-parent"); await page.waitForSelector(".lineage-menu"); await tally(page, at("lineage menu " + short)); await closeOverlays(page);
-      });
       if (await page.locator(".step > .out:not([hidden]) .viewscript").count()) await attempt("open View script in " + short, async () => {
         await page.locator(".step > .out:not([hidden]) .viewscript").first().click(); await page.waitForSelector("dialog.viewer[open]");
         await tally(page, at("view script " + short)); await closeOverlays(page);
@@ -278,7 +282,7 @@ export default async function tapsCheck(browser) {
   r.results = {
     screens, measured,
     under44: shortList.map(([sig, g]) => ({ sig, minW: g.minW, minH: g.minH, n: g.n, text: g.text, screens: [...g.screens].slice(0, 6) })),
-    signatures: bySignature, problems,
+    signatures: bySignature, allowed: allowedBy, problems,
   };
   for (const [sig, g] of shortList) {
     r.expect(false, sig + " is " + g.minW + "×" + g.minH + " at its smallest (" + g.n + " on the screens measured, e.g. “" + g.text + "” on " + [...g.screens].slice(0, 3).join("; ") + ")");
@@ -294,7 +298,7 @@ export default async function tapsCheck(browser) {
   r.expect(chipScreens >= 6, "the order chips were put on " + chipScreens + " screens, want 6 (three widths, in the drawer and on Sessions)");
   // The check is not vacuous: it reached the screens it names, and measured the controls those screens are made of.
   r.expect(screens > 60, "measured only " + screens + " screens");
-  for (const must of ["tracebtn", "nav-item", "srow", "cost-breakdown-head", "vclose", "jump-bottom", "analytics-range", "analytics-measure", "viewscript", "account-trigger", "order-chip"]) {
+  for (const must of ["tracebtn", "nav-item", "srow", "cost-breakdown-head", "vclose", "jump-bottom", "analytics-range", "analytics-measure", "viewscript", "account-trigger", "order-chip", "menu-path-item"]) {
     r.expect(Object.keys(bySignature).some((sig) => sig.includes("." + must)), "no ." + must + " was measured: its screen was not reached");
   }
   return r.done();
