@@ -115,7 +115,7 @@ export default async function barCheck(browser) {
         const inside = (n) => { const r = n.getBoundingClientRect(); return r.top >= br.top - 0.5 && r.bottom <= br.bottom + 0.5; }, dr = dotEl?.getBoundingClientRect(), tr = title.getBoundingClientRect(), cr = cb;
         // What the bar was before: the same page with the phone rules off (the line drawn), a floor on the gain.
         bar.classList.remove("session-bar"); const oldH = bar.getBoundingClientRect().height; bar.classList.add("session-bar");
-        return { phone, h: Math.round(br.height * 10) / 10, oldH, l2Shown, leadShown: !!lead && getComputedStyle(lead).display !== "none",
+        return { phone, crumbShown: !!crumb && getComputedStyle(crumb).display !== "none", titleGap: Math.round(tr.left - btn.getBoundingClientRect().right), h: Math.round(br.height * 10) / 10, oldH, l2Shown, leadShown: !!lead && getComputedStyle(lead).display !== "none",
           oneRow: !!btn && !!more && [btn, more, title].every((n) => inside(n)) && Math.max(btn.getBoundingClientRect().top, more.getBoundingClientRect().top, tr.top) < Math.min(btn.getBoundingClientRect().bottom, more.getBoundingClientRect().bottom, tr.bottom),
           dot: !!dotEl && dotEl.getAttribute("role") === "img", dotState: dotEl ? [...dotEl.classList].find((c) => c !== "dot") : null, dotName: dotEl?.getAttribute("aria-label") ?? null, dotVisible: !!dr && dr.width > 0,
           dotBeforeTitle: !!dr && dr.right <= tr.left + 0.5, dotAfterCrumb: !cr || (!!dr && dr.left >= cr.right - 0.5),
@@ -142,7 +142,7 @@ export default async function barCheck(browser) {
       if (phone) window.scrollTo(0, 0); else main.scrollTop = 0; return out;
     });
     const R = { mode, pages: 0, notPinned: [], l2Pages: 0, l2NotOneLine: [], l2Overflowing: 0, metaFailures: [], sessionMetaPages: 0, sideways: 0, smallControls: [], overflowScreens: 0 };
-    const measure = async (name) => {
+    const measure = async (name, expectedMeta = null) => {
       const c = await barCheckOnce(); R.pages++;
       if (!c.pinned) R.notPinned.push(name + (c.scrolled ? "" : "(no scroll)"));
       if (c.l2) { R.l2Pages++; if (!c.l2.oneLine) R.l2NotOneLine.push(name + ":" + c.l2.h); if (c.l2.overflows) R.l2Overflowing++; if (c.l2.sessionMeta) R.sessionMetaPages++; }
@@ -155,13 +155,21 @@ export default async function barCheck(browser) {
           if (pr.oldH < pr.h) bad.push("taller than the two-row form: " + pr.oldH + " -> " + pr.h);
           if (!pr.oneRow) bad.push("not one row");
           if (pr.l2Shown) bad.push("the line of labels is displayed");
-          if (!pr.leadShown || !pr.dot || !pr.dotVisible) bad.push("no state dot");
-          if (!pr.dotName || stateWord[pr.dotState] !== pr.dotName) bad.push("the dot's name " + pr.dotName + " for its state " + pr.dotState);
-          if (!pr.dotBeforeTitle || !pr.dotAfterCrumb) bad.push("the dot is not between the chevron and the title");
-          if (!pr.tip) bad.push("the dot's tip is " + JSON.stringify(pr.tipText) + ", not \"Status: … N turns\"");
-          if (pr.crumbW != null && (pr.crumbW < 44 || pr.crumbW > 48 || pr.sepShown)) bad.push("the chevron is " + pr.crumbW + " px wide (44 to 48) or shows its separator " + pr.sepShown);
-          if (pr.crumbH != null && pr.crumbH < 35.5) bad.push("the chevron's tap height " + pr.crumbH);
-          if (pr.leadW < 32 || pr.leadH < 32 || pr.leadOverlapsCrumb) bad.push("the dot's tap area " + pr.leadW + "x" + pr.leadH + (pr.leadOverlapsCrumb ? ", overlapping the chevron" : ""));
+          if (expectedMeta?.child) {
+            // A child session's bar on a phone has neither the chevron nor the dot (Marvin: "the top dot and left chevron taking too much space"): the title follows the menu button, and the ⋯ menu holds the status and the path (checked in the child path test below).
+            R.phoneChildBars = (R.phoneChildBars ?? 0) + 1;
+            if (pr.leadShown || pr.crumbShown) bad.push("a child's bar still draws the " + [pr.leadShown ? "state dot" : "", pr.crumbShown ? "chevron" : ""].filter(Boolean).join(" and "));
+            if (pr.titleGap > 16) bad.push("the title starts " + pr.titleGap + " px after the menu button (16 at most)");
+          } else {
+            R.phoneTopLevelBars = (R.phoneTopLevelBars ?? 0) + 1;
+            if (!pr.leadShown || !pr.dot || !pr.dotVisible) bad.push("no state dot");
+            if (!pr.dotName || stateWord[pr.dotState] !== pr.dotName) bad.push("the dot's name " + pr.dotName + " for its state " + pr.dotState);
+            if (!pr.dotBeforeTitle || !pr.dotAfterCrumb) bad.push("the dot is not between the chevron and the title");
+            if (!pr.tip) bad.push("the dot's tip is " + JSON.stringify(pr.tipText) + ", not \"Status: … N turns\"");
+            if (pr.crumbW != null && (pr.crumbW < 44 || pr.crumbW > 48 || pr.sepShown)) bad.push("the chevron is " + pr.crumbW + " px wide (44 to 48) or shows its separator " + pr.sepShown);
+            if (pr.crumbH != null && pr.crumbH < 35.5) bad.push("the chevron's tap height " + pr.crumbH);
+            if (pr.leadW < 32 || pr.leadH < 32 || pr.leadOverlapsCrumb) bad.push("the dot's tap area " + pr.leadW + "x" + pr.leadH + (pr.leadOverlapsCrumb ? ", overlapping the chevron" : ""));
+          }
           if (bad.length) R.metaFailures.push(name + ": a phone's session bar: " + bad.join(", "));
           R.phoneBars = (R.phoneBars ?? 0) + 1;
         } else if (pr.leadShown || !pr.l2Shown) R.metaFailures.push(name + ": a desktop's session bar shows the phone's state dot or hides its line: " + JSON.stringify(pr));
@@ -223,7 +231,7 @@ export default async function barCheck(browser) {
       info.trace.forEach((t) => traceTurns.push([sid, t]));
       F.youTurns += info.you.length; F.youWithHeader += info.you.filter(Boolean).length; F.msgTimes += info.times; F.relayHeaders += info.relays; F.gapMarkersBetweenTurns += info.gapOut; F.gapMarkersInsideTurns += info.gapIn; F.tables += info.tables; F.tsum += info.tsum.length;
       for (const t of info.tsum) { if (/ \d+ steps?\b/.test(t)) F.tsumFallback.push(t); if (/(^|, )[a-z]+[a-z0-9_]* \d+ steps?/.test(t) && !/^(ran|read|edited|wrote|patched|searched)/i.test(t)) F.tsumLowercasedUnknown++; }
-      await measure("session " + D.SESS[sid].name.slice(0, 16));
+      await measure("session " + D.SESS[sid].name.slice(0, 16), { child: !!parentOf(sid) });
     }
     for (const [sid, t] of traceTurns) { await goto(page, { v: "trace", sid, turn: t }, D); const c = await measure("trace " + t); if (!c.l2) R.traceWithoutL2 = (R.traceWithoutL2 ?? 0) + 1; }
     for (const m of Object.keys(D.MACHINE ?? {})) { await goto(page, { v: "machine", id: m }, D); await measure("machine " + m); }
@@ -398,12 +406,44 @@ export default async function barCheck(browser) {
   r.expect(!!failedChild, "fixture has no failed child session for the return-row check");
   if (grandchild && parentKids.length >= 3 && failedChild) for (const size of ["phone", "desktop"]) {
     const page = await served(browser, { size }); await goto(page, { v: "session", id: grandchild.id }, D);
-    // The bar names one step up: the parent as a crumb, then this session. The crumb opens the parent.
-    const pathNames = [(await page.locator("#topbar .crumb").allTextContents()).join("|"), await page.locator("#topbar .t").textContent()].map((x) => x.trim());
-    const expectedPath = [D.SESS[parentOf(grandchild.id)].name, grandchild.name];
-    const pathOk = pathNames[0] === expectedPath[0] && pathNames[1] === expectedPath[1];
-    await page.click("#topbar .crumb"); await afterTitle(page, expectedPath[0]);
-    const crumbOpens = await page.evaluate(() => history.state?.id);
+    const pathNames = [], expectedPath = []; let cursor = grandchild.id;
+    while (cursor && D.SESS[cursor]) { expectedPath.unshift(D.SESS[cursor].name); cursor = parentOf(cursor); }
+    const expectedAncestors = expectedPath.slice(0, -1);
+    let childBar = null, pathStatus = null, pathMenuFacts = null, tappedUp = null, pathOk = false;
+    if (size === "phone") {
+      childBar = await page.evaluate(() => {
+        const bar = document.querySelector("#topbar"), lead = bar.querySelector(".l1-state"), title = bar.querySelector(".t"), menuButton = bar.querySelector("#lead-btn"), ttl = title.parentElement.parentElement;
+        const normalGap = parseFloat(getComputedStyle(bar).columnGap) + parseFloat(getComputedStyle(ttl).paddingLeft);
+        return { lineageParent: !!bar.querySelector(".lineage-parent"), stateLead: !!lead, titleGapError: Math.abs(title.getBoundingClientRect().left - menuButton.getBoundingClientRect().right - normalGap) };
+      });
+      const capture = async (name, withMenu) => {
+        const height = await page.evaluate((open) => { const box = document.querySelector(open ? ".session-menu" : "#topbar").getBoundingClientRect(); return Math.max(1, Math.min(innerHeight, Math.ceil(box.bottom + 8))); }, withMenu);
+        await page.screenshot({ path: path.join(ENV.out, name), clip: { x: 0, y: 0, width: 390, height } });
+      };
+      for (const scheme of ["light", "dark"]) { await page.emulateMedia({ colorScheme: scheme }); await page.waitForTimeout(120); await capture("childbar-390-" + scheme + ".png", false); }
+      await page.emulateMedia({ colorScheme: "light" });
+      await page.click("#more-btn"); await page.waitForSelector(".session-menu .menu-path-item");
+      pathMenuFacts = await page.evaluate(() => {
+        const menu = document.querySelector(".session-menu"), status = menu.querySelector(".menu-status"), items = [...menu.querySelectorAll(".menu-path-item")].map((item) => {
+          const name = item.querySelector(".menu-path-name"), rect = item.getBoundingClientRect(), style = getComputedStyle(name);
+          return { name: name.textContent.trim(), label: item.getAttribute("aria-label"), role: item.getAttribute("role"), harness: item.querySelector(".hname")?.textContent.trim(), chevron: !!item.querySelector(".menu-path-chevron"), height: rect.height, whiteSpace: style.whiteSpace, overflow: style.overflow, textOverflow: style.textOverflow };
+        });
+        const statusText = status?.lastElementChild, statusStyle = statusText && getComputedStyle(statusText);
+        return { status: status?.textContent.replace(/\u2009/g, " ").replace(/\s+/g, " ").trim() ?? null, statusRole: status?.getAttribute("role") ?? null, statusIsMenuItem: !!status?.matches('[role="menuitem"]'), statusDot: status?.querySelector(".dot")?.getAttribute("aria-label") ?? null, statusWhiteSpace: statusStyle?.whiteSpace ?? null, statusOverflow: statusStyle?.overflow ?? null, statusTextOverflow: statusStyle?.textOverflow ?? null, menuRows: [...menu.querySelectorAll('button[role="menuitem"]')].map((row) => ({ height: row.getBoundingClientRect().height, oneLine: row.scrollHeight <= row.clientHeight + 1 })), order: [...(menu.querySelector(".panel-b") ?? menu).children].slice(0, 3).map((item) => item.className), items, separator: !!menu.querySelector('.menu-separator[role="separator"]') };
+      });
+      pathStatus = pathMenuFacts.status;
+      pathNames.push(...pathMenuFacts.items.map((item) => item.name));
+      pathMenuFacts.sideways = await overflow(page);
+      for (const scheme of ["light", "dark"]) { await page.emulateMedia({ colorScheme: scheme }); await page.waitForTimeout(120); await capture("childbar-menu-390-" + scheme + ".png", true); }
+      await page.emulateMedia({ colorScheme: "light" });
+      pathOk = pathNames.length === expectedAncestors.length && expectedAncestors.every((name, i) => pathNames[i] === name);
+      const parent = D.SESS[parentOf(grandchild.id)];
+      await page.locator(".session-menu .menu-path-item[aria-label]").click(); await afterTitle(page, parent.name); await page.waitForTimeout(120);
+      tappedUp = await page.evaluate(() => ({ title: document.querySelector("#topbar .t")?.textContent ?? null, expanded: document.querySelector("#more-btn")?.getAttribute("aria-expanded") ?? null }));
+    } else {
+      pathNames.push(...await page.locator("#topbar .l1 .crumb").allTextContents(), await page.locator("#topbar .t").textContent());
+      pathOk = expectedPath.every((name) => pathNames.some((got) => got.trim() === name));
+    }
 
     await goto(page, { v: "session", id: grandchild.id }, D);
     const origin = D.H.find((h) => h.kind === "spawn" && h.to === grandchild.id);
@@ -443,12 +483,20 @@ export default async function barCheck(browser) {
     await page.keyboard.press("Escape"); await page.waitForTimeout(150);
     const focusAfter = await page.evaluate(() => document.activeElement?.id ?? document.activeElement?.tagName ?? null);
     const expectedRuns = Object.values(D.SESS).filter((s) => { let p = parentOf(s.id); while (p && p !== "harbor") p = parentOf(p); return p === "harbor"; }).length;
-    childAssertions.push({ size, introActions, pathNames, expectedPath, pathOk, crumbOpens, briefCard, openedParent, returnRow, returnParent, siblingNav, runs, runsViaMenu, runsFocus, focusAfter, expectedRuns });
+    childAssertions.push({ size, introActions, pathNames, expectedPath, expectedAncestors, pathOk, childBar, pathStatus, pathMenuFacts, tappedUp, briefCard, openedParent, returnRow, returnParent, siblingNav, runs, runsViaMenu, runsFocus, expectedRuns });
     await page.context().close();
   }
 
   for (const child of childAssertions) {
-    r.expect(child.pathOk === true && child.crumbOpens === parentOf(grandchild.id), child.size + ": the bar did not show the parent as a crumb before the title, or the crumb did not open the parent: " + JSON.stringify({ expected: child.expectedPath, got: child.pathNames, opens: child.crumbOpens }));
+    r.expect(child.pathOk === true, child.size + (child.size === "phone" ? ": Session path does not list ancestors in root-first order" : ": lineage breadcrumbs do not show the full parent path") + ": " + JSON.stringify({ expected: child.size === "phone" ? child.expectedAncestors : child.expectedPath, got: child.pathNames }));
+    if (child.size === "phone") {
+      const expectedState = { work: "Working", wait: "Needs you", idle: "Idle", done: "Done", err: "Failed", new: "New result", read: "Read result" }[grandchild.state];
+      r.expect(child.childBar && !child.childBar.lineageParent && !child.childBar.stateLead && child.childBar.titleGapError <= 8, "phone: child bar still has a lineage chevron or state dot, or its title is not beside the menu button: " + JSON.stringify(child.childBar));
+      r.expect(child.pathStatus?.startsWith(expectedState + " · ") && / · \d+ turns?$/.test(child.pathStatus), "phone: child menu status line does not show the current state and turn count: " + JSON.stringify(child.pathStatus));
+      const pathItems = child.pathMenuFacts?.items ?? [];
+      r.expect(child.pathMenuFacts?.statusRole === "presentation" && !child.pathMenuFacts.statusIsMenuItem && child.pathMenuFacts.statusDot === expectedState && child.pathMenuFacts.statusWhiteSpace === "nowrap" && child.pathMenuFacts.statusOverflow === "hidden" && child.pathMenuFacts.statusTextOverflow === "ellipsis" && child.pathMenuFacts.order.join() === "menu-status,menu-path-group,menu-separator" && child.pathMenuFacts.separator && child.pathMenuFacts.menuRows.every((row) => row.height >= 44 && row.oneLine) && pathItems.length === child.expectedAncestors.length && pathItems.every((item, i) => item.role === "menuitem" && item.harness && item.height >= 44 && item.height <= 46 && item.whiteSpace === "nowrap" && item.overflow === "hidden" && item.textOverflow === "ellipsis" && item.chevron === (i === pathItems.length - 1)) && pathItems.at(-1)?.label === "Up to " + D.SESS[parentOf(grandchild.id)].name && child.pathMenuFacts.sideways === 0, "phone: Session path rows lost their labels, ellipsis, tap size, separator, or screen fit: " + JSON.stringify(child.pathMenuFacts));
+      r.expect(child.tappedUp?.title === D.SESS[parentOf(grandchild.id)].name && child.tappedUp?.expanded === "false", "phone: Up to parent did not close ⋯ and land on the parent: " + JSON.stringify(child.tappedUp));
+    }
     r.expect(child.briefCard.visible && child.briefCard.includesBrief && child.briefCard.openInParent?.includes("Open in") && child.openedParent.id === parentOf(grandchild.id) && child.openedParent.handoff, child.size + ": child brief or Open in parent handoff link failed: " + JSON.stringify({ brief: child.briefCard, opened: child.openedParent }));
     r.expect(child.briefCard.bars.length > 0 && child.briefCard.bars.every((w) => parseFloat(w) === 0), child.size + ": the child intro still has a left bar: " + JSON.stringify(child.briefCard.bars));
     r.expect(child.briefCard.transcript && parseFloat(child.briefCard.transcript.rail) === 0 && parseFloat(child.briefCard.transcript.pad) === 0, child.size + ": a child session's transcript still carries a left rail or the padding for one: " + JSON.stringify(child.briefCard.transcript));
@@ -619,7 +667,7 @@ export default async function barCheck(browser) {
     r.expect(m.smallControls.length === 0, m.mode + ": bar controls under the tap size (36px, 44px on a phone): " + JSON.stringify(m.smallControls));
     r.expect(m.l2NotOneLine.length === 0, m.mode + ": the label line is not one line: " + JSON.stringify(m.l2NotOneLine));
     r.expect(m.l2Overflowing === 0, m.mode + ": the label line overflows: count=" + m.l2Overflowing);
-    r.expect((m.mode !== "desktop" ? (m.phoneBars ?? 0) > 0 : m.sessionMetaPages > 0) && m.metaFailures.length === 0, m.mode + ": session label line (state first with its dot, labels in order, none a control, Find and the menu only): " + JSON.stringify(m.metaFailures.slice(0, 6)));
+    r.expect((m.mode !== "desktop" ? (m.phoneBars ?? 0) > 0 && (m.phoneTopLevelBars ?? 0) > 0 && (m.phoneChildBars ?? 0) > 0 : m.sessionMetaPages > 0) && m.metaFailures.length === 0, m.mode + ": session label line (state first with its dot, labels in order, none a control, Find and the menu only): " + JSON.stringify(m.metaFailures.slice(0, 6)));
     if (m.mode !== "desktop") {
       const sl = m.startedLine;
       r.expect(!!sl, m.mode + ": no session showed a Started line to check");
