@@ -30,7 +30,146 @@
 //  - the desktop dialog: at least one "View all" is visible on the sample's first expanded step, the dialog is not
 //    sideways-clipped off the 1280px viewport, and a backdrop click closes it (closedByBackdrop === true).
 import path from "node:path";
-import { ENV, served, data, goto, reporter, wide } from "../lib.mjs";
+import { ENV, served, data, goto, reporter, wide, overflow } from "../lib.mjs";
+
+// Synthetic /api/tx pages cover background lifecycles without reading another transcript fixture.
+async function backgroundCommands(browser, r) {
+  const results = {};
+  for (const size of ["phone", "desktop"]) {
+    const page = await served(browser, { size, path: "/s/claude/harbor" });
+    try {
+      const normal = (text) => text.replace(/\s+/g, " ").trim();
+      const tool = (tid, bg) => ({ k: "tool", name: "Bash", arg: "git fetch " + tid, tid, ok: true, secs: "0.5s", out: "Command running in background with ID: " + tid, bg });
+      const foreground = { k: "tool", name: "Bash", arg: "git status", ok: true, secs: "0.2s", out: "Clean" };
+      const read = { k: "tool", name: "Read", arg: "README.md", ok: true, secs: "0.1s", out: "Read" };
+      let entries = [tool("running", { state: "running", secs: "8m 18s", since: ENV.now - 498000 }), foreground, read];
+      await page.route(/\/api\/tx\?/, async (route) => {
+        const response = await route.fetch(), p = await response.json();
+        if (p.sid !== "harbor") { await route.fulfill({ response }); return; }
+        const rows = [{ k: "u", text: "Background command coverage", turn: p.entries[0]?.turn }, ...entries];
+        await route.fulfill({ response, json: { ...p, from: 0, to: rows.length, total: rows.length, entries: rows } });
+      });
+      const reload = async () => {
+        await page.reload({ waitUntil: "load" });
+        await page.waitForFunction(() => !!document.querySelector('.step[data-tid]'));
+        await page.evaluate(() => document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((n) => n.click()));
+      };
+      await reload();
+      const running = await page.evaluate(() => {
+        const step = document.querySelector('.step[data-tid="running"]');
+        return { sd: step.querySelector(".sd").textContent, spin: step.querySelectorAll(":scope > button > .spin").length, summary: step.closest(".tgroup").querySelector(".tsum").textContent };
+      });
+      r.expect(normal(running.sd) === "background · running 8m 18s" && running.spin === 1, size + ": running background label and spinner: " + JSON.stringify(running));
+      r.expect(normal(running.summary).includes("Ran 2 commands, read 1 file") && normal(running.summary).includes("· running 8m 18s"), size + ": background command counts as running: " + running.summary);
+      await page.clock.setFixedTime(ENV.now + 2000);
+      await page.waitForFunction(() => document.querySelector('.step[data-tid="running"] .sd')?.textContent.replace(/\s+/g, " ").trim() === "background · running 8m 20s");
+      const ticked = await page.locator(".tsum .tl").textContent();
+      r.expect(normal(ticked) === "· running 8m 20s", size + ": the group ticker follows the background call: " + ticked);
+      await page.clock.setFixedTime(ENV.now);
+      const summary = 'Background command "<script>literal</script>" completed (exit code 0)';
+      entries = [
+        tool("done:1", { state: "done", exit: 0, secs: "12.0s", summary }),
+        tool("failed", { state: "failed", exit: 2, secs: "3.0s", summary: "Failed (exit code 2)" }),
+        tool("killed", { state: "killed", secs: "4.0s" }),
+        tool("unknown", { state: "unknown" }),
+        tool("done-no-exit", { state: "done", secs: "5.0s" }),
+        foreground, read,
+        { k: "bgend", call: "done:1", state: "done", exit: 0, label: "Fetch changes " + "with a long description ".repeat(8) },
+        { k: "bgend", call: "failed", state: "failed", exit: 2, label: "Fetch failed" },
+        { k: "bgend", call: "killed", state: "killed", label: "Fetch stopped" },
+        { k: "bgend", call: "done-no-exit", state: "done", label: "Fetch done" },
+        { k: "bgend", call: "earlier-page", state: "done", label: "Earlier command" },
+        { ...foreground, arg: "git diff" },
+      ];
+      await reload();
+      const ended = await page.evaluate(() => {
+        const steps = [...document.querySelectorAll(".step[data-tid]")];
+        return { steps: steps.map((n) => ({ tid: n.dataset.tid, sd: n.querySelector(".sd").textContent, spin: n.querySelectorAll(":scope > button > .spin").length, err: n.classList.contains("err") })), groups: document.querySelectorAll(".tgroup").length, summary: document.querySelector(".tsum .tt")?.textContent, ends: [...document.querySelectorAll(".bgend")].map((n) => ({ text: n.textContent, button: !!n.querySelector("button"), err: n.classList.contains("err") })) };
+      });
+      const expected = ["background · exit 0 · 12.0s", "background · failed · 3.0s", "background · stopped · 4.0s", "background · no end recorded", "background · done · 5.0s"];
+      r.expect(ended.steps.length === 5 && ended.steps.every((n, i) => normal(n.sd) === expected[i] && n.spin === 0 && n.err === (i === 1)), size + ": terminal and unknown labels, errors and spinners: " + JSON.stringify(ended.steps));
+      r.expect(ended.groups === 1, size + ": completion rows must stay inside one run: " + ended.groups);
+      r.expect(normal(ended.summary) === "Finished 5 background commands (1 failed, 1 stopped), ran 7 commands, read 1 file", size + ": completion counts and tool verbs: " + ended.summary);
+      r.expect(ended.ends.length === 5 && normal(ended.ends[0].text).startsWith("Background command completed · Fetch changes") && normal(ended.ends[1].text) === "Background command failed · Fetch failed" && ended.ends[1].err && normal(ended.ends[2].text) === "Background command stopped · Fetch stopped", size + ": arrival rows: " + JSON.stringify(ended.ends));
+      r.expect(ended.ends.slice(0, 4).every((n) => n.button) && ended.ends[4].button === false, size + ": only loaded originating calls get a jump button");
+      const done = page.locator('.step[data-tid="done:1"]');
+      await done.locator(":scope > button").click();
+      const finished = await done.locator(".out .io").allTextContents();
+      r.expect(finished.at(-1) === "Finished" && await done.locator(".out .finished").textContent() === summary, size + ": expanded Finished summary is literal text");
+      r.expect(await done.locator("script").count() === 0, size + ": summary text must not create markup");
+      await page.locator(".bgend > button").first().click();
+      r.expect(await done.evaluate((n) => n.classList.contains("flash")), size + ": the completion row highlights its originating call");
+      const over = await overflow(page);
+      r.expect(over === 0, size + ": background rows must not scroll sideways: " + over);
+      r.expect(page.errors.length === 0, size + ": background page errors: " + page.errors.join(" | "));
+      // A finish in another run owns the failure count; a failed call without a loaded finish owns its own count.
+      entries = [tool("late-failure", { state: "failed", exit: 2, secs: "3.0s" }), foreground,
+        { k: "a", text: "The command finished during the next run." },
+        { k: "bgend", call: "late-failure", state: "failed", label: "Late failure" },
+        tool("no-finish-row", { state: "failed", exit: 2, secs: "3.0s" }), foreground];
+      await reload();
+      const split = await page.evaluate(() => [...document.querySelectorAll(".tsum")].map((n) => ({ text: n.textContent.replace(/\s+/g, " ").trim(), failure: n.querySelector(".tf")?.textContent.replace(/\s+/g, " ").trim() ?? "" })));
+      r.expect(split.length === 2 && split[0].failure === "" && split[1].text.includes("Finished 1 background command (1 failed)") && split[1].failure === "· 1 failed", size + ": each background failure is counted in its finish run, or its call run when no finish is loaded: " + JSON.stringify(split));
+      await page.locator(".tsum").first().click(); // hide the originating step in the earlier run
+      await page.locator(".bgend > button").click();
+      r.expect(await page.locator(".tsum").first().getAttribute("aria-expanded") === "true", size + ": jumping to a call opens its collapsed run");
+      // Load earlier: the initially plain completion row must become a jump button.
+      await page.unroute(/\/api\/tx\?/);
+      const prior = tool("paged-call", { state: "done", exit: 0, secs: "1.0s" });
+      await page.route(/\/api\/tx\?/, async (route) => {
+        const response = await route.fetch(), p = await response.json();
+        if (p.sid !== "harbor") { await route.fulfill({ response }); return; }
+        const before = new URL(route.request().url()).searchParams.has("before");
+        const rows = before ? [{ k: "u", text: "Earlier call", turn: p.entries[0]?.turn }, prior] : [{ k: "bgend", call: "paged-call", state: "done", label: "Earlier call", turn: p.entries[0]?.turn }];
+        await route.fulfill({ response, json: { ...p, from: before ? 0 : 2, to: before ? 2 : 3, total: 3, entries: rows } });
+      });
+      await page.reload({ waitUntil: "load" });
+      await page.waitForFunction(() => !!document.querySelector(".bgend"));
+      r.expect(await page.locator(".bgend > button").count() === 0, size + ": an unloaded originating call has a plain completion row");
+      await page.getByRole("button", { name: "Load earlier", exact: true }).click();
+      await page.waitForFunction(() => !!document.querySelector(".bgend > button"));
+      r.expect(await page.locator('.step[data-tid="paged-call"]').count() === 1 && await page.locator(".bgend > button").count() === 1, size + ": loading the earlier page enables the completion link");
+      r.expect(page.errors.length === 0, size + ": pagination background page errors: " + page.errors.join(" | "));
+      results[size] = { running, ticked, ended, finished, overflow: over, split };
+    } finally { await page.context().close(); }
+  }
+  return results;
+}
+
+// Screenshot a real synthetic Claude log at every size and theme, with the run and Finished output open.
+async function backgroundScreenshots(browser, r) {
+  const results = {};
+  for (const [size, dark] of [["phone", false], ["phone", true], ["desktop", false], ["desktop", true]]) {
+    const tag = (size === "phone" ? "390" : "1280") + "-" + (dark ? "dark" : "light");
+    const page = await served(browser, { extras: true, size, dark, path: "/s/claude/bgcmd" });
+    try {
+      await page.waitForFunction(() => document.querySelectorAll(".step[data-tid]").length === 4);
+      await page.locator(".tsum").click();
+      await page.locator('.step[data-tid="bg-completed"] > button').click();
+      await page.locator(".tgroup").scrollIntoViewIfNeeded();
+      await page.mouse.wheel(0, -1); // release the opening scroll pin before framing the run
+      await page.evaluate(() => {
+        const group = document.querySelector(".tgroup"), gap = document.querySelector("#topbar").getBoundingClientRect().bottom + 8;
+        const sc = matchMedia("(max-width: 760px)").matches ? document.scrollingElement : document.querySelector("#main");
+        sc.scrollTop += group.getBoundingClientRect().top - gap;
+      });
+      await page.waitForTimeout(200);
+      const shown = await page.evaluate(() => {
+        const normal = (text) => text.replace(/\s+/g, " ").trim();
+        return { labels: [...document.querySelectorAll(".step[data-tid] .sd")].map((n) => normal(n.textContent)), ends: [...document.querySelectorAll(".bgend")].map((n) => normal(n.textContent)), summary: normal(document.querySelector(".tsum").textContent), finished: document.querySelector('.step[data-tid="bg-completed"] .finished')?.textContent, open: document.querySelector(".tsum")?.getAttribute("aria-expanded") === "true", visible: [...document.querySelectorAll('.step[data-tid], .bgend, .step[data-tid="bg-completed"] .finished')].every((n) => n.getClientRects().length > 0) };
+      });
+      r.expect(shown.labels[0] === "background · running 9m 0s" && shown.labels[1] === "background · exit 0 · 1m 0s" && shown.labels[2] === "background · failed · 2m 0s" && shown.labels[3] === "background · stopped · 3m 0s", tag + ": fixture covers running and all terminal states: " + JSON.stringify(shown.labels));
+      r.expect(shown.ends.length === 3 && shown.summary.includes("Finished 3 background commands (1 failed, 1 stopped), ran 4 commands"), tag + ": screenshot includes completion rows and summary: " + JSON.stringify(shown));
+      r.expect(shown.open && shown.visible && shown.finished === 'Background command "cargo build" completed (exit code 0)', tag + ": run and Finished summary are expanded for the screenshot");
+      r.expect(await page.locator('.step[data-tid="bg-completed"] > button').getAttribute("aria-expanded") === "true" && await page.locator('.step[data-tid="bg-completed"] .finished').isVisible(), tag + ": completed command has its Finished summary open");
+      const over = await overflow(page);
+      r.expect(over === 0 && page.errors.length === 0, tag + ": screenshot fixture has no overflow or page errors: " + JSON.stringify({ over, errors: page.errors }));
+      await page.screenshot({ path: path.join(ENV.out, "bgcmd-" + tag + ".png") });
+      results[tag] = shown;
+    } finally { await page.context().close(); }
+  }
+  return results;
+}
 
 export default async function viewerCheck(browser) {
   const D = await data();
@@ -146,6 +285,8 @@ export default async function viewerCheck(browser) {
     await page.context().close();
   }
 
+  R.background = await backgroundCommands(browser, r);
+  R.backgroundScreenshots = await backgroundScreenshots(browser, r);
   r.results = R;
   r.expect((R.phoneErrors ?? []).length === 0, "phone page errors: " + (R.phoneErrors ?? []).join(" | "));
   r.expect((R.deskErrors ?? []).length === 0, "desktop page errors: " + (R.deskErrors ?? []).join(" | "));

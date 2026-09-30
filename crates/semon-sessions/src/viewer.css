@@ -533,6 +533,13 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .step .sa { font-family: var(--mono); font-size: var(--fs-sm); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; overflow-wrap: normal; }
 .step .sa.st { font: inherit; color: var(--ink-2); }
 .step .sd { margin-left: auto; font-family: var(--mono); font-size: var(--fs-cap); color: var(--muted); flex: none; padding-left: 8px; }
+.step.background .sd { flex: 0 1 auto; min-width: 0; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step > button > .spin { flex: none; }
+.step.flash > button { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.step .bg-line { display: flex; align-items: center; gap: 8px; padding: 3px 6px; min-width: 0; color: var(--muted); font-size: var(--fs-sm); }
+.step .bg-line > svg { width: 16px; height: 16px; flex: none; }
+.step .bg-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.step.err .bg-line { color: var(--err); }
 .step .chev { color: var(--faint); transition: transform .15s; }
 .step > button[aria-expanded="true"] .chev { transform: rotate(90deg); }
 .step.err .sv, .step.err .sd, .step.err > button > svg:first-child { color: var(--err); }
