@@ -4,7 +4,7 @@
 // on the first spawn card that has activity to show; screenshots of the card collapsed and opened go to out/childcard/ for the visual pass.
 import fs from "node:fs";
 import path from "node:path";
-import { ENV, served, data, goto, reporter } from "../lib.mjs";
+import { ENV, served, data, goto, reporter, settled } from "../lib.mjs";
 
 const OUT = path.join(ENV.out, "childcard");
 fs.mkdirSync(OUT, { recursive: true });
