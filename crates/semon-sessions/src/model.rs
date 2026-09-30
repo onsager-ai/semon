@@ -1017,7 +1017,7 @@ pub(crate) fn working_dirs(
     dirty: &mut bool,
 ) -> io::Result<BTreeSet<String>> {
     let cutoff = scan_cutoff(options, now_ms());
-    let (files, _) = scan(options, cache, dirty, &mut Texts::default(), cutoff)?;
+    let (files, _, _) = scan(options, cache, dirty, &mut Texts::default(), cutoff)?;
     let mut cwds = BTreeSet::new();
     for file in &files {
         cwds.extend(file.summary.cwd.clone());
