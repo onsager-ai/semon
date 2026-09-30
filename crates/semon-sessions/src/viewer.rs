@@ -1828,7 +1828,7 @@ impl MachineView {
         let path = self
             .transcript_path(&harness, &id)?
             .ok_or(io::ErrorKind::NotFound)?;
-        let mut file = crate::sealed::LogFile::open(path)?;
+        let mut file = crate::sealed::LogFile::open(&path)?;
         file.seek(SeekFrom::Start(offset))?;
         let mut reader = io::BufReader::new(file).take((MAX_LINE + 1) as u64);
         let mut bytes = Vec::new();
