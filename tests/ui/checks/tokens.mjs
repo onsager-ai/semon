@@ -5,7 +5,7 @@
 // "Faint" is not a text colour, and its ratio is about 2.6:1, so it fails here wherever it is used for words. Text that holds no
 // letter or digit (a separator such as "·" or "›") is a rule, not words, and isn't measured. Disabled controls and text that is
 // not drawn (hidden, closed drawer, under 2 px) are skipped.
-import { served, data, reporter, goto } from "../lib.mjs";
+import { served, data, reporter, goto, ENV } from "../lib.mjs";
 import path from "node:path";
 
 const audit = (page) => page.evaluate(() => {
