@@ -1711,9 +1711,10 @@ impl<'a> Builder<'a> {
             }
             if pid.alive {
                 session.alive = true;
-                // `shell` is a finished turn with background shells still
-                // running, which `claude agents` reports as busy too.
-                session.busy = matches!(pid.status.as_deref(), Some("busy" | "shell"));
+                // `shell` (a finished turn with background shells running)
+                // is not busy here: it stays idle rather than working for as
+                // long as a shell lives.
+                session.busy = pid.status.as_deref() == Some("busy");
                 session.waiting =
                     pid.status.as_deref() == Some("waiting") || pid.waiting_for.is_some();
                 if let Some(name) = &pid.name {

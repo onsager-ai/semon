@@ -1346,8 +1346,8 @@ fn states_follow_the_process_the_question_and_the_last_word() {
             ),
         ],
     );
-    // The process is mid-turn while the question is on screen, so its record
-    // can still read `busy`; an open question outranks it.
+    // The capture showed `waiting` while a question is on screen; a record
+    // that still reads `busy` is defensive, and the open question outranks it.
     home.live(31, "asking", "busy", json!({}));
     // Claude Code 2.1.285 records `waiting` with the reason while it is
     // stopped on a dialog: a question, or a permission prompt.
@@ -1368,9 +1368,19 @@ fn states_follow_the_process_the_question_and_the_last_word() {
         "waiting",
         json!({"waitingFor":"permission prompt"}),
     );
-    // A finished turn with background shells still running.
+    // A finished turn with background shells still running is not counted as
+    // working: it reads idle, as before.
     home.top("shell", &[human("shell", ts(16, 0), "start a server")]);
     home.live(40, "shell", "shell", json!({}));
+    // A `waitingFor` outranks a `busy` status (defensive: a stale reason left
+    // in the record while the turn runs again reads as needs you).
+    home.top("stale-wait", &[human("stale-wait", ts(16, 0), "go on")]);
+    home.live(
+        41,
+        "stale-wait",
+        "busy",
+        json!({"waitingFor":"permission prompt"}),
+    );
     home.top(
         "answered",
         &[
@@ -1466,6 +1476,7 @@ fn states_follow_the_process_the_question_and_the_last_word() {
             state("input-needed"),
             state("permission"),
             state("shell"),
+            state("stale-wait"),
             state("answered"),
             state("relayed-reply"),
             state("scheduled-reply"),
@@ -1475,8 +1486,8 @@ fn states_follow_the_process_the_question_and_the_last_word() {
             state("ended")
         ],
         [
-            "work", "wait", "wait", "wait", "work", "idle", "idle", "idle", "idle", "idle", "idle",
-            "done"
+            "work", "wait", "wait", "wait", "idle", "wait", "idle", "idle", "idle", "idle", "idle",
+            "idle", "done"
         ]
     );
     assert_eq!(by_brief(&built, "busy work").status, "work");
