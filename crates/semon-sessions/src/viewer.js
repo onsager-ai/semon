@@ -1859,6 +1859,45 @@
       if (t.u || h?.kind === "ask") blk.setAttribute("aria-label", "Your message" + (h ? " at " + clock(h.at) : ""));
       else if (h && h.id !== opts.excludeH) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in)); const sender = SESS[h.from] && harnessIcon(SESS[h.from].harness, { size: 16 }); if (sender) hd.append(sender); hd.append(l, el("span", "tm", clock(h.at))); blk.append(hd); }
       tx = el("div", "tx"); blk.append(tx); box.append(blk); cur = { t, blk }; };
+    const toolStep = (e, v, ic, live) => {
+      const box = keyed(el("div", "step" + (live ? " live" : e.ok || e.ok === null ? "" : " err")), e);
+      if (live) { box.dataset.live = sid; if (e.since != null) box.dataset.since = e.since; }
+      const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
+      const status = live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
+      b.append(live ? el("span", "spin") : icon(I[ic]), el("span", "sv", live && v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd" + (live ? " tick" : ""), status), icon(I.chev, "chev"));
+      const out = el("div", "out"); out.hidden = true;
+      // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
+      // eleven lines. When either is cut, "View all" opens the whole call in a sheet.
+      const shell = /^(Bash|shell|exec_command|local_shell)$/.test(e.name), inLabel = shell ? "Command" : "Input";
+      const input = shell ? (e.in ?? e.arg) : e.in;
+      if (input != null) out.append(el("div", "io", inLabel), el("pre", "in clip", input));
+      if (e.cwd && e.cwd !== ".") out.append(el("div", "io", "Working directory · " + e.cwd));
+      if (live) out.append(el("div", "noout", "Running · no output yet"));
+      else {
+        if (e.out != null && e.out !== "") out.append(el("div", "io", "Output"));
+        if (e.changes) {
+          for (const change of e.changes) {
+            out.append(el("div", "io", "Change · " + change.path + (change.move ? " → " + change.move : "")));
+            if (change.diff?.length) out.append(diffEl(change.diff, "clip")); else out.append(el("div", "noout", "No diff recorded"));
+          }
+          if (!e.changes.length) out.append(el("div", "noout", "No changes recorded"));
+        } else if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) { out.append(outEl(e, "clip")); if (e.cut) out.append(el("div", "cutnote", cutNoteText(e.cut))); } else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
+      }
+      const actions = el("div", "step-actions");
+      if (!live && e.script != null) { const script = el("button", "viewscript", "View script"); script.type = "button"; script.addEventListener("click", () => openScript(e)); actions.append(script); }
+      const all = el("button", "viewall"); all.type = "button"; all.hidden = true; all.append(icon(I.expand), el("span", null, "View all"));
+      all.addEventListener("click", () => openViewer(e, v, ic, inLabel)); actions.append(all); actions.hidden = e.script == null; out.append(actions);
+      b.addEventListener("click", () => { out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden));
+        if (!out.hidden) {
+          let cut = !!e.more?.length;
+          out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; });
+          all.hidden = !cut; actions.hidden = e.script == null && !cut;
+          // Text cut when this copy was made, with nothing more to show: say so instead of ending on "…".
+          if (!cut && !e.cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs"));
+        }
+      });
+      box.append(b, out); return box;
+    };
     for (const e of entries) {
       if (owner && !opts.only.has(owner.get(e.key))) continue;
       if (turnMode && isGap(e)) { closeTurn(); if (!find) box.append(el("div", "divider", e.text)); continue; }
@@ -1877,33 +1916,10 @@
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
-        if (e.live) { const r = keyed(el("div", "step live"), e); r.dataset.live = sid; if (e.since != null) r.dataset.since = e.since; r.append(el("span", "spin"), el("span", "sv", v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd tick", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs, key: e.key }); continue; }
-        const box = keyed(el("div", "step" + (e.ok || e.ok === null ? "" : " err")), e); const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
-        b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs), icon(I.chev, "chev"));
-        const out = el("div", "out"); out.hidden = true;
-        // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
-        // eleven lines. When either is cut, "View all" opens the whole call in a sheet.
-        const shell = /^(Bash|shell|exec_command|local_shell)$/.test(e.name), inLabel = shell ? "Command" : "Input";
-        const input = shell ? (e.in ?? e.arg) : e.in;
-        if (input != null) out.append(el("div", "io", inLabel), el("pre", "in clip", input));
-        if (e.cwd && e.cwd !== ".") out.append(el("div", "io", "Working directory · " + e.cwd));
-        if (e.out != null && e.out !== "") out.append(el("div", "io", "Output"));
-        if (e.changes) {
-          for (const change of e.changes) {
-            out.append(el("div", "io", "Change · " + change.path + (change.move ? " → " + change.move : "")));
-            if (change.diff?.length) out.append(diffEl(change.diff, "clip")); else out.append(el("div", "noout", "No diff recorded"));
-          }
-          if (!e.changes.length) out.append(el("div", "noout", "No changes recorded"));
-        } else if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) { out.append(outEl(e, "clip")); if (e.cut) out.append(el("div", "cutnote", cutNoteText(e.cut))); } else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
-        const actions = el("div", "step-actions");
-        if (e.script != null) { const script = el("button", "viewscript", "View script"); script.type = "button"; script.addEventListener("click", () => openScript(e)); actions.append(script); }
-        const all = el("button", "viewall"); all.type = "button"; all.hidden = true; all.append(icon(I.expand), el("span", null, "View all"));
-        all.addEventListener("click", () => openViewer(e, v, ic, inLabel)); actions.append(all); actions.hidden = e.script == null; out.append(actions);
-        b.addEventListener("click", () => { out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden));
-          if (!out.hidden) { let cut = !!e.more?.length; out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; }); all.hidden = !cut; actions.hidden = e.script == null && !cut;
-            // Text cut when this copy was made, with nothing more to show: say so instead of ending on "…".
-            if (!cut && !e.cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs")); } });
-        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key }); continue;
+        const box = toolStep(e, v, ic, !!e.live);
+        if (e.live) run.push({ node: box, v, k: e.name, live: true, secs: e.secs, key: e.key });
+        else run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key });
+        continue;
       }
       flush();
       if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg user"), e); userBody(m, e, e.text); tx.append(m); }
@@ -1962,7 +1978,8 @@
     const d = el("dialog", "viewer"); d.setAttribute("aria-label", verb + " " + e.arg);
     const head = el("div", "vh"); const t = el("div", "vt"); t.append(icon(I[ic]), el("span", null, verb + " " + e.arg));
     const close = el("button", "vclose"); close.type = "button"; close.setAttribute("aria-label", "Close"); close.append(icon(I.x)); close.addEventListener("click", () => d.close());
-    head.append(t, close, el("div", "vm" + (e.ok || e.ok === null ? "" : " err"), e.name + " · " + (e.unfinished ? "no result" : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs)));
+    const resultStatus = e.live ? "Running · " + e.secs : e.unfinished ? "no result" : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
+    head.append(t, close, el("div", "vm" + (!e.live && !(e.ok || e.ok === null) ? " err" : ""), e.name + " · " + resultStatus));
     const body = el("div", "vb");
     const section = (label, text) => { const s = el("div", "vs"); s.append(el("span", null, label));
       if (text) { const c = el("button", "vcopy"); c.type = "button"; c.append(icon(I.copy), el("span", null, "Copy"));
@@ -1979,7 +1996,7 @@
         for (const change of e.changes) { section("Change · " + change.path + (change.move ? " → " + change.move : ""), null); body.append(diffEl(change.diff ?? [])); }
         if (!e.changes.length) body.append(el("p", "vnote", "No changes recorded."));
       } else if (e.diff) { section("Change", null); body.append(diffEl(e.diff)); }
-      else { section("Output", e.out); if (e.out) { body.append(outEl(e)); cutNote(e.out); } else body.append(el("p", "vnote", e.unfinished ? "No result recorded." : "No output.")); }
+      else { section("Output", e.out); if (e.out) { body.append(outEl(e)); cutNote(e.out); } else body.append(el("p", "vnote", e.live ? "Running · no output yet" : e.unfinished ? "No result recorded." : "No output.")); }
     }
     if (e.fullFailed) body.append(el("p", "vnote", "Couldn't load the full text: this is the preview."));
     if (e.fullCut?.length) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));
