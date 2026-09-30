@@ -111,9 +111,9 @@ fn reads_match_at_any_offset_across_frames_and_segments() {
     fs::write(&log, &bytes).unwrap();
     set_modified(&log, 1);
     let before = modified(&log);
-    let ino = identity(&fs::metadata(&log).unwrap()).1;
+    let ino = ino(&fs::metadata(&log).unwrap());
 
-    let first = seal(&log, 1).unwrap();
+    let first = seal(&log, 1, u64::MAX).unwrap();
     let e1 = bytes.len() as u64;
     assert_eq!(
         first.added.as_ref().map(|s| (s.start, s.end)),
@@ -122,7 +122,7 @@ fn reads_match_at_any_offset_across_frames_and_segments() {
     assert!(first.punched);
     let meta = fs::metadata(&log).unwrap();
     assert_eq!(
-        (meta.len(), identity(&meta).1, modified(&log)),
+        (meta.len(), ino(&meta), modified(&log)),
         (e1, ino, before),
         "length, inode and modified time are the log's own"
     );
@@ -140,7 +140,7 @@ fn reads_match_at_any_offset_across_frames_and_segments() {
     bytes.extend_from_slice(b"{\"partial\":");
     assert_eq!(read_all(&log), bytes, "sealed, then plain");
 
-    let second = seal(&log, 1).unwrap();
+    let second = seal(&log, 1, u64::MAX).unwrap();
     assert_eq!(
         second.added.as_ref().map(|s| (s.start, s.end)),
         Some((e1, e2))
@@ -187,7 +187,7 @@ fn reads_match_at_any_offset_across_frames_and_segments() {
         assert_eq!(four, bytes[at as usize..at as usize + 4]);
     }
     // A segment is plain zstd: the stock decoder reads it back.
-    let manifest = read_manifest(&seal_dir(&log)).unwrap().unwrap().0;
+    let manifest = read_manifest(&seal_dir(&log)).unwrap().unwrap();
     let path = seal_dir(&log).join(manifest.segments[1].file_name(&manifest.generation));
     let decoded = zstd::stream::decode_all(fs::File::open(path).unwrap()).unwrap();
     assert_eq!(decoded, bytes[e1 as usize..e2 as usize]);
@@ -203,7 +203,7 @@ fn real_nul_runs_read_back_from_the_segment() {
     bytes.extend(std::iter::repeat_n(0, 9_000));
     bytes.extend_from_slice(&jsonl(50_000, 5));
     fs::write(&log, &bytes).unwrap();
-    seal(&log, 1).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
     assert_eq!(read_all(&log), bytes);
     assert_eq!(read_range(&log, 50_100, 100), bytes[50_100..50_200]);
     fs::remove_dir_all(root).unwrap();
@@ -219,7 +219,7 @@ fn a_reader_opened_before_the_seal_reads_through_it() {
     let mut early = LogFile::open(&log).unwrap();
     let mut head = [0; 100];
     early.read_exact(&mut head).unwrap();
-    assert!(seal(&log, 1).unwrap().punched);
+    assert!(seal(&log, 1, u64::MAX).unwrap().punched);
     let mut rest = Vec::new();
     early.read_to_end(&mut rest).unwrap();
     assert_eq!([&head[..], &rest[..]].concat(), bytes);
@@ -248,7 +248,7 @@ fn an_interrupted_seal_is_ignored_then_cleaned_up_and_finished() {
 
     // Crashed after the manifest, before the punch.
     CRASH_BEFORE_PUNCH.with(|crash| crash.set(true));
-    let sealed = seal(&log, 1).unwrap();
+    let sealed = seal(&log, 1, u64::MAX).unwrap();
     CRASH_BEFORE_PUNCH.with(|crash| crash.set(false));
     assert!(sealed.added.is_some() && !sealed.punched);
     let status_now = status(&log).unwrap();
@@ -258,7 +258,7 @@ fn an_interrupted_seal_is_ignored_then_cleaned_up_and_finished() {
     fs::write(dir.join("x.zst.tmp"), b"junk").unwrap();
     fs::write(dir.join("9-00000000000000000000.zst"), b"junk").unwrap();
     assert_eq!(tidy(&log).unwrap(), 2);
-    let finished = seal(&log, u64::MAX).unwrap();
+    let finished = seal(&log, u64::MAX, u64::MAX).unwrap();
     assert!(finished.added.is_none() && finished.punched);
     assert!(!status(&log).unwrap().needs_punch);
     assert_eq!(modified(&log), before);
@@ -267,7 +267,7 @@ fn an_interrupted_seal_is_ignored_then_cleaned_up_and_finished() {
     // Crashed after a punch, before restoring the time: the next seal
     // restores it.
     set_modified(&log, 99);
-    let again = seal(&log, u64::MAX).unwrap();
+    let again = seal(&log, u64::MAX, u64::MAX).unwrap();
     assert!(again.added.is_none() && !again.punched);
     assert_eq!(modified(&log), before);
     fs::remove_dir_all(root).unwrap();
@@ -279,8 +279,8 @@ fn a_replaced_log_reads_its_new_bytes_and_retires_the_old_generation() {
     let root = scratch("replace");
     let log = root.join("a.jsonl");
     fs::write(&log, jsonl(200_000, 8)).unwrap();
-    seal(&log, 1).unwrap();
-    let old = read_manifest(&seal_dir(&log)).unwrap().unwrap().0;
+    seal(&log, 1, u64::MAX).unwrap();
+    let old = read_manifest(&seal_dir(&log)).unwrap().unwrap();
 
     // As a receiver replaces a file: a new one renamed over it.
     let bytes = jsonl(150_000, 9);
@@ -290,9 +290,9 @@ fn a_replaced_log_reads_its_new_bytes_and_retires_the_old_generation() {
     assert_eq!(read_all(&log), bytes);
     assert!(!status(&log).unwrap().bound);
 
-    let sealed = seal(&log, 1).unwrap();
+    let sealed = seal(&log, 1, u64::MAX).unwrap();
     assert!(sealed.retired && sealed.added.is_some());
-    let new = read_manifest(&seal_dir(&log)).unwrap().unwrap().0;
+    let new = read_manifest(&seal_dir(&log)).unwrap().unwrap();
     assert_ne!(new.generation, old.generation);
     assert!(
         !seal_dir(&log)
@@ -310,7 +310,7 @@ fn a_copied_log_reads_through_its_holes_and_rebinds() {
     let log = root.join("a.jsonl");
     let bytes = jsonl(300_000, 10);
     fs::write(&log, &bytes).unwrap();
-    seal(&log, 1).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
 
     // A copy of the volume: the holes come over as zeros, on a new inode.
     let copied = fs::read(&log).unwrap();
@@ -322,7 +322,7 @@ fn a_copied_log_reads_through_its_holes_and_rebinds() {
     assert_eq!(read_all(&log), bytes, "zeros filled from the segments");
     assert_eq!(tidy(&log).unwrap(), 0, "a copy is not a replace");
 
-    let sealed = seal(&log, u64::MAX).unwrap();
+    let sealed = seal(&log, u64::MAX, u64::MAX).unwrap();
     assert!(sealed.rebound && !sealed.retired && sealed.punched);
     assert!(status(&log).unwrap().bound);
     assert_eq!(read_all(&log), bytes);
@@ -334,9 +334,115 @@ fn a_small_tail_or_a_partial_line_is_not_sealed() {
     let root = scratch("small");
     let log = root.join("a.jsonl");
     fs::write(&log, b"{\"no newline yet\":").unwrap();
-    assert_eq!(seal(&log, 1).unwrap(), Sealed::default());
+    assert_eq!(seal(&log, 1, u64::MAX).unwrap(), Sealed::default());
     fs::write(&log, jsonl(10_000, 11)).unwrap();
-    assert_eq!(seal(&log, 64 * 1024).unwrap(), Sealed::default());
+    assert_eq!(seal(&log, 64 * 1024, u64::MAX).unwrap(), Sealed::default());
     assert!(!seal_dir(&log).exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_seal_takes_at_most_max_new_bytes_up_to_a_line() {
+    let root = scratch("capped");
+    let log = root.join("a.jsonl");
+    let bytes = jsonl(300_000, 12);
+    fs::write(&log, &bytes).unwrap();
+    let mut end = 0;
+    let mut segments = 0;
+    while let Some(segment) = seal(&log, 1, 100_000).unwrap().added {
+        assert_eq!(segment.start, end);
+        assert!(segment.end - segment.start <= 100_000);
+        assert_eq!(bytes[segment.end as usize - 1], b'\n');
+        end = segment.end;
+        segments += 1;
+    }
+    assert_eq!(end, bytes.len() as u64);
+    assert!(segments >= 3);
+    assert_eq!(read_all(&log), bytes);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A new file can take a replaced one's inode number at once: a manifest
+/// binds to the birth time too, so the new file never reads the old
+/// segments, and its next seal retires them.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_new_file_on_a_reused_inode_number_is_not_bound() {
+    let root = scratch("reuse");
+    let old = root.join("old.jsonl");
+    fs::write(&old, jsonl(200_000, 13)).unwrap();
+    seal(&old, 1, u64::MAX).unwrap();
+    let log = root.join("a.jsonl");
+    let bytes = jsonl(250_000, 14);
+    fs::write(&log, &bytes).unwrap();
+    // The old log's seal, as if recorded from this file's inode number.
+    fs::rename(seal_dir(&old), seal_dir(&log)).unwrap();
+    let birth = Birth::of(&fs::metadata(&log).unwrap());
+    let mut manifest = read_manifest(&seal_dir(&log)).unwrap().unwrap();
+    manifest.ino = birth.ino;
+    manifest.born_ns = birth.born_ns;
+    write_manifest(&seal_dir(&log), &manifest).unwrap();
+    assert!(
+        status(&log).unwrap().bound,
+        "the inode number and birth time bind"
+    );
+    manifest.born_ns = birth.born_ns.wrapping_add(1);
+    write_manifest(&seal_dir(&log), &manifest).unwrap();
+    assert!(!status(&log).unwrap().bound, "another birth time doesn't");
+    assert_eq!(read_all(&log), bytes);
+    let sealed = seal(&log, 1, u64::MAX).unwrap();
+    assert!(sealed.retired && sealed.added.is_some());
+    assert_eq!(read_all(&log), bytes);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forget_removes_a_seal_before_a_replace() {
+    let root = scratch("forget");
+    let log = root.join("a.jsonl");
+    fs::write(&log, jsonl(100_000, 15)).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    forget(&log).unwrap();
+    assert!(!seal_dir(&log).exists());
+    forget(&log).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A log shorter than its sealed range, with holes: the segments may hold
+/// the only copy, so nothing is retired or punched.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_shorter_log_with_holes_keeps_its_segments() {
+    let root = scratch("shorter");
+    let log = root.join("a.jsonl");
+    let bytes = jsonl(200_000, 16);
+    fs::write(&log, &bytes).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    let copied = fs::read(&log).unwrap();
+    let next = root.join("copy.tmp");
+    fs::write(&next, &copied[..150_000]).unwrap();
+    fs::rename(&next, &log).unwrap();
+    assert!(seal(&log, 1, u64::MAX).is_err());
+    assert!(tidy(&log).is_err());
+    assert!(read_manifest(&seal_dir(&log)).unwrap().is_some());
+    assert_eq!(read_all(&log), bytes[..150_000]);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A manifest that can't be read is an error when the log reads as holes,
+/// never zeros passed off as its bytes.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unreadable_manifest_fails_the_read() {
+    let root = scratch("unreadable");
+    let log = root.join("a.jsonl");
+    fs::write(&log, jsonl(100_000, 17)).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    fs::write(seal_dir(&log).join(MANIFEST), b"{").unwrap();
+    let mut out = Vec::new();
+    assert!(LogFile::open(&log).unwrap().read_to_end(&mut out).is_err());
+    assert!(status(&log).is_err());
     fs::remove_dir_all(root).unwrap();
 }

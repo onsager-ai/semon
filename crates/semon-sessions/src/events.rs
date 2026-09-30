@@ -4783,7 +4783,7 @@ mod tests {
 
         // Sealed: the same stat, so shared as it is, in this process or a
         // new one, and a cold read finds the same index.
-        assert!(crate::sealed::seal(&log, 1).unwrap().punched);
+        assert!(crate::sealed::seal(&log, 1, u64::MAX).unwrap().punched);
         ledger_trace();
         let before = parsed();
         scan(&mut cache);
@@ -4804,7 +4804,12 @@ mod tests {
         assert_eq!(stored(&v1, &log), cold(&log));
 
         // Sealed again, the new lines too: still unchanged.
-        assert!(crate::sealed::seal(&log, 1).unwrap().added.is_some());
+        assert!(
+            crate::sealed::seal(&log, 1, u64::MAX)
+                .unwrap()
+                .added
+                .is_some()
+        );
         ledger_trace();
         scan(&mut cache);
         assert_eq!(ledger_trace(), ["unchanged"]);
