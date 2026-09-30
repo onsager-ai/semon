@@ -26,6 +26,20 @@ import { XSS, XSS_KEY } from "../fixture.mjs";
 
 const inView = (page, sel) => page.evaluate((sel) => { const e = document.querySelector(sel), bar = document.querySelector("#topbar").getBoundingClientRect(); if (!e) return null; const r = e.getBoundingClientRect(); return r.top >= bar.bottom - 1 && r.top < innerHeight - 40; }, sel);
 const pager = (page) => page.evaluate(() => [...document.querySelectorAll(".turns > .list > button.more")].map((b) => ({ text: b.textContent, first: b.parentElement === document.querySelector(".turns").firstElementChild, last: b.parentElement === document.querySelector(".turns").lastElementChild })));
+function trackChildRequests(page) {
+  const requests = new Set(), idle = [];
+  page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname === "/api/tx" && url.searchParams.has("turn")) requests.add(request); });
+  const finished = (request) => { if (requests.delete(request) && !requests.size) idle.splice(0).forEach((resolve) => resolve()); };
+  page.on("requestfinished", finished);
+  page.on("requestfailed", finished);
+  return async () => {
+    for (;;) {
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      if (!requests.size) return;
+      await new Promise((resolve) => idle.push(resolve));
+    }
+  };
+}
 
 export default async function (browser) {
   const r = reporter("extras");
@@ -39,18 +53,7 @@ export default async function (browser) {
     let titled;
     let untitled;
     let commandOverride = null;
-    const childRequests = new Set(), childIdle = [];
-    page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname === "/api/tx" && url.searchParams.has("turn")) childRequests.add(request); });
-    const childFinished = (request) => { if (childRequests.delete(request) && !childRequests.size) childIdle.splice(0).forEach((resolve) => resolve()); };
-    page.on("requestfinished", childFinished);
-    page.on("requestfailed", childFinished);
-    const childRequestsSettled = async () => {
-      for (;;) {
-        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-        if (!childRequests.size) return;
-        await new Promise((resolve) => childIdle.push(resolve));
-      }
-    };
+    const childRequestsSettled = trackChildRequests(page);
     await page.route("**/api/tx**", async (route) => {
       const url = new URL(route.request().url());
       const response = await route.fetch();
@@ -142,6 +145,7 @@ export default async function (browser) {
     const shotTitle = "Run queue retry tests";
     const captureTitleShot = async ({ size, dark, filename, expanded = false }) => {
       const shot = await served(browser, { extras: true, path: "/s/claude/harbor", size, dark });
+      const childRequestsSettled = trackChildRequests(shot);
       await shot.route("**/api/tx**", async (route) => {
         const url = new URL(route.request().url());
         const response = await route.fetch();
@@ -155,6 +159,7 @@ export default async function (browser) {
       });
       await shot.reload({ waitUntil: "load" });
       await shot.waitForFunction((value) => [...document.querySelectorAll(".step .sa.st")].some((title) => title.textContent === value), shotTitle);
+      await childRequestsSettled();
       await shot.evaluate(() => document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click()));
       const titleLabel = shot.locator(".step .sa.st");
       await titleLabel.scrollIntoViewIfNeeded();
