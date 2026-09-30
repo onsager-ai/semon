@@ -33,9 +33,11 @@ pub(crate) type Key = (Instant, u64);
 /// background view starts none.
 ///
 /// When the pool falls behind (every worker busy, entries waiting past their
-/// time), a read of a view whose check is over a second late refreshes the
-/// view itself before it answers, as the first read of a view does: reads
-/// then wait for builds, but no answer is further behind the logs than that.
+/// time), reads still answer from each view's last model at once: none waits
+/// for a build once a model is built. A read of a view whose check is over a
+/// second late nudges the pool, which starts a worker only if it has room
+/// for one; with every worker busy, the check waits its turn, and answers
+/// are as far behind the logs as the queue is.
 ///
 /// [`ViewerCore`]: crate::ViewerCore
 /// [`ViewerCore::set_refresh_pool`]: crate::ViewerCore::set_refresh_pool
@@ -170,9 +172,29 @@ impl RefreshPool {
         true
     }
 
+    /// A read found its view's check overdue: the waiting workers are woken,
+    /// or with none waiting a thread starts if the pool has room (as when
+    /// the system refused one before). With every worker busy it does
+    /// nothing, and the check waits its turn. The caller holds the view's
+    /// `live` lock, which is always taken before this pool's, as in
+    /// [`RefreshPool::queue`].
+    pub(crate) fn nudge(self: &Arc<Self>) {
+        let mut state = lock(&self.state);
+        let start = if state.waiting == 0 {
+            self.reserve(&mut state)
+        } else {
+            self.wake.notify_all();
+            false
+        };
+        drop(state);
+        if start {
+            self.start();
+        }
+    }
+
     /// Starts the worker [`RefreshPool::reserve`] counted, without the
-    /// pool's lock held. Without it (the system refused a thread), queued
-    /// views are refreshed by their reads once their checks are overdue.
+    /// pool's lock held. Without it (the system refused a thread), the next
+    /// queue or a read that finds its check overdue tries again.
     fn start(self: &Arc<Self>) {
         let pool = self.clone();
         let started = thread::Builder::new()

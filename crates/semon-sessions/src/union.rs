@@ -193,20 +193,20 @@ impl AccountMenu {
 /// machine and core that uses the pool: the queue holds each machine once
 /// at most. A machine is rebuilt at most once a second, so the changes of
 /// one second are one rebuild, and it is checked only while it is read: 30 s
-/// after its last read it goes idle. A read waits for a build only when it
-/// must refresh first: its machine has no model yet, or went idle (see each
-/// mode), or its queued check is over a second late because every worker of
-/// the pool is busy. While the pool keeps up, an answer is at most about
-/// 1 s plus one build behind the logs; when it falls behind, the reads that
-/// find their checks overdue refresh themselves, so an answer is still
-/// never further behind than that, but those reads wait for their builds.
+/// after its last read it goes idle, and its next read queues a check at
+/// once. A read waits for a build only when its machine has no model yet:
+/// once one is built, every read answers from it at once, never waiting for
+/// a rebuild in progress, a late check or failing rebuilds. While the pool
+/// keeps up, an answer is at most about 1 s plus one build behind the logs,
+/// and the first read after an idle spell answers from the model before it
+/// (a poll sees the change once the check it queued has rebuilt). When the
+/// pool falls behind (every worker busy), a machine's check waits its turn,
+/// and its answers are as far behind the logs as the pool's queue is.
 ///
 /// A background rebuild that fails leaves the last model served, with the
-/// error printed once; 3 s after rebuilds started failing, each read
-/// refreshes itself instead and answers the error (500), as
-/// [`Refresh::OnRead`] does, until a build works again. The model and the V1
-/// tree fail on their own: a tree that won't build never turns `/api/model`
-/// into an error.
+/// error printed once, and each check tries again until a build works. The
+/// model and the V1 tree fail on their own: a tree that won't build never
+/// holds back the model.
 ///
 /// [`RefreshPool`]: crate::RefreshPool
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -222,8 +222,8 @@ pub enum Refresh {
     /// the pool checks it every 250 ms (a stat pass over its logs) and
     /// rebuilds when they changed. For a server whose logs change on disk
     /// with no one to say so; `semon sessions --serve` uses it. The first
-    /// read after the machine went idle refreshes first, since its logs
-    /// may have changed unseen.
+    /// read after the machine went idle answers from its last model and
+    /// queues a check at once, since its logs may have changed unseen.
     Background,
     /// In the background, when the embedding server says a machine's logs
     /// changed ([`ViewerCore::invalidate`]): no stat pass every 250 ms, only
@@ -232,11 +232,11 @@ pub enum Refresh {
     /// rebuild, and one that comes while a rebuild runs is one more after
     /// it. As a safety net for a writer that doesn't invalidate, a machine
     /// that is read is still checked every 30 s. The first read after the
-    /// machine went idle refreshes first only if it was invalidated
-    /// meanwhile; otherwise it answers at once, and the machine is checked
-    /// at its next safety check (at once if none is queued), so a writer
-    /// that doesn't invalidate is seen within 30 s. For servers that
-    /// receive the logs themselves.
+    /// machine went idle answers at once from its last model, invalidated
+    /// meanwhile or not, and the machine is checked at its next safety
+    /// check (at once if none is queued), so a writer that doesn't
+    /// invalidate is seen within 30 s. For servers that receive the logs
+    /// themselves.
     OnInvalidate,
 }
 
@@ -1502,10 +1502,9 @@ impl ViewerCore {
     /// clears the invalidations it covers, so the first read after an idle
     /// spell answers at once from what it built. It blocks for as long as
     /// the builds take (a machine's first build reads all its logs): call
-    /// it off an async runtime, and bound how many run at once. A read that
-    /// answers from the last model never waits for it; one that must
-    /// refresh first waits for the machine it is building, then finds it
-    /// built. Every machine is tried; the first error is returned. Once the
+    /// it off an async runtime, and bound how many run at once. A read of a
+    /// machine that has a model never waits for it; the first read of one
+    /// with none waits for the machine it is building, then finds it built. Every machine is tried; the first error is returned. Once the
     /// core is closed it does nothing.
     pub fn warm(&self) -> io::Result<()> {
         let Some(_entered) = self.open.enter() else {
