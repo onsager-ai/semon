@@ -738,6 +738,13 @@ fn run_push(args: &PushArgs) -> Result<(), String> {
     let stop = semon_push::Stop::new();
     interrupt::stop_on_signal(&stop);
     let result = semon_push::push_until(&args.options, args.watch, &stop);
+    if interrupt::received()
+        && let Err(error) = &result
+    {
+        // Said here, as `main` would, since raising the signal below ends
+        // the process before `main` sees the result.
+        eprintln!("semon: {error}");
+    }
     if stop.is_stopped() {
         eprintln!("semon push: stopped");
     }
@@ -802,6 +809,11 @@ mod interrupt {
             });
     }
 
+    /// Whether Ctrl-C or SIGTERM came.
+    pub fn received() -> bool {
+        RECEIVED.load(Ordering::SeqCst) != 0
+    }
+
     /// Ends the process by the signal that stopped the push, if one did.
     pub fn raise_received() {
         let signum = RECEIVED.load(Ordering::SeqCst);
@@ -818,6 +830,9 @@ mod interrupt {
 #[cfg(not(unix))]
 mod interrupt {
     pub fn stop_on_signal(_: &semon_push::Stop) {}
+    pub fn received() -> bool {
+        false
+    }
     pub fn raise_received() {}
 }
 

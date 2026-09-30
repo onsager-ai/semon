@@ -21,7 +21,7 @@ use std::{
     fmt, fs,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -37,6 +37,7 @@ mod stop;
 pub mod tokens;
 pub mod wire;
 
+use lock::Hold;
 pub use lock::StateLock;
 pub use stop::Stop;
 
@@ -91,6 +92,8 @@ impl Credential {
 /// A push's bearer token. It leaves this crate only in the `Authorization`
 /// header of a request to the receiver: it has no `Display`, its `Debug`
 /// shows `Token(<redacted>)`, and nothing here writes it to a file or a log.
+/// Its memory is not zeroised when dropped, and the HTTP client keeps its
+/// own copy of the header while a request runs.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Token(String);
 
@@ -135,8 +138,11 @@ pub fn default_state_path(url: &str) -> PathBuf {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local/state"));
+    // Keyed by the URL as a push uses it ([`check_url`]), so spellings of
+    // one receiver share one state file and one lock.
+    let key = check_url(url).unwrap_or_else(|_| url.to_owned());
     base.join("semon/push")
-        .join(format!("{}.json", &sha256_hex(url.as_bytes())[..16]))
+        .join(format!("{}.json", &sha256_hex(key.as_bytes())[..16]))
 }
 
 /// Reads a bearer token from `path`, refusing a file that anyone but its
@@ -167,13 +173,19 @@ pub fn read_token(path: &Path) -> Result<String> {
 }
 
 /// Checks the receiver URL: https, or http on a loopback address only, and
-/// no query or fragment. Returns it without a trailing slash.
+/// no query or fragment. Returns it normalised: the scheme and host in
+/// lower case, and no trailing slash.
 pub fn check_url(url: &str) -> Result<String> {
     let url = url.trim_end_matches('/');
     let (scheme, rest) = url
         .split_once("://")
         .ok_or_else(|| format!("{url} is not a URL"))?;
+    let scheme = scheme.to_ascii_lowercase();
     let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let path = &rest[host.len()..];
+    let host = host.to_ascii_lowercase();
+    let host = host.as_str();
+    let normal = format!("{scheme}://{host}{path}");
     let hostname = host
         .rsplit_once(':')
         .filter(|(_, port)| port.bytes().all(|byte| byte.is_ascii_digit()))
@@ -184,9 +196,9 @@ pub fn check_url(url: &str) -> Result<String> {
     if url.contains(['?', '#']) {
         return Err(format!("{url}: no query or fragment allowed"));
     }
-    match scheme {
-        "https" => Ok(url.to_owned()),
-        "http" if loopback(hostname) => Ok(url.to_owned()),
+    match scheme.as_str() {
+        "https" => Ok(normal),
+        "http" if loopback(hostname) => Ok(normal),
         "http" => Err(format!(
             "{url}: plain http is allowed to a loopback address only"
         )),
@@ -310,6 +322,7 @@ pub struct Client {
     token: Token,
     http: reqwest::blocking::Client,
     stop: Stop,
+    lock: Option<Arc<StateLock>>,
     state_path: PathBuf,
     state: State,
     chunk: usize,
@@ -339,6 +352,7 @@ impl Client {
             token,
             http,
             stop: Stop::new(),
+            lock: None,
             state_path: options.state.clone(),
             state,
             chunk: CHUNK_BYTES,
@@ -359,9 +373,17 @@ impl Client {
         self
     }
 
+    /// Holds `lock` from each request's own thread too, so a request a stop
+    /// leaves running keeps the state locked until it ends.
+    pub(crate) fn with_lock(mut self, lock: Arc<StateLock>) -> Self {
+        self.lock = Some(lock);
+        self
+    }
+
     /// One request to the receiver, made on a thread of its own so that a
     /// stop doesn't wait for it (up to the 120 s timeout). A request a stop
-    /// leaves behind finishes there, and its answer is dropped.
+    /// leaves behind finishes there, holding the state lock (see
+    /// [`StateLock`]), and its answer is dropped.
     fn post(&self, route: &str, body: String) -> std::result::Result<(u16, String), Failure> {
         let request = self
             .http
@@ -369,7 +391,9 @@ impl Client {
             .bearer_auth(self.token.expose())
             .header("content-type", "application/json")
             .body(body);
+        let lock = self.lock.clone();
         let answer = self.stop.run(route, move || {
+            let _lock = lock;
             request.send().map(|response| {
                 let status = response.status().as_u16();
                 (status, response.text().unwrap_or_default())
@@ -872,17 +896,28 @@ pub fn push(options: &PushOptions, watch: bool) -> Result<()> {
     push_until(options, watch, &Stop::new())
 }
 
-/// [`push`], ended by `stop`: it returns `Ok(())` within about 20 ms of
+/// [`push`], ended by `stop`: it returns `Ok(())` within about 40 ms of
 /// [`Stop::stop`], from the sleep between passes, a pass, a request to the
 /// receiver or a facts collection (see [`Stop`]). What the receiver
 /// acknowledged is in the state file by then, which is only ever replaced
 /// whole ([`write_private`]).
 ///
-/// It holds the state file's [`StateLock`] until it returns, and fails at
-/// once when another push holds it.
+/// It holds the state file's [`StateLock`] while it runs, and fails at once
+/// when another push holds it. Work a stop left running keeps holding the
+/// lock until that work ends (at most the 120 s request timeout, or the
+/// facts collection in progress), so a push started again right after a
+/// stop can fail with a "still finishing" error; retry it shortly.
+///
+/// Call it from a plain thread, not from async code: the HTTP client is
+/// `reqwest::blocking`, which panics inside a tokio runtime (in an async
+/// Tauri command, say; use `spawn_blocking` or `std::thread::spawn`).
 pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()> {
-    let _lock = StateLock::acquire(&options.state)?;
-    let mut client = Client::new(options)?.with_stop(stop.clone());
+    // Declared first, so it is dropped last, after the client and the
+    // facts worker have let go of their shares.
+    let hold = Hold::new(StateLock::acquire(&options.state)?);
+    let mut client = Client::new(options)?
+        .with_stop(stop.clone())
+        .with_lock(hold.share());
     let report = client.pass(&options.sessions)?;
     if stop.is_stopped() {
         return Ok(());
@@ -899,7 +934,9 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
     );
     if !watch {
         let sessions = options.sessions.clone();
+        let lock = hold.share();
         let Some(facts) = stop.run("facts", move || {
+            let _lock = lock;
             semon_sessions::local_facts(&sessions).map_err(|error| error.to_string())
         })?
         else {
@@ -911,7 +948,7 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
         };
     }
 
-    let facts = FactsWorker::start(&options.sessions)?;
+    let facts = FactsWorker::start(&options.sessions, hold.share())?;
     let Some(initial) = facts.collect(stop)? else {
         return Ok(());
     };
@@ -925,12 +962,13 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
             return Ok(());
         }
         match client.pass(&options.sessions) {
+            // A refusal that comes with a stop is still reported.
+            Err(error) if error.contains("refused the token") => return Err(error),
             _ if stop.is_stopped() => return Ok(()),
             Ok(report) if report.files > 0 => {
                 eprintln!("semon push: {} files, {} bytes", report.files, report.bytes);
             }
             Ok(_) => {}
-            Err(error) if error.contains("refused the token") => return Err(error),
             Err(error) => eprintln!("semon push: {error}"),
         }
         if last_facts.elapsed() >= FACTS_EVERY {
@@ -957,20 +995,22 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
 /// Collects `--watch`'s facts on a thread of its own, where its
 /// [`FactsSource`] lives, so a stop doesn't wait for a collection (the
 /// first can read every log's metadata). A collection a stop leaves behind
-/// finishes there; the thread ends when this is dropped.
+/// finishes there, holding the state lock; the thread ends when this is
+/// dropped.
 struct FactsWorker {
     ask: mpsc::Sender<()>,
     answers: mpsc::Receiver<Result<Facts>>,
 }
 
 impl FactsWorker {
-    fn start(sessions: &Options) -> Result<Self> {
+    fn start(sessions: &Options, lock: Arc<StateLock>) -> Result<Self> {
         let sessions = sessions.clone();
         let (ask, asked) = mpsc::channel::<()>();
         let (answer, answers) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name("semon-push-facts".to_owned())
             .spawn(move || {
+                let _lock = lock;
                 let mut source = FactsSource::new(&sessions);
                 for () in asked {
                     let facts = source.facts().map_err(|error| error.to_string());

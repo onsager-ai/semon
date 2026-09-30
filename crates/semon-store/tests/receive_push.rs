@@ -341,13 +341,25 @@ fn push_mirrors_a_home_into_semon_receive() {
     assert_ne!(fixture.copy(LOG), fixture.redacted(LOG));
 }
 
-/// `semon push --watch` ends on Ctrl-C through its stop, not by the
-/// signal's default action alone: it says so, then ends by SIGINT as it
-/// always did. While it runs, a second push with its state fails at once;
-/// after, the state lock is free.
 #[cfg(unix)]
 #[test]
 fn push_watch_stops_on_ctrl_c_and_holds_its_state_alone_until_then() {
+    push_watch_stops_on("INT", 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn push_watch_stops_on_sigterm_and_holds_its_state_alone_until_then() {
+    push_watch_stops_on("TERM", 15);
+}
+
+/// `semon push --watch` ends on SIG`name` (Ctrl-C, or a service manager's
+/// stop) through its stop, not by the signal's default action alone: it
+/// says so, then ends by that signal as it always did. While it runs, a
+/// second push with its state fails at once; after, the state lock is
+/// free.
+#[cfg(unix)]
+fn push_watch_stops_on(name: &str, number: i32) {
     use std::{os::unix::process::ExitStatusExt, time::Instant};
 
     let mut fixture = Fixture::new();
@@ -423,7 +435,7 @@ fn push_watch_stops_on_ctrl_c_and_holds_its_state_alone_until_then() {
     );
 
     let interrupted = Command::new("kill")
-        .args(["-INT", &watch.id().to_string()])
+        .args([format!("-{name}"), watch.id().to_string()])
         .status()
         .unwrap();
     assert!(interrupted.success());
@@ -432,10 +444,10 @@ fn push_watch_stops_on_ctrl_c_and_holds_its_state_alone_until_then() {
         if let Some(status) = watch.try_wait().unwrap() {
             break status;
         }
-        assert!(Instant::now() < deadline, "the watch ignored Ctrl-C");
+        assert!(Instant::now() < deadline, "the watch ignored SIG{name}");
         thread::sleep(Duration::from_millis(10));
     };
-    assert_eq!(status.signal(), Some(2), "{status:?}");
+    assert_eq!(status.signal(), Some(number), "{status:?}");
     let mut stopped = false;
     while let Ok(line) = said.recv_timeout(Duration::from_secs(5)) {
         stopped |= line == "semon push: stopped";

@@ -38,9 +38,15 @@ struct Received {
     hang_after: Option<u64>,
     /// Appends left unanswered so far.
     held: u64,
+    /// The unanswered appends themselves: dropping them ends their
+    /// connections.
+    held_requests: Vec<tiny_http::Request>,
     /// Stop this push once this many appends have succeeded, before
     /// answering the last of them.
     stop_after: Option<(u64, Stop)>,
+    /// Refuse the token (401) for any append after this many successful
+    /// ones, and stop this push right after answering.
+    refuse_after: Option<(u64, Stop)>,
 }
 
 struct Receiver {
@@ -67,8 +73,6 @@ fn receiver() -> Receiver {
     let state = Arc::new(Mutex::new(Received::default()));
     let (worker, shared) = (Arc::clone(&server), Arc::clone(&state));
     thread::spawn(move || {
-        // Requests left unanswered, until the receiver is dropped.
-        let mut held = Vec::new();
         for mut request in worker.incoming_requests() {
             let authorized = request.headers().iter().any(|header| {
                 header.field.equiv("Authorization")
@@ -84,8 +88,15 @@ fn receiver() -> Receiver {
                     .is_some_and(|limit| received.appends >= limit)
                 {
                     received.held += 1;
+                    received.held_requests.push(request);
+                    continue;
+                }
+                if let Some((limit, stop)) = received.refuse_after.clone()
+                    && received.appends >= limit
+                {
                     drop(received);
-                    held.push(request);
+                    let _ = request.respond(json_response(401, json!({"error":"revoked"})));
+                    stop.stop();
                     continue;
                 }
             }
@@ -517,8 +528,30 @@ fn stop_and_join(stop: &Stop, push: JoinHandle<Result<(), String>>) -> Result<()
 }
 
 /// After a stop: the state file, if any, is whole; no temporary file is
-/// left beside it; and its lock is free again. Returns the state.
+/// left beside it; and its lock is free again once the push's threads have
+/// let go. Returns the state.
 fn assert_stopped_cleanly(options: &PushOptions) -> serde_json::Value {
+    let value = state_after_stop(options);
+    assert_lock_freed(options);
+    value
+}
+
+/// The lock can be taken again within a moment: nothing of the stopped
+/// push is left running.
+fn assert_lock_freed(options: &PushOptions) {
+    let deadline = Instant::now() + STOP_BOUND * 2;
+    loop {
+        match StateLock::acquire(&options.state) {
+            Ok(_lock) => return,
+            Err(error) => assert!(Instant::now() < deadline, "still locked: {error}"),
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The state file, if any, is whole, and no temporary file is left beside
+/// it. Returns the state.
+fn state_after_stop(options: &PushOptions) -> serde_json::Value {
     let state = &options.state;
     let value = if state.exists() {
         serde_json::from_slice(&fs::read(state).unwrap()).expect("a whole state file")
@@ -531,7 +564,6 @@ fn assert_stopped_cleanly(options: &PushOptions) -> serde_json::Value {
         .filter(|name| name.ends_with(".tmp"))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
-    drop(StateLock::acquire(state).expect("the stop released the lock"));
     value
 }
 
@@ -542,6 +574,7 @@ fn assert_resumes(home: &Home, receiver: &Receiver, logs: &[(&str, String)]) {
         let mut received = receiver.state.lock().unwrap();
         received.hang_after = None;
         received.stop_after = None;
+        received.refuse_after = None;
     }
     semon_push::push(&home.push_options(&receiver.url), false).unwrap();
     for (relative, text) in logs {
@@ -604,7 +637,7 @@ fn a_stop_midway_through_a_pass_leaves_the_rest_for_the_next_push() {
 }
 
 #[test]
-fn a_stop_mid_upload_returns_without_waiting_for_the_receiver() {
+fn a_stop_mid_upload_returns_at_once_and_keeps_the_lock_until_the_request_ends() {
     let home = Home::new();
     let receiver = receiver();
     let logs = two_logs(&home);
@@ -616,8 +649,28 @@ fn a_stop_mid_upload_returns_without_waiting_for_the_receiver() {
         receiver.state.lock().unwrap().held == 1
     });
     stop_and_join(&stop, push).unwrap();
+
+    // The request is still out: no other push may start and overlap it,
+    // and the refusal says why.
+    let started = Instant::now();
+    let error = semon_push::push(&options, false).unwrap_err();
+    assert!(started.elapsed() < STOP_BOUND, "{:?}", started.elapsed());
+    assert!(error.contains("still finishing"), "{error}");
+    let error = StateLock::acquire(&options.state).unwrap_err();
+    assert!(error.contains("still finishing"), "{error}");
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        StateLock::acquire(&options.state).is_err(),
+        "held while out"
+    );
+
+    // The receiver lets the request go unanswered: it ends, and so does
+    // the lock.
+    receiver.state.lock().unwrap().held_requests.clear();
+    assert_lock_freed(&options);
+
     // The answered file is recorded; the unanswered one isn't.
-    let state = assert_stopped_cleanly(&options);
+    let state = state_after_stop(&options);
     let files = state["files"].as_object().unwrap();
     assert_eq!(files.len(), 1, "{files:?}");
     let (key, file) = files.iter().next().unwrap();
@@ -655,6 +708,54 @@ fn a_second_push_on_the_same_state_fails_at_once_until_the_first_stops() {
     stop_and_join(&stop, push).unwrap();
     assert_stopped_cleanly(&options);
     assert_resumes(&home, &receiver, &logs);
+}
+
+#[test]
+fn a_refused_token_is_reported_even_when_a_stop_comes_with_it() {
+    let home = Home::new();
+    let receiver = receiver();
+    home.write(LOG, &line("one"));
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    receiver.state.lock().unwrap().refuse_after = Some((1, stop.clone()));
+    let push = watch_in_background(&options, &stop);
+    wait_for("the first facts", || {
+        receiver.state.lock().unwrap().facts.is_some()
+    });
+    // The next pass is refused, and the stop comes right after the 401.
+    home.append(LOG, &line("two"));
+    wait_for("the refusal", || stop.is_stopped());
+    let error = stop_and_join(&stop, push).unwrap_err();
+    assert!(error.contains("refused the token"), "{error}");
+    assert_stopped_cleanly(&options);
+}
+
+#[test]
+fn spellings_of_one_receiver_share_one_state_file_and_lock() {
+    assert_eq!(
+        semon_push::check_url("HTTPS://Mirror.Example/api/Push/").unwrap(),
+        "https://mirror.example/api/Push"
+    );
+    assert_eq!(
+        semon_push::check_url("http://LOCALHOST:8735").unwrap(),
+        "http://localhost:8735"
+    );
+    let state = semon_push::default_state_path("https://mirror.example");
+    for spelling in [
+        "https://mirror.example/",
+        "HTTPS://MIRROR.EXAMPLE",
+        "https://Mirror.Example//",
+    ] {
+        assert_eq!(
+            semon_push::default_state_path(spelling),
+            state,
+            "{spelling}"
+        );
+    }
+    assert_ne!(
+        semon_push::default_state_path("https://mirror.example/other"),
+        state
+    );
 }
 
 #[test]

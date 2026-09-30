@@ -11,20 +11,22 @@ use std::{
 };
 
 /// How often a wait on work running on another thread (a request to the
-/// receiver, facts) looks at the stop: the most a stop waits there.
+/// receiver, facts) looks at the stop. A stop waits there at most two of
+/// these: one to be seen, one for an answer racing it.
 const POLL: Duration = Duration::from_millis(20);
 
 /// A stop handle for [`crate::push_until`]. Clones share one flag; once
 /// stopped it stays stopped.
 ///
-/// A stop is seen within 20 ms at every point a push blocks: the sleep
+/// A stop is seen within about 40 ms at every point a push blocks: the sleep
 /// between `--watch` passes wakes at once, a pass checks it before each file
 /// and each chunk it reads, and a request to the receiver or a facts
 /// collection is waited on from here, so the push returns without waiting
-/// for it. Work left running that way finishes on its own thread and its
-/// result is dropped: the state file only ever records what the receiver
-/// acknowledged before the stop, and the mirror protocol's 409 answer brings
-/// the next push back in step with anything that landed after it.
+/// for it. Work left running that way finishes on its own thread, holding
+/// the state lock until it ends ([`crate::StateLock`]), and its result is
+/// dropped: the state file only ever records what the receiver acknowledged
+/// before the stop, and no other push with that state runs until the work
+/// is done.
 #[derive(Clone, Default)]
 pub struct Stop {
     inner: Arc<Inner>,
@@ -108,7 +110,8 @@ impl Stop {
 
     /// Waits for one answer from work on another thread, or for the stop:
     /// `Ok(None)` when stopped first. An answer already there wins over a
-    /// stop, so what the receiver acknowledged is recorded.
+    /// stop, and one racing it gets one more poll, so what the receiver
+    /// acknowledged, or refused, just as the stop came is still seen.
     pub(crate) fn wait<T>(
         &self,
         name: &str,
@@ -117,7 +120,9 @@ impl Stop {
         loop {
             match answers.recv_timeout(POLL) {
                 Ok(answer) => return Ok(Some(answer)),
-                Err(RecvTimeoutError::Timeout) if self.is_stopped() => return Ok(None),
+                Err(RecvTimeoutError::Timeout) if self.is_stopped() => {
+                    return Ok(answers.recv_timeout(POLL).ok());
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(format!("{name}: its thread ended without an answer"));
