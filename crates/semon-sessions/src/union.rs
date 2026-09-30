@@ -194,9 +194,13 @@ impl AccountMenu {
 /// at most. A machine is rebuilt at most once a second, so the changes of
 /// one second are one rebuild, and it is checked only while it is read: 30 s
 /// after its last read it goes idle, and its next read queues a check at
-/// once. A read waits for a build only when its machine has no model yet:
-/// once one is built, every read answers at once, never waiting for a
-/// rebuild in progress, a late check or failing rebuilds. While the pool
+/// once. Once a machine's model is built, every read of it answers at once,
+/// never waiting for a rebuild in progress, a late check or failing
+/// rebuilds. A read waits for a build only when there is nothing built to
+/// answer it from: the first model read of a machine, the first V1 tree
+/// read (`/api/tree`, `/api/transcript`), which may wait behind a model
+/// rebuild, and a page URL the built models lack, which is checked against
+/// models brought up to date first. While the pool
 /// keeps up, an answer is at most about 1 s plus one build behind the logs,
 /// and the first read after an idle spell answers from the model before it
 /// (a poll sees the change once the check it queued has rebuilt). When the
@@ -204,11 +208,13 @@ impl AccountMenu {
 /// and its answers are as far behind the logs as the pool's queue is.
 ///
 /// A background rebuild that fails leaves the last model served, with the
-/// error printed once, and each check tries again; 3 s after rebuilds
-/// started failing, each read answers the error (500) instead, at once,
-/// without waiting for a build, until a build works again. The model and
-/// the V1 tree fail on their own: a tree that won't build never turns
-/// `/api/model` into an error.
+/// error printed once, and each check tries again; 3 s after rebuilds were
+/// first seen failing, each read answers the error (500) instead, at once,
+/// without waiting for a build, until a build works again. A machine whose
+/// builds hang is not shown as a model that silently stopped either: once
+/// its check is a minute late, or has run a minute, each read answers an
+/// error (500) at once. The model and the V1 tree fail on their own: a tree
+/// that won't build never turns `/api/model` into an error.
 ///
 /// [`RefreshPool`]: crate::RefreshPool
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1506,8 +1512,10 @@ impl ViewerCore {
     /// the builds take (a machine's first build reads all its logs): call
     /// it off an async runtime, and bound how many run at once. A read of a
     /// machine that has a model never waits for it; the first read of one
-    /// with none waits for the machine it is building, then finds it built. Every machine is tried; the first error is returned. Once the
-    /// core is closed it does nothing.
+    /// with none waits for the machine it is building, then finds it built,
+    /// and so does a page URL the built models lack. Every machine is
+    /// tried; the first error is returned. Once the core is closed it does
+    /// nothing.
     pub fn warm(&self) -> io::Result<()> {
         let Some(_entered) = self.open.enter() else {
             return Ok(());
