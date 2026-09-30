@@ -2165,7 +2165,7 @@
     else if (open) { b.type = "button"; b.addEventListener("click", onOpen); }
     const label = el("span", "hlabel"), mark = harnessIcon(harness, { size: 14 }); if (mark) label.append(mark); label.append(harnessName(harness, true)); // the mark and the label share the cell the label had
     b.append(el("span", "session-name", nameOfSid(A, sid)), label, el("span", "session-value", value));
-    if (rank) { b.classList.add("ranked", "h-" + harness); b.append(rankTrack(rank.measure, rank.max).track); }
+    if (rank) { b.classList.add("ranked"); if (/^[\w-]+$/.test(harness)) b.classList.add("h-" + harness); b.append(rankTrack(rank.measure, rank.max).track); }
     return b;
   }
   // The bar of a ranked row (a Breakdown row or a top session): its width is the value's share of the list's largest, never under 2 % when there is a value.
@@ -2587,7 +2587,7 @@
   }
   const ANCHORS = "[data-e], .turn, .hop, .ib, .nrow, .sec-h, .ph, .divider, .analytics-metric, .analytics-panel, .facet-filters, .groupby, .find, .empty";
   const HOSTS = "[data-e], [data-h], [data-id], [data-sid], [data-go], [data-turn], [data-g], [data-m]";
-  const FOCUSABLE = "button, input, [tabindex]";
+  const FOCUSABLE = "button, input, [tabindex], a[href]";
   const identOf = (n) => { const d = n.dataset, keys = [d.e, d.turn, d.h, d.id, d.m, d.sid, d.go, d.g];
     return [n.classList[0], ...keys, keys.some((x) => x != null) ? "" : n.firstChild?.nodeType === 3 ? n.firstChild.data : ""].map((x) => x ?? "").join("|"); };
   // Each anchor candidate on the page, in order, with its identity made unique by how many came before it.

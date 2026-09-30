@@ -35,10 +35,10 @@ function fakeAnswer(A, D) {
 }
 
 // Serves the fake answer for every /api/analytics request of the page, with a tag of its own so the page's kept answer is answered with a 304.
-async function fake(page, D) {
+async function fake(page, D, state = { n: 0 }) {
   await page.route((u) => u.pathname === "/api/analytics", async (route) => {
     const headers = { ...route.request().headers() }; delete headers["if-none-match"];
-    const res = await route.fetch({ headers }), tag = (res.headers().etag ?? '"a"') + "-fake";
+    const res = await route.fetch({ headers }), tag = (res.headers().etag ?? '"a"') + "-fake" + state.n;
     if (route.request().headers()["if-none-match"] === tag) return route.fulfill({ status: 304, headers: { etag: tag } });
     return route.fulfill({ status: 200, headers: { "content-type": "application/json", etag: tag }, body: JSON.stringify(fakeAnswer(await res.json(), D)) });
   });
@@ -47,25 +47,27 @@ async function fake(page, D) {
 async function open(browser, D, { size, dark = false }) {
   const page = await served(browser, { size, dark, path: "/analytics" });
   await drawn(page, "range=7d");
-  await fake(page, D);
+  const state = page.fakeState = { n: 0 };
+  await fake(page, D, state);
   await page.click('#topbar .analytics-range button:has-text("24 h")');
   await drawn(page, "range=24h");
   await page.waitForFunction(() => document.querySelectorAll('.analytics-row[data-breakdown="repo"]').length === 24);
-  // A redraw (a poll's answer) puts the page back at the top; let the page's first few asks settle before scrolling.
-  await page.evaluate(() => document.fonts.ready);
-  await page.waitForTimeout(2000);
+  // A redraw puts the page back where it was two frames later (restore()); scroll only once fonts are in and two frames have passed.
+  await page.evaluate(() => document.fonts.ready.then(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))));
   return page;
 }
 
 // Scrolls the nth row of a breakdown group to the top of the screen, so the list fills the view under whatever is pinned.
 // Asked again while the row is not at the top, in case a redraw moved the page back.
-const scrollToRow = async (page, group, n) => {
+const scrollToRow = async (page, group, n, r, mode) => {
   for (let tries = 0; tries < 4; tries++) {
     await page.evaluate(([g, i]) => document.querySelectorAll('.analytics-row[data-breakdown="' + g + '"]')[i].scrollIntoView({ block: "start" }), [group, n]);
     await page.waitForTimeout(250);
     const at = await page.evaluate(([g, i]) => document.querySelectorAll('.analytics-row[data-breakdown="' + g + '"]')[i].getBoundingClientRect().top, [group, n]);
-    if (Math.abs(at) < 3) return;
+    if (Math.abs(at) < 3) return true;
   }
+  r.expect(false, mode + ": the " + group + " row " + n + " could not be scrolled to the top of the screen in 4 tries");
+  return false;
 };
 
 // Where the bar, the control strip and each group heading are, and whether each is what a tap at its middle would reach.
@@ -93,7 +95,7 @@ export default async function breakdownCheck(browser) {
     const groups = [["repo", 12, "By repo"], ["machine", 2, "By machine"], ["harness", 2, "By harness and model"]];
     res.pinned = {};
     for (const [group, index, heading] of groups) {
-      await scrollToRow(page, group, index);
+      await scrollToRow(page, group, index, r, mode);
       const p = res.pinned[group] = await probe(page);
       r.expect(Math.abs(p.strip.top - p.bar.bottom) <= 1, mode + ": with " + group + " rows in view, the control strip's top is not at the bar's bottom: " + JSON.stringify({ bar: p.bar, strip: p.strip }));
       r.expect(p.toggle.top >= p.strip.top - 1 && p.toggle.bottom <= p.strip.bottom + 1 && p.stripPosition === "sticky", mode + ": the toggle is not inside a sticky strip: " + JSON.stringify({ strip: p.strip, toggle: p.toggle, position: p.stripPosition }));
@@ -107,9 +109,9 @@ export default async function breakdownCheck(browser) {
       if (stacked) for (const h of p.headings.filter((x) => x.text !== heading)) r.expect(h.top > p.strip.bottom + 1 || h.bottom <= p.strip.bottom + 1, mode + ": heading '" + h.text + "' is drawn over the pinned one: " + JSON.stringify({ strip: p.strip, heading: h }));
     }
     // A shot with the strip pinned over the repo rows and one over the machine rows.
-    await scrollToRow(page, "repo", 12);
+    await scrollToRow(page, "repo", 12, r, mode);
     await page.screenshot({ path: path.join(shots, "breakdown-" + (stacked ? "390" : "1280") + "-light-repo.png") });
-    await scrollToRow(page, "machine", 2);
+    await scrollToRow(page, "machine", 2, r, mode);
     await page.screenshot({ path: path.join(shots, "breakdown-" + (stacked ? "390" : "1280") + "-light-machine.png") });
 
     // Scrolled past the Breakdown, the strip and the headings have gone with it.
@@ -178,6 +180,17 @@ export default async function breakdownCheck(browser) {
     } else {
       await page.screenshot({ path: path.join(shots, "breakdown-1280-light-top-sessions.png") });
     }
+    // A keyboard reader's focus on a top-session link survives the next redraw (a new answer from the server), on the same row.
+    if (stacked) {
+      const before = await page.evaluate(() => { const rows = [...document.querySelectorAll(".analytics-split .analytics-session.ranked")], row = rows[7]; row.focus(); row.__old = true; return { index: rows.indexOf(row), focused: document.activeElement === row }; });
+      r.expect(before.focused, mode + ": a top-session link cannot take focus");
+      page.fakeState.n++;
+      const redrawn = await page.waitForFunction(() => ![...document.querySelectorAll(".analytics-split .analytics-session.ranked")].some((x) => x.__old), null, { timeout: 20000 }).then(() => true, () => false);
+      await page.waitForTimeout(400);
+      const after = await page.evaluate(() => { const rows = [...document.querySelectorAll(".analytics-split .analytics-session.ranked")], a = document.activeElement; return { index: rows.indexOf(a), tag: a?.tagName }; });
+      res.focus = { before, redrawn, after };
+      r.expect(redrawn && after.index === before.index, mode + ": focus on a top-session link did not survive a redraw: " + JSON.stringify(res.focus));
+    }
     // A tap on a row opens its session (the link is still handled in the page).
     const first = page.locator(".analytics-split .analytics-session.ranked").first();
     if (await first.count()) {
@@ -193,9 +206,9 @@ export default async function breakdownCheck(browser) {
   // The same screens in the dark scheme, and the light and dark shots the visual pass reads: the strip pinned over the repo rows, the top lists.
   for (const [scheme, size, dark] of [["390-dark", "phone", true], ["1280-dark", "desktop", true]]) {
     const page = await open(browser, D, { size, dark });
-    await scrollToRow(page, "repo", 12);
+    await scrollToRow(page, "repo", 12, r, scheme);
     await page.screenshot({ path: path.join(shots, "breakdown-" + scheme + "-repo.png") });
-    await scrollToRow(page, "machine", 2);
+    await scrollToRow(page, "machine", 2, r, scheme);
     await page.screenshot({ path: path.join(shots, "breakdown-" + scheme + "-machine.png") });
     await page.evaluate(() => document.querySelector(".analytics-split").scrollIntoView({ block: "start" }));
     await page.waitForTimeout(100);
