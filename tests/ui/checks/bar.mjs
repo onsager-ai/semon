@@ -669,6 +669,7 @@ export default async function barCheck(browser) {
         await route.fulfill({ response, json: body });
       });
       await page.reload({ waitUntil: "load" });
+      await settled(page); // DOM load precedes async model adoption; wait for the initial Home render before navigating.
       try { await goto(page, { v: "session", id: "principal" }, D); }
       catch (error) { throw new Error("lone-step fixture could not open Principal: " + (error?.message ?? error) + "; page errors: " + (page.errors.join(" | ") || "none")); }
       const selector = '.turn[data-turn="bt-lone-line"] .steps.lone .step > button';
