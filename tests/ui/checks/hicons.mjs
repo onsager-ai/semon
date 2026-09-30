@@ -194,7 +194,7 @@ export default async function hiconsCheck(browser) {
       rec["note-" + name] = note.total;
       r.expect(note.own.length === 1 && note.own[0] === NOTICE && note.total === 1, tag + " details (" + name + "): the trademark note is " + JSON.stringify(note) + ", expected exactly once");
       r.expect(note.size >= 12, tag + " details (" + name + "): the note is " + note.size + "px");
-      if (name === "opencode") await shot("details");
+      if (name === "opencode") { await shot("details"); await page.evaluate(() => { const vb = document.querySelector("dialog.session-details .vb"); vb.scrollTop = vb.scrollHeight; }); await page.waitForTimeout(100); await shot("details-end"); }
       await page.evaluate(() => document.querySelector("dialog.session-details")?.close()); await page.waitForTimeout(300);
     }
     r.expect(await page.evaluate(() => document.body.innerText.split("Third-party trademarks").length - 1) === 0, tag + ": the trademark note is shown outside Session details");
