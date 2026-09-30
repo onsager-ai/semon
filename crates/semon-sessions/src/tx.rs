@@ -38,6 +38,8 @@ pub(crate) const FULL_MAX: usize = 8 * 1024 * 1024;
 pub(crate) const LINE_MAX: u64 = FULL_MAX as u64 + 1024 * 1024;
 
 const SHELLS: [&str; 4] = ["Bash", "shell", "exec_command", "local_shell"];
+const TITLED_TOOLS: [&str; 1] = ["Bash"];
+const TITLE_MAX: usize = 160;
 const EDITS: [&str; 5] = ["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch"];
 // Codex has recorded 1,597–7,375 ns for these commands, shorter than spawn overhead.
 const CODEX_COMMAND_MIN_DURATION_NS: i64 = 1_000_000;
@@ -1100,6 +1102,13 @@ fn tool_entry(
     entry.insert("k".into(), json!("tool"));
     entry.insert("name".into(), json!(name));
     entry.insert("arg".into(), json!(arg));
+    if TITLED_TOOLS.contains(&name)
+        && let Some(title) = field(&input, "description")
+            .map(|description| one_line(description, TITLE_MAX))
+            .filter(|title| !title.is_empty())
+    {
+        entry.insert("title".into(), json!(title));
+    }
     let mut more = Vec::new();
     if let Some(text) = tool_in(name, &input, &arg) {
         let (text, cut) = clip(&text, PREVIEW_MAX);
@@ -2254,6 +2263,47 @@ mod tests {
             start + 10_000,
         );
         assert!(finished.get("since").is_none());
+    }
+
+    #[test]
+    fn bash_descriptions_are_titles_only_for_bash_calls() {
+        let home = Home::new();
+        let long = "x".repeat(300);
+        home.lines(
+            "claude/projects/-work-proj/titles.jsonl",
+            &[
+                ask("titles", ts(1, 0, 0), "Show titled tool calls"),
+                said(
+                    "titles",
+                    ts(1, 0, 1),
+                    json!([
+                        {"type": "tool_use", "id": "with-title", "name": "Bash", "input": {"command": "printf titled\nprintf again", "description": "Check  CI\n and merge"}},
+                        {"type": "tool_use", "id": "without-title", "name": "Bash", "input": {"command": "printf untitled"}},
+                        {"type": "tool_use", "id": "long-title", "name": "Bash", "input": {"command": "printf long", "description": long}},
+                        {"type": "tool_use", "id": "agent-title", "name": "Agent", "input": {"description": "Agent title", "prompt": "delegate"}}
+                    ]),
+                ),
+            ],
+        );
+
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "titles", &Anchor::Last);
+        let tools = page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["k"] == "tool")
+            .collect::<Vec<_>>();
+
+        assert_eq!(tools.len(), 4);
+        assert_eq!(tools[0]["title"], "Check CI and merge");
+        assert_eq!(tools[0]["arg"], "printf titled printf again");
+        assert_eq!(tools[0]["in"], "printf titled\nprintf again");
+        assert!(tools[1].get("title").is_none());
+        let clipped = tools[2]["title"].as_str().unwrap();
+        assert_eq!(clipped.chars().count(), TITLE_MAX);
+        assert!(clipped.ends_with('…'));
+        assert!(tools[3].get("title").is_none());
     }
 
     #[test]

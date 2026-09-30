@@ -32,6 +32,149 @@ export default async function (browser) {
   const R = r.results;
   const D = await data({ extras: true });
 
+  // ---- Command descriptions title Bash steps while the command stays in its details -----------------------------
+  {
+    const titleText = "DescriptionOnlySearchWord " + "x".repeat(120);
+    const page = await served(browser, { extras: true, path: "/s/claude/harbor" });
+    let titled;
+    let untitled;
+    let commandOverride = null;
+    await page.route("**/api/tx**", async (route) => {
+      const url = new URL(route.request().url());
+      const response = await route.fetch();
+      if (url.searchParams.get("sid") !== "harbor") return route.fulfill({ response });
+      const tx = await response.json();
+      const entry = tx.entries.filter((item) => item.k === "tool" && item.name === "Bash" && item.ok === true && item.in)
+        .sort((a, b) => b.in.length - a.in.length)[0];
+      const plain = tx.entries.find((item) => item.k === "tool" && item.name === "Read");
+      if (!entry || !plain) throw new Error("harbor needs a long Bash call and a Read step for the title check");
+      entry.title = titleText;
+      if (commandOverride != null) entry.in = commandOverride;
+      const command = entry.in ?? entry.arg;
+      const rawFirstLine = command.split(/\r\n|\n|\r/).find((line) => line.trim()) ?? "";
+      titled = { command, rawFirstLine, firstLine: rawFirstLine.slice(0, 200) };
+      untitled = { arg: plain.arg };
+      return route.fulfill({ response, json: tx });
+    });
+    await page.reload({ waitUntil: "load" });
+    await page.waitForFunction((value) => [...document.querySelectorAll(".step .sa.st")].some((title) => title.textContent === value), titleText);
+    const rows = await page.evaluate(({ titleText, plainArg }) => {
+      document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click());
+      const titleStep = [...document.querySelectorAll(".step")].find((step) => step.querySelector(".sa.st")?.textContent === titleText);
+      const titleButton = titleStep?.querySelector(":scope > button");
+      const title = titleButton?.querySelector(".sa.st");
+      const plainStep = [...document.querySelectorAll(".step")].find((step) => step.querySelector(":scope > button code.sa")?.textContent === plainArg);
+      return {
+        titleText: title?.textContent ?? null,
+        titleTip: title?.getAttribute("data-tip") ?? null,
+        titleVerb: titleButton?.querySelector(".sv")?.textContent ?? null,
+        titleCode: !!titleButton?.querySelector("code.sa"),
+        titleRow: titleButton?.textContent ?? null,
+        plainCode: plainStep?.querySelector(":scope > button code.sa")?.textContent ?? null,
+        plainVerb: plainStep?.querySelector(":scope > button .sv")?.textContent ?? null,
+        plainMatches: plainStep?.querySelector(":scope > button code.sa")?.textContent === plainArg,
+      };
+    }, { titleText, plainArg: untitled.arg });
+    R.stepTitle = rows;
+    r.expect(rows.titleText === titleText && rows.titleVerb === null && !rows.titleCode && !(rows.titleRow ?? "").includes("Ran") && !(rows.titleRow ?? "").includes(titled.command), "a titled command step shows only its title as plain text: " + JSON.stringify(rows));
+    r.expect(rows.titleTip === titled.firstLine, "the title tooltip holds the command's first line: " + JSON.stringify(rows));
+    r.expect(titled.firstLine.length <= 200 && titled.firstLine === titled.rawFirstLine.slice(0, 200), "the title tooltip is clipped to the command's first 200 characters");
+    r.expect(rows.plainCode === untitled.arg && rows.plainVerb === "Read" && rows.plainMatches, "a step without a title keeps its verb and command code: " + JSON.stringify(rows));
+
+    await page.mouse.move(0, 0);
+    await page.locator(".step .sa.st").hover();
+    await page.waitForFunction((text) => document.querySelector("#sh-tooltip:not([hidden])")?.textContent === text, titled.firstLine);
+    const tooltip = await page.locator("#sh-tooltip").textContent();
+    r.expect(tooltip === titled.firstLine, "hovering the title shows the command's first line: " + JSON.stringify(tooltip));
+
+    await page.locator(".step .sa.st").click();
+    const detail = await page.evaluate(() => {
+      const step = [...document.querySelectorAll(".step")].find((item) => item.querySelector(".sa.st"));
+      const out = step?.querySelector(":scope > .out");
+      return { labels: [...(out?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.textContent), command: out?.querySelector("pre.in")?.textContent ?? null };
+    });
+    r.expect(detail.labels[0] === "Command" && detail.command === titled.command, "expanding a titled step shows the full command under Command: " + JSON.stringify(detail));
+
+    const layout = await page.evaluate(() => {
+      const title = document.querySelector(".step .sa.st"), button = title?.closest("button");
+      return { width: innerWidth, document: document.documentElement.scrollWidth, buttonWidth: button?.clientWidth ?? 0, buttonScroll: button?.scrollWidth ?? 0, titleWidth: title?.clientWidth ?? 0, titleScroll: title?.scrollWidth ?? 0, whiteSpace: title ? getComputedStyle(title).whiteSpace : null, textOverflow: title ? getComputedStyle(title).textOverflow : null };
+    });
+    r.expect(layout.width === 390 && layout.document <= layout.width && layout.buttonScroll <= layout.buttonWidth + 1 && layout.titleScroll > layout.titleWidth && layout.whiteSpace === "nowrap" && layout.textOverflow === "ellipsis", "the title row stays on one line with ellipsis and no horizontal scrolling at 390 px: " + JSON.stringify(layout));
+
+    await page.click("#more-btn");
+    await page.locator('.menu [role="menuitem"]').filter({ hasText: "Find in transcript" }).click();
+    await page.fill("#find", "DescriptionOnlySearchWord");
+    await page.waitForFunction(() => document.querySelector("#topbar .fcount")?.textContent === "1 match");
+    const found = await page.evaluate(() => ({
+      count: document.querySelectorAll(".turns .step").length,
+      title: document.querySelector(".turns .step .sa.st")?.textContent ?? null,
+    }));
+    R.stepTitle.find = found;
+    r.expect(found.count === 1 && found.title === titleText, "find-in-transcript matches the title word: " + JSON.stringify(found));
+    r.expect(page.errors.length === 0, "step-title page errors: " + page.errors.join(" | "));
+
+    commandOverride = "\nls";
+    await page.reload({ waitUntil: "load" });
+    await page.waitForFunction((value) => [...document.querySelectorAll(".step .sa.st")].some((title) => title.textContent === value), titleText);
+    const firstNonemptyTip = await page.locator(".step .sa.st").getAttribute("data-tip");
+    R.stepTitle.firstNonemptyTip = firstNonemptyTip;
+    r.expect(firstNonemptyTip === "ls", "a leading blank command line uses the first non-empty line for its tooltip: " + JSON.stringify(firstNonemptyTip));
+
+    commandOverride = "\n \r\n\t";
+    await page.reload({ waitUntil: "load" });
+    await page.waitForFunction((value) => [...document.querySelectorAll(".step .sa.st")].some((title) => title.textContent === value), titleText);
+    const allEmptyHasTip = await page.locator(".step .sa.st").evaluate((title) => title.hasAttribute("data-tip"));
+    R.stepTitle.allEmptyHasTip = allEmptyHasTip;
+    r.expect(!allEmptyHasTip, "an all-empty command has no title tooltip attribute");
+
+    const shotTitle = "Run queue retry tests";
+    const captureTitleShot = async ({ size, dark, filename, expanded = false }) => {
+      const shot = await served(browser, { extras: true, path: "/s/claude/harbor", size, dark });
+      await shot.route("**/api/tx**", async (route) => {
+        const url = new URL(route.request().url());
+        const response = await route.fetch();
+        if (url.searchParams.get("sid") !== "harbor") return route.fulfill({ response });
+        const tx = await response.json();
+        const entry = tx.entries.filter((item) => item.k === "tool" && item.name === "Bash" && item.ok === true && item.in)
+          .sort((a, b) => b.in.length - a.in.length)[0];
+        if (!entry) throw new Error("harbor needs a finished Bash call with a command for title screenshots");
+        entry.title = shotTitle;
+        return route.fulfill({ response, json: tx });
+      });
+      await shot.reload({ waitUntil: "load" });
+      await shot.waitForFunction((value) => [...document.querySelectorAll(".step .sa.st")].some((title) => title.textContent === value), shotTitle);
+      await shot.evaluate(() => document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click()));
+      const titleLabel = shot.locator(".step .sa.st");
+      await titleLabel.scrollIntoViewIfNeeded();
+      if (expanded) {
+        await titleLabel.click();
+        await titleLabel.scrollIntoViewIfNeeded();
+        await shot.waitForFunction(() => document.querySelector(".step .sa.st")?.closest(".step")?.querySelector(":scope > button")?.getAttribute("aria-expanded") === "true");
+      }
+      const visibleRows = await shot.evaluate((value) => {
+        const label = [...document.querySelectorAll(".step .sa.st")].find((node) => node.textContent === value), step = label?.closest(".step");
+        const siblings = [...(step?.parentElement?.children ?? [])].filter((node) => node.classList.contains("step"));
+        const index = siblings.indexOf(step);
+        const neighbor = [siblings[index - 1], siblings[index + 1]].find((node) => node && !node.classList.contains("live") && !node.querySelector(".sa.st")) ?? null;
+        const onScreen = (node) => { const rect = node?.querySelector(":scope > button")?.getBoundingClientRect(); return !!rect && rect.top >= 0 && rect.bottom <= innerHeight && rect.left >= 0 && rect.right <= innerWidth; };
+        return { title: label?.textContent ?? null, finished: !!step && !step.classList.contains("live"), expanded: step?.querySelector(":scope > button")?.getAttribute("aria-expanded") === "true", neighbor: neighbor?.querySelector(".sa")?.textContent ?? null, neighborVerb: neighbor?.querySelector(".sv")?.textContent ?? null, bothVisible: onScreen(step) && onScreen(neighbor) };
+      }, shotTitle);
+      r.expect(visibleRows.title === shotTitle && visibleRows.finished && visibleRows.neighborVerb === "Ran" && visibleRows.bothVisible && visibleRows.expanded === expanded,
+        filename + ": screenshot must show adjacent titled and untitled finished steps: " + JSON.stringify(visibleRows));
+      await shot.screenshot({ path: path.join(ENV.out, filename) });
+      await shot.context().close();
+      return filename;
+    };
+    R.stepTitle.screenshots = [];
+    for (const spec of [
+      { size: "phone", dark: false, filename: "steptitle-390-light.png", expanded: true },
+      { size: "phone", dark: true, filename: "steptitle-390-dark.png" },
+      { size: "desktop", dark: false, filename: "steptitle-1280-light.png" },
+      { size: "desktop", dark: true, filename: "steptitle-1280-dark.png" },
+    ]) R.stepTitle.screenshots.push(await captureTitleShot(spec));
+    await page.context().close();
+  }
+
   // ---- Embedding server account menu and Machines destination -----------------------------------------------------
   {
     const name = '<img src=x onerror="window.__accountXss=1">';
