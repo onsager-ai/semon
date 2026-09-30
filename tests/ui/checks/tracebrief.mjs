@@ -1,0 +1,147 @@
+// A trace's brief looks the same open or closed, and a hop's line names its machine only when the trace spans several.
+//
+// Two phone reports: "Show more" turned the whole brief the link colour and a smaller size (the button's own rule matched the open
+// brief's class too), and each hop's line ended in the raw hostname, which wrapped and pushed a marker onto a line of its own. Held here, at
+// 390 and 1280 px, light and dark, on the served trace with the most clamped briefs:
+//  - every clamped brief keeps its colour, size, family, weight and line height when opened (its first paragraph too), and is not the
+//    accent colour of the "Show more" button;
+//  - with one machine (given a long hostname), no hop line and no header subtitle contains the hostname, in full or in part;
+//  - with two (each given a long hostname), the hop lines and the subtitle name them by their short names, never the hostname, and
+//    the root hop's line names the machine the root ran on;
+//  - each part of a hop's line (its state, its kind chip, its note) is one line tall, and the page does not scroll sideways;
+//  - the chip carries no harness-coloured mark.
+// The fixture's hostnames are short, so the served model is rewritten on the way to the page: the machine names are made long, and for
+// two machines every session but the trace's root moves to a second one. Screenshots of the trace collapsed and opened are written
+// to out/tracebrief/ for the visual pass.
+import fs from "node:fs";
+import path from "node:path";
+import { ENV, served, data, reporter, goto, settled, overflow } from "../lib.mjs";
+
+const OUT = path.join(ENV.out, "tracebrief");
+fs.mkdirSync(OUT, { recursive: true });
+const HOST_A = "marvin-HP-EliteBook-X-G2i-14-inch-Notebook-Next-Gen-AI-PC", SHORT_A = "marvin-HP-Elit…";
+const HOST_B = "build-runner-eu-west-4-node-17-large", SHORT_B = "build-runner-e…";
+const PIECES = ["marvin-HP", "EliteBook", "Notebook", "build-runner-eu", "node-17"];
+
+// The served model with long machine names; with `two`, every session but `rootSid` on a second machine.
+async function longNames(page, { two, rootSid }) {
+  await page.route("**/api/model*", async (route) => {
+    const res = await route.fetch();
+    let m; try { m = await res.json(); } catch { return route.fulfill({ response: res }); }
+    if (m?.sessions && m.machine) {
+      const first = { ...m.machine, name: HOST_A };
+      if (two) {
+        m.machines = [first, { id: "desktop", name: HOST_B, up: true }]; m.machine = first;
+        for (const [id, s] of Object.entries(m.sessions)) s.machine = id === rootSid ? first.id : "desktop";
+      } else m.machine = first;
+    }
+    return route.fulfill({ status: res.status(), contentType: "application/json", body: JSON.stringify(m) });
+  });
+  await page.reload({ waitUntil: "load" });
+  await settled(page);
+}
+
+// How each hop's brief is drawn: the brief's own boxes and its first paragraph's.
+const snap = (page) => page.evaluate(() => [...document.querySelectorAll(".hop .body > .brief")].map((b) => {
+  const more = b.parentElement.querySelector(":scope > .more");
+  const look = (n) => { if (!n) return null; const c = getComputedStyle(n); return { color: c.color, fontSize: c.fontSize, fontFamily: c.fontFamily, fontWeight: c.fontWeight, fontStyle: c.fontStyle, lineHeight: c.lineHeight }; };
+  return { text: b.textContent.slice(0, 40), open: b.classList.contains("open"), clamped: !!more && !more.hidden, brief: look(b), inner: look(b.querySelector("p, li")), moreColor: more ? getComputedStyle(more).color : null };
+}));
+
+// Each part of every hop's line, with how many lines it takes (the text's own boxes, not the row's).
+const lines = (page) => page.evaluate(() => [...document.querySelectorAll(".hop .meta > .stat, .hop .meta > .chip-h, .hop .meta > .gone")].map((n) => {
+  const cs = getComputedStyle(n), lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4, tops = [];
+  const walk = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+  for (let t = walk.nextNode(); t; t = walk.nextNode()) { if (!t.textContent.trim()) continue; const r = document.createRange(); r.selectNodeContents(t); for (const q of r.getClientRects()) if (q.width) tops.push(q.top); }
+  const spread = tops.length ? Math.max(...tops) - Math.min(...tops) : 0;
+  return { cls: n.className, text: n.textContent.trim(), oneLine: spread < lh * 0.7, spread: Math.round(spread * 10) / 10 };
+}));
+
+const page_ = (page) => page.evaluate(() => ({
+  metaText: [...document.querySelectorAll(".hop .meta")].map((m) => m.textContent.replace(/\s+/g, " ").trim()),
+  chips: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => c.textContent.trim()),
+  bar: (document.querySelector("#topbar")?.textContent ?? "").replace(/\s+/g, " ").trim(),
+  chipMark: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => { const b = getComputedStyle(c, "::before"); return b.content !== "none" && b.content !== "normal" ? b.content : null; }).filter(Boolean),
+}));
+
+export default async function tracebrief(browser) {
+  const D = await data();
+  const r = reporter("tracebrief");
+  r.results.runs = [];
+
+  // The served trace with the most clamped briefs, and its root session.
+  const spawners = [...new Set(D.H.filter((h) => h.kind === "spawn" || h.kind === "relay").map((h) => h.from))].filter((id) => D.SESS[id]);
+  const probe = await served(browser, { size: "phone" });
+  let pick = null;
+  for (const sid of spawners) {
+    await goto(probe, { v: "session", id: sid }, D);
+    const turns = await probe.evaluate(() => [...document.querySelectorAll(".turn-end .tracebtn")].map((b) => b.closest(".turn").dataset.turn));
+    for (const turn of turns) {
+      await goto(probe, { v: "trace", sid, turn }, D);
+      const n = await probe.evaluate(() => ({ clamped: [...document.querySelectorAll(".hop .body > .more")].filter((x) => !x.hidden).length, hops: document.querySelectorAll(".hop.child").length, chips: document.querySelectorAll(".hop .meta .chip-h").length }));
+      if (n.hops && (!pick || n.clamped > pick.clamped || (n.clamped === pick.clamped && n.hops > pick.hops))) pick = { sid, turn, ...n };
+    }
+  }
+  await probe.context().close();
+  r.results.trace = pick;
+  r.expect(!!pick, "the fixture needs a trace with a hop to check");
+  if (!pick) return r.done();
+  r.expect(pick.clamped > 0, "the chosen trace needs a brief that clamps behind \"Show more\": " + JSON.stringify(pick));
+
+  for (const size of ["phone", "desktop"]) {
+    for (const dark of [false, true]) {
+      for (const two of [false, true]) {
+        const name = size + (dark ? "-dark" : "-light") + (two ? "-two-machines" : "-one-machine");
+        const page = await served(browser, { size, dark });
+        await longNames(page, { two, rootSid: pick.sid });
+        await goto(page, { v: "trace", sid: pick.sid, turn: pick.turn }, D);
+        await page.waitForTimeout(150);
+
+        // The brief, collapsed, then opened.
+        const before = await snap(page);
+        await page.screenshot({ path: path.join(OUT, name + "-collapsed.png"), fullPage: true });
+        const idx = before.map((b, i) => (b.clamped && !b.open ? i : -1)).filter((i) => i >= 0);
+        r.expect(idx.length > 0, name + ": no clamped brief to open");
+        await page.evaluate(() => document.querySelectorAll(".hop .body > .more:not([hidden])").forEach((x) => x.click()));
+        await page.waitForTimeout(80);
+        const after = await snap(page);
+        await page.screenshot({ path: path.join(OUT, name + "-expanded.png"), fullPage: true });
+        for (const i of idx) {
+          const a = before[i], b = after[i];
+          r.expect(b.open, name + ": brief " + i + " opened");
+          for (const k of ["color", "fontSize", "fontFamily", "fontWeight", "fontStyle", "lineHeight"]) {
+            r.expect(a.brief[k] === b.brief[k], name + ": brief " + i + " changes " + k + " when opened: " + a.brief[k] + " then " + b.brief[k]);
+            if (a.inner && b.inner) r.expect(a.inner[k] === b.inner[k], name + ": brief " + i + "'s first paragraph changes " + k + " when opened: " + a.inner[k] + " then " + b.inner[k]);
+          }
+          r.expect(b.brief.color !== b.moreColor, name + ": the open brief is drawn in the button's colour (" + b.brief.color + ")");
+        }
+
+        // Machines: named by their short names where the trace spans two, and not at all where it spans one.
+        const p = await page_(page), all = p.metaText.join(" | ") + " | " + p.bar;
+        r.expect(p.chips.length > 0, name + ": no hop line has a kind chip");
+        r.expect(/handoff/.test(p.bar), name + ": the header subtitle is missing: " + JSON.stringify(p.bar));
+        for (const piece of [HOST_A, HOST_B, ...PIECES]) r.expect(!all.includes(piece), name + ": the hostname shows (" + piece + "): " + JSON.stringify({ bar: p.bar, chips: p.chips }));
+        if (two) {
+          r.expect(p.bar.includes(SHORT_A) && p.bar.includes(SHORT_B), name + ": the subtitle names both machines by their short names: " + JSON.stringify(p.bar));
+          r.expect(p.chips.every((c) => c.endsWith(" · " + SHORT_A) || c.endsWith(" · " + SHORT_B)), name + ": every chip ends in a machine's short name: " + JSON.stringify(p.chips));
+          r.expect(p.chips[0]?.endsWith(" · " + SHORT_A), name + ": the root hop's chip names its machine: " + JSON.stringify(p.chips[0]));
+          r.expect(p.chips.some((c) => c.endsWith(" · " + SHORT_B)), name + ": a hop on the second machine names it: " + JSON.stringify(p.chips));
+        } else {
+          r.expect(p.chips.every((c) => !c.includes(" · ")), name + ": a chip names a machine although the trace spans one: " + JSON.stringify(p.chips));
+        }
+        r.expect(p.chipMark.length === 0, name + ": a chip carries a coloured mark: " + JSON.stringify(p.chipMark));
+
+        // Every part of every hop's line is one line, and nothing scrolls sideways.
+        const ls = await lines(page);
+        r.expect(ls.length > 0, name + ": no hop line found");
+        for (const l of ls) r.expect(l.oneLine, name + ": a hop line wraps (" + l.cls + "): " + JSON.stringify(l));
+        const over = await overflow(page);
+        r.expect(over === 0, name + ": the trace sticks out sideways (" + over + ")");
+        r.expect(page.errors.length === 0, name + ": page errors: " + page.errors.join(" | "));
+        r.results.runs.push({ name, briefs: idx.length, chips: p.chips, bar: p.bar, wrapped: ls.filter((l) => !l.oneLine).length });
+        await page.context().close();
+      }
+    }
+  }
+  return r.done();
+}

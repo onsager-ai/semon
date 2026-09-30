@@ -61,7 +61,15 @@
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
   const where = (s) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " · " + s.branch : "") : "No repo";
   const hostOf = (s) => s.host ?? MACHINE[s.machine] ?? s.machine ?? "Unknown machine";
-  const shortHost = (s) => { const h = hostOf(s).split(".")[0]; return h.length > 14 ? h.slice(0, 14) + "…" : h; };
+  const shortName = (name) => { const h = String(name).split(".")[0]; return h.length > 14 ? h.slice(0, 14) + "…" : h; };
+  const shortHost = (s) => shortName(hostOf(s));
+  // A session's machine, by its short name, only where the view spans several machines (`scope`: the sessions, or their ids, the view
+  // draws; every session by default). With one machine every line would say the same thing, so it says nothing: "".
+  const machineLabel = (s, scope = Object.values(SESS)) => {
+    if (!s) return "";
+    const machines = new Set(); for (const x of scope) { const m = (typeof x === "string" ? SESS[x] : x)?.machine; if (m != null) machines.add(m); }
+    return machines.size > 1 ? shortHost(s) : "";
+  };
   const branchOf = (s) => s.worktree ?? s.branch ?? "No branch";
   const shortModel = (model) => String(model ?? "Unknown model").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
   // A harness is named in plain muted text (.hname), never in a vendor colour; "short" gives "Claude" where the line is tight. The label itself
@@ -1661,9 +1669,9 @@
     new ResizeObserver(() => { if (br.classList.contains("open") || !br.clientHeight) return; const x = br.scrollHeight > br.clientHeight + 1; more.hidden = !x; br.classList.toggle("clipped", x); }).observe(br);
     body.append(more);
   }
-  function traceMeta(body, st, text, sid, turn, note) {
+  function traceMeta(body, st, text, sid, turn, note, scope) {
     const meta = el("div", "meta"), s = SESS[sid]; const sw = el("span", "stat " + st); sw.append(st === "work" ? el("span", "spin") : dot(st, false), text); meta.append(sw);
-    if (s) meta.append(withHarnessIcon(el("span", "chip-h " + hcls(sid), (s.kind ?? HARNESS[s.harness]) + " · " + MACHINE[s.machine]), s.harness, { size: 14, lead: false }));
+    if (s) meta.append(withHarnessIcon(el("span", "chip-h " + hcls(sid), [s.kind ?? HARNESS[s.harness], machineLabel(s, scope)].filter(Boolean).join(" · ")), s.harness, { size: 14, lead: false }));
     if (note) meta.append(el("span", "gone", note));
     if (s && !s.stub) { const o = el("button", "open", "Open in " + s.name + " ›"); o.type = "button"; o.addEventListener("click", () => goSession(sid, turn?.id)); meta.append(o); }
     body.append(meta);
@@ -1679,12 +1687,17 @@
     };
     readTrace(root);
     const flow = el("div", "flow"), seen = new Set([root.id]), sess = new Set([root.sid]); let n = 0;
+    // Every session the trace names, so a machine shows only when the trace spans several.
+    const scope = new Set([root.sid]), reached = new Set([root.id]);
+    const reach = (t) => { for (const h of t.sent) { scope.add(h.kind === "toyou" ? h.from : h.to); const c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null; if (c && !reached.has(c.id)) { reached.add(c.id); reach(c); } } };
+    reach(root);
+    const meta = (body, st, text, sid, turn, note) => traceMeta(body, st, text, sid, turn, note, scope);
     const hop = (cls, ic, hc, parts, at) => { const x = el("div", "hop " + cls); const node = el("div", "node " + hc); node.append(icon(ic)); const body = el("div", "body"); const sent = el("div", "sent"); sent.append(...parts); if (at != null) sent.append(el("span", "tm", clock(at))); body.append(sent); x.append(node, body); flow.append(x); return [x, body]; };
     const s0 = root.start, text = s0 ? s0.brief : root.u?.text;
     const [ic0, parts0] = s0 ? sentence(s0, null) : root.u ? sentence({ kind: "ask", to: root.sid }, null) : [I.more, [el("span", "who", SESS[root.sid].name), el("span", "verb", " · a turn whose start isn't in these logs")]];
     const [r0, b0] = hop("k-root", ic0, hcls(s0 ? s0.from : root.u ? "you" : root.sid), parts0, s0?.at); r0.dataset.turn = root.id; if (s0) r0.dataset.h = s0.id;
     if (text) clampBrief(b0, text);
-    const e0 = turnEnd(root); traceMeta(b0, e0?.st ?? "idle", e0?.text ?? "Nothing recorded", root.sid, root);
+    const e0 = turnEnd(root); meta(b0, e0?.st ?? "idle", e0?.text ?? "Nothing recorded", root.sid, root);
     const walk = (t) => {
       for (const h of t.sent) {
         const result = h.kind === "toyou" && h.ask === "result";
@@ -1693,18 +1706,18 @@
         if (result) { n++; continue; }
         clampBrief(b, h.brief); const an = answerEl(h, "result"); if (an) b.append(an);
         if (h.result) { const r = el("div", "result"); r.append(el("span", "rl", "Result:")); const s = el("span"); inline(s, h.result); r.append(s); b.append(r); }
-        if (h.kind === "move") { traceMeta(b, "done", "Moved", h.to, t); continue; }
+        if (h.kind === "move") { meta(b, "done", "Moved", h.to, t); continue; }
         n++;
-        if (h.kind === "toyou") { traceMeta(b, isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : h.status === "done" ? "done" : h.status, statWord(h), h.from, t); continue; }
+        if (h.kind === "toyou") { meta(b, isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : h.status === "done" ? "done" : h.status, statWord(h), h.from, t); continue; }
         sess.add(h.to); const e = c && turnEnd(c);
-        traceMeta(b, e ? e.st : h.status === "done" ? "done" : h.status, e ? e.text : statWord(h), h.to, c, c ? null : "Its turn isn't in these logs");
+        meta(b, e ? e.st : h.status === "done" ? "done" : h.status, e ? e.text : statWord(h), h.to, c, c ? null : "Its turn isn't in these logs");
         if (c && !seen.has(c.id)) { seen.add(c.id); walk(c); } // a turn is drawn once, so a loop in the data can't recurse forever
       }
     };
     walk(root);
     page.append(flow);
     // The bar's summary line.
-    return [sess.size + (sess.size === 1 ? " session" : " sessions"), n + (n === 1 ? " handoff" : " handoffs"), [...new Set([...sess].map((x) => MACHINE[SESS[x]?.machine]).filter(Boolean))].join(", ")].join(" · ");
+    return [sess.size + (sess.size === 1 ? " session" : " sessions"), n + (n === 1 ? " handoff" : " handoffs"), [...new Set([...scope].map((x) => machineLabel(SESS[x], scope)).filter(Boolean))].join(", ")].filter(Boolean).join(" · ");
   }
 
   // ---- Session page --------------------------------------------------------------------------------------------------
