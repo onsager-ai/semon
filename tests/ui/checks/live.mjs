@@ -270,6 +270,20 @@ async function scheme(browser, name, opts, r, protocol) {
     R.pinned = await S.evaluate(() => ({ hidden: document.querySelector(".jump-bottom")?.hidden, left: window.__left(), top: window.__sc().scrollTop }));
     R.pinned.before = top1;
     r.expect(R.pinned.hidden && R.pinned.left <= 1 && R.pinned.top > top1, name + ": not kept at the end: " + JSON.stringify(R.pinned));
+    if (phone) await S.setViewportSize({ width: 390, height: 844 });
+    R.liveStep = await S.evaluate((k) => { const step = [...document.querySelectorAll(".step.live")].find((x) => x.dataset.e === k), group = step?.closest(".tgroup"), summary = group?.querySelector(":scope > .tsum");
+      if (summary?.getAttribute("aria-expanded") === "false") summary.click();
+      return step ? { expanded: step.querySelector(":scope > button")?.getAttribute("aria-expanded") } : null; }, live1);
+    r.expect(R.liveStep?.expanded === "false", name + ": the live step's disclosure button is missing or not initially closed: " + JSON.stringify(R.liveStep));
+    await S.locator(byKey(live1) + " > button").click();
+    R.livePanel = await S.evaluate((k) => { const step = [...document.querySelectorAll(".step.live")].find((x) => x.dataset.e === k), button = step?.querySelector(":scope > button"), out = step?.querySelector(":scope > .out");
+      return step ? { expanded: button?.getAttribute("aria-expanded"), hidden: out?.hidden, command: out?.querySelector(".in")?.textContent,
+        noout: out?.querySelector(".noout")?.textContent, viewAllHidden: out?.querySelector(".viewall")?.hidden, viewScript: !!out?.querySelector(".viewscript") } : null; }, live1);
+    r.expect(R.livePanel?.expanded === "true" && R.livePanel.hidden === false && R.livePanel.command === "sleep 30 && echo live" && R.livePanel.noout === "Running · no output yet", name + ": opening the live step didn't show its command and running note: " + JSON.stringify(R.livePanel));
+    r.expect(R.livePanel?.viewAllHidden === true, name + ": View all is missing or visible for an uncut input: " + JSON.stringify(R.livePanel));
+    r.expect(!R.livePanel?.viewScript, name + ": View script appeared for a live step: " + JSON.stringify(R.livePanel));
+    if (phone) { R.liveOverflow = await overflow(S); r.expect(R.liveOverflow === 0, name + ": expanded live step overflows at 390 px: " + R.liveOverflow); }
+    await S.evaluate(() => { const sc = window.__sc(); sc.scrollTop = sc.scrollHeight; });
     R.innerKept = await S.evaluate(({ cw, keys }) => { const w = document.querySelector('.child-work[data-e="' + cw + '"]'), t = w.querySelector(":scope > .cw-toggle"), closed = t.getAttribute("aria-expanded") === "false"; t.click();
       return { closed, open: keys.filter((k) => w.querySelector('.step[data-e="' + k + '"] > button')?.getAttribute("aria-expanded") === "true").length, of: keys.length }; }, inner0);
     r.expect(R.innerKept.closed && R.innerKept.open === R.innerKept.of, name + ": steps open inside closed child work didn't survive the redraw: " + JSON.stringify(R.innerKept));
@@ -311,6 +325,9 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(R.callDone != null, name + ": the call didn't become a finished step within 4 s");
     R.call2Done = await appear(S, t0, (k) => { const n = document.querySelector('.step[data-e="' + k + '"]'); return !!n && !n.classList.contains("live"); }, live2);
     r.expect(R.call2Done != null, name + ": the second parallel call didn't become a finished step within 4 s");
+    R.finishedPanel = await S.evaluate((k) => { const step = [...document.querySelectorAll(".step")].find((x) => x.dataset.e === k), button = step?.querySelector(":scope > button"), out = step?.querySelector(":scope > .out");
+      return step ? { expanded: button?.getAttribute("aria-expanded"), hidden: out?.hidden, output: out?.textContent } : null; }, live1);
+    r.expect(R.finishedPanel?.expanded === "true" && R.finishedPanel.hidden === false && R.finishedPanel.output.includes("live"), name + ": the finished step lost its open state or output: " + JSON.stringify(R.finishedPanel));
 
     // ---- 3. a subagent starts while View all is open ----
     await S.locator(".viewall:visible").first().click();
