@@ -42,7 +42,7 @@ Colour is for content and state, not decoration. No coloured borders anywhere.
 | `--faint` | #8a918d | #6f7773 | Rules, separators and icons only. Never text |
 | `--line`, `--line-2` | #e5e7e3, #d3d7d2 | #2a302d, #3d4541 | Hairlines; control and card outlines |
 | `--ground`, `--side`, `--sunken` | #fff, #f7f7f5, #f1f2ef | #141817, #181c1b, #222725 | Page, sidebar, fills (inputs, bubbles, code) |
-| `--accent` | #3b4dbf | #98a4f3 | Links and the pressed state of controls. Nothing else |
+| `--accent` | = `--ink` | = `--ink` | Links and the pressed state of controls, by weight 500 and a hover underline; no hue |
 | `--work` | #1d6db0 | #66b0ef | The working dot and spinner |
 | `--wait` / `--wait-dot` | #8f5700 / #d08f1a | #e4a53f | "Needs you": its dot, word and badge |
 | `--err` | #b53232 | #f27c77 | Failed: its dot and word |
