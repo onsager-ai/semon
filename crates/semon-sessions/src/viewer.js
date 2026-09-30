@@ -1210,7 +1210,7 @@
   // mode is its own controller, apart from find, so the two can become one mode later.
   const ERR = { on: false, sid: null, slots: [], listed: false, count: 0, version: null, k: -1, slot: null, saved: null, range: null, tools: true, chain: Promise.resolve(), gen: 0 };
   const ERR_NEAR = 400, ERR_AROUND = 40; // slots: a page (at most 200 entries) or two away is added; 40 entries of context above
-  const errLive = el("div", "sr-only"); errLive.setAttribute("role", "status"); errLive.setAttribute("aria-live", "polite"); document.body.append(errLive);
+  const errLive = el("div", "sr-only"); errLive.setAttribute("role", "status"); errLive.setAttribute("aria-live", "polite"); if (!SIDEBAR_ONLY) document.body.append(errLive);
   const errText = () => ERR.k < 0 ? (ERR.count ? "Finding errors…" : "No errors") : "Error " + (ERR.k + 1) + " of " + ERR.count;
   const errOn = (sid) => ERR.on && ERR.sid === sid;
   function errorsBar(bar) {
