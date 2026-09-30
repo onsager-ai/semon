@@ -284,6 +284,12 @@ export default async function barCheck(browser) {
       await goto(page, { v: "session", id: detailsSid }, D);
       await page.evaluate(() => { window.scrollTo(0, 400); document.querySelector("#main").scrollTop = 400; }); await page.waitForTimeout(100);
       await page.click("#more-btn"); await page.waitForFunction(() => document.querySelector("dialog.session-menu")?.open === true);
+      // "/" while a dialog is open goes nowhere (#174): the ⋯ menu is the dialog here (Session details is a part of it), so the check that main runs on the menu and again on Details is one check on this menu.
+      const menuBefore = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.id ?? document.activeElement?.className }));
+      await page.keyboard.press("/");
+      const menuAfter = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.id ?? document.activeElement?.className, open: !!document.querySelector("dialog.session-menu[open]") }));
+      out.menuSlash = menuAfter;
+      r.expect(menuAfter.open && JSON.stringify(menuAfter.route) === JSON.stringify(menuBefore.route) && menuAfter.path === menuBefore.path && menuAfter.focus === menuBefore.focus, mode + ": / navigated or moved focus while the session menu was open: " + JSON.stringify({ menuBefore, menuAfter }));
       out.details = await page.evaluate((phone) => {
         const d = document.querySelector("dialog.session-menu"), r = d.getBoundingClientRect(), text = (x) => x.textContent.replace(/\s+/g, " ").trim();
         const cost = d.querySelector(".cost");
