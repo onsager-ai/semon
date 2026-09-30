@@ -21,7 +21,8 @@ const OUT = path.join(ENV.out, "tracebrief");
 fs.mkdirSync(OUT, { recursive: true });
 const HOST_A = "marvin-HP-EliteBook-X-G2i-14-inch-Notebook-Next-Gen-AI-PC", SHORT_A = "marvin-HP-Elit…";
 const HOST_B = "build-runner-eu-west-4-node-17-large", SHORT_B = "build-runner-e…";
-const PIECES = ["marvin-HP", "EliteBook", "Notebook", "build-runner-eu", "node-17"];
+// Pieces of the hostnames that a short name (the first 14 characters) does not hold.
+const PIECES = ["EliteBook", "Notebook", "AI-PC", "build-runner-eu", "node-17"];
 
 // The served model with long machine names; with `two`, every session but `rootSid` on a second machine.
 async function longNames(page, { two, rootSid }) {
@@ -59,7 +60,7 @@ const lines = (page) => page.evaluate(() => [...document.querySelectorAll(".hop 
 
 const page_ = (page) => page.evaluate(() => ({
   metaText: [...document.querySelectorAll(".hop .meta")].map((m) => m.textContent.replace(/\s+/g, " ").trim()),
-  chips: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => c.textContent.trim()),
+  chips: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => c.textContent.replace(/[\s\u2009\u00a0]+/g, " ").trim()),
   bar: (document.querySelector("#topbar")?.textContent ?? "").replace(/\s+/g, " ").trim(),
   chipMark: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => { const b = getComputedStyle(c, "::before"); return b.content !== "none" && b.content !== "normal" ? b.content : null; }).filter(Boolean),
 }));
@@ -101,7 +102,8 @@ export default async function tracebrief(browser) {
         const before = await snap(page);
         await page.screenshot({ path: path.join(OUT, name + "-collapsed.png"), fullPage: true });
         const idx = before.map((b, i) => (b.clamped && !b.open ? i : -1)).filter((i) => i >= 0);
-        r.expect(idx.length > 0, name + ": no clamped brief to open");
+        // At 1280 px a brief may fit whole; at 390 the chosen trace's briefs must clamp.
+        if (size === "phone") r.expect(idx.length > 0, name + ": no clamped brief to open");
         await page.evaluate(() => document.querySelectorAll(".hop .body > .more:not([hidden])").forEach((x) => x.click()));
         await page.waitForTimeout(80);
         const after = await snap(page);
