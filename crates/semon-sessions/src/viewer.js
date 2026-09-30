@@ -369,14 +369,17 @@
   // A return line arrives as data; it reads as the mockup's "Returned to … · HH:MM".
   const txEntry = (e) => e.k === "end" && e.ret ? { k: "end", text: "Returned to " + nameOf(e.ret.to) + (e.ret.failed ? " · failed" : "") + (e.ret.at != null ? " · " + clock(e.ret.at) : ""), turn: e.turn } : e;
   // where: "before" and "after" extend the loaded range; otherwise the page replaces it.
-  function fetchTx(sid, q, where, signal) {
-    const tok = TOK[sid];
+  function fetchTx(sid, q, where, signal, onPage) {
+    const tok = TOK[sid], range = TXM[sid], boundary = where === "before" ? range?.from : range?.to;
     return api("/api/tx?sid=" + enc(sid) + (q ? "&" + q : ""), signal).then((p) => {
+      // An error jump or a reload may replace the range while a pager request is out. Its page no longer adjoins ours.
+      if (signal?.aborted || (where && (TXM[sid] !== range || (where === "before" ? TXM[sid]?.from : TXM[sid]?.to) !== boundary))) return;
       const es = p.entries.map((e) => txEntry({ ...e, sid })), m = TXM[sid];
       if (where === "before" && m) { TX[sid] = es.concat(TX[sid]); m.from = p.from; }
       else if (where === "after" && m) { TX[sid] = TX[sid].concat(es); m.to = p.to; }
-      else { TX[sid] = es; TXM[sid] = { from: p.from, to: p.to }; }
+      else { clearPaging(sid); TX[sid] = es; TXM[sid] = { from: p.from, to: p.to }; }
       Object.assign(TXM[sid], { total: p.total, calls: p.calls, errors: p.errors }); if (where !== "before" && p.to >= p.total) TXM[sid].tok = tok; spread(sid);
+      onPage?.(); // optional notification for a pager; the promise still resolves without a value
     });
   }
   // A spawn's child work opens inline under its card: load the turn each brief started, when its session isn't loaded.
@@ -421,7 +424,7 @@
     TXCACHE.delete(r.id); TX[r.id] = c.entries; TXM[r.id] = c.meta;
     if (!r.turn) return true;
     spread(r.id); const t = TURN.get(r.turn);
-    if (t && t.sid === r.id && !t.entries.length) { delete TX[r.id]; delete TXM[r.id]; return false; }
+    if (t && t.sid === r.id && !t.entries.length) { dropTx(r.id); return false; }
     return true;
   }
   // A mark with fewer entries or bytes than the one loaded means the file was cut or rewritten: load it again.
@@ -437,7 +440,30 @@
   // Paging state survives redraws: a click and an observer share one request per session and direction, and a failed
   // page stays manual until Retry succeeds. Observers belong only to the buttons currently drawn.
   const PAGING = new Map(), pagerObservers = new Map();
-  let pagerFrame = null;
+  let pagerFrame = null, pagerArmed = false, automaticLoads = 0, scrollRevision = 0, programmaticScrollPending = false, programmaticScrollTimer = null;
+  function clearPaging(sid) {
+    for (const state of Object.values(PAGING.get(sid) ?? {})) state.controller?.abort();
+    PAGING.delete(sid);
+    if (route.v === "session" && route.id === sid) resetPagerInput();
+  }
+  function dropTx(sid) { clearPaging(sid); delete TX[sid]; delete TXM[sid]; }
+  function resetPagerInput() { pagerArmed = false; automaticLoads = 0; scrollRevision++; disconnectPagerObservers(); }
+  function holdProgrammaticScroll() {
+    programmaticScrollPending = true;
+    clearTimeout(programmaticScrollTimer);
+    // Scroll events arrive after scrollTop writes. Smooth jumps keep extending this guard until scrolling is quiet.
+    programmaticScrollTimer = setTimeout(() => { programmaticScrollPending = false; programmaticScrollTimer = null; }, 120);
+  }
+  function scrollProgrammatically(fn, jump = true) {
+    if (jump) resetPagerInput();
+    holdProgrammaticScroll(); fn();
+  }
+  function readerScrollInput() {
+    if (route.v !== "session" || rendered !== route || $("#page").hasAttribute("aria-busy")) return;
+    clearTimeout(programmaticScrollTimer); programmaticScrollTimer = null; programmaticScrollPending = false;
+    stopOpeningEndPin(); pagerArmed = true; automaticLoads = 0; scrollRevision++; queuePagerObservers();
+  }
+  const automaticPagingAllowed = () => pagerArmed && automaticLoads < 3 && !openingEndUntil && !findOpen && !find && show.messages && show.tools && show.thinking;
   function pagingState(sid, where) {
     if (!PAGING.has(sid)) PAGING.set(sid, { before: { busy: false, failed: false }, after: { busy: false, failed: false } });
     return PAGING.get(sid)[where];
@@ -445,9 +471,12 @@
   function paintPager(b) {
     const state = pagingState(b.dataset.pagerSid, b.dataset.pagerWhere), direction = b.dataset.pagerWhere === "before" ? "earlier" : "later";
     b.disabled = state.busy;
-    b.replaceChildren();
-    if (state.busy) { const spin = el("span", "spin"); spin.setAttribute("aria-hidden", "true"); b.append(spin); }
-    b.append(el("span", null, state.busy ? "Loading " + direction + "…" : state.failed ? "Couldn't load " + direction + " entries · Retry" : "Load " + direction));
+    const label = b.querySelector(".pager-label") ?? el("span", "pager-label");
+    if (!label.parentNode) b.replaceChildren(label);
+    b.querySelector(".spin")?.remove();
+    if (state.busy) { const spin = el("span", "spin"); spin.setAttribute("aria-hidden", "true"); b.prepend(spin); }
+    label.setAttribute("aria-live", "polite");
+    label.textContent = spaced(state.busy ? "Loading " + direction + "…" : state.failed ? "Couldn't load " + direction + " entries · Retry" : "Load " + direction);
   }
   function disconnectPagerObservers() {
     if (pagerFrame !== null) cancelAnimationFrame(pagerFrame); pagerFrame = null;
@@ -459,7 +488,7 @@
     // Wait until rendering, opening at the end and restoring the reader's place have finished.
     pagerFrame = requestAnimationFrame(() => {
       pagerFrame = null; disconnectPagerObservers();
-      if (route.v !== "session" || rendered !== route || openingEndUntil || $("#page").hasAttribute("aria-busy") || typeof IntersectionObserver === "undefined") return;
+      if (route.v !== "session" || rendered !== route || !automaticPagingAllowed() || $("#page").hasAttribute("aria-busy") || typeof IntersectionObserver === "undefined") return;
       for (const b of $("#page").querySelectorAll("[data-pager-where]")) {
         const state = pagingState(b.dataset.pagerSid, b.dataset.pagerWhere);
         if (state.busy || state.failed) continue;
@@ -472,31 +501,36 @@
   }
   async function loadPager(b, manual) {
     const sid = b.dataset.pagerSid, where = b.dataset.pagerWhere, state = pagingState(sid, where), r = route;
-    if (!b.isConnected || r.v !== "session" || r.id !== sid || rendered !== r || state.busy || (!manual && (state.failed || openingEndUntil))) return;
+    if (!b.isConnected || r.v !== "session" || r.id !== sid || rendered !== r || state.busy || (!manual && (state.failed || !automaticPagingAllowed()))) return;
     if (manual) stopOpeningEndPin();
     const m = TXM[sid]; if (!m || (where === "before" ? m.from <= 0 : m.to >= m.total)) return;
-    state.busy = true; paintPager(b);
+    const boundary = where === "before" ? m.from : m.to;
+    if (!manual) automaticLoads++;
+    state.busy = true; state.controller = new AbortController(); paintPager(b);
     try {
-      await fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where);
-      await kids(sid);
+      let applied = false;
+      await fetchTx(sid, where + "=" + boundary, where, state.controller.signal, () => { applied = true; });
+      if (!applied || PAGING.get(sid)?.[where] !== state || TXM[sid] !== m) return;
+      await kids(sid, state.controller.signal);
       state.failed = false;
-      if (route !== r || rendered !== r) return;
+      if (route !== r || rendered !== r || PAGING.get(sid)?.[where] !== state) return;
       // Capture at the last moment: the reader can keep scrolling while the request is out.
-      const box = scroller(), top = phone.matches ? 0 : box.getBoundingClientRect().top, height = box.scrollHeight, scroll = box.scrollTop;
-      const turn = [...$("#page").querySelectorAll(".turns > .turn[data-turn]")].find((t) => t.getBoundingClientRect().top >= top);
-      const anchor = turn ? { id: turn.dataset.turn, offset: turn.getBoundingClientRect().top - top } : null;
-      render();
-      const found = anchor && $("#page .turns > .turn[data-turn='" + CSS.escape(anchor.id) + "']");
-      if (found) box.scrollTop += found.getBoundingClientRect().top - (phone.matches ? 0 : box.getBoundingClientRect().top) - anchor.offset;
-      else box.scrollTop = scroll + (where === "before" ? box.scrollHeight - height : 0);
-      LIVE.anchor = null; syncJump(); saveHistoryScroll();
-    } catch {
-      state.failed = true;
+      const box = scroller(), top = phone.matches ? 0 : box.getBoundingClientRect().top, st = capture();
+      const entry = [...$("#page").querySelectorAll(".turns [data-e][data-entry-key]:not(.tgroup)")].find((n) => { const rect = n.getBoundingClientRect(); return rect.height && rect.top >= top; });
+      st.paging = { anchor: entry ? { key: entry.dataset.entryKey, off: entry.getBoundingClientRect().top - top } : null, height: box.scrollHeight, before: where === "before" };
+      const armed = pagerArmed, used = automaticLoads;
+      render(); restore(st);
+      // This paging redraw may continue the same reader gesture, within its three-page limit.
+      if (!manual) { pagerArmed = armed; automaticLoads = used; }
+      syncJump(); saveHistoryScroll();
+    } catch (error) {
+      if (error?.name !== "AbortError" && PAGING.get(sid)?.[where] === state) state.failed = true;
     } finally {
-      state.busy = false;
-      for (const button of $("#page").querySelectorAll("[data-pager-where]")) if (button.dataset.pagerSid === sid && button.dataset.pagerWhere === where) paintPager(button);
-      // A new observer also checks a pager that stayed inside the margin, loading short pages one at a time.
-      queuePagerObservers();
+      state.busy = false; state.controller = null;
+      if (PAGING.get(sid)?.[where] === state) {
+        for (const button of $("#page").querySelectorAll("[data-pager-where]")) if (button.dataset.pagerSid === sid && button.dataset.pagerWhere === where) paintPager(button);
+        queuePagerObservers();
+      }
     }
   }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
@@ -591,12 +625,12 @@
   if (!SIDEBAR_ONLY) try { history.scrollRestoration = "manual"; } catch {}
   let show = { messages: true, tools: true, thinking: true }; let find = ""; let findOpen = false; let filterOpen = false;
   const currentScroll = () => phone.matches ? window.scrollY : $("#main").scrollTop;
-  const restoreScroll = (top) => { if (phone.matches) window.scrollTo(0, top); else $("#main").scrollTop = top; };
+  const restoreScroll = (top) => scrollProgrammatically(() => { if (phone.matches) window.scrollTo(0, top); else $("#main").scrollTop = top; });
   const saveHistoryScroll = () => { try { if (history.state?.v) history.replaceState({ ...history.state, scrollTop: currentScroll() }, ""); } catch {} };
   let scrollSaveFrame = false;
   const queueScrollSave = () => { if (scrollSaveFrame) return; scrollSaveFrame = true; requestAnimationFrame(() => { scrollSaveFrame = false; saveHistoryScroll(); }); };
   if (!SIDEBAR_ONLY) { window.addEventListener("scroll", queueScrollSave, { passive: true }); $("#main").addEventListener("scroll", queueScrollSave, { passive: true }); }
-  const quietTop = () => { if (phone.matches) window.scrollTo(0, 0); else $("#main").scrollTop = 0; };
+  const quietTop = () => restoreScroll(0);
   function openSessionAtEnd() { if (location.hash) return; startOpeningEndPin(); }
   // Opening a session draws what the model already holds at once, before its transcript arrives: the sidebar row, the top bar,
   // and the old page held dimmed and inert (aria-busy). If the transcript is still on its way after 150 ms, a skeleton of turn-shaped
@@ -653,7 +687,8 @@
   const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
   function go(r, fromHistory) {
     if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : r.v === "sessions" && query ? "/sessions?q=" + enc(query) : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
-    disconnectPagerObservers(); stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
+    if (route.v === "session") clearPaging(route.id);
+    resetPagerInput(); stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
@@ -674,7 +709,7 @@
       syncJump();
       if (pendingFlashHandoff && r.v === "session" && HID.get(pendingFlashHandoff)?.from === r.id) {
         const id = pendingFlashHandoff; pendingFlashHandoff = null;
-        requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1500); });
+        requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; scrollProgrammatically(() => card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" })); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1500); });
       }
     };
     // A transcript already in memory, still in TX or kept in the cache, needs no network: the top bar and the sidebar are drawn
@@ -704,20 +739,22 @@
   // A deep link to a turn: scroll it just below the top bar (measured, since its height varies) and mark it for a moment.
   // It is placed again two frames later, after "Show more" buttons above it have appeared.
   function revealTurn(id, flash) {
+    resetPagerInput();
     const b = [...document.querySelectorAll(".turn")].find((x) => x.dataset.turn === id); if (!b) { quietTop(); return; }
     const place = () => { if (!b.isConnected) return; const gap = $("#topbar").offsetHeight + 8;
-      if (phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + b.getBoundingClientRect().top - gap)); else { const m = $("#main"); m.scrollTop += b.getBoundingClientRect().top - m.getBoundingClientRect().top - gap; }
+      scrollProgrammatically(() => { if (phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + b.getBoundingClientRect().top - gap)); else { const m = $("#main"); m.scrollTop += b.getBoundingClientRect().top - m.getBoundingClientRect().top - gap; } });
       syncJump(); saveHistoryScroll(); };
     place(); requestAnimationFrame(() => requestAnimationFrame(place));
     if (flash) { b.classList.add("flash"); setTimeout(() => b.classList.remove("flash"), 1500); }
   }
   function revealEntryHash() {
+    resetPagerInput();
     if (!location.hash) return;
     let key = ""; try { key = decodeURIComponent(location.hash.slice(1)); } catch { key = location.hash.slice(1); }
     const target = document.getElementById(key) ?? [...document.querySelectorAll("[data-e]")].find((n) => n.dataset.e === key) ?? [...document.querySelectorAll(".turn[data-turn]")].find((n) => n.dataset.turn === key);
     if (!target) return;
     const place = () => { if (!target.isConnected) return; const gap = $("#topbar").offsetHeight + 8;
-      if (phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + target.getBoundingClientRect().top - gap)); else { const m = $("#main"); m.scrollTop += target.getBoundingClientRect().top - m.getBoundingClientRect().top - gap; }
+      scrollProgrammatically(() => { if (phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + target.getBoundingClientRect().top - gap)); else { const m = $("#main"); m.scrollTop += target.getBoundingClientRect().top - m.getBoundingClientRect().top - gap; } });
       syncJump(); saveHistoryScroll(); };
     place(); requestAnimationFrame(() => requestAnimationFrame(place));
   }
@@ -959,7 +996,7 @@
   // re-sorts where the list stands (its top is already in view).
   function orderResort(name, keyboard, quiet) {
     ORD.delete(name);
-    if (name === "side") { renderLanes(); if (!quiet) sideRegion().scrollTop = 0; if (keyboard) $("#lanes .srow")?.focus({ preventScroll: true }); }
+    if (name === "side") { renderLanes(); if (!quiet) scrollProgrammatically(() => { sideRegion().scrollTop = 0; }); if (keyboard) $("#lanes .srow")?.focus({ preventScroll: true }); }
     else if (quiet) { const st = capture(); render(); restore(st); syncOrderPill("page"); syncOrderPill("side"); if (keyboard) $("#page .nrow")?.focus({ preventScroll: true }); }
     else { render(); quietTop(); if (keyboard) $("#page .nrow")?.focus({ preventScroll: true }); }
   }
@@ -1096,7 +1133,7 @@
     const fewer = el("button", "tree-fewer"); fewer.type = "button"; fewer.setAttribute("aria-label", "Show fewer sessions under " + s.name); fewer.append(el("span", null, "Show fewer"), icon(I.chev));
     fewer.addEventListener("click", (e) => {
       e.stopPropagation(); expandedAll = null; renderLanes();
-      const row = $('#lanes .srow[data-id="' + CSS.escape(s.id) + '"]'); row?.scrollIntoView({ block: "nearest" }); row?.focus({ preventScroll: true });
+      const row = $('#lanes .srow[data-id="' + CSS.escape(s.id) + '"]'); scrollProgrammatically(() => row?.scrollIntoView({ block: "nearest" })); row?.focus({ preventScroll: true });
     });
     line.append(fewer);
   }
@@ -1215,7 +1252,7 @@
     // A stuck row covers the top of the sidebar: what is scrolled into view (the open session, after a navigation) stays clear of it.
     const stuck = box.querySelector(".tree-row.stuck"), navigated = revealedFor !== route; revealedFor = route;
     ($("#side-list") ?? $("#sidebar")).style.scrollPaddingTop = stuck ? stuck.offsetHeight + 8 + "px" : "";
-    if (stuck && navigated) box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" });
+    if (stuck && navigated) scrollProgrammatically(() => box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" }));
   }
 
   // ---- Top bar ---------------------------------------------------------------------------------------
@@ -1350,7 +1387,7 @@
   const keepFocus = (fn) => { const id = document.activeElement?.id; fn(); const n = id && document.getElementById(id); if (n && n !== document.activeElement) n.focus({ preventScroll: true }); };
   function openErrors(sid) {
     if (ERR.on || route.v !== "session" || route.id !== sid || !TXM[sid]) return;
-    stopOpeningEndPin(); closeFilter(); $(".session-menu")?.remove();
+    resetPagerInput(); stopOpeningEndPin(); closeFilter(); $(".session-menu")?.remove();
     Object.assign(ERR, { on: true, sid, slots: [], listed: false, count: countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: show.tools, gen: ERR.gen + 1 });
     if (!show.tools) { show.tools = true; render(); } else drawSessionBar();
     document.getElementById("err-next")?.focus({ preventScroll: true }); errLabel(true);
@@ -1404,10 +1441,11 @@
   function centre(node) {
     if (!node.isConnected) return;
     const sc = scroller(), r = (node.querySelector(":scope > button") ?? node).getBoundingClientRect(), bottom = phone.matches ? window.innerHeight : $("#main").getBoundingClientRect().bottom;
-    const d = (r.top + r.bottom) / 2 - (edge() + bottom) / 2; if (Math.abs(d) >= 1) sc.scrollTop += d;
+    const d = (r.top + r.bottom) / 2 - (edge() + bottom) / 2; scrollProgrammatically(() => { if (Math.abs(d) >= 1) sc.scrollTop += d; });
     syncBarLine(); syncJump(); saveHistoryScroll();
   }
   function showError(announce) {
+    resetPagerInput();
     const sid = ERR.sid, slot = ERR.slots[ERR.k], gen = ERR.gen; ERR.slot = slot; errLabel(announce);
     ERR.chain = ERR.chain.then(() => {
       if (!ERR.on || ERR.gen !== gen || ERR.slot !== slot) return null; // a later step or a close since
@@ -1427,7 +1465,7 @@
     if (!ERR.on) return;
     const sid = ERR.sid, range = ERR.range, m = TXM[sid];
     ERR.on = false; ERR.gen++; show.tools = ERR.tools; ERR.saved = ERR.range = null; errLive.textContent = "";
-    if (away && range && m && (m.from !== range.m.from || m.to < range.m.to)) { delete TX[sid]; delete TXM[sid]; }
+    if (away && range && m && (m.from !== range.m.from || m.to < range.m.to)) dropTx(sid);
   }
   function closeErrors() {
     if (!ERR.on) return;
@@ -1872,7 +1910,9 @@
     const turnMode = !opts.nested;
     // On a session page the transcript is a list of turns, each with its own entries; a nested one is a plain list.
     const box = el("div", turnMode ? "turns" : "tx"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);
-    const keyed = (n, e) => { if (e.key) n.dataset.e = e.key; return n; };
+    // Slots identify the same entry even when an earlier page extends its turn and its turn-relative data-e key moves.
+    const entryKey = (e) => e.slot != null ? sid + "#slot:" + e.slot : e.key;
+    const keyed = (n, e) => { if (e.key) { n.dataset.e = e.key; n.dataset.entryKey = entryKey(e); } return n; };
     const range = turnMode ? TXM[sid] : null;
     if (range?.from > 0) box.append(pager(sid, "before", "Load earlier"));
     else if (!find && turnMode) box.append(startedDivider(sid));
@@ -1887,7 +1927,7 @@
       let text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
       text = text[0].toUpperCase() + text.slice(1);
       const failed = run.filter((r) => r.err).length, live = run.find((r) => r.live);
-      const g = el("div", "tgroup"); if (run[0].key) g.dataset.e = "g:" + run[0].key; const b = el("button", "tsum"); b.type = "button"; b.setAttribute("aria-expanded", "false");
+      const g = el("div", "tgroup"); if (run[0].key) { g.dataset.e = "g:" + run[0].key; g.dataset.entryKey = "g:" + run[0].entryKey; } const b = el("button", "tsum"); b.type = "button"; b.setAttribute("aria-expanded", "false");
       b.append(live ? el("span", "spin") : icon(I.stack), el("span", "tt", text));
       if (failed) b.append(el("span", "tf", "· " + failed + " failed"));
       if (live) b.append(el("span", "tl tick", "· running " + live.secs));
@@ -1933,7 +1973,7 @@
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
-        if (e.live) { const r = keyed(el("div", "step live"), e); r.dataset.live = sid; if (e.since != null) r.dataset.since = e.since; r.append(el("span", "spin"), el("span", "sv", v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd tick", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs, key: e.key }); continue; }
+        if (e.live) { const r = keyed(el("div", "step live"), e); r.dataset.live = sid; if (e.since != null) r.dataset.since = e.since; r.append(el("span", "spin"), el("span", "sv", v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd tick", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs, key: e.key, entryKey: entryKey(e) }); continue; }
         const box = keyed(el("div", "step" + (e.ok || e.ok === null ? "" : " err")), e); const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
         b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs), icon(I.chev, "chev"));
         const out = el("div", "out"); out.hidden = true;
@@ -1959,7 +1999,7 @@
           if (!out.hidden) { let cut = !!e.more?.length; out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; }); all.hidden = !cut; actions.hidden = e.script == null && !cut;
             // Text cut when this copy was made, with nothing more to show: say so instead of ending on "…".
             if (!cut && !e.cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs")); } });
-        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key }); continue;
+        box.append(b, out); run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key, entryKey: entryKey(e) }); continue;
       }
       flush();
       if (e.k === "u") { if (!show.messages || !hit(e.text)) continue; const m = keyed(el("div", "msg user"), e); userBody(m, e, e.text); tx.append(m); }
@@ -2203,7 +2243,7 @@
   function render() {
     if (SIDEBAR_ONLY) { CHILDREN = null; tick(); rendered = route; renderNav(); renderLanes(); return; } // the embedding page draws its own page and bar
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
-    disconnectPagerObservers(); closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
+    resetPagerInput(); holdProgrammaticScroll(); closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
     ordPageState = ordState("page"); tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; clearBox(page, r); page.classList.remove("child-page");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
@@ -2639,7 +2679,7 @@
     const changedH = new Set(H.filter((h) => oldH.get(h.id) !== handKey(h)).map((h) => h.id));
     const view = viewed(), grown = new Set(), cuts = new Map();
     let full = Object.values(SESS).some((x) => names.has(x.id) && names.get(x.id) !== x.name); // a new name shows in every turn
-    for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
+    for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else dropTx(sid); }
     // Only transcripts whose mark in the model moved are asked for, one at a time.
     let chain = Promise.resolve();
     for (const sid of view) if (TX[sid] && LIVE.late === sid) chain = chain.then(() => soft(reloadLate(sid).then(() => { grown.add(sid); full = true; })));
@@ -2681,7 +2721,7 @@
   }
   // The page's own transcript loads its last page again; a child run's is dropped, and loads again as new child work.
   function reload(sid) {
-    if (sid !== route.id) { delete TX[sid]; delete TXM[sid]; return Promise.resolve({ cut: null, reload: true }); }
+    if (sid !== route.id) { dropTx(sid); return Promise.resolve({ cut: null, reload: true }); }
     return fetchTx(sid, "").then(() => ({ cut: null, reload: true }));
   }
   // The reload of a page whose origin arrived late (update): done once it loads; a failure is counted, makes the poll back off, and
@@ -2734,9 +2774,10 @@
   }
   function pinOpeningEnd() {
     if (route.v !== "session" || performance.now() >= openingEndUntil) { stopOpeningEndPin(); return; }
-    const sc = scroller(); sc.scrollTop = sc.scrollHeight; LIVE.anchor = null; syncJump(); saveHistoryScroll();
+    const sc = scroller(); scrollProgrammatically(() => { sc.scrollTop = sc.scrollHeight; }); LIVE.anchor = null; syncJump(); saveHistoryScroll();
   }
   function startOpeningEndPin() {
+    resetPagerInput();
     stopOpeningEndPin(); if (route.v !== "session" || location.hash) return;
     openingEndUntil = performance.now() + 2000;
     disconnectPagerObservers();
@@ -2747,14 +2788,15 @@
   const ANCHORS = "[data-e], .turn, .hop, .ib, .nrow, .sec-h, .ph, .divider, .analytics-metric, .analytics-panel, .facet-filters, .groupby, .find, .empty";
   const HOSTS = "[data-e], [data-h], [data-id], [data-sid], [data-go], [data-turn], [data-g], [data-m]";
   const FOCUSABLE = "button, input, [tabindex], a[href]";
-  const identOf = (n) => { const d = n.dataset, keys = [d.e, d.turn, d.h, d.id, d.m, d.sid, d.go, d.g];
+  const stateKey = (n) => n.dataset.entryKey ?? n.dataset.e;
+  const identOf = (n) => { const d = n.dataset, keys = [stateKey(n), d.turn, d.h, d.id, d.m, d.sid, d.go, d.g];
     return [n.classList[0], ...keys, keys.some((x) => x != null) ? "" : n.firstChild?.nodeType === 3 ? n.firstChild.data : ""].map((x) => x ?? "").join("|"); };
   // Each anchor candidate on the page, in order, with its identity made unique by how many came before it.
   function anchors(fn) { const seen = new Map(); for (const n of $("#page").querySelectorAll(ANCHORS)) { const id = identOf(n), k = seen.get(id) ?? 0; seen.set(id, k + 1); if (fn(n, id + "#" + k)) return; } }
   const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : n.classList.contains("child-work") ? n.querySelector(":scope > .cw-toggle") : null;
   function capture() {
     const sc = scroller(), line = edge();
-    const st = { top: sc.scrollTop, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80, anchor: null, open: new Set(), groups: new Set(), focus: null, drawer: document.body.classList.contains("drawer-open") };
+    const st = { top: sc.scrollTop, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80, anchor: null, open: new Set(), groups: new Set(), groupMembers: new Set(), focus: null, drawer: document.body.classList.contains("drawer-open") };
     // The first block, innermost, still visible under the bar, and how far its top is from the bar. While the reader hasn't
     // scrolled since the last redraw placed it, that placement's block and offset are kept as they were, so the fraction
     // of a pixel each placement rounds off can't add up over many updates.
@@ -2764,12 +2806,15 @@
     if (still && Math.abs(still.getBoundingClientRect().top - line - kept.off) <= 1) st.anchor = { id: kept.id, off: kept.off };
     else anchors((n, id) => { if (n.querySelector(ANCHORS)) return false; const b = n.getBoundingClientRect(); if (!b.height || b.bottom <= line) return false; st.anchor = { id, off: b.top - line }; return true; });
     for (const n of $("#page").querySelectorAll("[data-e]")) {
-      if (n.classList.contains("tgroup")) st.groups.add(n.dataset.e);
-      if (opener(n)?.getAttribute("aria-expanded") === "true" || (n.classList.contains("hcard") && n.classList.contains("open"))) st.open.add(n.dataset.e);
+      if (n.classList.contains("tgroup")) {
+        st.groups.add(stateKey(n));
+        if (opener(n)?.getAttribute("aria-expanded") === "true") for (const step of n.querySelectorAll(".step[data-e]")) st.groupMembers.add(stateKey(step));
+      }
+      if (opener(n)?.getAttribute("aria-expanded") === "true" || (n.classList.contains("hcard") && n.classList.contains("open"))) st.open.add(stateKey(n));
     }
     for (const n of $("#page").querySelectorAll(".hop")) if (n.querySelector(".brief.open")) st.open.add("hop:" + identOf(n));
     // Child work opened and then closed keeps what was open inside it, for when it opens again.
-    st.shut = new Set([...$("#page").querySelectorAll(".child-work[data-e]")].filter((n) => opener(n).getAttribute("aria-expanded") === "false" && n.querySelector(":scope > .cw-body").childElementCount).map((n) => n.dataset.e));
+    st.shut = new Set([...$("#page").querySelectorAll(".child-work[data-e]")].filter((n) => opener(n).getAttribute("aria-expanded") === "false" && n.querySelector(":scope > .cw-body").childElementCount).map(stateKey));
     const a = document.activeElement;
     if (a && a !== document.body && !a.closest("dialog")) {
       const host = a.id ? null : a.closest(HOSTS), sel = host && host !== a ? a.tagName.toLowerCase() + [...a.classList].map((c) => "." + CSS.escape(c)).join("") : null;
@@ -2782,7 +2827,7 @@
     return st;
   }
   function restore(st, pin) {
-    const all = (sel) => [...$("#page").querySelectorAll(sel)], r0 = rendered;
+    const all = (sel) => [...$("#page").querySelectorAll(sel)], r0 = rendered, revision = scrollRevision;
     // A new card or brief measures its "Show more" now, as its ResizeObserver would a frame later, so nothing moves after the
     // scroll position is set.
     const clamp = (br, more) => { if (!br || !more || !br.clientHeight) return; const x = br.scrollHeight > br.clientHeight + 1; more.hidden = !x; br.classList.toggle("clipped", x); };
@@ -2791,16 +2836,16 @@
     // Child work first (opening it draws its steps), then groups (a new one opens if it holds an open step), then steps and cards.
     // Child work that was closed with something open inside is opened for the restore (so its steps measure as shown) and
     // closed again below, in the same task: it is never drawn open.
-    const shut = all(".child-work[data-e]").filter((n) => st.shut.has(n.dataset.e) && opener(n).getAttribute("aria-expanded") === "false");
-    for (const n of all(".child-work[data-e]")) if ((st.open.has(n.dataset.e) || shut.includes(n)) && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
+    const shut = all(".child-work[data-e]").filter((n) => st.shut.has(stateKey(n)) && opener(n).getAttribute("aria-expanded") === "false");
+    for (const n of all(".child-work[data-e]")) if ((st.open.has(stateKey(n)) || shut.includes(n)) && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
     for (const n of all(".tgroup[data-e]")) {
-      const want = st.groups.has(n.dataset.e) ? st.open.has(n.dataset.e) : [...n.querySelectorAll(".step[data-e]")].some((x) => st.open.has(x.dataset.e));
+      const want = st.groups.has(stateKey(n)) ? st.open.has(stateKey(n)) : [...n.querySelectorAll(".step[data-e]")].some((x) => st.open.has(stateKey(x)) || st.groupMembers.has(stateKey(x)));
       if (want && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
     }
-    for (const n of all(".step[data-e]")) if (st.open.has(n.dataset.e) && opener(n)?.getAttribute("aria-expanded") === "false") opener(n).click();
+    for (const n of all(".step[data-e]")) if (st.open.has(stateKey(n)) && opener(n)?.getAttribute("aria-expanded") === "false") opener(n).click();
     for (const n of shut) opener(n).click();
     // A card or brief opened before its size was measured: its "Show less" is shown by hand.
-    for (const n of all(".hcard[data-e]")) if (st.open.has(n.dataset.e) && !n.classList.contains("open")) { const m = n.querySelector(":scope > .more"); m.hidden = false; m.click(); }
+    for (const n of all(".hcard[data-e]")) if (st.open.has(stateKey(n)) && !n.classList.contains("open")) { const m = n.querySelector(":scope > .more"); m.hidden = false; m.click(); }
     for (const n of all(".hop")) if (st.open.has("hop:" + identOf(n)) && !n.querySelector(".brief.open")) { const m = n.querySelector(".body > .more"); m.hidden = false; m.click(); }
     if (st.drawer) { document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
     if (st.focus) {
@@ -2816,31 +2861,38 @@
     }
     const place = (first) => {
       const sc = scroller();
-      if (pin) sc.scrollTop = sc.scrollHeight;
-      else {
-        let found = null; if (st.anchor) anchors((n, id) => (id === st.anchor.id ? (found = n) : false));
-        if (found) {
-          // Rows that moved from below the anchor to above it (a re-sorted list) need more room below than the page may
-          // have: the page's bottom padding grows by what is missing, rather than the view sliding. The next redraw or
-          // navigation drops it.
-          const d = found.getBoundingClientRect().top - edge() - st.anchor.off, want = sc.scrollTop + d, room = sc.scrollHeight - sc.clientHeight;
-          if (want > room + 0.5) { const page = $("#page"); page.style.paddingBottom = parseFloat(getComputedStyle(page).paddingBottom) + Math.ceil(want - room) + "px"; }
-          if (d) sc.scrollTop = want;
-          LIVE.anchor = { ...st.anchor, route: r0, top: sc.scrollTop };
-        } else if (first) sc.scrollTop = st.top;
-      }
+      scrollProgrammatically(() => {
+        if (pin) sc.scrollTop = sc.scrollHeight;
+        else {
+          const paging = st.paging;
+          let found = null;
+          if (paging?.anchor) found = all(".turns [data-e][data-entry-key]:not(.tgroup)").find((n) => n.dataset.entryKey === paging.anchor.key);
+          else if (!paging && st.anchor) anchors((n, id) => (id === st.anchor.id ? (found = n) : false));
+          if (found) {
+            // Rows that moved from below the anchor to above it (a re-sorted list) need more room below than the page may
+            // have: the page's bottom padding grows by what is missing, rather than the view sliding. The next redraw or
+            // navigation drops it.
+            const line = paging ? (phone.matches ? 0 : sc.getBoundingClientRect().top) : edge();
+            const d = found.getBoundingClientRect().top - line - (paging ? paging.anchor.off : st.anchor.off), want = sc.scrollTop + d, room = sc.scrollHeight - sc.clientHeight;
+            if (want > room + 0.5) { const page = $("#page"); page.style.paddingBottom = parseFloat(getComputedStyle(page).paddingBottom) + Math.ceil(want - room) + "px"; }
+            if (d) sc.scrollTop = want;
+            LIVE.anchor = paging ? null : { ...st.anchor, route: r0, top: sc.scrollTop };
+          } else if (first) sc.scrollTop = st.top + (paging?.before ? sc.scrollHeight - paging.height : 0);
+        }
+      }, false);
       if (pin) LIVE.anchor = null;
       syncBarLine();
     };
     // And once more two frames later, in case something above changed size after all (as revealTurn does).
-    place(true); requestAnimationFrame(() => requestAnimationFrame(() => { if (rendered === r0 && !viewerEl) place(false); })); // not on a page opened since
+    place(true); const placedTop = scroller().scrollTop;
+    requestAnimationFrame(() => requestAnimationFrame(() => { if (rendered === r0 && !viewerEl && scrollRevision === revision && Math.abs(scroller().scrollTop - placedTop) < 1) place(false); })); // yield to a new scroll or jump
   }
 
   // A session page in place: its turns are drawn again and only those that changed (or are new) replace the ones shown, so
   // the rest keep their nodes and state. The bar's summary line, the title and the sidebar follow. Returns how many entries
   // are new.
   function patchSession(dirty) {
-    disconnectPagerObservers();
+    resetPagerInput(); holdProgrammaticScroll();
     tick(); const s = SESS[route.id], box = $("#page .turns");
     const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .step, .hcard, .thought, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
     const before = keys();
@@ -2922,7 +2974,7 @@
     if (phone.matches) return { top: window.scrollY, height: document.documentElement.scrollHeight, viewport: window.innerHeight, gap: Math.max(0, document.documentElement.scrollHeight - window.innerHeight - window.scrollY) };
     const m = $("#main"); return { top: m.scrollTop, height: m.scrollHeight, viewport: m.clientHeight, gap: Math.max(0, m.scrollHeight - m.clientHeight - m.scrollTop) };
   }
-  function scrollToEnd(behavior = "smooth") { if (phone.matches) window.scrollTo({ top: document.documentElement.scrollHeight, behavior }); else { const m = $("#main"); m.scrollTo({ top: m.scrollHeight, behavior }); } }
+  function scrollToEnd(behavior = "smooth") { scrollProgrammatically(() => { if (phone.matches) window.scrollTo({ top: document.documentElement.scrollHeight, behavior }); else { const m = $("#main"); m.scrollTo({ top: m.scrollHeight, behavior }); } }); }
   // The button is rebuilt only when what it shows changes (hidden or not, and the new-entry count), not on every scroll.
   let jumpKey = "";
   function syncJump() {
@@ -2939,8 +2991,16 @@
   if (!SIDEBAR_ONLY) { window.addEventListener("scroll", syncJump, { passive: true }); $("#main").addEventListener("scroll", syncJump, { passive: true }); }
   const cancelOpeningEndPin = () => { if (openingEndUntil) stopOpeningEndPin(); };
   if (!SIDEBAR_ONLY) { window.addEventListener("wheel", cancelOpeningEndPin, { passive: true }); window.addEventListener("touchmove", cancelOpeningEndPin, { passive: true }); window.addEventListener("pointerdown", cancelOpeningEndPin, { passive: true }); } // a press anywhere, a scrollbar drag included
+  const transcriptInput = (e) => !e.target.closest?.("#sidebar, dialog, input, textarea, select, [contenteditable='true']") && (phone.matches || $("#main").contains(e.target));
+  if (!SIDEBAR_ONLY) {
+    const input = (e) => { if (transcriptInput(e)) readerScrollInput(); };
+    window.addEventListener("wheel", input, { passive: true }); window.addEventListener("touchmove", input, { passive: true });
+    const scroll = () => { if (programmaticScrollPending) holdProgrammaticScroll(); else if (!openingEndUntil) readerScrollInput(); };
+    window.addEventListener("scroll", () => { if (phone.matches) scroll(); }, { passive: true });
+    $("#main").addEventListener("scroll", () => { if (!phone.matches) scroll(); }, { passive: true });
+  }
   if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => {
-    if (!e.defaultPrevented && !e.target.closest?.("input, textarea, select, [contenteditable='true']") && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) cancelOpeningEndPin();
+    if (!e.defaultPrevented && (transcriptInput(e) || e.target === document.body || e.target === document.documentElement) && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) readerScrollInput();
   });
 
   // Every second: each running step's elapsed time and a running row's age.

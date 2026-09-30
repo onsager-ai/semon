@@ -28,8 +28,8 @@ const inView = (page, sel) => page.evaluate((sel) => { const e = document.queryS
 const pager = (page) => page.evaluate(() => [...document.querySelectorAll(".turns > .list > button.more")].map((b) => ({ text: b.textContent, first: b.parentElement === document.querySelector(".turns").firstElementChild, last: b.parentElement === document.querySelector(".turns").lastElementChild })));
 const pagingAnchor = (page) => page.evaluate(() => {
   const top = innerWidth <= 760 ? 0 : document.querySelector("#main").getBoundingClientRect().top;
-  const turn = [...document.querySelectorAll(".turns > .turn[data-turn]")].find((t) => t.getBoundingClientRect().top >= top);
-  return turn ? { id: turn.dataset.turn, top: turn.getBoundingClientRect().top } : null;
+  const entry = [...document.querySelectorAll(".turns [data-e][data-entry-key]:not(.tgroup)")].find((n) => { const rect = n.getBoundingClientRect(); return rect.height && rect.top >= top; });
+  return entry ? { id: entry.dataset.entryKey, top: entry.getBoundingClientRect().top } : null;
 });
 const entryCount = (page) => page.locator(".turns [data-e]").count();
 const scrollTranscript = (page, end = false) => page.evaluate((end) => {
@@ -37,14 +37,15 @@ const scrollTranscript = (page, end = false) => page.evaluate((end) => {
   box.scrollTop = end ? box.scrollHeight : 0;
 }, end);
 
-async function automaticPaging(browser, size, D, r) {
-  const page = await served(browser, { extras: true, size });
-  const requests = [], held = [];
+async function automaticPaging(browser, size, D, r, dark = false) {
+  const page = await served(browser, { extras: true, size, dark });
+  const requests = [], afterRequests = [], held = [], tag = size + (dark ? "-dark" : "-light");
   let next = "hold", holdStarted;
   const waitForHold = () => new Promise((resolve) => { holdStarted = resolve; });
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (url.pathname === "/api/tx" && url.searchParams.get("sid") === "backlog" && url.searchParams.has("before")) requests.push(url.searchParams.get("before"));
+    if (url.pathname === "/api/tx" && url.searchParams.get("sid") === "backlog" && url.searchParams.has("after")) afterRequests.push(url.searchParams.get("after"));
   });
   await page.route("**/api/tx?**", async (route) => {
     const url = new URL(route.request().url());
@@ -73,6 +74,9 @@ async function automaticPaging(browser, size, D, r) {
   await firstHeld;
   const loading = await page.locator("[data-load-earlier]").evaluate((b) => ({ text: b.textContent, spin: !!b.querySelector(".spin"), disabled: b.disabled }));
   r.expect(loading.text === "Loading earlier…" && loading.spin && loading.disabled, size + ": automatic paging shows its disabled loading control");
+  r.expect(await page.locator(".pager-label").getAttribute("aria-live") === "polite", tag + ": the busy label is announced politely");
+  if (size === "phone") r.expect(await page.locator("[data-load-earlier]").evaluate((b) => b.getBoundingClientRect().height) >= 44, tag + ": the pager has a 44px tap height");
+  await page.screenshot({ path: path.join(ENV.out, "extras-auto-paging-busy-" + tag + ".png") });
   // Scroll again while the response is held: anchoring must use this position, rather than the request's starting point.
   await page.evaluate(() => { const box = innerWidth <= 760 ? document.scrollingElement : document.querySelector("#main"); box.scrollTop += 120; });
   const anchor = await pagingAnchor(page);
@@ -84,13 +88,14 @@ async function automaticPaging(browser, size, D, r) {
   next = "fail";
   held.shift()();
   await page.waitForFunction((n) => document.querySelectorAll(".turns [data-e]").length > n, before);
-  const after = anchor && await page.evaluate((id) => document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]')?.getBoundingClientRect().top ?? null, anchor.id);
+  const after = anchor && await page.evaluate((id) => document.querySelector('[data-entry-key="' + CSS.escape(id) + '"]')?.getBoundingClientRect().top ?? null, anchor.id);
   r.expect(after !== null && anchor !== null && Math.abs(after - anchor.top) <= 2, size + ": automatic earlier paging keeps the turn within 2px: " + JSON.stringify({ anchor, after }));
   await scrollTranscript(page);
   await page.waitForFunction(() => document.querySelector("[data-load-earlier]")?.textContent.includes("Retry"));
   const retry = page.locator("[data-load-earlier]");
   r.expect((await retry.textContent()).replace(/\u2009/g, "").replace(/\s+/g, " ") === "Couldn't load earlier entries · Retry", size + ": a failed page offers Retry");
   const failedRequests = requests.slice();
+  await page.screenshot({ path: path.join(ENV.out, "extras-auto-paging-failed-" + tag + ".png") });
   r.expect(new Set(failedRequests).size === failedRequests.length, size + ": each automatic before boundary is requested only once: " + JSON.stringify(failedRequests));
   await page.waitForTimeout(3000);
   r.expect(requests.length === failedRequests.length, size + ": a failed pager makes no automatic retry for 3 seconds");
@@ -114,18 +119,164 @@ async function automaticPaging(browser, size, D, r) {
   next = null; held.shift()();
   await page.waitForFunction((n) => document.querySelectorAll(".turns [data-e]").length > n, keyboardBefore);
 
+  next = "fail";
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector("[data-load-earlier]");
+  await page.mouse.wheel(0, -1); await scrollTranscript(page);
+  await page.waitForFunction(() => document.querySelector("[data-load-earlier]")?.textContent.includes("Retry"));
+  await goto(page, { v: "home" }, D);
+  await goto(page, { v: "session", id: "backlog" }, D);
+  r.expect(await page.locator("[data-load-earlier]").textContent() === "Load earlier", tag + ": leaving the session clears its failed pager state");
+  const revisited = await entryCount(page);
+  await page.locator("[data-load-earlier]").evaluate((b) => b.click());
+  await page.waitForFunction((n) => document.querySelectorAll(".turns [data-e]").length > n, revisited);
+
   // The other margin loads toward the end of a middle page without a click.
   const older = D.turns.filter((t) => t.sid === "backlog")[1];
   await page.goto(ENV.extraBase + "/s/claude/backlog?turn=" + encodeURIComponent(older.id), { waitUntil: "load" });
   await page.waitForSelector(".turns > .turn");
-  await page.waitForTimeout(100); // the deep link places its turn again two frames later
+  const landedRequests = requests.length, landedLater = afterRequests.length;
+  await page.waitForTimeout(2200); // programmatic placement must stay idle even after the opening-pin interval
+  r.expect(requests.length === landedRequests && afterRequests.length === landedLater, tag + ": a deep-link landing makes no automatic before or after request");
+  await page.mouse.move(size === "phone" ? 350 : 1200, 300);
+  await page.mouse.wheel(0, 1);
   await scrollTranscript(page, true);
   await page.waitForFunction(() => document.querySelector(".turns")?.textContent.includes("Backlog triaged: 460 issues read."));
   r.expect(!await page.locator('[data-pager-where="after"]').count(), size + ": scrolling to the end automatically loads the later page");
   r.expect(page.errors.length === 0, size + ": automatic paging page errors: " + page.errors.join(" | "));
-  const result = { range: { from: range.from, to: range.to }, loading, anchor, after, failedRequests, requests };
+  const result = { range: { from: range.from, to: range.to }, loading, anchor, after, failedRequests, requests, afterRequests };
   await page.context().close();
   return result;
+}
+
+async function pagingBoundaryCheck(browser, size, D, r) {
+  const page = await served(browser, { extras: true, size }), turn = D.turns.find((t) => t.sid === "backlog").id;
+  const tool = (slot) => ({ k: "tool", slot, name: "Read", arg: "retained tool " + slot, in: "read file " + slot, out: "Retained output " + slot, ok: true, secs: 1 });
+  const message = (slot) => ({ k: "a", slot, text: "Boundary entry " + slot + ".\n\n" + "This paragraph keeps enough room to scroll while paging.\n\n".repeat(4) });
+  let release, started;
+  const held = new Promise((resolve) => { started = resolve; });
+  await page.route("**/api/tx?**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("sid") !== "backlog") return route.fallback();
+    const before = url.searchParams.has("before");
+    if (before) await new Promise((resolve) => { release = resolve; started(); });
+    const entries = before ? [...Array.from({ length: 8 }, (_, slot) => message(slot)), tool(8), tool(9)] : [tool(10), tool(11), ...Array.from({ length: 8 }, (_, i) => message(i + 12))];
+    entries[0].turn = turn; // both pages continue the same turn, including the boundary between slots 9 and 10
+    return route.fulfill({ json: { sid: "backlog", from: before ? 0 : 10, to: before ? 10 : 20, total: 20, calls: 4, errors: 0, entries } });
+  });
+  await page.goto(ENV.extraBase + "/s/claude/backlog", { waitUntil: "load" });
+  await page.waitForSelector(".tgroup");
+  await page.mouse.move(size === "phone" ? 350 : 1200, 300); await page.mouse.wheel(0, -1);
+  await scrollTranscript(page); await held;
+  await page.evaluate(() => {
+    document.querySelector(".tsum").click();
+    document.querySelector('.step[data-entry-key="backlog#slot:10"] > button').click();
+  });
+  await scrollTranscript(page);
+  const anchor = await pagingAnchor(page);
+  const oldKey = await page.locator('[data-entry-key="backlog#slot:10"]').getAttribute("data-e");
+  r.expect(anchor?.id === "backlog#slot:10", size + ": the boundary check anchors the first entry in the continuing turn");
+  release();
+  await page.waitForFunction(() => document.querySelector(".turns")?.textContent.includes("Boundary entry 0."));
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const after = await page.locator('[data-entry-key="backlog#slot:10"]').evaluate((n) => ({ top: n.getBoundingClientRect().top, key: n.dataset.e, group: n.closest(".tgroup")?.querySelector(".tsum")?.getAttribute("aria-expanded"), step: n.querySelector(":scope > button")?.getAttribute("aria-expanded"), output: !n.querySelector(":scope > .out")?.hidden }));
+  r.expect(after.key !== oldKey, size + ": loading the older prefix changes the entry's turn-relative key");
+  r.expect(anchor !== null && Math.abs(after.top - anchor.top) <= 2, size + ": a mid-turn page boundary keeps the anchored entry within 2px: " + JSON.stringify({ anchor, after }));
+  r.expect(after.group === "true" && after.step === "true" && after.output, size + ": paging keeps the merged group and its open step/output");
+  r.expect(page.errors.length === 0, size + ": boundary paging page errors: " + page.errors.join(" | "));
+  await page.context().close();
+  return { anchor, after, oldKey };
+}
+
+async function pagingChainCheck(browser, size, D, r) {
+  const page = await served(browser, { extras: true, size }), turn = D.turns.find((t) => t.sid === "backlog").id, requests = [];
+  await page.route("**/api/tx?**", (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("sid") !== "backlog") return route.fallback();
+    const before = url.searchParams.get("before"), from = before === null ? 20 : Number(before) - 1;
+    if (before !== null) requests.push(Number(before));
+    return route.fulfill({ json: { sid: "backlog", from, to: before === null ? 21 : Number(before), total: 21, calls: 0, errors: 0, entries: [{ k: "a", slot: from, turn, text: "Short page " + from }] } });
+  });
+  await page.goto(ENV.extraBase + "/s/claude/backlog", { waitUntil: "load" });
+  await page.waitForSelector("[data-load-earlier]");
+  await page.waitForTimeout(2200);
+  r.expect(requests.length === 0, size + ": the opening pin ending does not arm paging on a short page");
+  await page.mouse.move(size === "phone" ? 350 : 1200, 300); await page.mouse.wheel(0, -1);
+  await page.waitForFunction(() => document.querySelector(".turns")?.textContent.includes("Short page 17"));
+  await page.waitForTimeout(500);
+  r.expect(requests.length === 3, size + ": a short-page chain stops after three automatic loads: " + JSON.stringify(requests));
+  r.expect(new Set(requests).size === requests.length, size + ": a short-page chain has no duplicate boundary requests");
+  await page.locator("[data-load-earlier]").evaluate((b) => b.click());
+  await page.waitForFunction(() => document.querySelector(".turns")?.textContent.includes("Short page 16"));
+  await page.waitForTimeout(250);
+  r.expect(requests.length === 4, size + ": the button still works after the automatic chain limit");
+  // The scroller's unguarded scroll event represents a scrollbar drag and arms a new chain.
+  await scrollTranscript(page);
+  await page.waitForFunction(() => document.querySelector(".turns")?.textContent.includes("Short page 13"));
+  await page.waitForTimeout(500);
+  r.expect(requests.length === 7, size + ": a new reader scroll arms another three-page chain");
+
+  // Find and narrowed transcript filters keep their fallback button while automatic paging is off.
+  if (size === "phone") { await page.click("#more-btn"); await page.locator(".menu [role=menuitem]").filter({ hasText: "Find in transcript" }).click(); }
+  else await page.click('.topbar [aria-label="Find in transcript"]');
+  const beforeFind = requests.length;
+  await page.mouse.wheel(0, -1); await scrollTranscript(page); await page.waitForTimeout(250);
+  r.expect(requests.length === beforeFind, size + ": find-in-transcript suppresses automatic paging");
+  await page.locator("[data-load-earlier]").evaluate((b) => b.click());
+  await page.waitForFunction(() => document.querySelector(".turns")?.textContent.includes("Short page 12"));
+  r.expect(requests.length === beforeFind + 1, size + ": the pager button works while find is active");
+  await page.click('.topbar [aria-label="Close search"]');
+  if (size === "phone") { await page.click("#more-btn"); await page.locator(".menu [role=menuitem]").filter({ hasText: "Filter transcript" }).click(); }
+  else await page.click("#filter-btn");
+  await page.locator("#f-tools").uncheck();
+  const beforeFilter = requests.length;
+  await page.mouse.wheel(0, -1); await scrollTranscript(page); await page.waitForTimeout(250);
+  r.expect(requests.length === beforeFilter, size + ": a narrowed tools filter suppresses automatic paging");
+  await page.locator("[data-load-earlier]").evaluate((b) => b.click());
+  await page.waitForFunction(() => document.querySelector(".turns")?.textContent.includes("Short page 11"));
+  r.expect(requests.length === beforeFilter + 1, size + ": the pager button works with narrowed filters");
+  r.expect(page.errors.length === 0, size + ": chained paging page errors: " + page.errors.join(" | "));
+  await page.context().close();
+  return { requests };
+}
+
+async function stalePagingCheck(browser, size, D, r) {
+  const page = await served(browser, { extras: true, size }), turn = D.turns.find((t) => t.sid === "backlog").id;
+  await page.route("**/api/model", (route) => route.fulfill({ json: { ...D.model, sessions: { ...D.model.sessions, backlog: { ...D.model.sessions.backlog, errors: 1 } } } }));
+  let release, started, requests = 0;
+  const held = new Promise((resolve) => { started = resolve; });
+  await page.route("**/api/tx?**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("sid") !== "backlog") return route.fallback();
+    if (url.searchParams.has("errors")) return route.fulfill({ json: { errors: 1, slots: [1], version: "paging-check" } });
+    const before = url.searchParams.has("before");
+    let stale = false;
+    if (before) { requests++; stale = requests === 1; if (stale) await new Promise((resolve) => { release = resolve; started(); }); }
+    const entries = Array.from({ length: 10 }, (_, i) => {
+      const slot = i + (before ? 0 : 10);
+      return slot === 1 && !stale ? { k: "tool", slot, name: "Read", arg: "boundary failure", in: "read missing", out: "Missing file", ok: false, secs: 1 } : { k: "a", slot, text: (stale ? "Stale response " : "Current range ") + slot };
+    });
+    entries[0].turn = turn;
+    return route.fulfill({ json: { sid: "backlog", from: before ? 0 : 10, to: before ? 10 : 20, total: 20, calls: 1, errors: 1, entries } });
+  });
+  await page.goto(ENV.extraBase + "/s/claude/backlog", { waitUntil: "load" });
+  await page.waitForSelector("[data-load-earlier]");
+  await page.mouse.move(size === "phone" ? 350 : 1200, 300); await page.mouse.wheel(0, -1);
+  await scrollTranscript(page); await held;
+  // Errors mode extends this same range from 10 to 0 while the first before=10 request is still waiting.
+  await page.locator("#topbar .errs").evaluate((b) => b.click());
+  await page.waitForSelector(".step.err-current");
+  const acceptedEntries = await entryCount(page);
+  r.expect(requests === 2, size + ": the error jump requested its page while automatic paging was held");
+  const response = page.waitForResponse((response) => new URL(response.url()).searchParams.has("before"));
+  release(); await response;
+  await page.waitForTimeout(250);
+  const discarded = await page.evaluate(() => !document.querySelector(".turns").textContent.includes("Stale response"));
+  r.expect(discarded && await entryCount(page) === acceptedEntries, size + ": a late before response is discarded after the boundary moved");
+  r.expect(requests === 2, size + ": the error jump does not arm another automatic request");
+  r.expect(page.errors.length === 0, size + ": stale paging page errors: " + page.errors.join(" | "));
+  await page.context().close();
+  return { requests, acceptedEntries, discarded };
 }
 
 export default async function (browser) {
@@ -231,7 +382,13 @@ export default async function (browser) {
 
   // ---- Paging -------------------------------------------------------------------------------------------------------
   R.automaticPaging = {};
-  for (const size of ["phone", "desktop"]) R.automaticPaging[size] = await automaticPaging(browser, size, D, r);
+  for (const size of ["phone", "desktop"]) for (const dark of [false, true]) R.automaticPaging[size + (dark ? "-dark" : "-light")] = await automaticPaging(browser, size, D, r, dark);
+  R.pagingBoundaries = {}; R.pagingChains = {}; R.stalePaging = {};
+  for (const size of ["phone", "desktop"]) {
+    R.pagingBoundaries[size] = await pagingBoundaryCheck(browser, size, D, r);
+    R.pagingChains[size] = await pagingChainCheck(browser, size, D, r);
+    R.stalePaging[size] = await stalePagingCheck(browser, size, D, r);
+  }
   {
     const page = await served(browser, { extras: true, path: "/s/claude/backlog" });
     // Keep the original fallback-control assertions deterministic in a browser without IntersectionObserver.
@@ -246,13 +403,13 @@ export default async function (browser) {
     r.expect(!P.open.started, "no Started divider on a page that doesn't start the transcript");
     r.expect(P.open.turns > 0 && P.open.turns < 10, "the last page holds some of the turns: " + P.open.turns);
     for (let k = 0; k < 5 && (await pager(page)).some((b) => b.text === "Load earlier"); k++) {
-      // Bring the button into view first (the click would scroll to it), then note the first turn below the scroller edge.
+      // Bring the button into view first (the click would scroll to it), then note the first entry below the scroller edge.
       await page.locator(".turns > .list > button.more").scrollIntoViewIfNeeded(); await page.waitForTimeout(80);
       const anchor = await pagingAnchor(page);
       const before = await count();
       await page.click(".turns > .list > button.more"); await page.waitForFunction((n) => document.querySelectorAll(".turns > .turn").length > n || ![...document.querySelectorAll(".turns > .list > button.more")].some((b) => b.textContent === "Load earlier"), before.turns);
       await page.waitForTimeout(100);
-      const after = await page.evaluate((id) => document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]')?.getBoundingClientRect().top ?? null, anchor.id);
+      const after = await page.evaluate((id) => document.querySelector('[data-entry-key="' + CSS.escape(id) + '"]')?.getBoundingClientRect().top ?? null, anchor.id);
       P.clicks.push({ before: before.turns, after: (await count()).turns, anchorMoved: after == null ? null : Math.round(after - anchor.top) });
     }
     P.done = { ...(await count()), pager: await pager(page) };
