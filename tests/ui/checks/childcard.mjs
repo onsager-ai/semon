@@ -114,6 +114,16 @@ export default async function childcard(browser) {
   if (fixture) {
     for (const [size, suffix] of [["phone", "390-light"], ["desktop", "1280-light"]]) {
       const page = await served(browser, { size, dark: false });
+      const parentTurn = D.turns.find((t) => t.sid === fixture.parent && t.sent.includes(fixture.spawn));
+      await page.route((url) => url.pathname === "/api/tx" && url.searchParams.get("sid") === fixture.parent && !url.searchParams.has("turn") && !url.searchParams.has("before") && !url.searchParams.has("after"), async (route) => {
+        const response = await route.fetch(); if (response.status() !== 200 || !parentTurn) return route.fulfill({ response });
+        const body = await response.json(), at = body.entries.findIndex((e) => e.k === "h" && e.id === fixture.spawn);
+        if (at >= 0) {
+          const filler = Array.from({ length: 5 }, (_, i) => ({ k: "a", text: "The parent has its own activity before this child card, while the child's page is still loading. " + (i + 1), turn: parentTurn.id }));
+          body.entries.splice(at, 0, ...filler); body.to += filler.length; body.total += filler.length;
+        }
+        await route.fulfill({ response, json: body });
+      });
       let release;
       const gate = new Promise((resolve) => { release = resolve; });
       let requested;
@@ -152,11 +162,14 @@ export default async function childcard(browser) {
     const deep = await served(browser, { size: "desktop", dark: true });
     const parentTurns = D.turns.filter((t) => t.sid === fixture.parent), deepAt = Math.max(0, ...parentTurns.map((t) => t.at ?? 0)) + 1;
     const laterTurn = { id: fixture.deepTurn, sid: fixture.parent, at: deepAt, start: null, u: true, text: "A later parent turn", sent: [], end: null };
-    await deep.route((url) => url.pathname === "/api/model", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...D.model, turns: [...D.turns, laterTurn] }) }));
+    const followingTurn = { id: "paintfirst-following-parent-turn", sid: fixture.parent, at: deepAt + 1, start: null, u: true, text: "A following parent turn", sent: [], end: null };
+    await deep.route((url) => url.pathname === "/api/model", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...D.model, turns: [...D.turns, laterTurn, followingTurn] }) }));
     await deep.route((url) => url.pathname === "/api/tx" && url.searchParams.get("sid") === fixture.parent && !url.searchParams.has("turn") && !url.searchParams.has("before") && !url.searchParams.has("after"), async (route) => {
       const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response });
       const body = await response.json();
-      body.entries.push({ k: "a", text: "Later parent turn", turn: fixture.deepTurn }); body.to += 1; body.total += 1;
+      body.entries.push({ k: "a", text: "Later parent turn", turn: fixture.deepTurn });
+      for (let i = 0; i < 30; i++) body.entries.push({ k: "a", text: "Follow-up parent activity leaves room to keep the linked turn at the top of the reader.", turn: followingTurn.id });
+      body.to += 31; body.total += 31;
       await route.fulfill({ response, json: body });
     });
     let releaseDeep;

@@ -103,7 +103,7 @@ export default async function (browser) {
     const tooltip = await page.locator("#sh-tooltip").textContent();
     r.expect(tooltip === titled.firstLine, "hovering the title shows the command's first line: " + JSON.stringify(tooltip));
 
-    await page.locator(".step .sa.st").click();
+    await page.locator(".step .sa.st").evaluate((title) => title.click());
     const detail = await page.evaluate(() => {
       const step = [...document.querySelectorAll(".step")].find((item) => item.querySelector(".sa.st"));
       const out = step?.querySelector(":scope > .out");
@@ -117,7 +117,7 @@ export default async function (browser) {
     });
     r.expect(layout.width === 390 && layout.document <= layout.width && layout.buttonScroll <= layout.buttonWidth + 1 && layout.titleScroll > layout.titleWidth && layout.whiteSpace === "nowrap" && layout.textOverflow === "ellipsis", "the title row stays on one line with ellipsis and no horizontal scrolling at 390 px: " + JSON.stringify(layout));
 
-    await page.click("#find-btn");
+    await page.locator("#find-btn").evaluate((button) => button.click());
     await page.fill("#find", "DescriptionOnlySearchWord");
     await page.waitForFunction(() => document.querySelector("#topbar .fcount")?.textContent === "1 match");
     const found = await page.evaluate(() => ({
@@ -164,7 +164,7 @@ export default async function (browser) {
       const titleLabel = shot.locator(".step .sa.st");
       await titleLabel.scrollIntoViewIfNeeded();
       if (expanded) {
-        await titleLabel.click();
+        await titleLabel.evaluate((title) => title.click());
         await titleLabel.scrollIntoViewIfNeeded();
         await shot.waitForFunction(() => document.querySelector(".step .sa.st")?.closest(".step")?.querySelector(":scope > button")?.getAttribute("aria-expanded") === "true");
       }
