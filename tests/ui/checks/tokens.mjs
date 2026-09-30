@@ -6,6 +6,7 @@
 // letter or digit (a separator such as "·" or "›") is a rule, not words, and isn't measured. Disabled controls and text that is
 // not drawn (hidden, closed drawer, under 2 px) are skipped.
 import { served, data, reporter, goto } from "../lib.mjs";
+import path from "node:path";
 
 const audit = (page) => page.evaluate(() => {
   const canvas = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
@@ -44,18 +45,56 @@ const audit = (page) => page.evaluate(() => {
   return { texts, small: small.slice(0, 12), smallCount: small.length, low: low.slice(0, 12), lowCount: low.length };
 });
 
+const tokenColors = (page) => page.evaluate(() => {
+  const probe = document.createElement("span");
+  probe.style.position = "fixed"; probe.style.visibility = "hidden";
+  document.body.append(probe);
+  probe.style.color = "var(--ink)"; const ink = getComputedStyle(probe).color;
+  probe.style.color = "var(--accent)"; const accent = getComputedStyle(probe).color;
+  probe.remove();
+  return { ink, accent };
+});
+
+const styledText = (page, selector) => page.evaluate((sel) => {
+  const el = document.querySelector(sel); if (!el) return null;
+  const style = getComputedStyle(el);
+  return { color: style.color, weight: Number(style.fontWeight), text: el.textContent.trim() };
+}, selector);
+
+const legacyHues = (page) => page.evaluate(() => {
+  const old = new Set(["rgb(59, 77, 191)", "rgb(152, 164, 243)"]), hits = [];
+  for (const el of document.querySelectorAll("*")) {
+    const style = getComputedStyle(el), values = [style.color, style.backgroundColor, style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor];
+    if (values.some((value) => old.has(value))) hits.push({ tag: el.tagName.toLowerCase(), className: typeof el.className === "string" ? el.className : "", values: values.filter((value) => old.has(value)) });
+    if (hits.length === 8) break;
+  }
+  return hits;
+});
+
 export default async function tokensCheck(browser) {
   const D = await data(), r = reporter("tokens"), results = {};
   const harbor = D.SESS.harbor ? "harbor" : Object.keys(D.SESS)[0];
   const parent = Object.values(D.SESS).find((s) => Object.values(D.SESS).filter((c) => c.parent === s.id).length >= 5)?.id ?? harbor;
+  const originFor = (sid) => D.H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === sid && h.from !== sid &&
+    (h.kind === "spawn" || D.SESS[sid]?.kind === "Relayed" || !D.SESS[sid]?.lane));
+  const briefSessions = [...new Set(D.H.filter((h) => (h.kind === "spawn" || h.kind === "relay") && h.to && h.brief).sort((a, b) => b.brief.length - a.brief.length).map((h) => h.to))];
+  const headerSession = Object.keys(D.TX).find((sid) => D.TX[sid].some((entry) => {
+    const h = entry.k === "h" ? D.H.find((item) => item.id === entry.id) : null;
+    return h && h.to === sid && (h.kind === "spawn" || h.kind === "relay") && h.id !== originFor(sid)?.id;
+  }));
+  r.expect(!!headerSession, "the fixture needs a received turn header with a .turn-h .from control");
   const turn = D.turns.find((t) => t.sent.length);
   const screens = [
     ["home", { v: "home" }], ["sessions", { v: "sessions" }], ["analytics", { v: "analytics" }], ["machines", { v: "machines" }],
     ["session-" + harbor, { v: "session", id: harbor }], ["session-" + parent, { v: "session", id: parent }],
+    ...(headerSession ? [["inkaccent-header", { v: "session", id: headerSession }]] : []),
     ...(turn ? [["trace", { v: "trace", sid: turn.sid, turn: turn.id }]] : []),
   ];
   for (const [size, dark] of [["phone", false], ["phone", true], ["desktop", false], ["desktop", true]]) {
+    const width = size === "phone" ? 390 : 1280, scheme = dark ? "dark" : "light";
     const tag = size + (dark ? "-dark" : "-light"), rec = (results[tag] = {}), page = await served(browser, { size, dark });
+    const tokens = await tokenColors(page);
+    r.expect(tokens.accent === tokens.ink, tag + ": --accent does not compute to --ink: " + JSON.stringify(tokens));
     const judge = (where, a) => {
       rec[where] = { texts: a.texts, small: a.smallCount, low: a.lowCount };
       r.expect(a.texts > 5, tag + " " + where + ": only " + a.texts + " texts were measured");
@@ -66,6 +105,42 @@ export default async function tokensCheck(browser) {
       await goto(page, route, D);
       await page.waitForTimeout(150);
       judge(name, await audit(page));
+      if (route.v === "home" || route.v === "analytics" || route.v === "session") {
+        const hits = await legacyHues(page);
+        r.expect(hits.length === 0, tag + " " + name + ": legacy accent colors remain in computed color, background, or border: " + JSON.stringify(hits));
+      }
+      if (name === "home") {
+        rec.homeUnreadDots = await page.locator(".ib .unread-dot").count();
+        await page.screenshot({ path: path.join(ENV.out, "inkaccent-" + width + "-" + scheme + "-home.png"), fullPage: true });
+      }
+      if (name === "inkaccent-header") {
+        const from = await styledText(page, ".turn-h .from");
+        r.expect(!!from && from.color === tokens.ink && from.weight >= 500, tag + ": .turn-h .from is missing, not ink, or below weight 500: " + JSON.stringify(from));
+      }
+    }
+    let brief = null, briefSid = null;
+    for (const sid of briefSessions) {
+      await goto(page, { v: "session", id: sid }, D);
+      await page.waitForTimeout(120);
+      const facts = await page.evaluate(() => {
+        const crumb = document.querySelector(".topbar .crumb"), more = document.querySelector(".child-intro .more"), open = document.querySelector(".child-intro .intro-open");
+        const drawn = (el) => !!el && !el.hidden && el.getClientRects().length > 0;
+        return { crumb: !!crumb, more: drawn(more), moreText: more?.textContent.trim() ?? null, open: drawn(open), openText: open?.textContent.trim() ?? null };
+      });
+      if (facts.crumb && facts.more && facts.moreText === "Show more" && facts.open && facts.openText.startsWith("Open in ")) { brief = facts; briefSid = sid; break; }
+    }
+    r.expect(!!brief, tag + ": no received brief card has a visible Show more, Open in, and breadcrumb: " + JSON.stringify({ briefSid, brief }));
+    if (brief) {
+      const crumb = await styledText(page, ".topbar .crumb"), more = await styledText(page, ".child-intro .more");
+      r.expect(crumb.color === tokens.ink && crumb.weight >= 500, tag + ": breadcrumb is not ink at weight 500: " + JSON.stringify(crumb));
+      r.expect(more.color === tokens.ink && more.weight >= 500, tag + ": handoff Show more is not ink at weight 500: " + JSON.stringify(more));
+      rec.briefSession = briefSid;
+      await page.screenshot({ path: path.join(ENV.out, "inkaccent-" + width + "-" + scheme + "-session.png"), fullPage: true });
+      if (size === "desktop") {
+        await page.locator(".child-intro .more").hover();
+        const hover = await page.locator(".child-intro .more").evaluate((el) => { const style = getComputedStyle(el); return { line: style.textDecorationLine, offset: style.textUnderlineOffset }; });
+        r.expect(hover.line.includes("underline") && hover.offset === "3px", tag + ": Show more is not underlined on hover: " + JSON.stringify(hover));
+      }
     }
     // The phone's navigation drawer is closed everywhere else; open it on Home. On desktop the sidebar is drawn beside every screen.
     if (size === "phone") { await goto(page, { v: "home" }, D); await page.click("#lead-btn"); await page.waitForTimeout(320); judge("drawer", await audit(page)); }
