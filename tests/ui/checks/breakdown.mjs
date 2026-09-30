@@ -51,13 +51,21 @@ async function open(browser, D, { size, dark = false }) {
   await page.click('#topbar .analytics-range button:has-text("24 h")');
   await drawn(page, "range=24h");
   await page.waitForFunction(() => document.querySelectorAll('.analytics-row[data-breakdown="repo"]').length === 24);
+  // A redraw (a poll's answer) puts the page back at the top; let the page's first few asks settle before scrolling.
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForTimeout(2000);
   return page;
 }
 
 // Scrolls the nth row of a breakdown group to the top of the screen, so the list fills the view under whatever is pinned.
+// Asked again while the row is not at the top, in case a redraw moved the page back.
 const scrollToRow = async (page, group, n) => {
-  await page.evaluate(([g, i]) => document.querySelectorAll('.analytics-row[data-breakdown="' + g + '"]')[i].scrollIntoView({ block: "start" }), [group, n]);
-  await page.waitForTimeout(150);
+  for (let tries = 0; tries < 4; tries++) {
+    await page.evaluate(([g, i]) => document.querySelectorAll('.analytics-row[data-breakdown="' + g + '"]')[i].scrollIntoView({ block: "start" }), [group, n]);
+    await page.waitForTimeout(250);
+    const at = await page.evaluate(([g, i]) => document.querySelectorAll('.analytics-row[data-breakdown="' + g + '"]')[i].getBoundingClientRect().top, [group, n]);
+    if (Math.abs(at) < 3) return;
+  }
 };
 
 // Where the bar, the control strip and each group heading are, and whether each is what a tap at its middle would reach.
@@ -67,7 +75,7 @@ const probe = (page) => page.evaluate(() => {
   const bar = document.querySelector("#topbar"), toggle = document.querySelector(".analytics-measure"), strip = toggle.closest(".analytics-bd-bar") ?? toggle, sb = box(strip), tb = box(toggle);
   const opaque = (n) => { const m = /rgba?\(([^)]+)\)/.exec(getComputedStyle(n).backgroundColor); if (!m) return false; const p = m[1].split(/[ ,/]+/).filter(Boolean).map(Number); return (p[3] ?? 1) === 1; };
   return {
-    bar: box(bar), strip: sb, stripPosition: getComputedStyle(strip).position, stripOpaque: opaque(strip), toggle: tb,
+    scroll: document.scrollingElement.scrollTop + document.querySelector("#main").scrollTop, bar: box(bar), strip: sb, stripPosition: getComputedStyle(strip).position, stripOpaque: opaque(strip), toggle: tb,
     stripTopmost: reaches(strip, sb.left + 2, sb.top + 2), toggleTopmost: reaches(toggle, (tb.left + tb.right) / 2, (tb.top + tb.bottom) / 2),
     headings: [...document.querySelectorAll(".analytics-breakdowns .analytics-panel h3")].map((h) => { const b = box(h); return { text: h.textContent, ...b, position: getComputedStyle(h).position, opaque: opaque(h), topmost: reaches(h, b.left + 8, (b.top + b.bottom) / 2) }; }),
   };
@@ -122,9 +130,9 @@ export default async function breakdownCheck(browser) {
     const fit = res.fit = await page.evaluate(() => {
       const vw = document.documentElement.clientWidth, text = (n) => { const q = document.createRange(); q.selectNodeContents(n); const b = q.getBoundingClientRect(); return { left: b.left, right: b.right }; };
       const rows = [...document.querySelectorAll(".analytics-breakdowns .analytics-row")];
-      return { vw, rows: rows.map((row) => { const box = row.getBoundingClientRect(), track = row.querySelector(".row-track").getBoundingClientRect(); return { title: row.querySelector(".row-title").textContent, right: box.right, track: track.width, figures: ["row-count", "row-hours", "row-cost"].map((c) => ({ c, ...text(row.querySelector("." + c)), align: getComputedStyle(row.querySelector("." + c)).textAlign, nums: getComputedStyle(row.querySelector("." + c)).fontVariantNumeric })) }; }) };
+      return { vw, rows: rows.map((row) => { const box = row.getBoundingClientRect(), track = row.querySelector(".row-track").getBoundingClientRect(); return { group: row.dataset.breakdown, title: row.querySelector(".row-title").textContent, right: box.right, track: track.width, figures: ["row-count", "row-hours", "row-cost"].map((c) => ({ c, ...text(row.querySelector("." + c)), align: getComputedStyle(row.querySelector("." + c)).textAlign, nums: getComputedStyle(row.querySelector("." + c)).fontVariantNumeric })) }; }) };
     });
-    r.expect(fit.rows.length === 24, mode + ": expected 24 repo rows in the fake answer: " + fit.rows.length);
+    r.expect(fit.rows.filter((row) => row.group === "repo").length === 24, mode + ": expected 24 repo rows in the fake answer: " + fit.rows.length);
     for (const row of fit.rows) {
       for (const f of row.figures) {
         r.expect(f.right <= Math.min(row.right, fit.vw - 16) + 0.5, mode + ": '" + row.title + "' " + f.c + " runs past the row or the 16px gutter (right " + f.right + ", row " + row.right + ", limit " + (fit.vw - 16) + ")");
@@ -132,8 +140,10 @@ export default async function breakdownCheck(browser) {
       }
       r.expect(row.track >= 40, mode + ": '" + row.title + "' bar is " + row.track + "px wide, want at least 40");
     }
-    const rights = (c) => fit.rows.map((row) => row.figures.find((f) => f.c === c).right);
-    for (const c of ["row-hours", "row-cost"]) r.expect(Math.max(...rights(c)) - Math.min(...rights(c)) <= 1, mode + ": the " + c + " figures don't line up down the list: " + JSON.stringify(rights(c)));
+    for (const group of ["repo", "machine", "harness"]) {
+      const rights = (c) => fit.rows.filter((row) => row.group === group).map((row) => row.figures.find((f) => f.c === c).right);
+      for (const c of ["row-hours", "row-cost"]) r.expect(Math.max(...rights(c)) - Math.min(...rights(c)) <= 1, mode + ": the " + group + " " + c + " figures don't line up down the list: " + JSON.stringify(rights(c)));
+    }
     if (stacked) r.expect(await overflow(page) === 0, mode + ": the page scrolls sideways or something is drawn past the edge");
 
     // The top-session lists: a bar per row scaled to the list's largest value (within 2 %), in its harness's colour; figures inside the gutter; each row a link to its session.
@@ -169,10 +179,13 @@ export default async function breakdownCheck(browser) {
       await page.screenshot({ path: path.join(shots, "breakdown-1280-light-top-sessions.png") });
     }
     // A tap on a row opens its session (the link is still handled in the page).
-    await page.locator(".analytics-split .analytics-session.ranked").first().click();
-    await page.waitForFunction(() => history.state?.v === "session");
+    const first = page.locator(".analytics-split .analytics-session.ranked").first();
+    if (await first.count()) {
+      await first.click();
+      await page.waitForFunction(() => history.state?.v === "session", null, { timeout: 3000 }).catch(() => {});
+    }
     res.opened = await page.evaluate(() => ({ path: location.pathname, state: history.state?.v }));
-    r.expect(/^\/s\//.test(res.opened.path), mode + ": a top-session row did not open its session: " + JSON.stringify(res.opened));
+    r.expect(/^\/s\//.test(res.opened.path) && res.opened.state === "session", mode + ": a top-session row did not open its session: " + JSON.stringify(res.opened));
     errors.push(...page.errors);
     await page.context().close();
   }

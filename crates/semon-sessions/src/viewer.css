@@ -865,7 +865,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .analytics-row, .analytics-session.ranked { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; width: 100%; min-width: 0; min-height: 48px; align-content: center; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 7px 0; color: inherit; text-align: left; text-decoration: none; }
 .analytics-row { grid-template-columns: minmax(0, 1fr) auto auto; }
 .analytics-row .row-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: var(--fs-sm); }
-.analytics-row .row-count { grid-column: 2 / 4; color: var(--muted); font: var(--fs-cap) var(--mono); white-space: nowrap; text-align: right; }
+.analytics-row .row-count { grid-column: 2 / 4; color: var(--muted); font: var(--fs-cap) var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
 .row-track { grid-column: 1; height: 4px; overflow: hidden; border-radius: 3px; background: var(--sunken); }
 .row-bar { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: var(--accent); }
 .analytics-row .row-hours, .analytics-row .row-cost, .analytics-session.ranked .session-value { grid-row: 2; align-self: center; color: var(--muted); font: var(--fs-cap) var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
