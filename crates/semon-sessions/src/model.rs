@@ -91,6 +91,12 @@ pub(crate) struct Session {
     pub(crate) calls: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) errors: Option<usize>,
+    /// The transcript's tool calls by tool name, counted from the same
+    /// slots as `calls` (so the counts add up to it): at most
+    /// [`TOOL_KINDS_MAX`] names, the rest in one `other` bucket, each name at
+    /// most [`TOOL_NAME_MAX`] characters. Absent when there are none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) tool_calls: BTreeMap<String, usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1387,6 +1393,7 @@ impl<'a> Builder<'a> {
             busy: Vec::new(),
             calls: None,
             errors: None,
+            tool_calls: BTreeMap::new(),
         }
     }
 
@@ -3743,6 +3750,60 @@ impl Slot {
             _ => None,
         }
     }
+
+    /// The tool a call slot is a call of, for counting calls by tool: a
+    /// Claude call's name; a Codex command, poll or file change by the tool
+    /// that ran it. `Some` exactly when [`Slot::failed_call`] is.
+    pub(crate) fn call_name(&self) -> Option<&str> {
+        match &self.kind {
+            SlotKind::Tool { name, .. } => Some(name),
+            SlotKind::Yielded { .. } => Some("exec_command"),
+            SlotKind::Sent { .. } => Some("write_stdin"),
+            SlotKind::Operation { kind, .. } => Some(if kind == "CommandExecution" {
+                "exec_command"
+            } else {
+                "apply_patch"
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// The most tool names a session's `tool_calls` keeps; the calls of the rest
+/// are counted together under [`TOOL_OTHER`].
+pub(crate) const TOOL_KINDS_MAX: usize = 12;
+/// The longest tool name `tool_calls` keeps, in characters.
+pub(crate) const TOOL_NAME_MAX: usize = 64;
+/// The bucket for the calls of the tools past [`TOOL_KINDS_MAX`].
+pub(crate) const TOOL_OTHER: &str = "other";
+
+/// A tool name fit to keep: at most [`TOOL_NAME_MAX`] characters. A longer
+/// name (an MCP tool's) is cut and ends in `#` and a hash of the whole name,
+/// so two names that share a long prefix stay different.
+pub(crate) fn tool_label(name: &str) -> String {
+    if name.chars().count() <= TOOL_NAME_MAX {
+        return name.to_owned();
+    }
+    // 8 hex digits and the `#` make up the last 9 characters.
+    let head: String = name.chars().take(TOOL_NAME_MAX - 9).collect();
+    format!("{head}#{}", events::short_hash(name))
+}
+
+/// The calls by tool, bounded: the [`TOOL_KINDS_MAX`] tools with the most
+/// calls (ties by name) and the rest added up under [`TOOL_OTHER`], so the
+/// counts still add up to the calls.
+pub(crate) fn capped_tool_counts(counts: BTreeMap<String, usize>) -> BTreeMap<String, usize> {
+    if counts.len() <= TOOL_KINDS_MAX {
+        return counts;
+    }
+    let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let rest = ranked.split_off(TOOL_KINDS_MAX);
+    let mut kept: BTreeMap<String, usize> = ranked.into_iter().collect();
+    for (_, calls) in rest {
+        *kept.entry(TOOL_OTHER.to_owned()).or_default() += calls;
+    }
+    kept
 }
 
 /// A session's transcript index and its totals.
@@ -3752,20 +3813,32 @@ pub(crate) struct Transcript {
     /// Tool calls, and those that failed or never finished.
     pub(crate) calls: usize,
     pub(crate) errors: usize,
+    /// The calls by tool name, bounded (see [`capped_tool_counts`]); they add
+    /// up to `calls`.
+    pub(crate) tools: BTreeMap<String, usize>,
 }
 
 impl Transcript {
     fn from_slots(slots: Vec<Slot>) -> Self {
         let mut calls = 0;
         let mut errors = 0;
-        for failed in slots.iter().filter_map(Slot::failed_call) {
+        let mut tools = BTreeMap::<String, usize>::new();
+        for slot in &slots {
+            let Some(failed) = slot.failed_call() else {
+                continue;
+            };
             calls += 1;
             errors += usize::from(failed);
+            *tools
+                .entry(tool_label(slot.call_name().unwrap_or("tool")))
+                .or_default() += 1;
         }
+        let tools = capped_tool_counts(tools);
         Self {
             slots,
             calls,
             errors,
+            tools,
         }
     }
 }
@@ -4370,6 +4443,7 @@ pub(crate) fn build(
         if let Some(transcript) = tx.get(key) {
             session.calls = Some(transcript.calls);
             session.errors = Some(transcript.errors);
+            session.tool_calls = transcript.tools.clone();
         }
     }
     let busy = BTreeMap::from([(machine.clone(), all_busy)]);

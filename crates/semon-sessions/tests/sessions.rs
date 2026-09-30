@@ -759,6 +759,7 @@ fn model_json_matches_the_golden_file() {
                 session.shift_remove("cost_check");
                 session.shift_remove("calls");
                 session.shift_remove("errors");
+                session.shift_remove("tool_calls");
             }
         }
     }
