@@ -1173,10 +1173,9 @@
     const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); put(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
     if (opts.lineage?.length) {
-      if (phone.matches) { const parent = opts.lineage.at(-1), c = el("button", "crumb lineage-parent", parent.name); c.type = "button"; c.setAttribute("aria-label", "Open session path through " + parent.name); c.addEventListener("click", () => showLineageMenu(s.id, bar)); l1.append(c, el("span", "sep", "›")); }
-      else opts.lineage.forEach((item) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); });
+      if (!phone.matches) opts.lineage.forEach((item) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); });
     } else if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
-    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; if (s) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
+    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; if (s && !(phone.matches && opts.lineage?.length)) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
     if (opts.line2) {
       const l2 = el("div", "l2" + (s ? " session-meta" : ""));
       opts.line2(l2); t.append(l2);
@@ -1222,11 +1221,6 @@
     const path = [], seen = new Set(); let id = sid;
     while (id && SESS[id] && !seen.has(id)) { seen.add(id); path.push(SESS[id]); id = parentOf(id); }
     return path.reverse();
-  }
-  function showLineageMenu(sid, bar) {
-    bar.querySelector(".lineage-menu")?.remove(); const path = lineageOf(sid), menu = el("div", "lineage-menu"); menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", "Session path");
-    path.forEach((s, i) => { const b = el("button"); b.type = "button"; b.setAttribute("role", "menuitem"); if (i === path.length - 1) b.setAttribute("aria-current", "page"); b.append(el("span", null, s.name), harnessName(s.harness)); b.addEventListener("click", () => { menu.remove(); goSession(s.id); }); menu.append(b); });
-    bar.append(menu); const close = (e) => { if (!menu.contains(e.target) && !e.target.closest?.(".lineage-parent")) { menu.remove(); document.removeEventListener("click", close); } }; setTimeout(() => document.addEventListener("click", close), 0);
   }
   // Kind and state are the two items line 2 always keeps. Everything else drops from the right in append order
   // (model, machine, branch, tools, runs, tokens, cost); errors, the kind word, turn count, then state word give way last.
@@ -1389,7 +1383,7 @@
   if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => {
     if (!ERR.on || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || document.querySelector("dialog[open]")) return;
     // The drawer and an open menu have the keys first: Escape closes them and leaves the mode on.
-    if (document.body.classList.contains("drawer-open") || document.querySelector(".menu, .lineage-menu")) return;
+    if (document.body.classList.contains("drawer-open") || document.querySelector(".menu")) return;
     if (e.target.closest?.("input, textarea, select, [contenteditable='true']")) return;
     const inBar = !!e.target.closest?.("#topbar .errnav-bar"), onButton = e.target.tagName === "BUTTON";
     if (e.key === "Escape") { e.preventDefault(); closeErrors(); return; }
@@ -1427,8 +1421,8 @@
   // "Started 21:57 on <machine>" stays on one line: the machine name ellipsises (its tip, only while cut off, has the whole name).
   const startedDivider = (sid) => { const d = el("div", "divider started"), name = MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine], line = el("span", "dv-text"), m = el("span", "dv-machine", name); m.dataset.tip = name; m.dataset.tipClipped = ""; line.append(el("span", "dv-lead", "Started " + clock(SESS[sid].start) + " on\u00a0"), m); d.append(line); return d; };
   const turnsLabel = (s) => { const n = (TURNS[s.id] ?? []).filter(hasTurn).length; return n + (n === 1 ? " turn" : " turns"); };
-  // On phones line 2 leaves the bar; the state is then the small dot before the title. The dot names the state for a screen
-  // reader, and its tip (a tap on a phone) adds the turn count. Desktop hides it, since line 2 shows the state there.
+  // On phones line 2 leaves the bar; top-level sessions keep the state dot before the title, while children put full status in ⋯.
+  // The dot names the state for a screen reader, and its tip (a tap on a phone) adds the turn count. Desktop hides it, since line 2 shows the state there.
   const stateLead = (s) => { const lead = el("span", "l1-state"); lead.dataset.tip = spaced("Status: " + STATE[s.state] + " · " + turnsLabel(s)); lead.append(dot(s.state, false)); return lead; };
   const sessionLine = (s) => (l2) => {
     const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0, turnsText = turnsLabel(s);
@@ -1467,6 +1461,21 @@
     closeAccountMenu();
     const m = el("div", "menu session-menu"); m.setAttribute("role", "menu");
     if (phone.matches) {
+      const path = lineageOf(s.id);
+      if (path.length > 1) {
+        // The menu is rebuilt each time it opens, so this status uses the latest state and turn count.
+        const status = el("div", "menu-status"); status.setAttribute("role", "presentation"); status.append(dot(s.state, false), el("span", null, STATE[s.state] + " · " + turnsLabel(s)));
+        const group = el("div", "menu-path-group"), heading = el("div", "menu-section-heading", "Session path"); heading.setAttribute("role", "presentation"); group.append(heading);
+        const ancestors = path.slice(0, -1);
+        ancestors.forEach((ancestor, i) => {
+          const item = el("button", "menu-path-item"); item.type = "button"; item.setAttribute("role", "menuitem");
+          if (i === ancestors.length - 1) { item.setAttribute("aria-label", "Up to " + ancestor.name); item.append(el("span", "menu-path-chevron")); }
+          item.append(el("span", "menu-path-name", ancestor.name), harnessName(ancestor.harness));
+          item.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); btn.setAttribute("aria-expanded", "false"); goSession(ancestor.id); }); group.append(item);
+        });
+        const separator = el("div", "menu-separator"); separator.setAttribute("role", "separator");
+        m.append(status, group, separator);
+      }
       const findItem = el("button"); findItem.type = "button"; findItem.setAttribute("role", "menuitem"); findItem.append(icon(I.search, "icon"), el("span", null, "Find in transcript"));
       findItem.addEventListener("click", (e) => { e.stopPropagation(); m.remove(); findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
       const filtered = !(show.messages && show.tools && show.thinking), filterItem = el("button"); filterItem.type = "button"; filterItem.setAttribute("role", "menuitem"); filterItem.append(icon(I.filter, "icon"), el("span", null, "Filter transcript"));
