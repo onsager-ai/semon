@@ -38,6 +38,7 @@ export default async function (browser) {
     const page = await served(browser, { extras: true, path: "/s/claude/harbor" });
     let titled;
     let untitled;
+    let commandOverride = null;
     await page.route("**/api/tx**", async (route) => {
       const url = new URL(route.request().url());
       const response = await route.fetch();
@@ -48,8 +49,9 @@ export default async function (browser) {
       const plain = tx.entries.find((item) => item.k === "tool" && item.name === "Read");
       if (!entry || !plain) throw new Error("harbor needs a long Bash call and a Read step for the title check");
       entry.title = titleText;
+      if (commandOverride != null) entry.in = commandOverride;
       const command = entry.in ?? entry.arg;
-      const rawFirstLine = command.split(/[\r\n]/, 1)[0];
+      const rawFirstLine = command.split(/\r\n|\n|\r/).find((line) => line.trim()) ?? "";
       titled = { command, rawFirstLine, firstLine: rawFirstLine.slice(0, 200) };
       untitled = { arg: plain.arg };
       return route.fulfill({ response, json: tx });
@@ -110,6 +112,20 @@ export default async function (browser) {
     R.stepTitle.find = found;
     r.expect(found.count === 1 && found.title === titleText, "find-in-transcript matches the title word: " + JSON.stringify(found));
     r.expect(page.errors.length === 0, "step-title page errors: " + page.errors.join(" | "));
+
+    commandOverride = "\nls";
+    await page.reload({ waitUntil: "load" });
+    await page.waitForFunction((value) => [...document.querySelectorAll(".step .sa.st")].some((title) => title.textContent === value), titleText);
+    const firstNonemptyTip = await page.locator(".step .sa.st").getAttribute("data-tip");
+    R.stepTitle.firstNonemptyTip = firstNonemptyTip;
+    r.expect(firstNonemptyTip === "ls", "a leading blank command line uses the first non-empty line for its tooltip: " + JSON.stringify(firstNonemptyTip));
+
+    commandOverride = "\n \r\n\t";
+    await page.reload({ waitUntil: "load" });
+    await page.waitForFunction((value) => [...document.querySelectorAll(".step .sa.st")].some((title) => title.textContent === value), titleText);
+    const allEmptyHasTip = await page.locator(".step .sa.st").evaluate((title) => title.hasAttribute("data-tip"));
+    R.stepTitle.allEmptyHasTip = allEmptyHasTip;
+    r.expect(!allEmptyHasTip, "an all-empty command has no title tooltip attribute");
 
     const shotTitle = "Run queue retry tests";
     const captureTitleShot = async ({ size, dark, filename, expanded = false }) => {
