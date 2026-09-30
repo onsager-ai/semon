@@ -39,6 +39,8 @@ pub(crate) const LINE_MAX: u64 = FULL_MAX as u64 + 1024 * 1024;
 
 const SHELLS: [&str; 4] = ["Bash", "shell", "exec_command", "local_shell"];
 const EDITS: [&str; 5] = ["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch"];
+// Codex has recorded 1,597–7,375 ns for these commands, shorter than spawn overhead.
+const CODEX_COMMAND_MIN_DURATION_NS: i64 = 1_000_000;
 
 /// Which page of a transcript to return.
 pub(crate) enum Anchor {
@@ -930,9 +932,12 @@ fn yielded_entry(
     let took = item
         .as_ref()
         .and_then(codex_duration)
-        .or_else(|| match (slot.t, done.and_then(|done| done.t)) {
-            (Some(start), Some(end)) => Some(secs(end - start)),
-            _ => None,
+        .or_else(|| {
+            // This step does not carry the previous command's completion, so use the call start.
+            match (slot.t, done.and_then(|done| done.t)) {
+                (Some(start), Some(end)) => Some(secs(end - start)),
+                _ => None,
+            }
         })
         .unwrap_or_else(|| "—".to_owned());
     state_fields(&mut entry, shown, took, slot.t, now);
@@ -1174,6 +1179,9 @@ fn codex_duration(item: &Value) -> Option<String> {
     let duration = item.get("duration")?;
     let seconds = duration.get("secs")?.as_i64()?;
     let nanos = duration.get("nanos").and_then(Value::as_i64).unwrap_or(0);
+    if seconds == 0 && nanos < CODEX_COMMAND_MIN_DURATION_NS {
+        return None;
+    }
     Some(secs(
         seconds
             .saturating_mul(1000)
@@ -1249,10 +1257,20 @@ fn operation_entry(
         }),
     );
     entry.insert("ok".into(), json!(ok));
-    entry.insert(
-        "secs".into(),
-        json!(codex_duration(item).unwrap_or_else(|| "—".to_owned())),
-    );
+    let took = codex_duration(item).or_else(|| {
+        if kind != "CommandExecution" {
+            return None;
+        }
+        // The previous command's completion is not carried here, so use the owning call's time.
+        let start = script_offset
+            .and_then(|offset| lines.get(&file.path, offset))
+            .and_then(|record| events::record_time(&record));
+        match (start, slot.t) {
+            (Some(start), Some(end)) => Some(secs(end - start)),
+            _ => None,
+        }
+    });
+    entry.insert("secs".into(), json!(took.unwrap_or_else(|| "—".to_owned())));
     entry.insert("slot".into(), json!(index));
     if let Some(script_offset) = script_offset {
         entry.insert("script".into(), json!(script_offset));
@@ -2345,6 +2363,88 @@ mod tests {
             serde_json::from_str(&full_slot(&built, "ops", 0, "script").unwrap()).unwrap();
         assert_eq!(script_view["text"], script);
         assert_eq!(script_view["truncated"], false);
+    }
+
+    #[test]
+    fn code_mode_command_duration_falls_back_when_underreported_or_missing() {
+        let home = Home::new();
+        let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});
+        let item = |id: &str, command: &str, duration: Option<Value>| {
+            let mut item = json!({
+                "type": "CommandExecution",
+                "id": id,
+                "command": ["/bin/zsh", "-lc", command],
+                "exit_code": 0,
+                "aggregated_output": "done\n"
+            });
+            if let Some(duration) = duration {
+                item["duration"] = duration;
+            }
+            item
+        };
+        let completed = |time: String, item: Value| {
+            codex(
+                time,
+                "event_msg",
+                json!({"type":"item_completed","item":item}),
+            )
+        };
+        let script = "const r = await Promise.allSettled([\ntools.exec_command({cmd: 'short'}),\ntools.exec_command({cmd: 'recorded'}),\ntools.exec_command({cmd: 'long'}),\ntools.exec_command({cmd: 'missing'}),\n]);";
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-command-duration.jsonl",
+            &[
+                codex(
+                    ts(4, 0, 0),
+                    "session_meta",
+                    json!({"id":"command-duration","cwd":"/work/proj"}),
+                ),
+                codex(
+                    ts(4, 1, 0),
+                    "response_item",
+                    json!({"type":"custom_tool_call","call_id":"call","name":"exec","status":"completed","input":script}),
+                ),
+                completed(
+                    ts(4, 1, 142),
+                    item(
+                        "short",
+                        "short",
+                        Some(json!({"secs":0,"nanos":4029})),
+                    ),
+                ),
+                completed(
+                    ts(4, 1, 800),
+                    item(
+                        "recorded",
+                        "recorded",
+                        Some(json!({"secs":0,"nanos":562360489})),
+                    ),
+                ),
+                completed(
+                    ts(4, 1, 1800),
+                    item(
+                        "long",
+                        "long",
+                        Some(json!({"secs":1,"nanos":710401325})),
+                    ),
+                ),
+                completed(ts(4, 1, 4142), item("missing", "missing", None)),
+                codex(
+                    ts(4, 1, 6000),
+                    "response_item",
+                    json!({"type":"custom_tool_call_output","call_id":"call","output":"done"}),
+                ),
+            ],
+        );
+
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "command-duration", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0]["secs"], "0.1s");
+        assert_eq!(entries[1]["secs"], "0.6s");
+        assert_eq!(entries[2]["secs"], "1.7s");
+        // No prior completion is carried into this step, so the span starts at the call record.
+        assert_eq!(entries[3]["secs"], "4.1s");
     }
 
     #[test]
