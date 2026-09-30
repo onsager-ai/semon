@@ -699,7 +699,7 @@ export default async function barCheck(browser) {
       const view = { collapsed, expanded, recollapsed, overflow: await overflow(page), errors: page.errors };
       loneStep.views[tag] = view;
       if (size === "desktop" && !dark) {
-        await page.click('#topbar [aria-label="Find in transcript"]');
+        await page.click("#find-btn");
         await page.fill("#find", "lone-step-style-match");
         await page.waitForFunction(() => [...document.querySelectorAll(".step .sa")].some((arg) => arg.textContent.includes("lone-step-style-match")));
         loneStep.finding = await page.evaluate(() => {
