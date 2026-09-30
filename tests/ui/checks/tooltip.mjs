@@ -149,10 +149,12 @@ async function behaviour(page, tag, r, rec, { first, second, third }) {
   await away(page); await page.waitForTimeout(450);
 }
 
-// Runs one section; a throw is a failure of that section, so the rest of the report is still written. Closes the page's context.
+// Runs one section; a throw is a failure of that section, so the rest of the report is still written. Closes the page's context,
+// first dropping its routes: a handler still waiting on a poll would otherwise throw "Response has been disposed" out of the
+// whole run once the context is gone.
 async function guard(r, name, page, fn) {
   try { await fn(); } catch (e) { r.expect(false, name + ": threw " + String(e?.message ?? e).split("\n")[0]); }
-  finally { await page.context().close().catch(() => {}); }
+  finally { await page.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {}); await page.context().close().catch(() => {}); }
 }
 
 export default async function tooltipCheck(browser) {
