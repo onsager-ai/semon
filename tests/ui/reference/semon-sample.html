@@ -729,6 +729,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .topbar .l2.session-meta .errs { min-height: 44px; min-width: 44px; }
   .cost-info { position: relative; }
   .cost-info::before { content: ""; position: absolute; inset: -13px; }
+  .analytics-metric .label > span.cost-info { overflow: visible; } /* the label's spans clip: the reach would be cut to the glyph */
   .tracebtn { min-height: 44px; min-width: 44px; }
   .turn-end { min-height: 44px; margin-bottom: -14px; }
   .ib .ctx .tracebtn { margin: -12px -10px -12px auto; }
