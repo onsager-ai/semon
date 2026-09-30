@@ -50,7 +50,7 @@ fn unchanged_and_appended_scans_parse_only_complete_candidate_lines() {
     let parses = PARSES.with(|count| count.get());
     let parent = cache.parent(&path).unwrap();
     assert_eq!(parent.calls.len(), 1);
-    assert_eq!(parent.partial, second[..split].as_bytes());
+    assert_eq!(parent.partial, &second.as_bytes()[..split]);
     assert_eq!(
         BYTES.with(|count| count.get()) - bytes,
         initial.len() as u64
