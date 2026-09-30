@@ -651,18 +651,24 @@ export default async function barCheck(browser) {
         }
         await route.fulfill({ response, json: body });
       });
+      let loneEntriesInjected = false;
       await page.route("**/api/tx*", async (route) => {
         const u = new URL(route.request().url()); if (u.searchParams.get("sid") !== "principal") return route.continue();
         const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response });
         const body = await response.json();
-        if (!body.entries.some((e) => e.key === "bt-lone-write")) body.entries.push(
-          { key: "bt-lone-write", k: "tool", name: "Write", arg: longPath, in: "Lone tool input", out: "Lone step output is visible.", ok: true, exit: 0, secs: "0.1s", turn: "bt-lone-line" },
-          ...[1, 2, 3].map((n) => ({ key: "bt-lone-group-" + n, k: "tool", name: "Bash", arg: "command " + n, in: "command " + n, out: "Group output " + n, ok: true, exit: 0, secs: "0.1s", turn: "bt-lone-line" })),
-        );
+        if (!loneEntriesInjected) {
+          const slot = (Number(body.from) || 0) + body.entries.length;
+          body.entries.push(
+            { k: "tool", name: "Write", arg: longPath, in: "Lone tool input", out: "Lone step output is visible.", ok: true, secs: "0.1s", slot, turn: "bt-lone-line" },
+            ...[1, 2, 3].map((n) => ({ k: "tool", name: "Bash", arg: "command " + n, out: "Group output " + n, ok: true, secs: "0.1s", slot: slot + n })),
+          );
+          loneEntriesInjected = true;
+        }
         await route.fulfill({ response, json: body });
       });
       await page.reload({ waitUntil: "load" });
-      await goto(page, { v: "session", id: "principal" }, D);
+      try { await goto(page, { v: "session", id: "principal" }, D); }
+      catch (error) { throw new Error("lone-step fixture could not open Principal: " + (error?.message ?? error) + "; page errors: " + (page.errors.join(" | ") || "none")); }
       const selector = 'section.turn[data-turn="bt-lone-line"] .steps.lone .step > button';
       await page.waitForSelector(selector, { state: "attached" });
       const button = page.locator(selector);

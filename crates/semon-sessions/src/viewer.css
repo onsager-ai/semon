@@ -524,6 +524,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .steps > * { min-width: 0; }
 .steps.lone { border-left: 0; padding-left: 0; margin-left: 0; }
 .steps.lone .step > button, .steps.lone .step.live { min-height: 0; }
+/* Align the output with .sv, after the 16px leading icon and 8px row gap. */
 .steps.lone .step > .out { margin: 4px 0 8px 24px; }
 .step > button, .step.live { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: none; padding: 3px 6px; margin-left: -6px; border-radius: 7px; text-align: left; color: var(--muted); font-size: var(--fs-sm); min-width: 0; }
 @media (hover: hover) { .step > button:hover { background: var(--sunken); } }
