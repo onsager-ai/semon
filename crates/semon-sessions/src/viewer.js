@@ -496,7 +496,9 @@
         else quietTop();
         schedule(2000); setInterval(ticker, 1000);
       };
-      const p = load(route); if (p) p.then(done, done); else done();
+      const initialRoute = route, p = load(initialRoute);
+      if (p) p.then(() => { done(); if (route === initialRoute) fillKids(initialRoute); }, done);
+      else { done(); if (route === initialRoute) fillKids(initialRoute); }
     }, (err) => { $(SIDEBAR_ONLY ? "#lanes" : "#page").replaceChildren(el("p", SIDEBAR_ONLY ? "ghead" : "empty", "Couldn't load the sessions: " + err.message)); });
   }
 

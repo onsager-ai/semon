@@ -11,14 +11,14 @@ fs.mkdirSync(OUT, { recursive: true });
 const near = (a, b) => Math.abs(a - b) <= 1;
 function paintFixture(D) {
   const candidates = [];
+  const deepTurn = "paintfirst-later-parent-turn";
   for (const h of D.H) {
     if (h.kind !== "spawn" || !D.SESS[h.from] || !D.SESS[h.to]) continue;
-    const childTurn = D.turns.find((t) => t.sid === h.to && t.start === h.id), parentTurns = D.turns.filter((t) => t.sid === h.from);
-    const spawnTurn = parentTurns.find((t) => t.sent.includes(h.id)), spawnRank = parentTurns.indexOf(spawnTurn), deepTurn = parentTurns.at(-1);
-    if (!childTurn || !spawnTurn || !deepTurn || parentTurns.indexOf(deepTurn) <= spawnRank) continue;
+    const childTurn = D.turns.find((t) => t.sid === h.to && t.start === h.id);
+    if (!childTurn) continue;
     const activity = (D.TX[h.to] ?? []).filter((e) => e.turn === childTurn.id && !(e.k === "h" && e.id === h.id));
     const handoffAt = (D.TX[h.from] ?? []).findIndex((e) => e.k === "h" && e.id === h.id);
-    if (activity.length && handoffAt >= 0) candidates.push({ parent: h.from, child: h.to, spawn: h.id, childTurn: childTurn.id, deepTurn: deepTurn.id, rank: handoffAt });
+    if (activity.length && handoffAt >= 0) candidates.push({ parent: h.from, child: h.to, spawn: h.id, childTurn: childTurn.id, deepTurn, rank: handoffAt });
   }
   return candidates.sort((a, b) => b.rank - a.rank)[0] ?? null;
 }
@@ -145,12 +145,22 @@ export default async function childcard(browser) {
     }
 
     const deep = await served(browser, { size: "desktop", dark: true });
+    const parentTurns = D.turns.filter((t) => t.sid === fixture.parent), deepAt = Math.max(0, ...parentTurns.map((t) => t.at ?? 0)) + 1;
+    const laterTurn = { id: fixture.deepTurn, sid: fixture.parent, at: deepAt, start: null, u: true, text: "A later parent turn", sent: [], end: null };
+    await deep.route((url) => url.pathname === "/api/model", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...D.model, turns: [...D.turns, laterTurn] }) }));
+    await deep.route((url) => url.pathname === "/api/tx" && url.searchParams.get("sid") === fixture.parent && !url.searchParams.has("turn") && !url.searchParams.has("before") && !url.searchParams.has("after"), async (route) => {
+      const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response });
+      const body = await response.json();
+      body.entries.push({ k: "a", text: "Later parent turn", turn: fixture.deepTurn }); body.to += 1; body.total += 1;
+      await route.fulfill({ response, json: body });
+    });
     let releaseDeep;
     const deepGate = new Promise((resolve) => { releaseDeep = resolve; });
     let deepRequested, deepAgain;
     const deepRequestSeen = new Promise((resolve) => { deepRequested = resolve; }), deepAgainSeen = new Promise((resolve) => { deepAgain = resolve; });
     let deepRequests = 0;
     await deep.route(childTurnRoute(fixture), async (route) => { deepRequests++; if (deepRequests === 1) deepRequested(); if (deepRequests === 2) deepAgain(); await deepGate; await route.continue().catch(() => {}); });
+    await deep.reload({ waitUntil: "load" }); await settled(deep);
     const deepStarted = Date.now();
     await goto(deep, { v: "session", id: fixture.parent }, D);
     const initialRemaining = 3000 - (Date.now() - deepStarted), initialDrawn = initialRemaining > 0 && await drawnWithoutChildWork(deep, D, fixture, null, initialRemaining);
