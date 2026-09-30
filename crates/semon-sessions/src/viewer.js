@@ -504,7 +504,7 @@
   try { const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = pruneTreePrefs(saved); } catch {}
   const app = $(".app");
   const syncLayoutPrefs = () => { if (SIDEBAR_ONLY) return; app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches && route.v === "session"); };
-  function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); }
+  function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); $(".account-popover [data-pref=\"wide\"]")?.setAttribute("aria-checked", String(on)); }
   function setRailMode(on) { railMode = on; ORD.delete("side"); try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
   // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
   // it is dropped on load, along with any entry that has no `open`, and the next save writes the pruned list.
@@ -741,7 +741,7 @@
   function toggleAccountMenu(widget, trigger, compact) {
     if (accountOpen) { closeAccountMenu(); return; }
     closeAccountMenu();
-    const menu = accountPopover();
+    const menu = accountPopover(compact);
     if (compact) {
       // On a phone it floats just above its row, as wide as the row, over a clear backdrop that takes the tap outside it, so it
       // never pushes the drawer and never runs past the screen (the stylesheet caps its height and it scrolls inside).
