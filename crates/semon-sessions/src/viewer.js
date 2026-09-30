@@ -434,15 +434,76 @@
     const job = moved ? (shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid)) : null, work = job ? job.then(() => kids(sid)) : kids(sid);
     if (work) work.then(() => { if (route === r && rendered === r) refresh(null); }, () => {});
   }
+  // Paging state survives redraws: a click and an observer share one request per session and direction, and a failed
+  // page stays manual until Retry succeeds. Observers belong only to the buttons currently drawn.
+  const PAGING = new Map(), pagerObservers = new Map();
+  let pagerFrame = null;
+  function pagingState(sid, where) {
+    if (!PAGING.has(sid)) PAGING.set(sid, { before: { busy: false, failed: false }, after: { busy: false, failed: false } });
+    return PAGING.get(sid)[where];
+  }
+  function paintPager(b) {
+    const state = pagingState(b.dataset.pagerSid, b.dataset.pagerWhere), direction = b.dataset.pagerWhere === "before" ? "earlier" : "later";
+    b.disabled = state.busy;
+    b.replaceChildren();
+    if (state.busy) { const spin = el("span", "spin"); spin.setAttribute("aria-hidden", "true"); b.append(spin); }
+    b.append(el("span", null, state.busy ? "Loading " + direction + "…" : state.failed ? "Couldn't load " + direction + " entries · Retry" : "Load " + direction));
+  }
+  function disconnectPagerObservers() {
+    if (pagerFrame !== null) cancelAnimationFrame(pagerFrame); pagerFrame = null;
+    for (const observer of pagerObservers.values()) observer.disconnect();
+    pagerObservers.clear();
+  }
+  function queuePagerObservers() {
+    if (pagerFrame !== null || SIDEBAR_ONLY) return;
+    // Wait until rendering, opening at the end and restoring the reader's place have finished.
+    pagerFrame = requestAnimationFrame(() => {
+      pagerFrame = null; disconnectPagerObservers();
+      if (route.v !== "session" || rendered !== route || openingEndUntil || $("#page").hasAttribute("aria-busy") || typeof IntersectionObserver === "undefined") return;
+      for (const b of $("#page").querySelectorAll("[data-pager-where]")) {
+        const state = pagingState(b.dataset.pagerSid, b.dataset.pagerWhere);
+        if (state.busy || state.failed) continue;
+        const observer = new IntersectionObserver((entries) => {
+          if (pagerObservers.get(b) === observer && entries.some((entry) => entry.isIntersecting)) loadPager(b, false);
+        }, { root: phone.matches ? null : $("#main"), rootMargin: b.dataset.pagerWhere === "before" ? "800px 0px 0px 0px" : "0px 0px 800px 0px" });
+        pagerObservers.set(b, observer); observer.observe(b);
+      }
+    });
+  }
+  async function loadPager(b, manual) {
+    const sid = b.dataset.pagerSid, where = b.dataset.pagerWhere, state = pagingState(sid, where), r = route;
+    if (!b.isConnected || r.v !== "session" || r.id !== sid || rendered !== r || state.busy || (!manual && (state.failed || openingEndUntil))) return;
+    if (manual) stopOpeningEndPin();
+    const m = TXM[sid]; if (!m || (where === "before" ? m.from <= 0 : m.to >= m.total)) return;
+    state.busy = true; paintPager(b);
+    try {
+      await fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where);
+      await kids(sid);
+      state.failed = false;
+      if (route !== r || rendered !== r) return;
+      // Capture at the last moment: the reader can keep scrolling while the request is out.
+      const box = scroller(), top = phone.matches ? 0 : box.getBoundingClientRect().top, height = box.scrollHeight, scroll = box.scrollTop;
+      const turn = [...$("#page").querySelectorAll(".turns > .turn[data-turn]")].find((t) => t.getBoundingClientRect().top >= top);
+      const anchor = turn ? { id: turn.dataset.turn, offset: turn.getBoundingClientRect().top - top } : null;
+      render();
+      const found = anchor && $("#page .turns > .turn[data-turn='" + CSS.escape(anchor.id) + "']");
+      if (found) box.scrollTop += found.getBoundingClientRect().top - (phone.matches ? 0 : box.getBoundingClientRect().top) - anchor.offset;
+      else box.scrollTop = scroll + (where === "before" ? box.scrollHeight - height : 0);
+      LIVE.anchor = null; syncJump(); saveHistoryScroll();
+    } catch {
+      state.failed = true;
+    } finally {
+      state.busy = false;
+      for (const button of $("#page").querySelectorAll("[data-pager-where]")) if (button.dataset.pagerSid === sid && button.dataset.pagerWhere === where) paintPager(button);
+      // A new observer also checks a pager that stayed inside the margin, loading short pages one at a time.
+      queuePagerObservers();
+    }
+  }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
   function pager(sid, where, label) {
     const w = el("div", "list"), b = el("button", "more", label); b.type = "button"; if (where === "before") b.dataset.loadEarlier = ""; w.append(b); // data-load-earlier: a stable hook for the budget check
-    b.addEventListener("click", () => {
-      stopOpeningEndPin();
-      const m = TXM[sid], box = phone.matches ? document.documentElement : $("#main"), h0 = box.scrollHeight; b.disabled = true;
-      fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where).then(() => kids(sid)).then(() => {
-        render(); if (where === "before") { const d = box.scrollHeight - h0; if (phone.matches) window.scrollBy(0, d); else box.scrollTop += d; } }, () => { b.disabled = false; });
-    });
+    b.dataset.pagerSid = sid; b.dataset.pagerWhere = where; paintPager(b);
+    b.addEventListener("click", () => loadPager(b, true));
     return w;
   }
   // "View all" reads the whole call: each part the server cut ("more") is fetched in full from /api/entry, by the entry's
@@ -592,7 +653,7 @@
   const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
   function go(r, fromHistory) {
     if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : r.v === "sessions" && query ? "/sessions?q=" + enc(query) : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
-    stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
+    disconnectPagerObservers(); stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
@@ -2142,7 +2203,7 @@
   function render() {
     if (SIDEBAR_ONLY) { CHILDREN = null; tick(); rendered = route; renderNav(); renderLanes(); return; } // the embedding page draws its own page and bar
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
-    closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
+    disconnectPagerObservers(); closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
     ordPageState = ordState("page"); tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; clearBox(page, r); page.classList.remove("child-page");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
@@ -2155,6 +2216,7 @@
     document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px");
     const lanesKept = lanesFor && lanesFor.r === r && lanesFor.version === LIVE.version; lanesFor = null;
     syncLayoutPrefs(); syncBarLine(); renderNav(); if (!lanesKept) renderLanes(); renderDrawerAccount(); syncJump(); syncOrderPill("page"); ordPageState = null;
+    queuePagerObservers();
   }
 
   // ---- Analytics: the server computes each range (/api/analytics) -----------------------------------------------------------
@@ -2664,9 +2726,11 @@
   // The opened transcript can still grow as fonts and clamped cards settle; hold the tail briefly, then yield on reader input.
   let openingEndUntil = 0, openingEndTimer = null, openingEndObserver = null;
   function stopOpeningEndPin() {
+    const wasPinned = !!openingEndUntil;
     openingEndUntil = 0;
     clearTimeout(openingEndTimer); openingEndTimer = null;
     openingEndObserver?.disconnect(); openingEndObserver = null;
+    if (wasPinned) queuePagerObservers();
   }
   function pinOpeningEnd() {
     if (route.v !== "session" || performance.now() >= openingEndUntil) { stopOpeningEndPin(); return; }
@@ -2675,6 +2739,7 @@
   function startOpeningEndPin() {
     stopOpeningEndPin(); if (route.v !== "session" || location.hash) return;
     openingEndUntil = performance.now() + 2000;
+    disconnectPagerObservers();
     const turns = $("#page section[aria-label='Transcript'] .turns");
     if (turns) { openingEndObserver = new ResizeObserver(pinOpeningEnd); openingEndObserver.observe(turns); }
     pinOpeningEnd(); openingEndTimer = setTimeout(stopOpeningEndPin, 2000);
@@ -2775,6 +2840,7 @@
   // the rest keep their nodes and state. The bar's summary line, the title and the sidebar follow. Returns how many entries
   // are new.
   function patchSession(dirty) {
+    disconnectPagerObservers();
     tick(); const s = SESS[route.id], box = $("#page .turns");
     const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .step, .hcard, .thought, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
     const before = keys();
@@ -2807,6 +2873,7 @@
     const fc = $("#topbar .fcount"); if (fc) { const n = find ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : 0; fc.textContent = find ? (n ? n + (n === 1 ? " match" : " matches") : "No matches") : ""; }
     renderNav(); renderLanes(); ticker();
     let n = 0; for (const k of keys()) if (!before.has(k)) n++;
+    queuePagerObservers();
     return n;
   }
   // What a block shows, without what the reader toggled (open, hidden, measured clipping) or what opening fills in.
