@@ -2477,7 +2477,9 @@
   if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && accountSheet) closeAccountMenu();
     else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); }
-    if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) {
+    const target = document.activeElement;
+    if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey &&
+        !/^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName ?? "") && !target?.isContentEditable) {
       e.preventDefault();
       if (route.v === "sessions") {
         const search = $("#sq");

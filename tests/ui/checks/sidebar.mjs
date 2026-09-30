@@ -21,7 +21,8 @@
 //   - the toggle sits over the right end of its row's meta line, and only rows with children have one: no row has a left gutter.
 //   - the toggle's box is at least 44x44 at 390 px and at least 28x36 at 1280 px.
 //   - the header puts the logo first and the collapse toggle at the right end of the row (on a phone, the drawer's close button
-//     there instead), both at least 44x44; in the rail the toggle shows with the logo mark above it.
+//     there instead), both at least 44x44; in the rail the toggle shows with the logo mark above it, and keyboard focus reaches
+//     the toggle from the first nav row and returns in order.
 //   - only the open session's row is current: its parent is not highlighted; a collapsed parent opens for the child's page
 //     without saving that, and its saved choice is unchanged after navigating away; a collapse made while the child is open
 //     stays collapsed through redraws; the open child is always listed; in the rail the ancestor keeps a ring, no highlight, and
