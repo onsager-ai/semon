@@ -809,8 +809,9 @@
   }
   const sideRegion = () => $("#side-list") ?? $("#sidebar");
   // How long the wide screen's sidebar is left alone before it applies what it holds. Read once, at load, with 10 s as the default; a
-  // browser check sets window.__semonOrderIdleMs before the page loads to shorten it, and nothing else looks at that name.
-  const ORD_IDLE_MS = Number(window.__semonOrderIdleMs) > 0 ? Number(window.__semonOrderIdleMs) : 10000;
+  // browser check may set window.__semonOrderIdleMs to a finite number from 200 to 60000 ms before load; other values use the default.
+  const ordIdleMs = window.__semonOrderIdleMs;
+  const ORD_IDLE_MS = Number.isFinite(ordIdleMs) && ordIdleMs >= 200 && ordIdleMs <= 60000 ? ordIdleMs : 10000;
   const ORD_DRAWER_MS = 320; // the drawer's slide (0.24 s) and a little
   // Applies what a screen holds: the list is drawn sorted, from scratch.
   function orderApply(name) {
@@ -819,16 +820,16 @@
     if (name === "side") renderLanes(); else { const st = capture(); render(); restore(st); }
   }
   // The wide screen's sidebar is always in view: what it holds is applied once it has been left alone for ORD_IDLE_MS. Left alone means
-  // no pointer over it or down, no focus in it, and no menu or dialog open (the session menu hangs from the top bar, outside the
-  // sidebar, so it is named here); anything the reader does to it starts the wait again.
+  // no pointer over it or down, no keyboard focus or focused text field in it, and no menu or dialog open (the session menu hangs from
+  // the top bar, outside the sidebar, so it is named here); anything the reader does to it starts the wait again.
   let ordIdle = null;
   function ordIdleArm() {
     clearTimeout(ordIdle); ordIdle = null;
     if (phone.matches || !ORD.get("side")?.n) return;
     ordIdle = setTimeout(() => {
-      ordIdle = null; const bar = $("#sidebar");
+      ordIdle = null; const bar = $("#sidebar"), a = document.activeElement;
       const menu = $(".session-menu, .account-popover, .runs-popover, .filters.pop:not([hidden])");
-      if (ordTouch.down || bar.matches(":hover") || bar.contains(document.activeElement) || menu || viewerEl) ordIdleArm(); else orderApply("side");
+      if (ordTouch.down || bar.matches(":hover") || (bar.contains(a) && (a.matches(":focus-visible") || a.matches("input, textarea, select, [contenteditable]"))) || menu || viewerEl) ordIdleArm(); else orderApply("side");
     }, ORD_IDLE_MS);
   }
   for (const t of ["pointermove", "pointerdown", "pointerleave", "focusin", "focusout", "wheel", "keydown"]) $("#sidebar").addEventListener(t, () => { if (ordIdle) ordIdleArm(); }, { passive: true });
