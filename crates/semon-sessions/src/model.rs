@@ -925,6 +925,10 @@ pub(crate) struct PidFile {
     pub(crate) alive: bool,
     /// The process start time the file records.
     pub(crate) start: Option<u64>,
+    /// When the process started, in epoch milliseconds (`startedAt`): a
+    /// process that resumed a session into the same file ran none of the
+    /// background calls logged before it.
+    started: Option<i64>,
     status: Option<String>,
     /// What the process is waiting on you for, when it says so
     /// (`input needed`, `permission prompt`): the record's `waitingFor`.
@@ -997,6 +1001,7 @@ pub(crate) fn pid_files(options: &Options, machine: &MachineFacts) -> Vec<PidFil
             session: session.to_owned(),
             alive: start.is_some() && machine.proc_start(options, pid) == start,
             start,
+            started: record.get("startedAt").and_then(Value::as_i64),
             status: field(&record, "status").map(str::to_owned),
             waiting_for: field(&record, "waitingFor")
                 .filter(|reason| !reason.is_empty())
@@ -1342,6 +1347,10 @@ struct Builder<'a> {
     /// Background Bash calls and their first terminal notification, scoped to a session.
     backgrounds: HashMap<Ref, Option<Ref>>,
     bg_ends: HashMap<Ref, Ref>,
+    /// Top-level log files a live process writes, with the earliest such
+    /// process's start (None: not recorded). An alive pid file names each
+    /// file by its session id; a resumed session's older files are not here.
+    live_files: BTreeMap<usize, Option<i64>>,
     ids: HashMap<String, usize>,
     /// Events a copy-resume duplicated: skipped everywhere.
     copied: BTreeSet<Ref>,
@@ -1378,6 +1387,7 @@ impl<'a> Builder<'a> {
             tools: HashMap::new(),
             backgrounds: HashMap::new(),
             bg_ends: HashMap::new(),
+            live_files: BTreeMap::new(),
             ids: HashMap::new(),
             copied: BTreeSet::new(),
         }
@@ -1703,6 +1713,22 @@ impl<'a> Builder<'a> {
             }
         }
         for pid in pids {
+            if pid.alive {
+                let files = self.files;
+                for file in (0..files.len()).filter(|&file| {
+                    matches!(files[file].role, Role::Top { .. }) && files[file].id == pid.session
+                }) {
+                    self.live_files
+                        .entry(file)
+                        .and_modify(|since| {
+                            *since = match (*since, pid.started) {
+                                (Some(a), Some(b)) => Some(a.min(b)),
+                                _ => None,
+                            }
+                        })
+                        .or_insert(pid.started);
+                }
+            }
             let Some(&index) = self
                 .files
                 .iter()
@@ -1974,6 +2000,25 @@ impl<'a> Builder<'a> {
             .get(id)
             .copied()
             .filter(|at| self.of_file[at.0] == session)
+    }
+
+    /// Whether a background call's shell can still be running: only while a
+    /// live process writes the call's own log file, and started no later
+    /// than the call (`t`). A resumed session is stitched from several files,
+    /// or resumed into the same one, and the process that logged an older
+    /// call (and its shells) is gone, however long the newer one lives. A
+    /// subagent's file is its own session, alive while the subagent works.
+    fn background_live(&self, file: usize, session: &Sess, t: Option<i64>) -> bool {
+        match self.files[file].role {
+            Role::Top { .. } => self
+                .live_files
+                .get(&file)
+                .is_some_and(|since| match (since, t) {
+                    (Some(since), Some(t)) => t >= *since,
+                    _ => true,
+                }),
+            _ => session.alive,
+        }
     }
 
     /// Join background Bash calls once per build, in each session's event order.
@@ -3126,6 +3171,7 @@ impl<'a> Builder<'a> {
                         call: source.id.clone().unwrap_or_default(),
                         status: event(self.files, at).n.clone().unwrap_or_default(),
                         source: (call.0, source.o, source.b),
+                        start: source.t,
                     }
                 }
                 EntryKind::Tool(state) => {
@@ -3182,14 +3228,24 @@ impl<'a> Builder<'a> {
                                 .unwrap_or_else(|| "tool".into()),
                             reply: found.and_then(|found| found.r.clone()),
                             item: found.and_then(|found| found.item),
+                            // Only a launch that returned: one denied or blocked
+                            // (an error result) started nothing, and one with
+                            // no result yet is running or unfinished as any call.
                             bg: entry
                                 .at
+                                .filter(|_| state == ToolState::Ok)
                                 .and_then(|at| self.backgrounds.get(&at))
                                 .map(|end| Background {
                                     tid: found
                                         .and_then(|found| found.id.clone())
                                         .unwrap_or_default(),
-                                    live: session.alive,
+                                    live: entry.at.is_some_and(|at| {
+                                        self.background_live(
+                                            at.0,
+                                            session,
+                                            found.and_then(|found| found.t),
+                                        )
+                                    }),
                                     end: end.map(|at| {
                                         let found = event(self.files, at);
                                         BgEnd {
@@ -3787,6 +3843,8 @@ pub(crate) enum SlotKind {
         status: String,
         /// The original call's file, offset and block, for its label.
         source: (usize, u64, u32),
+        /// The original call's time, for how long it ran.
+        start: Option<i64>,
     },
     /// A Codex code-mode command or file change, drawn in place of its
     /// wrapper when exactly one code-mode call owns it.
