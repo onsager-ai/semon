@@ -225,7 +225,7 @@ pub(crate) struct SessionFacts {
     /// writer lock is held), `false` when the record's process is gone,
     /// `None` when there is no process record to check.
     pub(crate) alive: Option<bool>,
-    /// The status the Claude pid file recorded (`busy`, `idle`, …).
+    /// The status the Claude pid file recorded (`busy`, `idle`, `shell`, `waiting`, …).
     pub(crate) recorded_status: Option<String>,
     /// The live process's run ids: the entries of its environment named in
     /// [`crate::RUN_VARIABLES`], nothing else. Empty when it has none;
@@ -923,6 +923,9 @@ pub(crate) struct PidFile {
     /// The process start time the file records.
     pub(crate) start: Option<u64>,
     status: Option<String>,
+    /// What the process is waiting on you for, when it says so
+    /// (`input needed`, `permission prompt`): the record's `waitingFor`.
+    waiting_for: Option<String>,
     name: Option<String>,
 }
 
@@ -992,6 +995,9 @@ pub(crate) fn pid_files(options: &Options, machine: &MachineFacts) -> Vec<PidFil
             alive: start.is_some() && machine.proc_start(options, pid) == start,
             start,
             status: field(&record, "status").map(str::to_owned),
+            waiting_for: field(&record, "waitingFor")
+                .filter(|reason| !reason.is_empty())
+                .map(str::to_owned),
             name: field(&record, "name").map(str::to_owned),
         });
     }
@@ -1286,6 +1292,8 @@ struct Sess {
     files: Vec<usize>,
     alive: bool,
     busy: bool,
+    /// The process is stopped on a dialog only you can answer.
+    waiting: bool,
     names: BTreeSet<String>,
     refs: Vec<Ref>,
     parent: Option<usize>,
@@ -1415,6 +1423,7 @@ impl<'a> Builder<'a> {
             files,
             alive: false,
             busy: false,
+            waiting: false,
             names: BTreeSet::new(),
             refs: Vec::new(),
             parent: None,
@@ -1702,7 +1711,11 @@ impl<'a> Builder<'a> {
             }
             if pid.alive {
                 session.alive = true;
-                session.busy = pid.status.as_deref() == Some("busy");
+                // `shell` is a finished turn with background shells still
+                // running, which `claude agents` reports as busy too.
+                session.busy = matches!(pid.status.as_deref(), Some("busy" | "shell"));
+                session.waiting =
+                    pid.status.as_deref() == Some("waiting") || pid.waiting_for.is_some();
                 if let Some(name) = &pid.name {
                     session.out.name = name.clone();
                 }
@@ -2704,8 +2717,8 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Live top-level sessions: working, waiting on an open question or
-    /// decision, or idle.
+    /// Live top-level sessions: waiting on you (an open question or
+    /// decision, or a dialog the process reports), working, or idle.
     fn lineage_states(&mut self) {
         for index in 0..self.sessions.len() {
             let session = &self.sessions[index];
@@ -2716,18 +2729,22 @@ impl<'a> Builder<'a> {
                 self.sessions[index].out.state = "done";
                 continue;
             }
-            if session.busy {
-                self.sessions[index].out.state = "work";
-                continue;
-            }
-            let open = self.handoffs.iter().any(|handoff| {
-                handoff.from == Some(index)
-                    && handoff.out.kind == "toyou"
-                    && matches!(handoff.out.ask, Some("question" | "decision"))
-                    && handoff.out.status == "wait"
-            });
+            // Waiting on you outranks working: a session asking a question
+            // or stopped on a permission prompt is still mid-turn, so its
+            // process reads as busy (or as `waiting`, for a dialog).
+            let open = session.waiting
+                || self.handoffs.iter().any(|handoff| {
+                    handoff.from == Some(index)
+                        && handoff.out.kind == "toyou"
+                        && matches!(handoff.out.ask, Some("question" | "decision"))
+                        && handoff.out.status == "wait"
+                });
             if open {
                 self.sessions[index].out.state = "wait";
+                continue;
+            }
+            if session.busy {
+                self.sessions[index].out.state = "work";
                 continue;
             }
             let refs = self.events_of(index);

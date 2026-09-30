@@ -1346,7 +1346,31 @@ fn states_follow_the_process_the_question_and_the_last_word() {
             ),
         ],
     );
-    home.live(31, "asking", "idle", json!({}));
+    // The process is mid-turn while the question is on screen, so its record
+    // can still read `busy`; an open question outranks it.
+    home.live(31, "asking", "busy", json!({}));
+    // Claude Code 2.1.285 records `waiting` with the reason while it is
+    // stopped on a dialog: a question, or a permission prompt.
+    home.top(
+        "input-needed",
+        &[human("input-needed", ts(16, 0), "dialog")],
+    );
+    home.live(
+        38,
+        "input-needed",
+        "waiting",
+        json!({"waitingFor":"input needed"}),
+    );
+    home.top("permission", &[human("permission", ts(16, 0), "touch it")]);
+    home.live(
+        39,
+        "permission",
+        "waiting",
+        json!({"waitingFor":"permission prompt"}),
+    );
+    // A finished turn with background shells still running.
+    home.top("shell", &[human("shell", ts(16, 0), "start a server")]);
+    home.live(40, "shell", "shell", json!({}));
     home.top(
         "answered",
         &[
@@ -1439,6 +1463,9 @@ fn states_follow_the_process_the_question_and_the_last_word() {
         [
             state("working"),
             state("asking"),
+            state("input-needed"),
+            state("permission"),
+            state("shell"),
             state("answered"),
             state("relayed-reply"),
             state("scheduled-reply"),
@@ -1448,7 +1475,8 @@ fn states_follow_the_process_the_question_and_the_last_word() {
             state("ended")
         ],
         [
-            "work", "wait", "idle", "idle", "idle", "idle", "idle", "idle", "done"
+            "work", "wait", "wait", "wait", "work", "idle", "idle", "idle", "idle", "idle", "idle",
+            "done"
         ]
     );
     assert_eq!(by_brief(&built, "busy work").status, "work");
