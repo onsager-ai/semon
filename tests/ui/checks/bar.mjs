@@ -623,10 +623,10 @@ export default async function barCheck(browser) {
     });
     await page.reload({ waitUntil: "load" }); await settled(page); // served() loaded the model before these routes existed; the app is ready when its bar is drawn
     await goto(page, { v: "session", id: "principal" }, D);
-    await page.waitForSelector('section.turn[data-turn="bt-masked-then-reply"]', { timeout: 8000 }).catch(() => {});
+    await page.waitForSelector('.turn[data-turn="bt-masked-then-reply"]', { timeout: 8000 }).catch(() => {});
     bareTurns = await page.evaluate(() => {
-      const withReply = document.querySelector('section.turn[data-turn="bt-masked-then-reply"]'), bare = document.querySelector('section.turn[data-turn="bt-bare-turn"]');
-      const shape = (id) => { const b = document.querySelector('section.turn[data-turn="' + id + '"]'), tx = b?.querySelector(".tx"), g = b ? [...b.querySelectorAll(".tgroup")] : [];
+      const withReply = document.querySelector('.turn[data-turn="bt-masked-then-reply"]'), bare = document.querySelector('.turn[data-turn="bt-bare-turn"]');
+      const shape = (id) => { const b = document.querySelector('.turn[data-turn="' + id + '"]'), tx = b?.querySelector(".tx"), g = b ? [...b.querySelectorAll(".tgroup")] : [];
         return { block: !!b, masked: b?.querySelectorAll(".thought.masked").length ?? null, groups: g.length, summary: g[0]?.querySelector(".tt")?.textContent.trim() ?? null, steps: g[0]?.querySelectorAll(".step").length ?? null, singles: b?.querySelectorAll(".tx > .steps").length ?? null, order: tx ? [...tx.children].map((c) => c.classList.contains("thought") ? "masked" : c.classList.contains("tgroup") ? "group" : c.className) : null }; };
       return { alternating: shape("bt-alternating"), inRun: shape("bt-in-run"), bareBlock: !!bare, bareLines: bare?.querySelectorAll(".thought.masked").length ?? null, bareMessages: bare?.querySelectorAll(".msg").length ?? null, replyBlock: !!withReply, replyText: withReply?.querySelector(".msg")?.textContent ?? null, linesInReply: withReply?.querySelectorAll(".thought.masked").length ?? null, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] };
     });
@@ -669,13 +669,14 @@ export default async function barCheck(browser) {
       await page.reload({ waitUntil: "load" });
       try { await goto(page, { v: "session", id: "principal" }, D); }
       catch (error) { throw new Error("lone-step fixture could not open Principal: " + (error?.message ?? error) + "; page errors: " + (page.errors.join(" | ") || "none")); }
-      const selector = 'section.turn[data-turn="bt-lone-line"] .steps.lone .step > button';
-      await page.waitForSelector(selector, { state: "attached" });
+      const selector = '.turn[data-turn="bt-lone-line"] .steps.lone .step > button';
+      try { await page.waitForSelector(selector, { state: "attached" }); }
+      catch (error) { throw new Error("lone-step fixture did not render the row: " + (error?.message ?? error) + "; page errors: " + (page.errors.join(" | ") || "none")); }
       const button = page.locator(selector);
       await button.scrollIntoViewIfNeeded();
       const width = size === "phone" ? 390 : 1280, scheme = dark ? "dark" : "light", tag = width + "-" + scheme;
       const collapsed = await page.evaluate(() => {
-        const turn = document.querySelector('section.turn[data-turn="bt-lone-line"]'), steps = turn?.querySelector(":scope .steps.lone"), button = steps?.querySelector(":scope > .step > button"), group = steps?.nextElementSibling, summary = group?.querySelector(":scope > .tsum");
+        const turn = document.querySelector('.turn[data-turn="bt-lone-line"]'), steps = turn?.querySelector(":scope .steps.lone"), button = steps?.querySelector(":scope > .step > button"), group = steps?.nextElementSibling, summary = group?.querySelector(":scope > .tsum");
         if (!steps || !button || !summary) return { found: false };
         const b = button.getBoundingClientRect(), s = summary.getBoundingClientRect(), bc = getComputedStyle(button), sc = getComputedStyle(summary), arg = button.querySelector(".sa"), ac = arg && getComputedStyle(arg);
         return { found: true, leftDelta: b.left - s.left, heightDelta: Math.abs(b.height - s.height), buttonFont: bc.fontSize, summaryFont: sc.fontSize, buttonColor: bc.color, summaryColor: sc.color,
@@ -685,15 +686,15 @@ export default async function barCheck(browser) {
       await page.screenshot({ path: path.join(ENV.out, "bar-lone-step-" + width + "-" + scheme + "-collapsed.png") });
       loneStep.screenshots.push("bar-lone-step-" + width + "-" + scheme + "-collapsed.png");
       await button.click();
-      await page.waitForFunction(() => { const b = document.querySelector('section.turn[data-turn="bt-lone-line"] .steps.lone .step > button'); return b?.getAttribute("aria-expanded") === "true" && b.parentElement.querySelector(":scope > .out")?.hidden === false; });
+      await page.waitForFunction(() => { const b = document.querySelector('.turn[data-turn="bt-lone-line"] .steps.lone .step > button'); return b?.getAttribute("aria-expanded") === "true" && b.parentElement.querySelector(":scope > .out")?.hidden === false; });
       const expanded = await page.evaluate(() => {
-        const button = document.querySelector('section.turn[data-turn="bt-lone-line"] .steps.lone .step > button'), out = button?.parentElement.querySelector(":scope > .out"), verb = button?.querySelector(".sv"), r = out?.getBoundingClientRect();
+        const button = document.querySelector('.turn[data-turn="bt-lone-line"] .steps.lone .step > button'), out = button?.parentElement.querySelector(":scope > .out"), verb = button?.querySelector(".sv"), r = out?.getBoundingClientRect();
         return { ariaExpanded: button?.getAttribute("aria-expanded"), outputVisible: !!out && !out.hidden && out.textContent.includes("Lone step output is visible."), outputLeftDelta: r && verb ? Math.abs(r.left - verb.getBoundingClientRect().left) : null };
       });
       await page.screenshot({ path: path.join(ENV.out, "bar-lone-step-" + width + "-" + scheme + "-expanded.png") });
       loneStep.screenshots.push("bar-lone-step-" + width + "-" + scheme + "-expanded.png");
       await button.click();
-      const recollapsed = await page.evaluate(() => { const b = document.querySelector('section.turn[data-turn="bt-lone-line"] .steps.lone .step > button'), out = b?.parentElement.querySelector(":scope > .out"); return { ariaExpanded: b?.getAttribute("aria-expanded"), outputHidden: !!out?.hidden }; });
+      const recollapsed = await page.evaluate(() => { const b = document.querySelector('.turn[data-turn="bt-lone-line"] .steps.lone .step > button'), out = b?.parentElement.querySelector(":scope > .out"); return { ariaExpanded: b?.getAttribute("aria-expanded"), outputHidden: !!out?.hidden }; });
       const view = { collapsed, expanded, recollapsed, overflow: await overflow(page), errors: page.errors };
       loneStep.views[tag] = view;
       if (size === "desktop" && !dark) {
