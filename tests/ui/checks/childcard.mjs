@@ -16,7 +16,12 @@ function paintFixture(D) {
     if (h.kind !== "spawn" || !D.SESS[h.from] || !D.SESS[h.to]) continue;
     const childTurn = D.turns.find((t) => t.sid === h.to && t.start === h.id);
     if (!childTurn) continue;
-    const activity = (D.TX[h.to] ?? []).filter((e) => e.turn === childTurn.id && !(e.k === "h" && e.id === h.id));
+    let turn = null;
+    const activity = [];
+    for (const e of D.TX[h.to] ?? []) {
+      if (e.turn) turn = e.turn;
+      if (turn === childTurn.id && !(e.k === "h" && e.id === h.id)) activity.push(e);
+    }
     const handoffAt = (D.TX[h.from] ?? []).findIndex((e) => e.k === "h" && e.id === h.id);
     if (activity.length && handoffAt >= 0) candidates.push({ parent: h.from, child: h.to, spawn: h.id, childTurn: childTurn.id, deepTurn, rank: handoffAt });
   }
