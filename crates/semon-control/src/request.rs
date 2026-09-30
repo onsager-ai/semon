@@ -144,10 +144,20 @@ pub struct Source {
 }
 
 impl Source {
+    /// The source for a journal line; the window id, which the client
+    /// chooses, is cut to 128 bytes.
     pub(crate) fn to_json(&self) -> Value {
-        json!({"window": self.window, "peer_pid": self.peer_pid, "peer_uid": self.peer_uid})
+        json!({
+            "window": truncated(&self.window, 128),
+            "peer_pid": self.peer_pid,
+            "peer_uid": self.peer_uid,
+        })
     }
 }
+
+/// A deny's message is kept, delivered and journalled up to this many
+/// bytes; the rest is cut.
+pub const MAX_DENY_MESSAGE_BYTES: usize = 1024;
 
 /// An answer, as the human gave it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +174,16 @@ pub enum Answer {
 }
 
 impl Answer {
+    /// The answer with a deny's message cut to [`MAX_DENY_MESSAGE_BYTES`].
+    pub(crate) fn capped(self) -> Self {
+        match self {
+            Self::Deny { message } => Self::Deny {
+                message: message.map(|text| truncated(&text, MAX_DENY_MESSAGE_BYTES)),
+            },
+            other => other,
+        }
+    }
+
     pub(crate) fn is_deny(&self) -> bool {
         matches!(self, Self::Deny { .. })
     }
@@ -184,7 +204,7 @@ impl Answer {
             Self::Allow => json!({"decision": "allow"}),
             Self::Deny { message } => json!({
                 "decision": "deny",
-                "message": message.as_deref().map(|text| truncated(text, 1024)),
+                "message": message.as_deref().map(|text| truncated(text, MAX_DENY_MESSAGE_BYTES)),
             }),
             Self::Questions(answers) => {
                 let kept: serde_json::Map<String, Value> = answers
@@ -322,7 +342,8 @@ pub enum State {
         answer: Answer,
         /// Who sent it.
         source: Source,
-        /// When the claim was made.
+        /// When the claim was made, on the monotonic clock
+        /// ([`crate::monotonic_ms`]), not the epoch.
         at_ms: u64,
     },
     /// Semon delivered the answer, as far as the harness lets it see.
@@ -436,13 +457,19 @@ pub struct PendingRequest {
     pub match_key: Option<MatchKey>,
     /// Whether a Claude hook connection waits on it.
     pub hook_wait: bool,
-    /// When the store first saw it.
+    /// When the store first saw it, on the monotonic clock
+    /// ([`crate::monotonic_ms`]), not the epoch: it orders and ages
+    /// requests, and must never be shown or serialized as a wall time.
     pub created_ms: u64,
+    /// When the store first saw it, in wall-clock milliseconds since the
+    /// epoch, for display only.
+    pub created_wall_ms: u64,
     /// After this, answers are refused and it becomes `left`, timed out.
     pub expires_ms: u64,
     /// Where it is.
     pub state: State,
-    /// When it reached its final state.
+    /// When it reached its final state, on the monotonic clock, not the
+    /// epoch; never shown as a wall time.
     pub ended_ms: Option<u64>,
     /// Whether a tool-run report has been matched to it.
     pub tool_run_matched: bool,

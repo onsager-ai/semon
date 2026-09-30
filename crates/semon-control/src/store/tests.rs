@@ -22,8 +22,8 @@ use crate::{
         tests::{lines, scratch},
     },
     request::{
-        Answer, Answerable, Harness, Kind, LeftReason, MatchKey, NewRequest, PendingRequest,
-        RequestId, ResolvedReason, Source, State,
+        Answer, Answerable, Harness, Kind, LeftReason, MAX_DENY_MESSAGE_BYTES, MatchKey,
+        NewRequest, PendingRequest, RequestId, ResolvedReason, Source, State,
     },
 };
 
@@ -1533,4 +1533,112 @@ fn a_refused_answer_is_journalled_capped() {
     }));
     assert_eq!(journal[1]["answer"]["answer_count"], 40);
     assert_eq!(adapter.calls(), 0);
+}
+
+#[test]
+fn a_registration_is_refused_without_dropping_when_dropping_would_not_be_enough() {
+    let (store, _) = new_store("budget-partial");
+    let sized = |session: &str, bytes: usize| NewRequest {
+        payload: json!({"s": "x".repeat(bytes - 8)}),
+        ..unhooked(session)
+    };
+    let quarter = MAX_PAYLOAD_BYTES / 4;
+    let final_one = store.register(sized("f", quarter), T0).unwrap();
+    store.resolve(final_one, ResolvedReason::OtherClient, T0);
+    let full_slots = MAX_HELD_PAYLOAD_BYTES / MAX_PAYLOAD_BYTES - 1;
+    for number in 0..full_slots {
+        store
+            .register(sized(&format!("o{number}"), MAX_PAYLOAD_BYTES), T0 + 1)
+            .unwrap();
+    }
+    store
+        .register(sized("half", MAX_PAYLOAD_BYTES / 2), T0 + 1)
+        .unwrap();
+    let held = store.held_payload_bytes();
+    assert_eq!(
+        held,
+        full_slots * MAX_PAYLOAD_BYTES + MAX_PAYLOAD_BYTES / 2 + quarter
+    );
+
+    // One more full payload needs three quarters of a slot freed; only a
+    // quarter is droppable, so the registration is refused and nothing is
+    // dropped.
+    assert_eq!(
+        store.register(sized("over", MAX_PAYLOAD_BYTES), T0 + 2),
+        Err(RegisterError::OverBudget)
+    );
+    let kept = store.get(final_one, T0 + 2).unwrap();
+    assert!(!kept.payload_dropped);
+    assert_eq!(kept.payload_bytes, quarter);
+    assert_eq!(store.held_payload_bytes(), held);
+}
+
+#[test]
+fn a_deny_message_is_capped_before_the_claim() {
+    let (store, path) = new_store("deny-cap");
+    let id = store.register(permission("s1", "ls"), T0).unwrap();
+    store
+        .answer(
+            &Fake::new(Delivery::Written),
+            id,
+            Answer::Deny {
+                message: Some("m".repeat(5000)),
+            },
+            &digest(&store, id),
+            source(&"w".repeat(500)),
+            &|| T0 + 1,
+        )
+        .unwrap();
+    let State::Answered {
+        answer: Answer::Deny {
+            message: Some(message),
+        },
+        ..
+    } = state(&store, id, T0 + 1)
+    else {
+        panic!("expected a delivered deny");
+    };
+    assert!(message.len() <= MAX_DENY_MESSAGE_BYTES + '\u{2026}'.len_utf8());
+    let journal = lines(&path);
+    assert_eq!(journal[0]["answer"]["message"], json!(message));
+    assert!(journal[0]["source"]["window"].as_str().unwrap().len() <= 128 + '\u{2026}'.len_utf8());
+}
+
+#[test]
+fn a_malformed_hash_is_a_mismatch_and_is_journalled_cut() {
+    let (store, path) = new_store("hash-format");
+    let id = store.register(permission("s1", "ls"), T0).unwrap();
+    let upper = digest(&store, id).to_uppercase();
+    let adapter = Fake::new(Delivery::Written);
+    for bad in [upper, "f".repeat(5000)] {
+        let error = store
+            .answer(&adapter, id, Answer::Allow, &bad, source("w"), &|| T0 + 1)
+            .unwrap_err();
+        assert_eq!(error.http_status(), 412);
+    }
+    assert!(
+        lines(&path).iter().all(
+            |line| line["payload_sha256"].as_str().unwrap().len() <= 64 + '\u{2026}'.len_utf8()
+        )
+    );
+    assert_eq!(adapter.calls(), 0);
+}
+
+#[test]
+fn a_claude_request_without_a_match_key_is_refused() {
+    let (store, _) = new_store("no-key");
+    assert_eq!(
+        store.register(
+            NewRequest {
+                match_key: None,
+                ..permission("s1", "ls")
+            },
+            T0
+        ),
+        Err(RegisterError::KindMismatch)
+    );
+    let id = store.register(permission("s2", "ls"), T0).unwrap();
+    let request = store.get(id, T0).unwrap();
+    assert_eq!(request.created_ms, T0);
+    assert_eq!(request.created_wall_ms, WALL);
 }

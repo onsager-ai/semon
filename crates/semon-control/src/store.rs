@@ -16,8 +16,8 @@ use crate::{
     canonical,
     journal::Journal,
     request::{
-        Answer, Answerable, Kind, LeftReason, MatchKey, NewRequest, PendingRequest, RequestId,
-        ResolvedReason, Source, State, single_choice_questions, truncated,
+        Answer, Answerable, Harness, Kind, LeftReason, MatchKey, NewRequest, PendingRequest,
+        RequestId, ResolvedReason, Source, State, single_choice_questions, truncated,
     },
 };
 
@@ -105,8 +105,8 @@ pub enum RegisterError {
     /// dropping every final request's payload.
     #[error("the held payloads are at their budget")]
     OverBudget,
-    /// A Claude request whose tool is `AskUserQuestion` must be a question,
-    /// and a question must come from `AskUserQuestion`.
+    /// A Claude request must carry a match key; its tool is
+    /// `AskUserQuestion` exactly when it is a question.
     #[error("the request's kind doesn't match its tool")]
     KindMismatch,
 }
@@ -259,6 +259,7 @@ impl RequestStore {
                     Some(reason) => Answerable::No(reason),
                     None => Answerable::Yes,
                 };
+                let created_wall_ms = (inner.wall)();
                 inner.requests.push(PendingRequest {
                     id,
                     session: new.session,
@@ -273,6 +274,7 @@ impl RequestStore {
                     match_key: new.match_key,
                     hook_wait: new.hook_wait,
                     created_ms: now_ms,
+                    created_wall_ms,
                     expires_ms: new.expires_ms,
                     state: State::Open,
                     ended_ms: None,
@@ -308,6 +310,7 @@ impl RequestStore {
         source: Source,
         clock: &dyn Fn() -> u64,
     ) -> Result<State, AnswerError> {
+        let answer = answer.capped();
         let claimed = {
             let mut inner = self.lock();
             let now_ms = clock();
@@ -472,10 +475,12 @@ fn hash_payload(new: &NewRequest) -> Result<Hashed, RegisterError> {
     {
         return Err(RegisterError::IdTooLong);
     }
-    if let Some(key) = &new.match_key
-        && (key.tool_name == "AskUserQuestion") != (new.kind == Kind::Question)
-    {
-        return Err(RegisterError::KindMismatch);
+    match &new.match_key {
+        None if new.harness == Harness::Claude => return Err(RegisterError::KindMismatch),
+        Some(key) if (key.tool_name == "AskUserQuestion") != (new.kind == Kind::Question) => {
+            return Err(RegisterError::KindMismatch);
+        }
+        _ => {}
     }
     // Refuse a payload that is too large before encoding it, from a cheap
     // lower bound on its size; the exact check follows the encoding.
@@ -750,7 +755,10 @@ impl Inner {
             }
             Some(request) => match &request.answerable {
                 Answerable::No(reason) => Some(AnswerError::ReadOnly(reason.clone())),
-                Answerable::Yes if request.payload_sha256.as_deref() != Some(payload_sha256) => {
+                Answerable::Yes
+                    if !is_sha256_hex(payload_sha256)
+                        || request.payload_sha256.as_deref() != Some(payload_sha256) =>
+                {
                     Some(AnswerError::HashMismatch {
                         payload: Box::new(request.payload.clone()),
                     })
@@ -777,7 +785,7 @@ impl Inner {
                     "request": id.to_string(),
                     "source": source.to_json(),
                     "answer": answer.to_capped_json(),
-                    "payload_sha256": payload_sha256,
+                    "payload_sha256": truncated(payload_sha256, 64),
                     "status": error.http_status(),
                     "reason": error.to_string(),
                 });
@@ -901,6 +909,14 @@ impl Inner {
             ToolRun::Marked(id)
         }
     }
+}
+
+/// Whether `text` is a SHA-256 in lowercase hex.
+fn is_sha256_hex(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Whether a claimed deny may have reached Claude: it was written, or its

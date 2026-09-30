@@ -25,8 +25,8 @@ mod store;
 
 pub use journal::Journal;
 pub use request::{
-    Answer, Answerable, Harness, Kind, LeftReason, MatchKey, NewRequest, PendingRequest, RequestId,
-    ResolvedReason, Source, State,
+    Answer, Answerable, Harness, Kind, LeftReason, MAX_DENY_MESSAGE_BYTES, MatchKey, NewRequest,
+    PendingRequest, RequestId, ResolvedReason, Source, State,
 };
 pub use store::{
     Adapter, AnswerError, DELIVERY_DEADLINE_MS, Delivery, MAX_HELD_PAYLOAD_BYTES, MAX_HOOK_WAITS,
@@ -60,10 +60,10 @@ pub fn wall_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_monotonic_clock_never_goes_back() {
+    fn the_monotonic_clock_advances_with_real_time() {
         let first = super::monotonic_ms();
+        std::thread::sleep(std::time::Duration::from_millis(20));
         let second = super::monotonic_ms();
-        assert!(second >= first);
-        assert!(super::wall_ms() > 1_600_000_000_000);
+        assert!(second >= first + 20, "{first} then {second}");
     }
 }
