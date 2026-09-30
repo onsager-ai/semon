@@ -1867,7 +1867,17 @@
       if (live) { box.dataset.live = sid; if (e.since != null) box.dataset.since = e.since; }
       const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
       const status = live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
-      b.append(live ? el("span", "spin") : icon(I[ic]), el("span", "sv", live && v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd" + (live ? " tick" : ""), status), icon(I.chev, "chev"));
+      const title = e.title ? String(e.title) : null;
+      const command = e.in ?? e.arg;
+      const firstNonemptyLine = typeof command === "string" ? command.split(/\r\n|\n|\r/).find((line) => line.trim()) : null;
+      const label = title ? el("span", "sa st", title) : el("code", "sa", e.arg);
+      if (title) {
+        b.setAttribute("aria-label", "Ran: " + title);
+        if (firstNonemptyLine != null) label.setAttribute("data-tip", firstNonemptyLine.slice(0, 200));
+      }
+      b.append(live ? el("span", "spin") : icon(I[ic]));
+      if (!title) b.append(el("span", "sv", live && v === "Ran" ? "Running" : v));
+      b.append(label, el("span", "sd" + (live ? " tick" : ""), status), icon(I.chev, "chev"));
       const out = el("div", "out"); out.hidden = true;
       // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
       // eleven lines. When either is cut, "View all" opens the whole call in a sheet.
@@ -1917,7 +1927,7 @@
         continue;
       }
       if (e.k === "tool") {
-        if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
+        if (!show.tools || !hit(e.name + " " + (e.title ?? "") + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
         const box = toolStep(e, v, ic, !!e.live);
         if (e.live) run.push({ node: box, v, k: e.name, live: true, secs: e.secs, key: e.key });

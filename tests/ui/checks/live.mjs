@@ -258,20 +258,26 @@ async function scheme(browser, name, opts, r, protocol) {
     await sleep(200); const top1 = await S.evaluate(() => window.__sc().scrollTop);
     t0 = Date.now();
     const clipCommand = ["sleep 90 && echo line 01", ...Array.from({ length: 13 }, (_, i) => "echo line " + String(i + 2).padStart(2, "0"))].join("\n");
-    harbor.append(harbor.tool(at(12, 42), "toolu-live1", "Bash", { command: "sleep 30 && echo live", description: "Wait" }),
+    harbor.append(harbor.tool(at(12, 42), "toolu-live1", "Bash", { command: "sleep 30 && echo live" }),
       harbor.tool(at(12, 42, 30), "toolu-live1b", "Bash", { command: "sleep 31 && echo live two", description: "Wait" }),
       harbor.tool(at(12, 42, 31), "toolu-liveclip", "Bash", { command: clipCommand, description: "Wait" }));
-    R.call = await appear(S, t0, () => [...document.querySelectorAll(".step.live .sa")].some((x) => x.textContent.includes("sleep 30")));
+    R.call = await appear(S, t0, () => [...document.querySelectorAll(".step.live code.sa")].some((x) => x.textContent.includes("sleep 30")));
     r.expect(R.call != null, name + ": the new call didn't appear within 4 s");
-    R.call2 = await appear(S, t0, () => [...document.querySelectorAll(".step.live .sa")].some((x) => x.textContent.includes("sleep 31")));
+    R.call2 = await appear(S, t0, () => !!document.querySelector('.step.live .sa[data-tip^="sleep 31"]'));
     r.expect(R.call2 != null, name + ": the second parallel call didn't appear within 4 s");
-    R.clipCall = await appear(S, t0, () => [...document.querySelectorAll(".step.live .sa")].some((x) => x.textContent.includes("sleep 90 && echo line 01")));
+    R.clipCall = await appear(S, t0, () => !!document.querySelector('.step.live .sa[data-tip^="sleep 90 && echo line 01"]'));
     r.expect(R.clipCall != null, name + ": the long live call didn't appear within 4 s");
-    const liveClip = await S.evaluate(() => [...document.querySelectorAll(".step.live")].find((x) => x.querySelector(".sa")?.textContent.includes("sleep 90 && echo line 01"))?.dataset.e ?? null);
-    const liveKeys = await S.evaluate(() => [...document.querySelectorAll(".step.live")].filter((x) => x.querySelector(".sa")?.textContent.includes("sleep 30") || x.querySelector(".sa")?.textContent.includes("sleep 31")).map((x) => ({ key: x.dataset.e, command: x.querySelector(".sa")?.textContent, since: Number(x.dataset.since) })));
+    const liveClip = await S.evaluate(() => [...document.querySelectorAll(".step.live")].find((x) => x.querySelector('.sa[data-tip^="sleep 90 && echo line 01"]'))?.dataset.e ?? null);
+    const liveKeys = await S.evaluate(() => [...document.querySelectorAll(".step.live")].flatMap((x) => {
+      const label = x.querySelector(".sa"), command = label?.getAttribute("data-tip") ?? label?.textContent ?? "";
+      return command.includes("sleep 30") || command.includes("sleep 31") ? [{ key: x.dataset.e, command, title: x.querySelector(".sa.st")?.textContent ?? null, verb: x.querySelector(".sv")?.textContent ?? null, since: Number(x.dataset.since) }] : [];
+    }));
     const live1 = liveKeys.find((x) => x.command.includes("sleep 30"))?.key ?? null, live2 = liveKeys.find((x) => x.command.includes("sleep 31"))?.key ?? null;
     R.parallelStarts = [liveKeys.find((x) => x.key === live1)?.since, liveKeys.find((x) => x.key === live2)?.since];
     r.expect(liveKeys.length === 2 && live1 && live2 && Math.abs(Math.abs(R.parallelStarts[0] - R.parallelStarts[1]) / 1000 - 30) <= 0.01, name + ": the parallel calls don't have distinct starts 30 s apart: " + JSON.stringify(liveKeys));
+    const untitledLive = liveKeys.find((x) => x.key === live1), titledLive = liveKeys.find((x) => x.key === live2);
+    r.expect(untitledLive?.verb === "Running" && untitledLive.title === null, name + ": the untitled live call didn't keep its Running label: " + JSON.stringify(untitledLive));
+    r.expect(titledLive?.title === "Wait", name + ": the titled live call didn't show its description: " + JSON.stringify(titledLive));
     R.pinned = await S.evaluate(() => ({ hidden: document.querySelector(".jump-bottom")?.hidden, left: window.__left(), top: window.__sc().scrollTop }));
     R.pinned.before = top1;
     r.expect(R.pinned.hidden && R.pinned.left <= 1 && R.pinned.top > top1, name + ": not kept at the end: " + JSON.stringify(R.pinned));
@@ -325,6 +331,8 @@ async function scheme(browser, name, opts, r, protocol) {
     const timerState = () => S.evaluate((keys) => {
       const steps = keys.map((key) => [...document.querySelectorAll(".step.live")].find((n) => n.dataset.e === key));
       return { texts: steps.map((n) => n?.querySelector(".sd")?.textContent ?? null),
+        titles: steps.map((n) => n?.querySelector(".sa.st")?.textContent ?? null),
+        verbs: steps.map((n) => n?.querySelector(".sv")?.textContent ?? null),
         summary: steps[0]?.closest(".tgroup")?.querySelector(":scope > .tsum > .tl")?.textContent ?? null,
         sameGroup: !!steps[0]?.closest(".tgroup") && steps.every((n) => n?.closest(".tgroup") === steps[0].closest(".tgroup")) };
     }, [live1, live2]);
@@ -336,8 +344,11 @@ async function scheme(browser, name, opts, r, protocol) {
       return Date.now() - started >= 2000 && currentSeconds.every((value, i) => value != null && beforeSeconds[i] != null && value >= beforeSeconds[i] + 2);
     }, { keys: [live1, live2], before: ticksBefore.texts, started: tickSince }, 7000);
     const ticksAfter = await timerState(), tickA = ticksBefore.texts[0], tickB = ticksAfter.texts[0];
-    R.ticks = { before: ticksBefore.texts, after: ticksAfter.texts, group: ticksAfter.summary, sameGroup: ticksAfter.sameGroup };
+    R.ticks = { before: ticksBefore.texts, after: ticksAfter.texts, titles: ticksAfter.titles, group: ticksAfter.summary, sameGroup: ticksAfter.sameGroup };
     r.expect(secsOf(tickA) != null && secsOf(tickB) > secsOf(tickA), name + ": the running step's time didn't tick: " + JSON.stringify([tickA, tickB]));
+    const titledBefore = secsOf(ticksBefore.texts[1]), titledAfter = secsOf(ticksAfter.texts[1]);
+    r.expect(ticksBefore.titles[1] === "Wait", name + ": the live step title didn't remain visible: " + JSON.stringify(ticksBefore.titles));
+    r.expect(titledBefore != null && titledAfter != null && titledAfter >= titledBefore + 2, name + ": the titled live step's time didn't tick by at least 2 s: " + JSON.stringify([ticksBefore.texts[1], ticksAfter.texts[1]]));
     const durations = ticksAfter.texts.map(secsOf);
     r.expect(R.parallelTick != null && ticksAfter.sameGroup && durations.every((x) => x != null) && Math.abs(Math.abs(durations[0] - durations[1]) - 30) <= 1,
       name + ": both parallel running steps didn't advance by at least 2 s and stay about 30 s apart: " + JSON.stringify(R.ticks));
@@ -573,9 +584,9 @@ async function scheme(browser, name, opts, r, protocol) {
     await S.click('#topbar button[aria-label="Close search"]'); await S.waitForFunction(() => !document.querySelector("#find")); // find from step 5 would hide the call
     t0 = Date.now();
     harbor.append(harbor.tool(at(12, 46), "toolu-live5", "Bash", { command: "sleep 99 && echo gone" }));
-    R.lastCall = await appear(S, t0, () => [...document.querySelectorAll(".step.live .sa")].some((x) => x.textContent.includes("sleep 99")));
+    R.lastCall = await appear(S, t0, () => [...document.querySelectorAll(".step.live code.sa")].some((x) => x.textContent.includes("sleep 99")));
     r.expect(R.lastCall != null, name + ": the last call didn't appear within 4 s");
-    const live5 = await S.evaluate(() => [...document.querySelectorAll(".step.live")].find((x) => x.querySelector(".sa")?.textContent.includes("sleep 99"))?.dataset.e ?? null);
+    const live5 = await S.evaluate(() => [...document.querySelectorAll(".step.live")].find((x) => x.querySelector("code.sa")?.textContent.includes("sleep 99"))?.dataset.e ?? null);
     const pidFile = fs.readdirSync(path.join(dir, "claude/sessions")).find((f) => JSON.parse(fs.readFileSync(path.join(dir, "claude/sessions", f), "utf8")).sessionId === "harbor");
     t0 = Date.now(); fs.rmSync(path.join(dir, "proc", path.basename(pidFile, ".json"), "stat"));
     R.died = await appear(S, t0, (k) => { const n = document.querySelector('.step[data-e="' + k + '"]'); return !!n && !n.classList.contains("live") && n.querySelector(".sd")?.textContent === "no result"; }, live5);
