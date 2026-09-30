@@ -863,6 +863,9 @@ fn state_fields(
     match shown {
         Shown::Live => {
             entry.insert("live".into(), json!(true));
+            if let Some(t) = t {
+                entry.insert("since".into(), json!(t));
+            }
             entry.insert(
                 "secs".into(),
                 json!(t.map_or_else(|| "—".to_owned(), |t| running(now - t))),
@@ -1104,6 +1107,9 @@ fn tool_entry(
     match shown {
         Shown::Live => {
             entry.insert("live".into(), json!(true));
+            if let Some(t) = slot.t {
+                entry.insert("since".into(), json!(t));
+            }
             entry.insert(
                 "secs".into(),
                 json!(slot.t.map_or_else(|| "—".to_owned(), |t| running(now - t))),
@@ -2147,6 +2153,89 @@ mod tests {
         assert!(full_slot(&built, "lane", 5, "out").is_err(), "no result");
         assert!(full_slot(&built, "lane", 99, "in").is_err());
         assert!(full_slot(&built, "nobody", 0, "in").is_err());
+    }
+
+    #[test]
+    fn a_live_tool_entry_has_its_start_and_a_finished_entry_has_no_since() {
+        let home = Home::new();
+        let start = BASE + 60_000;
+        let path = home.lines(
+            "claude/projects/-work-proj/lane.jsonl",
+            &[said(
+                "lane",
+                ts(0, 1, 0),
+                json!([{"type":"tool_use","id":"live","name":"Bash","input":{"command":"sleep 30"}}]),
+            )],
+        );
+        let file = SlotFile {
+            path,
+            cwd: Some("/work/proj".to_owned()),
+        };
+        let slot = |shown| Slot {
+            kind: SlotKind::Tool {
+                shown,
+                name: "Bash".to_owned(),
+                reply: None,
+                item: None,
+            },
+            file: Some(0),
+            offset: 0,
+            block: 0,
+            t: Some(start),
+            turn: None,
+            first: false,
+        };
+        let live = tool_entry(
+            &mut Lines::default(),
+            &file,
+            &slot(Shown::Live),
+            0,
+            Shown::Live,
+            "Bash",
+            None,
+            None,
+            start + 10_000,
+            None,
+        );
+        assert_eq!(live["since"], json!(start));
+
+        let finished = tool_entry(
+            &mut Lines::default(),
+            &file,
+            &slot(Shown::Ok),
+            0,
+            Shown::Ok,
+            "Bash",
+            None,
+            None,
+            start + 10_000,
+            None,
+        );
+        assert!(finished.get("since").is_none());
+    }
+
+    #[test]
+    fn state_fields_include_since_only_for_live_steps() {
+        let start = BASE + 60_000;
+        let mut live = Map::new();
+        state_fields(
+            &mut live,
+            Shown::Live,
+            "—".to_owned(),
+            Some(start),
+            start + 10_000,
+        );
+        assert_eq!(live["since"], json!(start));
+
+        let mut finished = Map::new();
+        state_fields(
+            &mut finished,
+            Shown::Ok,
+            "10.0s".to_owned(),
+            Some(start),
+            start + 10_000,
+        );
+        assert!(finished.get("since").is_none());
     }
 
     #[test]

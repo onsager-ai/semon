@@ -257,21 +257,43 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(inner0.keys.length >= 1, name + ": no step open inside child work to close it over");
     await sleep(200); const top1 = await S.evaluate(() => window.__sc().scrollTop);
     t0 = Date.now();
-    harbor.append(harbor.tool(at(12, 42), "toolu-live1", "Bash", { command: "sleep 30 && echo live", description: "Wait" }));
+    harbor.append(harbor.tool(at(12, 42), "toolu-live1", "Bash", { command: "sleep 30 && echo live", description: "Wait" }),
+      harbor.tool(at(12, 42, 30), "toolu-live1b", "Bash", { command: "sleep 31 && echo live two", description: "Wait" }));
     R.call = await appear(S, t0, () => [...document.querySelectorAll(".step.live .sa")].some((x) => x.textContent.includes("sleep 30")));
     r.expect(R.call != null, name + ": the new call didn't appear within 4 s");
-    await sleep(300);
-    const live1 = await S.evaluate(() => [...document.querySelectorAll(".step.live")].find((x) => x.querySelector(".sa")?.textContent.includes("sleep 30"))?.dataset.e ?? null);
+    R.call2 = await appear(S, t0, () => [...document.querySelectorAll(".step.live .sa")].some((x) => x.textContent.includes("sleep 31")));
+    r.expect(R.call2 != null, name + ": the second parallel call didn't appear within 4 s");
+    const liveKeys = await S.evaluate(() => [...document.querySelectorAll(".step.live")].filter((x) => x.querySelector(".sa")?.textContent.includes("sleep 30") || x.querySelector(".sa")?.textContent.includes("sleep 31")).map((x) => ({ key: x.dataset.e, command: x.querySelector(".sa")?.textContent, since: Number(x.dataset.since) })));
+    const live1 = liveKeys.find((x) => x.command.includes("sleep 30"))?.key ?? null, live2 = liveKeys.find((x) => x.command.includes("sleep 31"))?.key ?? null;
+    R.parallelStarts = [liveKeys.find((x) => x.key === live1)?.since, liveKeys.find((x) => x.key === live2)?.since];
+    r.expect(liveKeys.length === 2 && live1 && live2 && Math.abs(Math.abs(R.parallelStarts[0] - R.parallelStarts[1]) / 1000 - 30) <= 0.01, name + ": the parallel calls don't have distinct starts 30 s apart: " + JSON.stringify(liveKeys));
     R.pinned = await S.evaluate(() => ({ hidden: document.querySelector(".jump-bottom")?.hidden, left: window.__left(), top: window.__sc().scrollTop }));
     R.pinned.before = top1;
     r.expect(R.pinned.hidden && R.pinned.left <= 1 && R.pinned.top > top1, name + ": not kept at the end: " + JSON.stringify(R.pinned));
     R.innerKept = await S.evaluate(({ cw, keys }) => { const w = document.querySelector('.child-work[data-e="' + cw + '"]'), t = w.querySelector(":scope > .cw-toggle"), closed = t.getAttribute("aria-expanded") === "false"; t.click();
       return { closed, open: keys.filter((k) => w.querySelector('.step[data-e="' + k + '"] > button')?.getAttribute("aria-expanded") === "true").length, of: keys.length }; }, inner0);
     r.expect(R.innerKept.closed && R.innerKept.open === R.innerKept.of, name + ": steps open inside closed child work didn't survive the redraw: " + JSON.stringify(R.innerKept));
-    const sd = () => S.evaluate((k) => document.querySelector('.step.live[data-e="' + k + '"] .sd')?.textContent ?? null, live1);
-    const tickA = await sd(); await sleep(2500); const tickB = await sd();
-    R.ticks = [tickA, tickB];
-    r.expect(secsOf(tickA) != null && secsOf(tickB) > secsOf(tickA), name + ": the running step's time didn't tick: " + JSON.stringify(R.ticks));
+    const timerState = () => S.evaluate((keys) => {
+      const steps = keys.map((key) => [...document.querySelectorAll(".step.live")].find((n) => n.dataset.e === key));
+      return { texts: steps.map((n) => n?.querySelector(".sd")?.textContent ?? null),
+        summary: steps[0]?.closest(".tgroup")?.querySelector(":scope > .tsum > .tl")?.textContent ?? null,
+        sameGroup: !!steps[0]?.closest(".tgroup") && steps.every((n) => n?.closest(".tgroup") === steps[0].closest(".tgroup")) };
+    }, [live1, live2]);
+    const ticksBefore = await timerState(), tickSince = Date.now();
+    R.parallelTick = await appear(S, tickSince, ({ keys, before, started }) => {
+      const seconds = (text) => { const m = /^(?:(\d+)m )?(\d+)s$/.exec(text ?? ""); return m ? Number(m[1] ?? 0) * 60 + Number(m[2]) : null; };
+      const current = keys.map((key) => [...document.querySelectorAll(".step.live")].find((n) => n.dataset.e === key)?.querySelector(".sd")?.textContent ?? null);
+      const beforeSeconds = before.map(seconds), currentSeconds = current.map(seconds);
+      return Date.now() - started >= 2000 && currentSeconds.every((value, i) => value != null && beforeSeconds[i] != null && value >= beforeSeconds[i] + 2);
+    }, { keys: [live1, live2], before: ticksBefore.texts, started: tickSince }, 7000);
+    const ticksAfter = await timerState(), tickA = ticksBefore.texts[0], tickB = ticksAfter.texts[0];
+    R.ticks = { before: ticksBefore.texts, after: ticksAfter.texts, group: ticksAfter.summary, sameGroup: ticksAfter.sameGroup };
+    r.expect(secsOf(tickA) != null && secsOf(tickB) > secsOf(tickA), name + ": the running step's time didn't tick: " + JSON.stringify([tickA, tickB]));
+    const durations = ticksAfter.texts.map(secsOf);
+    r.expect(R.parallelTick != null && ticksAfter.sameGroup && durations.every((x) => x != null) && Math.abs(Math.abs(durations[0] - durations[1]) - 30) <= 1,
+      name + ": both parallel running steps didn't advance by at least 2 s and stay about 30 s apart: " + JSON.stringify(R.ticks));
+    const earlier = R.parallelStarts[0] < R.parallelStarts[1] ? 0 : 1;
+    r.expect(ticksAfter.summary === "· running " + ticksAfter.texts[earlier], name + ": the group summary didn't show its earliest running step: " + JSON.stringify(R.ticks));
     // A selection in the last turn, while its call runs, survives two updates of harbor itself that change nothing it shows
     // (a line with no entry of its own): the turn is drawn again off-DOM, and only the running time the clock has since
     // rewritten differs, which the comparison leaves out. Each asks for harbor's transcript once.
@@ -284,9 +306,11 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(picked === "Live check" && R.selection.text === picked && R.selection.connected, name + ": the selection didn't survive two updates: " + JSON.stringify(R.selection));
     r.expect(R.selection.tx === 2, name + ": two updates of harbor asked for " + R.selection.tx + " transcripts, not 2");
     t0 = Date.now();
-    harbor.append(harbor.result(at(12, 42, 40), "toolu-live1", "live"));
+    harbor.append(harbor.result(at(12, 42, 40), "toolu-live1", "live"), harbor.result(at(12, 42, 45), "toolu-live1b", "live two"));
     R.callDone = await appear(S, t0, (k) => { const n = document.querySelector('.step[data-e="' + k + '"]'); return !!n && !n.classList.contains("live"); }, live1);
     r.expect(R.callDone != null, name + ": the call didn't become a finished step within 4 s");
+    R.call2Done = await appear(S, t0, (k) => { const n = document.querySelector('.step[data-e="' + k + '"]'); return !!n && !n.classList.contains("live"); }, live2);
+    r.expect(R.call2Done != null, name + ": the second parallel call didn't become a finished step within 4 s");
 
     // ---- 3. a subagent starts while View all is open ----
     await S.locator(".viewall:visible").first().click();
