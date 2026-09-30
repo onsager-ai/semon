@@ -742,10 +742,11 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   /* A step's row is 36px: its target reaches 44px past its box, whatever its height (a % here is the row's own height). */
   .step > button, .tsum { position: relative; }
   .step > button::before, .tsum::before { content: ""; position: absolute; inset: min(0px, calc((100% - 44px) / 2)) 0; }
-  .viewscript { min-height: 44px; min-width: 44px; }
   .step .out .step-actions { min-height: 45px; padding-block: 0; }
-  .step .out .step-actions > button { min-height: 44px; min-width: 44px; }
-  .child-actions button, .child-intro .intro-title button, .child-return button, .child-work .cw-toggle, .child-work .show-all, .child-intro .more, .hcard.child-card .more, .child-intro .intro-open { min-width: 44px; min-height: 44px; }
+  /* The buttons are drawn 36px, so they do not sit flush against the divider and the card's edge; the ::before makes up the rest. */
+  .step .out .step-actions > button { position: relative; min-height: 36px; min-width: 44px; }
+  .step .out .step-actions > button::before { content: ""; position: absolute; inset: -4px 0; }
+  .child-actions button, .child-intro .intro-title button, .session-foot button, .child-return button, .child-work .cw-toggle, .child-work .show-all, .child-intro .more, .hcard.child-card .more, .child-intro .intro-open { min-width: 44px; min-height: 44px; }
   /* The list-order chips are 24 or 28px: their reach makes up the rest, sideways too when the chip is down to its count. */
   .order-chip::before, .side-h .order-chip::before { inset: min(0px, calc((100% - 44px) / 2)); }
 }
