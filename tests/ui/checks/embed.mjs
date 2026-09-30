@@ -231,10 +231,59 @@ export default async function embedCheck(browser) {
     await footer.evaluate((w) => w.scrollIntoView({ block: "end" }));
     return menuOf(page, "#account-drawer");
   };
+  for (const dark of [false, true]) {
+    const tag = "1280" + (dark ? "-dark" : "");
+    const page = await open(browser, { embed: { account: account() }, size: "desktop", dark });
+    const start = await page.evaluate(() => localStorage.getItem("semon.wide") === "1");
+    await openMenu(page);
+    const control = page.locator('#topbar .account-popover [role="menuitemcheckbox"][data-pref="wide"]');
+    const before = await control.getAttribute("aria-checked");
+    await control.click();
+    const changed = await page.evaluate(() => ({
+      checked: document.querySelector('#topbar .account-popover [role="menuitemcheckbox"][data-pref="wide"]')?.getAttribute("aria-checked"),
+      wide: document.querySelector("#page").classList.contains("wide-mode"),
+      saved: localStorage.getItem("semon.wide"),
+      open: !!document.querySelector("#topbar .account-popover"),
+    }));
+    const expected = !start;
+    R["desktopWideMode " + tag] = { before, changed };
+    r.expect(before === String(start) && changed.checked === String(expected) && changed.wide === expected && changed.saved === (expected ? "1" : "0") && changed.open,
+      "the desktop Display switch should toggle wide mode, save it, and leave the menu open: " + JSON.stringify(R["desktopWideMode " + tag]));
+    await page.waitForTimeout(300); // the knob's slide is 160 ms; the shot shows the settled state
+    await page.screenshot({ path: path.join(OUT, "embed-menu-wide-on-" + tag + ".png") });
+    await page.reload({ waitUntil: "load" }); await settled(page); await openMenu(page);
+    const saved = await page.evaluate(() => ({
+      checked: document.querySelector('#topbar .account-popover [role="menuitemcheckbox"][data-pref="wide"]')?.getAttribute("aria-checked"),
+      wide: document.querySelector("#page").classList.contains("wide-mode"),
+    }));
+    R["desktopWideModeReload " + tag] = saved;
+    r.expect(saved.checked === String(expected) && saved.wide === expected, "the desktop Display switch should show the saved state after reload: " + JSON.stringify(saved));
+    r.expect(page.errors.length === 0, "page errors (desktop wide mode): " + page.errors.join("; "));
+    await page.context().close();
+  }
   for (const [size, dark] of [["desktop", false], ["desktop", true], ["phone", false], ["phone", true]]) {
     const tag = (size === "desktop" ? "1280" : "390") + (dark ? "-dark" : "");
     const page = await open(browser, { embed: { account: account() }, size, dark });
     const menu = size === "desktop" ? await openMenu(page) : await openPhoneMenu(page);
+    const display = await page.evaluate((scope) => {
+      const menu = document.querySelector(scope + " .account-popover");
+      const sections = [...(menu?.querySelectorAll(".account-section") ?? [])].filter((section) => section.querySelector(".account-heading")?.textContent.trim() === "Display");
+      const rows = menu?.querySelectorAll('[role="menuitemcheckbox"][data-pref="wide"]') ?? [];
+      return {
+        topWideToggles: document.querySelectorAll("#topbar .wide-toggle").length,
+        sections: sections.length,
+        rows: rows.length,
+        rowUnderHeading: rows.length === 1 && rows[0].closest(".account-section") === sections[0],
+      };
+    }, size === "desktop" ? "#topbar" : "#account-drawer");
+    if (size === "desktop") {
+      R["desktopDisplay " + tag] = display;
+      r.expect(display.topWideToggles === 0, "the desktop top bar should omit the wide mode button when an account menu is available (" + tag + ")");
+      r.expect(display.sections === 1 && display.rows === 1 && display.rowUnderHeading, "the desktop account menu should have one wide mode switch under Display (" + tag + "): " + JSON.stringify(display));
+    } else {
+      R["phoneDisplay " + tag] = display;
+      r.expect(display.sections === 0 && display.rows === 0, "the phone account menu should omit the Display section (" + tag + "): " + JSON.stringify(display));
+    }
     R["embedMenu " + tag] = menu;
     r.expect(menu?.name === "Embed <b>Ada</b> Lovelace" && menu.login === "ada" && menu.bold === 0, "the embedding page's account should show as text (" + tag + "): " + JSON.stringify(menu));
     r.expect(menu && menu.hrefs.join() === "/embed/profile" && menu.actions.join() === "/embed/switch/1,/embed/sign-out" && menu.workspaces.join() === "Engine room", "the embedding page's menu links (" + tag + "): " + JSON.stringify(menu));
