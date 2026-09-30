@@ -111,7 +111,7 @@ fn reads_match_at_any_offset_across_frames_and_segments() {
     fs::write(&log, &bytes).unwrap();
     set_modified(&log, 1);
     let before = modified(&log);
-    let ino = ino(&fs::metadata(&log).unwrap());
+    let inode = ino(&fs::metadata(&log).unwrap());
 
     let first = seal(&log, 1, u64::MAX).unwrap();
     let e1 = bytes.len() as u64;
@@ -123,7 +123,7 @@ fn reads_match_at_any_offset_across_frames_and_segments() {
     let meta = fs::metadata(&log).unwrap();
     assert_eq!(
         (meta.len(), ino(&meta), modified(&log)),
-        (e1, ino, before),
+        (e1, inode, before),
         "length, inode and modified time are the log's own"
     );
     assert!(
