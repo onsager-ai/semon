@@ -7,11 +7,13 @@ publish = false
 description = "Read-only local Claude Code and Codex session tree."
 
 [dependencies]
+libc.workspace = true
 rusqlite.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 tiny_http.workspace = true
+zstd.workspace = true
 
 [features]
 # Lets `SEMON_TEST_NOW` (epoch ms) pin the viewer's clock. Only CI's browser
