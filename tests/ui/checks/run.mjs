@@ -29,7 +29,6 @@ import tooltipCheck from "./tooltip.mjs";
 import detailsCheck from "./details.mjs";
 import selectCheck from "./select.mjs";
 import filtersCheck from "./filters.mjs";
-import childcardCheck from "./childcard.mjs";
 import breakdownCheck from "./breakdown.mjs";
 import tracebriefCheck from "./tracebrief.mjs";
 
@@ -57,7 +56,6 @@ const checks = [
   ["details", detailsCheck],
   ["select", selectCheck],
   ["filters", filtersCheck],
-  ["childcard", childcardCheck],
   ["breakdown", breakdownCheck],
   ["tracebrief", tracebriefCheck],
 ];

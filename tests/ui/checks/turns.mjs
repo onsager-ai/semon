@@ -15,9 +15,9 @@
 //  - no page errors, light or dark.
 //  - zero overflow screens on every screen visited (home, machines, every session, every trace).
 //  - T.modelMismatch is empty: every session's rendered turn list (ids, and which turns show a Trace button) matches
-//    the independent model and the mockup's child-page rule: its final turn omits the end row when the parent's brief
-//    is represented separately above the transcript.
-//  - onwardWithoutButton === 0 and buttonWithoutOnward === 0 outside that explicit final child-turn rule.
+//    the independent model: a turn shows a Trace button exactly when it sent something onward (the overhaul draws a child
+//    session's brief inside its first turn, so no turn is exempt).
+//  - onwardWithoutButton === 0 and buttonWithoutOnward === 0.
 //  - every trace opened matches the model with no `bad` count (root turn, crumb, title and history state all agree).
 //  - deep links land on the exact expected turn id (fromTrace.turn === expectTurn, fromHome.turn === expectTurn), and
 //    inView with a flash, in every form the original tried (from a trace node, from Home's item, from Home's Trace
@@ -78,26 +78,26 @@ export default async function turnsCheck(browser) {
     for (const m of await page.evaluate(() => [...document.querySelectorAll(".page .nrow")].map((row) => row.dataset.m))) { await goto(page, { v: "machine", id: m }, D0); await screen("machine " + m); addTap("ib", await small(".ib")); }
 
     // Every session page: turns, trace buttons against the model, overflow collapsed and fully opened.
-    const T = { sessions: 0, turns: 0, perSession: {}, withOnward: 0, traceButtons: 0, onwardWithoutButton: 0, buttonWithoutOnward: 0, childTailOnwardWithoutButton: 0, expectedChildTailOnwardWithoutButton: Object.entries(D.turns).filter(([sid, ts]) => D.hasChildOrigin(sid) && ts.at(-1)?.last && ts.at(-1)?.out.length).length, modelMismatch: [], mismatchDetails: [] };
+    const T = { sessions: 0, turns: 0, perSession: {}, withOnward: 0, traceButtons: 0, onwardWithoutButton: 0, buttonWithoutOnward: 0, childTailOnwardWithoutButton: 0, expectedChildTailOnwardWithoutButton: 0, modelMismatch: [], mismatchDetails: [] };
     const traceTurns = [];
     for (const sid of Object.keys(D.SESS)) {
       await goto(page, { v: "session", id: sid }, D0); T.sessions++;
-      const info = await page.evaluate(() => [...document.querySelectorAll(".turns > .turn")].map((t) => ({ id: t.dataset.turn, head: !!t.querySelector(":scope > .turn-h"), onward: t.querySelectorAll(":scope > .tx > .hcard:not(.start):not(.move)").length + t.querySelectorAll(":scope > .tx > .result-marker").length, btn: !!t.querySelector(":scope > .turn-end .tracebtn"), end: t.querySelector(":scope > .turn-end .stat")?.textContent ?? null })));
+      const info = await page.evaluate(() => [...document.querySelectorAll(".turns > .turn")].map((t) => ({ id: t.dataset.turn, head: !!t.querySelector(":scope > .turn-h"), onward: t.querySelectorAll(":scope > .tx > .event:not(.move), :scope > .tx > .child-card").length, btn: !!t.querySelector(":scope > .turn-end .link"), end: t.querySelector(":scope > .turn-end .stat")?.textContent ?? null })));
       const exp = D.turns[sid] ?? [];
-      if (info.length !== exp.length || info.some((t, i) => t.id !== exp[i].id || t.btn !== (!!exp[i].out.length && !(exp[i].last && exp[i].childOrigin)))) {
+      if (info.length !== exp.length || info.some((t, i) => t.id !== exp[i].id || t.btn !== !!exp[i].out.length)) {
         T.modelMismatch.push(sid.slice(0, 12));
         T.mismatchDetails.push({ sid, expected: exp.map((t) => ({ id: t.id, out: t.out.map((h) => h.id) })), native: (D0.model.turns ?? []).filter((t) => t.sid === sid).map((t) => ({ id: t.id, start: t.start, sent: t.sent, end: t.end })), rendered: info });
       }
       T.turns += info.length; T.perSession[D.SESS[sid].name.slice(0, 28)] = info.length;
-      for (const t of info) { const modeled = exp.find((x) => x.id === t.id), childTail = !!(modeled?.last && modeled.childOrigin); if (t.onward) T.withOnward++; if (t.btn) { T.traceButtons++; traceTurns.push([sid, t.id]); } if (t.onward && !t.btn) { if (childTail) T.childTailOnwardWithoutButton++; else T.onwardWithoutButton++; } if (t.btn && !t.onward) T.buttonWithoutOnward++; }
-      await screen("session " + sid.slice(0, 8)); addTap(".tracebtn", await small(".turn-end .tracebtn")); addTap(".turn-h .from", await small(".turn-h .from"));
-      await page.evaluate(() => { for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll('.hcard .more:not([hidden])').forEach((x) => x.click()); });
+      for (const t of info) { const childTail = false; if (t.onward) T.withOnward++; if (t.btn) { T.traceButtons++; traceTurns.push([sid, t.id]); } if (t.onward && !t.btn) { if (childTail) T.childTailOnwardWithoutButton++; else T.onwardWithoutButton++; } if (t.btn && !t.onward) T.buttonWithoutOnward++; }
+      await screen("session " + sid.slice(0, 8)); addTap(".turn-end .link", await small(".turn-end .link")); addTap(".turn-h .who-link", await small(".turn-h .who-link"));
+      await page.evaluate(() => { for (let k = 0; k < 3; k++) document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll('.turns .more:not([hidden])').forEach((x) => x.click()); });
       await page.waitForTimeout(80); await screen("session open " + sid.slice(0, 8));
     }
     // Every trace, opened by tapping its Trace button.
     const TR = { traces: 0, nodes: 0, roots: 0, childNodes: 0, stubLeaves: 0, toyouLeaves: 0, railOff: 0, railGaps: 0 }; const traces = [];
     for (const [sid, tid] of traceTurns) {
-      await goto(page, { v: "session", id: sid }, D0); await page.click('.turn[data-turn="' + tid + '"] > .turn-end .tracebtn'); await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, "Trace"); await page.waitForTimeout(120);
+      await goto(page, { v: "session", id: sid }, D0); await page.click('.turn[data-turn="' + tid + '"] > .turn-end .link'); await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, "Trace"); await page.waitForTimeout(120);
       const t = await page.evaluate(() => ({ st: history.state, crumb: document.querySelector(".topbar .crumb")?.textContent, title: document.querySelector(".topbar .t")?.textContent, root: (() => { const r = document.querySelector(".hop.k-root"); return r && { turn: r.dataset.turn, h: r.dataset.h ?? null }; })(), nodes: [...document.querySelectorAll(".hop.child")].map((x) => ({ h: x.dataset.h, turn: x.dataset.turn ?? null, stub: x.classList.contains("stub"), toyou: x.classList.contains("k-toyou") })) }));
       if (t.st?.v !== "trace" || t.st.turn !== tid || t.root?.turn !== tid || t.title !== "Trace" || t.crumb !== D.SESS[sid].name) TR.bad = (TR.bad ?? 0) + 1;
       TR.traces++; TR.roots++; TR.nodes += 1 + t.nodes.length; TR.childNodes += t.nodes.length; TR.stubLeaves += t.nodes.filter((x) => x.stub).length; TR.toyouLeaves += t.nodes.filter((x) => x.toyou).length;
@@ -139,7 +139,7 @@ export default async function turnsCheck(browser) {
       let pick = null; for (const t of traces) for (const x of t.nodes) if (x.turn && !pick) { const ts = D.turns[D.starts.get(x.h).sid]; if (ts.findIndex((y) => y.id === x.turn) > 0) pick = { t, x }; }
       pick ??= traces.flatMap((t) => t.nodes.filter((x) => x.turn).map((x) => ({ t, x })))[0];
       if (pick) {
-        await goto(page, { v: "session", id: pick.t.sid }, D0); await page.click('.turn[data-turn="' + pick.t.tid + '"] > .turn-end .tracebtn'); await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, "Trace"); await page.waitForTimeout(150);
+        await goto(page, { v: "session", id: pick.t.sid }, D0); await page.click('.turn[data-turn="' + pick.t.tid + '"] > .turn-end .link'); await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t, "Trace"); await page.waitForTimeout(150);
         await page.click('.hop.child[data-h="' + pick.x.h + '"] .open'); await page.waitForTimeout(250);
         D1.fromTrace = { node: pick.x.h, expectTurn: pick.x.turn, ...(await landed()) };
         await page.waitForTimeout(1500); D1.fromTrace.flashGoneAfter1_75s = !(await page.evaluate(() => !!document.querySelector(".turn.flash")));
@@ -193,10 +193,10 @@ export default async function turnsCheck(browser) {
       await goto(page, { v: "home" }, D0); await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(150); await page.screenshot({ path: path.join(ENV.out, "turns-sample-home.png") });
       await goto(page, { v: "session", id: "harbor" }, D0); await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(150); await page.screenshot({ path: path.join(ENV.out, "turns-sample-harbor.png") });
       const h4 = D0.H.find((h) => h.kind === "ask" && h.to === "quill")?.id;
-      if (h4) { await goto(page, { v: "session", id: "quill" }, D0); await page.click('.turn[data-turn="' + h4 + '"] .tracebtn'); await page.waitForTimeout(200); await page.screenshot({ path: path.join(ENV.out, "turns-sample-trace-quill.png"), fullPage: true }); }
+      if (h4) { await goto(page, { v: "session", id: "quill" }, D0); await page.click('.turn[data-turn="' + h4 + '"] .turn-end .link'); await page.waitForTimeout(200); await page.screenshot({ path: path.join(ENV.out, "turns-sample-trace-quill.png"), fullPage: true }); }
     } else {
       const h4 = D0.H.find((h) => h.kind === "ask" && h.to === "quill")?.id;
-      if (h4) { await goto(page, { v: "session", id: "quill" }, D0); await page.click('.turn[data-turn="' + h4 + '"] .tracebtn'); await page.waitForTimeout(200); await page.screenshot({ path: path.join(ENV.out, "turns-sample-trace-quill-dark.png"), fullPage: true }); }
+      if (h4) { await goto(page, { v: "session", id: "quill" }, D0); await page.click('.turn[data-turn="' + h4 + '"] .turn-end .link'); await page.waitForTimeout(200); await page.screenshot({ path: path.join(ENV.out, "turns-sample-trace-quill-dark.png"), fullPage: true }); }
       await goto(page, { v: "session", id: "harbor" }, D0); await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(150); await page.screenshot({ path: path.join(ENV.out, "turns-sample-harbor-dark.png") });
     }
     one.errors = page.errors;
@@ -212,7 +212,7 @@ export default async function turnsCheck(browser) {
   r.expect(out.dark.overflowScreens === 0, "dark overflowScreens=" + out.dark.overflowScreens + " " + JSON.stringify(out.dark.overflowWhere));
   r.expect(light.turns.modelMismatch.length === 0, "modelMismatch=" + JSON.stringify(light.turns.modelMismatch));
   r.expect(light.turns.onwardWithoutButton === 0, "onwardWithoutButton=" + light.turns.onwardWithoutButton);
-  r.expect(light.turns.childTailOnwardWithoutButton === light.turns.expectedChildTailOnwardWithoutButton, "final child-turn Trace visibility differs from the approved child-page rule: " + JSON.stringify({ actual: light.turns.childTailOnwardWithoutButton, expected: light.turns.expectedChildTailOnwardWithoutButton }));
+  r.expect(light.turns.childTailOnwardWithoutButton === light.turns.expectedChildTailOnwardWithoutButton, "a child session's final turn hid its Trace button (the overhaul shows it on every turn that sent something): " + JSON.stringify({ actual: light.turns.childTailOnwardWithoutButton, expected: light.turns.expectedChildTailOnwardWithoutButton }));
   r.expect(light.turns.buttonWithoutOnward === 0, "buttonWithoutOnward=" + light.turns.buttonWithoutOnward);
   r.expect(!light.traces.bad, "bad traces=" + light.traces.bad);
   r.expect(light.deepLinks.hadPick === true, "no trace child node with its own turn was found for the fromTrace/crumb deep-link test");
@@ -242,7 +242,7 @@ export default async function turnsCheck(browser) {
   // Tap targets: every group measured must have nothing under 36px; groups this fixture is expected to populate
   // (Home's items and their Trace buttons, session Trace buttons, the one relay header, and trace child "open"
   // links) must also have measured something, so a selector typo or a broken affordance fails loudly.
-  const expectPositiveTaps = new Set(["ib", "ib .tracebtn", ".tracebtn", ".turn-h .from", ".hop .open"]);
+  const expectPositiveTaps = new Set(["ib", "ib .tracebtn", ".turn-end .link", ".turn-h .who-link", ".hop .open"]);
   for (const scheme of ["light", "dark"]) {
     const taps = out[scheme]?.taps ?? {};
     for (const [k, t] of Object.entries(taps)) {

@@ -113,11 +113,17 @@ export function overhaulPortReference(D, html) {
   out = swapFunction(out, "costForSessions", COST_FUNCTION);
   // The served model gives a thought's seconds itself.
   out = swapFunction(out, "thoughtSeconds", "  function thoughtSeconds(entries, i, sid) { const secs = entries[i]?.secs; return Number.isFinite(secs) && secs >= 0 ? secs : null; }");
+  // The mockup sets inline code in a transcript at .86em of 13px (11.2px), under the 12px floor its own principle P3 sets (and
+  // the tokens check enforces); the viewer floors it at the caption size, so the reference does too.
+  out = swapLine(out, ".body code, .cc-brief code, .ev-text code, .ib code { font-size: .86em;", ".body code, .cc-brief code, .ev-text code, .ib code { font-size: max(.86em, var(--fs-cap)); background: color-mix(in srgb, var(--ink) 6%, transparent); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }");
   // Until the sidebar's port (PR 4), the viewer's sidebar is 296px wide and the mockup's 272px. The regions compare parts of the main
   // column, so the reference takes the viewer's width; PR 4 removes this.
   const styleEnd = out.lastIndexOf("</style>");
   if (styleEnd < 0) throw new Error("overhaul mockup style block moved");
   out = out.slice(0, styleEnd) + "@media (min-width: 761px) { .app:not(.rail) { grid-template-columns: 296px minmax(0, 1fr); } }\n" + out.slice(styleEnd);
+  // A working run's card names its current call. The mockup reads it from the run's transcript (the last call, finished or not); the
+  // served model reports only a call still running (gaps.json: h-review-codex.activity), so the card shows that.
+  out = swapLine(out, '    else if (c.state === "work") { const last = (TX[c.id] ?? []).filter', '    else if (c.state === "work" && c.activity) { const n = el("span", "cc-now"); n.append(el("span", "spin"), el("span", null, verbNow(c.activity[0])), el("code", null, c.activity[1])); b.append(n); }');
   // Each of the mockup's histories is inside the served sessions' busy intervals already.
   const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
   if (!histories.test(out)) throw new Error("overhaul mockup analytics history block moved");

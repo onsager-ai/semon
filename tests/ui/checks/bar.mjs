@@ -225,8 +225,8 @@ export default async function barCheck(browser) {
     const F = { youTurns: 0, youWithHeader: 0, msgTimes: 0, relayHeaders: 0, gapMarkersBetweenTurns: 0, gapMarkersInsideTurns: 0, tables: 0, tsum: 0, tsumFallback: [], tsumLowercasedUnknown: 0 };
     for (const sid of sids) {
       await goto(page, { v: "session", id: sid }, D);
-      const info = await page.evaluate(() => ({ trace: [...document.querySelectorAll(".turn-end .tracebtn")].map((b) => b.closest(".turn").dataset.turn),
-        you: [...document.querySelectorAll('.turn[aria-label^="Your message"]')].map((t) => !!t.querySelector(":scope > .turn-h")), times: document.querySelectorAll(".msg-tm").length, relays: document.querySelectorAll(".turn-h .from").length,
+      const info = await page.evaluate(() => ({ trace: [...document.querySelectorAll(".turn-end .link")].map((b) => b.closest(".turn").dataset.turn),
+        you: [...document.querySelectorAll('.turn[aria-label^="Your message"]')].map((t) => !!t.querySelector(":scope > .turn-h")), times: document.querySelectorAll(".msg-tm").length, relays: document.querySelectorAll(".turn-h .who-link").length,
         gapOut: [...document.querySelectorAll(".turns > .divider")].filter((d) => /not included|omitted|No activity/.test(d.textContent)).length, gapIn: [...document.querySelectorAll(".turn .divider")].filter((d) => /not included|omitted|No activity/.test(d.textContent)).length,
         tables: document.querySelectorAll(".msg .tbl").length, tsum: [...document.querySelectorAll(".tsum .tt")].map((x) => x.textContent) }));
       info.trace.forEach((t) => traceTurns.push([sid, t]));
@@ -264,7 +264,7 @@ export default async function barCheck(browser) {
       await page.click("#find-btn"); await page.waitForTimeout(100);
       const S = { session: D.SESS[busy].name, word, turnsBefore, searching: await page.evaluate(() => !!document.querySelector("#topbar .find-row") && document.activeElement?.id === "find"), chips: await page.evaluate(() => [...document.querySelectorAll("#topbar .find-chips .chip")].map((c) => c.dataset.filter + ":" + c.getAttribute("aria-pressed"))) };
       await page.keyboard.type(word, { delay: 10 }); await page.waitForTimeout(200);
-      Object.assign(S, await page.evaluate(() => ({ count: document.querySelector(".fcount")?.textContent, hits: document.querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length, turns: document.querySelectorAll(".turns > .turn").length, focus: document.activeElement?.id, barH: document.querySelector("#topbar").offsetHeight })));
+      Object.assign(S, await page.evaluate(() => ({ count: document.querySelector(".fcount")?.textContent, hits: document.querySelectorAll(".turns .msg, .turns .step, .turns .event, .turns .child-card, .turns .bubble").length, turns: document.querySelectorAll(".turns > .turn").length, focus: document.activeElement?.id, barH: document.querySelector("#topbar").offsetHeight })));
       S.countMatchesHits = S.count === S.hits + (S.hits === 1 ? " match" : " matches");
       // One choice at a time: Messages hides every step, Steps every message, and All brings both back.
       // A step is a row of its group, and a group is collapsed until opened: both count.
@@ -376,7 +376,7 @@ export default async function barCheck(browser) {
       out.deepLinks = DL;
       // A relay header's sender link opens the sender's turn.
       const relaySid = sids.find((s) => D.TX[s]?.some((e) => e.k === "h" && D.H.find((h) => h.id === e.id && h.to === s && h.kind === "relay")));
-      if (relaySid) { await goto(page, { v: "session", id: relaySid }, D); const has = await page.$(".turn-h .from"); if (has) { await has.click(); await page.waitForTimeout(250); out.relayHeaderLink = await page.evaluate(() => ({ v: history.state?.v, id: history.state?.id?.slice(0, 8), turn: history.state?.turn ?? null })); } }
+      if (relaySid) { await goto(page, { v: "session", id: relaySid }, D); const has = await page.$(".turn-h .who-link"); if (has) { await has.click(); await page.waitForTimeout(250); out.relayHeaderLink = await page.evaluate(() => ({ v: history.state?.v, id: history.state?.id?.slice(0, 8), turn: history.state?.turn ?? null })); } }
       // Sessions page: every session, each grouping and search; the sidebar's capped tree.
       await goto(page, { v: "sessions" }, D);
       const SP = { expected: allSessions.length, expectedRoots: Math.min(8, roots.length), expectedTreeRows, rows: await page.evaluate(() => document.querySelectorAll(".page .nrow").length), nav: await page.evaluate(() => [...document.querySelectorAll(".nav-item")].map((n) => n.textContent + (n.getAttribute("aria-current") ? "*" : ""))) };
@@ -397,7 +397,7 @@ export default async function barCheck(browser) {
       out.sessionsPage = SP;
     }
     out.fixes = { ...F, tsumFallback: F.tsumFallback.slice(0, 8), expected: X };
-    if (mode !== "desktop") { const h4 = D.H.find((h) => h.kind === "ask" && h.to === "quill")?.id; r.expect(!!h4, mode + ": quill's inbound ask handoff was not found (needed for the trace screenshot)"); if (h4) { await goto(page, { v: "session", id: "quill" }, D); await page.click('.turn[data-turn="' + h4 + '"] .tracebtn'); await page.waitForTimeout(200); await page.screenshot({ path: path.join(ENV.out, "bar-sample-trace" + (dark ? "-dark" : "") + ".png") }); } }
+    if (mode !== "desktop") { const h4 = D.H.find((h) => h.kind === "ask" && h.to === "quill")?.id; r.expect(!!h4, mode + ": quill's inbound ask handoff was not found (needed for the trace screenshot)"); if (h4) { await goto(page, { v: "session", id: "quill" }, D); await page.click('.turn[data-turn="' + h4 + '"] .turn-end .link'); await page.waitForTimeout(200); await page.screenshot({ path: path.join(ENV.out, "bar-sample-trace" + (dark ? "-dark" : "") + ".png") }); } }
     out.errors = page.errors;
     modes.push(out);
     await page.context().close();
@@ -467,22 +467,17 @@ export default async function barCheck(browser) {
 
     await goto(page, { v: "session", id: grandchild.id }, D);
     const origin = D.H.find((h) => h.kind === "spawn" && h.to === grandchild.id);
-    const briefCard = await page.evaluate((text) => { const intro = document.querySelector(".child-intro"), brief = intro?.querySelector(".brief"); return { visible: !!intro && !!brief, includesBrief: !!brief && brief.textContent.includes(text.slice(0, 48)), openInParent: intro?.querySelector(".intro-open")?.textContent, bars: [...document.querySelectorAll(".child-intro, .session-foot")].map((x) => getComputedStyle(x).borderLeftWidth), transcript: (() => { const sec = document.querySelector('#page section[aria-label="Transcript"]'), cs = sec && getComputedStyle(sec); return sec ? { rail: cs.borderLeftWidth, pad: cs.paddingLeft } : null; })() }; }, origin?.brief ?? "");
-    // "Show more" and "Open in <parent>" are separate targets: with the first shown (unhidden for the measurement) they never touch.
-    const introActions = await page.evaluate(() => {
-      const more = document.querySelector(".child-intro .more"), open = document.querySelector(".child-intro .intro-open"); if (!more || !open) return null;
-      const wasHidden = more.hidden; more.hidden = false; const a = more.getBoundingClientRect(), b = open.getBoundingClientRect(); more.hidden = wasHidden;
-      const sameLine = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0;
-      return { sameLine, gap: sameLine ? Math.round((b.left - a.right) * 10) / 10 : null, moreH: Math.round(a.height), openH: Math.round(b.height), moreW: Math.round(a.width) };
-    });
-    await page.click(".child-intro .intro-open"); await afterTitle(page, D.SESS[parentOf(grandchild.id)].name); await page.waitForTimeout(260);
-    const openedParent = await page.evaluate((id) => ({ id: history.state?.id, handoff: !!document.querySelector('.hcard[data-h="' + id + '"].flash') }), origin?.id);
+    const briefCard = await page.evaluate((text) => { const turn = document.querySelector(".turns > .turn"), head = turn?.querySelector(":scope > .turn-h"), brief = turn?.querySelector(".bubble.in"), who = head?.querySelector(".who-link"); return { visible: !!head && !!brief, includesBrief: !!brief && brief.textContent.includes(text.slice(0, 48)), openInParent: who?.textContent, bars: [head, brief].filter(Boolean).map((x) => { const cs = getComputedStyle(x); return cs.borderLeftWidth === cs.borderRightWidth ? "0px" : cs.borderLeftWidth; }), transcript: (() => { const sec = document.querySelector('#page section[aria-label="Transcript"]'), cs = sec && getComputedStyle(sec); return sec ? { rail: cs.borderLeftWidth, pad: cs.paddingLeft } : null; })() }; }, origin?.brief ?? "");
+    // The sender's name in the turn's header is the way back to the parent: a link, and on a phone at least a tap target high.
+    const introActions = await page.evaluate(() => { const who = document.querySelector(".turns > .turn > .turn-h .who-link"); if (!who) return null; const b = who.getBoundingClientRect(); return { openH: Math.round(b.height), openW: Math.round(b.width) }; });
+    await page.click(".turns > .turn > .turn-h .who-link"); await afterTitle(page, D.SESS[parentOf(grandchild.id)].name); await page.waitForTimeout(260);
+    const openedParent = await page.evaluate((id) => ({ id: history.state?.id, handoff: !!document.querySelector('.child-card[data-h="' + id + '"]') }), origin?.id);
 
     await goto(page, { v: "session", id: failedChild.id }, D);
-    const returnRow = await page.evaluate(() => { const row = document.querySelector(".session-foot"); return { text: row?.textContent, openParent: row?.querySelector("button")?.textContent }; });
-    await page.click(".session-foot button"); await afterTitle(page, D.SESS[parentOf(failedChild.id)].name); await page.waitForTimeout(260);
+    const returnRow = await page.evaluate(() => { const row = [...document.querySelectorAll(".turns .divider")].find((x) => /^Returned to /.test(x.textContent)); return { text: row?.textContent, openParent: document.querySelector(".turns > .turn > .turn-h .who-link")?.textContent }; });
+    await page.click(".turns > .turn > .turn-h .who-link"); await afterTitle(page, D.SESS[parentOf(failedChild.id)].name); await page.waitForTimeout(260);
     const failedOrigin = D.H.find((h) => h.kind === "spawn" && h.to === failedChild.id);
-    const returnParent = await page.evaluate((id) => ({ id: history.state?.id, handoff: !!document.querySelector('.hcard[data-h="' + id + '"].flash') }), failedOrigin?.id);
+    const returnParent = await page.evaluate((id) => ({ id: history.state?.id, handoff: !!document.querySelector('.child-card[data-h="' + id + '"]') }), failedOrigin?.id);
 
     const middleIndex = Math.floor(parentKids.length / 2), middle = parentKids[middleIndex];
     await goto(page, { v: "session", id: middle.id }, D);
@@ -525,11 +520,11 @@ export default async function barCheck(browser) {
       r.expect(child.backTwice?.sheet === false && child.backTwice.id === child.stateBeforeChild.id && child.backTwice.v === child.stateBeforeChild.v, "phone: after Up to parent and two Backs, the route is not the one before the child: " + JSON.stringify({ backTwice: child.backTwice, before: child.stateBeforeChild }));
     }
     if (child.size === "desktop") r.expect(child.crumbFacts?.length === child.expectedAncestors.length && child.crumbFacts.every((c) => c.w >= 2.5 * c.em - 1), "desktop: an ancestor crumb is under the 2.5em floor or an ancestor is missing: " + JSON.stringify(child.crumbFacts));
-    r.expect(child.briefCard.visible && child.briefCard.includesBrief && child.briefCard.openInParent?.includes("Open in") && child.openedParent.id === parentOf(grandchild.id) && child.openedParent.handoff, child.size + ": child brief or Open in parent handoff link failed: " + JSON.stringify({ brief: child.briefCard, opened: child.openedParent }));
-    r.expect(child.briefCard.bars.length > 0 && child.briefCard.bars.every((w) => parseFloat(w) === 0), child.size + ": the child intro still has a left bar: " + JSON.stringify(child.briefCard.bars));
+    r.expect(child.briefCard.visible && child.briefCard.includesBrief && child.briefCard.openInParent === D.SESS[parentOf(grandchild.id)].name && child.openedParent.id === parentOf(grandchild.id) && child.openedParent.handoff, child.size + ": child brief or the sender link to the parent failed: " + JSON.stringify({ brief: child.briefCard, opened: child.openedParent }));
+    r.expect(child.briefCard.bars.length > 0 && child.briefCard.bars.every((w) => parseFloat(w) === 0), child.size + ": the child intro or its header still has a left bar: " + JSON.stringify(child.briefCard.bars));
     r.expect(child.briefCard.transcript && parseFloat(child.briefCard.transcript.rail) === 0 && parseFloat(child.briefCard.transcript.pad) === 0, child.size + ": a child session's transcript still carries a left rail or the padding for one: " + JSON.stringify(child.briefCard.transcript));
-    r.expect(child.introActions && (!child.introActions.sameLine || child.introActions.gap >= 12) && (child.size !== "phone" || Math.min(child.introActions.moreH, child.introActions.openH) >= 44), child.size + ": the intro's Show more and Open in buttons touch or are under the phone tap size: " + JSON.stringify(child.introActions));
-    r.expect(child.returnRow.text?.toLowerCase().includes("failed") && child.returnRow.openParent?.includes("Open in") && child.returnParent.id === parentOf(failedChild.id) && child.returnParent.handoff, child.size + ": failed child return row did not reopen its parent handoff: " + JSON.stringify({ row: child.returnRow, parent: child.returnParent }));
+    r.expect(child.introActions && (child.size !== "phone" || child.introActions.openH >= 44), child.size + ": the sender link in a child's header is under the phone tap size: " + JSON.stringify(child.introActions));
+    r.expect(child.returnRow.text?.toLowerCase().includes("failed") && child.returnRow.openParent === D.SESS[parentOf(failedChild.id)].name && child.returnParent.id === parentOf(failedChild.id) && child.returnParent.handoff, child.size + ": failed child return divider did not say so, or its header link did not reopen the parent card: " + JSON.stringify({ row: child.returnRow, parent: child.returnParent }));
     r.expect(child.siblingNav.nav === 0 && child.siblingNav.buttons === 0 && !child.siblingNav.count, child.size + ": a child session still shows previous/next sibling controls or an \"N of M\" count: " + JSON.stringify(child.siblingNav));
     r.expect(child.runs.open && child.runs.rows === child.expectedRuns && child.runs.shown === Math.min(5, child.expectedRuns) && child.runs.nested > 0 && child.runs.costs === child.expectedRuns && child.runs.apiLabel, child.size + ": the menu's runs list did not hold every descendant with its cost, five shown: " + JSON.stringify(child.runs));
   }
@@ -642,7 +637,7 @@ export default async function barCheck(browser) {
     const page = await servedExtra(browser, { size: "phone" });
     await page.evaluate(() => { history.pushState({ v: "session", id: "harbor" }, ""); dispatchEvent(new PopStateEvent("popstate", { state: { v: "session", id: "harbor" } })); });
     await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']"));
-    await page.evaluate(() => { for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"]').forEach((x) => x.click()); document.querySelectorAll(".hcard .more:not([hidden])").forEach((x) => x.click()); });
+    await page.evaluate(() => { document.querySelectorAll(".turns .more:not([hidden])").forEach((x) => x.click()); });
     await page.waitForTimeout(150);
     extra = { tables: await page.evaluate(() => document.querySelectorAll(".msg .tbl").length), errors: page.errors };
     await page.context().close();
@@ -818,8 +813,15 @@ export default async function barCheck(browser) {
       const effortBar = await page.evaluate(() => ({
         suffix: document.querySelector("#topbar .meta-model .meta-effort")?.textContent ?? null,
         tip: document.querySelector("#topbar .meta-model")?.dataset.tip ?? "",
+        gaps: (() => { // the space each side of the suffix's dot: the model name to the dot, and the dot to the effort word
+          const model = document.querySelector("#topbar .meta-model"), eff = model?.querySelector(".meta-effort"), sep = eff?.querySelector(".meta-sep"); if (!sep || !eff.lastChild) return null;
+          const text = (node) => { const range = document.createRange(); range.selectNodeContents(node); return range.getBoundingClientRect(); };
+          const name = text(model.firstChild), dot = sep.getBoundingClientRect(), word = text(eff.lastChild);
+          return { before: Math.round((dot.left - name.right) * 10) / 10, after: Math.round((word.left - dot.right) * 10) / 10 };
+        })(),
       }));
       r.expect(!!effortBar.suffix && /·\s*max/.test(effortBar.suffix), "session bar omitted the · max suffix: " + JSON.stringify(effortBar));
+      r.expect(effortBar.gaps && Math.abs(effortBar.gaps.before - effortBar.gaps.after) <= 1, "the space before the effort suffix's dot differs from the space after it (#81 review): " + JSON.stringify(effortBar.gaps));
       r.expect(effortBar.tip.includes("Reasoning effort: max"), "model tooltip omitted the reasoning effort: " + JSON.stringify(effortBar));
       await page.screenshot({ path: path.join(ENV.out, "bar-effort-1280-light.png") });
       await page.click("#more-btn");
