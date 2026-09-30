@@ -53,6 +53,7 @@ const groupOf = (page, id) => page.evaluate((id) => {
   const stored = JSON.parse(localStorage.getItem("semon.tree") ?? "{}")[id] ?? null;
   return {
     ids: [...item.querySelectorAll(":scope > .tree-group > .treeitem")].map((x) => x.dataset.id),
+    label: item.querySelector(":scope > .tree-row .srow")?.getAttribute("aria-label") ?? null,
     all: all ? { text: all.textContent, role: all.getAttribute("role"), label: all.getAttribute("aria-label"), tag: all.tagName, tabIndex: all.tabIndex, height: Math.round(all.getBoundingClientRect().height * 10) / 10 } : null,
     oldButtons: document.querySelectorAll("#lanes .tree-more").length, dialogs: document.querySelectorAll("dialog").length,
     pills, expanded: item.getAttribute("aria-expanded"), stored,
@@ -147,6 +148,38 @@ const servedPatched = async (browser, opts, kidIds) => {
   await page.route((u) => u.pathname === "/api/model" && !u.searchParams.has("since"), async (route) => {
     const res = await route.fetch(), m = await res.json();
     await route.fulfill({ status: res.status(), headers: { "content-type": "application/json" }, body: JSON.stringify(patchModel(m, kidIds)) });
+  });
+  await page.reload({ waitUntil: "load" }); await settled(page);
+  return page;
+};
+const approvalReviewIds = ["guardian-review-canonical", "guardian-review-nested"];
+const approvalHelperId = "approval-review-name-only";
+const patchApprovalReviews = (m, parentId, sourceId) => {
+  const source = m.sessions[sourceId], now = Number(m.now) || source.last;
+  const add = (id, name, kind, last) => {
+    m.sessions[id] = { ...structuredClone(source), id, name, kind, harness: "codex", lane: false, stub: false, parent: parentId, state: "done", last };
+  };
+  add(approvalReviewIds[0], "Approval review", "Approval review", now + 2);
+  add(approvalReviewIds[1], "Approval review", "Approval review", now + 1);
+  add(approvalHelperId, "Approval review helper", "Codex run", now + 3);
+  return m;
+};
+const servedApprovalPatched = async (browser, opts, parentId, sourceId) => {
+  const page = await served(browser, opts), reviews = new Set(approvalReviewIds);
+  await page.route((u) => u.pathname === "/api/model" && !u.searchParams.has("since"), async (route) => {
+    const res = await route.fetch(), m = patchApprovalReviews(await res.json(), parentId, sourceId);
+    await route.fulfill({ status: res.status(), headers: { "content-type": "application/json" }, body: JSON.stringify(m) });
+  });
+  await page.route((u) => u.pathname === "/api/tx" && reviews.has(u.searchParams.get("sid")), async (route) => {
+    const url = new URL(route.request().url()); url.searchParams.set("sid", sourceId);
+    const res = await route.fetch({ url: url.toString() });
+    await route.fulfill({ status: res.status(), headers: { "content-type": "application/json" }, body: await res.text() });
+  });
+  // Synthetic review IDs exist only in this browser-side fixture, so serve the ordinary shell at their deep-link path.
+  await page.route((u) => u.pathname.startsWith("/s/codex/") && reviews.has(decodeURIComponent(u.pathname.split("/").at(-1))), async (route) => {
+    const url = new URL(route.request().url()); url.pathname = "/";
+    const res = await route.fetch({ url: url.toString() });
+    await route.fulfill({ status: res.status(), headers: { "content-type": "text/html; charset=utf-8" }, body: await res.text() });
   });
   await page.reload({ waitUntil: "load" }); await settled(page);
   return page;
@@ -269,6 +302,97 @@ export default async function sidebarCheck(browser) {
   const kidMap = new Map();
   for (const s of Object.values(D.SESS)) { const p = s.parent ?? D.H.find((h) => h.kind === "spawn" && h.to === s.id)?.from; if (p && D.SESS[p]) { if (!kidMap.has(p)) kidMap.set(p, []); kidMap.get(p).push(s); } }
   const below = (id, seen = new Set([id])) => (kidMap.get(id) ?? []).flatMap((k) => (seen.has(k.id) ? [] : (seen.add(k.id), [k, ...below(k.id, seen)])));
+
+  // Approval reviews stay in the model and accounting, while the session list and navigation hide them by default.
+  const baseOtherRuns = below(fan.id).filter((s) => s.kind !== "Subagent" && s.kind !== "Codex run").length;
+  for (const [size, sizeTag] of [["phone", "390"], ["desktop", "1280"]]) for (const dark of [false, true]) {
+    const theme = dark ? "dark" : "light", page = await servedApprovalPatched(browser, { extras: true, size, dark }, fan.id, fanKids[0].id);
+    if (size === "phone") await openDrawer(page);
+    const defaultGroup = await groupOf(page, fan.id);
+    r.expect(defaultGroup && !approvalReviewIds.some((id) => defaultGroup.ids.includes(id)) && defaultGroup.all?.text === "All 8" && defaultGroup.label?.includes("8 runs"), size + " " + theme + ": the default sidebar hides review rows from its children, count and state summary: " + JSON.stringify(defaultGroup));
+    if (size === "phone" && defaultGroup?.all) {
+      await page.locator("#lanes .treeitem[data-id=\"" + fan.id + "\"] .tree-all").click();
+      await page.waitForFunction(() => document.querySelector("dialog.kids-sheet")?.open === true);
+      const hiddenSheet = await page.evaluate(() => ({ count: document.querySelector("dialog.kids-sheet .vm")?.textContent, ids: [...document.querySelectorAll("dialog.kids-sheet .kids-row")].map((x) => x.dataset.id) }));
+      r.expect(hiddenSheet.count === "8 sessions" && !approvalReviewIds.some((id) => hiddenSheet.ids.includes(id)), size + " " + theme + ": All N and its search sheet omit hidden approval reviews: " + JSON.stringify(hiddenSheet));
+      await page.locator("dialog.kids-sheet .kids-search input").fill("Approval review");
+      const hiddenSearch = await page.locator("dialog.kids-sheet .kids-row").evaluateAll((rows) => rows.map((x) => x.dataset.id));
+      r.expect(hiddenSearch.includes(approvalHelperId) && !approvalReviewIds.some((id) => hiddenSearch.includes(id)), size + " " + theme + ": sidebar search returns the misleading ordinary child without exposing hidden reviews: " + JSON.stringify(hiddenSearch));
+      await page.locator("dialog.kids-sheet .kids-search input").fill("");
+      await page.locator("dialog.kids-sheet .vclose").click();
+      await page.waitForFunction(() => !document.querySelector("dialog.kids-sheet"));
+    } else if (size === "desktop" && defaultGroup?.all) {
+      await page.locator("#lanes .treeitem[data-id=\"" + fan.id + "\"] .tree-all").click();
+      await page.waitForFunction((id) => !!document.querySelector('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] .tree-fewer'), fan.id);
+      const fullDefaultGroup = await groupOf(page, fan.id);
+      r.expect(fullDefaultGroup.ids.includes(approvalHelperId) && !approvalReviewIds.some((id) => fullDefaultGroup.ids.includes(id)), size + " " + theme + ": the expanded default sidebar keeps the misleading nickname child and hides reviews");
+      await page.locator("#lanes .treeitem[data-id=\"" + fan.id + "\"] .tree-fewer").click();
+    }
+
+    await goto(page, { v: "sessions" }, D);
+    const defaultList = await page.evaluate(() => ({
+      count: Number(document.querySelector(".ph .sub span:first-child b")?.textContent),
+      ids: [...document.querySelectorAll("#page .nrow")].map((x) => x.dataset.id),
+    }));
+    const expectedDefaultCount = Object.keys(D.SESS).length + 1;
+    r.expect(defaultList.count === expectedDefaultCount && defaultList.ids.includes(approvalHelperId) && !approvalReviewIds.some((id) => defaultList.ids.includes(id)), size + " " + theme + ": the session total and rows hide only exact review kinds: " + JSON.stringify([defaultList.count, expectedDefaultCount, defaultList.ids.includes(approvalHelperId), approvalReviewIds.filter((id) => defaultList.ids.includes(id))]));
+    const fanRow = page.locator("#page .nrow[data-id=\"" + fan.id + "\"]");
+    const otherCount = (text) => Number(text.match(/(\d+) other runs?/)?.[1] ?? 0);
+    r.expect(otherCount(await fanRow.locator(".kids").innerText().catch(() => "")) === baseOtherRuns, size + " " + theme + ": default child counts exclude the two hidden review rows");
+    await page.locator("#sq").fill("Approval review");
+    const searchIds = await page.locator("#page .nrow").evaluateAll((rows) => rows.map((x) => x.dataset.id));
+    r.expect(searchIds.includes(approvalHelperId) && !approvalReviewIds.some((id) => searchIds.includes(id)), size + " " + theme + ": session search returns the misleading ordinary child without exposing hidden reviews: " + JSON.stringify(searchIds));
+    await page.locator("#sq").fill("");
+
+    await page.locator("#page .groupby button[data-show-approval-reviews]").click();
+    await page.waitForFunction(() => document.querySelector("#page .groupby button[data-show-approval-reviews]")?.getAttribute("aria-pressed") === "true");
+    const shownList = await page.evaluate(() => ({
+      count: Number(document.querySelector(".ph .sub span:first-child b")?.textContent),
+      ids: [...document.querySelectorAll("#page .nrow")].map((x) => x.dataset.id),
+      reviewLabels: [...document.querySelectorAll("#page .nrow")].filter((x) => x.dataset.id.startsWith("guardian-review-")).map((x) => ({ name: x.querySelector(".nm")?.textContent, label: x.querySelector(".for")?.textContent })),
+    }));
+    r.expect(shownList.count === expectedDefaultCount + 2 && approvalReviewIds.every((id) => shownList.ids.includes(id)) && shownList.ids.includes(approvalHelperId) && shownList.reviewLabels.length === 2 && shownList.reviewLabels.every((x) => x.name === "Approval review" && x.label.includes("Approval review")), size + " " + theme + ": the toggle reveals labeled reviews in the Sessions list and updates totals: " + JSON.stringify([shownList.count, shownList.reviewLabels]));
+    r.expect(otherCount(await fanRow.locator(".kids").innerText().catch(() => "")) === baseOtherRuns + 2, size + " " + theme + ": child counts include reviews only while enabled");
+    if (size === "phone") await openDrawer(page);
+    const shownGroup = await groupOf(page, fan.id);
+    r.expect(shownGroup?.all?.text === "All 10" && shownGroup.label?.includes("10 runs"), size + " " + theme + ": the enabled sidebar count and state summary include the two reviews: " + JSON.stringify(shownGroup));
+    if (size === "phone" && shownGroup?.all) {
+      await page.locator("#lanes .treeitem[data-id=\"" + fan.id + "\"] .tree-all").click();
+      await page.waitForFunction(() => document.querySelector("dialog.kids-sheet")?.open === true);
+      const shownSheet = await page.locator("dialog.kids-sheet .kids-row").evaluateAll((rows) => rows.map((x) => x.dataset.id));
+      r.expect(approvalReviewIds.every((id) => shownSheet.includes(id)), size + " " + theme + ": the enabled sidebar search sheet reveals both reviews: " + JSON.stringify(shownSheet));
+      await page.screenshot({ path: path.join(ENV.out, "approval-reviews-" + sizeTag + "-" + theme + ".png") });
+      await page.locator("dialog.kids-sheet .vclose").click();
+      await page.waitForFunction(() => !document.querySelector("dialog.kids-sheet"));
+    } else if (shownGroup?.all) {
+      await page.locator("#lanes .treeitem[data-id=\"" + fan.id + "\"] .tree-all").click();
+      await page.waitForFunction((ids) => ids.every((id) => document.querySelector('#lanes .treeitem[data-id="' + CSS.escape(id) + '"]')), approvalReviewIds);
+      const shownIds = await groupOf(page, fan.id);
+      r.expect(approvalReviewIds.every((id) => shownIds?.ids.includes(id)), size + " " + theme + ": the enabled expanded sidebar reveals both reviews: " + JSON.stringify(shownIds?.ids));
+      await page.screenshot({ path: path.join(ENV.out, "approval-reviews-" + sizeTag + "-" + theme + ".png") });
+    }
+    r.expect(await overflow(page) === 0, size + " " + theme + ": the approval review control and expanded results have no horizontal overflow");
+
+    if (size === "phone") {
+      await page.click("#drawer-close");
+      await page.waitForFunction(() => !document.body.classList.contains("drawer-open"));
+    }
+    await page.locator("#page .groupby button[data-show-approval-reviews]").click();
+    await page.waitForFunction(() => document.querySelector("#page .groupby button[data-show-approval-reviews]")?.getAttribute("aria-pressed") === "false");
+    const hiddenAgain = await page.locator("#page .nrow").evaluateAll((rows) => rows.map((x) => x.dataset.id));
+    r.expect(!approvalReviewIds.some((id) => hiddenAgain.includes(id)), size + " " + theme + ": the toggle hides reviews again");
+
+    const direct = new URL("/s/codex/" + encodeURIComponent(approvalReviewIds[0]), page.url());
+    direct.searchParams.set("t", ENV.extraToken);
+    await page.goto(direct.toString(), { waitUntil: "load" }); await settled(page);
+    await page.waitForFunction(({ id, parent }) => {
+      const row = document.querySelector('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] .srow'), ancestor = document.querySelector('#lanes .treeitem[data-id="' + CSS.escape(parent) + '"]');
+      return document.querySelector("#topbar .t")?.textContent === "Approval review" && row?.getAttribute("aria-current") === "page" && ancestor?.getAttribute("aria-expanded") === "true";
+    }, { id: approvalReviewIds[0], parent: fan.id });
+    r.expect(page.errors.length === 0, size + " " + theme + ": direct review navigation keeps the current review and its expanded parent visible without browser errors: " + JSON.stringify(page.errors));
+    r.expect(await overflow(page) === 0, size + " " + theme + ": direct review navigation has no horizontal overflow");
+    await page.close();
+  }
 
   // ---- Phone, light: the short lists, the "All N" row, prefs, keys and the sheet --------------------------------------
   {

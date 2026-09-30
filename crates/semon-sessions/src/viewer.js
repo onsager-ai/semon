@@ -521,6 +521,7 @@
   // An embedding page's sidebar has no rail and no toggle for it (shell::session_sidebar): the toggle is then a detached button.
   const railToggle = $("#rail-toggle") ?? el("button"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
   let groupBy = "recent"; let query = ""; let focusSessionsSearchOnRender = null; let analyticsRange = 7, analyticsMeasure = "hours";
+  let showApprovalReviews = false;
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
   let pendingSessionOpen = null, pendingFlashHandoff = null;
   let accountOpen = false;
@@ -929,6 +930,18 @@
     for (const xs of children.values()) xs.sort((a, b) => b.last - a.last);
     return (CHILDREN = children);
   };
+  const isApprovalReview = (s) => s.kind === "Approval review";
+  const visibleInNavigation = (s, path = routedPath()) => showApprovalReviews || !isApprovalReview(s) || s.id === path.current || path.ancestors.has(s.id);
+  const navigationChildren = (path = routedPath()) => {
+    const all = sessionChildren();
+    if (showApprovalReviews) return all;
+    const visible = new Map();
+    for (const [parent, kids] of all) {
+      const shown = kids.filter((s) => visibleInNavigation(s, path));
+      if (shown.length) visible.set(parent, shown);
+    }
+    return visible;
+  };
   // Children in the order their handoffs were sent; the sidebar list stays newest-first.
   const childSessions = (sid) => [...(sessionChildren().get(sid) ?? [])].sort((a, b) => (originHandoff(a.id)?.at ?? a.last) - (originHandoff(b.id)?.at ?? b.last));
   const descendantsOf = (sid, children, out = [], seen = new Set([sid])) => {
@@ -1039,7 +1052,7 @@
   }
   // A phone's "All N": every session below the parent in one sheet, waiting first, then running, then finished, newest first in each.
   function openKidsSheet(parent, trigger) {
-    const all = descendantsOf(parent.id, sessionChildren()), bucket = (s) => s.state === "wait" ? 0 : s.state === "work" ? 1 : 2;
+    const all = descendantsOf(parent.id, navigationChildren()), bucket = (s) => s.state === "wait" ? 0 : s.state === "work" ? 1 : 2;
     const d = el("dialog", "viewer kids-sheet"), head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose");
     d.setAttribute("aria-label", "All sessions under " + parent.name);
     title.append(el("span", null, parent.name)); close.type = "button"; close.setAttribute("aria-label", "Close"); close.append(icon(I.x)); close.addEventListener("click", () => d.close());
@@ -1123,7 +1136,7 @@
   function renderLanes() {
     const rail = railMode && !phone.matches, prevSide = ORD.get("side");
     if (rail || prevSide?.rail !== rail) ORD.delete("side"); // the rail draws sorted, and so does a change into or out of it
-    const sideState = ordState("side"), focus = laneFocus(), everyone = sessionChildren(), { current, ancestors } = routedPath();
+    const sideState = ordState("side"), focus = laneFocus(), path = routedPath(), { current, ancestors } = path, everyone = navigationChildren(path);
     sideOrder = orderScope("side", "", null, sideState); sideOrder.rail = rail;
     // The rows drawn now, before the list is emptied: which parents the reader can see, and which sessions were drawn at all.
     const box = $("#lanes"), drawn = [...box.querySelectorAll(".treeitem")];
@@ -1137,7 +1150,7 @@
       if (held.length) { children = new Map([...everyone].filter(([p]) => !held.includes(p))); sideOrder.n += held.reduce((n, p) => n + everyone.get(p).length, 0); }
     }
     sideOrder.kids = new Set(children.keys());
-    const lanes = Object.values(SESS).filter((s) => s.lane && !parentOf(s.id));
+    const lanes = Object.values(SESS).filter((s) => s.lane && !parentOf(s.id) && visibleInNavigation(s, path));
     if (expandedAll && (phone.matches || railMode || !SESS[expandedAll])) expandedAll = null;
     // Opening or folding a parent's whole list, or crossing into or out of the rail, changes which lists are drawn: those the reader
     // just brought back are drawn sorted, not held as new.
@@ -2406,11 +2419,11 @@
   // ---- Sessions: every top-level session and its child runs ---------------------------------------------------------------
   const laneOf = (sid) => { const seen = new Set(); while (parentOf(sid) && !seen.has(sid)) { seen.add(sid); sid = parentOf(sid); } return sid; };
   function childRuns(sid) {
-    const kids = Object.values(SESS).filter((x) => x.id !== sid && laneOf(x.id) === sid), sub = kids.filter((x) => x.kind === "Subagent").length, cdx = kids.filter((x) => x.kind === "Codex run").length, other = kids.length - sub - cdx;
+    const kids = Object.values(SESS).filter((x) => x.id !== sid && laneOf(x.id) === sid && (showApprovalReviews || !isApprovalReview(x))), sub = kids.filter((x) => x.kind === "Subagent").length, cdx = kids.filter((x) => x.kind === "Codex run").length, other = kids.length - sub - cdx;
     return [sub ? sub + (sub === 1 ? " subagent" : " subagents") : null, cdx ? cdx + (cdx === 1 ? " Codex run" : " Codex runs") : null, other ? other + (other === 1 ? " other run" : " other runs") : null].filter(Boolean).join(" · ");
   }
   function renderSessions(page, focusSearch = false) {
-    const all = Object.values(SESS).filter(matchesSessionFacets);
+    const all = Object.values(SESS).filter((s) => (showApprovalReviews || !isApprovalReview(s)) && matchesSessionFacets(s));
     const head = el("div", "ph"); const h1 = el("h1", null, "Sessions"); head.append(h1);
     const sub = el("div", "sub"); for (const [v, l] of [[all.length, all.length === 1 ? "session" : "sessions"], [all.filter((s) => s.state === "work").length, "working"], [all.filter((s) => s.state === "wait").length, "waiting on you"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
     head.append(sub); const put = placer(page); put(head); observeTitle(h1);
@@ -2423,6 +2436,7 @@
     const grouped = slot("groupby", page, (ctx) => {
       const gb = el("div", "groupby"); gb.setAttribute("role", "group"); gb.setAttribute("aria-label", "Group by");
       for (const [g, label] of [["recent", "Recent"], ["project", "Project"], ["machine", "Machine"], ["harness", "Harness"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.g = g; b.addEventListener("click", () => { groupBy = g; ctx.draw(); }); gb.append(b); }
+      const reviews = el("button", null, "Show approval reviews"); reviews.type = "button"; reviews.dataset.showApprovalReviews = ""; reviews.setAttribute("aria-pressed", String(showApprovalReviews)); reviews.addEventListener("click", () => { showApprovalReviews = !showApprovalReviews; render(); }); gb.append(reviews);
       return gb;
     }), gb = grouped.el;
     const out = el("div", "sess"); out.style.display = "grid"; out.style.gap = "16px";
@@ -2440,6 +2454,7 @@
       }
       if (!lanes.length) out.append(el("p", "empty", "No sessions match “" + query + "”."));
       for (const b of gb.querySelectorAll("button[data-g]")) b.setAttribute("aria-pressed", String(b.dataset.g === groupBy));
+      gb.querySelector("button[data-show-approval-reviews]")?.setAttribute("aria-pressed", String(showApprovalReviews));
       syncOrderPill("page"); renderLanes();
     };
     found.ctx.draw = grouped.ctx.draw = draw;

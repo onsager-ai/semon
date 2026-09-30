@@ -894,6 +894,7 @@ struct CodexMeta {
     path: Option<String>,
     cwd: Option<String>,
     branch: Option<String>,
+    guardian_review: bool,
 }
 
 enum Role {
@@ -1183,6 +1184,12 @@ fn scan(
                     .get("git")
                     .and_then(|git| field(git, "branch"))
                     .map(str::to_owned),
+                guardian_review: field(&meta, "thread_source") == Some("guardian_review")
+                    || meta
+                        .get("source")
+                        .and_then(|source| source.get("subagent"))
+                        .and_then(|subagent| field(subagent, "other"))
+                        == Some("guardian"),
             }),
             path,
             summary,
@@ -1695,8 +1702,16 @@ impl<'a> Builder<'a> {
                 }
                 Role::Codex(meta) => {
                     let mut out = self.blank(String::new(), "codex");
-                    out.kind = Some("Codex run");
-                    out.name = meta.nickname.clone().unwrap_or_default();
+                    out.kind = Some(if meta.guardian_review {
+                        "Approval review"
+                    } else {
+                        "Codex run"
+                    });
+                    out.name = if meta.guardian_review {
+                        "Approval review".into()
+                    } else {
+                        meta.nickname.clone().unwrap_or_default()
+                    };
                     let index =
                         self.add_session(file.id.clone(), SessKind::Codex, vec![position], out);
                     self.sessions[index].alive = held.contains(&file.id);
