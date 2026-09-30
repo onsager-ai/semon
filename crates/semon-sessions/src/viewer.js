@@ -1388,7 +1388,7 @@
     const failed = countOf(s, "errors") ?? 0;
     const st = el("span", "lab state " + s.state); st.append(dot(s.state, false), el("span", null, STATE[s.state])); l2.append(st);
     l2.append(lab(kindText(s), s.kind ? s.kind + " · " + HARNESS[s.harness] : null, 2));
-    l2.append(lab(shortModel(s.model), "Model: " + modelIdOf(s), 3));
+    const model = lab(shortModel(s.model), "Model: " + modelIdOf(s) + (s.effort ? ". Reasoning effort: " + s.effort : ""), 3, "meta-model"); if (s.effort) model.append(el("span", "meta-effort", " · " + s.effort)); l2.append(model);
     // Failed steps and runs are the two labels that lead somewhere, so they are the last two the fitter drops.
     if (failed) l2.append(lab(failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ": step through them", 0, "lab-errs", () => openErrors(s.id)));
     const runs = descendantsOf(s.id, sessionChildren());
@@ -1483,7 +1483,7 @@
     const det = el("section", "panel-sec"); det.append(el("h3", null, "Details"));
     const dl = el("dl", "kv"), machine = MACHINE[s.machine] ?? s.machine ?? "Unknown machine";
     const calls = countOf(s, "calls"), errorCount = countOf(s, "errors") ?? 0;
-    const rows = [["Status", STATE[s.state] + " · " + turnsLabel(s)], ...(s.kind ? [["Kind", s.kind]] : []), ["Harness", withHarnessIcon(el("span", null, HARNESS[s.harness] ?? s.harness), s.harness, { size: 16 })], ["Model", modelIdOf(s), true], ["Machine", machine + (hostOf(s) !== machine ? " · " + hostOf(s) : "") + (s.movedFrom ? " (moved from " + (MACHINE[s.movedFrom] ?? s.movedFrom) + ")" : "")], ["Directory", s.cwd ?? s.dir ?? s.directory, true], [s.worktree ? "Worktree" : "Branch", branchOf(s), true], ["Tool calls", calls == null ? "—" : String(calls)], ...(errorCount ? [["Errors", String(errorCount)]] : []), ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Process id", s.pid, true], ["Session id", s.sessionId ?? s.id, true]];
+    const rows = [["Status", STATE[s.state] + " · " + turnsLabel(s)], ...(s.kind ? [["Kind", s.kind]] : []), ["Harness", withHarnessIcon(el("span", null, HARNESS[s.harness] ?? s.harness), s.harness, { size: 16 })], ["Model", modelIdOf(s), true], ...(s.effort ? [["Effort", s.effort]] : []), ["Machine", machine + (hostOf(s) !== machine ? " · " + hostOf(s) : "") + (s.movedFrom ? " (moved from " + (MACHINE[s.movedFrom] ?? s.movedFrom) + ")" : "")], ["Directory", s.cwd ?? s.dir ?? s.directory, true], [s.worktree ? "Worktree" : "Branch", branchOf(s), true], ["Tool calls", calls == null ? "—" : String(calls)], ...(errorCount ? [["Errors", String(errorCount)]] : []), ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Process id", s.pid, true], ["Session id", s.sessionId ?? s.id, true]];
     for (const [k, v, mono] of rows) { if (v == null || v === "") continue; dl.append(el("dt", null, k), (() => { const d = el("dd", mono ? "mono" : null, v instanceof Node ? null : String(v)); if (v instanceof Node) d.append(v); return d; })()); }
     det.append(dl); body.append(det, costSection(s, kids, d), el("p", "third-party", TRADEMARK_NOTICE));
     anchor?.setAttribute("aria-expanded", "true");
