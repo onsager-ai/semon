@@ -208,7 +208,10 @@ export default async function turnsCheck(browser) {
   const handoffCards = {};
   const handoffs = new Map(D0.H.map((h) => [h.id, h]));
   const routeState = (page) => page.evaluate(() => { const s = history.state; return { v: s?.v ?? null, id: s?.id ?? null, turn: s?.turn ?? null }; });
-  const waitRoute = (page, expected) => page.waitForFunction((x) => { const s = history.state; return s?.v === x.v && s?.id === x.id && (x.turn == null || s?.turn === x.turn); }, expected);
+  const waitRoute = async (page, expected) => {
+    try { return await page.waitForFunction((x) => { const s = history.state; return s?.v === x.v && s?.id === x.id && (x.turn == null || s?.turn === x.turn); }, expected); }
+    catch (err) { throw new Error("waitRoute expected " + JSON.stringify(expected) + ", got " + JSON.stringify(await routeState(page)) + ": " + err.message); }
+  };
   const sameRoute = async (page) => JSON.stringify(await routeState(page));
   const cardSelector = (id) => '.hcard[data-h="' + id + '"]';
   for (const [size, width] of [["phone", 390], ["desktop", 1280]]) for (const scheme of ["light", "dark"]) {
