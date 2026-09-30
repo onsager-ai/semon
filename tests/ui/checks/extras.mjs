@@ -328,7 +328,7 @@ export default async function (browser) {
     r.expect(P.deep.url === "/s/claude/backlog?turn=" + encodeURIComponent(older.id), "the URL keeps the turn: " + P.deep.url);
     for (let k = 0; k < 5 && (await pager(page)).some((b) => b.text === "Load later"); k++) {
       const moreLater = page.locator(".turns > .list:last-child > button.more");
-      await moreLater.scrollIntoViewIfNeeded(); await moreLater.click(); await page.waitForTimeout(250);
+      await moreLater.scrollIntoViewIfNeeded(); await moreLater.evaluate((button) => button.click()); await page.waitForTimeout(250);
     }
     P.later = await page.evaluate((id) => ({ last: !!document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]'), text: document.querySelector(".turns").textContent.includes("Backlog triaged: 460 issues read."), pager: [...document.querySelectorAll(".turns > .list > button.more")].map((b) => b.textContent) }), turns.at(-1).id);
     r.expect(P.later.last && P.later.text && !P.later.pager.includes("Load later"), "Load later reaches the last turn: " + JSON.stringify(P.later));
