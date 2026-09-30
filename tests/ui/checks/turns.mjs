@@ -321,7 +321,7 @@ export default async function turnsCheck(browser) {
       await target.filter({ hasText: recipient }).press("Enter"); await page.waitForTimeout(100);
       interaction.links.relayTargetEnter = await routeState(page);
       r.expect(interaction.links.relayTargetEnter.id === h.to && (!started || interaction.links.relayTargetEnter.turn === started), tag + ": Enter did not open the relay target at its started turn: " + JSON.stringify(interaction.links.relayTargetEnter));
-      await page.goBack(); await waitRoute(page, { v: "session", id: sentRelay.sid });
+      await goto(page, { v: "session", id: sentRelay.sid }, D0);
       await target.filter({ hasText: recipient }).click(); await waitRoute(page, { v: "session", id: h.to, turn: started });
       interaction.links.relayTargetOpens = await routeState(page);
       r.expect(interaction.links.relayTargetOpens.id === h.to && (!started || interaction.links.relayTargetOpens.turn === started), tag + ": relay target did not open its started turn: " + JSON.stringify(interaction.links.relayTargetOpens));
