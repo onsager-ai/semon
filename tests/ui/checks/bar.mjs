@@ -629,6 +629,84 @@ export default async function barCheck(browser) {
     await page.context().close();
   }
 
+  // A standalone tool row sits beside a folded run of three calls. It uses the summary line's edge and type, opens its output,
+  // and keeps the existing direct-step presentation while finding. Screenshots cover both states, themes and viewport sizes.
+  let loneStep = null;
+  if (D.SESS.principal) {
+    loneStep = { views: {}, screenshots: [], finding: null };
+    const longPath = "/tmp/lone-step-style-match-" + "a-long-file-name-".repeat(9) + "result.txt";
+    for (const size of ["phone", "desktop"]) for (const dark of [false, true]) {
+      const page = await served(browser, { size, dark });
+      await page.route("**/api/model*", async (route) => {
+        const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response });
+        const body = await response.json();
+        if (!body.turns.some((t) => t.id === "bt-lone-line")) {
+          const base = body.turns.filter((t) => t.sid === "principal").at(-1);
+          body.turns.push({ id: "bt-lone-line", sid: "principal", at: base?.at ?? 0, start: null, u: false, text: "", sent: [], end: null });
+        }
+        await route.fulfill({ response, json: body });
+      });
+      let loneEntriesInjected = false;
+      await page.route("**/api/tx*", async (route) => {
+        const u = new URL(route.request().url()); if (u.searchParams.get("sid") !== "principal") return route.continue();
+        const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response });
+        const body = await response.json();
+        if (!loneEntriesInjected) {
+          const slot = (Number(body.from) || 0) + body.entries.length;
+          body.entries.push(
+            { k: "tool", name: "Write", arg: longPath, in: "Lone tool input", out: "Lone step output is visible.", ok: true, secs: "0.1s", slot, turn: "bt-lone-line" },
+            { k: "a", text: "Between the lone call and the run" },
+            ...[1, 2, 3].map((n) => ({ k: "tool", name: "Bash", arg: "command " + n, out: "Group output " + n, ok: true, secs: "0.1s", slot: slot + n + 1 })),
+          );
+          loneEntriesInjected = true;
+        }
+        await route.fulfill({ response, json: body });
+      });
+      await page.reload({ waitUntil: "load" });
+      try { await goto(page, { v: "session", id: "principal" }, D); }
+      catch (error) { throw new Error("lone-step fixture could not open Principal: " + (error?.message ?? error) + "; page errors: " + (page.errors.join(" | ") || "none")); }
+      const selector = '.turn[data-turn="bt-lone-line"] .steps.lone .step > button';
+      try { await page.waitForSelector(selector, { state: "attached" }); }
+      catch (error) { throw new Error("lone-step fixture did not render the row: " + (error?.message ?? error) + "; page errors: " + (page.errors.join(" | ") || "none")); }
+      const button = page.locator(selector);
+      await button.scrollIntoViewIfNeeded();
+      const width = size === "phone" ? 390 : 1280, scheme = dark ? "dark" : "light", tag = width + "-" + scheme;
+      const collapsed = await page.evaluate(() => {
+        const turn = document.querySelector('.turn[data-turn="bt-lone-line"]'), steps = turn?.querySelector(":scope .steps.lone"), button = steps?.querySelector(":scope > .step > button"), summary = turn?.querySelector(":scope .tgroup > .tsum");
+        if (!steps || !button || !summary) return { found: false };
+        const b = button.getBoundingClientRect(), s = summary.getBoundingClientRect(), bc = getComputedStyle(button), sc = getComputedStyle(summary), arg = button.querySelector(".sa"), ac = arg && getComputedStyle(arg);
+        return { found: true, leftDelta: b.left - s.left, heightDelta: Math.abs(b.height - s.height), buttonFont: bc.fontSize, summaryFont: sc.fontSize, buttonColor: bc.color, summaryColor: sc.color,
+          borderLeft: getComputedStyle(steps).borderLeftWidth, summaryText: summary.querySelector(".tt")?.textContent.trim(), verbLeft: button.querySelector(".sv")?.getBoundingClientRect().left ?? null,
+          argOverflow: !!arg && arg.scrollWidth > arg.clientWidth + 1, argEllipsis: !!ac && ac.textOverflow === "ellipsis" && ac.whiteSpace === "nowrap" && ac.overflow === "hidden" };
+      });
+      await page.screenshot({ path: path.join(ENV.out, "bar-lone-step-" + width + "-" + scheme + "-collapsed.png") });
+      loneStep.screenshots.push("bar-lone-step-" + width + "-" + scheme + "-collapsed.png");
+      await button.click();
+      await page.waitForFunction(() => { const b = document.querySelector('.turn[data-turn="bt-lone-line"] .steps.lone .step > button'); return b?.getAttribute("aria-expanded") === "true" && b.parentElement.querySelector(":scope > .out")?.hidden === false; });
+      const expanded = await page.evaluate(() => {
+        const button = document.querySelector('.turn[data-turn="bt-lone-line"] .steps.lone .step > button'), out = button?.parentElement.querySelector(":scope > .out"), verb = button?.querySelector(".sv"), r = out?.getBoundingClientRect();
+        return { ariaExpanded: button?.getAttribute("aria-expanded"), outputVisible: !!out && !out.hidden && out.textContent.includes("Lone step output is visible."), outputLeftDelta: r && verb ? Math.abs(r.left - verb.getBoundingClientRect().left) : null };
+      });
+      await page.screenshot({ path: path.join(ENV.out, "bar-lone-step-" + width + "-" + scheme + "-expanded.png") });
+      loneStep.screenshots.push("bar-lone-step-" + width + "-" + scheme + "-expanded.png");
+      await button.click();
+      const recollapsed = await page.evaluate(() => { const b = document.querySelector('.turn[data-turn="bt-lone-line"] .steps.lone .step > button'), out = b?.parentElement.querySelector(":scope > .out"); return { ariaExpanded: b?.getAttribute("aria-expanded"), outputHidden: !!out?.hidden }; });
+      const view = { collapsed, expanded, recollapsed, overflow: await overflow(page), errors: page.errors };
+      loneStep.views[tag] = view;
+      if (size === "desktop" && !dark) {
+        await page.click("#find-btn");
+        await page.fill("#find", "lone-step-style-match");
+        await page.waitForFunction(() => [...document.querySelectorAll(".step .sa")].some((arg) => arg.textContent.includes("lone-step-style-match")));
+        loneStep.finding = await page.evaluate(() => {
+          const step = [...document.querySelectorAll(".step")].find((x) => x.querySelector(".sa")?.textContent.includes("lone-step-style-match"));
+          return { found: !!step, loneClass: !!step?.parentElement.classList.contains("lone"), parentClass: step?.parentElement.className ?? null, loneContainers: document.querySelectorAll(".steps.lone").length };
+        });
+        loneStep.finding.errors = page.errors;
+      }
+      await page.context().close();
+    }
+  }
+
   // Tables, on the extras fixture: the sample fixture's own data has zero table messages (X.tableMessages === 0 there
   // always, so a rendered-vs-expected equality on it can never catch a missing table, only a spurious one). Harbor's
   // extras-only markdown message has a genuine table, so this is where "tables render" gets a positive check.
@@ -643,7 +721,7 @@ export default async function barCheck(browser) {
     await page.context().close();
   }
 
-  r.results = { modes, expected: X, thoughtsBySize, harborThinking, maskedTurn, bareTurns, extra, childAssertions };
+  r.results = { modes, expected: X, thoughtsBySize, harborThinking, maskedTurn, bareTurns, loneStep, extra, childAssertions };
   r.expect(!!thoughtSid, "no session transcript was available for the thinking check");
   for (const [size, t] of Object.entries(thoughtsBySize)) {
     r.expect(t.errors.length === 0, size + " thinking route: page errors: " + t.errors.join(" | "));
@@ -672,6 +750,23 @@ export default async function barCheck(browser) {
   }
   r.expect(!D.SESS.principal || !!bareTurns, "the bare masked turn check did not run");
   r.expect(!D.SESS.principal || !!maskedTurn, "the principal session's masked-thinking turn was not checked");
+  r.expect(!D.SESS.principal || !!loneStep, "the principal lone-step style check did not run");
+  if (loneStep) {
+    r.expect(Object.keys(loneStep.views).length === 4 && loneStep.screenshots.length === 8, "lone-step screenshots did not cover collapsed and expanded at 390 and 1280 in light and dark: " + JSON.stringify({ views: Object.keys(loneStep.views), screenshots: loneStep.screenshots }));
+    for (const [tag, v] of Object.entries(loneStep.views)) {
+      r.expect(v.errors.length === 0, tag + " lone-step route: page errors: " + v.errors.join(" | "));
+      r.expect(v.collapsed.found && v.collapsed.summaryText === "Ran 3 commands", tag + ": the lone call is not next to the expected folded group: " + JSON.stringify(v.collapsed));
+      r.expect(Math.abs(v.collapsed.leftDelta) <= 1 && v.collapsed.buttonFont === v.collapsed.summaryFont && v.collapsed.buttonColor === v.collapsed.summaryColor && v.collapsed.borderLeft === "0px", tag + ": lone row edge, font, color or rail differs from the group summary: " + JSON.stringify(v.collapsed));
+      r.expect(v.collapsed.heightDelta <= 1, tag + ": lone row height differs from the group summary: " + JSON.stringify(v.collapsed));
+      r.expect(v.expanded.ariaExpanded === "true" && v.expanded.outputVisible, tag + ": opening the lone step did not expose its output and expanded state: " + JSON.stringify(v.expanded));
+      r.expect(v.expanded.outputLeftDelta != null && v.expanded.outputLeftDelta <= 1, tag + ": the lone step output does not align under its text: " + JSON.stringify(v.expanded));
+      r.expect(v.recollapsed.ariaExpanded === "false" && v.recollapsed.outputHidden, tag + ": closing the lone step did not hide its output and clear expanded state: " + JSON.stringify(v.recollapsed));
+      r.expect(v.overflow === 0, tag + ": lone step makes the page scroll sideways: " + v.overflow);
+      if (tag.startsWith("390-")) r.expect(v.collapsed.argOverflow && v.collapsed.argEllipsis, tag + ": lone step argument is not ellipsised on one line: " + JSON.stringify(v.collapsed));
+    }
+    r.expect(!!loneStep.finding && loneStep.finding.found && !loneStep.finding.loneClass && loneStep.finding.parentClass === "steps" && loneStep.finding.loneContainers === 0, "finding a lone call added the lone style: " + JSON.stringify(loneStep.finding));
+    r.expect(loneStep.finding?.errors?.length === 0, "finding the lone call caused page errors: " + JSON.stringify(loneStep.finding?.errors));
+  }
   if (maskedTurn) {
     r.expect(maskedTurn.errors.length === 0, "principal masked-thinking route: page errors: " + maskedTurn.errors.join(" | "));
     r.expect(maskedTurn.maskedLines > 0 && maskedTurn.adjacent === 0 && maskedTurn.label === "Thinking hidden by the harness", "a turn of masked thoughts is not one quiet line: " + JSON.stringify(maskedTurn));

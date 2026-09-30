@@ -738,6 +738,8 @@ pub(crate) struct EventCache {
     busy: bool,
     /// Gone files whose rows the store still holds: dropped when it can.
     gone: Vec<(String, Option<Ledger>)>,
+    /// Time spent cloning a cached index during the current scan.
+    index_clone: Duration,
     /// Reported runs the store didn't take: saved at the next refresh.
     runs_unsaved: bool,
     /// Files whose change is in memory only (the store was busy, or other
@@ -852,11 +854,17 @@ impl EventCache {
         self.busy = false;
     }
 
+    /// Time spent cloning cached file indexes in the current scan.
+    pub(crate) fn index_clone_duration(&self) -> Duration {
+        self.index_clone
+    }
+
     /// Starts a scan: an index kept in memory tries its store again, at most
     /// every [`REOPEN_EVERY`]. Once it opens, the store's rows replace this
     /// process's: a file the store lacks or holds at another ledger is read
     /// again when next scanned.
     pub(crate) fn begin_scan(&mut self) {
+        self.index_clone = Duration::ZERO;
         if self.store.is_some() || self.reopen_at.is_none_or(|at| Instant::now() < at) {
             return;
         }
@@ -1248,7 +1256,9 @@ pub(crate) fn scan_file(
             _ => 0,
         };
         trace(if base.is_some() { "append" } else { "replace" });
+        let clone_started = Instant::now();
         let mut index = base.as_deref().cloned().unwrap_or_default();
+        cache.index_clone += clone_started.elapsed();
         let offset = parse(&file, from, harness, &mut index)?;
         let (head, tail) = window_hashes(&file, offset)?;
         let ledger = Ledger {
