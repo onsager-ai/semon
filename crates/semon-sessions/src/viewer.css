@@ -150,7 +150,7 @@ code { overflow-wrap: anywhere; }
 .topbar .ttl .t { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .ibtn { display: inline-grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 9px; background: none; color: var(--ink-2); flex: none; }
 @media (hover: hover) { .ibtn:hover { background: var(--sunken); } }
-.ibtn[aria-expanded="true"] { background: var(--sunken); }
+.ibtn[aria-expanded="true"]:not(.rail-toggle) { background: var(--sunken); }
 .ibtn svg { width: 20px; height: 20px; }
 .lead { display: none; }
 /* The page title lives only in the top bar. A parent crumb before it ("quill ›") is the way up a level. */
