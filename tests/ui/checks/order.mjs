@@ -21,6 +21,12 @@
 //      enters the icons at once;
 //   6. Home's Working now, then a machine page, scrolled down: a bump moves nothing, and applies when the tab comes back (a
 //      visibilitychange to visible);
+//   8. the tab comes back (a visibilitychange to visible) with one change held and a second one waiting in a poll the test holds on the
+//      wire: the return applies the first from the data the page has, and when the held poll then lands (a real redraw, observed) the
+//      rows in view do not move;
+//   9. wide screen, the sidebar's idle timer (IDLE, the hook's shortened time): with the pointer away it applies after IDLE and not
+//      before; keyboard focus inside the sidebar blocks it and the focus leaving starts the wait again; a pointer passing over it
+//      resets the wait; an open session menu (which hangs from the top bar) blocks it;
 //   7. on the phone: with the drawer closed a held order stays in the (hidden) list; opening the drawer shows it in recency order at once;
 //      while it is open a change moves nothing; closing it applies the change.
 // 0 page errors on every page.
@@ -107,10 +113,11 @@ async function scheme(browser, name, opts, r) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-order-")), now = write(dir);
   const L = logs(dir);
   L.create("order-old", at(0, 5)); // an old session of its own, below the sidebar's top eight from the start
-  const srv = await serve(dir, now + 90 * 60000), pages = [];
+  const srv = await serve(dir, now + 150 * 60000), pages = [];
+  const gate = { hold: false, held: [], release: async () => { gate.hold = false; const rs = gate.held.splice(0); for (const x of rs) await x.continue(); } }; // holds the page's /api/model polls while set
   const saved = () => { try { localStorage.setItem("semon.tree", JSON.stringify(Object.fromEntries(["principal", "sentinel", "advisor"].map((id) => [id, { open: true, at: 1 }])))); } catch {} };
   try {
-    const page = await open(browser, srv, "/sessions", opts, async (p) => { await p.addInitScript(saved); await p.addInitScript(idleHook, IDLE); }); pages.push(page);
+    const page = await open(browser, srv, "/sessions", opts, async (p) => { await p.addInitScript(saved); await p.addInitScript(idleHook, IDLE); await p.route(/\/api\/model/, async (route) => { if (gate.hold) gate.held.push(route); else await route.continue(); }); }); pages.push(page);
     await page.setViewportSize(phone ? { width: 390, height: 420 } : { width: 1280, height: 420 }); await sleep(300);
     await page.waitForFunction(() => document.querySelectorAll("#page .sess .nrow").length >= 6);
     // A change has reached the page and been drawn: the served model has it (the caller waited), the page has had an update since
@@ -293,7 +300,7 @@ async function scheme(browser, name, opts, r) {
       const held = await listRows(page);
       say(same(ids(held), order) && still(tops, held), key + ": rows moved under a scrolled list");
       say(await noUi(page), key + ": a chip, pill or status element exists");
-      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))); await sleep(3500); // the tab comes back (its first 3 s draw sorted, so wait them out)
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))); await sleep(500); // the tab comes back
       const after = ids(await listRows(page));
       say(key === "home" ? after[0] === cand && inRecency(after, lastOf(m1)) : after.indexOf(cand) < order.indexOf(cand), key + ": the held order didn't apply when the tab came back: " + after.join(","));
     }
@@ -325,6 +332,82 @@ async function scheme(browser, name, opts, r) {
       const lp = lastOf(modelP ?? { sessions: {} }), closed = ids(await sideRows(page)), closedRoots = closed.map((id) => lp[id]);
       say(closed[0] === "order-p" && closedRoots.every((t, i) => i === 0 || closedRoots[i - 1] >= t), "closing the drawer didn't apply what it held: " + closed.join(","));
     }
+    // ---- 8. the tab comes back: what was held applies once, from the data the page has; the catch-up poll's changes are held ----
+    {
+      await hop(); await page.mouse.move(640, 4); await sleep(500);
+      const list = ids(await pageRows(page)), pair = OLD.filter((id) => list.includes(id)).sort((a, b) => list.indexOf(b) - list.indexOf(a)).slice(0, 2), [A, B] = pair;
+      say(pair.length === 2, "fewer than two of the sample's Claude sessions are on the Sessions page: " + list.join(","));
+      let a0 = (await model(srv)).sessions[A].last; u0 = page.updates;
+      L.bump(A, at(14, 20));
+      await modelWith(srv, (m) => m.sessions[A].last > a0); say(await drawn(u0), "the page drew no update after the first change");
+      say(same(ids(await pageRows(page)), list), "the first change was applied to a list being looked at");
+      const modelA1 = await model(srv);
+      // The page's next poll is held on the wire; the second change reaches the server; the tab returns; only then does the poll land.
+      gate.hold = true; const b0 = (await model(srv)).sessions[B].last; L.bump(B, at(14, 21));
+      await modelWith(srv, (m) => m.sessions[B].last > b0);
+      const heldPoll = await (async () => { const t0 = Date.now(); while (!gate.held.length && Date.now() - t0 < 6000) await sleep(50); return gate.held.length > 0; })();
+      say(heldPoll, "no poll was held, so the check below proves nothing");
+      const mark = () => page.evaluate(() => document.querySelectorAll("#page .nrow, #lanes .treeitem").forEach((x) => { x.__d = 1; }));
+      const redrawn = () => until(page, () => !document.querySelector("#page .nrow")?.__d, null, 8000);
+      await mark(); await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      say(await redrawn(), "the page didn't draw when the tab returned");
+      const applied = await pageRows(page), sideApplied = phone ? [] : await sideRows(page);
+      say(applied[0]?.id === A && inRecency(ids(applied), lastOf(modelA1)) && same([...ids(applied)].sort(), [...list].sort()), "the return didn't apply the first change from the data the page has: " + ids(applied).slice(0, 5).join(","));
+      say(applied[0]?.id !== B, "the second change was applied by the return, before its poll landed");
+      await mark(); u0 = page.updates; await gate.release();
+      say(await redrawn() && page.updates > u0, "the catch-up poll wasn't drawn");
+      const caught = await pageRows(page);
+      say(same(ids(caught), ids(applied)) && still(applied, caught), "the catch-up poll after the tab's return reordered rows that were in view: " + ids(caught).slice(0, 5).join(",") + " vs " + ids(applied).slice(0, 5).join(","));
+      if (!phone) say(same(ids(await sideRows(page)), ids(sideApplied)), "the catch-up poll reordered the sidebar's rows");
+    }
+
+    // ---- 9. wide screen: the sidebar's idle timer and its guards ----
+    if (!phone) {
+      let clk = at(14, 30); const nextT = () => (clk += 60000);
+      const sideFirst = () => page.evaluate(() => document.querySelector("#lanes > .treeitem")?.dataset.id);
+      const waitFirst = async (id, limit) => { const t0 = Date.now(); while (Date.now() - t0 < limit) { if ((await sideFirst()) === id) return Date.now(); await sleep(50); } return null; };
+      // Something is held in the sidebar (its two lowest Claude lanes become the most recent), the pointer away: returns when the sidebar drew it.
+      const holdSide = async ({ skipApply = false, avoid = null } = {}) => {
+        if (!skipApply) await applyAll();
+        await page.evaluate(() => { document.querySelector("#side-list").scrollTop = 40; });
+        const lanes = ids(await sideRows(page)), t = OLD.filter((id) => id !== avoid && lanes.includes(id)).sort((a, b) => lanes.indexOf(b) - lanes.indexOf(a)).slice(0, 2);
+        say(t.length === 2, "fewer than two of the sample's Claude sessions are in the sidebar: " + lanes.join(","));
+        await page.evaluate(() => document.querySelectorAll("#lanes .treeitem").forEach((x) => { x.__d = 1; }));
+        const pre = (await model(srv)).sessions[t[1]].last;
+        L.bump(t[0], nextT()); L.bump(t[1], nextT());
+        await modelWith(srv, (m) => m.sessions[t[1]].last > pre);
+        say(await until(page, () => !document.querySelector("#lanes .treeitem")?.__d, null, 12000), "the sidebar didn't draw the change");
+        return { Td: Date.now(), newest: t[1] };
+      };
+      // (a) the pointer away: it doesn't apply before IDLE, and does after
+      let h = await holdSide(); let tf = await waitFirst(h.newest, IDLE + 4000);
+      R.idleMs = tf && tf - h.Td;
+      say(tf !== null && tf - h.Td >= IDLE - 400 && tf - h.Td <= IDLE + 3000, "the idle sidebar applied after " + R.idleMs + " ms, not after " + IDLE + " ms");
+      // (b) keyboard focus inside it blocks it; taking the focus away starts the wait again
+      h = await holdSide();
+      await page.keyboard.press("Shift"); await page.locator("#lanes .srow").first().focus(); await sleep(IDLE * 2 + 500);
+      say((await sideFirst()) !== h.newest, "the sidebar applied what it held with keyboard focus inside it");
+      let tb = Date.now(); await page.evaluate(() => document.activeElement.blur()); tf = await waitFirst(h.newest, IDLE + 4000);
+      R.blurMs = tf && tf - tb;
+      say(tf !== null && tf - tb >= IDLE - 400, "the sidebar applied " + R.blurMs + " ms after the focus left, not after " + IDLE + " ms (focus leaving didn't start the wait again)");
+      // (c) a pointer event resets it: the pointer passes over the sidebar and leaves at Tr, and the wait runs from Tr
+      h = await holdSide(); await sleep(1500);
+      await page.hover("#lanes .srow"); await page.mouse.move(640, 4); const tr = Date.now(); tf = await waitFirst(h.newest, IDLE + 4000);
+      R.pointerMs = tf && tf - tr;
+      say(tf !== null && tf - tr >= IDLE - 400 && tf - h.Td >= 1500 + IDLE - 400, "the sidebar applied " + R.pointerMs + " ms after the pointer left, " + (tf && tf - h.Td) + " ms after it drew (a pointer event didn't reset the wait)");
+      // (d) an open menu blocks it: the session menu hangs from the top bar, outside the sidebar
+      await applyAll();
+      await page.evaluate((r) => { history.pushState(r, ""); dispatchEvent(new PopStateEvent("popstate", { state: r })); }, { v: "session", id: "harbor" });
+      await page.waitForFunction(() => document.querySelector("#topbar .t")?.textContent === "harbor" && !document.querySelector("#page").hasAttribute("aria-busy") && document.querySelector("#page section[aria-label='Transcript']"));
+      await page.click("#more-btn"); await page.waitForSelector(".session-menu"); await page.mouse.move(640, 4);
+      h = await holdSide({ skipApply: true, avoid: "harbor" }); await sleep(IDLE * 2 + 500);
+      say((await sideFirst()) !== h.newest && (await page.evaluate(() => !!document.querySelector(".session-menu"))), "the sidebar applied what it held with the session menu open");
+      const tm = Date.now(); await page.keyboard.press("Escape");
+      say(await page.evaluate(() => !document.querySelector(".session-menu")), "Escape didn't close the session menu, so the check below proves nothing");
+      tf = await waitFirst(h.newest, IDLE * 2 + 3000); R.menuMs = tf && tf - tm;
+      say(tf !== null, "the sidebar never applied what it held once the session menu closed");
+    }
+
     R.errors = page.errors; say(page.errors.length === 0, "page errors: " + page.errors.join(" | "));
   } finally {
     for (const p of pages) await p.context().close();

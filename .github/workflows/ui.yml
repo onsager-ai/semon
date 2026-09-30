@@ -133,7 +133,7 @@ jobs:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
         run: node checks/live.mjs
 
-      # Lists of sessions keep their rows where they are while updates arrive; a "N updated" pill counts what would move.
+      # Lists of sessions keep their rows where they are while updates arrive; what they hold applies when the list is out of sight.
       - name: Stable session order
         if: ${{ !cancelled() }}
         working-directory: tests/ui

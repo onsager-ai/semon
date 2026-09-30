@@ -756,10 +756,9 @@
   document.addEventListener("pointerdown", () => { ordTouch.down = true; }, true);
   for (const t of ["pointerup", "pointercancel"]) document.addEventListener(t, () => { ordTouch.down = false; }, true);
   window.addEventListener("blur", () => { ordTouch.down = false; });
-  // A tab that comes back from the background applies what was held (before it paints), and draws the updates of its first moments
-  // sorted too: nobody has looked at these lists since.
-  let ordReturnUntil = 0;
-  document.addEventListener("visibilitychange", () => { ordTouch.down = false; if (visible()) { ordReturnUntil = performance.now() + ORD_RETURN_MS; orderApply("page"); orderApply("side"); } });
+  // A tab that comes back from the background applies what was held, once, before it paints, from the data it has. What the catch-up
+  // poll brings after that is held like any other update.
+  document.addEventListener("visibilitychange", () => { ordTouch.down = false; if (visible()) { orderApply("page"); orderApply("side"); } });
   // How many rows must move to put `rows` in `cmp` order: all of them but the longest run already in it.
   function ordMoves(rows, cmp) {
     const tails = [];
@@ -784,7 +783,7 @@
   // One draw of a screen's lists. `sig` is what the reader chose to show, `tie` the route it belongs to (null: the sidebar, which
   // outlives routes); a draw with another sig or tie starts from the sorted order. `st` is ordState from before the draw.
   function orderScope(name, sig, tie, st) {
-    const prev = ORD.get(name), keep = !!prev && prev.sig === sig && prev.tie === tie && performance.now() >= ordReturnUntil;
+    const prev = ORD.get(name), keep = !!prev && prev.sig === sig && prev.tie === tie;
     const scope = { sig, tie, keep, calm: st.inView && !st.touched, // calm: a new session may be put at the top
       prev: keep ? prev.lists : new Map(), prevKids: keep ? prev.kids : new Set(), kids: new Set(), prevExp: keep ? prev.exp : null, exp: null, reseed: false, lists: new Map(), n: 0 };
     ORD.set(name, scope); return scope;
@@ -809,22 +808,27 @@
     return ids.map((id) => by.get(id));
   }
   const sideRegion = () => $("#side-list") ?? $("#sidebar");
-  const ORD_IDLE_MS = Number(window.__semonOrderIdleMs) > 0 ? Number(window.__semonOrderIdleMs) : 10000; // (a browser check sets the hook to shorten it)
-  const ORD_DRAWER_MS = 320, ORD_RETURN_MS = 3000; // the drawer's slide (0.24 s) and a little; the first moments after a tab returns
+  // How long the wide screen's sidebar is left alone before it applies what it holds. Read once, at load, with 10 s as the default; a
+  // browser check sets window.__semonOrderIdleMs before the page loads to shorten it, and nothing else looks at that name.
+  const ORD_IDLE_MS = Number(window.__semonOrderIdleMs) > 0 ? Number(window.__semonOrderIdleMs) : 10000;
+  const ORD_DRAWER_MS = 320; // the drawer's slide (0.24 s) and a little
   // Applies what a screen holds: the list is drawn sorted, from scratch.
   function orderApply(name) {
     const sc = ORD.get(name); if (!sc?.n || (name === "page" && (sc.tie !== route || rendered !== route || viewerEl || $("#page").hasAttribute("aria-busy")))) return;
     ORD.delete(name);
     if (name === "side") renderLanes(); else { const st = capture(); render(); restore(st); }
   }
-  // The wide screen's sidebar is always in view: what it holds is applied once it has been left alone for ORD_IDLE_MS.
+  // The wide screen's sidebar is always in view: what it holds is applied once it has been left alone for ORD_IDLE_MS. Left alone means
+  // no pointer over it or down, no focus in it, and no menu or dialog open (the session menu hangs from the top bar, outside the
+  // sidebar, so it is named here); anything the reader does to it starts the wait again.
   let ordIdle = null;
   function ordIdleArm() {
     clearTimeout(ordIdle); ordIdle = null;
     if (phone.matches || !ORD.get("side")?.n) return;
     ordIdle = setTimeout(() => {
       ordIdle = null; const bar = $("#sidebar");
-      if (ordTouch.down || bar.matches(":hover") || bar.contains(document.activeElement)) ordIdleArm(); else orderApply("side");
+      const menu = $(".session-menu, .account-popover, .runs-popover, .filters.pop:not([hidden])");
+      if (ordTouch.down || bar.matches(":hover") || bar.contains(document.activeElement) || menu || viewerEl) ordIdleArm(); else orderApply("side");
     }, ORD_IDLE_MS);
   }
   for (const t of ["pointermove", "pointerdown", "pointerleave", "focusin", "focusout", "wheel", "keydown"]) $("#sidebar").addEventListener(t, () => { if (ordIdle) ordIdleArm(); }, { passive: true });
