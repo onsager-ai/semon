@@ -40,7 +40,10 @@
 //   - a running subagent's page ends in a status line that follows it: "Working" with a tool-call count and a cost that advance,
 //     then "Returned to <parent> · Done" when it finishes, without a reload; each item (calls, time, cost) has a plain-text
 //     breakdown tip that follows the numbers, and a tap on it shows the tip on a phone; and when its origin only appears after
-//     the page is open, the intro block is added (once) and the brief is in it alone;
+//     the page is open, the intro block is added (once) and the brief is in it alone; the focus stays on the same kind of footer
+//     item (cost, "Open in") while the items change around it;
+//   - a page whose origin arrived late retries a failed reload of its transcript on the next poll (which asks for the whole
+//     model), keeps polling when hidden and shown in between, and gives up after 4 tries spaced 4 s, 8 s, 16 s;
 //   - any other session's page ends in the same footer ("Working · N tool calls · …" that follows its calls, with no "Still
 //     working" line under its last turn; "Done · N tool calls · …" when it has stopped);
 //   - a 403 stops polling and shows "Session ended: reload with the printed URL";
@@ -701,6 +704,9 @@ async function childReturnLive(browser, r) {
     items: [...n.querySelectorAll(".cr-item")].map((x) => ({ text: x.textContent, tip: x.dataset.tip ?? null, tab: x.tabIndex === 0, control: !!x.closest("a[href], button, input, select, textarea, summary, label, [role='button'], [role='link'], [role='menuitem'], [role='tab']") })),
     untipped: [...n.querySelectorAll("[data-tip]")].filter((x) => !x.classList.contains("cr-item")).length } : null; });
   const CACHE = { input: 100000, output: 10000, cacheRead: 1000000, cacheWrite: 100000 }; // $0.40, $0.20, $0.20, $0.50 at Opus 5.5 rates
+  // The focused element: its footer item kind (data-foot), its text, and whether it is in the footer and in the document.
+  const focused = (page) => page.evaluate(() => { const a = document.activeElement; return { inFoot: !!a?.closest("#page .session-foot"), foot: a?.dataset?.foot ?? null, text: a?.textContent ?? null, connected: !!a?.isConnected }; });
+  let lastModel = null;
   try {
     harbor.append(harbor.tool(at(12, 43), "toolu-ret1", "Agent", { description: "Live returner", subagent_type: "general-purpose", prompt: BRIEF, run_in_background: true }),
       harbor.result(at(12, 43, 0, 500), "toolu-ret1", "Async agent launched successfully.", { toolUseResult: { status: "async_launched", agentId: "ret-sub" } }));
@@ -708,8 +714,15 @@ async function childReturnLive(browser, r) {
     fs.mkdirSync(path.dirname(sub.path), { recursive: true });
     fs.writeFileSync(sub.path.replace(/\.jsonl$/, ".meta.json"), JSON.stringify({ agentType: "general-purpose", description: "Live returner", toolUseId: "toolu-ret1" }));
     sub.append(sub.prompt(at(12, 43, 1), BRIEF), sub.tool(at(12, 43, 5), "toolu-ret-t0", "Bash", { command: "true" }), sub.result(at(12, 43, 6), "toolu-ret-t0", "ok"), sub.usage(at(12, 43, 10), CACHE), sub.text(at(12, 43, 20), "Live check: reading the flush change."));
+    // A second subagent that has already returned and has no token use yet, so its footer has no cost: [time, "Open in"].
+    harbor.append(harbor.tool(at(12, 43, 2), "toolu-ret2", "Agent", { description: "Live unpriced", subagent_type: "general-purpose", prompt: BRIEF, run_in_background: true }),
+      harbor.result(at(12, 43, 2, 500), "toolu-ret2", "Async agent launched successfully.", { toolUseResult: { status: "async_launched", agentId: "ret-sub2" } }));
+    const sub2 = L.lane("ret-sub2", { parent: "harbor" });
+    fs.writeFileSync(sub2.path.replace(/\.jsonl$/, ".meta.json"), JSON.stringify({ agentType: "general-purpose", description: "Live unpriced", toolUseId: "toolu-ret2" }));
+    sub2.append(sub2.prompt(at(12, 43, 3), BRIEF), sub2.text(at(12, 43, 30), "Live check: nothing to change."));
+    harbor.append(harbor.notify(at(12, 43, 40), "toolu-ret2", "completed", "Live check: nothing to change."));
     const t0 = Date.now();
-    while (Date.now() - t0 < 8000 && !(await model(srv)).handoffs.some((h) => h.kind === "spawn" && h.to === "ret-sub")) await sleep(50);
+    while (Date.now() - t0 < 8000 && !["ret-sub", "ret-sub2"].every((id) => lastModel?.handoffs.some((h) => h.kind === "spawn" && h.to === id))) { lastModel = await model(srv); await sleep(50); }
     const page = await open(browser, srv, "/s/claude/ret-sub", { size: "phone", dark: false }); pages.push(page);
     await page.evaluate(() => { window.__noReload = true; });
     await page.waitForFunction(() => !!document.querySelector("#page .session-foot"));
@@ -735,7 +748,9 @@ async function childReturnLive(browser, r) {
     r.expect(w?.items[0]?.tip === "Bash 2 · Read 1 · 1 failed", "child-return-live: after 2 more calls the calls tip is " + JSON.stringify(w?.items[0]?.tip));
     r.expect(w?.items[1]?.tip === "Started 12:43 · last activity 12:44", "child-return-live: after the update the time tip is " + JSON.stringify(w?.items[1]?.tip));
     r.expect(w?.items[2]?.tip === "Input $0.80 · Output $0.40 · Cache read $0.40 · Cache write $1.00. " + COST_TIP, "child-return-live: after the update the cost tip is " + JSON.stringify(w?.items[2]?.tip));
-    // It finishes (the parent is told): the line says so, with the button to the parent, and the time tip says when.
+    // It finishes (the parent is told): the line says so, with the button to the parent, and the time tip says when. The cost item
+    // has the focus meanwhile: the items go from [calls, time, cost] to [time, cost, "Open in"], and the focus stays on the cost.
+    await page.locator('#page .session-foot [data-foot="cost"]').focus();
     u0 = page.updates; t1 = Date.now();
     harbor.append(harbor.notify(at(12, 45), "toolu-ret1", "completed", "Live check: the flush change looks right."));
     R.returned = await appear(page, t1, () => /^Returned to .+\s+·\s+Done\s+·\s+[\dhdm ]+\s+·\s+\$2\.60$/.test(document.querySelector("#page .session-foot .stat")?.textContent ?? ""), null, 8000);
@@ -744,14 +759,29 @@ async function childReturnLive(browser, r) {
     r.expect(R.returned != null && page.updates > u0, "child-return-live: the status line stayed at " + JSON.stringify(d) + " after the subagent finished");
     r.expect(d?.n === 1 && d.state.includes("done") && d.open && d.untipped === 0, "child-return-live: after it finished, the status line is " + JSON.stringify(d));
     r.expect(d?.items.length === 2 && d.items[0].tip === "Started 12:43 · last activity 12:44 · finished 12:45" && d.items[1].tip === "Input $0.80 · Output $0.40 · Cache read $0.40 · Cache write $1.00. " + COST_TIP, "child-return-live: after it finished, the items are " + JSON.stringify(d?.items));
+    R.costFocus = await focused(page);
+    r.expect(R.costFocus.inFoot && R.costFocus.foot === "cost" && R.costFocus.text === "$2.60" && R.costFocus.connected, "child-return-live: with the cost item focused while the subagent finished, the focus went to " + JSON.stringify(R.costFocus));
     // A redraw that changes the footer's text (more cost) keeps the focus on "Open in <parent>", on the button that replaced it.
     await page.locator("#page .session-foot button").focus();
     t1 = Date.now();
     sub.append(sub.usage(at(12, 46), CACHE));
     R.recosted = await appear(page, t1, () => /\$3\.90$/.test(document.querySelector("#page .session-foot .stat")?.textContent ?? ""), null, 8000);
-    R.focus = await page.evaluate(() => { const a = document.activeElement; return { inFoot: !!a?.closest("#page .session-foot"), text: a?.textContent ?? null, connected: !!a?.isConnected }; });
+    R.focus = await focused(page);
     r.expect(R.recosted != null, "child-return-live: the finished footer stayed at " + JSON.stringify(await block(page)) + " after the subagent's cost grew");
-    r.expect(R.focus.inFoot && R.focus.text === "Open in harbor" && R.focus.connected, "child-return-live: the focus after the footer's text changed is " + JSON.stringify(R.focus));
+    r.expect(R.focus.inFoot && R.focus.foot === "open" && R.focus.text === "Open in harbor" && R.focus.connected, "child-return-live: the focus after the footer's text changed is " + JSON.stringify(R.focus));
+    // A returned subagent with no cost yet: "Open in" has the focus when its cost gets priced, and the items go from
+    // [time, "Open in"] to [time, cost, "Open in"]. The focus stays on the button, not on the cost that took its place.
+    const unpriced = await open(browser, srv, "/s/claude/ret-sub2", { size: "phone", dark: false }); pages.push(unpriced);
+    await unpriced.waitForFunction(() => /^Returned to .+\s+·\s+Done\s+·\s+[\dhdm ]+$/.test(document.querySelector("#page .session-foot .stat")?.textContent ?? ""));
+    R.unpriced = await block(unpriced);
+    r.expect(R.unpriced?.items.length === 1 && R.unpriced.open, "child-return-live: a returned subagent with no token use has the footer " + JSON.stringify(R.unpriced));
+    await unpriced.locator("#page .session-foot button").focus();
+    t1 = Date.now();
+    sub2.append(sub2.usage(at(12, 43, 35), CACHE));
+    R.priced = await appear(unpriced, t1, () => /\$1\.30$/.test(document.querySelector("#page .session-foot .stat")?.textContent ?? ""), null, 8000);
+    R.pricedFocus = await focused(unpriced);
+    r.expect(R.priced != null, "child-return-live: the unpriced subagent's footer stayed at " + JSON.stringify(await block(unpriced)) + " after it used tokens");
+    r.expect(R.pricedFocus.inFoot && R.pricedFocus.foot === "open" && R.pricedFocus.text === "Open in harbor" && R.pricedFocus.connected, "child-return-live: with \"Open in\" focused while the cost got priced, the focus went to " + JSON.stringify(R.pricedFocus));
     R.kept = await page.evaluate(() => window.__noReload === true);
     r.expect(R.kept, "child-return-live: the page was reloaded");
     R.errors = pages.flatMap((p) => p.errors);
@@ -824,38 +854,74 @@ async function sessionFooterLive(browser, r) {
   return R;
 }
 
-// A subagent's page opened before its parent's log exists has no origin and no intro. When the parent's log appears, the live
-// update adds the intro (once) and marks the page a child's, and the brief is in that intro alone (the transcript loads again, so the prompt it drew as a message is gone).
-async function childIntroLate(browser, r) {
-  const R = { name: "child-intro-late" }, dir = fs.mkdtempSync(path.join(os.tmpdir(), "semon-live-late-")), now = write(dir);
+// A subagent's page opened before its parent's log exists: its own transcript, and the parent's log to write once the page is
+// open (the subagent then has an origin). `shown` reads the intro blocks, the child-page class and where the brief is drawn.
+async function lateFixture(browser, prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix)), now = write(dir);
   const srv = await serve(dir, now + 10 * 60000), L = logs(dir), pages = [];
   const cwd = L.cwdOf("harbor"), projects = L.dirOf("harbor"), NOTE = "Live check: the late brief.";
   const line = (sub, t, type, extra) => ({ parentUuid: null, isSidechain: sub, type, timestamp: iso(t), sessionId: "late-par", ...(sub ? { agentId: "late-sub" } : {}), cwd, version: "2.1.0", uuid: "u-late-" + (sub ? "s" : "p") + "-" + t, ...extra });
   const say = (sub, t, text) => line(sub, t, "assistant", { message: { id: "msg-late-" + t, model: "claude-opus-5-5", role: "assistant", type: "message", content: [{ type: "text", text }] } });
   const ask = (sub, t, text) => line(sub, t, "user", { message: { role: "user", content: text } });
   const put = (f, lines) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, lines.map((l) => JSON.stringify(l) + "\n").join("")); };
-  const shown = (page) => page.evaluate((note) => ({ intros: document.querySelectorAll("#page .child-intro").length, child: document.querySelector("#page").classList.contains("child-page"),
+  const shown = (page) => page.evaluate((note) => ({ intros: document.querySelectorAll("#page .child-intro").length, child: document.querySelector("#page").classList.contains("child-page"), foot: document.querySelectorAll("#page .session-foot").length,
     copies: [...document.querySelectorAll("#page *")].filter((n) => n.textContent.includes(note) && ![...n.children].some((c) => c.textContent.includes(note))).map((n) => ({ tag: n.tagName.toLowerCase(), intro: !!n.closest(".child-intro") })) }), NOTE);
+  const close = async () => { for (const p of pages) await p.context().close(); srv.proc.kill("SIGTERM"); fs.rmSync(dir, { recursive: true, force: true }); };
   try {
     const subFile = path.join(projects, "late-par", "subagents", "agent-late-sub.jsonl");
     put(subFile, [ask(true, at(12, 43, 1), NOTE), say(true, at(12, 43, 20), "Live check: reading the flush change.")]);
     fs.writeFileSync(subFile.replace(/\.jsonl$/, ".meta.json"), JSON.stringify({ agentType: "general-purpose", description: "Late reviewer", toolUseId: "toolu-late1" }));
     const page = await open(browser, srv, "/s/claude/late-sub", { size: "phone", dark: false }); pages.push(page);
+    // Each /api/model request the page makes: when, and the `since` it sent ("" asks for the whole model).
+    page.polls = []; page.on("request", (q) => { if (q.url().includes("/api/model")) page.polls.push({ t: Date.now(), since: new URL(q.url()).searchParams.get("since") }); });
+    const parent = () => put(path.join(projects, "late-par.jsonl"), [ask(false, at(12, 40), "Live check: start a late reviewer."), say(false, at(12, 43), "Live check: started it.")]);
+    return { page, pages, parent, shown, close, NOTE };
+  } catch (e) { await close(); throw e; }
+}
+const RELOAD = /\/api\/tx\?sid=late-sub$/;
+// The viewer's LATE_TRIES: how many times a page whose origin arrived late asks for its transcript again before it gives up.
+const LATE_TRIES = 4;
+// The page's visibility, as the browser reports it when the phone is locked and unlocked.
+const setVisible = (page, state) => page.evaluate((state) => { Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state }); document.dispatchEvent(new Event("visibilitychange")); }, state);
+
+// A subagent's page opened before its parent's log exists has no origin and no intro. When the parent's log appears, the live
+// update adds the intro (once) and marks the page a child's, and the brief is in that intro alone (the transcript loads again, so
+// the prompt it drew as a message is gone). The first request to load it again fails, and the page is hidden and shown again
+// before the retry: polling resumes (asking for the whole model), the retry loads it, and it is not asked for again.
+async function childIntroLate(browser, r) {
+  const R = { name: "child-intro-late" }, F = await lateFixture(browser, "semon-live-late-"), { page, pages, shown, NOTE } = F;
+  try {
     R.before = await shown(page);
     r.expect(R.before.intros === 0 && !R.before.child, "child-intro-late: before its parent's log exists the page already has an intro or the child-page class: " + JSON.stringify(R.before));
-    // The first request to load the transcript again fails: the next poll asks again, and once it has loaded it is not asked for again.
-    const base = page.txs.length, reloads = () => page.txs.slice(base).filter((u) => /\/api\/tx\?sid=late-sub$/.test(u)).length;
+    const base = page.txs.length, reloads = () => page.txs.slice(base).filter((u) => RELOAD.test(u)).length;
     let asked = 0;
-    await page.route(/\/api\/tx\?sid=late-sub$/, (route) => (asked++ === 0 ? route.fulfill({ status: 500, body: "no" }) : route.continue()));
+    await page.route(RELOAD, (route) => (asked++ === 0 ? route.fulfill({ status: 500, body: "no" }) : route.continue()));
+    const failed = page.waitForResponse((q) => RELOAD.test(q.url()) && q.status() === 500, { timeout: 10000 }).then(() => true, () => false);
     // The parent's log appears: the subagent now has an origin.
     const u0 = page.updates, t1 = Date.now();
-    put(path.join(projects, "late-par.jsonl"), [ask(false, at(12, 40), "Live check: start a late reviewer."), say(false, at(12, 43), "Live check: started it.")]);
+    F.parent();
     R.added = await appear(page, t1, () => document.querySelectorAll("#page .child-intro").length > 0, null, 8000);
-    R.fixed = await appear(page, t1, (note) => { const c = [...document.querySelectorAll("#page *")].filter((n) => n.textContent.includes(note) && ![...n.children].some((k) => k.textContent.includes(note))); return c.length === 1 && !!c[0].closest(".child-intro"); }, NOTE, 14000);
-    await sleep(4500); // two more polls: a transcript that loaded is not loaded again
-    R.reloads = reloads();
+    R.failedFirst = await failed;
+    r.expect(R.failedFirst, "child-intro-late: the first reload of the transcript was never made (or didn't fail)");
+    // The phone is locked before the retry, and unlocked: the page polls again (a poll that asks for the whole model), at the
+    // backoff the failed request set.
+    await setVisible(page, "hidden");
+    let n = page.polls.length; await sleep(1500);
+    R.hiddenPolls = page.polls.length - n;
+    n = page.polls.length; const t2 = Date.now();
+    await setVisible(page, "visible");
+    while (page.polls.length === n && Date.now() - t2 < 8000) await sleep(50);
+    R.resumedIn = page.polls.length > n ? Date.now() - t2 : null; R.resumed = page.polls[n] ?? null;
+    r.expect(R.hiddenPolls === 0, "child-intro-late: polled " + R.hiddenPolls + " times while hidden");
+    r.expect(R.resumedIn != null, "child-intro-late: shown again after a failed reload of its transcript, the page never polled again");
+    r.expect(R.resumed?.since === "", "child-intro-late: the poll after the failed reload asked for " + JSON.stringify(R.resumed) + " (want since=\"\": the whole model)");
+    R.fixed = await appear(page, t2, (note) => { const c = [...document.querySelectorAll("#page *")].filter((n) => n.textContent.includes(note) && ![...n.children].some((k) => k.textContent.includes(note))); return c.length === 1 && !!c[0].closest(".child-intro"); }, NOTE, 12000);
+    n = page.polls.length; const t3 = Date.now();
+    while (page.polls.length < n + 2 && Date.now() - t3 < 8000) await sleep(50); // two more polls: a transcript that loaded is not loaded again
+    R.reloads = reloads(); R.later = page.polls.slice(n).map((p) => p.since);
     R.after = await shown(page);
     r.expect(R.reloads === 2, "child-intro-late: the transcript was asked for " + R.reloads + " times after the origin appeared (want 2: one that failed, one retry)");
+    r.expect(R.later.length >= 2 && R.later.every((x) => !!x), "child-intro-late: the polls after the transcript loaded sent " + JSON.stringify(R.later) + " (want the model's version)");
     r.expect(R.fixed != null, "child-intro-late: the brief was not in the intro alone after the retry: " + JSON.stringify(R.after.copies));
     r.expect(R.added != null && page.updates > u0, "child-intro-late: the intro never appeared after the parent's log did: " + JSON.stringify(R.after));
     r.expect(R.after.intros === 1 && R.after.child, "child-intro-late: after the origin appeared the page has " + R.after.intros + " intro blocks (child-page " + R.after.child + ")");
@@ -863,9 +929,40 @@ async function childIntroLate(browser, r) {
     R.errors = pages.flatMap((p) => p.errors);
     r.expect(R.errors.length === 0, "child-intro-late: page errors: " + R.errors.join(" | "));
   } finally {
-    for (const p of pages) await p.context().close();
-    srv.proc.kill("SIGTERM");
-    fs.rmSync(dir, { recursive: true, force: true });
+    await F.close();
+  }
+  return R;
+}
+
+// When the transcript never loads again (every request fails), the page asks for it LATE_TRIES times in all, each retry on a poll
+// that asks for the whole model, with gaps that double (4 s, 8 s, 16 s); then it gives up and polls as usual (2 s, sending the
+// model's version), with the intro and footer drawn and no page errors. Spacing comes from the request timestamps.
+async function childIntroLateGivesUp(browser, r) {
+  const R = { name: "child-intro-late-gives-up" }, F = await lateFixture(browser, "semon-live-giveup-"), { page, pages, shown } = F;
+  try {
+    const tries = [];
+    page.on("request", (q) => { if (RELOAD.test(q.url())) tries.push(Date.now()); });
+    await page.route(RELOAD, (route) => route.fulfill({ status: 500, body: "no" }));
+    const t1 = Date.now();
+    F.parent();
+    while (tries.length < LATE_TRIES && Date.now() - t1 < 50000) await sleep(100);
+    // Three polls after the last try: none asks for the transcript again.
+    const last = () => tries[tries.length - 1] ?? Infinity, after = () => page.polls.filter((p) => p.t > last());
+    const t2 = Date.now();
+    while (after().length < 3 && Date.now() - t2 < 15000) await sleep(100);
+    R.tries = tries.length; R.gaps = tries.slice(1).map((t, i) => t - tries[i]);
+    R.between = page.polls.filter((p) => p.t > tries[0] && p.t < last()).map((p) => p.since);
+    R.after = after().map((p) => ({ since: p.since, at: p.t - last() }));
+    R.shown = await shown(page);
+    r.expect(R.tries === LATE_TRIES, "child-intro-late-gives-up: the failing transcript was asked for " + R.tries + " times (want " + LATE_TRIES + ")");
+    r.expect(R.gaps.length === 3 && R.gaps[0] >= 3500 && R.gaps[1] >= 7000 && R.gaps[2] >= 14000 && R.gaps[2] < 24000 && R.gaps[0] < R.gaps[1] && R.gaps[1] < R.gaps[2], "child-intro-late-gives-up: the retries didn't back off 4 s, 8 s, 16 s: " + JSON.stringify(R.gaps));
+    r.expect(R.between.length === LATE_TRIES - 1 && R.between.every((x) => x === ""), "child-intro-late-gives-up: the polls that retried sent " + JSON.stringify(R.between) + " (want " + (LATE_TRIES - 1) + " asking for the whole model)");
+    r.expect(R.after.length >= 3 && R.after.every((p) => !!p.since) && R.after[0].at < 5000, "child-intro-late-gives-up: after giving up, the polls are " + JSON.stringify(R.after) + " (want the model's version, every 2 s)");
+    r.expect(R.shown.intros === 1 && R.shown.child, "child-intro-late-gives-up: after giving up the page shows " + JSON.stringify(R.shown));
+    R.errors = pages.flatMap((p) => p.errors);
+    r.expect(R.errors.length === 0, "child-intro-late-gives-up: page errors: " + R.errors.join(" | "));
+  } finally {
+    await F.close();
   }
   return R;
 }
@@ -889,6 +986,8 @@ export default async function liveCheck(browser) {
   catch (e) { r.expect(false, "session-footer-live: threw " + (e?.stack ?? e)); }
   try { out.childIntroLate = await childIntroLate(browser, r); }
   catch (e) { r.expect(false, "child-intro-late: threw " + (e?.stack ?? e)); }
+  try { out.childIntroLateGivesUp = await childIntroLateGivesUp(browser, r); }
+  catch (e) { r.expect(false, "child-intro-late-gives-up: threw " + (e?.stack ?? e)); }
   r.results = out;
   return r.done();
 }

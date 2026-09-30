@@ -1682,7 +1682,9 @@
   // ---- Session page --------------------------------------------------------------------------------------------------
   // A child's brief is drawn once, in its intro block, so its transcript leaves out the handoff that started it. Every draw of
   // that transcript takes these options: a live update redraws turns too, and one drawn without them shows the brief again.
-  const transcriptOpts = (sid) => { const origin = originHandoff(sid); return origin ? { excludeH: origin.id } : { footer: true }; };
+  // A page that ends in a footer leaves the last turn's "Still working" line to it; one without a footer (a stub, a session with
+  // no repo) keeps that line.
+  const transcriptOpts = (sid) => { const origin = originHandoff(sid); return origin ? { excludeH: origin.id } : { footer: !!SESS[sid] && showsFooter(SESS[sid], null) }; };
   function renderSession(page, sid) {
     markSeenResults(H.filter((h) => isResult(h) && h.from === sid));
     const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr"); const h1 = el("h1", null, s.name); head.append(h1); page.append(head); observeTitle(h1);
@@ -1992,14 +1994,15 @@
   function sessionFooter(s, h) {
     const block = el("div", "session-foot"), done = s.state === "done" || s.state === "err", finished = h ? done || h.status === "done" || h.status === "err" : done;
     const status = h ? (finished ? (s.state === "err" || h.status === "err" ? "err" : "done") : "work") : s.state;
-    const item = (text, tip) => { const n = el("span", "cr-item", text); if (tip) { n.dataset.tip = tip; n.tabIndex = 0; } return n; };
+    // Each item names its kind (data-foot), so a redraw that adds or drops items can give the focus back to the same one.
+    const item = (kind, text, tip) => { const n = el("span", "cr-item", text); n.dataset.foot = kind; if (tip) { n.dataset.tip = tip; n.tabIndex = 0; } return n; };
     const line = el("span"), cost = costForSession(s.id), priced = cost.usd != null && !costMissing(cost).length && cost.usd >= 0.005, running = status === "work";
     line.append(spaced(h && finished ? "Returned to " + nameOf(h.from) + " · " + STATE[status] : STATE[status]));
-    if (!h || !finished) line.append(spaced(" · "), item(callsText(countOf(s, "calls")), callsTip(s)));
-    line.append(spaced(" · "), item(dur(s.start, running ? null : s.last), timeTip(s, h, finished)));
-    if (priced) line.append(spaced(" · "), item(asMoney(cost.usd), costTip(cost)));
+    if (!h || !finished) line.append(spaced(" · "), item("calls", callsText(countOf(s, "calls")), callsTip(s)));
+    line.append(spaced(" · "), item("time", dur(s.start, running ? null : s.last), timeTip(s, h, finished)));
+    if (priced) line.append(spaced(" · "), item("cost", asMoney(cost.usd), costTip(cost)));
     const state = el("span", "stat " + status); state.append(running ? el("span", "spin") : dot(status, false), line); block.append(state);
-    if (h && finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
+    if (h && finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.dataset.foot = "open"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
     return block;
   }
 
@@ -2417,7 +2420,7 @@
   // again with its view state kept: the scroll position, anchored to the first visible block; what is open, by stable keys;
   // focus, find and filters; the drawer. A session page follows its transcript's tail
   // with /api/tx?after= and replaces only the turns that changed. An open View all sheet holds the redraw until it closes.
-  const LIVE = { late: null, version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2000, ended: false, again: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
+  const LIVE = { late: null, lateTries: 0, retry: false, version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2000, ended: false, again: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
   // The turn index as last drawn, to tell which turns an update changed.
   const remember = (m) => { LIVE.turns = new Map(m.turns.map((x) => [x.id, turnKey(x)])); };
   // What an update can change in a turn record or a handoff, cheaply (not the text, which a record never rewrites).
@@ -2445,12 +2448,15 @@
     if (!LIVE.timer || performance.now() + wait < LIVE.due) schedule(wait);
   });
   function poll() {
-    LIVE.timer = null; if (LIVE.busy || LIVE.ended || !visible()) return; LIVE.busy = true; LIVE.started = performance.now();
+    LIVE.timer = null; if (LIVE.busy || LIVE.ended || !visible()) return; LIVE.busy = true; LIVE.started = performance.now(); LIVE.retry = false;
     let ok = false;
-    fetch("/api/model?since=" + enc(LIVE.version ?? ""), { credentials: "same-origin" })
+    // While a late origin's transcript has yet to load again, the poll asks for the whole model (an empty since), so the update
+    // that retries it runs even when nothing else moved.
+    fetch("/api/model?since=" + enc(LIVE.late ? "" : LIVE.version ?? ""), { credentials: "same-origin" })
       .then((r) => r.status === 304 ? null : r.ok ? r.json() : Promise.reject(Object.assign(new Error(r.status + " " + r.statusText), { status: r.status })), (e) => Promise.reject(Object.assign(e, { status: 0 })))
       .then((m) => (m ? update(m) : null))
-      .then(() => { LIVE.delay = 2000; ok = true; }, (err) => {
+      // A failed retry of that transcript backs off like a failed poll (4 s, 8 s, 16 s, capped at 30 s); anything else resets to 2 s.
+      .then(() => { LIVE.delay = LIVE.retry ? Math.min(30000, LIVE.delay * 2) : 2000; ok = true; }, (err) => {
         if (err?.status === 403) return ended(403);
         LIVE.delay = Math.min(30000, LIVE.delay * 2);
         if (err?.status == null) setTimeout(() => { throw err; }); // not the network: a fault on the page, reported as one
@@ -2477,10 +2483,10 @@
     const hadOrigin = route.v === "session" && !!SESS[route.id] && !!originHandoff(route.id);
     adopt(m); remember(m);
     // A page that had no origin and now has one (its parent's spawn arrived) loads its transcript again: the first prompt it drew as
-    // a message is the brief, which the intro now shows. It is asked for until it loads, so a failed request can't leave the brief
-    // twice on the page: the next update asks again.
+    // a message is the brief, which the intro now shows. A failed request is retried on the next poll, which backs off, up to
+    // LATE_TRIES requests in all; after that the page stays as drawn (the brief shows twice until a reload) and polls as usual.
     if (LIVE.late !== route.id) LIVE.late = null;
-    if (route.v === "session" && !hadOrigin && !!SESS[route.id] && !!originHandoff(route.id)) LIVE.late = route.id;
+    if (route.v === "session" && !hadOrigin && !!SESS[route.id] && !!originHandoff(route.id)) { LIVE.late = route.id; LIVE.lateTries = 0; }
     if (LIVE.late && !TX[LIVE.late]) LIVE.late = null; // nothing loaded to load again: the page loads it with its origin
     const changedH = new Set(H.filter((h) => oldH.get(h.id) !== handKey(h)).map((h) => h.id));
     const view = viewed(), grown = new Set(), cuts = new Map();
@@ -2488,10 +2494,11 @@
     for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
     // Only transcripts whose mark in the model moved are asked for, one at a time.
     let chain = Promise.resolve();
-    for (const sid of view) if (TX[sid] && ((LIVE.late === sid) || (TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])))) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; if (LIVE.late === sid) LIVE.late = null; })));
+    for (const sid of view) if (TX[sid] && LIVE.late === sid) chain = chain.then(() => soft(reloadLate(sid).then(() => { grown.add(sid); full = true; })));
+    else if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
     else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.reload) full = true; })));
     if (route.v === "session" && TX[route.id]) chain = chain.then(() => newKids(route.id, grown));
-    return chain.then(() => { LIVE.version = LIVE.late ? null : m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
+    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
   }
   // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), those
   // whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw them all.
@@ -2528,6 +2535,15 @@
   function reload(sid) {
     if (sid !== route.id) { delete TX[sid]; delete TXM[sid]; return Promise.resolve({ cut: null, reload: true }); }
     return fetchTx(sid, "").then(() => ({ cut: null, reload: true }));
+  }
+  // The reload of a page whose origin arrived late (update): done once it loads; a failure is counted, makes the poll back off, and
+  // after LATE_TRIES requests gives up.
+  const LATE_TRIES = 4;
+  function reloadLate(sid) {
+    return reload(sid).then((r) => { if (LIVE.late === sid) LIVE.late = null; return r; }, (err) => {
+      if (LIVE.late === sid) { if (++LIVE.lateTries >= LATE_TRIES) LIVE.late = null; else LIVE.retry = true; }
+      throw err;
+    });
   }
   // A new spawn's child work: its turn, loaded one request at a time. A turn the server doesn't have (404) isn't asked for again.
   function newKids(sid, grown) {
@@ -2681,9 +2697,13 @@
       const next = sessionFooter(s, origin);
       if (!foot) page.append(next);
       else if (footerSig(foot) !== footerSig(next)) {
-        // Focus stays on the same control (the button, or a tipped item) of the footer that replaces this one.
-        const controls = (n) => [...n.querySelectorAll("button, [tabindex]")], held = controls(foot).indexOf(document.activeElement);
-        foot.replaceWith(next); if (held >= 0) controls(next)[held]?.focus({ preventScroll: true });
+        // Focus stays on the same kind of control (the button, or the calls, time or cost item) of the footer that replaces this
+        // one, matched by kind since the items change as the session runs and finishes ([calls, time, cost] while a child works;
+        // [time, cost, button] once it has returned). An item the new footer lacks (the calls, once a child returns) hands the
+        // focus to the time item, which every footer has, and never to the button, where Enter would leave the page.
+        const held = foot.contains(document.activeElement) ? document.activeElement.closest("[data-foot]")?.dataset.foot : null;
+        foot.replaceWith(next);
+        if (held) (next.querySelector('[data-foot="' + held + '"]') ?? next.querySelector('[data-foot="time"]'))?.focus({ preventScroll: true });
       }
     }
     const h1 = $("#page .ph h1"); if (h1) h1.textContent = s.name;
