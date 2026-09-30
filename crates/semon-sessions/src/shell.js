@@ -7,6 +7,8 @@
 
   function openDrawer() {
     if (!phone.matches || !sidebar) return;
+    // Named before it opens, so the viewer's sidebar on an embedding page can re-sort what its list held, as the viewer's own drawer does.
+    window.dispatchEvent(new Event("semon:drawer-open"));
     document.body.classList.add("drawer-open");
     lead?.setAttribute("aria-expanded", "true");
   }
@@ -27,7 +29,7 @@
   // a menu opened from the drawer closes on its own. A browser without popovers has none open.
   const popoverOpen = () => { try { return !!document.querySelector(":popover-open"); } catch { return false; } };
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !popoverOpen()) closeDrawer();
+    if (event.key === "Escape" && !popoverOpen() && !document.querySelector("dialog[open]")) closeDrawer(); // an open dialog takes its own Esc
   });
 
   let touchStart = null;
