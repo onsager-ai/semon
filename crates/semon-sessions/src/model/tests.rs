@@ -268,6 +268,34 @@ fn turns_of<'a>(built: &'a Built, sid: &str) -> Vec<&'a Turn> {
 }
 
 #[test]
+fn build_records_each_phase_timing_in_order() {
+    let built = Home::new().build();
+    let names: Vec<_> = built.timings.iter().map(|(name, _)| *name).collect();
+    let expected = [
+        "scan",
+        "index_clone",
+        "facts",
+        "sessions",
+        "index_tools",
+        "claude_spawns",
+        "codex_spawns",
+        "relays",
+        "codex_relays",
+        "asks",
+        "questions",
+        "lineage_states",
+        "activity",
+        "turns",
+        "stubs",
+        "session_facts",
+        "post",
+    ];
+    assert_eq!(names.as_slice(), &expected);
+    let unique: BTreeSet<_> = names.iter().copied().collect();
+    assert_eq!(unique.len(), names.len());
+}
+
+#[test]
 fn sessions_include_the_latest_effort_and_omit_it_when_missing() {
     let home = Home::new();
     let mut claude_high = assistant("claude-effort", ts(1, 0), Vec::new());

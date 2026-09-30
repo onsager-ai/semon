@@ -5,8 +5,8 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
-        TryLockError, Weak,
+        Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard,
+        RwLockWriteGuard, TryLockError, Weak,
         atomic::{AtomicU8, Ordering},
     },
     thread,
@@ -37,6 +37,26 @@ const PAGE_BYTES: usize = 2 * 1024 * 1024;
 const PREVIEW_BYTES: usize = 64 * 1024;
 const EXPAND_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LINE: usize = EXPAND_BYTES + 1024 * 1024;
+
+static BUILD_TIMING: OnceLock<bool> = OnceLock::new();
+
+fn build_timing_enabled() -> bool {
+    *BUILD_TIMING.get_or_init(|| {
+        std::env::var("SEMON_BUILD_TIMING")
+            .map(|value| value == "1")
+            .unwrap_or(false)
+    })
+}
+
+fn timing_line(total: u32, timings: &[(&'static str, u32)]) -> String {
+    use std::fmt::Write as _;
+
+    let mut line = format!("semon sessions viewer: build total={total}");
+    for &(name, elapsed) in timings {
+        let _ = write!(&mut line, " {name}={elapsed}");
+    }
+    line
+}
 
 #[derive(Clone, Debug)]
 pub struct ServeOptions {
@@ -994,7 +1014,12 @@ impl MachineView {
         let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
         #[cfg(test)]
         self.hooks.building()?;
+        let build_started = Instant::now();
         let built = model::build(&self.options, cache, &mut dirty, &mut work.texts, now)?;
+        if build_timing_enabled() {
+            let total = u32::try_from(build_started.elapsed().as_millis()).unwrap_or(u32::MAX);
+            eprintln!("{}", timing_line(total, &built.timings));
+        }
         if self.options.facts.is_none() {
             snapshot.pids = built
                 .pids
@@ -2637,6 +2662,14 @@ mod tests {
     use super::*;
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn formats_build_timing_line() {
+        assert_eq!(
+            timing_line(123, &[("scan", 20), ("index_clone", 3), ("sessions", 8)]),
+            "semon sessions viewer: build total=123 scan=20 index_clone=3 sessions=8"
+        );
+    }
 
     /// A view's test hooks, seen from any thread (a background rebuild runs
     /// on a refresh pool's).
