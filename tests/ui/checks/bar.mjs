@@ -623,10 +623,10 @@ export default async function barCheck(browser) {
     });
     await page.reload({ waitUntil: "load" }); await settled(page); // served() loaded the model before these routes existed; the app is ready when its bar is drawn
     await goto(page, { v: "session", id: "principal" }, D);
-    await page.waitForSelector('.turn[data-turn="bt-masked-then-reply"]', { timeout: 8000 }).catch(() => {});
+    await page.waitForSelector('section.turn[data-turn="bt-masked-then-reply"]', { timeout: 8000 }).catch(() => {});
     bareTurns = await page.evaluate(() => {
-      const withReply = document.querySelector('.turn[data-turn="bt-masked-then-reply"]'), bare = document.querySelector('.turn[data-turn="bt-bare-turn"]');
-      const shape = (id) => { const b = document.querySelector('.turn[data-turn="' + id + '"]'), tx = b?.querySelector(".tx"), g = b ? [...b.querySelectorAll(".tgroup")] : [];
+      const withReply = document.querySelector('section.turn[data-turn="bt-masked-then-reply"]'), bare = document.querySelector('section.turn[data-turn="bt-bare-turn"]');
+      const shape = (id) => { const b = document.querySelector('section.turn[data-turn="' + id + '"]'), tx = b?.querySelector(".tx"), g = b ? [...b.querySelectorAll(".tgroup")] : [];
         return { block: !!b, masked: b?.querySelectorAll(".thought.masked").length ?? null, groups: g.length, summary: g[0]?.querySelector(".tt")?.textContent.trim() ?? null, steps: g[0]?.querySelectorAll(".step").length ?? null, singles: b?.querySelectorAll(".tx > .steps").length ?? null, order: tx ? [...tx.children].map((c) => c.classList.contains("thought") ? "masked" : c.classList.contains("tgroup") ? "group" : c.className) : null }; };
       return { alternating: shape("bt-alternating"), inRun: shape("bt-in-run"), bareBlock: !!bare, bareLines: bare?.querySelectorAll(".thought.masked").length ?? null, bareMessages: bare?.querySelectorAll(".msg").length ?? null, replyBlock: !!withReply, replyText: withReply?.querySelector(".msg")?.textContent ?? null, linesInReply: withReply?.querySelectorAll(".thought.masked").length ?? null, emptyBlocks: document.querySelectorAll(".turn > .tx:empty").length, errors: [] };
     });
@@ -660,7 +660,8 @@ export default async function barCheck(browser) {
           const slot = (Number(body.from) || 0) + body.entries.length;
           body.entries.push(
             { k: "tool", name: "Write", arg: longPath, in: "Lone tool input", out: "Lone step output is visible.", ok: true, secs: "0.1s", slot, turn: "bt-lone-line" },
-            ...[1, 2, 3].map((n) => ({ k: "tool", name: "Bash", arg: "command " + n, out: "Group output " + n, ok: true, secs: "0.1s", slot: slot + n })),
+            { k: "a", text: "Between the lone call and the run" },
+            ...[1, 2, 3].map((n) => ({ k: "tool", name: "Bash", arg: "command " + n, out: "Group output " + n, ok: true, secs: "0.1s", slot: slot + n + 1 })),
           );
           loneEntriesInjected = true;
         }
@@ -676,7 +677,7 @@ export default async function barCheck(browser) {
       await button.scrollIntoViewIfNeeded();
       const width = size === "phone" ? 390 : 1280, scheme = dark ? "dark" : "light", tag = width + "-" + scheme;
       const collapsed = await page.evaluate(() => {
-        const turn = document.querySelector('.turn[data-turn="bt-lone-line"]'), steps = turn?.querySelector(":scope .steps.lone"), button = steps?.querySelector(":scope > .step > button"), group = steps?.nextElementSibling, summary = group?.querySelector(":scope > .tsum");
+        const turn = document.querySelector('.turn[data-turn="bt-lone-line"]'), steps = turn?.querySelector(":scope .steps.lone"), button = steps?.querySelector(":scope > .step > button"), summary = turn?.querySelector(":scope .tgroup > .tsum");
         if (!steps || !button || !summary) return { found: false };
         const b = button.getBoundingClientRect(), s = summary.getBoundingClientRect(), bc = getComputedStyle(button), sc = getComputedStyle(summary), arg = button.querySelector(".sa"), ac = arg && getComputedStyle(arg);
         return { found: true, leftDelta: b.left - s.left, heightDelta: Math.abs(b.height - s.height), buttonFont: bc.fontSize, summaryFont: sc.fontSize, buttonColor: bc.color, summaryColor: sc.color,
