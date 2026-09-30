@@ -271,6 +271,8 @@ async function referencePage(browser, size, dark, html) {
   await page.route(/.*/, async (r) => {
     const url = new URL(r.request().url());
     if (url.href === "http://reference.test/") return r.fulfill({ contentType: "text/html; charset=utf-8", body: stableMockup(html) });
+    const harness = url.host === "reference.test" ? /^\/harness\/([\w.-]+\.svg)$/.exec(url.pathname) : null; // the harness marks the viewer serves at /harness/*.svg
+    if (harness && fs.existsSync(path.join(here, "../../assets/harnesses", harness[1]))) return r.fulfill({ contentType: "image/svg+xml", body: fs.readFileSync(path.join(here, "../../assets/harnesses", harness[1])) });
     if (url.href === "http://reference.test/mark.svg") return r.fulfill({ contentType: "image/svg+xml", body: MARK_SVG });
     if (url.host === "fonts.googleapis.com") return r.fulfill({ contentType: "text/css", body: FACES.replaceAll('url("/fonts/', 'url("http://reference.test/fonts/') });
     const font = /^\/fonts\/(instrument-sans|jetbrains-mono|source-serif-4)-(latin-ext|latin)\.woff2$/.exec(url.pathname);
