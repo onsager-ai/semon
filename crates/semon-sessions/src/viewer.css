@@ -1014,14 +1014,12 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .session-details .vclose { width: 44px; height: 44px; }
 }
 
-/* The tooltip (tooltip.js): one element, #sh-tooltip, shown for any element with data-tip. The inverse surface: --ink behind --ground
-   text, which is AA in both schemes. A popover, so it stays above an open modal dialog. It takes no pointer events: a
-   pointer moving on to the next item is never caught by it, and a click goes to what is under it. The fade is skipped for
-   reduced motion and when a neighbour's tip was just open. */
-.tip { position: fixed; inset: auto; z-index: 1000; box-sizing: border-box; width: max-content; max-width: 280px; margin: 0; border: 0; border-radius: 6px; padding: 6px 9px; overflow: visible; background: var(--ink); color: var(--ground); font: 400 var(--fs-sm)/1.4 var(--sans); text-align: left; overflow-wrap: anywhere; pointer-events: none; }
-.tip::before { position: absolute; left: var(--arrow, 50%); width: 8px; height: 8px; margin-left: -4px; background: inherit; content: ""; transform: rotate(45deg); }
-.tip[data-side="top"]::before { bottom: -4px; }
-.tip[data-side="bottom"]::before { top: -4px; }
+/* The tooltip (tooltip.js): one light card, #sh-tooltip, shown for any element with data-tip. A popover, so it stays above
+   an open modal dialog. It takes no pointer events: a pointer moving on to the next item is never caught by it, and a click
+   goes to what is under it. The fade is skipped for reduced motion and when a neighbour's tip was just open. */
+.tip { position: fixed; inset: auto; z-index: 1000; box-sizing: border-box; width: max-content; max-width: 280px; margin: 0; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; overflow: visible; background: var(--ground); color: var(--ink); box-shadow: 0 6px 20px rgb(0 0 0 / .12); font: 400 var(--fs-sm)/1.4 var(--sans); text-align: left; white-space: pre-line; overflow-wrap: anywhere; pointer-events: none; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .tip { border-color: var(--line-2); } }
+:root[data-theme="dark"] .tip { border-color: var(--line-2); }
 @media (prefers-reduced-motion: no-preference) { .tip:not([data-instant]) { animation: tip-in .12s ease-out; } }
 @keyframes tip-in { from { opacity: 0; } }
 /* The bar's title has a tip while it is cut off. The bar lets pointers through its lines (.l1 has pointer-events: none), so the title takes them back. */

@@ -82,11 +82,21 @@ const reveal = async (page) => { await page.evaluate(() => document.getElementBy
 // WCAG contrast of the open tooltip's text on its background.
 const contrast = (page) => page.evaluate(() => {
   const tip = document.getElementById("sh-tooltip"), cs = getComputedStyle(tip);
+  const surface = document.createElement("span"); surface.style.backgroundColor = "var(--ground)"; document.body.append(surface);
+  const ground = getComputedStyle(surface).backgroundColor; surface.remove();
   const parse = (css) => css.match(/[\d.]+/g).slice(0, 4).map(Number);
   const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
   const fg = parse(cs.color), bg = parse(cs.backgroundColor), a = lum(fg), b = lum(bg);
-  return { ratio: Math.round((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) * 100) / 100, alpha: bg[3] ?? 1, fontSize: parseFloat(cs.fontSize), maxWidth: cs.maxWidth, animation: cs.animationName };
+  return { ratio: Math.round((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) * 100) / 100, alpha: bg[3] ?? 1, fontSize: parseFloat(cs.fontSize), maxWidth: cs.maxWidth, animation: cs.animationName, background: cs.backgroundColor, ground, borderWidth: cs.borderTopWidth, shadow: cs.boxShadow, before: getComputedStyle(tip, "::before").content, whiteSpace: cs.whiteSpace };
 });
+
+function appearance(tag, c, r) {
+  r.expect(c.background === c.ground, tag + ": the tooltip background does not match --ground " + JSON.stringify({ background: c.background, ground: c.ground }));
+  r.expect(c.borderWidth === "1px", tag + ": the tooltip border is " + c.borderWidth + ", expected 1px");
+  r.expect(c.shadow !== "none", tag + ": the tooltip has no box shadow");
+  r.expect(c.before === "none", tag + ": the tooltip still has ::before content " + c.before);
+  r.expect(c.whiteSpace === "pre-line", tag + ": the tooltip does not preserve line breaks " + c.whiteSpace);
+}
 
 const titles = (page) => page.evaluate(() => [
   ...[...document.querySelectorAll("[title]")].map((e) => e.tagName.toLowerCase() + (typeof e.className === "string" && e.className ? "." + e.className.split(" ")[0] : "") + '[title="' + e.getAttribute("title").slice(0, 40) + '"]'),
@@ -163,6 +173,7 @@ export default async function tooltipCheck(browser) {
       placement(tag, "button", s, b, r);
       const c = await contrast(page);
       rec.contrast = c;
+      appearance(tag, c, r);
       r.expect(c.ratio >= 4.5 && c.alpha === 1, tag + ": the tooltip's contrast is " + c.ratio + " (alpha " + c.alpha + "), under 4.5");
       r.expect(c.fontSize === 13 && c.maxWidth === Math.min(280, s.view.width - 16) + "px", tag + ": the tooltip is " + c.fontSize + "px, max-width " + c.maxWidth);
       r.expect(c.animation === "tip-in" || c.animation === "none", tag + ": unexpected animation " + c.animation);
@@ -270,6 +281,7 @@ export default async function tooltipCheck(browser) {
       const shot = (await page.locator("#topbar .meta-cost").count()) && await page.locator("#topbar .meta-cost").first().isVisible() ? "#topbar .meta-cost" : size === "phone" ? "#topbar .l1-state" : "#topbar .meta-state";
       await hover(page, shot, 1500);
       const c = await contrast(page); rec.contrast = c.ratio;
+      appearance(tag, c, r);
       r.expect(c.ratio >= 4.5 && c.alpha === 1, tag + ": the tooltip's contrast is " + c.ratio + ", under 4.5");
       await page.waitForTimeout(300); // past the 120 ms fade
       await page.screenshot({ path: path.join(OUT, "tip-bar-" + size + (dark ? "-dark" : "-light") + ".png"), clip: { x: 0, y: 0, width: VIEWPORTS[size].viewport.width, height: 220 } });
