@@ -209,7 +209,13 @@ export default async function turnsCheck(browser) {
   const handoffs = new Map(D0.H.map((h) => [h.id, h]));
   const routeState = (page) => page.evaluate(() => { const s = history.state; return { v: s?.v ?? null, id: s?.id ?? null, turn: s?.turn ?? null }; });
   const waitRoute = async (page, expected) => {
-    try { return await page.waitForFunction((x) => { const s = history.state; return s?.v === x.v && s?.id === x.id && (x.turn == null || s?.turn === x.turn); }, expected); }
+    try {
+      await page.waitForFunction((x) => { const s = history.state; return s?.v === x.v && s?.id === x.id && (x.turn == null || s?.turn === x.turn); }, expected);
+      if (expected.v === "session") {
+        const title = D0.SESS[expected.id]?.name;
+        if (title) await page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t && !document.querySelector("#page")?.hasAttribute("aria-busy") && !!document.querySelector("#page section[aria-label='Transcript']"), title);
+      }
+    }
     catch (err) { throw new Error("waitRoute expected " + JSON.stringify(expected) + ", got " + JSON.stringify(await routeState(page)) + ": " + err.message); }
   };
   const sameRoute = async (page) => JSON.stringify(await routeState(page));
