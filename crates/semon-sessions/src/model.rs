@@ -262,6 +262,8 @@ struct Rest<'a> {
 /// length, so it changes when, and only when, the logs do.
 pub(crate) struct Built {
     pub(crate) version: String,
+    /// Milliseconds spent in each model build phase, in order.
+    pub(crate) timings: Vec<(&'static str, u32)>,
     machine: String,
     /// `activity[2]` holds the running tool's start (epoch ms) until served.
     pub(crate) sessions: BTreeMap<String, Session>,
@@ -1051,7 +1053,7 @@ fn scan(
     dirty: &mut bool,
     texts: &mut Texts,
     cutoff: Option<i64>,
-) -> io::Result<(Vec<SourceFile>, BTreeSet<String>)> {
+) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
     cache.begin_scan();
     let projects = options.claude_home.join("projects");
     let mut files = Vec::new();
@@ -1192,7 +1194,7 @@ fn scan(
         };
         seen.contains(file.to_string_lossy().as_ref())
     });
-    Ok((files, skipped))
+    Ok((files, skipped, cache.index_clone_duration()))
 }
 
 // ---- Lineages: exact links only (M0, D4, D5) ---------------------------------------------
@@ -4255,79 +4257,113 @@ pub(crate) fn build(
     texts: &mut Texts,
     now: i64,
 ) -> io::Result<Built> {
+    let mut timings = Vec::with_capacity(17);
+    macro_rules! timed {
+        ($name:literal, $body:expr) => {{
+            let started = std::time::Instant::now();
+            let value = $body;
+            timings.push((
+                $name,
+                u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+            ));
+            value
+        }};
+    }
+
     let window_start = scan_cutoff(options, now);
-    let (files, skipped) = scan(options, cache, dirty, texts, window_start)?;
+    let (files, skipped, index_clone) =
+        timed!("scan", scan(options, cache, dirty, texts, window_start)?);
+    timings.push((
+        "index_clone",
+        u32::try_from(index_clone.as_millis()).unwrap_or(u32::MAX),
+    ));
     #[cfg(test)]
     {
         BUILDS.with(|builds| builds.set(builds.get() + 1));
         AFTER_SCAN.with(|hook| hook.borrow_mut().take().map(|hook| hook()));
     }
-    let facts = MachineFacts::of(options);
-    let pids = pid_files(options, &facts);
-    let lock_pids = facts.codex_lock_pids(options);
-    let held: BTreeSet<String> = lock_pids
-        .iter()
-        .flat_map(|locks| locks.keys().cloned())
-        .collect();
-    let machine = facts.hostname(options);
-    let home = facts.home();
-    let offline_since = facts.offline_since();
-    let groups = lineages(&files);
+    let facts;
+    let pids;
+    let lock_pids;
+    let held;
+    let machine;
+    let home;
+    let offline_since;
+    let groups;
+    timed!("facts", {
+        facts = MachineFacts::of(options);
+        pids = pid_files(options, &facts);
+        lock_pids = facts.codex_lock_pids(options);
+        held = lock_pids
+            .iter()
+            .flat_map(|locks| locks.keys().cloned())
+            .collect::<BTreeSet<String>>();
+        machine = facts.hostname(options);
+        home = facts.home();
+        offline_since = facts.offline_since();
+        groups = lineages(&files);
+    });
     let reported_runs: Vec<ReportedRunSnapshot> = match &facts {
         MachineFacts::Local => cache.reported_runs().cloned().collect(),
         MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
     };
     let mut builder = Builder::new(&files, texts, now, machine.clone(), &facts, &reported_runs);
-    builder.sessions(groups, &pids, &held);
-    builder.index_tools();
-    builder.claude_spawns();
-    builder.codex_spawns();
-    builder.relays();
-    builder.codex_relays();
-    builder.asks();
-    builder.questions();
-    builder.lineage_states();
-    builder.activity();
+    timed!("sessions", builder.sessions(groups, &pids, &held));
+    timed!("index_tools", builder.index_tools());
+    timed!("claude_spawns", builder.claude_spawns());
+    timed!("codex_spawns", builder.codex_spawns());
+    timed!("relays", builder.relays());
+    timed!("codex_relays", builder.codex_relays());
+    timed!("asks", builder.asks());
+    timed!("questions", builder.questions());
+    timed!("lineage_states", builder.lineage_states());
+    timed!("activity", builder.activity());
     #[cfg(test)]
     let texts = builder.texts_by_turn();
-    let (mut turns, mut tx) = builder.turns();
+    let (mut turns, mut tx) = timed!("turns", builder.turns());
 
     // Stubs span the handoffs that name them.
-    for handoff in &builder.handoffs {
-        for end in [handoff.from, handoff.to].into_iter().flatten() {
-            let session = &mut builder.sessions[end];
-            if session.kind == SessKind::Stub {
-                let at = handoff.out.at;
-                session.out.start = if session.out.start == 0 {
-                    at
-                } else {
-                    session.out.start.min(at)
-                };
-                session.out.last = session.out.last.max(at);
+    timed!("stubs", {
+        for handoff in &builder.handoffs {
+            for end in [handoff.from, handoff.to].into_iter().flatten() {
+                let session = &mut builder.sessions[end];
+                if session.kind == SessKind::Stub {
+                    let at = handoff.out.at;
+                    session.out.start = if session.out.start == 0 {
+                        at
+                    } else {
+                        session.out.start.min(at)
+                    };
+                    session.out.last = session.out.last.max(at);
+                }
             }
         }
-    }
+    });
     let run_of = |pid, start| facts.run(options, pid, start);
-    let session_facts = builder.session_facts(
-        &skipped,
-        |id| match lock_pids.as_ref() {
-            Some(locks) => match locks.get(id) {
-                Some(pid) => (Some(*pid), Some(true)),
-                // A lock file no process holds: its writer is gone. Without a
-                // lock file there is no process record.
-                None => (
-                    None,
-                    facts
-                        .codex_lock_file(options, id)
-                        .filter(|exists| *exists)
-                        .map(|_| false),
-                ),
+    let session_facts = timed!(
+        "session_facts",
+        builder.session_facts(
+            &skipped,
+            |id| match lock_pids.as_ref() {
+                Some(locks) => match locks.get(id) {
+                    Some(pid) => (Some(*pid), Some(true)),
+                    // A lock file no process holds: its writer is gone. Without a
+                    // lock file there is no process record.
+                    None => (
+                        None,
+                        facts
+                            .codex_lock_file(options, id)
+                            .filter(|exists| *exists)
+                            .map(|_| false),
+                    ),
+                },
+                None => (None, None),
             },
-            None => (None, None),
-        },
-        run_of,
+            run_of,
+        )
     );
 
+    let post_started = std::time::Instant::now();
     let mut handoffs: Vec<Handoff> = builder
         .handoffs
         .iter()
@@ -4556,7 +4592,7 @@ pub(crate) fn build(
             cwd: file.summary.cwd.clone(),
         })
         .collect();
-    Ok(Built {
+    let mut built = Built {
         version,
         machine,
         sessions,
@@ -4575,7 +4611,13 @@ pub(crate) fn build(
         turns,
         #[cfg(test)]
         texts,
-    })
+        timings,
+    };
+    built.timings.push((
+        "post",
+        u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
+    ));
+    Ok(built)
 }
 
 #[cfg(test)]
