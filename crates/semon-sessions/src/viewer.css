@@ -522,7 +522,10 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .harness-note { font-size: var(--fs-sm); color: var(--muted); font-style: italic; }
 .steps { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; border-left: 2px solid var(--line); padding-left: 12px; margin-left: 2px; }
 .steps > * { min-width: 0; }
-.step > button { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: none; padding: 3px 6px; margin-left: -6px; border-radius: 7px; text-align: left; color: var(--muted); font-size: var(--fs-sm); min-width: 0; }
+.steps.lone { border-left: 0; padding-left: 0; margin-left: 0; }
+.steps.lone .step > button, .steps.lone .step.live { min-height: 0; }
+.steps.lone .step > .out { margin: 4px 0 8px 24px; }
+.step > button, .step.live { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: none; padding: 3px 6px; margin-left: -6px; border-radius: 7px; text-align: left; color: var(--muted); font-size: var(--fs-sm); min-width: 0; }
 @media (hover: hover) { .step > button:hover { background: var(--sunken); } }
 .step > button > svg:first-child { width: 16px; height: 16px; flex: none; }
 .step .sv { flex: none; }
