@@ -2591,15 +2591,6 @@
       throw err;
     });
   }
-  // A new spawn's child work: its turn, loaded one request at a time. A turn the server doesn't have (404) isn't asked for again.
-  function newKids(sid, grown) {
-    let chain = Promise.resolve();
-    for (const e of TX[sid] ?? []) {
-      const h = e.k === "h" ? HID.get(e.id) : null, c = h && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id) : null;
-      if (c && !TX[c.sid] && !LIVE.missing.has(c.id)) chain = chain.then(() => (TX[c.sid] ? null : soft(fetchTx(c.sid, "turn=" + enc(c.id)).then(() => { grown.add(c.sid); }, (err) => { if (err?.status === 404) LIVE.missing.add(c.id); throw err; }))));
-    }
-    return chain;
-  }
   // Draws the new model on the screen shown, unless a navigation is still loading (it draws when done), the sheet is open
   // (it draws when the sheet closes), or what the screen shows left the model (it stays as it was).
   function refresh(dirty) {

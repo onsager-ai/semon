@@ -101,8 +101,7 @@ export default async function (browser) {
     });
     r.expect(layout.width === 390 && layout.document <= layout.width && layout.buttonScroll <= layout.buttonWidth + 1 && layout.titleScroll > layout.titleWidth && layout.whiteSpace === "nowrap" && layout.textOverflow === "ellipsis", "the title row stays on one line with ellipsis and no horizontal scrolling at 390 px: " + JSON.stringify(layout));
 
-    await page.click("#more-btn");
-    await page.locator('.menu [role="menuitem"]').filter({ hasText: "Find in transcript" }).click();
+    await page.click("#find-btn");
     await page.fill("#find", "DescriptionOnlySearchWord");
     await page.waitForFunction(() => document.querySelector("#topbar .fcount")?.textContent === "1 match");
     const found = await page.evaluate(() => ({
