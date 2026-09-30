@@ -95,7 +95,7 @@ export default async function namesCheck(browser) {
         r.expect(menu.length > 0, tag + ": Session path shows no ancestor harness label");
         audit("session-path", menu);
         await shot("session-path");
-        await page.keyboard.press("Escape"); await page.waitForFunction(() => !document.querySelector("dialog.session-menu[open]")); await page.waitForTimeout(300); // the menu is a modal dialog here, with a history entry of its own: close it, and let its back step land, before the next page is opened by history
+        await page.keyboard.press("Escape"); await page.waitForFunction(() => !document.querySelector("dialog.session-menu[open]") && !history.state?.sheet); // the menu is a modal dialog here, with a history entry of its own: close it, and let its back step land, before the next page is opened by history
       }
     }
     await goto(page, { v: "analytics" }, D);
