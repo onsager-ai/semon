@@ -125,12 +125,7 @@ code { overflow-wrap: anywhere; }
 .brandrow { display: flex; align-items: center; gap: 8px; padding: 14px 16px 10px; font-weight: 600; font-size: 15px; }
 .mark { width: 16px; height: 16px; background: var(--ink); -webkit-mask: url(/mark.svg) center / contain no-repeat; mask: url(/mark.svg) center / contain no-repeat; flex: none; }
 .brandrow .close { display: none; margin-left: auto; }
-/* Search sits on the same grid as the nav rows below it: same side margin, padding, icon size, gap and height,
-   so its icon and text line up with Home / Machines. */
-.side-search { margin: 0 8px 6px; height: 36px; display: flex; align-items: center; gap: 10px; background: var(--sunken); border-radius: 9px; padding: 0 10px; color: var(--muted); overflow: hidden; }
-.side-search input { border: 0; outline: none; background: transparent; width: 100%; min-width: 0; padding: 0; font-size: var(--fs-ui); color: var(--ink); }
-.side-search input::placeholder, .find input::placeholder { color: var(--muted); }
-.side-search svg { width: 18px; height: 18px; flex: none; }
+.find input::placeholder { color: var(--muted); }
 .nav-item { width: calc(100% - 16px); margin: 1px 8px; display: flex; align-items: center; gap: 10px; border: 0; background: none; padding: 8px 10px; border-radius: 9px; text-align: left; font-weight: 500; color: var(--ink-2); }
 @media (hover: hover) { .nav-item:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); } }
 .nav-item[aria-current="page"] { background: var(--sunken); color: var(--ink); }
@@ -596,8 +591,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .brandrow .close { display: inline-grid; }
   .sidebar-head .brandrow .close { width: 44px; height: 44px; }
   /* iOS zooms on focus below 16px. Keep 16px for layout, draw it at 15px to match the phone's text size. */
-  .side-search input, .find input { font-size: 16px; transform: scale(.9375); transform-origin: left center; width: calc(100% / .9375); }
-  .side-search, .find { height: 42px; min-height: 42px; flex: none; }
+  .find input { font-size: 16px; transform: scale(.9375); transform-origin: left center; width: calc(100% / .9375); }
+  .find { height: 42px; min-height: 42px; flex: none; }
   .nav-item { padding-block: 10px; }
   .srow { padding-block: 8px; }
   .groupby button { padding: 6px 8px; }
@@ -654,16 +649,16 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 /* ---- Approved viewer UX: compact metadata, session tree and reading controls --------------------- */
 .app { transition: grid-template-columns .18s ease; }
 .sidebar { min-width: 0; }
-/* The sidebar never scrolls as a whole: the header, search, nav and the "Recent" label stay put, the session list is the one
-   scroller. The list is as tall as its rows and shrinks only when they overflow. There is no "All sessions" link under it: the nav's
-   Sessions row goes to the same page, with the same search (docs/design/overhaul.md lists the repeat). A hairline at each end of the list shows only while rows remain beyond it: a
+/* The sidebar never scrolls as a whole: the header, nav and the "Recent" label stay put, the session list is the one scroller.
+   The list is as tall as its rows and shrinks only when they overflow. There is no "All sessions" link under it: the nav's Sessions
+   row goes to that page. A hairline at each end of the list shows only while rows remain beyond it: a
    1px cover of the sidebar's colour scrolls with the content at each end and sits over the hairline until the list is scrolled
    away from that end. */
-.side-search, .side-h { flex: none; }
+.side-h { flex: none; }
 .side-list { flex: 0 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 8px;
   background: linear-gradient(var(--side), var(--side)) 0 0 / 100% 1px no-repeat local, linear-gradient(var(--side), var(--side)) 0 100% / 100% 1px no-repeat local,
     linear-gradient(var(--line), var(--line)) 0 0 / 100% 1px no-repeat scroll, linear-gradient(var(--line), var(--line)) 0 100% / 100% 1px no-repeat scroll; }
-/* As tall with the collapse toggle as without it (8 + 44 + 4), so a shell page's header, which has no toggle, puts its nav where the viewer's search starts. */
+/* As tall with the collapse toggle as without it (8 + 44 + 4), so an embedding page's nav starts where the viewer's does. */
 .sidebar-head { display: flex; align-items: center; gap: 4px; min-height: 56px; padding: 8px 8px 4px 0; }
 /* The header row grows and takes the tighter padding inside `.sidebar-head`, the viewer's and the shell pages' (shell::sidebar_head) alike; a bare `.brandrow` straight in the sidebar column keeps the base rule. */
 .sidebar-head .brandrow { flex: 1 1 auto; min-width: 0; padding: 6px 8px 6px 18px; }
@@ -978,7 +973,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .app.rail .sidebar { overflow-x: hidden; }
   .app.rail .sidebar-head { flex-direction: column; gap: 2px; padding: 10px 0 6px; }
   .app.rail .brandrow { flex: none; justify-content: center; padding: 7px 0; }
-  .app.rail .brandrow .brandname, .app.rail .side-search, .app.rail .side-h { display: none; }
+  .app.rail .brandrow .brandname, .app.rail .side-h { display: none; }
   .app.rail .nav-item { position: relative; width: 48px; height: 44px; margin: 2px auto; justify-content: center; padding: 0; }
   .app.rail .nav-item > span:not(.cnt) { display: none; }
   .app.rail .nav-item .cnt { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; overflow: hidden; border-radius: 50%; background: var(--faint); color: transparent; font-size: 0; }

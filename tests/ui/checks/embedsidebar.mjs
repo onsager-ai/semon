@@ -9,18 +9,18 @@
 //   - the viewer's script draws the navigation (its buttons, with Home's badge and no Sessions count, as the viewer's page has) and the
 //     Recent list from /api/model: the same rows, in the same order, with the same text and dots (state, and a parent's attention
 //     dot), as the viewer's own page, and only Machines is current;
-//   - nothing outside the sidebar's own parts (header, search, nav, Recent list) changes: the document, serialized without those
+//   - nothing outside the sidebar's own parts (header, nav, Recent list) changes: the document, serialized without those
 //     parts, equals the page as served (so the body gets no new children and no element outside them a class, attribute or child),
 //     the address is the page's, and no page error is thrown. At 1280 a wide page and a collapsed rail are saved, as a desktop reader
 //     may have them: the page gets neither, and there is no rail toggle;
 //   - a live poll that changes the model (a lower row's session active just now) redraws the list without moving a row (#126 holds
 //     the reorder) and leaves the page as served; at 390 on "full", opening the drawer then re-sorts it, that row first.
-// On "full", light and dark: the search, nav, Recent label and first row sit where the viewer's do (on a phone, in the open drawer),
-// with the same type, and screenshots of both go to out/embedsidebar/. At 390 light: "/" opens no drawer and takes no focus; the
-// phone's "All N" sheet opens and closes (Esc, which leaves the drawer open) without a history entry; the search narrows the list as
-// the viewer's does; a tap on a row opens its session's page in the viewer by a full page load (a marker set on the page is gone).
-// On "bare" at 1280: a click on a row does the same; a refused poll (403) leaves a note under the list and nothing else; Enter in the
-// search opens the viewer's Sessions page, by a page load, with the query in its search field.
+// On "full", light and dark: the nav, Recent label and first row sit where the viewer's do (on a phone, in the open drawer), with the
+// same type, and screenshots of both go to out/embedsidebar/. At 390 light: "/" opens no drawer and takes no focus; the phone's
+// "All N" sheet opens and closes (Esc, which leaves the drawer open) without a history entry; a tap on a row opens its session's page
+// in the viewer by a full page load (a marker set on the page is gone). The viewer's "/" shortcut opens Sessions and focuses its search;
+// that page's search filters its rows and a direct `?q=` link pre-fills it. On "bare" at 1280: a click on a row does the same; a
+// refused poll (403) leaves a note under the list and nothing else.
 import fs from "node:fs";
 import path from "node:path";
 import { ENV, context, served, reporter } from "../lib.mjs";
@@ -62,7 +62,7 @@ async function embedPage(browser, which, { size, dark, saved = false }) {
 // The document serialized with the sidebar's own parts (what the viewer's script draws into) cut out, now and as served. Any other
 // change, a new child of the body, a class or attribute on the page's elements, shows as a difference.
 const untouched = (page) => page.evaluate(({ html, at }) => {
-  const OWN = [".sidebar-head", ".side-search", "#nav", ".side-h", "#side-list"];
+  const OWN = [".sidebar-head", "#nav", ".side-h", "#side-list"];
   const text = (root) => { const c = root.cloneNode(true); for (const sel of OWN) c.querySelectorAll(sel).forEach((n) => n.replaceWith(document.createComment(sel))); return c.outerHTML; };
   const was = text(new DOMParser().parseFromString(html, "text/html").documentElement), now = text(document.documentElement);
   let i = 0; while (i < was.length && was[i] === now[i]) i++;
@@ -85,7 +85,7 @@ const layout = (page) => page.evaluate(() => {
   const type = (sel) => { const e = document.querySelector(sel); if (!e) return null; const s = getComputedStyle(e); return { size: s.fontSize, weight: s.fontWeight, family: s.fontFamily, color: s.color }; };
   const list = box("#side-list");
   return {
-    sidebar: { width: side.width }, search: box(".side-search"), nav: box("#nav"), navRow: box("#nav .nav-item"), recent: box(".side-h"),
+    sidebar: { width: side.width }, nav: box("#nav"), navRow: box("#nav .nav-item"), recent: box(".side-h"),
     list: list && { left: list.left, top: list.top, width: list.width }, row: box("#lanes .srow"), rowName: type("#lanes .srow .nm"),
     rowMeta: type("#lanes .srow-meta"), recentType: type(".side-h"), badge: type("#nav .cnt"),
   };
@@ -153,6 +153,9 @@ export default async function embedSidebarCheck(browser) {
     const page = await embedPage(browser, which, { size, dark, saved: size === "desktop" });
     const viewer = await served(browser, { size, dark, path: "/" });
     await viewer.waitForSelector("#lanes .srow", { state: "attached" });
+    const [embeddingInputs, viewerInputs] = await Promise.all([page.locator("#sidebar input").count(), viewer.locator("#sidebar input").count()]);
+    K.sidebarInputs = { embedding: embeddingInputs, viewer: viewerInputs };
+    r.expect(embeddingInputs === 0 && viewerInputs === 0, P + ": the sidebar contains an input: " + JSON.stringify(K.sidebarInputs));
 
     // The list and the navigation are the viewer's, drawn from the same model.
     const [ours, theirs] = await Promise.all([lanes(page), lanes(viewer)]);
@@ -198,6 +201,35 @@ export default async function embedSidebarCheck(browser) {
     }
 
     if (which === "full" && size === "phone" && !dark) {
+      // From Home, "/" opens Sessions and focuses its search. Its search filters the page without narrowing the sidebar.
+      await viewer.keyboard.press("/");
+      const wentToSessions = await viewer.waitForURL((u) => u.pathname === "/sessions", { timeout: 8000 }).then(() => true, () => false);
+      const focused = wentToSessions && await viewer.waitForFunction(() => document.activeElement === document.querySelector("#sq"), null, { timeout: 8000 }).then(() => true, () => false);
+      const homeSlash = await viewer.evaluate(() => ({ path: location.pathname, focus: document.activeElement?.id ?? null }));
+      K.homeSlash = { ...homeSlash, focused };
+      r.expect(wentToSessions && focused && homeSlash.path === "/sessions", P + ": \"/\" did not open Sessions with its search focused: " + JSON.stringify(K.homeSlash));
+
+      const beforeRows = await viewer.locator("#page .nrow").count(), query = (await viewer.locator("#page .nrow .nm").first().innerText()).trim();
+      const sideBefore = (await lanes(viewer)).map((x) => x.id);
+      await viewer.fill("#sq", query);
+      const afterRows = await viewer.locator("#page .nrow").count(), visibleNames = (await viewer.locator("#page .nrow .nm").allInnerTexts()).map((x) => x.trim());
+      const sideAfter = (await lanes(viewer)).map((x) => x.id);
+      K.sessionsSearch = { beforeRows, query, afterRows, visibleNames, sidebarUnchanged: JSON.stringify(sideBefore) === JSON.stringify(sideAfter) };
+      r.expect(beforeRows > 1 && afterRows > 0 && afterRows < beforeRows && visibleNames.includes(query), P + ": the Sessions search did not filter its rows: " + JSON.stringify(K.sessionsSearch));
+      r.expect(K.sessionsSearch.sidebarUnchanged, P + ": the Sessions search narrowed the sidebar: " + JSON.stringify(K.sessionsSearch));
+
+      const prefilled = await served(browser, { size, dark, path: "/sessions?q=" + encodeURIComponent(query) });
+      const prefill = await prefilled.evaluate(() => ({ value: document.querySelector("#sq")?.value ?? null, path: location.pathname, search: location.search }));
+      K.queryPrefill = prefill;
+      r.expect(prefill.value === query && prefill.path === "/sessions" && prefill.search === "?q=" + encodeURIComponent(query), P + ": a direct ?q= link did not prefill the Sessions search: " + JSON.stringify(prefill));
+      await prefilled.evaluate(() => document.activeElement?.blur());
+      await prefilled.keyboard.press("/");
+      const sessionsSlash = await prefilled.evaluate(() => ({ path: location.pathname + location.search, focus: document.activeElement?.id ?? null }));
+      K.sessionsSlash = sessionsSlash;
+      r.expect(sessionsSlash.path === "/sessions?q=" + encodeURIComponent(query) && sessionsSlash.focus === "sq", P + ": \"/\" on Sessions changed the route or failed to focus its search: " + JSON.stringify(sessionsSlash));
+      r.expect(prefilled.errors.length === 0, P + ": errors on the prefilled Sessions page: " + JSON.stringify(prefilled.errors));
+      await prefilled.context().close();
+
       // The phone's "All N" sheet opens and closes over the page without a history entry; Esc closes it and leaves the drawer open.
       // Open every collapsed top-level parent (a nested one is out of sight until its parent opens), so a long one shows "All N".
       // (One at a time: an opened toggle leaves the collapsed set, so a list taken up front would shift under the taps.)
@@ -217,13 +249,6 @@ export default async function embedSidebarCheck(browser) {
       r.expect(has && sheet.open && sheet.during.length === length && sheet.during.state === null && sheet.closed.length === length && sheet.closed.gone && sheet.closed.path === page.at && sheet.closed.drawer,
         P + ": the \"All N\" sheet touched the history, closed the drawer, or did not open and close: " + JSON.stringify(sheet));
 
-      // The search narrows the list as the viewer's does.
-      const query = theirs[theirs.length - 1].text.slice(0, 4).trim();
-      await page.fill("#q", query); await viewer.fill("#q", query);
-      const [ourFound, theirFound] = await Promise.all([lanes(page), lanes(viewer)]);
-      K.search = { query, rows: ourFound.length };
-      r.expect(ourFound.length > 0 && JSON.stringify(ourFound.map((x) => x.id)) === JSON.stringify(theirFound.map((x) => x.id)), P + ": the search narrows the list differently: " + JSON.stringify({ query, ours: ourFound.map((x) => x.id), theirs: theirFound.map((x) => x.id) }));
-      await page.fill("#q", "");
       K.opened = await opensRow(r, page, P, "tap");
     }
 
@@ -236,14 +261,6 @@ export default async function embedSidebarCheck(browser) {
       const kept = await untouched(refused);
       K.refused = { noted, kept: kept.same };
       r.expect(noted && kept.same, P + ": a refused poll left no note under the list, or changed the page: " + JSON.stringify({ noted, ...kept }));
-      // Enter in the search opens the viewer's Sessions page, searching for the same text.
-      await refused.evaluate(() => { window.__embedMarker = 1; });
-      const query = ours[0].text.slice(0, 4).trim();
-      await refused.fill("#q", query); await refused.locator("#q").press("Enter");
-      const went = await refused.waitForURL((u) => u.pathname === "/sessions", { timeout: 8000 }).then(() => true, () => false);
-      const field = went ? await refused.waitForSelector("#sq", { timeout: 8000 }).then(() => refused.evaluate(() => ({ value: document.querySelector("#sq").value, marker: window.__embedMarker ?? null, search: location.search })), () => null) : null;
-      K.enter = { query, went, field };
-      r.expect(went && field?.value === query && field.marker === null && field.search === "?q=" + encodeURIComponent(query), P + ": Enter did not open the Sessions page with the search: " + JSON.stringify(K.enter));
       r.expect(refused.errors.length === 0, P + ": page errors on the refused page: " + JSON.stringify(refused.errors));
       await refused.context().close();
     }
