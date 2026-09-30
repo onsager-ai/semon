@@ -287,7 +287,7 @@ export default async function turnsCheck(browser) {
       await name.click(); await waitRoute(page, { v: "session", id: h.to, turn: started });
       interaction.links.childNameOpens = await routeState(page);
       r.expect(interaction.links.childNameOpens.id === h.to && (!started || interaction.links.childNameOpens.turn === started), tag + ": child name did not open its started turn: " + JSON.stringify(interaction.links.childNameOpens));
-      await page.goBack(); await waitRoute(page, { v: "session", id: childCard.sid });
+      await goto(page, { v: "session", id: childCard.sid }, D0);
       await page.locator(sel + " .child-actions > button").click(); await waitRoute(page, { v: "session", id: h.to });
       interaction.links.childOpenButton = await routeState(page);
       r.expect(interaction.links.childOpenButton.id === h.to, tag + ": existing child Open button did not open the child: " + JSON.stringify(interaction.links.childOpenButton));
