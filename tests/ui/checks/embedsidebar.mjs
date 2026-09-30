@@ -164,7 +164,9 @@ export default async function embedSidebarCheck(browser) {
     if (which === "full" && size === "phone" && !dark) {
       // The phone's "All N" sheet opens and closes over the page without a history entry; Esc closes it and leaves the drawer open.
       // Open every collapsed top-level parent (a nested one is out of sight until its parent opens), so a long one shows "All N".
-      for (const t of await page.locator('#lanes > .treeitem > .tree-row > .tree-toggle[aria-expanded="false"]').all()) await t.tap();
+      // (One at a time: an opened toggle leaves the collapsed set, so a list taken up front would shift under the taps.)
+      const collapsed = page.locator('#lanes > .treeitem > .tree-row > .tree-toggle[aria-expanded="false"]');
+      for (let n = 0; n < 20 && (await collapsed.count()); n++) await collapsed.first().tap();
       const all = page.locator("#lanes .tree-all").first(), has = (await all.count()) > 0, length = await page.evaluate(() => history.length);
       let sheet = { has };
       if (has) {
