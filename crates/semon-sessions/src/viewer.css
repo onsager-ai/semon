@@ -181,7 +181,7 @@ dialog.panel[open] { display: flex; flex-direction: column; }
 dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); }
 .panel-h { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 8px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--line); }
 .panel-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
-.panel-sub { grid-column: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-cap); color: var(--muted); }
+.panel-h .panel-sub { grid-column: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-cap); color: var(--muted); }
 .panel-h .ibtn { grid-row: 1 / 3; grid-column: 2; }
 .panel-b { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; padding: 4px 16px 20px; }
 .panel-sec { padding: 14px 0 0; }
