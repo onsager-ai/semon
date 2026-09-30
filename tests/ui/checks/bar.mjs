@@ -265,6 +265,9 @@ export default async function barCheck(browser) {
       out.menuSlash = menuAfter;
       r.expect(menuAfter.open && JSON.stringify(menuAfter.route) === JSON.stringify(menuBefore.route) && menuAfter.path === menuBefore.path && menuAfter.focus === menuBefore.focus, mode + ": / navigated or moved focus while the session menu was open: " + JSON.stringify(menuAfter));
       await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click(); await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
+      // On a phone the modal locks the page's scroll, and the scroll save rewrites the sheet's history entry a frame later
+      // (scrollTop 0): let that land before taking the state to compare against.
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
       const dialogBefore = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.className }));
       await page.keyboard.press("/");
       const dialogAfter = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.className, open: !!document.querySelector("dialog.session-details[open]") }));
