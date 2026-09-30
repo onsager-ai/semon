@@ -121,7 +121,7 @@ code { overflow-wrap: anywhere; }
 .ibtn { display: inline-grid; place-items: center; width: var(--tap); height: var(--tap); flex: none; border: 0; border-radius: var(--r2); background: none; color: var(--ink-2); padding: 0; }
 .ibtn svg { width: 20px; height: 20px; }
 @media (hover: hover) { .ibtn:hover { background: var(--hover); } }
-.ibtn[aria-expanded="true"], .ibtn[aria-pressed="true"] { background: var(--sunken); }
+.ibtn[aria-expanded="true"]:not(.rail-toggle), .ibtn[aria-pressed="true"] { background: var(--sunken); }
 .ibtn .pip { position: absolute; }
 .chip { position: relative; display: inline-flex; align-items: center; gap: 6px; min-height: 32px; border: 1px solid var(--line-2); border-radius: 16px; background: var(--ground); padding: 0 12px; color: var(--ink-2); font-size: var(--fs-sm); white-space: nowrap; }
 .chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
