@@ -603,15 +603,15 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .groupby button { padding: 6px 8px; }
   .topbar { top: env(safe-area-inset-top, 0px); padding: 6px 10px; min-height: 50px; }
   .topbar.detail { min-height: 56px; }
-  /* A session's bar is one row on a phone: the menu button, the title behind its small state dot, then ⋯. Line 2 (kind, state,
-     turns, errors, model, machine, branch, tools, runs, tokens, cost) leaves the bar: the errors and the runs are in the ⋯ menu,
-     the rest in Session details. The parent crumb shrinks to a back chevron (a 44 px target like the buttons beside it), so the title gets the room. The dot is a 32 px
-     tap target that abuts the chevron's box and overlaps nothing. */
+  /* A session's bar is one row on a phone: the menu button, title and ⋯. Line 2 (kind, state, turns, errors, model, machine,
+     branch, tools, runs, tokens, cost) leaves the bar: a child's status and path, plus the errors and runs, are in ⋯; the rest
+     is in Session details. Top-level sessions keep the 32 px state-dot target. */
   .topbar.session-bar .l2 { display: none; }
   .topbar.session-bar .l1-state { display: inline-flex; flex: none; align-items: center; align-self: center; padding: 12px; margin: -12px -6px; pointer-events: auto; }
   .topbar.session-bar .l1 .crumb { position: relative; flex: none; align-self: center; width: 44px; min-width: 44px; max-width: 44px; overflow: hidden; color: transparent; text-decoration: none; }
   .topbar.session-bar .l1 .crumb::before { content: ""; position: absolute; left: 50%; top: 50%; width: 7px; height: 7px; border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: translate(-30%, -50%) rotate(45deg); }
   .topbar.session-bar .l1 .sep { display: none; }
+  .topbar.session-bar .l1 > .t { flex: 1 1 auto; max-width: none; }
   .topbar.session-bar .l1 .crumb ~ .t { flex: 0 1 auto; max-width: none; }
   .lead { display: inline-grid; }
   /* The bottom padding is the jump button's offset, height and a 16px gap, so the last content scrolls clear of it. */
@@ -766,13 +766,16 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .menu .menu-note { margin-left: auto; color: var(--accent); font-size: var(--fs-sm); }
 
 /* ---- Lineage, child runs and Analytics ------------------------------------ */
-.lineage-menu { position: absolute; left: 16px; top: calc(100% + 4px); z-index: 22; width: min(260px, calc(100vw - 32px)); padding: 5px; background: var(--ground); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 32px color-mix(in srgb, var(--ink) 14%, transparent); }
-.lineage-menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 40px; border: 0; border-radius: 7px; background: none; padding: 7px 9px; text-align: left; }
-.lineage-menu button[aria-current="page"] { background: var(--sunken); }
-.lineage-menu button[aria-current="page"] .hname { color: var(--ink-2); }
-.lineage-menu button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lineage-menu button span:first-child { flex: 1 1 auto; }
-.lineage-menu button .hname { flex: none; overflow: visible; }
+.menu .menu-status { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 2px 8px 4px; padding: 4px 2px; color: var(--muted); font-size: var(--fs-sm); line-height: 18px; }
+.menu .menu-status .dot { flex: none; }
+.menu .menu-status > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu .menu-section-heading { padding: 4px 10px 2px; color: var(--muted); font-size: var(--fs-sm); line-height: 18px; }
+.menu .menu-path-item { min-width: 0; }
+.menu .menu-path-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu .menu-path-item .hname { flex: none; overflow: visible; }
+.menu .menu-path-chevron { position: relative; flex: none; width: 18px; height: 18px; }
+.menu .menu-path-chevron::before { content: ""; position: absolute; left: 50%; top: 50%; width: 7px; height: 7px; border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: translate(-30%, -50%) rotate(45deg); }
+.menu .menu-separator { margin: 6px 2px; border-top: 1px solid var(--line); }
 .runs-popover { position: absolute; top: calc(100% + 4px); right: 12px; z-index: 22; width: min(400px, calc(100vw - 24px)); max-height: min(72vh, 620px); overflow: auto; overscroll-behavior: contain; background: var(--ground); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px color-mix(in srgb, var(--ink) 16%, transparent); padding: 12px 14px; }
 .runs-popover h2 { margin: 0; font-size: var(--fs-ui); }
 .runs-tree { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 6px; }
@@ -908,7 +911,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .analytics-breakdown { --bd-top: calc(env(safe-area-inset-top, 0px) + var(--barh, 50px)); }
   .analytics-range button, .analytics-measure button { min-width: 44px; }
   .topbar .l2.session-meta .meta-runs { min-height: 44px; }
-  .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-intro .more, .session-foot button, .child-work .cw-toggle, .lineage-menu button { min-height: 44px; }
+  .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-intro .more, .session-foot button, .child-work .cw-toggle { min-height: 44px; }
   dialog.viewer.analytics-slice, dialog.viewer.runs-sheet, dialog.viewer.kids-sheet, dialog.viewer.filters-sheet { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
   .analytics-slice .vh, .runs-sheet .vh, .kids-sheet .vh, .filters-sheet .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); } .analytics-slice .vb, .runs-sheet .vb, .kids-sheet .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
   .analytics-slice .vclose, .runs-sheet .vclose, .kids-sheet .vclose, .filters-sheet .vclose { width: 44px; height: 44px; }

@@ -157,8 +157,9 @@ async function guard(r, name, page, fn) {
 
 export default async function tooltipCheck(browser) {
   const D = await data(), r = reporter("tooltip"), results = {};
-  const parent = Object.values(D.SESS).find((s) => s.name === "harbor") ?? Object.values(D.SESS).find((s) => D.H.some((h) => h.kind === "spawn" && h.from === s.id));
-  r.expect(!!parent, "the fixture must hold a session with child runs");
+  const isRoot = (s) => !s.parent && !D.H.some((h) => h.kind === "spawn" && h.to === s.id);
+  const parent = Object.values(D.SESS).find((s) => s.name === "harbor" && isRoot(s)) ?? Object.values(D.SESS).find((s) => isRoot(s) && D.H.some((h) => h.kind === "spawn" && h.from === s.id));
+  r.expect(!!parent && isRoot(parent), "the fixture must hold a top-level session with child runs for the phone state-dot tooltip");
 
   // ---- The shell gallery ----
   for (const [size, dark] of [["desktop", false], ["desktop", true], ["phone", false], ["phone", true]]) {
