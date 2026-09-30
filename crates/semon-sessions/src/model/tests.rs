@@ -1815,6 +1815,145 @@ fn a_session_carries_its_transcripts_tool_call_and_error_counts() {
     assert_eq!(model["sessions"]["counted"]["errors"], 1);
 }
 
+#[test]
+fn a_session_counts_its_tool_calls_by_tool() {
+    let home = Home::new();
+    home.top(
+        "named",
+        &[
+            human("named", ts(18, 0), "read, read, run"),
+            assistant(
+                "named",
+                ts(18, 1),
+                vec![
+                    tool("r1", "Read", json!({"file_path":"/a"})),
+                    tool("r2", "Read", json!({"file_path":"/b"})),
+                    tool("b1", "Bash", json!({"command":"true"})),
+                    tool("b2", "Bash", json!({"command":"false"})),
+                    tool("e1", "Edit", json!({"file_path":"/a"})),
+                ],
+            ),
+            result("named", ts(18, 2), "r1", "ok", false, json!({})),
+            result("named", ts(18, 2), "r2", "ok", false, json!({})),
+            result("named", ts(18, 2), "b1", "ok", false, json!({})),
+            result("named", ts(18, 3), "b2", "exit 1", true, json!({})),
+            result("named", ts(18, 3), "e1", "ok", false, json!({})),
+            assistant("named", ts(18, 4), vec![text("done")]),
+        ],
+    );
+    home.top(
+        "quiet",
+        &[
+            human("quiet", ts(18, 0), "nothing to run"),
+            assistant("quiet", ts(18, 1), vec![text("ok")]),
+        ],
+    );
+    let built = home.build();
+    let session = &built.sessions["named"];
+    let expected = BTreeMap::from([
+        ("Bash".to_owned(), 2),
+        ("Edit".to_owned(), 1),
+        ("Read".to_owned(), 2),
+    ]);
+    // The same transcript index as the totals, so the counts add up to `calls`.
+    assert_eq!(session.tool_calls, expected);
+    assert_eq!(
+        session.tool_calls.values().sum::<usize>(),
+        session.calls.unwrap()
+    );
+    assert_eq!(built.tx["named"].tools, expected);
+    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    assert_eq!(
+        model["sessions"]["named"]["tool_calls"],
+        json!({"Bash": 2, "Edit": 1, "Read": 2})
+    );
+    // A session with no calls has no map at all.
+    assert!(model["sessions"]["quiet"].get("tool_calls").is_none());
+}
+
+#[test]
+fn a_tool_name_is_at_most_the_name_cap_and_long_names_stay_apart() {
+    // Invariant: no kept tool name is longer than TOOL_NAME_MAX characters, a short name is kept as it is, and two long
+    // names that share a prefix stay different.
+    assert_eq!(tool_label("Bash"), "Bash");
+    let edge = "x".repeat(TOOL_NAME_MAX);
+    assert_eq!(tool_label(&edge), edge);
+    let long_a = format!("mcp__server__{}", "a".repeat(200));
+    let long_b = format!("mcp__server__{}b", "a".repeat(200));
+    let (a, b) = (tool_label(&long_a), tool_label(&long_b));
+    assert_eq!(
+        (a.chars().count(), b.chars().count()),
+        (TOOL_NAME_MAX, TOOL_NAME_MAX)
+    );
+    assert!(a.starts_with("mcp__server__aaa") && a != b);
+    // Characters, not bytes: a name of multi-byte characters is cut on a character boundary.
+    let wide = "é".repeat(TOOL_NAME_MAX * 2);
+    assert_eq!(tool_label(&wide).chars().count(), TOOL_NAME_MAX);
+}
+
+#[test]
+fn tool_counts_keep_the_top_tools_and_one_other_bucket_that_sums_to_the_calls() {
+    // Invariant: at most TOOL_KINDS_MAX names plus one "other" bucket, the largest kept, and the counts add up to the calls.
+    let few: BTreeMap<String, usize> = (0..TOOL_KINDS_MAX)
+        .map(|i| (format!("t{i:02}"), i + 1))
+        .collect();
+    assert_eq!(
+        capped_tool_counts(few.clone()),
+        few,
+        "at the cap nothing is folded"
+    );
+    let many: BTreeMap<String, usize> = (0..TOOL_KINDS_MAX + 8)
+        .map(|i| (format!("t{i:02}"), i + 1))
+        .collect();
+    let total: usize = many.values().sum();
+    let capped = capped_tool_counts(many.clone());
+    assert_eq!(capped.len(), TOOL_KINDS_MAX + 1);
+    assert_eq!(capped.values().sum::<usize>(), total);
+    // The eight smallest (1 through 8 calls) are the bucket; the twelve largest are kept as they were.
+    assert_eq!(capped[TOOL_OTHER], (1..=8).sum::<usize>());
+    assert!((8..TOOL_KINDS_MAX + 8).all(|i| capped[&format!("t{i:02}")] == i + 1));
+    // A tool that is really named "other" adds to the bucket rather than replacing it.
+    let mut named = many;
+    named.insert(TOOL_OTHER.to_owned(), 1);
+    let capped = capped_tool_counts(named);
+    assert_eq!(capped.values().sum::<usize>(), total + 1);
+    assert!(capped.len() <= TOOL_KINDS_MAX + 1);
+}
+
+#[test]
+fn a_session_with_many_tools_serves_a_bounded_tool_calls_map_that_sums_to_its_calls() {
+    let home = Home::new();
+    let mut calls = Vec::new();
+    let mut results = Vec::new();
+    for i in 0..TOOL_KINDS_MAX + 5 {
+        let id = format!("c{i}");
+        let name = format!("mcp__server__{}{}", "n".repeat(90), i);
+        calls.push(tool(&id, &name, json!({})));
+        results.push(result("many", ts(19, 2), &id, "ok", false, json!({})));
+    }
+    let mut lines = vec![
+        human("many", ts(19, 0), "call many tools"),
+        assistant("many", ts(19, 1), calls),
+    ];
+    lines.extend(results);
+    home.top("many", &lines);
+    let built = home.build();
+    let session = &built.sessions["many"];
+    assert_eq!(session.calls, Some(TOOL_KINDS_MAX + 5));
+    assert_eq!(session.tool_calls.len(), TOOL_KINDS_MAX + 1);
+    assert_eq!(
+        session.tool_calls.values().sum::<usize>(),
+        TOOL_KINDS_MAX + 5
+    );
+    assert!(
+        session
+            .tool_calls
+            .keys()
+            .all(|name| name.chars().count() <= TOOL_NAME_MAX)
+    );
+    assert_eq!(session.tool_calls[TOOL_OTHER], 5);
+}
+
 fn golden(name: &str, built: &Built) {
     let mut expected_shape: Value = serde_json::from_str(&built.json(NOW)).unwrap();
     // These snapshots cover the legacy model surface. The cost additions and
@@ -1828,6 +1967,7 @@ fn golden(name: &str, built: &Built) {
                 session.shift_remove("cost_check");
                 session.shift_remove("calls");
                 session.shift_remove("errors");
+                session.shift_remove("tool_calls");
             }
         }
     }

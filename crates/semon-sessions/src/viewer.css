@@ -780,18 +780,18 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .child-work .cw-count { color: var(--muted); }
 .child-work .cw-body { flex: 1 1 100%; min-width: 0; margin: 2px 0 2px 2px; padding-left: 12px; border-left: 1px solid var(--line); }
 .child-work .show-all { justify-self: start; min-height: 36px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: var(--fs-sm); }
-.child-intro, .child-return { min-width: 0; padding: 8px 0; }
-.child-return { border-top: 1px solid var(--line); }
+.child-intro, .session-foot { min-width: 0; padding: 8px 0; }
+.session-foot { border-top: 1px solid var(--line); }
 .child-intro .intro-title { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--ink-2); font-weight: 600; }
-.child-intro .intro-title button, .child-return button { min-height: 36px; min-width: 0; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.child-intro .intro-title button, .session-foot button { min-height: 36px; min-width: 0; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .child-intro .intro-title .tm { margin-left: auto; flex: none; color: var(--muted); font: var(--fs-cap) var(--mono); }
 .child-intro .brief { max-height: 5.8em; margin-top: 3px; overflow: hidden; color: var(--ink-2); font: var(--fs-read)/1.5 var(--serif); }
 .child-intro .brief.open { max-height: none; }
 .child-intro .more { min-height: 36px; border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: var(--fs-sm); }
 .child-intro .intro-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0 16px; }
 .child-intro .intro-open { min-height: 40px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: var(--fs-sm); text-align: left; }
-.child-return { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: var(--fs-sm); }
-.child-return .stat { flex: none; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.session-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: var(--fs-sm); }
+.session-foot .stat { flex: none; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
 /* One compact segmented control (the Analytics range and the Breakdown measure): a 30 px track with a hairline, 24 px segments, a light selected state.
    The tap target is taller than what is drawn: each segment's ::before extends its hit area by --seg-reach above and below (30 px on a pointer, 44 px on a phone). */
 .analytics-range, .analytics-measure { --seg-reach: 3px; display: inline-flex; align-items: center; gap: 0; flex: none; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--sunken); white-space: nowrap; }
@@ -895,7 +895,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .analytics-breakdown { --bd-top: calc(env(safe-area-inset-top, 0px) + var(--barh, 50px)); }
   .analytics-range button, .analytics-measure button { min-width: 44px; }
   .topbar .l2.session-meta .meta-runs { min-height: 44px; }
-  .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-intro .more, .child-return button, .child-work .cw-toggle, .lineage-menu button { min-height: 44px; }
+  .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-intro .more, .session-foot button, .child-work .cw-toggle, .lineage-menu button { min-height: 44px; }
   dialog.viewer.analytics-slice, dialog.viewer.runs-sheet, dialog.viewer.kids-sheet, dialog.viewer.filters-sheet { position: fixed; inset: auto 0 0; width: 100%; height: auto; max-width: none; max-height: 84vh; max-height: 84dvh; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px color-mix(in srgb, var(--ink) 18%, transparent); overflow: hidden; }
   .analytics-slice .vh, .runs-sheet .vh, .kids-sheet .vh, .filters-sheet .vh { padding-top: calc(10px + env(safe-area-inset-top, 0px)); } .analytics-slice .vb, .runs-sheet .vb, .kids-sheet .vb { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
   .analytics-slice .vclose, .runs-sheet .vclose, .kids-sheet .vclose, .filters-sheet .vclose { width: 44px; height: 44px; }

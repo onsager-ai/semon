@@ -318,7 +318,7 @@ export default async function barCheck(browser) {
 
     await goto(page, { v: "session", id: grandchild.id }, D);
     const origin = D.H.find((h) => h.kind === "spawn" && h.to === grandchild.id);
-    const briefCard = await page.evaluate((text) => { const intro = document.querySelector(".child-intro"), brief = intro?.querySelector(".brief"); return { visible: !!intro && !!brief, includesBrief: !!brief && brief.textContent.includes(text.slice(0, 48)), openInParent: intro?.querySelector(".intro-open")?.textContent, bars: [...document.querySelectorAll(".child-intro, .child-return")].map((x) => getComputedStyle(x).borderLeftWidth), transcript: (() => { const sec = document.querySelector('#page section[aria-label="Transcript"]'), cs = sec && getComputedStyle(sec); return sec ? { rail: cs.borderLeftWidth, pad: cs.paddingLeft } : null; })() }; }, origin?.brief ?? "");
+    const briefCard = await page.evaluate((text) => { const intro = document.querySelector(".child-intro"), brief = intro?.querySelector(".brief"); return { visible: !!intro && !!brief, includesBrief: !!brief && brief.textContent.includes(text.slice(0, 48)), openInParent: intro?.querySelector(".intro-open")?.textContent, bars: [...document.querySelectorAll(".child-intro, .session-foot")].map((x) => getComputedStyle(x).borderLeftWidth), transcript: (() => { const sec = document.querySelector('#page section[aria-label="Transcript"]'), cs = sec && getComputedStyle(sec); return sec ? { rail: cs.borderLeftWidth, pad: cs.paddingLeft } : null; })() }; }, origin?.brief ?? "");
     // "Show more" and "Open in <parent>" are separate targets: with the first shown (unhidden for the measurement) they never touch.
     const introActions = await page.evaluate(() => {
       const more = document.querySelector(".child-intro .more"), open = document.querySelector(".child-intro .intro-open"); if (!more || !open) return null;
@@ -330,8 +330,8 @@ export default async function barCheck(browser) {
     const openedParent = await page.evaluate((id) => ({ id: history.state?.id, handoff: !!document.querySelector('.hcard[data-h="' + id + '"].flash') }), origin?.id);
 
     await goto(page, { v: "session", id: failedChild.id }, D);
-    const returnRow = await page.evaluate(() => { const row = document.querySelector(".child-return"); return { text: row?.textContent, openParent: row?.querySelector("button")?.textContent }; });
-    await page.click(".child-return button"); await afterTitle(page, D.SESS[parentOf(failedChild.id)].name); await page.waitForTimeout(260);
+    const returnRow = await page.evaluate(() => { const row = document.querySelector(".session-foot"); return { text: row?.textContent, openParent: row?.querySelector("button")?.textContent }; });
+    await page.click(".session-foot button"); await afterTitle(page, D.SESS[parentOf(failedChild.id)].name); await page.waitForTimeout(260);
     const failedOrigin = D.H.find((h) => h.kind === "spawn" && h.to === failedChild.id);
     const returnParent = await page.evaluate((id) => ({ id: history.state?.id, handoff: !!document.querySelector('.hcard[data-h="' + id + '"].flash') }), failedOrigin?.id);
 

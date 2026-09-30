@@ -223,7 +223,7 @@ pub(crate) const TAG_MAX: usize = 64;
 
 /// Eight hex digits of the SHA-256 of `text`: a stable short name that tells
 /// two long values, or two runs, apart without keeping either.
-fn short_hash(text: &str) -> String {
+pub(crate) fn short_hash(text: &str) -> String {
     Sha256::digest(text.as_bytes())
         .iter()
         .take(4)
