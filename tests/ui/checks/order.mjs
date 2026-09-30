@@ -27,6 +27,7 @@
 //   9. wide screen, the sidebar's idle timer (IDLE, the hook's shortened time): with the pointer away it applies after IDLE and not
 //      before; keyboard focus inside the sidebar blocks it and the focus leaving starts the wait again; a pointer passing over it
 //      resets the wait; an open session menu (which hangs from the top bar) blocks it; mouse focus left on a tree toggle doesn't block it;
+//      a live redraw preserves both mouse focus without :focus-visible and keyboard focus with :focus-visible on replacement controls;
 //   7. on the phone: with the drawer closed a held order stays in the (hidden) list; opening the drawer shows it in recency order at once;
 //      while it is open a change moves nothing; closing it applies the change.
 // 0 page errors on every page.
@@ -379,6 +380,15 @@ async function scheme(browser, name, opts, r) {
         say(await until(page, () => !document.querySelector("#lanes .treeitem")?.__d, null, 12000), "the sidebar didn't draw the change");
         return { Td: Date.now(), newest: t[1] };
       };
+      // Redraw the held list through a live update while a control is focused, keeping its old node to prove focus was restored.
+      const redrawFocusedSide = async (newest) => {
+        await page.evaluate(() => { window.__orderFocusBefore = document.activeElement; document.querySelectorAll("#lanes .treeitem").forEach((x) => { x.__d = 1; }); });
+        const pre = (await model(srv)).sessions[newest].last;
+        L.bump(newest, nextT());
+        say(!!await modelWith(srv, (m) => m.sessions[newest].last > pre), "the focused sidebar's session bump didn't reach the model");
+        say(await until(page, () => !document.querySelector("#lanes .treeitem")?.__d, null, 12000), "the focused sidebar didn't redraw after the live update");
+        say(await page.evaluate(() => document.activeElement !== window.__orderFocusBefore && !window.__orderFocusBefore.isConnected), "the focused sidebar control wasn't replaced by the live redraw");
+      };
       // (a) the pointer away: it doesn't apply before IDLE, and does after
       let h = await holdSide(); let tf = await waitFirst(h.newest, IDLE + 4000);
       R.idleMs = tf && tf - h.Td;
@@ -389,13 +399,19 @@ async function scheme(browser, name, opts, r) {
       const toggleBox = await toggle.boundingBox();
       await page.mouse.click(toggleBox.x + toggleBox.width / 2, toggleBox.y + toggleBox.height / 2);
       say(await page.evaluate(() => document.activeElement?.matches("#sidebar .tree-toggle") && !document.activeElement.matches(":focus-visible")), "the mouse click didn't leave non-keyboard focus on a tree toggle, so the check below proves nothing");
+      await redrawFocusedSide(h.newest);
+      say(await page.evaluate(() => document.activeElement?.matches("#sidebar .tree-toggle") && document.activeElement.dataset.treeToggle === window.__orderFocusBefore.dataset.treeToggle && !document.activeElement.matches(":focus-visible")), "the live redraw didn't restore mouse focus without :focus-visible on the replacement toggle");
       await page.mouse.move(640, 4);
       say((await sideFirst()) !== h.newest, "the sidebar has no held order after the mouse click, so the check below proves nothing");
       tf = await waitFirst(h.newest, IDLE + 1500);
       say(tf !== null, "the sidebar didn't apply what it held within IDLE + 1500 ms after a mouse click left focus on a tree toggle");
       // (b) keyboard focus inside it blocks it; taking the focus away starts the wait again
       h = await holdSide();
-      await page.keyboard.press("Shift"); await page.locator("#lanes .srow").first().focus(); await sleep(IDLE * 2 + 500);
+      await page.keyboard.press("Shift"); await page.locator("#lanes .srow").first().focus();
+      say(await page.evaluate(() => document.activeElement?.matches("#lanes .srow:focus-visible")), "the sidebar row didn't get keyboard focus, so the check below proves nothing");
+      await redrawFocusedSide(h.newest);
+      say(await page.evaluate(() => document.activeElement?.matches("#lanes .srow:focus-visible") && document.activeElement.dataset.id === window.__orderFocusBefore.dataset.id), "the live redraw didn't restore :focus-visible on the replacement sidebar row");
+      await sleep(IDLE * 2 + 500);
       say((await sideFirst()) !== h.newest, "the sidebar applied what it held with keyboard focus inside it");
       let tb = Date.now(); await page.evaluate(() => document.activeElement.blur()); tf = await waitFirst(h.newest, IDLE + 4000);
       R.blurMs = tf && tf - tb;
