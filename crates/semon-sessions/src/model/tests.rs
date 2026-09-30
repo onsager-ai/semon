@@ -3665,6 +3665,14 @@ fn progress_before_a_hand_back_is_not_the_spawns_result() {
         let relay = by_brief(&built, brief);
         assert_eq!(received_in(&built, "lead", &relay.id), 1, "{brief}");
     }
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.kind == "relay" && handoff.from == "ap")
+            .count(),
+        2
+    );
 }
 
 /// A subagent resumed after its first hand-back: its first send's receipt
@@ -3846,5 +3854,87 @@ fn batched_tags_are_read_in_place() {
     assert_eq!(
         only(&built, "spawn", "lead", "ap").result.as_deref(),
         Some("[Subagent hand-back] batched done")
+    );
+}
+
+/// A receipt whose body isn't the send's text (escaped here) still pairs
+/// by time: it was written between the send and the child's last event.
+/// The hand-back, written after that, stays the result.
+#[test]
+fn an_escaped_receipt_pairs_by_time() {
+    let mut child = send_to_main("lt", 2, "a < b", queued_reply());
+    child.push(child_says(4, "compared"));
+    let built = background_home(
+        vec![("ap", "tp", child)],
+        vec![
+            agm_line(3, &[("ap", "a &lt; b")]),
+            agm_line(5, &[("ap", "[Subagent hand-back] compared")]),
+        ],
+    )
+    .build();
+    let relay = by_brief(&built, "a < b");
+    assert_eq!(received_in(&built, "lead", &relay.id), 1);
+    assert_eq!(
+        only(&built, "spawn", "lead", "ap").result.as_deref(),
+        Some("[Subagent hand-back] compared")
+    );
+}
+
+/// A send whose receipt isn't in these logs doesn't take a receipt written
+/// after the child's last event: that one is the hand-back.
+#[test]
+fn a_receipt_after_the_childs_last_event_stays_the_hand_back() {
+    let mut child = send_to_main("lost", 2, "unreceived note", queued_reply());
+    child.push(child_says(4, "wrapped up"));
+    let built = background_home(
+        vec![("ap", "tp", child)],
+        vec![agm_line(5, &[("ap", "[Subagent hand-back] wrapped up")])],
+    )
+    .build();
+    let relay = by_brief(&built, "unreceived note");
+    assert_eq!(received_in(&built, "lead", &relay.id), 0);
+    assert_eq!(
+        only(&built, "spawn", "lead", "ap").result.as_deref(),
+        Some("[Subagent hand-back] wrapped up")
+    );
+}
+
+/// Two sends with the same text claim their receipts in order.
+#[test]
+fn identical_sends_claim_receipts_in_order() {
+    let mut child = send_to_main("same1", 2, "same note", queued_reply());
+    child.extend(send_to_main("same2", 4, "same note", queued_reply()));
+    child.push(child_says(6, "same done"));
+    let built = background_home(
+        vec![("ap", "tp", child)],
+        vec![
+            agm_line(3, &[("ap", "same note")]),
+            agm_line(5, &[("ap", "same note")]),
+            agm_line(7, &[("ap", "[Subagent hand-back] same done")]),
+        ],
+    )
+    .build();
+    let mut relays: Vec<&Handoff> = built
+        .handoffs
+        .iter()
+        .filter(|handoff| handoff.kind == "relay" && handoff.from == "ap")
+        .collect();
+    relays.sort_by_key(|handoff| handoff.at);
+    assert_eq!(
+        relays.iter().map(|relay| relay.at).collect::<Vec<_>>(),
+        [at(20, 2), at(20, 4)]
+    );
+    let drawn: Vec<&str> = built.tx["lead"]
+        .slots
+        .iter()
+        .filter_map(|slot| match &slot.kind {
+            SlotKind::H(id) if relays.iter().any(|relay| &relay.id == id) => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(drawn, [relays[0].id.as_str(), relays[1].id.as_str()]);
+    assert_eq!(
+        only(&built, "spawn", "lead", "ap").result.as_deref(),
+        Some("[Subagent hand-back] same done")
     );
 }

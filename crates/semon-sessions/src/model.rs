@@ -2564,43 +2564,97 @@ impl<'a> Builder<'a> {
     }
 
     /// Pairs each of `child`'s sends to `main` with its receipt in the
-    /// parent: the first unclaimed receipt, after the one the send before
-    /// claimed, written no earlier than the send, whose body is the send's
-    /// message. A send whose receipt isn't in these logs claims none, so a
-    /// hand-back is never taken for it. Returns which receipts were claimed.
+    /// parent, in two passes. First by body: the first unclaimed receipt,
+    /// after the one the send before claimed, written no earlier than the
+    /// send, whose body is the send's message. Then, for a send still
+    /// unpaired (its receipt's body differs, say escaped), by time: the
+    /// first unclaimed receipt between its neighbours' receipts, written
+    /// from the send up to the child's last event before its next send or
+    /// prompt. A hand-back is written after that last event, so it is never
+    /// claimed; a send whose receipt isn't in these logs claims none.
+    /// Returns which receipts were claimed.
     fn pair_sends(&mut self, child: usize, key: &str, received: &[Ref]) -> Vec<bool> {
         let mut paired = vec![false; received.len()];
-        let sends: Vec<Ref> = self
-            .events_of(child)
-            .into_iter()
-            .filter(|at| self.parent_addressed(child, *at).is_some())
+        let refs = self.events_of(child);
+        let positions: Vec<usize> = (0..refs.len())
+            .filter(|position| self.parent_addressed(child, refs[*position]).is_some())
             .collect();
-        if sends.is_empty() {
+        if positions.is_empty() {
             return paired;
         }
         let bodies: Vec<Option<String>> = (0..received.len())
             .map(|index| self.receipt_body(key, received, index))
             .collect();
+        let files = self.files;
+        let written = move |at: Ref| event(files, at).t;
+        let mut claims: Vec<Option<usize>> = vec![None; positions.len()];
         let mut next = 0;
-        for send in sends {
-            let Some(message) = self.text(send, "message", |record, block| {
+        for (send, position) in positions.iter().enumerate() {
+            let at = refs[*position];
+            let Some(message) = self.text(at, "message", |record, block| {
                 input_string(record, block, &["message", "content"])
             }) else {
                 continue;
             };
-            let sent = event(self.files, send).t;
+            let sent = written(at);
             let found = (next..received.len()).find(|index| {
-                let written = event(self.files, received[*index]).t;
                 !paired[*index]
                     && sent
-                        .zip(written)
+                        .zip(written(received[*index]))
                         .is_none_or(|(sent, written)| written >= sent)
                     && bodies[*index].as_deref().map(str::trim) == Some(message.trim())
             });
             if let Some(index) = found {
                 paired[index] = true;
+                claims[send] = Some(index);
                 next = index + 1;
-                self.progress.insert(send, received[index]);
+            }
+        }
+        for (send, &position) in positions.iter().enumerate() {
+            if claims[send].is_some() {
+                continue;
+            }
+            let Some(sent) = written(refs[position]) else {
+                continue;
+            };
+            // The child's last event before its next send or prompt, with
+            // the send's own result.
+            let boundary = (position + 1..refs.len())
+                .find(|later| {
+                    positions.contains(later) || event(self.files, refs[*later]).k == Kind::U
+                })
+                .unwrap_or(refs.len());
+            let last = refs[position..boundary]
+                .iter()
+                .flat_map(|at| {
+                    let found = event(self.files, *at);
+                    [found.t, found.r.as_ref().and_then(|reply| reply.t)]
+                })
+                .flatten()
+                .max()
+                .unwrap_or(sent);
+            let low = claims[..send]
+                .iter()
+                .rev()
+                .find_map(|claim| *claim)
+                .map_or(0, |index| index + 1);
+            let high = claims[send + 1..]
+                .iter()
+                .find_map(|claim| *claim)
+                .unwrap_or(received.len());
+            let found = (low..high).find(|index| {
+                !paired[*index]
+                    && written(received[*index])
+                        .is_some_and(|written| (sent..=last).contains(&written))
+            });
+            if let Some(index) = found {
+                paired[index] = true;
+                claims[send] = Some(index);
+            }
+        }
+        for (send, claim) in claims.into_iter().enumerate() {
+            if let Some(index) = claim {
+                self.progress.insert(refs[positions[send]], received[index]);
             }
         }
         paired
