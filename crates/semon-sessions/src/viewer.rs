@@ -61,6 +61,7 @@ struct TranscriptEntry {
     name: Option<String>,
     tool_id: Option<String>,
     link: Option<String>,
+    links: Vec<String>,
     collapsed: bool,
     truncated: bool,
 }
@@ -1955,18 +1956,18 @@ fn find_node<'a>(nodes: &'a [Node], harness: &str, id: &str) -> Option<&'a Node>
     None
 }
 
-fn tool_links(node: &Node) -> BTreeMap<String, String> {
-    node.children
-        .iter()
-        .filter_map(|child| {
-            child.via_tool.as_ref().map(|tool| {
-                (
-                    tool.id.clone(),
-                    format!("/s/{}/{}", child.harness, percent_encode(&child.id)),
-                )
-            })
-        })
-        .collect()
+fn tool_links(node: &Node) -> BTreeMap<String, Vec<String>> {
+    let mut links = BTreeMap::<String, Vec<String>>::new();
+    for child in &node.children {
+        if let Some(tool) = &child.via_tool {
+            links.entry(tool.id.clone()).or_default().push(format!(
+                "/s/{}/{}",
+                child.harness,
+                percent_encode(&child.id)
+            ));
+        }
+    }
+    links
 }
 
 pub(crate) fn percent_encode(value: &str) -> String {
@@ -2056,6 +2057,7 @@ fn entry(
         text,
         name,
         tool_id,
+        links: link.iter().cloned().collect(),
         link,
         collapsed,
         truncated,
@@ -2134,7 +2136,7 @@ fn entries(
     record: &Value,
     harness: &str,
     offset: u64,
-    links: &BTreeMap<String, String>,
+    links: &BTreeMap<String, Vec<String>>,
     harness_message: bool,
 ) -> Vec<TranscriptEntry> {
     let mut result = Vec::new();
@@ -2175,8 +2177,13 @@ fn entries(
                 )),
                 Some("tool_use") => {
                     let id = field(item, "id").map(str::to_owned);
-                    let link = id.as_ref().and_then(|id| links.get(id)).cloned();
-                    result.push(entry(
+                    let child_links = id
+                        .as_ref()
+                        .and_then(|id| links.get(id))
+                        .cloned()
+                        .unwrap_or_default();
+                    let link = child_links.first().cloned();
+                    let mut call = entry(
                         (offset, block),
                         "tool_use",
                         item.get("input").map(content_text).unwrap_or_default(),
@@ -2184,7 +2191,9 @@ fn entries(
                         id,
                         link,
                         true,
-                    ));
+                    );
+                    call.links = child_links;
+                    result.push(call);
                 }
                 Some("tool_result") => result.push(entry(
                     (offset, block),
@@ -2426,7 +2435,7 @@ fn read_page(
     path: &Path,
     harness: &str,
     before: Option<u64>,
-    links: &BTreeMap<String, String>,
+    links: &BTreeMap<String, Vec<String>>,
     harness_messages: &BTreeSet<u64>,
 ) -> io::Result<(TranscriptPage, usize)> {
     let length = fs::metadata(path)?.len();
@@ -2525,7 +2534,7 @@ fn read_after(
     path: &Path,
     harness: &str,
     after: u64,
-    links: &BTreeMap<String, String>,
+    links: &BTreeMap<String, Vec<String>>,
     harness_messages: &BTreeSet<u64>,
 ) -> io::Result<(TranscriptPage, usize)> {
     let mut file = fs::File::open(path)?;
@@ -4293,7 +4302,7 @@ mod tests {
             json!({"type":"thinking","thinking":"reasoning"}),
             json!({"type":"tool_use","id":"task-1","name":"Task","input":{"prompt":"inspect"}}),
             json!({"type":"tool_result","tool_use_id":"task-1","content":"done"}),
-            json!({"type":"tool_use","id":"bash-1","name":"Bash","input":{"command":format!("codex {prompt}")}}),
+            json!({"type":"tool_use","id":"bash-1","name":"Bash","input":{"command":format!("codex exec < {prompt}")}}),
         ])]);
         fixture.write(
             "claude/projects/project/parent/subagents/agent-child.jsonl",
@@ -4331,6 +4340,27 @@ mod tests {
                 .as_deref(),
             Some("/s/codex/run")
         );
+    }
+
+    #[test]
+    fn transcript_keeps_every_run_launched_by_one_call() {
+        let fixture = Fixture::new();
+        fixture.claude("parent", &[claude_record("parent", vec![
+            json!({"type":"tool_use","id":"launch","name":"Bash","input":{"command":"codex exec < /tmp/one.md; codex exec < /tmp/two.md","run_in_background":true}}),
+        ])]);
+        for id in ["one", "two"] {
+            fixture.codex(id, &[json!({"type":"event_msg","payload":{"type":"user_message","message":format!("Semon-Parent: claude:parent\nSemon-Handoff: /tmp/{id}.md\nPrompt")}})]);
+        }
+        let viewer = fixture.viewer();
+        let page = viewer.transcript("harness=claude&id=parent").unwrap();
+        let call = page
+            .entries
+            .iter()
+            .find(|item| item.tool_id.as_deref() == Some("launch"))
+            .unwrap();
+        assert_eq!(call.links, ["/s/codex/one", "/s/codex/two"]);
+        assert_eq!(call.link.as_deref(), Some("/s/codex/one"));
+        assert_eq!(page.children.len(), 2);
     }
 
     #[test]

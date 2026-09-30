@@ -563,6 +563,124 @@ fn links_new_and_old_markers_and_leaves_unmarked_unlinked() {
 }
 
 #[test]
+fn variable_built_handoffs_choose_the_launch_call_and_share_calls() {
+    let fixture = Fixture::new();
+    let command = r#"S=/tmp/x/scratchpad; P=$S/codex-foo-prompt.md; { printf 'Semon-Parent: claude:%s\nSemon-Handoff: %s\n' "$CLAUDE_CODE_SESSION_ID" "$P"; cat "$P"; } | codex exec --json -C /home/u/wt/semon-wt-foo"#;
+    let launch = |parent: &str, id: &str, time: &str, command: &str| {
+        let mut record = claude_line(
+            parent,
+            vec![tool(
+                id,
+                "Bash",
+                json!({"command":command,"run_in_background":true}),
+            )],
+            1,
+        );
+        record["timestamp"] = json!(time);
+        record
+    };
+    fixture.claude(
+        "parent",
+        &[
+            launch("parent", "first", "2026-09-24T00:00:00Z", command),
+            launch("parent", "second", "2026-09-24T00:10:00Z", command),
+            launch(
+                "parent",
+                "multi",
+                "2026-09-24T00:20:00Z",
+                "codex exec -C /home/u/wt/semon-wt-bar; codex exec -C /home/u/wt/semon-wt-baz",
+            ),
+            launch(
+                "parent",
+                "basename",
+                "2026-09-24T00:30:00Z",
+                "codex exec -C semon-wt-short",
+            ),
+        ],
+    );
+    fixture.claude(
+        "prefix",
+        &[launch(
+            "prefix",
+            "foobar",
+            "2026-09-24T00:00:00Z",
+            "codex exec -C /home/u/wt/semon-wt-foobar",
+        )],
+    );
+    let cases = [
+        (
+            "early",
+            "parent",
+            "semon-wt-foo",
+            "2026-09-24T00:00:08Z",
+            Some("first"),
+        ),
+        (
+            "later",
+            "parent",
+            "semon-wt-foo",
+            "2026-09-24T00:10:08Z",
+            Some("second"),
+        ),
+        (
+            "bar",
+            "parent",
+            "semon-wt-bar",
+            "2026-09-24T00:20:08Z",
+            Some("multi"),
+        ),
+        (
+            "baz",
+            "parent",
+            "semon-wt-baz",
+            "2026-09-24T00:20:09Z",
+            Some("multi"),
+        ),
+        (
+            "short",
+            "parent",
+            "semon-wt-short",
+            "2026-09-24T00:30:08Z",
+            Some("basename"),
+        ),
+        (
+            "missing",
+            "parent",
+            "semon-wt-absent",
+            "2026-09-24T00:30:08Z",
+            None,
+        ),
+        (
+            "prefix-child",
+            "prefix",
+            "semon-wt-foo",
+            "2026-09-24T00:00:08Z",
+            None,
+        ),
+    ];
+    for (id, parent, basename, start, _) in cases {
+        let prompt = format!("/tmp/x/scratchpad/codex-{id}-prompt.md");
+        assert!(!command.contains(&prompt));
+        fixture.jsonl(&format!("codex/sessions/2026/09/24/rollout-{id}.jsonl"), &[
+            json!({"type":"session_meta","timestamp":start,"payload":{"id":id,"cwd":format!("/home/u/wt/{basename}")}}),
+            json!({"type":"event_msg","timestamp":start,"payload":{"type":"user_message","message":format!("Semon-Parent: claude:{parent}\nSemon-Handoff: {prompt}\nImplement {id}")}}),
+        ]);
+    }
+    for _ in 0..2 {
+        let nodes = collect(&fixture.options).unwrap();
+        for (id, parent, _, _, expected) in cases {
+            let parent = nodes.iter().find(|node| node.id == parent).unwrap();
+            let child = parent.children.iter().find(|node| node.id == id).unwrap();
+            assert_eq!(
+                child.via_tool.as_ref().map(|tool| tool.id.as_str()),
+                expected,
+                "{id}"
+            );
+        }
+    }
+}
+
+#[test]
 fn window_session_and_json_schema() {
     let mut fixture = Fixture::new();
     fixture.claude("older", &[claude_line("older", vec![], 1)]);

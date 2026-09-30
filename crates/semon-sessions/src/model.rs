@@ -31,7 +31,7 @@ use crate::{
         ACK, ANSWERED, ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
     facts::{MachineFacts, ReportedModelUsage, ReportedRunSnapshot},
-    field, file_list, matches_handoff, read_first_marker,
+    field, file_list, handoff, read_first_marker,
 };
 
 /// Version of the `/api/model` JSON shape. Embedders and clients compare it;
@@ -438,7 +438,6 @@ pub(crate) struct Texts {
     tick: u64,
     generations: HashMap<PathBuf, (Stamp, u64)>,
     next_generation: u64,
-    handoff_tools: HashMap<String, (u64, Option<String>)>,
     repos: HashMap<String, Option<String>>,
     markers: HashMap<PathBuf, (Stamp, Option<Marker>)>,
     /// Each Codex file's `session_meta` and each subagent's `.meta.json`, by
@@ -1324,7 +1323,7 @@ struct Builder<'a> {
     of_file: Vec<usize>,
     by_key: HashMap<String, usize>,
     handoffs: Vec<H>,
-    placed: HashMap<Ref, (usize, Place)>,
+    placed: HashMap<Ref, Vec<(usize, Place)>>,
     head: HashMap<usize, usize>,
     after: HashMap<Ref, usize>,
     tools: HashMap<String, Ref>,
@@ -1566,7 +1565,7 @@ impl<'a> Builder<'a> {
     }
 
     fn place(&mut self, at: Ref, handoff: usize, place: Place) {
-        self.placed.entry(at).or_insert((handoff, place));
+        self.placed.entry(at).or_default().push((handoff, place));
     }
 
     fn root(&self, mut session: usize) -> usize {
@@ -2173,38 +2172,29 @@ impl<'a> Builder<'a> {
         let spawner = self.of_file[parent_file];
         let tool = match (&marker.tool_id, &marker.handoff) {
             (Some(id), _) => Some(id.clone()),
-            (None, Some(prompt)) => self.handoff_tool(&file.id, spawner, prompt),
+            (None, Some(prompt)) => {
+                self.handoff_tool(spawner, prompt, meta.cwd.as_deref(), file.first)
+            }
             _ => None,
         };
         let call = tool.and_then(|id| self.find_in(spawner, &id));
         (Some(spawner), call, false)
     }
 
-    /// The parent's Bash or Skill call that launched a `Semon-Handoff`
-    /// prompt, memoized per run until the parent's files grow.
-    fn handoff_tool(&mut self, run: &str, spawner: usize, prompt: &str) -> Option<String> {
+    /// Match through the same incremental parent scan used by the tree.
+    fn handoff_tool(
+        &self,
+        spawner: usize,
+        prompt: &str,
+        cwd: Option<&str>,
+        start: Option<i64>,
+    ) -> Option<String> {
         let paths: Vec<PathBuf> = self.sessions[spawner]
             .files
             .iter()
             .map(|file| self.files[*file].path.clone())
             .collect();
-        let size: u64 = paths
-            .iter()
-            .map(|path| fs::metadata(path).map(|meta| meta.len()).unwrap_or(0))
-            .sum();
-        if let Some((seen, found)) = self.texts.handoff_tools.get(run)
-            && (found.is_some() || *seen == size)
-        {
-            return found.clone();
-        }
-        let found = paths
-            .iter()
-            .find_map(|path| matches_handoff(path, prompt).ok().flatten())
-            .map(|tool| tool.id);
-        self.texts
-            .handoff_tools
-            .insert(run.to_owned(), (size, found.clone()));
-        found
+        handoff::find(&paths, prompt, cwd, start).map(|tool| tool.id)
     }
 
     fn codex_spawns(&mut self) {
@@ -3238,8 +3228,11 @@ impl<'a> Builder<'a> {
         for at in refs {
             let found = event(self.files, at);
             let time = event_times[&at.0][at.1];
-            let kind = if let Some((handoff, _)) = self.placed.get(&at) {
-                Some(EntryKind::H(*handoff))
+            let kinds: Vec<EntryKind> = if let Some(placements) = self.placed.get(&at) {
+                placements
+                    .iter()
+                    .map(|(handoff, _)| EntryKind::H(*handoff))
+                    .collect()
             } else {
                 match found.k {
                     Kind::U => Some(EntryKind::U),
@@ -3259,8 +3252,10 @@ impl<'a> Builder<'a> {
                     }
                     _ => None,
                 }
+                .into_iter()
+                .collect()
             };
-            if let Some(kind) = kind {
+            for kind in kinds {
                 // A code-mode call drawn as its operations that failed, or
                 // that never finished, is still a step: after them, where its
                 // failure arrived or after the last of them.
