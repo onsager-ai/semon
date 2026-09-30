@@ -13,7 +13,7 @@
   // One controller per page, even if a page loads both /viewer.js and /shell.js.
   if (window.__semonTooltip) return;
   window.__semonTooltip = true;
-  const SHOW_DELAY = 500, SKIP_WINDOW = 300, MARGIN = 8, GAP = 8, MAX_WIDTH = 280, ID = "sh-tooltip";
+  const SHOW_DELAY = 500, SKIP_WINDOW = 300, MARGIN = 8, GAP = 6, MAX_WIDTH = 280, ID = "sh-tooltip";
   const INTERACTIVE = 'a[href], button, input, select, textarea, summary, label, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [contenteditable="true"]';
   const HAS_TIP = '[data-tip]:not([data-tip=""])';
 
@@ -60,7 +60,6 @@
     const left = Math.min(Math.max(box.left + box.width / 2 - size.width / 2, MARGIN), Math.max(MARGIN, width - MARGIN - size.width));
     tip.style.left = Math.round(left) + "px";
     tip.style.top = Math.round(Math.min(Math.max(top, MARGIN), Math.max(MARGIN, height - MARGIN - size.height))) + "px";
-    tip.style.setProperty("--arrow", Math.round(Math.min(Math.max(box.left + box.width / 2 - left, 12), Math.max(12, size.width - 12))) + "px");
     tip.dataset.side = side;
   }
 
