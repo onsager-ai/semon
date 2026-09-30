@@ -4551,6 +4551,7 @@ fn unchanged_resumed_builds_only_change_clock_dependent_json_fields() {
             ),
         ],
     );
+    home.live(42, "clock", "busy", json!({}));
 
     let mut options = home.options.clone();
     options.all = false;
