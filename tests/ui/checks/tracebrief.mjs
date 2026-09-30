@@ -8,10 +8,13 @@
 //  - with one machine (given a long hostname), no hop line and no header subtitle contains the hostname, in full or in part;
 //  - with two (each given a long hostname), the hop lines and the subtitle name them by their short names, never the hostname, and
 //    the root hop's line names the machine the root ran on;
+//  - with two whose short names would cut alike ("build-runner-east-1" and "-2"), the chips and the subtitle tell them apart, and the
+//    subtitle names each machine once;
+//  - a chip and a move hop's machine names carry the full name as their tooltip, and a move hop says "from <short> to <short>";
 //  - each part of a hop's line (its state, its kind chip, its note) is one line tall, and the page does not scroll sideways;
 //  - the chip carries no harness-coloured mark.
 // The fixture's hostnames are short, so the served model is rewritten on the way to the page: the machine names are made long, and for
-// two machines every session but the trace's root moves to a second one. Screenshots of the trace collapsed and opened are written
+// two machines every session but the trace's root moves to a second one, and a move hop is added to the root's turn. Screenshots of the trace collapsed and opened are written
 // to out/tracebrief/ for the visual pass.
 import fs from "node:fs";
 import path from "node:path";
@@ -21,19 +24,31 @@ const OUT = path.join(ENV.out, "tracebrief");
 fs.mkdirSync(OUT, { recursive: true });
 const HOST_A = "marvin-HP-EliteBook-X-G2i-14-inch-Notebook-Next-Gen-AI-PC", SHORT_A = "marvin-HP-Elit…";
 const HOST_B = "build-runner-eu-west-4-node-17-large", SHORT_B = "build-runner-e…";
-// Pieces of the hostnames that a short name (the first 14 characters) does not hold.
-const PIECES = ["EliteBook", "Notebook", "AI-PC", "build-runner-eu", "node-17"];
+const EAST_1 = "build-runner-east-1", EAST_2 = "build-runner-east-2", TAIL_1 = "build-…-east-1", TAIL_2 = "build-…-east-2";
+// The machines a run gives the trace: their full names, the short names the page must draw, and pieces of a hostname that a short name
+// does not hold.
+const MODES = [
+  { name: "one-machine", hosts: [HOST_A], shorts: [], pieces: ["EliteBook", "Notebook", "AI-PC"] },
+  { name: "two-machines", hosts: [HOST_A, HOST_B], shorts: [SHORT_A, SHORT_B], pieces: ["EliteBook", "Notebook", "AI-PC", "build-runner-eu", "node-17"] },
+  { name: "colliding-names", hosts: [EAST_1, EAST_2], shorts: [TAIL_1, TAIL_2], pieces: [EAST_1, EAST_2, "build-runner"] },
+];
+const SECOND = "tracebrief-b";
 
-// The served model with long machine names; with `two`, every session but `rootSid` on a second machine.
-async function longNames(page, { two, rootSid }) {
+// The served model with long machine names; with two, every session but `rootSid` on a second machine, and a move between them in the
+// root's turn (the served logs hold none).
+async function longNames(page, { hosts, rootSid, turn }) {
   await page.route("**/api/model*", async (route) => {
     const res = await route.fetch();
     let m; try { m = await res.json(); } catch { return route.fulfill({ response: res }); }
     if (m?.sessions && m.machine) {
-      const first = { ...m.machine, name: HOST_A };
-      if (two) {
-        m.machines = [first, { id: "desktop", name: HOST_B, up: true }]; m.machine = first;
-        for (const [id, s] of Object.entries(m.sessions)) s.machine = id === rootSid ? first.id : "desktop";
+      const first = { ...m.machine, name: hosts[0] };
+      if (hosts.length > 1) {
+        m.machines = [first, { id: SECOND, name: hosts[1], up: true }]; m.machine = first;
+        for (const [id, s] of Object.entries(m.sessions)) s.machine = id === rootSid ? first.id : SECOND;
+        if (!m.handoffs.some((h) => h.id === "tracebrief-move")) {
+          m.handoffs.push({ id: "tracebrief-move", kind: "move", from: rootSid, to: rootSid, fromMachine: first.id, toMachine: SECOND, at: m.now - 60000, status: "done", brief: "Moved." });
+          m.turns.find((t) => t.id === turn)?.sent.push("tracebrief-move");
+        }
       } else m.machine = first;
     }
     return route.fulfill({ status: res.status(), contentType: "application/json", body: JSON.stringify(m) });
@@ -61,6 +76,9 @@ const lines = (page) => page.evaluate(() => [...document.querySelectorAll(".hop 
 const page_ = (page) => page.evaluate(() => ({
   metaText: [...document.querySelectorAll(".hop .meta")].map((m) => m.textContent.replace(/\s+/g, " ").trim()),
   chips: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => c.textContent.replace(/[\s\u2009\u00a0]+/g, " ").trim()),
+  chipTips: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => c.dataset.tip ?? null),
+  sent: [...document.querySelectorAll(".hop.k-move .sent")].map((c) => c.textContent.replace(/[\s\u2009\u00a0]+/g, " ").trim()),
+  sentTips: [...document.querySelectorAll(".hop.k-move .sent .mach")].map((c) => c.dataset.tip ?? null),
   bar: (document.querySelector("#topbar")?.textContent ?? "").replace(/\s+/g, " ").trim(),
   chipMark: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => { const b = getComputedStyle(c, "::before"); return b.content !== "none" && b.content !== "normal" ? b.content : null; }).filter(Boolean),
 }));
@@ -91,10 +109,10 @@ export default async function tracebrief(browser) {
 
   for (const size of ["phone", "desktop"]) {
     for (const dark of [false, true]) {
-      for (const two of [false, true]) {
-        const name = size + (dark ? "-dark" : "-light") + (two ? "-two-machines" : "-one-machine");
+      for (const mode of MODES) {
+        const two = mode.hosts.length > 1, name = size + (dark ? "-dark" : "-light") + "-" + mode.name;
         const page = await served(browser, { size, dark });
-        await longNames(page, { two, rootSid: pick.sid });
+        await longNames(page, { hosts: mode.hosts, rootSid: pick.sid, turn: pick.turn });
         await goto(page, { v: "trace", sid: pick.sid, turn: pick.turn }, D);
         await page.waitForTimeout(150);
 
@@ -119,17 +137,25 @@ export default async function tracebrief(browser) {
         }
 
         // Machines: named by their short names where the trace spans two, and not at all where it spans one.
-        const p = await page_(page), all = p.metaText.join(" | ") + " | " + p.bar;
+        const p = await page_(page), all = p.metaText.join(" | ") + " | " + p.sent.join(" | ") + " | " + p.bar, [s0, s1] = mode.shorts;
         r.expect(p.chips.length > 0, name + ": no hop line has a kind chip");
         r.expect(/handoff/.test(p.bar), name + ": the header subtitle is missing: " + JSON.stringify(p.bar));
-        for (const piece of [HOST_A, HOST_B, ...PIECES]) r.expect(!all.includes(piece), name + ": the hostname shows (" + piece + "): " + JSON.stringify({ bar: p.bar, chips: p.chips }));
+        for (const piece of [...mode.hosts, ...mode.pieces]) r.expect(!all.includes(piece), name + ": the hostname shows (" + piece + "): " + JSON.stringify({ bar: p.bar, chips: p.chips, sent: p.sent }));
         if (two) {
-          r.expect(p.bar.includes(SHORT_A) && p.bar.includes(SHORT_B), name + ": the subtitle names both machines by their short names: " + JSON.stringify(p.bar));
-          r.expect(p.chips.every((c) => c.endsWith(" · " + SHORT_A) || c.endsWith(" · " + SHORT_B)), name + ": every chip ends in a machine's short name: " + JSON.stringify(p.chips));
-          r.expect(p.chips[0]?.endsWith(" · " + SHORT_A), name + ": the root hop's chip names its machine: " + JSON.stringify(p.chips[0]));
-          r.expect(p.chips.some((c) => c.endsWith(" · " + SHORT_B)), name + ": a hop on the second machine names it: " + JSON.stringify(p.chips));
+          const named = (c) => [s0, s1].find((x) => c.endsWith(" · " + x));
+          r.expect(p.bar.includes(s0) && p.bar.includes(s1), name + ": the subtitle names both machines by their short names: " + JSON.stringify(p.bar));
+          r.expect(p.bar.split(s0).length === 2 && p.bar.split(s1).length === 2, name + ": the subtitle names a machine more than once: " + JSON.stringify(p.bar));
+          r.expect(p.chips.every(named), name + ": every chip ends in a machine's short name: " + JSON.stringify(p.chips));
+          r.expect(p.chips[0]?.endsWith(" · " + s0), name + ": the root hop's chip names its machine: " + JSON.stringify(p.chips[0]));
+          r.expect(p.chips.some((c) => c.endsWith(" · " + s1)), name + ": a hop on the second machine names it: " + JSON.stringify(p.chips));
+          r.expect(new Set(p.chips.map(named)).size === 2, name + ": the chips do not tell the two machines apart: " + JSON.stringify(p.chips));
+          r.expect(p.chipTips.every((t) => t === "Machine: " + mode.hosts[0] || t === "Machine: " + mode.hosts[1]), name + ": a chip's tooltip is not \"Machine: <full name>\": " + JSON.stringify(p.chipTips));
+          r.expect(p.chipTips[0] === "Machine: " + mode.hosts[0] && p.chipTips.includes("Machine: " + mode.hosts[1]), name + ": the chips' tooltips do not name both machines in full: " + JSON.stringify(p.chipTips));
+          r.expect(p.sent.length === 1 && p.sent[0].includes(" from " + s0 + " to " + s1), name + ": the move hop does not say from <short> to <short>: " + JSON.stringify(p.sent));
+          r.expect(p.sentTips.join("|") === ["Machine: " + mode.hosts[0], "Machine: " + mode.hosts[1]].join("|"), name + ": the move hop's machine names lack their full-name tooltips: " + JSON.stringify(p.sentTips));
         } else {
           r.expect(p.chips.every((c) => !c.includes(" · ")), name + ": a chip names a machine although the trace spans one: " + JSON.stringify(p.chips));
+          r.expect(p.chipTips.every((t) => t == null), name + ": a chip has a machine tooltip although the trace spans one: " + JSON.stringify(p.chipTips));
         }
         r.expect(p.chipMark.length === 0, name + ": a chip carries a coloured mark: " + JSON.stringify(p.chipMark));
 
