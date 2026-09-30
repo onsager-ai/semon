@@ -318,10 +318,11 @@ code { overflow-wrap: anywhere; }
 .account-menu-row.danger { color: var(--err); }
 .menu button.account-menu-row.danger { color: var(--err); }
 .account-links .account-menu-row { min-height: 40px; }
-.account-switch-row .switch { position: relative; display: block; flex: none; width: 32px; height: 18px; border: 1px solid var(--line); border-radius: 999px; background: var(--sunken); transition: background-color .16s ease, border-color .16s ease; }
-.account-switch-row .switch-knob { position: absolute; top: 1px; left: 1px; width: 14px; height: 14px; border-radius: 50%; background: var(--ground); transition: transform .16s ease; }
+.account-switch-row .switch { position: relative; display: block; flex: none; width: 32px; height: 18px; border: 1px solid var(--faint); border-radius: 999px; background: var(--sunken); transition: background-color .16s ease, border-color .16s ease; }
+.account-switch-row .switch-knob { position: absolute; top: 1px; left: 1px; width: 14px; height: 14px; border-radius: 50%; background: var(--faint); transition: transform .16s ease, background-color .16s ease; }
 .account-switch-row[aria-checked="true"] .switch { border-color: var(--accent); background: var(--accent); }
-.account-switch-row[aria-checked="true"] .switch-knob { transform: translateX(14px); }
+.account-switch-row[aria-checked="true"] .switch-knob { background: var(--ground); transform: translateX(14px); }
+.account-display .account-menu-row:last-child { border-bottom: 0; }
 @media (prefers-reduced-motion: reduce) { .account-switch-row .switch, .account-switch-row .switch-knob { transition: none; } }
 
 /* Transcript, modelled on Claude's chat */

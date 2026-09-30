@@ -231,8 +231,9 @@ export default async function embedCheck(browser) {
     await footer.evaluate((w) => w.scrollIntoView({ block: "end" }));
     return menuOf(page, "#account-drawer");
   };
-  {
-    const page = await open(browser, { embed: { account: account() }, size: "desktop" });
+  for (const dark of [false, true]) {
+    const tag = "1280" + (dark ? "-dark" : "");
+    const page = await open(browser, { embed: { account: account() }, size: "desktop", dark });
     const start = await page.evaluate(() => localStorage.getItem("semon.wide") === "1");
     await openMenu(page);
     const control = page.locator('#topbar .account-popover [role="menuitemcheckbox"][data-pref="wide"]');
@@ -245,15 +246,17 @@ export default async function embedCheck(browser) {
       open: !!document.querySelector("#topbar .account-popover"),
     }));
     const expected = !start;
-    R.desktopWideMode = { before, changed };
+    R["desktopWideMode " + tag] = { before, changed };
     r.expect(before === String(start) && changed.checked === String(expected) && changed.wide === expected && changed.saved === (expected ? "1" : "0") && changed.open,
-      "the desktop Display switch should toggle wide mode, save it, and leave the menu open: " + JSON.stringify(R.desktopWideMode));
+      "the desktop Display switch should toggle wide mode, save it, and leave the menu open: " + JSON.stringify(R["desktopWideMode " + tag]));
+    await page.waitForTimeout(300); // the knob's slide is 160 ms; the shot shows the settled state
+    await page.screenshot({ path: path.join(OUT, "embed-menu-wide-on-" + tag + ".png") });
     await page.reload({ waitUntil: "load" }); await settled(page); await openMenu(page);
     const saved = await page.evaluate(() => ({
       checked: document.querySelector('#topbar .account-popover [role="menuitemcheckbox"][data-pref="wide"]')?.getAttribute("aria-checked"),
       wide: document.querySelector("#page").classList.contains("wide-mode"),
     }));
-    R.desktopWideModeReload = saved;
+    R["desktopWideModeReload " + tag] = saved;
     r.expect(saved.checked === String(expected) && saved.wide === expected, "the desktop Display switch should show the saved state after reload: " + JSON.stringify(saved));
     r.expect(page.errors.length === 0, "page errors (desktop wide mode): " + page.errors.join("; "));
     await page.context().close();
