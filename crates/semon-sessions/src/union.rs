@@ -212,8 +212,10 @@ impl AccountMenu {
 /// first seen failing, each read answers the error (500) instead, at once,
 /// without waiting for a build, until a build works again. A machine whose
 /// builds hang is not shown as a model that silently stopped either: once
-/// its check is a minute late, or has run a minute, each read answers an
-/// error (500) at once. The model and the V1 tree fail on their own: a tree
+/// its check is a minute late, or its build has run a minute, each read
+/// answers an error (500) at once. A backlog of ordinary builds never grows
+/// the pool; only when every worker's check has run 5 s may it start
+/// threads past its size, up to twice it, each stopping once nothing is due. The model and the V1 tree fail on their own: a tree
 /// that won't build never turns `/api/model` into an error.
 ///
 /// [`RefreshPool`]: crate::RefreshPool

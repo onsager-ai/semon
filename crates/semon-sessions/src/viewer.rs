@@ -104,9 +104,10 @@ pub(crate) const IDLE_AFTER: Duration = Duration::from_secs(30);
 /// error (500) at once, without waiting for a build, for as long as the
 /// builds fail.
 pub(crate) const FAILING_AFTER: Duration = Duration::from_secs(3);
-/// A view whose queued check is this late, or whose check has run this
-/// long, is stalled: its builds hang, or every worker its pool may start is
-/// held by builds that do. Each read then answers that (500) at once, so a
+/// A view whose queued check is this late (counted from when it was due or
+/// queued, whichever is later), or whose check has run this long since it
+/// took `work`, is stalled: its builds hang, or every worker its pool may
+/// start is held by builds that do. Each read then answers that (500) at once, so a
 /// frozen machine is never shown as a model that silently stopped moving.
 pub(crate) const STALLED_AFTER: Duration = Duration::from_secs(60);
 
@@ -241,7 +242,7 @@ struct LiveState {
     /// Each kind's recorded error predates an idle spell: no build has been
     /// tried since, so it isn't answered until a check reports again.
     unconfirmed: [bool; 2],
-    /// When the running check started, while one runs.
+    /// When the running check took `work` and started, while one runs.
     running_since: Option<Instant>,
     /// [`STALLED_AFTER`], but for tests.
     stalled_after: Duration,
@@ -1118,8 +1119,8 @@ impl MachineView {
     /// - a view a worker is checking is queued again by that worker;
     /// - a queued check stays queued. One [`OVERDUE_AFTER`] late, the pool
     ///   has fallen behind: it is nudged to start a worker if it has room
-    ///   for one, or past its size once the check is
-    ///   [`OVERFLOW_AFTER`](crate::refresh::OVERFLOW_AFTER) late
+    ///   for one, or past its size if every worker's check has run
+    ///   [`OVERFLOW_AFTER`](crate::refresh::OVERFLOW_AFTER)
     ///   ([`RefreshPool::nudge`]); otherwise the check waits its turn and
     ///   the read answers from the last model;
     /// - a view not queued (idle, or invalidated while idle) is queued for
@@ -1147,9 +1148,10 @@ impl MachineView {
                 .running_since
                 .is_some_and(|since| now.saturating_duration_since(since) >= stalled_after),
             Slot::Queued(key) => {
+                // Due no earlier than it was queued ([`MachineView::queue_by`]).
                 let late = now.saturating_duration_since(key.0);
                 if late >= OVERDUE_AFTER {
-                    state.pool.nudge(late);
+                    state.pool.nudge();
                 }
                 late >= stalled_after
             }
@@ -1244,6 +1246,10 @@ impl MachineView {
         if state.closed || self.refresh() == Refresh::OnRead {
             return;
         }
+        // Never due before it is queued: after a long build the next check
+        // is due in the past, and would read as late (to a read's nudge, and
+        // as a stall) the moment it is queued.
+        let at = at.max(Instant::now());
         let replacing = match state.slot {
             Slot::Running => return,
             Slot::Queued(key) if !exact && key.0 <= at => return,
@@ -1293,7 +1299,6 @@ impl MachineView {
                 return;
             }
             state.slot = Slot::Running;
-            state.running_since = Some(Instant::now());
         }
         /// A check that panics leaves the last model served and the next
         /// check queued, as a failed rebuild does; its worker is replaced.
@@ -1319,6 +1324,9 @@ impl MachineView {
     fn tick(&self) {
         let mut work = lock(&self.work);
         let started = Instant::now();
+        // A stall counts from here, with `work` taken: a warm or a page's
+        // fresh check holding it meanwhile isn't this view's build hanging.
+        lock(&self.live.state).running_since = Some(started);
         if let Some(built) = work.built_at
             && started < built + REBUILD_SPACING
         {
@@ -7142,18 +7150,26 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("the check builds");
         thread::sleep(FAILING_AFTER + Duration::from_millis(500));
+        // The failure is seen after this: FAILING_AFTER from here, reads
+        // answer the last model, whatever `failing_since` says.
+        let released = Instant::now();
         drop(release);
-        let since = eventually("the long build's failure", || {
+        eventually("the long build's failure", || {
             lock(&view.live.state).failing_since[Kind::Model as usize]
         });
-        let reply = ask("/api/model", &view, "/api/model", &format!("since={v1}"));
-        let answered = since.elapsed();
-        if answered < FAILING_AFTER {
+        let mut reads = 0;
+        while released.elapsed() + Duration::from_millis(500) < FAILING_AFTER {
+            let reply = ask("/api/model", &view, "/api/model", &format!("since={v1}"));
             assert_eq!(
-                reply.status, 304,
-                "the error answered {answered:?} after the failure"
+                reply.status,
+                304,
+                "the error answered {:?} after the failure",
+                released.elapsed()
             );
+            reads += 1;
+            thread::sleep(Duration::from_millis(50));
         }
+        assert!(reads > 0, "no read inside the grace");
         view.hooks.failing.store(false, Ordering::SeqCst);
         view.close();
     }
@@ -7278,7 +7294,9 @@ mod tests {
         );
         assert_eq!(first.status, 304, "the last model answers first");
         let mut stalled = 0;
+        let deadline = Instant::now() + Duration::from_secs(20);
         while stalled < 5 {
+            assert!(Instant::now() < deadline, "no stall within 20 s");
             let reply = ask(
                 "a read behind the hung pool",
                 &view,
@@ -7302,12 +7320,13 @@ mod tests {
     }
 
     /// Builds that hang hold every worker of a pool (its only one here),
-    /// but not the other machines' checks: once a check is OVERFLOW_AFTER
-    /// late, a read's nudge starts a thread past the pool's size (never
-    /// more than twice it), which rebuilds that view while the hang goes
-    /// on. No read waits meanwhile.
+    /// but not the other machines' checks: once every worker's check has
+    /// run OVERFLOW_AFTER, a read that finds its check overdue starts a
+    /// thread past the pool's size (never more than twice it), which
+    /// rebuilds that view while the hang goes on. No read waits meanwhile.
+    /// Once the hang ends, the pool shrinks back to its size.
     #[test]
-    fn a_hung_pool_grows_for_a_late_check() {
+    fn a_hung_pool_grows_for_a_late_check_then_shrinks() {
         let (blocker, lane) = (lane_fixture(), lane_fixture());
         let pool = RefreshPool::with_overflow_after(1, Duration::from_millis(300));
         let busy = pooled(&blocker, Refresh::Background, &pool);
@@ -7324,10 +7343,97 @@ mod tests {
             serves_at_once("a read behind the hung pool", &view, "past the hung pool").then_some(())
         });
         let (peak, _) = pool.peak_and_started();
-        assert_eq!(peak, 2, "the pool grew once, to twice its size");
+        assert_eq!(peak, 2, "the pool grew, to twice its size");
         assert!(pool.threads() <= 2);
         drop(busy_release);
+        eventually("the pool back to its size", || {
+            // Reads keep the views checked meanwhile.
+            serves_at_once("a read after the hang", &view, "past the hung pool");
+            (pool.threads() == 1).then_some(())
+        });
         busy.close();
+        view.close();
+    }
+
+    /// A backlog is not a hang: four views whose builds take two seconds
+    /// each, all changing and read all the time, keep the pool's only
+    /// worker busy and their checks seconds late, past OVERFLOW_AFTER (three
+    /// seconds here). No build has run that long, so the pool never grows.
+    #[test]
+    fn a_backlog_never_grows_the_pool() {
+        let fixtures: Vec<_> = (0..4).map(|_| lane_fixture()).collect();
+        let pool = RefreshPool::with_overflow_after(1, Duration::from_secs(3));
+        let views: Vec<_> = fixtures
+            .iter()
+            .map(|fixture| {
+                let view = pooled(fixture, Refresh::Background, &pool);
+                assert_eq!(view.respond("GET", "/api/model", "", None).status, 200);
+                *lock(&view.hooks.building) =
+                    Some(Arc::new(|| thread::sleep(Duration::from_secs(2))));
+                view
+            })
+            .collect();
+        let until = Instant::now() + Duration::from_secs(10);
+        let mut line = 0;
+        let mut late = Duration::ZERO;
+        while Instant::now() < until {
+            line += 1;
+            for (fixture, view) in fixtures.iter().zip(&views) {
+                say(fixture, "lane", line, &format!("line {line}"));
+                if let Slot::Queued(key) = lock(&view.live.state).slot {
+                    late = late.max(Instant::now().saturating_duration_since(key.0));
+                }
+                let reply = ask("a read in a backlog", view, "/api/model", "");
+                assert_eq!(reply.status, 200);
+            }
+            assert!(pool.threads() <= 1, "{} threads", pool.threads());
+            thread::sleep(Duration::from_millis(300));
+        }
+        assert!(
+            late >= Duration::from_secs(3),
+            "no check fell OVERFLOW_AFTER behind: at most {late:?}"
+        );
+        assert_eq!(pool.peak_and_started().0, 1, "a backlog grew the pool");
+        for view in &views {
+            *lock(&view.hooks.building) = None;
+            view.close();
+        }
+    }
+
+    /// Lateness counts from when a check was queued: after a build longer
+    /// than STALLED_AFTER (a second here) the next check is due in the past,
+    /// and must not read as a stall, or overflow the pool, the moment it is
+    /// queued. Reads after the long build answer the rebuilt model.
+    #[test]
+    fn a_long_build_is_not_a_stall_once_it_ends() {
+        let fixture = lane_fixture();
+        let pool = RefreshPool::with_overflow_after(1, Duration::from_millis(300));
+        let view = pooled(&fixture, Refresh::Background, &pool);
+        let v1 = warm(&view);
+        lock(&view.live.state).stalled_after = Duration::from_secs(1);
+        *lock(&view.hooks.building) = Some(Arc::new(|| thread::sleep(Duration::from_secs(3))));
+        let builds = view.hooks.builds();
+        say(&fixture, "lane", 1, "after a long build");
+        // No read while it builds: a read then would rightly answer the stall.
+        eventually("the long build", || {
+            view.shown_model()
+                .filter(|model| model.built.version != v1)
+                .map(drop)
+        });
+        assert!(view.hooks.builds() > builds);
+        *lock(&view.hooks.building) = None;
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until {
+            let reply = ask(
+                "a read after a long build",
+                &view,
+                "/api/model",
+                &format!("since={v1}"),
+            );
+            assert_eq!(reply.status, 200, "the rebuilt model answers");
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(pool.peak_and_started().0, 1, "a long build grew the pool");
         view.close();
     }
 
