@@ -16,8 +16,9 @@
 // checkbox or radio inside a label is measured through its label, the row a finger actually hits.
 //
 // Allow-list (each entry a reason; only what a design change, not padding, would be needed to fix):
-//   - inline text links inside running text (an inline a[href] whose parent also holds text of its own): their box is a text
-//     line by nature. A link that stands alone in its element is measured like any control.
+//   - inline text links and tip anchors inside running text (an inline a[href], or the .cr-item runs of a session's status line
+//     (#133), whose parent also holds text of its own): their box is a text line by nature, and the runs sit a thin space from
+//     each other. A link that stands alone in its element is measured like any control.
 //   - chart columns (rect.chart-hit): a column's slot is (chart width - axis) / bins wide, 8-15 px at 390 for 24-30
 //     bins, so 44 px wide is not possible without changing the chart's interaction (a scrub or a list beside it).
 //     They are 140 px tall. Named in the PR body of #54's tap-target point.
@@ -58,7 +59,7 @@ function measure({ selector, min }) {
     // Off screen sideways: the closed drawer, or a carousel: not something a finger can reach yet.
     if (box.right <= 0 || box.left >= vw) continue;
     let allowed = null;
-    if (e.matches("a[href]") && style.display === "inline" && e.parentElement && [...e.parentElement.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) allowed = "inline text link in running text";
+    if (e.matches("a[href], .cr-item") && style.display === "inline" && e.parentElement && [...e.parentElement.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) allowed = "inline text link or tip anchor in running text";
     else if (e.matches("rect.chart-hit")) allowed = "chart column: its slot is narrower than 44 px by construction";
     const text = (e.getAttribute("aria-label") || e.textContent || e.getAttribute("title") || e.getAttribute("placeholder") || "").trim().replace(/\s+/g, " ").slice(0, 48);
     items.push({
