@@ -37,6 +37,7 @@
 //  - the sidebar shows the 8 most recent top-level tree rows with nested children; the Sessions page keeps all session rows,
 //    every grouping produces sections, search narrows to model matches, and opening a row lands at the end.
 //  - a visible working dot breathes, stops under reduced motion, and a waiting dot stays still.
+//  - a transcript entry naming a handoff the model doesn't hold draws nothing and throws nothing; its turn's reply still draws.
 import path from "node:path";
 import { ENV, VIEWPORTS, settled, served, goto, data, reporter, overflow, wide } from "../lib.mjs";
 
@@ -712,6 +713,36 @@ export default async function barCheck(browser) {
     }
   }
 
+  // A transcript page can name a handoff the model doesn't hold (a page from before the model's window). A turn of harbor's is
+  // added whose first entry is such a handoff, then a reply: the handoff draws nothing, the reply draws, and the page throws nothing.
+  let missingHandoff = null;
+  if (D.SESS.harbor) {
+    const page = await served(browser, { size: "phone" });
+    await page.route("**/api/model*", async (route) => {
+      const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response }); // a 304 has no body
+      const body = await response.json();
+      const base = body.turns.filter((t) => t.sid === "harbor").at(-1);
+      body.turns.push({ id: "mh-missing-handoff", sid: "harbor", at: base?.at ?? 0, start: null, u: false, text: "", sent: [], end: null });
+      await route.fulfill({ response, json: body });
+    });
+    await page.route("**/api/tx*", async (route) => {
+      const u = new URL(route.request().url()); if (u.searchParams.get("sid") !== "harbor") return route.continue();
+      const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response });
+      const body = await response.json(), slot = body.total;
+      body.entries.push({ k: "h", id: "mh-no-such-handoff", slot, turn: "mh-missing-handoff" }, { k: "a", text: "Reply after a missing handoff", slot: slot + 1 });
+      await route.fulfill({ response, json: body });
+    });
+    await page.reload({ waitUntil: "load" }); // served() loaded the model before these routes existed
+    await goto(page, { v: "session", id: "harbor" }, D);
+    await page.waitForSelector('section.turn[data-turn="mh-missing-handoff"]', { timeout: 8000 }).catch(() => {});
+    missingHandoff = await page.evaluate(() => {
+      const b = document.querySelector('section.turn[data-turn="mh-missing-handoff"]');
+      return { block: !!b, replyText: b?.querySelector(".msg")?.textContent ?? null, cards: b?.querySelectorAll(".hcard").length ?? null, transcript: !!document.querySelector("#page section[aria-label='Transcript']"), errors: [] };
+    });
+    missingHandoff.errors = page.errors;
+    await page.context().close();
+  }
+
   // Tables, on the extras fixture: the sample fixture's own data has zero table messages (X.tableMessages === 0 there
   // always, so a rendered-vs-expected equality on it can never catch a missing table, only a spurious one). Harbor's
   // extras-only markdown message has a genuine table, so this is where "tables render" gets a positive check.
@@ -726,7 +757,7 @@ export default async function barCheck(browser) {
     await page.context().close();
   }
 
-  r.results = { modes, expected: X, thoughtsBySize, harborThinking, maskedTurn, bareTurns, loneStep, extra, childAssertions };
+  r.results = { modes, expected: X, thoughtsBySize, harborThinking, maskedTurn, bareTurns, loneStep, missingHandoff, extra, childAssertions };
   r.expect(!!thoughtSid, "no session transcript was available for the thinking check");
   for (const [size, t] of Object.entries(thoughtsBySize)) {
     r.expect(t.errors.length === 0, size + " thinking route: page errors: " + t.errors.join(" | "));
@@ -754,6 +785,11 @@ export default async function barCheck(browser) {
     r.expect(bareTurns.bareBlock && bareTurns.bareLines === 1 && bareTurns.bareMessages === 0 && bareTurns.emptyBlocks === 0, "a turn holding only masked thoughts did not draw as one quiet line: " + JSON.stringify(bareTurns));
   }
   r.expect(!D.SESS.principal || !!bareTurns, "the bare masked turn check did not run");
+  r.expect(!D.SESS.harbor || !!missingHandoff, "the missing handoff check did not run");
+  if (missingHandoff) {
+    r.expect(missingHandoff.errors.length === 0, "a transcript entry naming a missing handoff: page errors: " + missingHandoff.errors.join(" | "));
+    r.expect(missingHandoff.transcript && missingHandoff.block && missingHandoff.replyText?.includes("Reply after a missing handoff") && missingHandoff.cards === 0, "a turn opening with a missing handoff did not draw its reply alone: " + JSON.stringify(missingHandoff));
+  }
   r.expect(!D.SESS.principal || !!maskedTurn, "the principal session's masked-thinking turn was not checked");
   r.expect(!D.SESS.principal || !!loneStep, "the principal lone-step style check did not run");
   if (loneStep) {

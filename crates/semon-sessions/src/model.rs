@@ -753,7 +753,9 @@ fn origin_of(record: &Value) -> Option<&Value> {
 }
 
 /// The body of a relay or hand-back: `origin.body`, else the tag's text.
-fn received_body(record: &Value, tag: &str, from: Option<&str>) -> Option<String> {
+/// With `from`, the `skip`th tag that agent sent (a record can batch
+/// several).
+fn received_body(record: &Value, tag: &str, from: Option<&str>, skip: usize) -> Option<String> {
     if let Some(body) = origin_of(record).and_then(|origin| field(origin, "body")) {
         return Some(body.trim().to_owned());
     }
@@ -784,20 +786,19 @@ fn received_body(record: &Value, tag: &str, from: Option<&str>) -> Option<String
         return Some(text.trim().to_owned());
     }
     let close = format!("</{tag}>");
-    for (attributes, end) in events::tags(&text, tag) {
-        if from.is_some()
-            && events::attributes(attributes)
-                .get("from")
-                .map(String::as_str)
-                != from
-        {
-            continue;
-        }
-        let rest = &text[end..];
-        let body = rest.find(&close).map_or(rest, |close| &rest[..close]);
-        return Some(body.trim().to_owned());
-    }
-    None
+    let (_, end) = events::tags(&text, tag)
+        .into_iter()
+        .filter(|(attributes, _)| {
+            from.is_none()
+                || events::attributes(attributes)
+                    .get("from")
+                    .map(String::as_str)
+                    == from
+        })
+        .nth(skip)?;
+    let rest = &text[end..];
+    let body = rest.find(&close).map_or(rest, |close| &rest[..close]);
+    Some(body.trim().to_owned())
 }
 
 fn notification_result(record: &Value, id: &str) -> Option<String> {
@@ -851,6 +852,10 @@ fn pretty_model(model: &str) -> Option<String> {
     }
     Some(model)
 }
+
+/// What a subagent's `SendMessage` names as `to` for its own parent
+/// conversation ("Message queued for the main conversation's next turn").
+const PARENT_ADDRESS: &str = "main";
 
 /// A relay recipient or sender name without the harness's ` [..]` suffix.
 fn plain_name(name: &str) -> String {
@@ -1342,6 +1347,8 @@ struct Builder<'a> {
     ids: HashMap<String, usize>,
     /// Events a copy-resume duplicated: skipped everywhere.
     copied: BTreeSet<Ref>,
+    /// A subagent's send to `main`, and its receipt in the parent.
+    progress: HashMap<Ref, Ref>,
 }
 
 fn event(files: &[SourceFile], at: Ref) -> &Event {
@@ -1375,6 +1382,7 @@ impl<'a> Builder<'a> {
             tools: HashMap::new(),
             ids: HashMap::new(),
             copied: BTreeSet::new(),
+            progress: HashMap::new(),
         }
     }
 
@@ -1975,7 +1983,10 @@ impl<'a> Builder<'a> {
 
     fn claude_spawns(&mut self) {
         let mut notifications = HashMap::<String, Ref>::new();
-        let mut handbacks = HashMap::<String, Ref>::new();
+        // Every `<agent-message>` a subagent's parent received from it: its
+        // sends to `main`, and its hand-backs.
+        let mut receipts = HashMap::<String, Vec<Ref>>::new();
+        let mut aliases = HashMap::<String, Vec<Ref>>::new();
         for (position, file) in self.files.iter().enumerate() {
             for (at, event) in file.summary.events.iter().enumerate() {
                 if self.copied.contains(&(position, at)) {
@@ -1987,12 +1998,16 @@ impl<'a> Builder<'a> {
                     {
                         notifications.insert(id.clone(), (position, at));
                     }
-                    // A hand-back names its sender by `senderTaskId` (the
-                    // agent id or the spawning call's id) and by `from`.
+                    // A receipt names its sender by `senderTaskId` (the
+                    // agent id or the spawning call's id), or by the tag's
+                    // `from` (the agent id), and by `from`.
                     (Kind::Agm, Some(id)) if file.harness() == "claude" => {
-                        handbacks.insert(id.clone(), (position, at));
+                        receipts.entry(id.clone()).or_default().push((position, at));
                         if let Some(from) = &event.n {
-                            handbacks.entry(from.clone()).or_insert((position, at));
+                            aliases
+                                .entry(from.clone())
+                                .or_default()
+                                .push((position, at));
                         }
                     }
                     _ => {}
@@ -2062,18 +2077,28 @@ impl<'a> Builder<'a> {
                 let failed = !matches!(status.as_str(), "completed" | "success" | "done");
                 result = Some((text, event(self.files, found).t, failed));
             }
+            // Both forms of receipt, by either id, in time order (a receipt
+            // with no time last).
+            let mut received: Vec<Ref> = [key.as_str()]
+                .into_iter()
+                .chain(tool_use_id.as_deref())
+                .flat_map(|id| receipts.get(id).into_iter().chain(aliases.get(id)))
+                .flatten()
+                .copied()
+                .collect();
+            received.sort_by_key(|at| {
+                let t = event(self.files, *at).t;
+                (t.is_none(), t, *at)
+            });
+            received.dedup();
+            let paired = self.pair_sends(child, &key, &received);
+            // A receipt no send claims is a hand-back: the last one is the
+            // result.
             if result.is_none()
-                && let Some(found) = handbacks
-                    .get(&key)
-                    .or_else(|| tool_use_id.as_deref().and_then(|id| handbacks.get(id)))
-                    .copied()
+                && let Some(index) = (0..received.len()).rev().find(|index| !paired[*index])
             {
-                let from = key.clone();
-                let text = self.text(found, &format!("agm:{from}"), |record, _| {
-                    // The sending agent's own body only: a batched record's
-                    // first `<agent-message>` may be another agent's.
-                    received_body(record, "agent-message", Some(&from))
-                });
+                let found = received[index];
+                let text = self.receipt_body(&key, &received, index);
                 result = Some((text, event(self.files, found).t, false));
             }
             if result.is_none()
@@ -2282,7 +2307,7 @@ impl<'a> Builder<'a> {
                     });
                     if author.as_deref() == Some(path.as_str()) {
                         let text = self.text(at, "agent_message", |record, _| {
-                            received_body(record, "agent-message", None)
+                            received_body(record, "agent-message", None, 0)
                         });
                         result = Some((text, event(self.files, at).t));
                     }
@@ -2413,6 +2438,10 @@ impl<'a> Builder<'a> {
                 // A failed or denied send reached no one: no receiver.
                 target = Some(self.send_target(at));
                 (None, None)
+            } else if let Some(parent) = self.parent_addressed(from, at) {
+                // Received as the parent's `<agent-message>` that answers
+                // this send (paired when the spawn was read).
+                (Some(parent), self.progress.get(&at).copied())
             } else if reply.m.is_some() {
                 let name = plain_name(&self.send_target(at));
                 unmatched = true;
@@ -2492,7 +2521,7 @@ impl<'a> Builder<'a> {
                 self.stub(&identity, &name)
             });
             let body = self.text(at, "body", |record, _| {
-                received_body(record, "cross-session-message", None)
+                received_body(record, "cross-session-message", None, 0)
             });
             let handoff = Handoff {
                 unmatched: self.sessions[from].kind == SessKind::Stub,
@@ -2511,6 +2540,145 @@ impl<'a> Builder<'a> {
             let handoff = self.add_handoff(handoff, Some(from), Some(to));
             self.place(at, handoff, Place::In);
         }
+    }
+
+    /// A subagent's send addressed to [`PARENT_ADDRESS`] goes to the
+    /// session that spawned it: Claude Code's name for a subagent's own
+    /// parent conversation, never a peer. `None` for any other send, for a
+    /// send that was refused, failed or went over the peer network (a
+    /// `msg_id` or a pin), and for a subagent whose spawner isn't in these
+    /// logs. A send still waiting for its result counts.
+    fn parent_addressed(&mut self, from: usize, at: Ref) -> Option<usize> {
+        if self.sessions[from].kind != SessKind::Agent {
+            return None;
+        }
+        let parent = self.sessions[from].parent?;
+        let found = event(self.files, at);
+        if found.k != Kind::Tool || found.n.as_deref() != Some("SendMessage") {
+            return None;
+        }
+        if found.r.as_ref().is_some_and(|reply| {
+            reply.e || reply.f & (DENIED | SEND_FAILED | PIN) != 0 || reply.m.is_some()
+        }) {
+            return None;
+        }
+        (plain_name(&self.send_target(at)) == PARENT_ADDRESS).then_some(parent)
+    }
+
+    /// Pairs each of `child`'s sends to `main` with its receipt in the
+    /// parent, in two passes. First by body: the first unclaimed receipt,
+    /// after the one the send before claimed, written no earlier than the
+    /// send, whose body is the send's message. Then, for a send still
+    /// unpaired (its receipt's body differs, say escaped), by time: the
+    /// first unclaimed receipt between its neighbours' receipts, written
+    /// from the send up to the child's last event before its next send or
+    /// prompt. A hand-back is written after that last event, so it is never
+    /// claimed; a send whose receipt isn't in these logs claims none.
+    /// Returns which receipts were claimed.
+    fn pair_sends(&mut self, child: usize, key: &str, received: &[Ref]) -> Vec<bool> {
+        let mut paired = vec![false; received.len()];
+        let refs = self.events_of(child);
+        let positions: Vec<usize> = (0..refs.len())
+            .filter(|position| self.parent_addressed(child, refs[*position]).is_some())
+            .collect();
+        if positions.is_empty() {
+            return paired;
+        }
+        let bodies: Vec<Option<String>> = (0..received.len())
+            .map(|index| self.receipt_body(key, received, index))
+            .collect();
+        let files = self.files;
+        let written = move |at: Ref| event(files, at).t;
+        let mut claims: Vec<Option<usize>> = vec![None; positions.len()];
+        let mut next = 0;
+        for (send, position) in positions.iter().enumerate() {
+            let at = refs[*position];
+            let Some(message) = self.text(at, "message", |record, block| {
+                input_string(record, block, &["message", "content"])
+            }) else {
+                continue;
+            };
+            let sent = written(at);
+            let found = (next..received.len()).find(|index| {
+                !paired[*index]
+                    && sent
+                        .zip(written(received[*index]))
+                        .is_none_or(|(sent, written)| written >= sent)
+                    && bodies[*index].as_deref().map(str::trim) == Some(message.trim())
+            });
+            if let Some(index) = found {
+                paired[index] = true;
+                claims[send] = Some(index);
+                next = index + 1;
+            }
+        }
+        for (send, &position) in positions.iter().enumerate() {
+            if claims[send].is_some() {
+                continue;
+            }
+            let Some(sent) = written(refs[position]) else {
+                continue;
+            };
+            // The child's last event before its next send or prompt, with
+            // the send's own result.
+            let boundary = (position + 1..refs.len())
+                .find(|later| {
+                    positions.contains(later) || event(self.files, refs[*later]).k == Kind::U
+                })
+                .unwrap_or(refs.len());
+            let last = refs[position..boundary]
+                .iter()
+                .flat_map(|at| {
+                    let found = event(self.files, *at);
+                    [found.t, found.r.as_ref().and_then(|reply| reply.t)]
+                })
+                .flatten()
+                .max()
+                .unwrap_or(sent);
+            let low = claims[..send]
+                .iter()
+                .rev()
+                .find_map(|claim| *claim)
+                .map_or(0, |index| index + 1);
+            let high = claims[send + 1..]
+                .iter()
+                .find_map(|claim| *claim)
+                .unwrap_or(received.len());
+            let found = (low..high).find(|index| {
+                !paired[*index]
+                    && written(received[*index])
+                        .is_some_and(|written| (sent..=last).contains(&written))
+            });
+            if let Some(index) = found {
+                paired[index] = true;
+                claims[send] = Some(index);
+            }
+        }
+        for (send, claim) in claims.into_iter().enumerate() {
+            if let Some(index) = claim {
+                self.progress.insert(refs[positions[send]], received[index]);
+            }
+        }
+        paired
+    }
+
+    /// The body of `received[index]`, a receipt from agent `from`: in a
+    /// record that batches several tags, the one at its place among that
+    /// agent's.
+    fn receipt_body(&mut self, from: &str, received: &[Ref], index: usize) -> Option<String> {
+        let at = received[index];
+        let offset = event(self.files, at).o;
+        let skip = received
+            .iter()
+            .filter(|other| {
+                other.0 == at.0 && other.1 < at.1 && event(self.files, **other).o == offset
+            })
+            .count();
+        self.text(at, &format!("agm:{from}:{skip}"), |record, _| {
+            // The sending agent's own body only: a batched record's first
+            // `<agent-message>` may be another agent's.
+            received_body(record, "agent-message", Some(from), skip)
+        })
     }
 
     fn send_target(&mut self, at: Ref) -> String {
@@ -4437,6 +4605,18 @@ pub(crate) fn build(
             }
         }
         tx.retain(|key, _| sessions.contains_key(key));
+        // A stub's transcript is the handoffs that name it, so it lists only
+        // the ones served: the page draws a handoff from the model's list.
+        // A real session's transcript stays whole, and its pages before the
+        // window can name handoffs the window left out.
+        for (key, transcript) in &mut tx {
+            if sessions.get(key).is_some_and(|session| session.stub) {
+                transcript.slots.retain(|slot| match &slot.kind {
+                    SlotKind::H(id) => kept.contains(id),
+                    _ => true,
+                });
+            }
+        }
         for session in sessions.values_mut() {
             session.busy.retain(|interval| interval.1 >= cutoff);
             if let Some(first) = session.busy.first_mut() {

@@ -1883,7 +1883,8 @@
       else if (e.k === "harness") { if (!show.messages || find) continue; tx.append(keyed(el("div", "harness-note", "Harness text added before the prompt (" + e.label + ")"), e)); }
       else if (e.k === "end") { if (find) continue; tx.append(keyed(el("div", "divider", e.text), e)); }
       else if (e.k === "h") {
-        const h = H.find((x) => x.id === e.id); if (!hit(h.brief + " " + (h.result ?? ""))) continue;
+        // A page before the model's window can name a handoff the model no longer holds: it draws nothing.
+        const h = HID.get(e.id); if (!h || !hit(h.brief + " " + (h.result ?? ""))) continue;
         // Your own ask is simply your message.
         if (h.kind === "ask") { if (!show.messages) continue; const m = keyed(el("div", "msg user"), e); userBody(m, e, h.brief); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
         if (h.kind === "toyou" && h.ask === "result") {
