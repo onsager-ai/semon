@@ -163,7 +163,7 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .topbar .ttl { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
 .topbar .l1 { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-weight: 600; font-size: var(--fs-title); line-height: 22px; }
 .topbar .t { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.crumb { flex: 0 1 auto; min-width: 0; max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-weight: 500; text-align: left; }
+.crumb { flex: 0 1 auto; min-width: 2.5em; max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-weight: 500; text-align: left; }
 .crumb-sep { flex: none; color: var(--faint); font-weight: 400; }
 /* After a crumb the title keeps most of the line; the crumb ellipsizes first but never below 30%. */
 .topbar .l1 .crumb-sep ~ .t { max-width: 70%; }
@@ -178,10 +178,10 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 /* A label that leads somewhere looks like the others. Its hit area is padded to the tap size inside the line, whose own box grows by the same amount (the margins cancel it), and only the buttons take clicks. */
 .topbar .l1-state { display: none; }
 .menu-item .dot { margin: 0 4px; }
-.session-menu .menu-status { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 2px 8px 4px; padding: 4px 2px; color: var(--muted); font-size: var(--fs-sm); line-height: 18px; }
+.session-menu .menu-status { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0; padding: 14px 0 4px; color: var(--muted); font-size: var(--fs-sm); line-height: 18px; }
 .session-menu .menu-status .dot { flex: none; }
 .session-menu .menu-status > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-menu .menu-section-heading { padding: 4px 10px 2px; color: var(--muted); font-size: var(--fs-sm); line-height: 18px; }
+.session-menu .menu-section-heading { padding: 4px 8px 2px; color: var(--muted); font-size: var(--fs-sm); line-height: 18px; }
 .session-menu .menu-path-item { min-width: 0; }
 .session-menu .menu-path-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-menu .menu-path-item .hname { flex: none; overflow: visible; }
@@ -594,7 +594,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   .brandrow .close { display: inline-grid; }
   .rail-toggle { display: none; }
   .tree-toggle::before { inset: -11px -8px; }
-  .topbar { top: env(safe-area-inset-top, 0px); padding: 4px 4px 4px 4px; min-height: 56px; }
+  .topbar { top: env(safe-area-inset-top, 0px); padding: 4px 6px 4px 4px; min-height: 56px; }
   .topbar .lead { display: inline-grid; }
   .topbar .ttl { padding: 0 4px; }
   .crumb { padding: 11px 0; margin: -11px 0; }
@@ -1267,8 +1267,10 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
         item.append(el("span", "menu-path-name", ancestor.name), harnessName(ancestor.harness));
         item.addEventListener("click", () => { d.close(); goSession(ancestor.id); }); group.append(item);
       });
+      // The group of menuitems sits inside a role=menu container, as the actions below do.
+      const pathMenu = el("div", "menu-list menu-path-menu"); pathMenu.setAttribute("role", "menu"); pathMenu.append(group);
       const separator = el("div", "menu-separator"); separator.setAttribute("role", "separator");
-      body.append(status, group, separator);
+      body.append(status, pathMenu, separator);
     }
     const a1 = el("section", "panel-sec"); a1.append(acts); body.append(a1);
     const det = el("section", "panel-sec"); det.append(el("h3", null, "Details"));

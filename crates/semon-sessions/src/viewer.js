@@ -1474,10 +1474,12 @@
         const item = btn("menu-item menu-path-item"); item.setAttribute("role", "menuitem");
         const chevron = i === ancestors.length - 1, slot = el("span", "menu-path-chevron" + (chevron ? "" : " blank")); if (chevron) item.setAttribute("aria-label", "Up to " + ancestor.name); else slot.setAttribute("aria-hidden", "true"); item.append(slot);
         item.append(el("span", "menu-path-name", ancestor.name), harnessName(ancestor.harness));
-        item.addEventListener("click", () => { d.close(); goSession(ancestor.id); }); group.append(item);
+        item.addEventListener("click", () => { pendingSessionOpen = ancestor.id; d.close(); }); group.append(item);
       });
+      // The group of menuitems sits inside a role=menu container, as the actions below do.
+      const pathMenu = el("div", "menu-list menu-path-menu"); pathMenu.setAttribute("role", "menu"); pathMenu.append(group);
       const separator = el("div", "menu-separator"); separator.setAttribute("role", "separator");
-      body.append(status, group, separator);
+      body.append(status, pathMenu, separator);
     }
     const a1 = el("section", "panel-sec"); a1.append(acts); body.append(a1);
     const det = el("section", "panel-sec"); det.append(el("h3", null, "Details"));
