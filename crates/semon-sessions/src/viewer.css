@@ -261,12 +261,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .brandrow { display: flex; align-items: center; gap: 8px; padding: 14px 16px 10px; font-weight: 600; font-size: 15px; }
 .mark { width: 16px; height: 16px; background: var(--ink); -webkit-mask: url(/mark.svg) center / contain no-repeat; mask: url(/mark.svg) center / contain no-repeat; flex: none; }
 .brandrow .close { display: none; margin-left: auto; }
-/* Search sits on the same grid as the nav rows below it: same side margin, padding, icon size, gap and height,
-   so its icon and text line up with Home / Machines. */
-.side-search { margin: 0 8px 6px; height: 36px; display: flex; align-items: center; gap: 10px; background: var(--sunken); border-radius: 9px; padding: 0 10px; color: var(--muted); overflow: hidden; }
-.side-search input { border: 0; outline: none; background: transparent; width: 100%; min-width: 0; padding: 0; font-size: var(--fs-ui); color: var(--ink); }
-.side-search input::placeholder, .find input::placeholder { color: var(--muted); }
-.side-search svg { width: 18px; height: 18px; flex: none; }
+.find input::placeholder { color: var(--muted); }
 .nav-item { width: calc(100% - 16px); margin: 1px 8px; display: flex; align-items: center; gap: 10px; border: 0; background: none; padding: 8px 10px; border-radius: 9px; text-align: left; font-weight: 500; color: var(--ink-2); }
 @media (hover: hover) { .nav-item:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); } }
 .nav-item[aria-current="page"] { background: var(--sunken); color: var(--ink); }
@@ -686,8 +681,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .brandrow .close { display: inline-grid; }
   .sidebar-head .brandrow .close { width: 44px; height: 44px; }
   /* iOS zooms on focus below 16px. Keep 16px for layout, draw it at 15px to match the phone's text size. */
-  .side-search input, .find input { font-size: 16px; transform: scale(.9375); transform-origin: left center; width: calc(100% / .9375); }
-  .side-search, .find { height: 42px; min-height: 42px; flex: none; }
+  .find input { font-size: 16px; transform: scale(.9375); transform-origin: left center; width: calc(100% / .9375); }
+  .find { height: 42px; min-height: 42px; flex: none; }
   .nav-item { padding-block: 10px; }
   .srow { padding-block: 8px; }
   .groupby button { padding: 6px 8px; }
@@ -695,7 +690,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   /* The bottom padding is the jump button's offset, height and a 16px gap, so the last content scrolls clear of it. */
   .page { padding: 2px 16px calc(72px + env(safe-area-inset-bottom, 0px)); gap: 16px; }
   .msg.user { max-width: 88%; }
-  .step > button, .step.live { min-height: 36px; }
+  .step > button { min-height: 36px; }
   .menu { right: 10px; }
   .account-widget-desktop { display: none; }
   .account-widget-phone { position: relative; display: flex; flex: none; flex-direction: column; margin-top: auto; padding: 8px 8px 0; border-top: 1px solid var(--line); }

@@ -520,7 +520,7 @@
   }
   // An embedding page's sidebar has no rail and no toggle for it (shell::session_sidebar): the toggle is then a detached button.
   const railToggle = $("#rail-toggle") ?? el("button"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
-  let groupBy = "recent"; let query = ""; let analyticsRange = 7, analyticsMeasure = "hours";
+  let groupBy = "recent"; let query = ""; let focusSessionsSearchOnRender = null; let analyticsRange = 7, analyticsMeasure = "hours";
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
   let pendingSessionOpen = null, pendingFlashHandoff = null;
   let accountOpen = false;
@@ -2441,7 +2441,23 @@
   // On an embedding page shell.js opens and closes the drawer, and names its opening (semon:drawer-open); the viewer binds none of it, "/" included.
   if (!SIDEBAR_ONLY) { $("#drawer-close").addEventListener("click", () => closeDrawer()); $("#scrim").addEventListener("click", () => closeDrawer()); }
   else window.addEventListener("semon:drawer-open", () => { if (ORD.get("side")?.n) { ORD.delete("side"); renderLanes(); } }); // opening the drawer re-sorts what the list held, as openDrawer does
-    if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
+  if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && accountSheet) closeAccountMenu();
+    else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); }
+    const target = document.activeElement;
+    if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey && !viewerEl && !accountOpen &&
+        !document.querySelector("dialog[open], .menu, .runs-popover") &&
+        !/^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName ?? "") && !target?.isContentEditable) {
+      e.preventDefault();
+      const search = route.v === "sessions" ? $("#sq") : null;
+      if (search) {
+        focusSessionsSearchOnRender = null; search.focus({ preventScroll: true });
+      } else {
+        const sessions = { v: "sessions" }; focusSessionsSearchOnRender = sessions;
+        go(sessions);
+      }
+    }
+  });
   let sx = null;
   if (!SIDEBAR_ONLY) sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
   if (!SIDEBAR_ONLY) sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });
