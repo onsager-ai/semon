@@ -1762,7 +1762,7 @@
     let run = []; const maskedIn = new WeakSet();
     const flush = () => {
       if (!run.length) return;
-      const steps = el("div", "steps"); run.forEach((r) => steps.append(r.node));
+      const steps = el("div", "steps" + (run.length === 1 && !find ? " lone" : "")); run.forEach((r) => steps.append(r.node));
       if (run.length === 1 || find) { tx.append(steps); run = []; return; }
       const counts = new Map(); for (const r of run) { const [, , p, one, many] = toolInfo(r.k), c = counts.get(p) ?? { n: 0, one, many }; c.n++; counts.set(p, c); }
       let text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
