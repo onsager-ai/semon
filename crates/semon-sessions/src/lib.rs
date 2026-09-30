@@ -16,6 +16,7 @@ mod analytics;
 mod attachments;
 mod events;
 mod facts;
+mod handoff;
 pub mod harness;
 mod inputs;
 mod mcp;
@@ -828,43 +829,6 @@ fn parse_rfc3339(value: &str) -> Option<u64> {
         .ok()
 }
 
-fn matches_handoff(path: &Path, prompt: &str) -> io::Result<Option<ToolCall>> {
-    let mut file = BufReader::new(fs::File::open(path)?);
-    let mut line = Vec::new();
-    while file.read_until(b'\n', &mut line)? != 0 {
-        if let Ok(record) = serde_json::from_slice::<Value>(&line)
-            && let Some(blocks) = record
-                .get("message")
-                .and_then(|msg| msg.get("content"))
-                .and_then(Value::as_array)
-        {
-            for block in blocks {
-                if field(block, "type") != Some("tool_use") {
-                    continue;
-                }
-                let Some(name) = field(block, "name") else {
-                    continue;
-                };
-                if name != "Bash" && name != "Skill" {
-                    continue;
-                }
-                if block
-                    .get("input")
-                    .is_some_and(|input| input.to_string().contains(prompt))
-                    && let Some(id) = field(block, "id")
-                {
-                    return Ok(Some(ToolCall {
-                        id: id.into(),
-                        name: name.into(),
-                    }));
-                }
-            }
-        }
-        line.clear();
-    }
-    Ok(None)
-}
-
 fn make_tree(
     key: &str,
     flat: &mut BTreeMap<String, Node>,
@@ -1172,7 +1136,12 @@ pub(crate) fn collect_with_index(
             if flat.contains_key(&parent_key) {
                 if let Some(prompt) = &marker.handoff {
                     if let Some(parent_path) = claude_paths.get(&marker.claude_id) {
-                        node.via_tool = matches_handoff(parent_path, prompt).ok().flatten();
+                        node.via_tool = handoff::find(
+                            std::slice::from_ref(parent_path),
+                            prompt,
+                            node.cwd.as_deref(),
+                            node.first_activity.as_deref().and_then(events::parse_ms),
+                        );
                     }
                 } else if let Some(tool_id) = &marker.tool_id {
                     node.via_tool = summaries

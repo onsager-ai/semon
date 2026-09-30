@@ -806,6 +806,175 @@ fn codex_runs_link_by_marker_or_parent_thread_and_otherwise_stay_unlinked() {
     assert_eq!(root[0].sent, [child.id.clone(), relay.id.clone()]);
 }
 
+#[test]
+fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
+    let home = Home::new();
+    let command = r#"S=/tmp/x/scratchpad; P=$S/codex-foo-prompt.md; { printf 'Semon-Parent: claude:%s\nSemon-Handoff: %s\n' "$CLAUDE_CODE_SESSION_ID" "$P"; cat "$P"; } | codex exec --json -C /home/u/wt/semon-wt-foo"#;
+    let launch = |id: &str, time: String, command: &str| {
+        assistant(
+            "lead",
+            time,
+            vec![tool(
+                id,
+                "Bash",
+                json!({"command":command,"run_in_background":true}),
+            )],
+        )
+    };
+    let path = home.top(
+        "lead",
+        &[
+            human("lead", ts(0, 0), "Launch the runs"),
+            launch("first", ts(0, 1), command),
+            launch("second", ts(0, 11), command),
+            launch(
+                "multi",
+                ts(0, 21),
+                "codex exec -C /home/u/wt/semon-wt-bar; codex exec -C /home/u/wt/semon-wt-baz",
+            ),
+            launch("basename", ts(0, 31), "codex exec -C semon-wt-short"),
+            launch(
+                "prefix",
+                ts(0, 41),
+                "codex exec -C /home/u/wt/semon-wt-foobar",
+            ),
+        ],
+    );
+    let cases = [
+        (
+            "early",
+            "semon-wt-foo",
+            "2026-09-24T00:01:08Z",
+            Some("first"),
+        ),
+        (
+            "later",
+            "semon-wt-foo",
+            "2026-09-24T00:11:08Z",
+            Some("second"),
+        ),
+        ("bar", "semon-wt-bar", "2026-09-24T00:21:08Z", Some("multi")),
+        ("baz", "semon-wt-baz", "2026-09-24T00:21:09Z", Some("multi")),
+        (
+            "short",
+            "semon-wt-short",
+            "2026-09-24T00:31:08Z",
+            Some("basename"),
+        ),
+        ("missing", "semon-wt-absent", "2026-09-24T00:31:08Z", None),
+    ];
+    for (id, basename, start, _) in cases {
+        let prompt = format!("/tmp/x/scratchpad/codex-{id}-prompt.md");
+        assert!(!command.contains(&prompt));
+        home.lines(&format!("codex/sessions/2026/09/24/rollout-{id}.jsonl"), &[
+            json!({"timestamp":start,"type":"session_meta","payload":{"id":id,"cwd":format!("/home/u/wt/{basename}")}}),
+            codex_user(start.into(), &format!("Semon-Parent: claude:lead\nSemon-Handoff: {prompt}\nImplement {id}")),
+            codex_reply(ts(1, 0), "done"),
+        ]);
+    }
+    let parses = crate::handoff::PARSES.with(|count| count.get());
+    let bytes = crate::handoff::BYTES.with(|count| count.get());
+    let built = home.build();
+    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 5);
+    assert_eq!(
+        crate::handoff::BYTES.with(|count| count.get()) - bytes,
+        fs::metadata(&path).unwrap().len()
+    );
+    let records: Vec<Value> = fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for (id, _, _, call) in cases {
+        let spawn = only(&built, "spawn", "lead", id);
+        let slots: Vec<_> = built.tx["lead"]
+            .slots
+            .iter()
+            .filter(|slot| matches!(&slot.kind, SlotKind::H(found) if found == &spawn.id))
+            .collect();
+        if let Some(call) = call {
+            assert_eq!(slots.len(), 1, "{id}");
+            let record = records
+                .iter()
+                .find(|record| record["message"]["content"][0]["id"] == call)
+                .unwrap();
+            assert_eq!(slots[0].t, events::record_time(record), "{id}");
+            assert_eq!(
+                read_line(&path, slots[0].offset).unwrap()["message"]["content"]
+                    [slots[0].block as usize]["id"],
+                call
+            );
+            assert!(
+                turns_of(&built, "lead")
+                    .iter()
+                    .any(|turn| turn.sent.contains(&spawn.id)),
+                "{id}"
+            );
+        } else {
+            assert!(slots.is_empty());
+        }
+    }
+    let scanned = crate::handoff::BYTES.with(|count| count.get());
+    home.build();
+    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 5);
+    assert_eq!(crate::handoff::BYTES.with(|count| count.get()), scanned);
+    let appended = format!("{}\n", launch("third", ts(0, 51), command));
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(appended.as_bytes())
+        .unwrap();
+    let after = home.build();
+    assert_eq!(crate::handoff::PARSES.with(|count| count.get()) - parses, 6);
+    assert_eq!(
+        crate::handoff::BYTES.with(|count| count.get()) - scanned,
+        appended.len() as u64
+    );
+    assert_eq!(only(&after, "spawn", "lead", "early").at, at(0, 1));
+    assert_eq!(only(&after, "spawn", "lead", "later").at, at(0, 11));
+}
+
+#[test]
+fn worktree_prefix_does_not_place_a_spawn_on_the_wrong_call() {
+    let home = Home::new();
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(0, 0), "Launch"),
+            assistant(
+                "lead",
+                ts(0, 1),
+                vec![tool(
+                    "foobar",
+                    "Bash",
+                    json!({"command":"codex exec -C /home/u/wt/semon-wt-foobar"}),
+                )],
+            ),
+        ],
+    );
+    let start = "2026-09-24T00:01:08Z";
+    home.lines("codex/sessions/2026/09/24/rollout-child.jsonl", &[
+        json!({"type":"session_meta","timestamp":start,"payload":{"id":"child","cwd":"/home/u/wt/semon-wt-foo"}}),
+        codex_user(start.into(), "Semon-Parent: claude:lead\nSemon-Handoff: /tmp/absent.md\nImplement"),
+    ]);
+    let built = home.build();
+    let spawn = only(&built, "spawn", "lead", "child");
+    assert_eq!(spawn.at, events::parse_ms(start).unwrap());
+    assert!(
+        built.tx["lead"]
+            .slots
+            .iter()
+            .all(|slot| !matches!(&slot.kind, SlotKind::H(id) if id == &spawn.id))
+    );
+    assert!(
+        turns_of(&built, "lead")
+            .iter()
+            .all(|turn| !turn.sent.contains(&spawn.id))
+    );
+}
+
 fn relay_home() -> Home {
     let home = Home::new();
     home.top(
