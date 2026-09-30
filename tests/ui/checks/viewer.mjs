@@ -46,7 +46,8 @@ const backgroundRows = (page) => page.evaluate(() => [...document.querySelectorA
   const b = n.querySelector(":scope > button"), sv = b.querySelector(".sv"), sa = b.querySelector(".sa"), sd = b.querySelector(".sd"), mark = b.querySelector(".bgmark");
   const rect = (x) => x.getBoundingClientRect(), mid = (x) => rect(x).top + rect(x).height / 2, line = (x) => rect(x).height < 2.2 * parseFloat(getComputedStyle(x).fontSize);
   return { tid: n.dataset.tid, shown: sd.innerText.replace(/\s+/g, " ").trim(), whole: sd.scrollWidth <= sd.clientWidth && rect(sd).right <= document.documentElement.clientWidth + 0.5,
-    oneLine: [sv, sa, sd].filter(Boolean).every((x) => line(x) && Math.abs(mid(x) - mid(sd)) < 4), // a titled step has no verb mark: !!mark && getComputedStyle(mark).display !== "none" && mark.getAttribute("role") === "img" && mark.getAttribute("aria-label") === "background",
+    // A titled step has no verb (.sv), so only what is there is checked.
+    oneLine: [sv, sa, sd].filter(Boolean).every((x) => line(x) && Math.abs(mid(x) - mid(sd)) < 4), mark: !!mark && getComputedStyle(mark).display !== "none" && mark.getAttribute("role") === "img" && mark.getAttribute("aria-label") === "background",
     word: getComputedStyle(sd.querySelector(".bgw")).display !== "none" };
 }));
 const expectRows = (r, label, size, rows, outcomes) => {
