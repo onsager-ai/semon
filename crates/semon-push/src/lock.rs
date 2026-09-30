@@ -15,7 +15,8 @@ use std::{
 ///
 /// Work a stop leaves running (a request to the receiver, a facts
 /// collection) holds it too, so it is released only when the last of that
-/// work ends, at most the request timeout after the stop. Until then a new
+/// work ends: a request within its 120 s timeout, a facts collection when
+/// its scan does (it has no timeout). Until then a new
 /// push gets a distinct "still finishing" error rather than overlapping
 /// with it.
 ///
@@ -99,8 +100,8 @@ impl StateLock {
                 let holder = Holder::read(&path);
                 if holder.finishing {
                     Err(format!(
-                        "a stopped push with the state {} is still finishing a request it had \
-                         started (it holds {}{}), for at most 2 minutes; try again shortly",
+                        "a stopped push with the state {} is still finishing a request or a \
+                         facts collection it had started (it holds {}{}); try again shortly",
                         state.display(),
                         path.display(),
                         holder.describe()

@@ -45,8 +45,8 @@ struct Received {
     /// answering the last of them.
     stop_after: Option<(u64, Stop)>,
     /// Refuse the token (401) for any append after this many successful
-    /// ones, and stop this push right after answering.
-    refuse_after: Option<(u64, Stop)>,
+    /// ones.
+    refuse_after: Option<u64>,
 }
 
 struct Receiver {
@@ -91,12 +91,12 @@ fn receiver() -> Receiver {
                     received.held_requests.push(request);
                     continue;
                 }
-                if let Some((limit, stop)) = received.refuse_after.clone()
-                    && received.appends >= limit
+                if received
+                    .refuse_after
+                    .is_some_and(|limit| received.appends >= limit)
                 {
                     drop(received);
                     let _ = request.respond(json_response(401, json!({"error":"revoked"})));
-                    stop.stop();
                     continue;
                 }
             }
@@ -710,21 +710,36 @@ fn a_second_push_on_the_same_state_fails_at_once_until_the_first_stops() {
     assert_resumes(&home, &receiver, &logs);
 }
 
+/// The stop comes once the push has read the 401: a refused pass saves
+/// the state file (replacing it, so its inode changes) before it returns,
+/// and only after the answer is in. Which of the refusal and the stop the
+/// watch sees first is then up to it, and either way the refusal is the
+/// result (the ordering itself is `after_pass`'s unit test).
+#[cfg(unix)]
 #[test]
 fn a_refused_token_is_reported_even_when_a_stop_comes_with_it() {
+    use std::os::unix::fs::MetadataExt;
+
     let home = Home::new();
     let receiver = receiver();
     home.write(LOG, &line("one"));
     let options = home.push_options(&receiver.url);
     let stop = Stop::new();
-    receiver.state.lock().unwrap().refuse_after = Some((1, stop.clone()));
+    receiver.state.lock().unwrap().refuse_after = Some(1);
     let push = watch_in_background(&options, &stop);
     wait_for("the first facts", || {
         receiver.state.lock().unwrap().facts.is_some()
     });
-    // The next pass is refused, and the stop comes right after the 401.
+    let inode = || {
+        fs::metadata(&options.state)
+            .map(|metadata| metadata.ino())
+            .ok()
+    };
+    let before = inode();
+    assert!(before.is_some(), "the first pass saved its state");
+    // The next pass is refused; the stop follows the save that refusal makes.
     home.append(LOG, &line("two"));
-    wait_for("the refusal", || stop.is_stopped());
+    wait_for("the refused pass's save", || inode() != before);
     let error = stop_and_join(&stop, push).unwrap_err();
     assert!(error.contains("refused the token"), "{error}");
     assert_stopped_cleanly(&options);

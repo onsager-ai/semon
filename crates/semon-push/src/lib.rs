@@ -961,15 +961,8 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
         if stop.sleep(PASS_EVERY) {
             return Ok(());
         }
-        match client.pass(&options.sessions) {
-            // A refusal that comes with a stop is still reported.
-            Err(error) if error.contains("refused the token") => return Err(error),
-            _ if stop.is_stopped() => return Ok(()),
-            Ok(report) if report.files > 0 => {
-                eprintln!("semon push: {} files, {} bytes", report.files, report.bytes);
-            }
-            Ok(_) => {}
-            Err(error) => eprintln!("semon push: {error}"),
+        if let Some(end) = after_pass(client.pass(&options.sessions), stop) {
+            return end;
         }
         if last_facts.elapsed() >= FACTS_EVERY {
             match facts.collect(stop)? {
@@ -988,6 +981,27 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
                 Some(Err(error)) => eprintln!("semon push: {error}"),
             }
             last_facts = Instant::now();
+        }
+    }
+}
+
+/// What `--watch` does with a pass's result: `Some` ends the push with it.
+/// A refused token ends it as an error even when a stop came with the
+/// refusal; otherwise a stop ends it cleanly, and other errors are reported
+/// and tried again next pass.
+fn after_pass(result: Result<Report>, stop: &Stop) -> Option<Result<()>> {
+    match result {
+        Err(error) if error.contains("refused the token") => Some(Err(error)),
+        _ if stop.is_stopped() => Some(Ok(())),
+        Ok(report) => {
+            if report.files > 0 {
+                eprintln!("semon push: {} files, {} bytes", report.files, report.bytes);
+            }
+            None
+        }
+        Err(error) => {
+            eprintln!("semon push: {error}");
+            None
         }
     }
 }
@@ -1296,5 +1310,33 @@ mod tests {
         assert_eq!(client.pass(&fixture.options).unwrap().files, 0);
         assert!(input_opens().get(&path).copied().unwrap_or_default() > 0);
         assert!(client.state.files[key].has_stat());
+    }
+
+    #[test]
+    fn a_refused_token_ends_the_watch_as_an_error_even_with_a_stop() {
+        fn refused<T>() -> Result<T> {
+            Err("append: the receiver refused the token (401)".to_owned())
+        }
+        fn failed() -> Result<Report> {
+            Err("append: 500 down".to_owned())
+        }
+        let sent = || {
+            Ok(Report {
+                files: 1,
+                bytes: 5,
+                replaced: 0,
+            })
+        };
+
+        let stopped = Stop::new();
+        stopped.stop();
+        assert_eq!(after_pass(refused(), &stopped), Some(refused()));
+        assert_eq!(after_pass(failed(), &stopped), Some(Ok(())));
+        assert_eq!(after_pass(sent(), &stopped), Some(Ok(())));
+
+        let running = Stop::new();
+        assert_eq!(after_pass(refused(), &running), Some(refused()));
+        assert_eq!(after_pass(failed(), &running), None);
+        assert_eq!(after_pass(sent(), &running), None);
     }
 }
