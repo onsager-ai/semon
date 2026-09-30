@@ -3500,99 +3500,136 @@ fn a_stubs_transcript_names_only_served_handoffs() {
     assert_eq!(entries[0]["id"], new.id.as_str());
 }
 
-/// A background subagent that sends `main` progress twice, then hands back:
-/// the parent receives three `<agent-message>`s from it. The first two are
-/// the two relays' received side, in order, and only the last is the spawn's
-/// result. With only progress so far, the spawn has no result.
-fn progress_home(hand_back: bool) -> Home {
+/// A lead that starts background subagents at 20:01, each (agent id,
+/// Agent call id, its lines after its brief), then gets `receipts`.
+fn background_home(agents: Vec<(&str, &str, Vec<Value>)>, receipts: Vec<Value>) -> Home {
     let home = Home::new();
-    let receipt = |minute, body: &str| {
-        user(
-            "lead",
-            ts(20, minute),
-            &format!("<agent-message from=\"ap\">{body}</agent-message>"),
-        )
-    };
+    let calls = agents
+        .iter()
+        .map(|(_, call, _)| tool(call, "Agent", json!({"prompt":format!("brief {call}")})))
+        .collect();
     let mut lead = vec![
-        human("lead", ts(20, 0), "Start a background worker"),
-        assistant(
+        human("lead", ts(20, 0), "Start background workers"),
+        assistant("lead", ts(20, 1), calls),
+    ];
+    for (agent, call, _) in &agents {
+        lead.push(result(
             "lead",
             ts(20, 1),
-            vec![tool("tp", "Agent", json!({"prompt":"progress brief"}))],
-        ),
-        result(
-            "lead",
-            ts(20, 1),
-            "tp",
+            call,
             "launched",
             false,
-            json!({"status":"async_launched","agentId":"ap"}),
-        ),
-        receipt(3, "first progress note"),
-        assistant("lead", ts(20, 4), vec![text("noted one")]),
-        receipt(5, "second progress note"),
-        assistant("lead", ts(20, 6), vec![text("noted two")]),
+            json!({"status":"async_launched","agentId":agent}),
+        ));
+    }
+    lead.extend(receipts);
+    home.top("lead", &lead);
+    for (agent, call, mut lines) in agents {
+        lines.insert(0, user("lead", ts(20, 1), &format!("brief {call}")));
+        home.agent("lead", agent, call, &lines);
+    }
+    home
+}
+
+/// One parent line at 20:`minute` holding `<agent-message>` tags.
+fn agm_line(minute: i64, tags: &[(&str, &str)]) -> Value {
+    let content: String = tags
+        .iter()
+        .map(|(from, body)| format!("<agent-message from=\"{from}\">{body}</agent-message>\n"))
+        .collect();
+    user("lead", ts(20, minute), &content)
+}
+
+fn child_says(minute: i64, said: &str) -> Value {
+    assistant("lead", ts(20, minute), vec![text(said)])
+}
+
+fn queued_reply() -> Option<Value> {
+    Some(json!({"success":true,"message":"Message queued for the main conversation's next turn."}))
+}
+
+/// A subagent's send to `main` at 20:`minute`, and its result: `None` for
+/// one not back yet, a string for a refused one.
+fn send_to_main(id: &str, minute: i64, message: &str, reply: Option<Value>) -> Vec<Value> {
+    let mut lines = vec![assistant(
+        "lead",
+        ts(20, minute),
+        vec![tool(
+            id,
+            "SendMessage",
+            json!({"to":"main","message":message}),
+        )],
+    )];
+    if let Some(reply) = reply {
+        let refused = reply.is_string();
+        let content = if refused {
+            "Permission denied"
+        } else {
+            "queued"
+        };
+        lines.push(result("lead", ts(20, minute), id, content, refused, reply));
+    }
+    lines
+}
+
+/// How often `sid`'s transcript draws handoff `id`.
+fn received_in(built: &Built, sid: &str, id: &str) -> usize {
+    built.tx[sid]
+        .slots
+        .iter()
+        .filter(|slot| matches!(&slot.kind, SlotKind::H(found) if found == id))
+        .count()
+}
+
+/// Two progress sends to `main` (each received a minute later), then the
+/// subagent's answer and its hand-back.
+fn progress_home(hand_back: bool) -> Home {
+    let mut child = send_to_main("p1", 2, "first progress note", queued_reply());
+    child.extend(send_to_main(
+        "p2",
+        4,
+        "second progress note",
+        queued_reply(),
+    ));
+    let mut receipts = vec![
+        agm_line(3, &[("ap", "first progress note")]),
+        agm_line(5, &[("ap", "second progress note")]),
     ];
     if hand_back {
-        lead.push(receipt(8, "[Subagent hand-back] the final answer"));
-        lead.push(assistant("lead", ts(20, 9), vec![text("all in")]));
+        child.push(child_says(6, "the final answer"));
+        receipts.push(agm_line(
+            7,
+            &[("ap", "[Subagent hand-back] the final answer")],
+        ));
     }
-    home.top("lead", &lead);
-    let send = |id: &str, minute, message: &str| {
-        [
-            assistant(
-                "lead",
-                ts(20, minute),
-                vec![tool(
-                    id,
-                    "SendMessage",
-                    json!({"to":"main","message":message}),
-                )],
-            ),
-            result(
-                "lead",
-                ts(20, minute),
-                id,
-                "queued",
-                false,
-                json!({"success":true,"message":"Message queued for the main conversation's next turn."}),
-            ),
-        ]
-    };
-    let mut child = vec![user("lead", ts(20, 1), "progress brief")];
-    child.extend(send("p1", 3, "first progress note"));
-    child.extend(send("p2", 5, "second progress note"));
-    if hand_back {
-        child.push(assistant("lead", ts(20, 7), vec![text("the final answer")]));
-    }
-    home.agent("lead", "ap", "tp", &child);
-    home
+    background_home(vec![("ap", "tp", child)], receipts)
 }
 
 #[test]
 fn progress_sends_to_main_are_relays_and_only_the_last_receipt_hands_back() {
-    let home = progress_home(true);
-    let built = home.build();
+    let built = progress_home(true).build();
     let spawn = only(&built, "spawn", "lead", "ap");
     assert_eq!(
         (spawn.status, spawn.result.as_deref(), spawn.done),
         (
             "done",
             Some("[Subagent hand-back] the final answer"),
-            Some(at(20, 8))
+            Some(at(20, 7))
         )
     );
     let lead = turns_of(&built, "lead");
-    for (minute, brief) in [(3, "first progress note"), (5, "second progress note")] {
+    for (minute, brief) in [(2, "first progress note"), (4, "second progress note")] {
         // One handoff per message: the relay, sent by the subagent's turn
-        // and starting the parent's turn at its receipt.
-        let found: Vec<&Handoff> = built
-            .handoffs
-            .iter()
-            .filter(|handoff| handoff.brief == brief)
-            .collect();
-        assert_eq!(found.len(), 1, "{brief}: {found:?}");
-        let relay = found[0];
+        // and starting the parent's turn at its receipt, drawn there once.
+        let relay = by_brief(&built, brief);
+        assert_eq!(
+            built
+                .handoffs
+                .iter()
+                .filter(|handoff| handoff.brief == brief)
+                .count(),
+            1
+        );
         assert_eq!(
             (
                 relay.kind,
@@ -3614,38 +3651,200 @@ fn progress_sends_to_main_are_relays_and_only_the_last_receipt_hands_back() {
             1,
             "{brief}"
         );
+        assert_eq!(received_in(&built, "lead", &relay.id), 1, "{brief}");
     }
-    // The receipt is the relay's own entry in the parent's transcript, once.
-    let relays: BTreeSet<&str> = built
-        .handoffs
-        .iter()
-        .filter(|handoff| handoff.kind == "relay")
-        .map(|handoff| handoff.id.as_str())
-        .collect();
-    let drawn: Vec<&str> = built.tx["lead"]
-        .slots
-        .iter()
-        .filter_map(|slot| match &slot.kind {
-            SlotKind::H(id) if relays.contains(id.as_str()) => Some(id.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(drawn.len(), 2, "{drawn:?}");
     assert!(built.sessions.values().all(|session| !session.stub));
 }
 
 #[test]
 fn progress_before_a_hand_back_is_not_the_spawns_result() {
-    let home = progress_home(false);
-    let built = home.build();
+    let built = progress_home(false).build();
     let spawn = only(&built, "spawn", "lead", "ap");
     assert_eq!((spawn.result.as_deref(), spawn.done), (None, None));
+    for brief in ["first progress note", "second progress note"] {
+        let relay = by_brief(&built, brief);
+        assert_eq!(received_in(&built, "lead", &relay.id), 1, "{brief}");
+    }
+}
+
+/// A subagent resumed after its first hand-back: its first send's receipt
+/// isn't in these logs. Neither hand-back is taken for a send, and the
+/// second is the result.
+#[test]
+fn a_resumed_subagents_hand_backs_are_not_taken_for_its_sends() {
+    let mut child = send_to_main("r1", 2, "first run note", queued_reply());
+    child.push(child_says(3, "first run done"));
+    child.push(user("lead", ts(20, 5), "carry on"));
+    child.extend(send_to_main("r2", 6, "second run note", queued_reply()));
+    child.push(child_says(8, "second run done"));
+    let built = background_home(
+        vec![("ap", "tp", child)],
+        vec![
+            agm_line(4, &[("ap", "[Subagent hand-back] first run done")]),
+            agm_line(7, &[("ap", "second run note")]),
+            agm_line(9, &[("ap", "[Subagent hand-back] second run done")]),
+        ],
+    )
+    .build();
+    let first = by_brief(&built, "first run note");
+    assert_eq!(received_in(&built, "lead", &first.id), 0);
+    let second = by_brief(&built, "second run note");
+    assert_eq!(received_in(&built, "lead", &second.id), 1);
+    let spawn = only(&built, "spawn", "lead", "ap");
     assert_eq!(
-        built
-            .handoffs
-            .iter()
-            .filter(|handoff| handoff.kind == "relay" && handoff.from == "ap")
-            .count(),
-        2
+        (spawn.result.as_deref(), spawn.done),
+        (
+            Some("[Subagent hand-back] second run done"),
+            Some(at(20, 9))
+        )
+    );
+}
+
+/// A send whose receipt is missing doesn't take the hand-back as its own:
+/// the spawn keeps its result.
+#[test]
+fn fewer_receipts_than_sends_keep_the_hand_back() {
+    let mut child = send_to_main("n1", 2, "note one", queued_reply());
+    child.extend(send_to_main("n2", 4, "note two", queued_reply()));
+    child.push(child_says(6, "done"));
+    let built = background_home(
+        vec![("ap", "tp", child)],
+        vec![
+            agm_line(3, &[("ap", "note one")]),
+            agm_line(7, &[("ap", "[Subagent hand-back] done")]),
+        ],
+    )
+    .build();
+    let spawn = only(&built, "spawn", "lead", "ap");
+    assert_eq!(spawn.result.as_deref(), Some("[Subagent hand-back] done"));
+    let one = by_brief(&built, "note one");
+    assert_eq!(received_in(&built, "lead", &one.id), 1);
+    let two = by_brief(&built, "note two");
+    assert_eq!(received_in(&built, "lead", &two.id), 0);
+}
+
+/// Two subagents of one parent, their receipts interleaved: each pairs and
+/// hands back on its own.
+#[test]
+fn interleaved_subagents_pair_their_own_receipts() {
+    let mut ap = send_to_main("pa", 2, "note from ap", queued_reply());
+    ap.push(child_says(5, "ap done"));
+    let mut aq = send_to_main("pq", 3, "note from aq", queued_reply());
+    aq.push(child_says(6, "aq done"));
+    let built = background_home(
+        vec![("ap", "tp", ap), ("aq", "tq", aq)],
+        vec![
+            agm_line(4, &[("aq", "note from aq")]),
+            agm_line(5, &[("ap", "note from ap")]),
+            agm_line(7, &[("aq", "[Subagent hand-back] aq done")]),
+            agm_line(8, &[("ap", "[Subagent hand-back] ap done")]),
+        ],
+    )
+    .build();
+    for (agent, note, handed) in [
+        ("ap", "note from ap", "[Subagent hand-back] ap done"),
+        ("aq", "note from aq", "[Subagent hand-back] aq done"),
+    ] {
+        assert_eq!(
+            only(&built, "spawn", "lead", agent).result.as_deref(),
+            Some(handed)
+        );
+        let relay = only(&built, "relay", agent, "lead");
+        assert_eq!(relay.brief, note);
+        assert_eq!(received_in(&built, "lead", &relay.id), 1, "{agent}");
+    }
+}
+
+/// A refused send to `main` reached no one, as any refused send: no
+/// receiver, the address as written, and it claims no receipt.
+#[test]
+fn a_refused_send_to_main_reached_no_one() {
+    let mut child = send_to_main(
+        "denied",
+        2,
+        "refused note",
+        Some(json!("Error: permission denied")),
+    );
+    child.push(child_says(3, "done anyway"));
+    let built = background_home(
+        vec![("ap", "tp", child)],
+        vec![agm_line(4, &[("ap", "[Subagent hand-back] done anyway")])],
+    )
+    .build();
+    let relay = by_brief(&built, "refused note");
+    assert_eq!(
+        (relay.status, relay.to.as_deref(), relay.target.as_deref()),
+        ("err", None, Some("main"))
+    );
+    assert_eq!(
+        only(&built, "spawn", "lead", "ap").result.as_deref(),
+        Some("[Subagent hand-back] done anyway")
+    );
+}
+
+/// A send whose result isn't written yet can already be received: its
+/// receipt is progress, not the hand-back.
+#[test]
+fn a_pending_sends_receipt_is_not_the_hand_back() {
+    let built = background_home(
+        vec![("ap", "tp", send_to_main("wait", 2, "pending note", None))],
+        vec![agm_line(3, &[("ap", "pending note")])],
+    )
+    .build();
+    let spawn = only(&built, "spawn", "lead", "ap");
+    assert_eq!((spawn.result.as_deref(), spawn.done), (None, None));
+}
+
+/// A hand-back keyed by the spawning call's id (`senderTaskId`) joins the
+/// tag receipts keyed by the agent id.
+#[test]
+fn a_hand_back_by_call_id_joins_receipts_by_agent_id() {
+    let mut child = send_to_main("k1", 2, "keyed note", queued_reply());
+    child.push(child_says(4, "done"));
+    let built = background_home(
+        vec![("ap", "tp", child)],
+        vec![
+            agm_line(3, &[("ap", "keyed note")]),
+            json!({"type":"user","timestamp":ts(20, 5),"sessionId":"lead",
+                "origin":{"kind":"peer","handback":true,"from":"worker","senderTaskId":"tp","body":"handed back by call id"},
+                "message":{"role":"user","content":"x"}}),
+        ],
+    )
+    .build();
+    assert_eq!(
+        only(&built, "spawn", "lead", "ap").result.as_deref(),
+        Some("handed back by call id")
+    );
+    let relay = by_brief(&built, "keyed note");
+    assert_eq!(received_in(&built, "lead", &relay.id), 1);
+}
+
+/// One parent line can batch tags, another agent's among them: each of the
+/// agent's tags is read as its own, in place.
+#[test]
+fn batched_tags_are_read_in_place() {
+    let mut child = send_to_main("b1", 2, "batched one", queued_reply());
+    child.extend(send_to_main("b2", 3, "batched two", queued_reply()));
+    child.push(child_says(4, "batched done"));
+    let built = background_home(
+        vec![("ap", "tp", child)],
+        vec![agm_line(
+            5,
+            &[
+                ("zz", "someone else"),
+                ("ap", "batched one"),
+                ("ap", "batched two"),
+                ("ap", "[Subagent hand-back] batched done"),
+            ],
+        )],
+    )
+    .build();
+    for brief in ["batched one", "batched two"] {
+        let relay = by_brief(&built, brief);
+        assert_eq!(received_in(&built, "lead", &relay.id), 1, "{brief}");
+    }
+    assert_eq!(
+        only(&built, "spawn", "lead", "ap").result.as_deref(),
+        Some("[Subagent hand-back] batched done")
     );
 }
