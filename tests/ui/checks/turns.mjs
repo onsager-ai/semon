@@ -289,9 +289,9 @@ export default async function turnsCheck(browser) {
       interaction.links.childOpenButton = await routeState(page);
       r.expect(interaction.links.childOpenButton.id === h.to, tag + ": existing child Open button did not open the child: " + JSON.stringify(interaction.links.childOpenButton));
       await page.goBack(); await waitRoute(page, { v: "session", id: childCard.sid });
-      await page.locator(sel + " .child-head > button.ln").focus(); await page.keyboard.press("Enter"); await waitRoute(page, { v: "session", id: h.to, turn: started });
+      await page.locator(sel + " .child-head > button.ln").press("Enter"); await page.waitForTimeout(100);
       interaction.links.childNameEnter = await routeState(page);
-      r.expect(interaction.links.childNameEnter.id === h.to, tag + ": Enter did not activate the child name button");
+      r.expect(interaction.links.childNameEnter.id === h.to && (!started || interaction.links.childNameEnter.turn === started), tag + ": Enter did not open the child at its started turn: " + JSON.stringify(interaction.links.childNameEnter));
     }
 
     const plainSpawn = candidates["plain-spawn"];
@@ -326,9 +326,9 @@ export default async function turnsCheck(browser) {
       interaction.links.relayTargetOpens = await routeState(page);
       r.expect(interaction.links.relayTargetOpens.id === h.to && (!started || interaction.links.relayTargetOpens.turn === started), tag + ": relay target did not open its started turn: " + JSON.stringify(interaction.links.relayTargetOpens));
       await page.goBack(); await waitRoute(page, { v: "session", id: sentRelay.sid });
-      await page.locator(sel + " .ln button.who").filter({ hasText: recipient }).focus(); await page.keyboard.press(" "); await waitRoute(page, { v: "session", id: h.to, turn: started });
+      await page.locator(sel + " .ln button.who").filter({ hasText: recipient }).press("Space"); await page.waitForTimeout(100);
       interaction.links.relayTargetSpace = await routeState(page);
-      r.expect(interaction.links.relayTargetSpace.id === h.to, tag + ": Space did not activate the relay target button");
+      r.expect(interaction.links.relayTargetSpace.id === h.to && (!started || interaction.links.relayTargetSpace.turn === started), tag + ": Space did not open the target at its started turn: " + JSON.stringify(interaction.links.relayTargetSpace));
     }
 
     const receivedOrigin = sentRelay && D0.H.find((h) => h.kind === "relay" && h.to === sentRelay.sid);
