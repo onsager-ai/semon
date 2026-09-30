@@ -18,13 +18,17 @@ use serde_json::Value;
 #[derive(Debug)]
 pub struct Journal {
     file: File,
+    /// A write failed, possibly part-way through a line, so the next line
+    /// starts on a fresh one.
+    after_failure: bool,
 }
 
 impl Journal {
     /// Opens `path` for appending, creating it with mode 0600 and its parent
     /// directory with mode 0700. Refuses a parent directory that is a
     /// symlink, is not owned by this process's user or is open to anyone
-    /// else, and a journal path that exists but isn't a regular file.
+    /// else, and a journal path that is a symlink (`O_NOFOLLOW`), isn't a
+    /// regular file, belongs to another user or is open to anyone else.
     pub fn open(path: &Path) -> io::Result<Self> {
         let directory = path
             .parent()
@@ -40,7 +44,8 @@ impl Journal {
                 "the journal's directory is a symlink or not a directory",
             ));
         }
-        if directory_metadata.uid() != fs::metadata("/proc/self")?.uid() {
+        let uid = fs::metadata("/proc/self")?.uid();
+        if directory_metadata.uid() != uid {
             return Err(refuse("the journal's directory belongs to another user"));
         }
         if directory_metadata.mode() & 0o777 != 0o700 {
@@ -58,18 +63,44 @@ impl Journal {
             .append(true)
             .create(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(path)?;
-        if file.metadata()?.mode() & 0o077 != 0 {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(refuse("the journal path is not a regular file"));
+        }
+        if metadata.uid() != uid {
+            return Err(refuse("the journal file belongs to another user"));
+        }
+        if metadata.mode() & 0o077 != 0 {
             return Err(refuse("the journal file must not be open to other users"));
         }
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            after_failure: false,
+        })
     }
 
-    /// Appends `line` as one line of JSON.
+    /// Appends `line` as one line of JSON. After a failed write, which may
+    /// have left part of a line, the next line starts with a newline, so
+    /// every later line still parses on its own.
     pub fn append(&mut self, line: &Value) -> io::Result<()> {
-        let mut bytes = serde_json::to_vec(line)?;
+        let mut bytes = Vec::new();
+        if self.after_failure {
+            bytes.push(b'\n');
+        }
+        serde_json::to_writer(&mut bytes, line)?;
         bytes.push(b'\n');
-        self.file.write_all(&bytes)
+        match self.file.write_all(&bytes) {
+            Ok(()) => {
+                self.after_failure = false;
+                Ok(())
+            }
+            Err(error) => {
+                self.after_failure = true;
+                Err(error)
+            }
+        }
     }
 }
 
@@ -159,5 +190,29 @@ pub(crate) mod tests {
         let path = directory.join("journal.jsonl");
         symlink(&target, &path).unwrap();
         assert!(Journal::open(&path).is_err());
+    }
+
+    #[test]
+    fn a_line_after_a_failed_write_starts_on_a_fresh_line() {
+        let mut journal = Journal {
+            file: fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+            after_failure: false,
+        };
+        assert!(journal.append(&json!({"event": "lost"})).is_err());
+
+        let directory = scratch("after-failure");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("journal.jsonl");
+        fs::write(&path, b"{\"event\":\"par").unwrap();
+        journal.file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        journal.append(&json!({"event": "next"})).unwrap();
+        journal.append(&json!({"event": "after"})).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\"event\":\"par\n{\"event\":\"next\"}\n{\"event\":\"after\"}\n"
+        );
     }
 }

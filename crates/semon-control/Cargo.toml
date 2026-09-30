@@ -8,6 +8,8 @@ description = "Two-way control, step 1: the pending-request model, its canonical
 
 [dependencies]
 hex.workspace = true
+# Already in Cargo.lock; only for the O_NOFOLLOW constant.
+libc = "0.2.189"
 serde_json.workspace = true
 # Already in the workspace for semon-store; RFC 8785 with UTF-16 key order
 # and ECMAScript number formatting.

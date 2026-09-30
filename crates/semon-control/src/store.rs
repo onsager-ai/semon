@@ -16,8 +16,8 @@ use crate::{
     canonical,
     journal::Journal,
     request::{
-        Answer, Answerable, LeftReason, MatchKey, NewRequest, PendingRequest, RequestId,
-        ResolvedReason, Source, State,
+        Answer, Answerable, Kind, LeftReason, MatchKey, NewRequest, PendingRequest, RequestId,
+        ResolvedReason, Source, State, single_choice_questions,
     },
 };
 
@@ -29,7 +29,8 @@ pub const MAX_HOOK_WAITS: usize = 64;
 pub const MAX_HOOK_WAITS_PER_SESSION: usize = 4;
 /// A payload whose canonical encoding is larger is not registered.
 pub const MAX_PAYLOAD_BYTES: usize = 1 << 20;
-/// A session key or tool name longer than this is not registered.
+/// A session key, tool name or harness reference longer than this is not
+/// registered.
 pub const MAX_ID_BYTES: usize = 256;
 /// At most this many final requests are kept; the oldest go first.
 pub const MAX_RETAINED_FINAL: usize = 1024;
@@ -38,6 +39,14 @@ pub const RETAIN_FINAL_MS: u64 = 10 * 60 * 1000;
 /// A claim that hasn't ended this long after it was made becomes `left`,
 /// delivery unknown.
 pub const DELIVERY_DEADLINE_MS: u64 = 10_000;
+/// Refused registrations for one session are journalled at most once per
+/// this window; the next line carries the count suppressed meanwhile.
+pub const REFUSAL_WINDOW_MS: u64 = 60_000;
+/// At most this many sessions' refusal windows are tracked; the oldest is
+/// forgotten first.
+const MAX_REFUSAL_WINDOWS: usize = 64;
+/// A session key in a registration-refusal line is cut to this many bytes.
+const JOURNAL_SESSION_BYTES: usize = 64;
 
 /// How delivering an answer to the harness ended, as far as it lets Semon
 /// see.
@@ -80,8 +89,9 @@ pub enum RegisterError {
     /// The payload's canonical encoding is over [`MAX_PAYLOAD_BYTES`].
     #[error("the payload is too large")]
     PayloadTooLarge,
-    /// The session key or tool name is over [`MAX_ID_BYTES`].
-    #[error("the session key or tool name is too long")]
+    /// The session key, tool name or harness reference is over
+    /// [`MAX_ID_BYTES`].
+    #[error("the session key, tool name or harness reference is too long")]
     IdTooLong,
     /// No random id could be made.
     #[error("no random id: {0}")]
@@ -108,7 +118,9 @@ pub enum AnswerError {
         /// The payload the request holds now.
         payload: Box<Value>,
     },
-    /// The answer doesn't fit the request's kind (400).
+    /// The answer doesn't fit the request (400): an allow or deny for a
+    /// question, or answers whose questions aren't exactly the request's or
+    /// whose labels aren't among its options.
     #[error("the answer doesn't fit the request")]
     WrongShape,
 }
@@ -164,6 +176,15 @@ struct Inner {
     journal: Journal,
     dropped: u64,
     journal_failures: u64,
+    refusal_windows: Vec<RefusalWindow>,
+}
+
+/// One session's current window of journalled registration refusals.
+#[derive(Debug)]
+struct RefusalWindow {
+    session: String,
+    started_ms: u64,
+    suppressed: u64,
 }
 
 impl RequestStore {
@@ -175,6 +196,7 @@ impl RequestStore {
                 journal,
                 dropped: 0,
                 journal_failures: 0,
+                refusal_windows: Vec::new(),
             }),
         }
     }
@@ -196,9 +218,17 @@ impl RequestStore {
         });
         let result = match admitted {
             Ok((id, (payload_sha256, problem))) => {
-                let answerable = match (new.read_only, problem) {
-                    (Some(reason), _) | (None, Some(reason)) => Answerable::No(reason),
-                    (None, None) => Answerable::Yes,
+                if let Some(key) = &new.match_key {
+                    inner.supersede(&new.session, key);
+                }
+                let question_problem = if new.kind == Kind::Question {
+                    single_choice_questions(&new.payload).err()
+                } else {
+                    None
+                };
+                let answerable = match new.read_only.or(problem).or(question_problem) {
+                    Some(reason) => Answerable::No(reason),
+                    None => Answerable::Yes,
                 };
                 inner.requests.push(PendingRequest {
                     id,
@@ -216,21 +246,13 @@ impl RequestStore {
                     state: State::Open,
                     ended_ms: None,
                     tool_run_matched: false,
+                    superseded: false,
                     tool_ran_after_deny: false,
                 });
                 Ok(id)
             }
             Err(error) => {
-                inner.dropped += 1;
-                let line = json!({
-                    "time_ms": now_ms,
-                    "event": "refused_registration",
-                    "session": new.session,
-                    "harness": new.harness.as_str(),
-                    "kind": new.kind.as_str(),
-                    "reason": error.to_string(),
-                });
-                inner.write(&line);
+                inner.refuse_registration(&new, &error, now_ms);
                 Err(error)
             }
         };
@@ -241,7 +263,9 @@ impl RequestStore {
     /// The driver's answer operation: checks and claims the request, has
     /// `adapter` deliver the answer, and returns the state that ends in
     /// (`claimed` while a Codex confirmation is awaited). Every answer and
-    /// every refusal is journalled.
+    /// every refusal is journalled. `clock` is read before the claim and
+    /// again after delivery, so a delivery that outlasts the deadline ends as
+    /// `left`, delivery unknown.
     pub fn answer(
         &self,
         adapter: &dyn Adapter,
@@ -249,15 +273,18 @@ impl RequestStore {
         answer: Answer,
         payload_sha256: &str,
         source: Source,
-        now_ms: u64,
+        clock: &dyn Fn() -> u64,
     ) -> Result<State, AnswerError> {
         let claimed = {
+            let now_ms = clock();
             let mut inner = self.lock();
             inner.expire(now_ms);
             inner.claim(id, &answer, payload_sha256, &source, now_ms)?
         };
         let delivery = adapter.deliver(&claimed, &answer);
+        let now_ms = clock();
         let mut inner = self.lock();
+        inner.expire(now_ms);
         let Some(index) = inner.position(id) else {
             return Ok(State::Gone);
         };
@@ -397,23 +424,90 @@ type Hashed = (Option<String>, Option<String>);
 
 fn hash_payload(new: &NewRequest) -> Result<Hashed, RegisterError> {
     let tool_name_len = new.match_key.as_ref().map_or(0, |key| key.tool_name.len());
-    if new.session.len() > MAX_ID_BYTES || tool_name_len > MAX_ID_BYTES {
+    if new.session.len() > MAX_ID_BYTES
+        || tool_name_len > MAX_ID_BYTES
+        || new.harness_ref.len() > MAX_ID_BYTES
+    {
         return Err(RegisterError::IdTooLong);
+    }
+    // Refuse a payload that is too large before encoding it, from a cheap
+    // lower bound on its size; the exact check follows the encoding.
+    if encoded_len_floor(&new.payload, MAX_PAYLOAD_BYTES) > MAX_PAYLOAD_BYTES {
+        return Err(RegisterError::PayloadTooLarge);
     }
     match canonical::canonical_bytes(&new.payload) {
         Ok(bytes) if bytes.len() > MAX_PAYLOAD_BYTES => Err(RegisterError::PayloadTooLarge),
         Ok(bytes) => Ok((Some(canonical::sha256_of(&bytes)), None)),
-        Err(error) => {
-            let size = serde_json::to_vec(&new.payload).map_or(usize::MAX, |bytes| bytes.len());
-            if size > MAX_PAYLOAD_BYTES {
-                return Err(RegisterError::PayloadTooLarge);
+        Err(error) => Ok((
+            None,
+            Some(format!("Semon can't hash this request exactly ({error})")),
+        )),
+    }
+}
+
+/// A lower bound on the length of `value`'s JSON encoding, canonical or not.
+/// The walk stops soon after the bound passes `limit`.
+fn encoded_len_floor(value: &Value, limit: usize) -> usize {
+    fn walk(value: &Value, total: &mut usize, limit: usize) {
+        match value {
+            Value::Null | Value::Bool(_) => *total += 4,
+            Value::Number(_) => *total += 1,
+            Value::String(text) => *total += text.len() + 2,
+            Value::Array(items) => {
+                *total += 2 + items.len().saturating_sub(1);
+                for item in items {
+                    if *total > limit {
+                        return;
+                    }
+                    walk(item, total, limit);
+                }
             }
-            Ok((
-                None,
-                Some(format!("Semon can't hash this request exactly ({error})")),
-            ))
+            Value::Object(fields) => {
+                *total += 2 + fields.len().saturating_sub(1);
+                for (key, item) in fields {
+                    if *total > limit {
+                        return;
+                    }
+                    *total += key.len() + 3;
+                    walk(item, total, limit);
+                }
+            }
         }
     }
+    let mut total = 0;
+    walk(value, &mut total, limit);
+    total
+}
+
+/// Whether `answer` fits `request`: allow or deny for a permission; for a
+/// question, exactly one label per question, each among its options.
+fn answer_fits(request: &PendingRequest, answer: &Answer) -> bool {
+    match (request.kind, answer) {
+        (Kind::Permission, Answer::Allow | Answer::Deny { .. }) => true,
+        (Kind::Question, Answer::Questions(chosen)) => single_choice_questions(&request.payload)
+            .is_ok_and(|questions| {
+                chosen.len() == questions.len()
+                    && questions.iter().all(|question| {
+                        chosen
+                            .get(&question.text)
+                            .is_some_and(|label| question.labels.contains(label))
+                    })
+            }),
+        _ => false,
+    }
+}
+
+/// `text` cut to at most `max` bytes on a character boundary, marked with
+/// an ellipsis when cut.
+fn truncated(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\u{2026}", &text[..end])
 }
 
 /// Moves `request` to `state`, stamping the end time when it is final.
@@ -457,6 +551,74 @@ impl Inner {
         Ok(())
     }
 
+    /// A new request with `key` is registering in `session`, so the session
+    /// has moved past every earlier request with that key that has ended and
+    /// that no tool run matched: a later run belongs to the new one. This
+    /// assumes Claude asks for one session's tool calls in order.
+    fn supersede(&mut self, session: &str, key: &MatchKey) {
+        for request in &mut self.requests {
+            if request.session == session
+                && request.match_key.as_ref() == Some(key)
+                && request.state.is_final()
+                && !request.tool_run_matched
+            {
+                request.superseded = true;
+            }
+        }
+    }
+
+    /// Counts a refused registration and journals it, at most once per
+    /// session per [`REFUSAL_WINDOW_MS`]; the line carries the number of
+    /// refusals suppressed in that session's previous window.
+    fn refuse_registration(&mut self, new: &NewRequest, error: &RegisterError, now_ms: u64) {
+        self.dropped += 1;
+        let session = truncated(&new.session, JOURNAL_SESSION_BYTES);
+        let existing = self
+            .refusal_windows
+            .iter()
+            .position(|window| window.session == session);
+        let suppressed_before = match existing {
+            Some(index) => {
+                let window = &mut self.refusal_windows[index];
+                if now_ms < window.started_ms.saturating_add(REFUSAL_WINDOW_MS) {
+                    window.suppressed += 1;
+                    return;
+                }
+                let suppressed = window.suppressed;
+                window.started_ms = now_ms;
+                window.suppressed = 0;
+                suppressed
+            }
+            None => {
+                if self.refusal_windows.len() >= MAX_REFUSAL_WINDOWS {
+                    let oldest = self
+                        .refusal_windows
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, window)| window.started_ms)
+                        .map_or(0, |(index, _)| index);
+                    self.refusal_windows.swap_remove(oldest);
+                }
+                self.refusal_windows.push(RefusalWindow {
+                    session: session.clone(),
+                    started_ms: now_ms,
+                    suppressed: 0,
+                });
+                0
+            }
+        };
+        let line = json!({
+            "time_ms": now_ms,
+            "event": "refused_registration",
+            "session": session,
+            "harness": new.harness.as_str(),
+            "kind": new.kind.as_str(),
+            "reason": error.to_string(),
+            "suppressed_before": suppressed_before,
+        });
+        self.write(&line);
+    }
+
     /// Checks an answer in order (unknown, not open, read-only, hash, shape)
     /// and, if it passes, claims the request. A refusal is journalled.
     fn claim(
@@ -480,7 +642,7 @@ impl Inner {
                         payload: Box::new(request.payload.clone()),
                     })
                 }
-                Answerable::Yes if !answer.fits(request.kind) => Some(AnswerError::WrongShape),
+                Answerable::Yes if !answer_fits(request, answer) => Some(AnswerError::WrongShape),
                 Answerable::Yes => None,
             },
         };
@@ -600,6 +762,7 @@ impl Inner {
             request.session == session
                 && request.match_key.as_ref() == Some(key)
                 && !request.tool_run_matched
+                && !request.superseded
                 && matches!(
                     request.state,
                     State::Open | State::Claimed { .. } | State::Answered { .. } | State::Left(_)

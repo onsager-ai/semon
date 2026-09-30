@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::{
     Adapter, AnswerError, DELIVERY_DEADLINE_MS, Delivery, MAX_HOOK_WAITS,
     MAX_HOOK_WAITS_PER_SESSION, MAX_ID_BYTES, MAX_OPEN, MAX_PAYLOAD_BYTES, MAX_RETAINED_FINAL,
-    RETAIN_FINAL_MS, RegisterError, RequestStore, ToolRun,
+    REFUSAL_WINDOW_MS, RETAIN_FINAL_MS, RegisterError, RequestStore, ToolRun,
 };
 use crate::{
     journal::{
@@ -171,7 +171,7 @@ fn first_claim_wins_under_concurrent_answers() {
                         Answer::Allow,
                         hash,
                         source(&format!("w{window}")),
-                        T0 + 1,
+                        &|| T0 + 1,
                     )
                 })
             })
@@ -217,11 +217,13 @@ fn not_open_comes_before_a_hash_mismatch() {
     let hash = digest(&store, id);
     let adapter = Fake::new(Delivery::Written);
     store
-        .answer(&adapter, id, Answer::Allow, &hash, source("w1"), T0 + 1)
+        .answer(&adapter, id, Answer::Allow, &hash, source("w1"), &|| T0 + 1)
         .unwrap();
 
     let error = store
-        .answer(&adapter, id, Answer::Allow, "0000", source("w2"), T0 + 2)
+        .answer(&adapter, id, Answer::Allow, "0000", source("w2"), &|| {
+            T0 + 2
+        })
         .unwrap_err();
     assert!(
         matches!(error, AnswerError::NotOpen(State::Answered { .. })),
@@ -241,7 +243,9 @@ fn a_wrong_hash_on_an_open_request_is_412_with_the_current_payload() {
     let stale = crate::canonical::sha256_hex(&json!({"command": "cargo test --release"})).unwrap();
 
     let error = store
-        .answer(&adapter, id, Answer::Allow, &stale, source("w1"), T0 + 1)
+        .answer(&adapter, id, Answer::Allow, &stale, source("w1"), &|| {
+            T0 + 1
+        })
         .unwrap_err();
     assert_eq!(
         error,
@@ -273,14 +277,16 @@ fn an_answer_must_fit_the_request_kind() {
     ] {
         let hash = digest(&store, id);
         let error = store
-            .answer(&adapter, id, answer, &hash, source("w1"), T0 + 1)
+            .answer(&adapter, id, answer, &hash, source("w1"), &|| T0 + 1)
             .unwrap_err();
         assert_eq!(error, AnswerError::WrongShape);
         assert_eq!(error.http_status(), 400);
     }
     let hash = digest(&store, questioned);
     let answered = store
-        .answer(&adapter, questioned, choice, &hash, source("w1"), T0 + 1)
+        .answer(&adapter, questioned, choice, &hash, source("w1"), &|| {
+            T0 + 1
+        })
         .unwrap();
     assert!(matches!(answered, State::Answered { .. }));
     assert_eq!(adapter.calls(), 1);
@@ -301,7 +307,14 @@ fn read_only_requests_refuse_answers() {
         .unwrap();
     let hash = digest(&store, marked);
     let error = store
-        .answer(&adapter, marked, Answer::Allow, &hash, source("w1"), T0 + 1)
+        .answer(
+            &adapter,
+            marked,
+            Answer::Allow,
+            &hash,
+            source("w1"),
+            &|| T0 + 1,
+        )
         .unwrap_err();
     assert!(matches!(error, AnswerError::ReadOnly(_)), "{error:?}");
     assert_eq!(error.http_status(), 409);
@@ -327,7 +340,7 @@ fn read_only_requests_refuse_answers() {
             Answer::Allow,
             "",
             source("w1"),
-            T0 + 1,
+            &|| T0 + 1,
         )
         .unwrap_err();
     assert!(matches!(error, AnswerError::ReadOnly(_)), "{error:?}");
@@ -345,7 +358,7 @@ fn unknown_ids_are_404_and_journalled() {
             Answer::Allow,
             "",
             source("w1"),
-            T0,
+            &|| T0,
         )
         .unwrap_err();
     assert_eq!(error, AnswerError::UnknownId);
@@ -380,7 +393,7 @@ fn each_delivery_mode_ends_the_claim_as_specified() {
                 deny(),
                 &hash,
                 source("w1"),
-                T0 + 1,
+                &|| T0 + 1,
             )
             .unwrap();
         assert_eq!(ended.name(), expected, "{delivery:?}");
@@ -417,7 +430,7 @@ fn a_claim_with_no_outcome_is_left_delivery_unknown_at_the_deadline() {
             Answer::Allow,
             &hash,
             source("w1"),
-            claimed_at,
+            &|| claimed_at,
         )
         .unwrap();
     assert_eq!(claimed.name(), "claimed");
@@ -456,7 +469,9 @@ fn answers_after_expiry_are_refused_and_the_request_is_left_timed_out() {
     let late = store.register(permission("s1", "ls"), T0).unwrap();
     let hash = digest(&store, late);
     let error = store
-        .answer(&adapter, late, Answer::Allow, &hash, source("w1"), EXPIRES)
+        .answer(&adapter, late, Answer::Allow, &hash, source("w1"), &|| {
+            EXPIRES
+        })
         .unwrap_err();
     assert_eq!(
         error,
@@ -474,7 +489,7 @@ fn answers_after_expiry_are_refused_and_the_request_is_left_timed_out() {
                 Answer::Allow,
                 &hash,
                 source("w1"),
-                EXPIRES - 1
+                &|| EXPIRES - 1
             )
             .is_ok()
     );
@@ -495,7 +510,7 @@ fn final_states_are_final() {
             Answer::Allow,
             &digest(&store, answered),
             source("w"),
-            now,
+            &|| now,
         )
         .unwrap();
     finals.push(answered);
@@ -512,7 +527,7 @@ fn final_states_are_final() {
             Answer::Allow,
             &digest(&store, rejected),
             source("w"),
-            now,
+            &|| now,
         )
         .unwrap();
     finals.push(rejected);
@@ -537,7 +552,7 @@ fn final_states_are_final() {
             Answer::Allow,
             &digest(&store, undelivered),
             source("w"),
-            now,
+            &|| now,
         )
         .unwrap();
     store.tick(now + DELIVERY_DEADLINE_MS);
@@ -563,7 +578,7 @@ fn final_states_are_final() {
                 Answer::Allow,
                 &digest(&store, *id),
                 source("w"),
-                later,
+                &|| later,
             )
             .unwrap_err();
         assert_eq!(error, AnswerError::NotOpen(before.clone()));
@@ -595,7 +610,7 @@ fn a_session_ending_makes_its_open_and_claimed_requests_gone() {
             Answer::Allow,
             &digest(&store, claimed),
             source("w"),
-            T0 + 1,
+            &|| T0 + 1,
         )
         .unwrap();
 
@@ -631,7 +646,7 @@ fn a_tool_run_resolves_the_open_request_and_a_later_answer_is_refused() {
     assert_eq!(state(&store, id, T0 + 1), allowed);
 
     let error = store
-        .answer(&adapter, id, deny(), &hash, source("w1"), T0 + 2)
+        .answer(&adapter, id, deny(), &hash, source("w1"), &|| T0 + 2)
         .unwrap_err();
     assert_eq!(error, AnswerError::NotOpen(allowed));
     assert_eq!(adapter.calls(), 0);
@@ -656,7 +671,7 @@ fn a_tool_run_after_a_viewer_deny_is_marked_and_journalled() {
             deny(),
             &digest(&store, id),
             source("w1"),
-            T0 + 1,
+            &|| T0 + 1,
         )
         .unwrap();
 
@@ -681,7 +696,7 @@ fn a_tool_run_during_a_claimed_deny_marks_it_when_the_claim_ends() {
             deny(),
             &digest(&store, id),
             source("w1"),
-            T0 + 1,
+            &|| T0 + 1,
         )
         .unwrap();
     assert_eq!(
@@ -708,7 +723,7 @@ fn identical_requests_in_one_session_are_matched_in_order() {
             Answer::Allow,
             &digest(&store, first),
             source("w"),
-            T0 + 1,
+            &|| T0 + 1,
         )
         .unwrap();
 
@@ -870,14 +885,26 @@ fn oversized_payloads_and_ids_are_not_registered() {
         ..permission("s2", "ls")
     };
     assert_eq!(store.register(long_tool, T0), Err(RegisterError::IdTooLong));
-    assert_eq!(store.snapshot(T0).dropped, 3);
+    let long_ref = NewRequest {
+        harness_ref: "r".repeat(MAX_ID_BYTES + 1),
+        ..unhooked("s3")
+    };
+    assert_eq!(store.register(long_ref, T0), Err(RegisterError::IdTooLong));
+    assert_eq!(store.snapshot(T0).dropped, 4);
     assert_eq!(
         events(&path),
         [
             "refused_registration",
             "refused_registration",
+            "refused_registration",
             "refused_registration"
         ]
+    );
+    // The over-long session key is cut in the journal.
+    let cut = lines(&path)[1]["session"].as_str().unwrap().to_owned();
+    assert!(
+        cut.len() <= 64 + '\u{2026}'.len_utf8() && cut.ends_with('\u{2026}'),
+        "{cut}"
     );
 }
 
@@ -911,10 +938,10 @@ fn the_journal_gets_one_line_per_answer_and_per_refusal() {
     let hash = digest(&store, id);
 
     store
-        .answer(&adapter, id, Answer::Allow, &hash, source("w1"), T0 + 1)
+        .answer(&adapter, id, Answer::Allow, &hash, source("w1"), &|| T0 + 1)
         .unwrap();
     store
-        .answer(&adapter, id, Answer::Allow, &hash, source("w2"), T0 + 2)
+        .answer(&adapter, id, Answer::Allow, &hash, source("w2"), &|| T0 + 2)
         .unwrap_err();
     store
         .answer(
@@ -923,7 +950,7 @@ fn the_journal_gets_one_line_per_answer_and_per_refusal() {
             Answer::Allow,
             &hash,
             source("w2"),
-            T0 + 3,
+            &|| T0 + 3,
         )
         .unwrap_err();
     for _ in 0..MAX_HOOK_WAITS_PER_SESSION {
@@ -977,4 +1004,236 @@ fn request_ids_are_32_lowercase_hex_digits() {
     assert_eq!(RequestId::parse(&text[..31]), None);
     assert_eq!(RequestId::parse(&format!("{text}0")), None);
     assert_eq!(RequestId::parse("zz".repeat(16).as_str()), None);
+}
+
+#[test]
+fn question_answers_must_match_the_payload() {
+    let (store, _) = new_store("question-shape");
+    let adapter = Fake::new(Delivery::Written);
+    let id = store.register(question("s1"), T0).unwrap();
+    let hash = digest(&store, id);
+    let pick = |pairs: &[(&str, &str)]| {
+        Answer::Questions(
+            pairs
+                .iter()
+                .map(|(text, label)| ((*text).to_owned(), (*label).to_owned()))
+                .collect(),
+        )
+    };
+    for wrong in [
+        pick(&[("Which branch?", "release")]),
+        pick(&[("Which tag?", "main")]),
+        pick(&[("Which branch?", "main"), ("Anything else?", "no")]),
+    ] {
+        let error = store
+            .answer(&adapter, id, wrong, &hash, source("w1"), &|| T0 + 1)
+            .unwrap_err();
+        assert_eq!(error, AnswerError::WrongShape);
+    }
+    assert_eq!(state(&store, id, T0 + 1), State::Open);
+    assert_eq!(adapter.calls(), 0);
+    let answered = store
+        .answer(
+            &adapter,
+            id,
+            pick(&[("Which branch?", "dev")]),
+            &hash,
+            source("w1"),
+            &|| T0 + 1,
+        )
+        .unwrap();
+    assert!(matches!(answered, State::Answered { .. }), "{answered:?}");
+}
+
+#[test]
+fn questions_step_1_cannot_answer_register_read_only() {
+    let (store, _) = new_store("question-read-only");
+    let payload = |questions: Value| json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": questions}});
+    let cases = [
+        payload(json!([{"question": "Which?", "options": [{"label": "a"}], "multiSelect": true}])),
+        payload(json!([
+            {"question": "Which?", "options": [{"label": "a"}]},
+            {"question": "Which?", "options": [{"label": "b"}]}
+        ])),
+        payload(json!([{"question": "Why?", "options": []}])),
+        payload(json!([])),
+    ];
+    for (number, payload) in cases.into_iter().enumerate() {
+        let id = store
+            .register(
+                NewRequest {
+                    payload,
+                    ..question(&format!("s{number}"))
+                },
+                T0,
+            )
+            .unwrap();
+        let request = store.get(id, T0).unwrap();
+        assert!(matches!(request.answerable, Answerable::No(_)), "{number}");
+    }
+}
+
+#[test]
+fn a_retry_after_a_honoured_deny_takes_the_next_tool_run() {
+    let (store, path) = new_store("retry-deny");
+    let adapter = Fake::new(Delivery::Written);
+    let first = store.register(permission("s1", "cargo test"), T0).unwrap();
+    store
+        .answer(
+            &adapter,
+            first,
+            deny(),
+            &digest(&store, first),
+            source("w"),
+            &|| T0 + 1,
+        )
+        .unwrap();
+    let retry = store
+        .register(permission("s1", "cargo test"), T0 + 2)
+        .unwrap();
+
+    assert_eq!(
+        store.tool_ran("s1", &key("cargo test"), T0 + 3),
+        ToolRun::ResolvedOpen(retry)
+    );
+    let denied = store.get(first, T0 + 3).unwrap();
+    assert!(denied.superseded);
+    assert!(!denied.tool_ran_after_deny);
+    assert_eq!(events(&path), ["answer"]);
+}
+
+#[test]
+fn a_retry_after_an_allowed_run_that_failed_takes_the_next_tool_run() {
+    let (store, _) = new_store("retry-allow");
+    let first = store.register(permission("s1", "cargo test"), T0).unwrap();
+    store
+        .answer(
+            &Fake::new(Delivery::Written),
+            first,
+            Answer::Allow,
+            &digest(&store, first),
+            source("w"),
+            &|| T0 + 1,
+        )
+        .unwrap();
+    // The tool failed and no report of it arrived; the agent asks again.
+    let retry = store
+        .register(permission("s1", "cargo test"), T0 + 2)
+        .unwrap();
+    assert_eq!(
+        store.tool_ran("s1", &key("cargo test"), T0 + 3),
+        ToolRun::ResolvedOpen(retry)
+    );
+}
+
+#[test]
+fn a_retry_after_a_timed_out_request_takes_the_next_tool_run() {
+    let (store, _) = new_store("retry-left");
+    let first = store
+        .register(
+            NewRequest {
+                expires_ms: T0 + 1,
+                ..permission("s1", "cargo test")
+            },
+            T0,
+        )
+        .unwrap();
+    store.tick(T0 + 1);
+    assert_eq!(
+        state(&store, first, T0 + 1),
+        State::Left(LeftReason::TimedOut)
+    );
+    let retry = store
+        .register(permission("s1", "cargo test"), T0 + 2)
+        .unwrap();
+    assert_eq!(
+        store.tool_ran("s1", &key("cargo test"), T0 + 3),
+        ToolRun::ResolvedOpen(retry)
+    );
+    // A request with another key, or in another session, is not superseded.
+    assert!(!store.get(retry, T0 + 3).unwrap().superseded);
+}
+
+#[test]
+fn registration_refusals_are_journalled_once_per_session_per_window() {
+    let (store, path) = new_store("coalesce");
+    for _ in 0..MAX_HOOK_WAITS_PER_SESSION {
+        store.register(permission("s1", "ls"), T0).unwrap();
+    }
+    for offset in 0..5 {
+        store
+            .register(permission("s1", "ls"), T0 + offset)
+            .unwrap_err();
+    }
+    assert_eq!(events(&path), ["refused_registration"]);
+    store
+        .register(unhooked(&"x".repeat(MAX_ID_BYTES + 1)), T0 + 5)
+        .unwrap_err();
+    store
+        .register(permission("s1", "ls"), T0 + REFUSAL_WINDOW_MS)
+        .unwrap_err();
+
+    let journal = lines(&path);
+    assert_eq!(journal.len(), 3);
+    assert_eq!(journal[0]["suppressed_before"], 0);
+    assert_eq!(journal[1]["reason"], RegisterError::IdTooLong.to_string());
+    assert_eq!(journal[2]["session"], "s1");
+    assert_eq!(journal[2]["suppressed_before"], 4);
+    assert_eq!(store.snapshot(T0 + REFUSAL_WINDOW_MS).dropped, 7);
+}
+
+#[test]
+fn a_delivery_that_outlasts_the_deadline_is_left_delivery_unknown() {
+    let (store, path) = new_store("slow-delivery");
+    let id = store.register(permission("s1", "ls"), T0).unwrap();
+    let hash = digest(&store, id);
+    let reads = std::cell::Cell::new(0_u64);
+    let clock = || {
+        let read = reads.get();
+        reads.set(read + 1);
+        if read == 0 {
+            T0 + 1
+        } else {
+            T0 + 1 + DELIVERY_DEADLINE_MS
+        }
+    };
+    let ended = store
+        .answer(
+            &Fake::new(Delivery::Written),
+            id,
+            Answer::Allow,
+            &hash,
+            source("w1"),
+            &clock,
+        )
+        .unwrap();
+    assert_eq!(ended, State::Left(LeftReason::DeliveryUnknown));
+    assert_eq!(reads.get(), 2);
+    let journal = lines(&path);
+    assert_eq!(journal.len(), 1);
+    assert_eq!(
+        journal[0]["outcome"],
+        json!({"state": "left", "reason": "delivery_unknown"})
+    );
+}
+
+#[test]
+fn the_size_floor_never_exceeds_the_encoding() {
+    for value in [
+        json!(null),
+        json!(false),
+        json!(12345.5),
+        json!("a\u{1}b\"c\u{e9}"),
+        json!([1, [2, {"k": "v"}], []]),
+        json!({"a": {"b": [true, null, "x"]}, "": 0}),
+        permission("s", "cargo test").payload,
+    ] {
+        let exact = crate::canonical::canonical_bytes(&value).unwrap().len();
+        assert!(
+            super::encoded_len_floor(&value, usize::MAX) <= exact,
+            "{value}"
+        );
+    }
+    let big = json!({"s": "x".repeat(MAX_PAYLOAD_BYTES)});
+    assert!(super::encoded_len_floor(&big, MAX_PAYLOAD_BYTES) > MAX_PAYLOAD_BYTES);
 }

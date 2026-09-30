@@ -164,14 +164,6 @@ pub enum Answer {
 }
 
 impl Answer {
-    /// Whether this answer has the shape `kind` takes.
-    pub fn fits(&self, kind: Kind) -> bool {
-        match self {
-            Self::Allow | Self::Deny { .. } => kind == Kind::Permission,
-            Self::Questions(answers) => kind == Kind::Question && !answers.is_empty(),
-        }
-    }
-
     pub(crate) fn is_deny(&self) -> bool {
         matches!(self, Self::Deny { .. })
     }
@@ -183,6 +175,63 @@ impl Answer {
             Self::Questions(answers) => json!({"answers": answers}),
         }
     }
+}
+
+/// One single-choice question of a question request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Question {
+    /// The question's text, which keys its answer.
+    pub(crate) text: String,
+    /// Its options' labels.
+    pub(crate) labels: Vec<String>,
+}
+
+/// The questions of a question payload, which carries them as Claude's
+/// `AskUserQuestion` does, at `tool_input.questions`; or why it can't be
+/// answered here. Only single-choice questions with distinct texts and at
+/// least one option are answerable in step 1.
+pub(crate) fn single_choice_questions(payload: &Value) -> Result<Vec<Question>, String> {
+    let items = payload
+        .pointer("/tool_input/questions")
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty())
+        .ok_or("the request carries no questions")?;
+    let mut questions: Vec<Question> = Vec::with_capacity(items.len());
+    for item in items {
+        let text = item
+            .get("question")
+            .and_then(Value::as_str)
+            .ok_or("a question has no text")?;
+        if item
+            .get("multiSelect")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err("multi-select questions are answered in the terminal".to_owned());
+        }
+        if questions.iter().any(|question| question.text == text) {
+            return Err("two questions have the same text".to_owned());
+        }
+        let labels: Vec<String> = item
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| option.get("label").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if labels.is_empty() {
+            return Err("a question with no options is answered in the terminal".to_owned());
+        }
+        questions.push(Question {
+            text: text.to_owned(),
+            labels,
+        });
+    }
+    Ok(questions)
 }
 
 /// Why a request ended elsewhere.
@@ -354,6 +403,10 @@ pub struct PendingRequest {
     pub ended_ms: Option<u64>,
     /// Whether a tool-run report has been matched to it.
     pub tool_run_matched: bool,
+    /// Whether a later request with the same session and match key was
+    /// registered after this one ended unmatched, so tool runs are no longer
+    /// matched to this one.
+    pub superseded: bool,
     /// Whether the tool ran although a deny from the viewer was delivered:
     /// the terminal allowed it first.
     pub tool_ran_after_deny: bool,
