@@ -359,7 +359,15 @@ async function scheme(browser, name, opts, r) {
       say(same(ids(drawerAfter), lanesOld) && still(drawerTops, drawerAfter), "the drawer's rows moved or changed under a scrolled list: " + ids(drawerAfter).join(",") + " vs " + lanesOld.join(","));
       say(Math.abs((await scrollOf(page, "side")) - R.sideScrolled) <= 1, "the drawer's scroll position changed");
       await page.screenshot({ path: path.join(ENV.out, "order-" + name + "-side.png") });
-      await tapPill("side");
+      // Tap the visible pill where a reader would: locator.tap scrolls this sticky descendant before hitting it.
+      const sideTap = await page.evaluate(() => {
+        const pill = document.querySelector('.order-pill[data-order="side"]'), rect = pill.getBoundingClientRect();
+        const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2, hit = document.elementFromPoint(x, y);
+        return { x, y, hitsPill: !pill.hidden && (hit === pill || pill.contains(hit)), hit: hit?.tagName + ":" + hit?.className };
+      });
+      R.sideTap = sideTap;
+      say(sideTap.hitsPill, "the drawer's pill must own the tap at its centre: " + JSON.stringify(sideTap));
+      await page.touchscreen.tap(sideTap.x, sideTap.y);
       await until(page, () => document.querySelector("#lanes > .treeitem")?.dataset.id === "order-c");
       const m = await model(srv), l = lastOf(m), side = ids(await sideRows(page));
       say(side[0] === "order-c" && side.every((id, i) => i === 0 || l[side[i - 1]] >= l[id]), "tapping the drawer's pill didn't list its rows in recency order, the new one first: " + side.join(","));

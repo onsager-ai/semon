@@ -127,23 +127,20 @@ fn brand_row(name: &str) -> String {
     )
 }
 
-/// The sidebar's search field, above the navigation. It narrows the Recent list as the reader types.
-const SIDEBAR_SEARCH: &str = "<label class=\"side-search\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\"><path d=\"M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4\"/></svg><input id=\"q\" type=\"search\" placeholder=\"Search\" autocomplete=\"off\"></label>";
-
 /// The Recent heading and the list the viewer's script draws the sessions into, below the navigation.
 const SIDEBAR_RECENT: &str = "<div class=\"side-h\">Recent</div>\n<div class=\"side-list\" id=\"side-list\"><div id=\"lanes\" role=\"tree\" aria-label=\"Recent sessions\"></div></div>";
 
 /// The viewer's own sidebar, for a page that shows the viewer's session list beside its own content (docs/shell.md, "The
 /// viewer's sidebar on an embedding page"): the header ([`sidebar_head`]: the rail and its collapse toggle are the viewer's own
-/// layout, which an embedding page doesn't take), the search field, `nav` inside
-/// `<nav id="nav">`, then the Recent heading and its list, each as `viewer.html` has it (a test holds them together).
+/// layout, which an embedding page doesn't take), `nav` inside `<nav id="nav">`, then the Recent heading and its list, each as
+/// `viewer.html` has it (a test holds them together).
 /// `name` is escaped here; `nav` is markup, the page's own rows (see [`NavLink::html`]), shown until the viewer's script
 /// draws its navigation in their place. The page adds anything of its own (an account row) after this, inside the
 /// `<aside class="sidebar" id="sidebar">`, marks its `.app` with [`SIDEBAR_ONLY`], and loads `/viewer.js` after
 /// `/shell.js`.
 pub fn session_sidebar(name: &str, nav: &str) -> String {
     format!(
-        "{head}\n{SIDEBAR_SEARCH}\n\
+        "{head}\n\
          <nav id=\"nav\" aria-label=\"Pages\">\n{nav}</nav>\n{SIDEBAR_RECENT}",
         head = sidebar_head(name),
     )
@@ -290,7 +287,7 @@ mod tests {
         let rest = sidebar
             .strip_prefix(&head)
             .expect("the exported sidebar starts with sidebar_head");
-        // The viewer's page has the same search and Recent list around its (empty) navigation, after its header.
+        // The viewer's page has the same navigation and Recent list after its header.
         let (before, after) = rest
             .split_once("<nav id=\"nav\" aria-label=\"Pages\"></nav>")
             .expect("the exported sidebar has its navigation");

@@ -93,7 +93,7 @@ Evidence: the viewer on main (Viewer UI run 36523657501, `viewer-ui` artifact, m
 | Colour says who | Orange 3 px borders on child cards, briefs, relays and a child's whole transcript; ✳ and ⌘ glyphs; tinted "Codex run" chips; harness squares in Trace | Harness in words; no coloured borders; harness colour only in charts |
 | State shown two or three times | Bar dot and a second dot by the runs count; "Working" in the bar and again at the transcript's foot; a machine's dot and its "up" word | One dot and one word per place (P6) |
 | Information dressed as controls, controls dressed as information | The meta line is one big button; the cost row is a full-width grey button; "?" icons that only hover; a child card that is a link with two more links inside | Labels are plain text with tooltips; one control per card; the menu holds details and cost (P5) |
-| Several ways to the same place | Details in the "…" menu and in the details sheet; runs in a popover, in cards, in the sidebar and on Sessions; the parent via crumb, header link and "Open in"; a trace from every Home item and every turn; search in the sidebar and on Sessions | One entry point each (P4) |
+| Several ways to the same place | Details in the "…" menu and in the details sheet; runs in a popover, in cards, in the sidebar and on Sessions; the parent via crumb, header link and "Open in"; a trace from every Home item and every turn | One entry point each (P4) |
 | Chrome louder than content | Four filter selects before the first session or figure; icon-and-number meta; "vs previous 7 d" eight times; faint 2.6:1 text everywhere | Filters in a sheet with chips; words not icons; one caption; AA text (P3, P7) |
 | Details lead with metadata | A step opens on its output with no command; a failed test log opens at its first line | Command first; failures show the tail (P8) |
 | The phone as a narrow desktop | Select grids, 11 px chart bars that are tap targets, 36–40 px buttons, a 44 px toggle gutter on every sidebar row | Phone-first layouts and 44 px targets (P2) |
@@ -107,7 +107,7 @@ Evidence: the viewer on main (Viewer UI run 36523657501, `viewer-ui` artifact, m
 | Unofficial ✳ / ⌘ glyphs mark the harness on every row | every 1280 shot | High | Decision: words, not logos |
 | Child lists are unbounded; long fan-outs push lanes off screen | `sidebar-tree-390-light` | Medium | P9 |
 | Two-line rows repeat host and repo ("marvin-mbp · harbor") on every row; 7 lanes fill the phone drawer | `sidebar-tree-390-light` | Medium | P3 |
-| Search in the sidebar and again on Sessions; "All sessions ›" repeats the Sessions nav item | `home-1280-light` | Medium | P4 |
+| "All sessions ›" repeats the Sessions nav item | `home-1280-light` | Medium | P4 |
 | Nav counts that ask nothing of you ("Sessions 15") | `home-1280-light` | Low | P3 |
 | Rail mode shows each session as an identical ✳ with a dot: sessions can't be told apart | `desktop-rail-1280-light` | Medium | P5 |
 | On phone, the drawer's edge stays over the left 40 px of the page, over the state dots (cause unverified: a capture during the close transition, or a transform bug) | viewer `check-real-home.png` | High | P1 |
