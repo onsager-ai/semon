@@ -480,7 +480,7 @@
   function boot() {
     api("/api/model").then((m) => {
       adopt(m); LIVE.version = m.version; remember(m); if (SIDEBAR_ONLY) { render(); schedule(2000); return; } route = routeOf(location);
-      if (route.v === "sessions") query = (new URLSearchParams(location.search).get("q") ?? "").trim(); // a search an embedding page's sidebar carried here
+      if (route.v === "sessions") query = (new URLSearchParams(location.search).get("q") ?? "").trim(); // direct Sessions links can prefill its search field
       if (route.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
       try { history.replaceState({ ...route, scrollTop: 0 }, "", urlOf(route) + (route.v === "session" ? location.hash : route.v === "sessions" && query ? "?q=" + enc(query) : "")); } catch {}
       const done = () => {
@@ -519,7 +519,7 @@
   }
   // An embedding page's sidebar has no rail and no toggle for it (shell::session_sidebar): the toggle is then a detached button.
   const railToggle = $("#rail-toggle") ?? el("button"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
-  let route = { v: "home" }; let groupBy = "recent"; let query = ""; let analyticsRange = 7, analyticsMeasure = "hours";
+  let route = { v: "home" }; let groupBy = "recent"; let query = ""; let focusSessionsSearchOnRender = null; let analyticsRange = 7, analyticsMeasure = "hours";
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
   let pendingSessionOpen = null, pendingFlashHandoff = null;
   let accountOpen = false;
@@ -591,7 +591,8 @@
   // A deep link to a turn the loaded transcript doesn't hold yet.
   const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
   function go(r, fromHistory) {
-    if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : r.v === "sessions" && query ? "/sessions?q=" + enc(query) : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
+    if (r.v !== "sessions" || r !== focusSessionsSearchOnRender) focusSessionsSearchOnRender = null;
+    if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
     stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
@@ -848,7 +849,9 @@
   }
   const sideRegion = () => $("#side-list") ?? $("#sidebar");
   const ordLive = el("div", "sr-only"); ordLive.id = "order-status"; ordLive.setAttribute("role", "status"); ordLive.setAttribute("aria-live", "polite");
-  { const slot = el("div", "order-slot"); slot.append(makeOrderButton("side", "order-pill")); sideRegion()?.prepend(slot);
+  { const content = el("div", "side-content"), slot = el("div", "order-slot"); slot.append(makeOrderButton("side", "order-pill"));
+    // Bound the sticky slot to the full list content, so it stays pinned through the entire scroll range.
+    content.append(slot, $("#lanes")); sideRegion().prepend(content);
     const pagePill = makeOrderButton("page", "order-pill"); if (SIDEBAR_ONLY) sideRegion().append(ordLive); else { $("#page").before(pagePill); document.body.append(ordLive); }
     makeOrderButton("side", "order-chip"); makeOrderButton("page", "order-chip"); } // the page's pill sits just before the page, so the tab order reaches it first
   function placeOrderPill() {
@@ -965,14 +968,8 @@
   // What a parent's descendants are doing, as parts to join: the runs, then only the non-zero needs-you, working and failed counts (the viewer's own state words).
   const childParts = (all) => { const n = (state) => all.filter((x) => x.state === state).length, wait = n("wait"), work = n("work"), err = n("err"); return [all.length + (all.length === 1 ? " run" : " runs"), wait && wait + " needs you", work && work + " working", err && err + " failed"].filter(Boolean); };
   const defaultTreeOpen = (sid, children) => descendantsOf(sid, children).some((s) => s.state === "wait" || s.state === "work");
-  const matchesTree = (sid, children, seen = new Set()) => {
-    if (seen.has(sid)) return false;
-    seen.add(sid);
-    return sessMatch(SESS[sid], query) || (children.get(sid) ?? []).some((s) => matchesTree(s.id, children, seen));
-  };
   // An open parent lists its waiting children, then its running ones (at most 8), then the newest finished ones until three rows are
-  // listed. "All N" opens the rest: a sheet on a phone, the whole list in the tree on a wide screen. While a search is typed, the
-  // children that match it are the ones listed.
+  // listed. "All N" opens the rest: a sheet on a phone, the whole list in the tree on a wide screen.
   const TREE_ACTIVE = 8, TREE_ROWS = 3;
   // The open session and the sessions above it. Only the open one is marked current; its ancestors are opened in the tree for this render
   // (nothing is saved) and are always listed, so the current row can always be found.
@@ -999,11 +996,9 @@
   function treeGroupFill(group, parent, kids, children, depth, rail, open) {
     const { current, ancestors } = routedPath(), rank = new Map(kids.map((c) => [c.id, kidRank(c, children)]));
     const byRank = (a, b) => rank.get(a.id) - rank.get(b.id) || b.last - a.last, sorted = [...kids].sort(byRank), keep = new Set();
-    // With a search typed, the children that match it are the pool; the short-list rule caps them like any other list.
-    const matching = query ? sorted.filter((c) => matchesTree(c.id, children)) : [], pool = matching.length ? matching : sorted;
-    for (const c of pool) if (rank.get(c.id) < 2 && keep.size < TREE_ACTIVE) keep.add(c.id);
+    for (const c of sorted) if (rank.get(c.id) < 2 && keep.size < TREE_ACTIVE) keep.add(c.id);
     for (const c of sorted) if (c.id === current || ancestors.has(c.id) || expandedPath.has(c.id)) keep.add(c.id);
-    for (const c of pool) if (keep.size < TREE_ROWS) keep.add(c.id);
+    for (const c of sorted) if (keep.size < TREE_ROWS) keep.add(c.id);
     const listed = sorted.filter((c) => keep.has(c.id)), hidden = kids.length - listed.length;
     if (!hidden && expandedAll === parent.id) expandedAll = null; // nothing is left to open: "Show fewer" would have nothing to fold
     const full = hidden > 0 && !rail && (expandedAll === parent.id || expandedUnder.has(parent.id));
@@ -1126,7 +1121,7 @@
     const rail = railMode && !phone.matches, prevSide = ORD.get("side");
     if (rail || prevSide?.rail !== rail) ORD.delete("side"); // the rail draws sorted, and so does a change into or out of it
     const sideState = ordState("side"), focus = laneFocus(), everyone = sessionChildren(), { current, ancestors } = routedPath();
-    sideOrder = orderScope("side", JSON.stringify([query]), null, sideState); sideOrder.rail = rail;
+    sideOrder = orderScope("side", "", null, sideState); sideOrder.rail = rail;
     // The rows drawn now, before the list is emptied: which parents the reader can see, and which sessions were drawn at all.
     const box = $("#lanes"), drawn = [...box.querySelectorAll(".treeitem")];
     sideOrder.seen = new Set(drawn.map((r) => r.dataset.id)); const seeing = new Set(drawn.filter((r) => r.querySelector(":scope > .tree-row .srow")?.getClientRects().length).map((r) => r.dataset.id));
@@ -1139,7 +1134,7 @@
       if (held.length) { children = new Map([...everyone].filter(([p]) => !held.includes(p))); sideOrder.n += held.reduce((n, p) => n + everyone.get(p).length, 0); }
     }
     sideOrder.kids = new Set(children.keys());
-    const lanes = Object.values(SESS).filter((s) => s.lane && !parentOf(s.id) && matchesTree(s.id, children));
+    const lanes = Object.values(SESS).filter((s) => s.lane && !parentOf(s.id));
     if (expandedAll && (phone.matches || railMode || !SESS[expandedAll])) expandedAll = null;
     // Opening or folding a parent's whole list, or crossing into or out of the rail, changes which lists are drawn: those the reader
     // just brought back are drawn sorted, not held as new.
@@ -1148,8 +1143,7 @@
     box.replaceChildren();
     for (const s of orderList(sideOrder, "lanes", lanes, byLast, { limit: 8, must: new Set([current, ...ancestors]) }).slice(0, 8)) box.append(buildLaneItem(s, 0, children, railMode && !phone.matches));
     syncOrderPill("side");
-    if (!lanes.length) { const empty = el("p", "ghead", "No sessions match"); empty.setAttribute("role", "none"); box.append(empty); }
-    const q = $("#q"); if (document.activeElement !== q) q.value = query;
+    if (!lanes.length) { const empty = el("p", "ghead", "No sessions"); empty.setAttribute("role", "none"); box.append(empty); }
     restoreLaneFocus(focus);
     // A stuck row covers the top of the sidebar: what is scrolled into view (the open session, after a navigation) stays clear of it.
     const stuck = box.querySelector(".tree-row.stuck"), navigated = revealedFor !== route; revealedFor = route;
@@ -2151,13 +2145,14 @@
     return put;
   }
   function render() {
+    const focusSearch = focusSessionsSearchOnRender === route; focusSessionsSearchOnRender = null;
     if (SIDEBAR_ONLY) { CHILDREN = null; tick(); rendered = route; renderNav(); renderLanes(); return; } // the embedding page draws its own page and bar
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
     closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
     ordPageState = ordState("page"); tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; clearBox(page, r); page.classList.remove("child-page");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
-    else if (r.v === "sessions") { renderSessions(page); renderTopbar("Sessions"); }
+    else if (r.v === "sessions") { renderSessions(page, focusSearch); renderTopbar("Sessions"); }
     else if (r.v === "machines") { renderMachines(page); renderTopbar("Machines"); }
     else if (r.v === "machine") { renderMachine(page, r.id); renderTopbar(MACHINE[r.id], { label: "Machines", go: () => go({ v: "machines" }) }, { line2: machineLine(r.id) }); }
     else if (r.v === "trace") { const sum = renderTrace(page, r.turn) ?? ""; renderTopbar("Trace", { label: SESS[r.sid].name, go: () => goSession(r.sid, r.turn) }, { line2: (l2) => l2.append(el("span", "rest", sum)) }); }
@@ -2449,7 +2444,7 @@
     const kids = Object.values(SESS).filter((x) => x.id !== sid && laneOf(x.id) === sid), sub = kids.filter((x) => x.kind === "Subagent").length, cdx = kids.filter((x) => x.kind === "Codex run").length, other = kids.length - sub - cdx;
     return [sub ? sub + (sub === 1 ? " subagent" : " subagents") : null, cdx ? cdx + (cdx === 1 ? " Codex run" : " Codex runs") : null, other ? other + (other === 1 ? " other run" : " other runs") : null].filter(Boolean).join(" · ");
   }
-  function renderSessions(page) {
+  function renderSessions(page, focusSearch = false) {
     const all = Object.values(SESS).filter(matchesSessionFacets);
     const head = el("div", "ph"); const h1 = el("h1", null, "Sessions"); head.append(h1);
     const sub = el("div", "sub"); for (const [v, l] of [[all.length, all.length === 1 ? "session" : "sessions"], [all.filter((s) => s.state === "work").length, "working"], [all.filter((s) => s.state === "wait").length, "waiting on you"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
@@ -2459,7 +2454,7 @@
       const fr = el("label", "find"), fi = el("input"); fi.id = "sq"; fi.type = "search"; fi.placeholder = "Search sessions"; fi.setAttribute("aria-label", "Search sessions"); fi.value = query; fr.append(icon(I.search), fi);
       fi.addEventListener("input", () => { query = fi.value.trim(); ctx.draw(); }); return fr;
     }), fr = found.el, fi = fr.querySelector("input");
-    if (fi.value.trim() !== query) fi.value = query; // the sidebar's search can have changed it
+    if (fi.value.trim() !== query) fi.value = query;
     const grouped = slot("groupby", page, (ctx) => {
       const gb = el("div", "groupby"); gb.setAttribute("role", "group"); gb.setAttribute("aria-label", "Group by");
       for (const [g, label] of [["recent", "Recent"], ["project", "Project"], ["machine", "Machine"], ["harness", "Harness"]]) { const b = el("button", null, label); b.type = "button"; b.dataset.g = g; b.addEventListener("click", () => { groupBy = g; ctx.draw(); }); gb.append(b); }
@@ -2484,6 +2479,7 @@
     };
     found.ctx.draw = grouped.ctx.draw = draw;
     put(renderFacetFilters(page, () => render()), fr, gb, out); put.done(); draw();
+    if (focusSearch) fi.focus({ preventScroll: true });
   }
 
   // ---- Drawer (phone) ---------------------------------------------------------------------------------------------------------
@@ -2493,13 +2489,26 @@
   // On an embedding page shell.js opens and closes the drawer, and names its opening (semon:drawer-open); the viewer binds none of it, "/" included.
   if (!SIDEBAR_ONLY) { $("#drawer-close").addEventListener("click", () => closeDrawer()); $("#scrim").addEventListener("click", () => closeDrawer()); }
   else window.addEventListener("semon:drawer-open", () => { if (ORD.get("side")?.n) { ORD.delete("side"); renderLanes(); } }); // opening the drawer re-sorts what the list held, as openDrawer does
-    if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); } if (e.key === "/" && !/INPUT/.test(document.activeElement?.tagName ?? "")) { e.preventDefault(); openDrawer(); $("#q").focus(); } });
+  if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && accountSheet) closeAccountMenu();
+    else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); }
+    const target = document.activeElement;
+    if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey && !viewerEl && !accountOpen &&
+        !document.querySelector("dialog[open], .menu, .lineage-menu, .runs-popover") &&
+        !/^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName ?? "") && !target?.isContentEditable) {
+      e.preventDefault();
+      const search = route.v === "sessions" ? $("#sq") : null;
+      if (search) {
+        focusSessionsSearchOnRender = null; search.focus({ preventScroll: true });
+      } else {
+        const sessions = { v: "sessions" }; focusSessionsSearchOnRender = sessions;
+        go(sessions);
+      }
+    }
+  });
   let sx = null;
   if (!SIDEBAR_ONLY) sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
   if (!SIDEBAR_ONLY) sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });
-  // The sidebar search narrows the Recent list as you type; Enter opens the Sessions page with the same query.
-  $("#q").addEventListener("input", (e) => { query = e.target.value.trim(); renderLanes(); });
-  $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); query = e.target.value.trim(); go({ v: "sessions" }); } });
   phone.addEventListener("change", () => {
     closeDrawer(true); syncLayoutPrefs(); expandedAll = null; renderLanes();
     if (!phone.matches && viewerEl?.classList.contains("kids-sheet")) viewerEl.close(); // a sheet is a phone's: a wide screen opens the list in the tree
