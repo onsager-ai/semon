@@ -177,6 +177,17 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 /* A label that leads somewhere looks like the others. Its hit area is padded to the tap size inside the line, whose own box grows by the same amount (the margins cancel it), and only the buttons take clicks. */
 .topbar .l1-state { display: none; }
 .menu-item .dot { margin: 0 4px; }
+.session-menu .menu-status { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 2px 8px 4px; padding: 4px 2px; color: var(--muted); font-size: var(--fs-sm); line-height: 18px; }
+.session-menu .menu-status .dot { flex: none; }
+.session-menu .menu-status > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-menu .menu-section-heading { padding: 4px 10px 2px; color: var(--muted); font-size: var(--fs-sm); line-height: 18px; }
+.session-menu .menu-path-item { min-width: 0; }
+.session-menu .menu-path-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-menu .menu-path-item .hname { flex: none; overflow: visible; }
+.session-menu .menu-path-chevron { position: relative; flex: none; width: 18px; height: 18px; }
+.session-menu .menu-path-chevron::before { content: ""; position: absolute; left: 50%; top: 50%; width: 7px; height: 7px; border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: translate(-30%, -50%) rotate(45deg); }
+.session-menu .menu-separator { margin: 6px 2px; border-top: 1px solid var(--line); }
+.hname { flex: none; font-size: var(--fs-cap); font-weight: 500; line-height: var(--lh-cap); letter-spacing: .01em; white-space: nowrap; color: var(--muted); }
 .menu-item .menu-note { margin-left: auto; color: var(--accent); font-size: var(--fs-sm); }
 @media (max-width: 760px) {
   /* A session's bar is one row on a phone: the menu button, a back chevron for the parent, the title behind its small state dot, then ⋯. The line of
@@ -1099,9 +1110,9 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     if (s && findOpen) { findBar(bar, s); return; }
     const m = btn("ibtn lead", null, "Open navigation"); m.id = "lead-btn"; m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); bar.append(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
-    if (opts.lineage?.length) { const parent = opts.lineage.at(-1), c = btn("crumb", parent.name, "Up to " + parent.name); c.addEventListener("click", () => goSession(parent.id)); l1.append(c, el("span", "crumb-sep", "›")); }
+    if (opts.lineage?.length) { if (!phone.matches) opts.lineage.forEach((item) => { const c = btn("crumb", item.name, "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "crumb-sep", "›")); }); }
     else if (crumb) { const c = btn("crumb", crumb.label, "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "crumb-sep", "›")); }
-    const tt = el("h1", "t", title); tt.style.margin = "0"; tt.style.font = "inherit"; tt.title = title; if (s) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
+    const tt = el("h1", "t", title); tt.style.margin = "0"; tt.style.font = "inherit"; tt.title = title; if (s && !(phone.matches && opts.lineage?.length)) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
     if (opts.line2) { const l2 = el("div", "meta-line"); opts.line2(l2); t.append(l2); if (s) requestAnimationFrame(() => { if (l2.isConnected) fitMeta(l2); }); }
     bar.append(t);
     if (s) {
@@ -1228,6 +1239,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     return box;
   }
   const withHarnessIcon = (node, harness, opts = {}) => { const mark = harnessIcon(harness, { lead: true, ...opts }); if (mark) node.prepend(mark); return node; };
+  const harnessName = (harness) => el("span", "hname h-" + harness, HARNESS[harness] ?? harness);
   const TRADEMARK_NOTICE = "Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.";
   function openSessionMenu(s, anchor, scrollTo) {
     const kids = descendantsOf(s.id, sessionChildren());
@@ -1242,6 +1254,22 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
       const failed = (TX[s.id] ?? []).filter((e) => e.k === "tool" && e.ok === false).length;
       if (failed) { const e = btn("menu-item menu-errors"); e.setAttribute("role", "menuitem"); const mark = el("span", "dot err"); mark.setAttribute("aria-hidden", "true"); e.append(mark, el("span", null, failed + " failed"), el("span", "menu-note", "Step through")); acts.append(e); }
       if (kids.length) { const q = btn("menu-item menu-runs"); q.setAttribute("role", "menuitem"); q.append(icon(I.stack, "icon"), el("span", null, "Runs · " + kids.length)); q.addEventListener("click", () => { body.querySelector(".runs")?.scrollIntoView({ block: "start" }); }); acts.append(q); }
+    }
+    // A child session's phone bar has neither the chevron nor the state dot: the menu holds its status and the path up.
+    const path = phone.matches ? lineageOf(s.id) : [];
+    if (path.length > 1) {
+      // The menu is rebuilt each time it opens, so this status uses the latest state and turn count.
+      const status = el("div", "menu-status"); status.setAttribute("role", "presentation"); status.append(dot(s.state), el("span", null, STATE[s.state] + " · " + turnsLabel(s)));
+      const group = el("div", "menu-path-group"), heading = el("div", "menu-section-heading", "Session path"); heading.setAttribute("role", "presentation"); group.append(heading);
+      const ancestors = path.slice(0, -1);
+      ancestors.forEach((ancestor, i) => {
+        const item = btn("menu-item menu-path-item"); item.setAttribute("role", "menuitem");
+        if (i === ancestors.length - 1) { item.setAttribute("aria-label", "Up to " + ancestor.name); item.append(el("span", "menu-path-chevron")); }
+        item.append(el("span", "menu-path-name", ancestor.name), harnessName(ancestor.harness));
+        item.addEventListener("click", () => { d.close(); goSession(ancestor.id); }); group.append(item);
+      });
+      const separator = el("div", "menu-separator"); separator.setAttribute("role", "separator");
+      body.append(status, group, separator);
     }
     const a1 = el("section", "panel-sec"); a1.append(acts); body.append(a1);
     const det = el("section", "panel-sec"); det.append(el("h3", null, "Details"));

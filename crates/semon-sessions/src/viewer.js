@@ -1172,9 +1172,10 @@
     if (s && findOpen) { findBar(sink, s, account); put.done(); return; }
     const m = btn("ibtn lead", null, "Open navigation"); m.id = "lead-btn"; m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); put(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
-    if (opts.lineage?.length) { const parent = opts.lineage.at(-1), c = btn("crumb", parent.name, "Up to " + parent.name); c.addEventListener("click", () => goSession(parent.id)); l1.append(c, el("span", "crumb-sep", "›")); }
+    // Ancestors are crumbs on a desktop; a phone's child session has none (its ⋯ menu lists the path, and holds the status the dot would show).
+    if (opts.lineage?.length) { if (!phone.matches) opts.lineage.forEach((item) => { const c = btn("crumb", item.name, "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "crumb-sep", "›")); }); }
     else if (crumb) { const c = btn("crumb", crumb.label, "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "crumb-sep", "›")); }
-    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; if (s) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
+    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; if (s && !(phone.matches && opts.lineage?.length)) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
     if (opts.line2) { const l2 = el("div", "meta-line"); opts.line2(l2); t.append(l2); if (s) requestAnimationFrame(() => { if (l2.isConnected) fitMeta(l2); }); }
     put(t);
     if (opts.analytics) { put(rangeControl(bar)); account(); put.done(); return; }
@@ -1461,6 +1462,22 @@
       const failed = countOf(s, "errors") ?? 0;
       if (failed) { const e = btn("menu-item menu-errors"); e.setAttribute("role", "menuitem"); const mark = el("span", "dot err"); mark.setAttribute("aria-hidden", "true"); e.append(mark, el("span", null, failed + " failed"), el("span", "menu-note", "Step through")); e.addEventListener("click", () => { d.close(); openErrors(s.id); }); acts.append(e); }
       if (kids.length) { const q = btn("menu-item menu-runs"); q.setAttribute("role", "menuitem"); q.append(icon(I.stack, "icon"), el("span", null, "Runs · " + kids.length)); q.addEventListener("click", () => { body.querySelector(".runs")?.scrollIntoView({ block: "start" }); }); acts.append(q); }
+    }
+    // A child session's phone bar has neither the chevron nor the state dot: the menu holds its status and the path up.
+    const path = phone.matches ? lineageOf(s.id) : [];
+    if (path.length > 1) {
+      // The menu is rebuilt each time it opens, so this status uses the latest state and turn count.
+      const status = el("div", "menu-status"); status.setAttribute("role", "presentation"); status.append(dot(s.state, false), el("span", null, STATE[s.state] + " · " + turnsLabel(s)));
+      const group = el("div", "menu-path-group"), heading = el("div", "menu-section-heading", "Session path"); heading.setAttribute("role", "presentation"); group.append(heading);
+      const ancestors = path.slice(0, -1);
+      ancestors.forEach((ancestor, i) => {
+        const item = btn("menu-item menu-path-item"); item.setAttribute("role", "menuitem");
+        if (i === ancestors.length - 1) { item.setAttribute("aria-label", "Up to " + ancestor.name); item.append(el("span", "menu-path-chevron")); }
+        item.append(el("span", "menu-path-name", ancestor.name), harnessName(ancestor.harness));
+        item.addEventListener("click", () => { d.close(); goSession(ancestor.id); }); group.append(item);
+      });
+      const separator = el("div", "menu-separator"); separator.setAttribute("role", "separator");
+      body.append(status, group, separator);
     }
     const a1 = el("section", "panel-sec"); a1.append(acts); body.append(a1);
     const det = el("section", "panel-sec"); det.append(el("h3", null, "Details"));
