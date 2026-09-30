@@ -738,6 +738,7 @@ export default async function barCheck(browser) {
     });
     try {
       await page.reload({ waitUntil: "load" }); // served() loaded the model before these routes existed
+      await settled(page); // DOM load precedes async model adoption; wait for the initial Home render before navigating.
       await goto(page, { v: "session", id: "harbor" }, D);
     } catch (error) {
       if (!missingHandoffStacks.length) throw error;
