@@ -80,7 +80,7 @@ export default async function agentFontCheck(browser) {
     await page.waitForTimeout(150);
     const m = await messageOf(page);
     if (r.expect(!!m, tag + ": no assistant message with a table and code was found")) {
-      const s = await styles(page, { p: "p", heading: ".mh", li: "li", quote: "blockquote", table: "table", th: "th", td: "td", tdCode: "td code" }, "[data-agentfont]");
+      const s = await styles(page, { p: "p:not(.mh)", heading: ".mh", li: "li", quote: "blockquote", table: "table", th: "th", td: "td", tdCode: "td code" }, "[data-agentfont]");
       res.message = { ...s, figures: m.figures };
       for (const k of ["p", "heading", "li", "quote", "table", "th", "td"]) same("the message's " + k, s[k]);
       r.expect(!!s.tdCode && s.tdCode.family === f.mono, tag + ": code in a cell is set in " + s.tdCode?.family + ", not the mono " + f.mono);
