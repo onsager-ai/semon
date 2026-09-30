@@ -958,6 +958,13 @@ export default async function sidebarCheck(browser) {
     const mark = document.querySelector(".brandrow .mark"), ctl = document.querySelector(control);
     return { mark: box(".brandrow .mark"), name: box(".brandrow .brandname"), control: box(control), sidebar: box("#sidebar"), nav: box("#nav"), search: box(".side-search"), markFirst: !!(mark && ctl && (mark.compareDocumentPosition(ctl) & Node.DOCUMENT_POSITION_FOLLOWING)), label: ctl?.getAttribute("aria-label"), expanded: ctl?.getAttribute("aria-expanded") };
   }, control);
+  const railBackground = (page) => page.evaluate(() => {
+    const toggle = document.querySelector("#rail-toggle"), sample = document.createElement("i");
+    sample.style.background = "var(--sunken)"; document.body.append(sample);
+    const background = getComputedStyle(toggle).backgroundColor, sunken = getComputedStyle(sample).backgroundColor;
+    sample.remove(); return { background, sunken };
+  });
+  const pointerAway = async (page) => { const viewport = page.viewportSize(); await page.mouse.move(viewport.width - 2, viewport.height - 2); };
   for (const [size, tagSize, control] of [["desktop", "1280", "#rail-toggle"], ["phone", "390", "#drawer-close"]]) {
     for (const dark of [false, true]) {
       const tag = dark ? "dark" : "light", P = "header " + tagSize + " " + tag;
@@ -972,6 +979,13 @@ export default async function sidebarCheck(browser) {
       r.expect(h.mark && h.mark.left >= h.sidebar.left && h.name && h.name.right <= h.control.left, P + ": the logo and name fit left of the control: " + JSON.stringify(h));
       r.expect(h.label === (size === "phone" ? "Close menu" : "Collapse sidebar") && (size === "phone" || h.expanded === "true"), P + ": label and state: " + h.label + " / " + h.expanded);
       if (size === "desktop") {
+        await pointerAway(page);
+        const expandedAway = await railBackground(page);
+        r.expect(expandedAway.background === "rgba(0, 0, 0, 0)", P + ": the expanded rail toggle has a transparent background with the pointer away: " + JSON.stringify(expandedAway));
+        await page.locator("#rail-toggle").hover();
+        const expandedHover = await railBackground(page);
+        r.expect(expandedHover.background === expandedHover.sunken, P + ": the expanded rail toggle uses --sunken on hover: " + JSON.stringify(expandedHover));
+        await pointerAway(page);
         // Keyboard order: the toggle, then the search field (the logo is not a link). Shift+Tab from search lands on the toggle with a focus ring.
         await page.focus("#q"); await page.keyboard.press("Shift+Tab");
         const ring = await page.evaluate(() => { const e = document.activeElement, c = getComputedStyle(e); return { id: e.id, visible: e.matches(":focus-visible"), outline: c.outlineStyle + " " + c.outlineWidth }; });
@@ -988,10 +1002,20 @@ export default async function sidebarCheck(browser) {
         r.expect(rail.control && rail.control.w >= 44 && rail.control.h >= 44 && rail.control.left >= rail.sidebar.left && rail.control.right <= rail.sidebar.right, P + " rail: the toggle shows at least 44x44 inside the rail: " + JSON.stringify(rail));
         r.expect(rail.mark && rail.mark.bottom <= rail.control.top && rail.mark.left >= rail.sidebar.left && rail.mark.right <= rail.sidebar.right && rail.control.bottom <= rail.nav.top, P + " rail: the logo mark sits above the toggle, clear of the nav: " + JSON.stringify(rail));
         r.expect(rail.label === "Expand sidebar" && rail.expanded === "false" && rail.name === null, P + " rail: label and state: " + rail.label + " / " + rail.expanded);
+        await pointerAway(page);
+        const collapsedAway = await railBackground(page);
+        r.expect(collapsedAway.background === "rgba(0, 0, 0, 0)", P + " rail: the collapsed toggle has a transparent background with the pointer away: " + JSON.stringify(collapsedAway));
+        await page.locator("#rail-toggle").hover();
+        const collapsedHover = await railBackground(page);
+        r.expect(collapsedHover.background === collapsedHover.sunken, P + " rail: the collapsed toggle uses --sunken on hover: " + JSON.stringify(collapsedHover));
+        await pointerAway(page);
         await page.screenshot({ path: path.join(ENV.out, "sidebar-header-" + tagSize + "-" + tag + "-rail.png") });
         await page.click("#rail-toggle"); await page.waitForTimeout(300);
         const back = await headBoxes(page, "#rail-toggle");
         r.expect(back.label === "Collapse sidebar" && back.name && back.mark.left < back.control.left, P + ": the toggle expands the rail again");
+        await pointerAway(page);
+        const expandedBackAway = await railBackground(page);
+        r.expect(expandedBackAway.background === "rgba(0, 0, 0, 0)", P + ": the expanded toggle remains transparent after returning from the rail: " + JSON.stringify(expandedBackAway));
       } else {
         r.expect(!(await headBoxes(page, "#rail-toggle")).control, P + ": the rail toggle stays hidden in the drawer");
         // A short list must not let the brand row grow: it sits straight in the drawer's column on a phone, so a query that leaves one row
