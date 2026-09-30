@@ -826,12 +826,18 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .analytics-metric .value { margin-top: 4px; font-size: var(--fs-fig); line-height: 1.3; font-weight: 600; font-variant-numeric: tabular-nums; }
 .analytics-metric .note { margin-top: 3px; color: var(--muted); font-size: var(--fs-cap); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .analytics-metric .note .up, .analytics-metric .note .down { color: var(--ink-2); font-variant-numeric: tabular-nums; }
-.analytics-bd-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 16px 0 0; border-top: 1px solid var(--line); }
+/* The Breakdown: its title and caption scroll away; the control strip (the measure toggle) and the heading of the group being read stay pinned under the top bar while
+   any row is in view. --barh is the top bar's measured height (set on every draw), --bd-top is where the strip sits (a phone's bar also clears the safe area). The strip is
+   opaque and ends where the group heading begins; the heading's hairline is the list's top rule, so nothing is drawn twice. Headings stick inside their own group, so the
+   next group's heading pushes the last one out, like iOS section headers; the strip leaves with the whole Breakdown. */
+.analytics-breakdown { --bd-top: var(--barh, 52px); --bd-bar-h: 44px; min-width: 0; }
+.analytics-bd-head { padding: 16px 0 0; border-top: 1px solid var(--line); }
 .analytics-bd-head h2 { margin: 0; font-size: var(--fs-ui); font-weight: 600; }
 .analytics-bd-head .panel-sub { margin-top: 2px; color: var(--muted); font-size: var(--fs-cap); }
+.analytics-bd-bar { position: sticky; top: var(--bd-top); z-index: 4; display: flex; align-items: center; height: var(--bd-bar-h); padding: 8px 0 6px; box-sizing: border-box; background: var(--ground); }
 .analytics-breakdowns { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
-.analytics-breakdowns .analytics-panel { padding-top: 4px; border-top: 0; }
-.analytics-breakdowns .analytics-panel h3 { margin: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--ink-2); }
+.analytics-breakdowns .analytics-panel { padding-top: 0; border-top: 0; }
+.analytics-breakdowns .analytics-panel h3 { position: sticky; top: calc(var(--bd-top) + var(--bd-bar-h)); z-index: 3; margin: 0; padding: 8px 0 7px; border-bottom: 1px solid var(--line); background: var(--ground); font-size: var(--fs-sm); font-weight: 600; color: var(--ink-2); }
 .analytics-measure { justify-self: start; }
 .analytics-panel { min-width: 0; padding: 16px 0 0; border-top: 1px solid var(--line); }
 .analytics-panel h2 { margin: 0; font-size: var(--fs-ui); font-weight: 600; }
@@ -851,14 +857,30 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .allowance-window .window-used { margin-top: 2px; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .allowance-window .window-reset { margin-top: 2px; color: var(--muted); font-size: var(--fs-cap); }
 .analytics-list { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 8px; border-top: 1px solid var(--line); }
-.analytics-breakdowns .analytics-list { margin-top: 6px; }
-.analytics-row { display: grid; grid-template-columns: minmax(0, 1fr) 46px 54px; gap: 3px 8px; width: 100%; min-width: 0; min-height: 48px; align-content: center; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 7px 0; text-align: left; }
+.analytics-list > .empty { grid-column: 1 / -1; }
+.analytics-breakdowns .analytics-list { margin-top: 0; border-top: 0; }
+/* The ranked rows (the Breakdown and the three top-session lists) share one bar and one grid: the figures take the widest value's width, right-aligned with tabular numbers, and the
+   bar takes what is left, so a long figure shrinks the bar and never pushes past the gutter. Where subgrid is supported the list holds the columns, so the widest figure in the
+   list sets them for every row and the bars start and end in the same place. */
+.analytics-row, .analytics-session.ranked { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; width: 100%; min-width: 0; min-height: 48px; align-content: center; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 7px 0; color: inherit; text-align: left; text-decoration: none; }
+.analytics-row { grid-template-columns: minmax(0, 1fr) auto auto; }
 .analytics-row .row-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: var(--fs-sm); }
-.analytics-row .row-count { grid-column: 2 / 4; color: var(--muted); font: var(--fs-cap) var(--mono); white-space: nowrap; text-align: right; }
-.analytics-row .row-track { grid-column: 1; height: 4px; overflow: hidden; border-radius: 3px; background: var(--sunken); }
-.analytics-row .row-bar { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: var(--accent); }
-.analytics-row .row-hours, .analytics-row .row-cost { grid-row: 2; align-self: center; color: var(--muted); font: var(--fs-cap) var(--mono); white-space: nowrap; text-align: right; }
+.analytics-row .row-count { grid-column: 2 / 4; color: var(--muted); font: var(--fs-cap) var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+.row-track { grid-column: 1; height: 4px; overflow: hidden; border-radius: 3px; background: var(--sunken); }
+.row-bar { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: var(--accent); }
+.analytics-row .row-hours, .analytics-row .row-cost, .analytics-session.ranked .session-value { grid-row: 2; align-self: center; color: var(--muted); font: var(--fs-cap) var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
 .analytics-row .on { color: var(--ink); } .analytics-row .row-hours { grid-column: 2; } .analytics-row .row-cost { grid-column: 3; }
+.analytics-session.ranked .row-track { grid-row: 2; }
+.analytics-session.ranked .session-name { grid-column: 1; grid-row: 1; }
+.analytics-session.ranked .hlabel { grid-column: 2; grid-row: 1; justify-self: end; }
+.analytics-session.ranked .session-value { grid-column: 2; }
+.analytics-session.ranked .row-bar { background: var(--h, var(--accent)); }
+.analytics-session.ranked .no-price { grid-row: 3; margin-top: 0; }
+@supports (grid-template-columns: subgrid) {
+  .analytics-breakdowns .analytics-list { grid-template-columns: minmax(0, 1fr) auto auto; column-gap: 8px; }
+  .analytics-split .analytics-list { grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; }
+  .analytics-breakdowns .analytics-row, .analytics-split .analytics-session.ranked { grid-template-columns: subgrid; grid-column: 1 / -1; }
+}
 .analytics-split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
 .analytics-session { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 44px; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 5px 0; text-align: left; }
 .analytics-session .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-size: var(--fs-sm); color: var(--ink-2); }
@@ -870,6 +892,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .facet-chip::before { content: ""; position: absolute; inset: -4px 0; }
   .filters-sheet .vf { padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
   .analytics-range, .analytics-measure { --seg-reach: 10px; }
+  .analytics-breakdown { --bd-top: calc(env(safe-area-inset-top, 0px) + var(--barh, 50px)); }
   .analytics-range button, .analytics-measure button { min-width: 44px; }
   .topbar .l2.session-meta .meta-runs { min-height: 44px; }
   .child-actions button, .child-intro .intro-title button, .child-intro .intro-open, .child-intro .more, .child-return button, .child-work .cw-toggle, .lineage-menu button { min-height: 44px; }

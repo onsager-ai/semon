@@ -1,6 +1,6 @@
 {
   "main": {
-    "desktop-light|analytics": {"ratio": 0.05947, "size": ["1280×860", "1280×860"]},
+    "desktop-light|analytics": {"ratio": 0.06158, "size": ["1280×860", "1280×860"]},
     "desktop-light|home": {"ratio": 0.04894, "size": ["1280×860", "1280×860"]},
     "desktop-light|machine-laptop": {"ratio": 0.05351, "size": ["1280×860", "1280×860"]},
     "desktop-light|machines": {"ratio": 0.0148, "size": ["1280×860", "1280×860"]},
@@ -37,7 +37,7 @@
     "desktop-light|trace-principal-h8": {"ratio": 0.03256, "size": ["1280×860", "1280×860"]},
     "desktop-light|trace-quill-h4": {"ratio": 0.05136, "size": ["1280×860", "1280×860"]},
     "desktop-light|trace-sentinel-sentinel_0": {"ratio": 0.02946, "size": ["1280×860", "1280×860"]},
-    "phone-dark|analytics": {"ratio": 0.06998, "size": ["780×5888", "780×5980"]},
+    "phone-dark|analytics": {"ratio": 0.08872, "size": ["780×6154", "780×5980"]},
     "phone-dark|drawer": {"ratio": 0.0301, "size": ["780×1688", "780×1688"]},
     "phone-dark|home": {"ratio": 0.46085, "size": ["780×3054", "780×1688"]},
     "phone-dark|machine-laptop": {"ratio": 0.16423, "size": ["780×3770", "780×3354"]},
@@ -75,7 +75,7 @@
     "phone-dark|trace-principal-h8": {"ratio": 0.04761, "size": ["780×1688", "780×1692"]},
     "phone-dark|trace-quill-h4": {"ratio": 0.17205, "size": ["780×2032", "780×2282"]},
     "phone-dark|trace-sentinel-sentinel_0": {"ratio": 0.03735, "size": ["780×1688", "780×1688"]},
-    "phone-light|analytics": {"ratio": 0.05404, "size": ["780×5888", "780×5980"]},
+    "phone-light|analytics": {"ratio": 0.0607, "size": ["780×6154", "780×5980"]},
     "phone-light|drawer": {"ratio": 0.05273, "size": ["780×1688", "780×1688"]},
     "phone-light|home": {"ratio": 0.04782, "size": ["780×3054", "780×1688"]},
     "phone-light|machine-laptop": {"ratio": 0.05981, "size": ["780×3770", "780×3354"]},
