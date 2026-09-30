@@ -784,7 +784,7 @@ fn received_body(record: &Value, tag: &str, from: Option<&str>, skip: usize) -> 
         return Some(text.trim().to_owned());
     }
     let close = format!("</{tag}>");
-    for (attributes, end) in events::tags(&text, tag)
+    let (_, end) = events::tags(&text, tag)
         .into_iter()
         .filter(|(attributes, _)| {
             from.is_none()
@@ -793,13 +793,10 @@ fn received_body(record: &Value, tag: &str, from: Option<&str>, skip: usize) -> 
                     .map(String::as_str)
                     == from
         })
-        .skip(skip)
-    {
-        let rest = &text[end..];
-        let body = rest.find(&close).map_or(rest, |close| &rest[..close]);
-        return Some(body.trim().to_owned());
-    }
-    None
+        .nth(skip)?;
+    let rest = &text[end..];
+    let body = rest.find(&close).map_or(rest, |close| &rest[..close]);
+    Some(body.trim().to_owned())
 }
 
 fn notification_result(record: &Value, id: &str) -> Option<String> {
