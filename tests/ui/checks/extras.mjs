@@ -327,7 +327,8 @@ export default async function (browser) {
     r.expect(P.deep.pager.some((b) => b.text === "Load earlier" && b.first) && P.deep.pager.some((b) => b.text === "Load later" && b.last), "a middle page has Load earlier above and Load later below: " + JSON.stringify(P.deep.pager));
     r.expect(P.deep.url === "/s/claude/backlog?turn=" + encodeURIComponent(older.id), "the URL keeps the turn: " + P.deep.url);
     for (let k = 0; k < 5 && (await pager(page)).some((b) => b.text === "Load later"); k++) {
-      await page.click(".turns > .list:last-child > button.more"); await page.waitForTimeout(250);
+      const moreLater = page.locator(".turns > .list:last-child > button.more");
+      await moreLater.scrollIntoViewIfNeeded(); await moreLater.click(); await page.waitForTimeout(250);
     }
     P.later = await page.evaluate((id) => ({ last: !!document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]'), text: document.querySelector(".turns").textContent.includes("Backlog triaged: 460 issues read."), pager: [...document.querySelectorAll(".turns > .list > button.more")].map((b) => b.textContent) }), turns.at(-1).id);
     r.expect(P.later.last && P.later.text && !P.later.pager.includes("Load later"), "Load later reaches the last turn: " + JSON.stringify(P.later));
