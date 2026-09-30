@@ -39,7 +39,7 @@ function convert(D) {
   const iso = (t) => new Date(t).toISOString();
   const hhmm = (t) => iso(t).slice(11, 16);
   const SESS = Object.fromEntries(Object.entries(D.SESS).map(([id, source]) => {
-    const s = { ...source, id, modelId: Object.keys(source.tokens_by_model ?? {})[0] ?? source.model };
+    const s = { ...source, id, modelId: source.model ?? Object.keys(source.tokens_by_model ?? {})[0] };
     s.start = minute(source.start); s.last = minute(source.last);
     s.busy = (source.busy ?? []).map(([a, b]) => [minute(a), minute(b)]);
     s.tokensByModel = Object.fromEntries(Object.entries(source.tokens_by_model ?? {}).map(([model, usage]) => [model, { input: usage.input, output: usage.output, cacheWrite: usage.cache_write, cacheRead: usage.cache_read }]));
@@ -68,7 +68,7 @@ function convert(D) {
 // has four kinds; the served five-minute and one-hour cache writes are shown together as one.
 const COST_FUNCTION = `  function costForSessions(sessions) {
     const kinds = Object.fromEntries(TOKEN_KINDS.map(([key]) => [key, { tokens: 0, usd: 0 }])), models = new Map(), unknown = new Set(); let usd = 0, allPriced = true;
-    const KEY = { input: "input", output: "output", cache_read: "cacheRead", cache_write_5m: "cacheWrite", cache_write_1h: "cacheWrite" };
+    const KEY = { input: "input", output: "output", cache_read: "cacheRead", cache_write_5m: "cacheWrite", cache_write_1h: "cacheWrite", web_search: "webSearch" };
     for (const s of sessions) {
       const cost = s.cost ?? {};
       if (cost.usd == null) allPriced = false; else usd += Number(cost.usd) || 0;
@@ -105,10 +105,19 @@ export function overhaulPortReference(D, html) {
   let out = html.slice(0, start) + block.replace(/<\/script/gi, "<\\/script") + html.slice(end);
   for (const [prefix, next] of CLOCKS) out = swapLine(out, prefix, next);
   out = swapLine(out, "  const HOST = ", "  const HOST = " + J(D.MACHINE) + ";");
+  // The session menu lists what the log gives: a directory and a process id only when there is one.
+  out = swapLine(out, "  const dirOf = ", "  const dirOf = (s) => s.cwd ?? s.dir ?? s.directory ?? null;");
+  out = swapLine(out, "  const pidOf = ", "  const pidOf = (s) => s.pid ?? null;");
+  out = swapLine(out, "  const sessionIdOf = ", "  const sessionIdOf = (s) => s.sessionId ?? s.id;");
   out = swapLine(out, "  const costText = ", '  const costText = (cost) => cost.unknown.length || cost.usd == null ? "—" : asMoney(cost.usd);');
   out = swapFunction(out, "costForSessions", COST_FUNCTION);
   // The served model gives a thought's seconds itself.
   out = swapFunction(out, "thoughtSeconds", "  function thoughtSeconds(entries, i, sid) { const secs = entries[i]?.secs; return Number.isFinite(secs) && secs >= 0 ? secs : null; }");
+  // Until the sidebar's port (PR 4), the viewer's sidebar is 296px wide and the mockup's 272px. The regions compare parts of the main
+  // column, so the reference takes the viewer's width; PR 4 removes this.
+  const styleEnd = out.lastIndexOf("</style>");
+  if (styleEnd < 0) throw new Error("overhaul mockup style block moved");
+  out = out.slice(0, styleEnd) + "@media (min-width: 761px) { .app:not(.rail) { grid-template-columns: 296px minmax(0, 1fr); } }\n" + out.slice(styleEnd);
   // Each of the mockup's histories is inside the served sessions' busy intervals already.
   const histories = /  const ANALYTICS_HISTORY = \{[\s\S]*?\n  \};\n  const ANALYTICS_WAIT_SAMPLES = \[[\s\S]*?\n  \];/;
   if (!histories.test(out)) throw new Error("overhaul mockup analytics history block moved");

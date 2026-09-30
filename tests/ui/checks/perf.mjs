@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { context, ENV, launch } from "../lib.mjs";
+import { context, ENV, launch, wide } from "../lib.mjs";
 import { writeLong } from "../long.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -142,10 +142,12 @@ async function checkLongSessionOpenEnd(page) {
   }, mode);
   const centring = [await centred("default")];
   if (!await page.evaluate(() => matchMedia("(max-width: 760px)").matches)) {
-    for (const [mode, toggle] of [["wide", ".wide-toggle"], ["rail", "#rail-toggle"]]) {
-      await page.locator(toggle).click(); await page.waitForTimeout(300);
+    for (const mode of ["wide", "rail"]) {
+      if (mode === "wide") await wide(page, true); else await page.locator("#rail-toggle").click();
+      await page.waitForTimeout(300);
       centring.push(await centred(mode));
-      await page.locator(toggle).click(); await page.waitForTimeout(300);
+      if (mode === "wide") await wide(page, false); else await page.locator("#rail-toggle").click();
+      await page.waitForTimeout(300);
     }
   }
   await page.locator(".jump-bottom").click();

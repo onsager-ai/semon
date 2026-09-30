@@ -7,8 +7,8 @@
 //   - a mark that stands alone (the sidebar) has the accessible name and the tip on its container; one beside text is aria-hidden;
 //   - the state dot is still there beside the mark, and the mark is never inside it;
 //   - the artwork served is byte for byte the file in assets/harnesses (SHA256SUMS);
-//   - the trademark note is in Session details, once.
-// Not covered, because other work is rewriting them: the session top bar and its menu (#81) and the four filter controls.
+//   - the trademark note is in the session menu, once.
+// Not covered, because other work is rewriting them: the top bar's model label and kind badge, and the four filter controls.
 // Screenshots go to out/hicons/ for the visual pass.
 import fs from "node:fs";
 import path from "node:path";
@@ -37,7 +37,7 @@ const PLACES = {
   "home-inbox": { selector: ".page .ib .ctx > span > .hicon", size: 14, text: (h) => NAME[h] },
   "analytics-top": { selector: ".page .analytics-session .hlabel > .hicon", size: 14, text: (h) => SHORT[h] },
   "analytics-legend": { selector: ".page .analytics-legend .hicon", size: 14, text: (h) => SHORT[h] },
-  details: { selector: "dialog.session-details .detail-value .hicon", size: 16, text: (h) => NAME[h] },
+  details: { selector: "dialog.session-menu dl.kv dd .hicon", size: 16, text: (h) => NAME[h] },
   trace: { selector: ".page .chip-h > .hicon", size: 14 },
   "turn-header": { selector: ".page .turn-h > .hicon", size: 16 },
   "child-kind": { selector: ".page .child-kind > .hicon", size: 14 },
@@ -181,23 +181,23 @@ export default async function hiconsCheck(browser) {
     await page.locator(".analytics-session").first().scrollIntoViewIfNeeded(); await page.waitForTimeout(100);
     await shot("analytics-list");
 
-    // ---- Session details: the Harness row, and the one trademark note ----
+    // ---- The session menu: the Harness row, and the one trademark note ----
     for (const [name, sid, harness] of [["claude", claude?.id, "claude"], ["codex", codex?.id, "codex"], ["opencode", opencode[0], "opencode"]]) {
       if (!sid) continue;
       await goto(page, { v: "session", id: sid }, D); await page.waitForTimeout(150);
-      await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
-      await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true); await loaded(page); await page.waitForTimeout(100);
+      await page.click("#more-btn");
+      await page.waitForFunction(() => document.querySelector("dialog.session-menu")?.open === true); await loaded(page); await page.waitForTimeout(100);
       const marks = await read(page, PLACES.details.selector);
       judge("details", marks, { need: 1 });
       r.expect(marks.length === 1 && marks[0].harness === harness, tag + " details (" + name + "): the Harness row's mark is " + JSON.stringify(marks.map((m) => m.harness)));
-      const note = await page.evaluate(() => ({ own: [...document.querySelectorAll("dialog.session-details .third-party")].map((n) => n.textContent), total: document.body.innerText.split("Third-party trademarks").length - 1, size: parseFloat(getComputedStyle(document.querySelector("dialog.session-details .third-party")).fontSize) }));
+      const note = await page.evaluate(() => ({ own: [...document.querySelectorAll("dialog.session-menu .third-party")].map((n) => n.textContent), total: document.body.innerText.split("Third-party trademarks").length - 1, size: parseFloat(getComputedStyle(document.querySelector("dialog.session-menu .third-party")).fontSize) }));
       rec["note-" + name] = note.total;
       r.expect(note.own.length === 1 && note.own[0] === NOTICE && note.total === 1, tag + " details (" + name + "): the trademark note is " + JSON.stringify(note) + ", expected exactly once");
       r.expect(note.size >= 12, tag + " details (" + name + "): the note is " + note.size + "px");
-      if (name === "opencode") { await shot("details"); await page.evaluate(() => { const vb = document.querySelector("dialog.session-details .vb"); vb.scrollTop = vb.scrollHeight; }); await page.waitForTimeout(100); await shot("details-end"); }
-      await page.evaluate(() => document.querySelector("dialog.session-details")?.close()); await page.waitForTimeout(300);
+      if (name === "opencode") { await shot("details"); await page.evaluate(() => { const vb = document.querySelector("dialog.session-menu .panel-b"); vb.scrollTop = vb.scrollHeight; }); await page.waitForTimeout(100); await shot("details-end"); }
+      await page.evaluate(() => document.querySelector("dialog.session-menu")?.close()); await page.waitForTimeout(300);
     }
-    r.expect(await page.evaluate(() => document.body.innerText.split("Third-party trademarks").length - 1) === 0, tag + ": the trademark note is shown outside Session details");
+    r.expect(await page.evaluate(() => document.body.innerText.split("Third-party trademarks").length - 1) === 0, tag + ": the trademark note is shown outside the session menu");
 
     // ---- A trace's session chip ----
     if (turn) {
