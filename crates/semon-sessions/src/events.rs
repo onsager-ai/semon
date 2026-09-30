@@ -388,7 +388,9 @@ fn denial_source(
             .take(32)
             .collect::<String>()
             .to_ascii_lowercase();
-        return Some(if kind.contains("classif") {
+        // `automode-blocked` is the value real logs carry for a classifier
+        // denial; the others are guesses.
+        return Some(if kind.contains("automode") || kind.contains("classif") {
             "classifier"
         } else if kind.contains("user") || kind.contains("reject") {
             "user"
@@ -3910,6 +3912,20 @@ mod tests {
                 record["toolDenialKind"] = serde_json::json!("classifier");
                 record
             },
+            // The kind real logs carry, on the real wording.
+            claude_tool("toolu_i"),
+            {
+                let mut record = refusal(
+                    "toolu_i",
+                    serde_json::json!(
+                        "Permission for this action was denied by the Claude Code auto mode classifier."
+                    ),
+                    true,
+                    Value::Null,
+                );
+                record["toolDenialKind"] = serde_json::json!("automode-blocked");
+                record
+            },
             claude_tool("toolu_h"),
             {
                 let mut record = refusal(
@@ -3942,7 +3958,8 @@ mod tests {
                 (Some("user"), Some(4)),
                 (Some("classifier"), Some(5)),
                 (Some("classifier"), Some(6)),
-                (Some("user"), Some(7)),
+                (Some("classifier"), Some(7)),
+                (Some("user"), Some(8)),
             ]
         );
         assert_eq!(index.events[0].id.as_deref(), Some("toolu_a"));
@@ -4035,6 +4052,9 @@ mod tests {
         let permission = signal_tags(&index, SignalKind::Permission);
         assert_eq!(permission.len(), 1);
         assert_eq!(permission[0].len(), TAG_MAX);
+        let expected_hash = short_hash(&"p".repeat(200));
+        assert!(permission[0].starts_with(&"p".repeat(TAG_MAX - 9)));
+        assert!(permission[0].ends_with(&format!("#{expected_hash}")));
         let hooks = signal_tags(&index, SignalKind::Hook);
         assert_eq!(hooks.len(), 1);
         assert!(hooks[0].ends_with(":blocked"));
