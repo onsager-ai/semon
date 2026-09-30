@@ -503,7 +503,7 @@
   try { const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = pruneTreePrefs(saved); } catch {}
   const app = $(".app");
   const syncLayoutPrefs = () => { if (SIDEBAR_ONLY) return; app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
-  function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); }
+  function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); $(".account-popover [data-pref=\"wide\"]")?.setAttribute("aria-checked", String(on)); }
   function setRailMode(on) { railMode = on; ORD.delete("side"); try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
   // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
   // it is dropped on load, along with any entry that has no `open`, and the next save writes the pruned list.
@@ -670,7 +670,7 @@
     }
     return avatar;
   }
-  function accountPopover() {
+  function accountPopover(compact) {
     const menu = el("div", "menu account-popover"); menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", "Account");
     const identity = el("div", "account-identity"); identity.append(accountAvatar(ACCOUNT));
     const details = el("span", "account-identity-text"); details.append(el("span", "account-name", ACCOUNT.name), el("span", "account-login-value", ACCOUNT.login)); identity.append(details); menu.append(identity);
@@ -685,6 +685,14 @@
       form.append(row); workspaces.append(form);
     }
     menu.append(workspaces);
+    if (!compact) {
+      const display = el("section", "account-section account-display"); display.append(el("div", "account-heading", "Display"));
+      const row = el("button", "account-menu-row account-switch-row"); row.type = "button"; row.setAttribute("role", "menuitemcheckbox"); row.setAttribute("aria-checked", String(wideMode)); row.dataset.pref = "wide";
+      row.append(el("span", "account-row-main", "Wide reading mode"));
+      const toggle = el("span", "switch"); toggle.setAttribute("aria-hidden", "true"); toggle.append(el("span", "switch-knob")); row.append(toggle);
+      row.addEventListener("click", (event) => { event.stopPropagation(); setWideMode(!wideMode); });
+      display.append(row); menu.append(display);
+    }
     if (ACCOUNT.links.length) {
       // A destructive link (Sign out) gets a section of its own, set apart from the rest.
       const links = el("section", "account-section account-links"), apart = el("section", "account-section account-links account-danger");
@@ -729,7 +737,7 @@
   function toggleAccountMenu(widget, trigger, compact) {
     if (accountOpen) { closeAccountMenu(); return; }
     closeAccountMenu(); closeFilter(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false");
-    const menu = accountPopover();
+    const menu = accountPopover(compact);
     if (compact) {
       // On a phone it floats just above its row, as wide as the row, over a clear backdrop that takes the tap outside it, so it
       // never pushes the drawer and never runs past the screen (the stylesheet caps its height and it scrolls inside).
@@ -1160,8 +1168,8 @@
     // What the bar holds is added through `put`, so the range control on Analytics (a persistent control) stays where it is.
     const put = placer(bar), sink = { append: put };
     bar.classList.toggle("detail", !!opts.line2); bar.classList.toggle("session-bar", !!s); bar.classList.toggle("searching", !!(s && (findOpen || errOn(s.id))));
-    if (s && errOn(s.id)) { errorsBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
-    if (s && findOpen) { searchBar(sink); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
+    if (s && errOn(s.id)) { errorsBar(sink); const account = accountWidget(false); if (!account) appendWideToggle(sink); if (account) put(account); put.done(); return; }
+    if (s && findOpen) { searchBar(sink); const account = accountWidget(false); if (!account) appendWideToggle(sink); if (account) put(account); put.done(); return; }
     const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); put(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
     if (opts.lineage?.length) {
@@ -1175,8 +1183,8 @@
       if (s) requestAnimationFrame(() => { if (l2.isConnected) fitSessionLine(l2); });
     }
     put(t);
-    if (opts.analytics) { put(rangeControl(bar)); appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
-    if (!s) { appendWideToggle(sink); const account = accountWidget(false); if (account) put(account); put.done(); return; }
+    if (opts.analytics) { put(rangeControl(bar)); const account = accountWidget(false); if (!account) appendWideToggle(sink); if (account) put(account); put.done(); return; }
+    if (!s) { const account = accountWidget(false); if (!account) appendWideToggle(sink); if (account) put(account); put.done(); return; }
     const fb = el("button", "ibtn"); fb.type = "button"; fb.setAttribute("aria-label", "Find in transcript"); fb.append(icon(I.search));
     fb.addEventListener("click", () => { findOpen = true; filterOpen = false; render(); $("#find")?.focus(); });
     const pop = el("div", "filters pop"); pop.hidden = !filterOpen;
@@ -1189,8 +1197,8 @@
     const place = () => { const anchor = phone.matches ? more : tb; pop.style.right = Math.max(0, bar.getBoundingClientRect().right - anchor.getBoundingClientRect().right) + "px"; };
     tb.addEventListener("click", place);
     if (phone.matches) put(more, pop); else put(fb, tb, more, pop);
-    appendWideToggle(sink); if (filterOpen) place();
-    const account = accountWidget(false); if (account) put(account);
+    const account = accountWidget(false); if (!account) appendWideToggle(sink); if (filterOpen) place();
+    if (account) put(account);
     put.done();
   }
   function appendWideToggle(bar) {
