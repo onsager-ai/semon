@@ -203,6 +203,7 @@ code { overflow-wrap: anywhere; }
 .ib.new-result > svg { color: var(--accent); }
 .ib .q { grid-column: 2 / 4; font-family: var(--serif); font-size: var(--fs-read); line-height: 1.5; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .ib .ctx { grid-column: 2 / 4; font-size: var(--fs-sm); color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: center; }
+.ib .ctx > span { display: inline-flex; align-items: center; }
 .ib { cursor: pointer; }
 /* Where the work came from: the message of yours at the root of its trace, one line. */
 .ib .org { grid-column: 2 / 4; min-width: 0; font-size: var(--fs-sm); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

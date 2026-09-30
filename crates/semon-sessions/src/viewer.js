@@ -81,9 +81,9 @@
     const box = el("span", "hicon" + (lead ? " hi-lead" : "")); box.dataset.harness = harness; box.style.setProperty("--hi", size + "px");
     const same = def.icon.light === def.icon.dark, dark = darkTheme();
     for (const [theme, src] of same ? [["", def.icon.light]] : [["light", def.icon.light], ["dark", def.icon.dark]]) {
-      const img = document.createElement("img"); img.src = src; img.alt = ""; img.draggable = false; img.decoding = "async";
-      if (theme) { img.className = "hi-" + theme; if ((theme === "dark") !== dark) img.loading = "lazy"; } // the variant hidden now loads when a theme change shows it
-      box.append(img);
+      const img = document.createElement("img"); img.alt = ""; img.draggable = false; img.decoding = "async";
+      if (theme) { img.className = "hi-" + theme; if ((theme === "dark") !== dark) img.loading = "lazy"; } // the variant hidden now loads when a theme change shows it; loading is set before src, which starts the fetch
+      img.src = src; box.append(img);
     }
     if (label) { const name = typeof label === "string" ? label : def.name; box.setAttribute("role", "img"); box.setAttribute("aria-label", name); box.dataset.tip = name; }
     else box.setAttribute("aria-hidden", "true");
@@ -1374,7 +1374,8 @@
   }
   function childKindChip(s, meta = false) {
     const c = el("span", meta ? "meta-item meta-kind" : "child-kind"); c.style.setProperty("--h", "var(--" + s.harness + ")");
-    const mark = s.kind === "Subagent" ? icon(I.delegate, "kind-delegate") : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
+    // The top bar's badge (meta) keeps the delegation glyph for a Subagent. The card's badge names the harness by its mark and the kind by its word, so it has no glyph for one.
+    const mark = s.kind === "Subagent" ? (meta ? icon(I.delegate, "kind-delegate") : null) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
     if (!meta) { const source = harnessIcon(s.harness, { size: 14 }); if (source) c.append(source); } // the top bar's badge (meta) is left to the session bar's own change
     if (mark) c.append(mark);
     const kindText = s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"); if (meta) c.dataset.tip = "Kind: " + kindText;
@@ -2257,7 +2258,7 @@
     });
     svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart);
-    const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, harnessIcon(h, { size: 14 }), label); legend.append(item); } panel.append(legend); return panel;
+    const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(...[swatch, harnessIcon(h, { size: 14 }), label].filter(Boolean)); legend.append(item); } panel.append(legend); return panel;
   }
   function renderCostChart(A) {
     const panel = el("section", "analytics-panel"), title = el("h2", null, "Cost over time"); title.append(costInfoTip());
@@ -2275,7 +2276,7 @@
     });
     svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart); const legend = el("div", "analytics-legend");
-    for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, harnessIcon(h, { size: 14 }), label); legend.append(item); } panel.append(legend);
+    for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(...[swatch, harnessIcon(h, { size: 14 }), label].filter(Boolean)); legend.append(item); } panel.append(legend);
     if (A.cost.unpriced_models.length) panel.append(el("div", "no-price", "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars.")); return panel;
   }
   function renderCodexAllowance(limits) {
