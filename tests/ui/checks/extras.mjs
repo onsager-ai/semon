@@ -140,7 +140,7 @@ export default async function (browser) {
         const siblings = [...(step?.parentElement?.children ?? [])].filter((node) => node.classList.contains("step"));
         const index = siblings.indexOf(step);
         const neighbor = [siblings[index - 1], siblings[index + 1]].find((node) => node && !node.classList.contains("live") && !node.querySelector(".sa.st")) ?? null;
-        const onScreen = (node) => { const rect = node?.getBoundingClientRect(); return !!rect && rect.top >= 0 && rect.bottom <= innerHeight && rect.left >= 0 && rect.right <= innerWidth; };
+        const onScreen = (node) => { const rect = node?.querySelector(":scope > button")?.getBoundingClientRect(); return !!rect && rect.top >= 0 && rect.bottom <= innerHeight && rect.left >= 0 && rect.right <= innerWidth; };
         return { title: label?.textContent ?? null, finished: !!step && !step.classList.contains("live"), expanded: step?.querySelector(":scope > button")?.getAttribute("aria-expanded") === "true", neighbor: neighbor?.querySelector(".sa")?.textContent ?? null, neighborVerb: neighbor?.querySelector(".sv")?.textContent ?? null, bothVisible: onScreen(step) && onScreen(neighbor) };
       }, shotTitle);
       r.expect(visibleRows.title === shotTitle && visibleRows.finished && visibleRows.neighborVerb === "Ran" && visibleRows.bothVisible && visibleRows.expanded === expanded,
