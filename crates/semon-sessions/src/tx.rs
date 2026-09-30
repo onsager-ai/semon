@@ -7,7 +7,6 @@
 
 use std::{
     collections::VecDeque,
-    fs,
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     rc::Rc,
@@ -80,7 +79,7 @@ pub(crate) fn read_record(path: &Path, offset: u64) -> Option<Value> {
 
 /// The record at `offset`, and how many bytes were read for it.
 fn read_sized(path: &Path, offset: u64) -> (Option<Value>, u64) {
-    let Ok(mut file) = fs::File::open(path) else {
+    let Ok(mut file) = crate::sealed::LogFile::open(path) else {
         return (None, 0);
     };
     if file.seek(SeekFrom::Start(offset)).is_err() {
@@ -1946,7 +1945,7 @@ fn full(path: &Path, offset: u64, block: usize, part: &str) -> io::Result<String
 #[cfg(test)]
 mod tests {
     use std::{
-        env,
+        env, fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
         time::Duration,

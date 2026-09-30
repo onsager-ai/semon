@@ -463,7 +463,7 @@ thread_local! {
 }
 
 pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
-    let mut file = fs::File::open(path).ok()?;
+    let mut file = crate::sealed::LogFile::open(path).ok()?;
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut reader = BufReader::new(file).take(MAX_LINE);
     let mut bytes = Vec::new();

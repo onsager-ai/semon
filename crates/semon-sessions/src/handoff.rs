@@ -67,7 +67,7 @@ struct Parent {
 
 impl Parent {
     fn scan(&mut self, path: &Path, stamp: Stamp) -> io::Result<()> {
-        let mut file = fs::File::open(path)?;
+        let mut file = crate::sealed::LogFile::open(path)?;
         file.seek(SeekFrom::Start(self.offset))?;
         // Read only the statted snapshot; a writer's next append is scanned next time.
         let mut reader = BufReader::new(file.take(stamp.len - self.offset));
