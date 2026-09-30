@@ -869,9 +869,10 @@ fn retire(dir: &Path, manifest: &Manifest) -> io::Result<()> {
     fs::remove_file(dir.join(MANIFEST))?;
     sync_dir(dir)?;
     for segment in &manifest.segments {
-        match fs::remove_file(dir.join(segment.file_name(&manifest.generation))) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-            _ => {}
+        if let Err(error) = fs::remove_file(dir.join(segment.file_name(&manifest.generation)))
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(error);
         }
     }
     Ok(())
