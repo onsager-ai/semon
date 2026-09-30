@@ -7,8 +7,9 @@
 //! view (and rebuilds what changed) and queues its next check. A view is in
 //! the queue at most once, so the queue never holds more entries than there
 //! are views, and a pool never runs more threads than its size, however many
-//! machines and cores share it, unless builds hang: then it may run up to
-//! twice its size ([`OVERFLOW_AFTER`]).
+//! machines and cores share it, unless every one of its workers is held by a
+//! check that has run [`OVERFLOW_AFTER`]: then, for as long as that lasts, it
+//! may run up to twice its size.
 
 use std::{
     collections::BTreeMap,
@@ -19,10 +20,12 @@ use std::{
 
 use crate::viewer::{IDLE_AFTER, MachineView, lock};
 
-/// A check this late, with every worker of its pool busy, lets a read's
-/// nudge start a thread past the pool's size, up to twice it: builds that
-/// hang on as many machines as the pool has threads then don't freeze every
-/// other machine's checks.
+/// Once every worker of a pool is running a check that started this long
+/// ago (builds that hang, most likely), a read that finds its own check
+/// overdue may start a thread past the pool's size, up to twice it, so those
+/// builds don't freeze every other machine's checks. Such a thread stops as
+/// soon as nothing is due. A check that is merely late behind ordinary
+/// builds (a backlog) never grows the pool.
 pub(crate) const OVERFLOW_AFTER: Duration = Duration::from_secs(5);
 
 /// A queued entry's key: when it is due, and a count that tells apart two
@@ -44,9 +47,11 @@ pub(crate) type Key = (Instant, u64);
 /// for a build once a model is built. A read of a view whose check is over a
 /// second late nudges the pool, which starts a worker if it has room for
 /// one; with every worker busy, the check waits its turn, and answers are as
-/// far behind the logs as the queue is. A check 5 s late lets the nudge
-/// start threads past the pool's size, up to twice it, so builds that hang
-/// can't hold every worker; a view whose check is a minute late answers an
+/// far behind the logs as the queue is. Only when every worker has been
+/// running its check for 5 s ([`OVERFLOW_AFTER`]) may the nudge start threads
+/// past the pool's size, up to twice it, so builds that hang can't hold
+/// every worker; each such thread stops as soon as nothing is due. A view
+/// whose check is a minute late, or whose build has run a minute, answers an
 /// error (500) instead of an ever older model.
 ///
 /// [`ViewerCore`]: crate::ViewerCore
@@ -72,6 +77,8 @@ struct PoolState {
     threads: usize,
     /// Of those, the ones waiting for an entry to come due.
     waiting: usize,
+    /// When each running entry (by its key's count) was taken by a worker.
+    running: BTreeMap<u64, Instant>,
     /// The most threads alive at once, and how many were ever started.
     #[cfg(test)]
     peak: usize,
@@ -99,8 +106,8 @@ impl RefreshPool {
         })
     }
 
-    /// [`RefreshPool::new`], starting threads past its size for checks
-    /// `overflow_after` late.
+    /// [`RefreshPool::new`], starting threads past its size once every
+    /// worker's check has run `overflow_after`.
     #[cfg(test)]
     pub(crate) fn with_overflow_after(size: usize, overflow_after: Duration) -> Arc<Self> {
         Arc::new(Self {
@@ -203,21 +210,28 @@ impl RefreshPool {
         true
     }
 
-    /// A read found its view's check `late`, past its time: the waiting
-    /// workers are woken, or with none waiting a thread starts if the pool
-    /// has room (as when the system refused one before). With every worker
-    /// busy the check waits its turn, unless it is [`OVERFLOW_AFTER`] late:
-    /// then a thread starts past the pool's size, up to twice it, since the
-    /// busy workers may be held by builds that hang. Extra threads stop,
-    /// like any, after the pool's idle time with nothing to run. The caller
+    /// A read found its view's check overdue: the waiting workers are
+    /// woken, or with none waiting a thread starts if the pool has room (as
+    /// when the system refused one before). With every worker busy the
+    /// check waits its turn, unless every worker's check has run for
+    /// [`OVERFLOW_AFTER`], which ordinary builds don't: then they are likely
+    /// hung, and a thread starts past the pool's size, up to twice it. Such
+    /// a thread stops as soon as nothing is due ([`worker`]). The caller
     /// holds the view's `live` lock, which is always taken before this
     /// pool's, as in [`RefreshPool::queue`].
-    pub(crate) fn nudge(self: &Arc<Self>, late: Duration) {
+    pub(crate) fn nudge(self: &Arc<Self>) {
         let mut state = lock(&self.state);
+        let now = Instant::now();
+        let hung = state.running.len() >= state.threads
+            && state.running.len() >= self.size
+            && state
+                .running
+                .values()
+                .all(|taken| now.saturating_duration_since(*taken) >= self.overflow_after);
         let start = if state.waiting > 0 {
             self.wake.notify_all();
             false
-        } else if late >= self.overflow_after {
+        } else if hung {
             self.reserve_up_to(&mut state, self.size * 2)
         } else {
             self.reserve(&mut state)
@@ -268,8 +282,9 @@ impl RefreshPool {
 }
 
 /// A worker: takes each entry once it is due and runs it, until it has had
-/// nothing to run for the pool's idle time. The pool's lock is never held
-/// while an entry runs.
+/// nothing to run for the pool's idle time, or at once when nothing is due
+/// and the pool runs more threads than its size (one a nudge started for
+/// hung builds). The pool's lock is never held while an entry runs.
 fn worker(pool: Arc<RefreshPool>) {
     /// A worker whose entry panicked is replaced, so the pool keeps its
     /// size: the view it ran keeps its last model, and is queued again.
@@ -289,6 +304,14 @@ fn worker(pool: Arc<RefreshPool>) {
             if start {
                 self.0.start();
             }
+        }
+    }
+    /// An entry a worker runs, counted in the pool's `running` until it
+    /// ends, panic or not.
+    struct Running<'a>(&'a RefreshPool, u64);
+    impl Drop for Running<'_> {
+        fn drop(&mut self) {
+            lock(&self.0.state).running.remove(&self.1);
         }
     }
     let replace = Replace(pool);
@@ -319,7 +342,14 @@ fn worker(pool: Arc<RefreshPool>) {
                             start = pool.reserve(&mut state);
                         }
                     }
+                    state.running.insert(key.1, now);
                     break (key, view, start);
+                }
+                // Past the pool's size, a thread a nudge started for hung
+                // builds: nothing is due, so it stops.
+                if state.threads > pool.size {
+                    state.threads -= 1;
+                    return;
                 }
                 let idle = now.saturating_duration_since(worked);
                 let head = state.queue.first_key_value().map(|(key, _)| key.0);
@@ -345,9 +375,11 @@ fn worker(pool: Arc<RefreshPool>) {
         if start {
             pool.start();
         }
+        let running = Running(pool, key.1);
         if let Some(view) = view.upgrade() {
             view.run_queued(key);
         }
+        drop(running);
         worked = Instant::now();
     }
 }
