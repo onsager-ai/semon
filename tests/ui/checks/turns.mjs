@@ -203,6 +203,209 @@ export default async function turnsCheck(browser) {
     await page.context().close();
   }
 
+  // Transcript handoffs are content, not links. Count the card forms actually rendered in the fixture, then exercise
+  // each form and its explicit name/control links at phone and desktop widths in both themes.
+  const handoffCards = {};
+  const handoffs = new Map(D0.H.map((h) => [h.id, h]));
+  const routeState = (page) => page.evaluate(() => { const s = history.state; return { v: s?.v ?? null, id: s?.id ?? null, turn: s?.turn ?? null }; });
+  const waitRoute = (page, expected) => page.waitForFunction((x) => { const s = history.state; return s?.v === x.v && s?.id === x.id && (x.turn == null || s?.turn === x.turn); }, expected);
+  const sameRoute = async (page) => JSON.stringify(await routeState(page));
+  const cardSelector = (id) => '.hcard[data-h="' + id + '"]';
+  for (const [size, width] of [["phone", 390], ["desktop", 1280]]) for (const scheme of ["light", "dark"]) {
+    const tag = width + "-" + scheme, page = await served(browser, { size, dark: scheme === "dark" });
+    const counts = {}, candidates = {}, badAttrs = [], shortTargets = [], sideways = [];
+    let visibleMore = null, totalCards = 0;
+    for (const sid of Object.keys(D0.SESS)) {
+      await goto(page, { v: "session", id: sid }, D0);
+      const scan = await page.evaluate(() => ({
+        cards: [...document.querySelectorAll(".hcard")].map((c) => ({ id: c.dataset.h, child: c.classList.contains("child-card"), start: c.classList.contains("start"), role: c.getAttribute("role"), tabindex: c.getAttribute("tabindex"), more: !!c.querySelector(".more:not([hidden])") })),
+        buttons: [...document.querySelectorAll(".hcard button.who, .hcard .child-head > button.ln, .hcard button.mach")].map((b) => { const p = getComputedStyle(b, "::before"); return { height: parseFloat(p.height) || 0, width: parseFloat(p.width) || 0, position: p.position }; }),
+        sideways: document.documentElement.scrollWidth - innerWidth,
+      }));
+      totalCards += scan.cards.length;
+      for (const c of scan.cards) {
+        if (c.role !== null || c.tabindex !== null) badAttrs.push({ sid, id: c.id, role: c.role, tabindex: c.tabindex });
+        const h = handoffs.get(c.id); if (!h) continue;
+        let kind = h.kind;
+        if (h.kind === "spawn") kind = c.child ? "child-card" : sid === h.to ? "received-brief" : "plain-spawn";
+        if (h.kind === "relay") kind = sid === h.from ? "relay-sent" : sid === h.to ? "relay-received" : "relay-third-session";
+        counts[kind] = (counts[kind] ?? 0) + 1;
+        candidates[kind] ??= { sid, id: c.id };
+        if (c.more) visibleMore ??= { sid, id: c.id };
+      }
+      if (size === "phone") {
+        if (scan.sideways > 0) sideways.push({ sid, pixels: scan.sideways });
+        scan.buttons.forEach((b) => { if (b.height < 44 || b.width <= 0 || b.position !== "absolute") shortTargets.push({ sid, ...b }); });
+      }
+    }
+    const interaction = { cards: totalCards, counts, bodyChecks: 0, links: {}, badAttrs, shortTargets, sideways };
+    r.expect(totalCards > 0, tag + ": no handoff cards were rendered");
+    r.expect(!badAttrs.length, tag + ": a handoff card still has role or tabindex: " + JSON.stringify(badAttrs.slice(0, 5)));
+    for (const kind of ["relay-sent", "relay-received", "child-card", "plain-spawn", "received-brief", "toyou", "move", "ask"]) {
+      if (!counts[kind]) continue;
+      const card = candidates[kind], sel = cardSelector(card.id);
+      await goto(page, { v: "session", id: card.sid }, D0);
+      const visible = await page.locator(sel).isVisible();
+      r.expect(visible, tag + ": " + kind + " candidate did not render: " + card.id);
+      const checkUnchanged = async (locator, label, position) => {
+        const before = await sameRoute(page);
+        if (position) await locator.click({ position }); else await locator.click();
+        await page.waitForTimeout(80);
+        const after = await sameRoute(page); interaction.bodyChecks++;
+        r.expect(after === before, tag + ": clicking " + kind + " " + label + " changed the route from " + before + " to " + after);
+      };
+      const box = await page.locator(sel).boundingBox();
+      r.expect(!!box, tag + ": " + kind + " card has no box: " + card.id);
+      if (box) await checkUnchanged(page.locator(sel), "empty card edge", { x: 3, y: Math.min(3, Math.max(1, box.height - 1)) });
+      const brief = page.locator(sel + " .brief");
+      if (await brief.count()) {
+        const b = await brief.boundingBox();
+        if (b) await checkUnchanged(brief, "message", { x: Math.max(1, Math.min(b.width - 2, b.width * 0.68)), y: Math.max(1, b.height / 2) });
+      }
+      const status = page.locator(sel + " .stat").first();
+      if (await status.isVisible()) await checkUnchanged(status, "status");
+    }
+    r.expect(!!counts.relay || !!counts["relay-sent"] || !!counts["relay-received"], tag + ": the fixture has no relay card");
+    r.expect(!!counts["child-card"], tag + ": the fixture has no child card");
+    r.expect(!!counts.toyou, tag + ": the fixture has no toyou card");
+    if (width === 390) {
+      r.expect(!shortTargets.length, tag + ": name buttons lack a 44px absolute hit area: " + JSON.stringify(shortTargets.slice(0, 5)));
+      r.expect(!sideways.length, tag + ": handoff cards caused horizontal overflow: " + JSON.stringify(sideways.slice(0, 5)));
+    }
+
+    const childCard = candidates["child-card"];
+    if (childCard) {
+      const h = handoffs.get(childCard.id), childName = D0.SESS[h.to].name, sel = cardSelector(h.id), started = D.starts.get(h.id)?.id ?? null;
+      await goto(page, { v: "session", id: childCard.sid }, D0);
+      const name = page.locator(sel + " .child-head > button.ln");
+      const aria = await name.getAttribute("aria-label");
+      interaction.links.childName = { label: aria, name: childName, turn: started };
+      r.expect(aria === "Open " + childName, tag + ": child name aria-label is " + aria);
+      await name.click(); await waitRoute(page, { v: "session", id: h.to, turn: started });
+      interaction.links.childNameOpens = await routeState(page);
+      r.expect(interaction.links.childNameOpens.id === h.to && (!started || interaction.links.childNameOpens.turn === started), tag + ": child name did not open its started turn: " + JSON.stringify(interaction.links.childNameOpens));
+      await page.goBack(); await waitRoute(page, { v: "session", id: childCard.sid });
+      await page.locator(sel + " .child-actions > button").click(); await waitRoute(page, { v: "session", id: h.to });
+      interaction.links.childOpenButton = await routeState(page);
+      r.expect(interaction.links.childOpenButton.id === h.to, tag + ": existing child Open button did not open the child: " + JSON.stringify(interaction.links.childOpenButton));
+      await page.goBack(); await waitRoute(page, { v: "session", id: childCard.sid });
+      await page.locator(sel + " .child-head > button.ln").focus(); await page.keyboard.press("Enter"); await waitRoute(page, { v: "session", id: h.to, turn: started });
+      interaction.links.childNameEnter = await routeState(page);
+      r.expect(interaction.links.childNameEnter.id === h.to, tag + ": Enter did not activate the child name button");
+    }
+
+    const plainSpawn = candidates["plain-spawn"];
+    if (plainSpawn) {
+      const h = handoffs.get(plainSpawn.id), recipient = D0.SESS[h.to]?.name ?? h.to, sel = cardSelector(h.id), started = D.starts.get(h.id)?.id ?? null;
+      await goto(page, { v: "session", id: plainSpawn.sid }, D0);
+      const target = page.locator(sel + " .ln button.who").filter({ hasText: recipient }), count = await target.count();
+      if (D0.SESS[h.to] && h.to !== plainSpawn.sid) {
+        const label = count ? await target.getAttribute("aria-label") : null;
+        interaction.links.spawnTarget = { count, label, recipient, turn: started };
+        r.expect(count > 0 && label === "Open " + recipient + " at the turn this started", tag + ": spawn target button or aria-label is missing: " + JSON.stringify(interaction.links.spawnTarget));
+        if (count) {
+          await target.click(); await waitRoute(page, { v: "session", id: h.to, turn: started });
+          interaction.links.spawnTargetOpens = await routeState(page);
+          r.expect(interaction.links.spawnTargetOpens.id === h.to && (!started || interaction.links.spawnTargetOpens.turn === started), tag + ": spawn target did not open its started turn: " + JSON.stringify(interaction.links.spawnTargetOpens));
+        }
+      }
+    }
+
+    const linkedRelay = D0.H.find((h) => h.kind === "relay" && D0.H.some((x) => x.kind === "relay" && x.to === h.from));
+    const sentRelay = linkedRelay ? { sid: linkedRelay.from, id: linkedRelay.id } : candidates["relay-sent"];
+    if (sentRelay) {
+      const h = handoffs.get(sentRelay.id), recipient = D0.SESS[h.to]?.name ?? h.to, sel = cardSelector(h.id), started = D.starts.get(h.id)?.id ?? null;
+      await goto(page, { v: "session", id: sentRelay.sid }, D0);
+      const target = page.locator(sel + " .ln button.who");
+      const labels = await target.evaluateAll((bs) => bs.map((b) => ({ text: b.textContent.trim(), label: b.getAttribute("aria-label") })));
+      const ownIsButton = labels.some((b) => b.text === (D0.SESS[sentRelay.sid]?.name ?? sentRelay.sid));
+      interaction.links.relayTarget = { labels, ownIsButton, target: recipient, turn: started };
+      r.expect(labels.some((b) => b.text === recipient && b.label === "Open " + recipient + " at the turn this started"), tag + ": relay target button or aria-label is missing: " + JSON.stringify(labels));
+      r.expect(!ownIsButton, tag + ": the viewer's own name became a button");
+      await target.filter({ hasText: recipient }).click(); await waitRoute(page, { v: "session", id: h.to, turn: started });
+      interaction.links.relayTargetOpens = await routeState(page);
+      r.expect(interaction.links.relayTargetOpens.id === h.to && (!started || interaction.links.relayTargetOpens.turn === started), tag + ": relay target did not open its started turn: " + JSON.stringify(interaction.links.relayTargetOpens));
+      await page.goBack(); await waitRoute(page, { v: "session", id: sentRelay.sid });
+      await page.locator(sel + " .ln button.who").filter({ hasText: recipient }).focus(); await page.keyboard.press(" "); await waitRoute(page, { v: "session", id: h.to, turn: started });
+      interaction.links.relayTargetSpace = await routeState(page);
+      r.expect(interaction.links.relayTargetSpace.id === h.to, tag + ": Space did not activate the relay target button");
+    }
+
+    const receivedOrigin = sentRelay && D0.H.find((h) => h.kind === "relay" && h.to === sentRelay.sid);
+    const receivedRelay = receivedOrigin ? { sid: receivedOrigin.to, id: receivedOrigin.id } : candidates["relay-received"];
+    if (receivedRelay) {
+      const h = handoffs.get(receivedRelay.id), sender = D0.SESS[h.from]?.name ?? h.from, held = D.holds.get(h.id)?.id ?? null;
+      // The incoming relay starts this turn, so its card sentence is hidden; the visible source name is the turn header button.
+      await page.goBack();
+      if (sentRelay && receivedRelay.sid === sentRelay.sid) await waitRoute(page, { v: "session", id: sentRelay.sid });
+      const returned = await routeState(page);
+      interaction.links.afterBack = returned;
+      if (returned.id !== receivedRelay.sid) await goto(page, { v: "session", id: receivedRelay.sid }, D0);
+      const turn = D.starts.get(h.id)?.id;
+      const cardSourceLabel = await page.locator(cardSelector(h.id) + " .ln button.who").getAttribute("aria-label");
+      r.expect(cardSourceLabel === "Open " + sender + " where it sent this", tag + ": received relay card sender aria-label is " + cardSourceLabel);
+      const from = page.locator('.turn[data-turn="' + turn + '"] > .turn-h .from');
+      const label = await from.getAttribute("aria-label");
+      interaction.links.relaySource = { cardLabel: cardSourceLabel, label, sender, held };
+      r.expect(label === "Open " + sender + " where it sent this", tag + ": received relay source aria-label is " + label);
+      await from.click(); await waitRoute(page, { v: "session", id: h.from, turn: held });
+      interaction.links.relaySourceOpens = await routeState(page);
+      r.expect(interaction.links.relaySourceOpens.id === h.from && (!held || interaction.links.relaySourceOpens.turn === held), tag + ": received relay source did not open the sender turn: " + JSON.stringify(interaction.links.relaySourceOpens));
+    }
+
+    const move = candidates.move;
+    if (move) {
+      const h = handoffs.get(move.id), sel = cardSelector(h.id), machineName = D0.MACHINE[h.fromMachine] ?? h.fromMachine;
+      await goto(page, { v: "session", id: move.sid }, D0);
+      const machines = page.locator(sel + " button.mach"), machineInfo = await machines.evaluateAll((bs) => bs.map((b) => ({ label: b.getAttribute("aria-label"), tip: b.dataset.tip })));
+      interaction.links.moveMachines = machineInfo;
+      r.expect(machineInfo.length === 2 && machineInfo.some((m) => m.label === "Open machine " + machineName && m.tip === "Machine: " + machineName), tag + ": move machine buttons or preserved tip are wrong: " + JSON.stringify(machineInfo));
+      await machines.first().click(); await waitRoute(page, { v: "machine", id: h.fromMachine });
+      interaction.links.moveOpens = await routeState(page);
+      r.expect(interaction.links.moveOpens.id === h.fromMachine, tag + ": move machine button did not open its machine: " + JSON.stringify(interaction.links.moveOpens));
+    }
+
+    if (visibleMore) {
+      const sel = cardSelector(visibleMore.id);
+      await goto(page, { v: "session", id: visibleMore.sid }, D0);
+      const before = await sameRoute(page), more = page.locator(sel + " .more");
+      await more.click(); await page.waitForTimeout(80);
+      const state = await routeState(page), expanded = await more.getAttribute("aria-expanded"), label = await more.textContent();
+      interaction.links.showMore = { before, state, expanded, label };
+      r.expect(JSON.stringify(state) === before && expanded === "true" && label === "Show less", tag + ": Show more navigated or failed to expand: " + JSON.stringify(interaction.links.showMore));
+    } else r.expect(false, tag + ": fixture has no visible Show more handoff control");
+
+    // The ingest session has both an outgoing relay and spawn child cards close together in the same transcript.
+    const captureRelay = D0.H.find((h) => h.kind === "relay" && D0.H.some((x) => x.kind === "spawn" && x.from === h.from && D0.SESS[x.to]));
+    const captureChild = captureRelay && D0.H.find((h) => h.kind === "spawn" && h.from === captureRelay.from && D0.SESS[h.to]);
+    if (captureRelay && captureChild) {
+      await goto(page, { v: "session", id: captureRelay.from }, D0); await page.mouse.move(0, 0);
+      const relaySel = cardSelector(captureRelay.id), childSel = cardSelector(captureChild.id);
+      await page.locator(relaySel).scrollIntoViewIfNeeded(); await page.waitForTimeout(120);
+      await page.screenshot({ path: path.join(ENV.out, "handoffcards-" + width + "-" + scheme + "-relay.png") });
+      if (width === 1280 && scheme === "light") {
+        const target = page.locator(relaySel + " .ln button.who"); await target.hover(); await page.waitForTimeout(120);
+        await page.screenshot({ path: path.join(ENV.out, "handoffcards-1280-light-hover.png") });
+      }
+      await page.locator(childSel).scrollIntoViewIfNeeded(); await page.waitForTimeout(120);
+      await page.screenshot({ path: path.join(ENV.out, "handoffcards-" + width + "-" + scheme + "-child.png") });
+      interaction.screenshots = [
+        "handoffcards-" + width + "-" + scheme + "-relay.png",
+        "handoffcards-" + width + "-" + scheme + "-child.png",
+        ...(width === 1280 && scheme === "light" ? ["handoffcards-1280-light-hover.png"] : []),
+      ];
+      r.expect(await page.locator(relaySel).count() === 1 && await page.locator(childSel).count() === 1, tag + ": screenshot route does not contain both target cards");
+    } else r.expect(false, tag + ": fixture needs its outgoing relay and child card screenshot pair");
+    interaction.errors = page.errors;
+    r.expect(page.errors.length === 0, tag + ": page errors: " + page.errors.join(" | "));
+    handoffCards[tag] = interaction;
+    await page.context().close();
+  }
+  r.expect(Object.values(handoffCards).every((x) => x.counts.relay || x.counts["relay-sent"] || x.counts["relay-received"]), "handoff card coverage: fixture relay cards were not found at every size/theme");
+  r.expect(Object.values(handoffCards).every((x) => x.counts["child-card"] > 0), "handoff card coverage: fixture child cards were not found at every size/theme");
+  r.expect(Object.values(handoffCards).every((x) => x.counts.toyou > 0), "handoff card coverage: fixture toyou cards were not found at every size/theme");
+  out.handoffCards = handoffCards;
+
   r.results = out;
   const light = out.light;
   r.expect(out.light.errors.length === 0, "light page errors: " + out.light.errors.join(" | "));

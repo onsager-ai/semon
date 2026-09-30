@@ -203,20 +203,43 @@
   const rich = (tag, cls, text) => { const n = el(tag, cls); inline(n, text); return n; };
 
   // What a handoff says, from a viewpoint. Returns [icon, [parts...]].
-  function sentence(h, viewer) {
-    const W = (id) => { const s = el("span", "who", nameOf(id)); return s; };
+  function sentence(h, viewer, { links = false } = {}) {
+    const W = (id, action) => {
+      const name = nameOf(id);
+      if (!links || !action || id === "you" || id === viewer || !SESS[id]) return el("span", "who", name);
+      const b = el("button", "who", name); b.type = "button"; b.setAttribute("aria-label", action.label(name));
+      b.addEventListener("click", (ev) => { ev.stopPropagation(); action.open(); });
+      return b;
+    };
     const kindOf = (id) => SESS[id]?.kind === "Subagent" ? "subagent" : SESS[id]?.kind ?? "";
-    if (h.kind === "ask") return [I.ask, [W("you"), el("span", "verb", " asked "), W(h.to)]];
-    if (h.kind === "spawn") return viewer === h.to ? [I.in, [el("span", "verb", "Brief from "), W(h.from)]] : [I.out, [W(h.from), el("span", "verb", " handed off to " + kindOf(h.to) + " "), W(h.to)]];
-    if (h.kind === "relay") return viewer === h.to ? [I.in, [el("span", "verb", "Relay from "), W(h.from)]] : [I.out, [W(h.from), el("span", "verb", " relayed to "), W(h.to)]];
+    if (h.kind === "ask") {
+      const recipient = { label: (name) => "Open " + name + " at the turn this started", open: () => goSession(h.to, STARTS.get(h.id)?.id) };
+      return [I.ask, [W("you"), el("span", "verb", " asked "), W(h.to, recipient)]];
+    }
+    if (h.kind === "spawn") {
+      const sender = { label: (name) => "Open " + name + " where it sent this", open: () => openSender(h) };
+      const recipient = { label: (name) => "Open " + name + " at the turn this started", open: () => goSession(h.to, STARTS.get(h.id)?.id) };
+      return viewer === h.to ? [I.in, [el("span", "verb", "Brief from "), W(h.from, sender)]] : [I.out, [W(h.from, sender), el("span", "verb", " handed off to " + kindOf(h.to) + " "), W(h.to, recipient)]];
+    }
+    if (h.kind === "relay") {
+      const sender = { label: (name) => "Open " + name + " where it sent this", open: () => openSender(h) };
+      const recipient = { label: (name) => "Open " + name + " at the turn this started", open: () => goSession(h.to, STARTS.get(h.id)?.id) };
+      return viewer === h.to ? [I.in, [el("span", "verb", "Relay from "), W(h.from, sender)]] : [I.out, [W(h.from, sender), el("span", "verb", " relayed to "), W(h.to, recipient)]];
+    }
     if (h.kind === "move") {
       const ends = [h.fromMachine, h.toMachine], short = machineShorts(ends.map((id) => [id, MACHINE[id] ?? id]));
-      const M = (id) => { const n = el("span", "verb mach", short.get(id)); n.dataset.tip = "Machine: " + (MACHINE[id] ?? id); return n; };
-      return [I.move, [el("span", "verb", "Semon moved "), W(h.to), el("span", "verb", " from "), M(h.fromMachine), el("span", "verb", " to "), M(h.toMachine)]];
+      const M = (id) => {
+        const label = MACHINE[id] ?? id, n = links ? el("button", "verb mach", short.get(id)) : el("span", "verb mach", short.get(id));
+        if (links) { n.type = "button"; n.setAttribute("aria-label", "Open machine " + label); n.addEventListener("click", (ev) => { ev.stopPropagation(); go({ v: "machine", id }); }); }
+        n.dataset.tip = "Machine: " + label; return n;
+      };
+      const session = { label: (name) => "Open " + name, open: () => goSession(h.to) };
+      return [I.move, [el("span", "verb", "Semon moved "), W(h.to, session), el("span", "verb", " from "), M(h.fromMachine), el("span", "verb", " to "), M(h.toMachine)]];
     }
     const what = { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h.ask];
     const answered = h.status === "done" && (h.ask === "question" || h.ask === "decision");
-    return [answered ? I.done : h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from), el("span", "verb", what)]];
+    const sender = { label: (name) => "Open " + name + " where it sent this", open: () => openSender(h) };
+    return [answered ? I.done : h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from, sender), el("span", "verb", what)]];
   }
   const statWord = (h) => isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
 
@@ -2105,14 +2128,18 @@
     const other = h.kind === "move" ? null : viewer === h.from ? h.to : h.from;
     const child = h.kind === "spawn" && viewer === h.from ? SESS[h.to] : null;
     const answered = h.kind === "toyou" && h.status === "done" && (h.ask === "question" || h.ask === "decision");
-    const c = el("div", "hcard " + (child ? "child-card " + hcls(h.to) : h.kind === "toyou" ? "toyou" + (h.status === "wait" ? " waiting" : "") + (answered ? " answered" : "") : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
-    const [ic, parts] = sentence(h, viewer);
-    if (child) { const head = el("div", "child-head"); head.append(childKindChip(child), el("span", "ln", child.name)); c.append(head); }
+    const c = el("div", "hcard " + (child ? "child-card " + hcls(h.to) : h.kind === "toyou" ? "toyou" + (h.status === "wait" ? " waiting" : "") + (answered ? " answered" : "") : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id;
+    const [ic, parts] = sentence(h, viewer, { links: true });
+    if (child) {
+      const head = el("div", "child-head"), childName = el("button", "ln", child.name); childName.type = "button"; childName.setAttribute("aria-label", "Open " + child.name);
+      childName.addEventListener("click", (ev) => { ev.stopPropagation(); goSession(child.id, STARTS.get(h.id)?.id); });
+      head.append(childKindChip(child), childName); c.append(head);
+    }
     else { c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln); }
     const shownState = child?.state ?? h.status, sw = el("span", "stat " + shownState); sw.append(shownState === "work" ? el("span", "spin") : dot(shownState === "done" ? "done" : shownState, false), child ? STATE[shownState] : statWord(h)); c.append(sw);
     if (child) { const meta = el("div", "child-meta"); meta.append(el("span", null, dur(child.start, child.state === "work" ? null : child.last)), el("span", null, callsText(countOf(child, "calls")))); c.append(meta); }
     const br = markdown(h.brief, "brief"); c.append(br);
-    // Long messages open in place; the rest of the card still goes to the other session.
+    // Long messages open in place with Show more; the handoff names provide navigation.
     const more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
     more.addEventListener("click", (ev) => { ev.stopPropagation(); const open = c.classList.toggle("open"); more.textContent = open ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(open)); });
     new ResizeObserver(() => { if (c.classList.contains("open") || !br.clientHeight) return; const x = br.scrollHeight > br.clientHeight + 1; more.hidden = !x; br.classList.toggle("clipped", x); }).observe(br);
@@ -2131,10 +2158,6 @@
       }
       c.append(actions);
     }
-    // Received: the sender's turn that sent it. Sent on: the turn it started there. To you: this turn's trace. A move: the machine it left.
-    const open = () => { if (h.kind === "move") go({ v: "machine", id: h.fromMachine }); else if (h.kind === "toyou") { const t = HOLDS.get(h.id); if (t) goTrace(t.id); } else if (viewer === h.to) openSender(h); else if (SESS[other]) goSession(other, STARTS.get(h.id)?.id); };
-    c.addEventListener("click", (ev) => { if (!getSelection().isCollapsed) return; open(); });
-    c.addEventListener("keydown", (ev) => { if (ev.target === c && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); open(); } });
     return c;
   }
 
