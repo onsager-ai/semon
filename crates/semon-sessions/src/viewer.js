@@ -64,7 +64,30 @@
   const hcls = (id) => id === "you" ? "h-you" : "h-" + SESS[id].harness;
   const where = (s) => s.repo ? s.repo + (s.branch && s.branch !== "main" && s.branch !== s.name ? " · " + s.branch : "") : "No repo";
   const hostOf = (s) => s.host ?? MACHINE[s.machine] ?? s.machine ?? "Unknown machine";
-  const shortHost = (s) => { const h = hostOf(s).split(".")[0]; return h.length > 14 ? h.slice(0, 14) + "…" : h; };
+  // The name of a machine that has none is drawn whole ("Unknown machine"); a real one is cut to 14 characters.
+  const shortName = (name) => { const h = String(name).split(".")[0]; return h.length > 14 ? h.slice(0, 14) + "…" : h; };
+  const shortHost = (s) => s.host == null && MACHINE[s.machine] == null && s.machine == null ? hostOf(s) : shortName(hostOf(s));
+  // Short display names for machines, `[[id, full name]]` in, a Map of id to name out. A long name is cut to 14 characters; two that
+  // cut alike keep their tails ("build-…-east-1"), then their whole first label, then their id, until no two in the list are alike.
+  const machineShorts = (names) => {
+    const forms = (id, full) => { const first = String(full).split(".")[0]; return [shortName(first), first.length > 14 ? first.slice(0, 6) + "…" + first.slice(-7) : first, first, id]; };
+    const opts = new Map(names.map(([id, full]) => [id, forms(id, full)])), level = new Map([...opts.keys()].map((id) => [id, 0]));
+    for (let step = 0; step < 3; step++) {
+      const groups = new Map(); for (const [id, o] of opts) { const l = o[level.get(id)]; if (!groups.has(l)) groups.set(l, []); groups.get(l).push(id); }
+      let clash = false; for (const ids of groups.values()) if (ids.length > 1) { clash = true; for (const id of ids) level.set(id, level.get(id) + 1); }
+      if (!clash) break;
+    }
+    return new Map([...opts].map(([id, o]) => [id, o[level.get(id)]]));
+  };
+  // Each machine the sessions in `scope` (sessions or their ids; every session by default) run on, by its short display name, only where
+  // they span several machines. With one machine every line would say the same thing, so the Map is empty. One entry per machine id.
+  const machineLabels = (scope = Object.values(SESS)) => {
+    const names = new Map();
+    for (const x of scope) { const s = typeof x === "string" ? SESS[x] : x; if (s?.machine != null && !names.has(s.machine)) names.set(s.machine, s.host ?? MACHINE[s.machine] ?? s.machine); }
+    return names.size > 1 ? machineShorts([...names]) : new Map();
+  };
+  // A session's machine by its short name, or "" where the view is of one machine.
+  const machineLabel = (s, scope) => (s ? machineLabels(scope).get(s.machine) ?? "" : "");
   const branchOf = (s) => s.worktree ?? s.branch ?? "No branch";
   const shortModel = (model) => String(model ?? "Unknown model").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
   // A harness is named in plain muted text (.hname), never in a vendor colour; "short" gives "Claude" where the line is tight. The label itself
@@ -186,7 +209,11 @@
     if (h.kind === "ask") return [I.ask, [W("you"), el("span", "verb", " asked "), W(h.to)]];
     if (h.kind === "spawn") return viewer === h.to ? [I.in, [el("span", "verb", "Brief from "), W(h.from)]] : [I.out, [W(h.from), el("span", "verb", " handed off to " + kindOf(h.to) + " "), W(h.to)]];
     if (h.kind === "relay") return viewer === h.to ? [I.in, [el("span", "verb", "Relay from "), W(h.from)]] : [I.out, [W(h.from), el("span", "verb", " relayed to "), W(h.to)]];
-    if (h.kind === "move") return [I.move, [el("span", "verb", "Semon moved "), W(h.to), el("span", "verb", " from " + MACHINE[h.fromMachine] + " to " + MACHINE[h.toMachine])]];
+    if (h.kind === "move") {
+      const ends = [h.fromMachine, h.toMachine], short = machineShorts(ends.map((id) => [id, MACHINE[id] ?? id]));
+      const M = (id) => { const n = el("span", "verb mach", short.get(id)); n.dataset.tip = "Machine: " + (MACHINE[id] ?? id); return n; };
+      return [I.move, [el("span", "verb", "Semon moved "), W(h.to), el("span", "verb", " from "), M(h.fromMachine), el("span", "verb", " to "), M(h.toMachine)]];
+    }
     const what = { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h.ask];
     const answered = h.status === "done" && (h.ask === "question" || h.ask === "decision");
     return [answered ? I.done : h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from), el("span", "verb", what)]];
@@ -1663,9 +1690,9 @@
     new ResizeObserver(() => { if (br.classList.contains("open") || !br.clientHeight) return; const x = br.scrollHeight > br.clientHeight + 1; more.hidden = !x; br.classList.toggle("clipped", x); }).observe(br);
     body.append(more);
   }
-  function traceMeta(body, st, text, sid, turn, note) {
+  function traceMeta(body, st, text, sid, turn, note, scope) {
     const meta = el("div", "meta"), s = SESS[sid]; const sw = el("span", "stat " + st); sw.append(st === "work" ? el("span", "spin") : dot(st, false), text); meta.append(sw);
-    if (s) meta.append(withHarnessIcon(el("span", "chip-h " + hcls(sid), (s.kind ?? HARNESS[s.harness]) + " · " + MACHINE[s.machine]), s.harness, { size: 14, lead: false }));
+    if (s) { const label = machineLabel(s, scope), chip = el("span", "chip-h " + hcls(sid), [s.kind ?? HARNESS[s.harness], label].filter(Boolean).join(" · ")); if (label) chip.dataset.tip = "Machine: " + hostOf(s); meta.append(withHarnessIcon(chip, s.harness, { size: 14, lead: false })); }
     if (note) meta.append(el("span", "gone", note));
     if (s && !s.stub) { const o = el("button", "open", "Open in " + s.name + " ›"); o.type = "button"; o.addEventListener("click", () => goSession(sid, turn?.id)); meta.append(o); }
     body.append(meta);
@@ -1681,12 +1708,17 @@
     };
     readTrace(root);
     const flow = el("div", "flow"), seen = new Set([root.id]), sess = new Set([root.sid]); let n = 0;
+    // Every session the trace names, so a machine shows only when the trace spans several.
+    const scope = new Set([root.sid]), reached = new Set([root.id]);
+    const reach = (t) => { for (const h of t.sent) { scope.add(h.kind === "toyou" ? h.from : h.to); const c = h.kind === "spawn" || h.kind === "relay" ? STARTS.get(h.id) : null; if (c && !reached.has(c.id)) { reached.add(c.id); reach(c); } } };
+    reach(root);
+    const meta = (body, st, text, sid, turn, note) => traceMeta(body, st, text, sid, turn, note, scope);
     const hop = (cls, ic, hc, parts, at) => { const x = el("div", "hop " + cls); const node = el("div", "node " + hc); node.append(icon(ic)); const body = el("div", "body"); const sent = el("div", "sent"); sent.append(...parts); if (at != null) sent.append(el("span", "tm", clock(at))); body.append(sent); x.append(node, body); flow.append(x); return [x, body]; };
     const s0 = root.start, text = s0 ? s0.brief : root.u?.text;
     const [ic0, parts0] = s0 ? sentence(s0, null) : root.u ? sentence({ kind: "ask", to: root.sid }, null) : [I.more, [el("span", "who", SESS[root.sid].name), el("span", "verb", " · a turn whose start isn't in these logs")]];
     const [r0, b0] = hop("k-root", ic0, hcls(s0 ? s0.from : root.u ? "you" : root.sid), parts0, s0?.at); r0.dataset.turn = root.id; if (s0) r0.dataset.h = s0.id;
     if (text) clampBrief(b0, text);
-    const e0 = turnEnd(root); traceMeta(b0, e0?.st ?? "idle", e0?.text ?? "Nothing recorded", root.sid, root);
+    const e0 = turnEnd(root); meta(b0, e0?.st ?? "idle", e0?.text ?? "Nothing recorded", root.sid, root);
     const walk = (t) => {
       for (const h of t.sent) {
         const result = h.kind === "toyou" && h.ask === "result";
@@ -1695,18 +1727,18 @@
         if (result) { n++; continue; }
         clampBrief(b, h.brief); const an = answerEl(h, "result"); if (an) b.append(an);
         if (h.result) { const r = el("div", "result"); r.append(el("span", "rl", "Result:")); const s = el("span"); inline(s, h.result); r.append(s); b.append(r); }
-        if (h.kind === "move") { traceMeta(b, "done", "Moved", h.to, t); continue; }
+        if (h.kind === "move") { meta(b, "done", "Moved", h.to, t); continue; }
         n++;
-        if (h.kind === "toyou") { traceMeta(b, isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : h.status === "done" ? "done" : h.status, statWord(h), h.from, t); continue; }
+        if (h.kind === "toyou") { meta(b, isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : h.status === "done" ? "done" : h.status, statWord(h), h.from, t); continue; }
         sess.add(h.to); const e = c && turnEnd(c);
-        traceMeta(b, e ? e.st : h.status === "done" ? "done" : h.status, e ? e.text : statWord(h), h.to, c, c ? null : "Its turn isn't in these logs");
+        meta(b, e ? e.st : h.status === "done" ? "done" : h.status, e ? e.text : statWord(h), h.to, c, c ? null : "Its turn isn't in these logs");
         if (c && !seen.has(c.id)) { seen.add(c.id); walk(c); } // a turn is drawn once, so a loop in the data can't recurse forever
       }
     };
     walk(root);
     page.append(flow);
     // The bar's summary line.
-    return [sess.size + (sess.size === 1 ? " session" : " sessions"), n + (n === 1 ? " handoff" : " handoffs"), [...new Set([...sess].map((x) => MACHINE[SESS[x]?.machine]).filter(Boolean))].join(", ")].join(" · ");
+    return [sess.size + (sess.size === 1 ? " session" : " sessions"), n + (n === 1 ? " handoff" : " handoffs"), [...machineLabels(scope).values()].join(", ")].filter(Boolean).join(" · ");
   }
 
   // ---- Session page --------------------------------------------------------------------------------------------------

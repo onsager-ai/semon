@@ -182,7 +182,7 @@ code { overflow-wrap: anywhere; }
    may break anywhere, and every grid track holding it may shrink below its content. */
 .hop .body { grid-template-columns: minmax(0, 1fr); }
 .hop .body > *, .hop .meta > *, .turn-h > *, .turn-end > * { min-width: 0; }
-.hop .brief, .hop .result, .hop .sent, .hcard .brief, .hcard .result, .hcard .ln, .ib .q, .ib .ln, .hop .open, .chip-h, .msg .body { overflow-wrap: anywhere; }
+.hop .brief, .hop .result, .hop .sent, .hcard .brief, .hcard .result, .hcard .ln, .ib .q, .ib .ln, .hop button.open, .chip-h, .msg .body { overflow-wrap: anywhere; }
 .chip-h { max-width: 100%; text-align: left; }
 
 /* A handoff's sentence: who did what to whom. Used on Home, in traces and in transcripts. */
@@ -248,6 +248,8 @@ code { overflow-wrap: anywhere; }
 .hop.k-move .node { color: var(--accent); }
 .hop .body { min-width: 0; padding-top: 3px; display: grid; gap: 4px; }
 .hop .sent { font-size: var(--fs-sm); overflow-wrap: anywhere; }
+/* A machine's short name in a move's sentence stays whole: the sentence wraps between words, never inside "build-…-east-2". */
+.mach { white-space: nowrap; }
 .hop .sent .tm { font-family: var(--mono); font-size: var(--fs-cap); color: var(--muted); margin-left: 6px; }
 .hop .brief { font-family: var(--serif); font-size: var(--fs-read); line-height: 1.5; color: var(--ink-2); max-height: 5.8em; overflow: hidden; }
 .hop .more { justify-self: start; min-height: 36px; margin: -8px 0; border: 0; background: none; padding: 0; color: var(--accent); font-size: var(--fs-sm); }
@@ -255,7 +257,8 @@ code { overflow-wrap: anywhere; }
 .hop .result .rl { color: var(--muted); margin-right: 4px; }
 .hop .meta { display: flex; flex-wrap: wrap; gap: 2px 12px; align-items: center; font-size: var(--fs-sm); color: var(--muted); }
 .hop .meta .stat { white-space: normal; }
-.hop .open { min-height: 36px; border: 0; background: none; padding: 0; color: var(--accent); font-size: var(--fs-sm); text-align: left; }
+/* The "Open in …" button only: an open brief carries the class `open` too, and must keep the brief's own look. */
+.hop button.open { min-height: 36px; border: 0; background: none; padding: 0; color: var(--accent); font-size: var(--fs-sm); text-align: left; }
 .hop .meta .gone { color: var(--muted); }
 .hop.k-root .node { color: var(--h); background: color-mix(in srgb, var(--h) 16%, var(--ground)); }
 /* A handoff whose receiving turn is not in these logs: a hollow node, nothing below it. */
