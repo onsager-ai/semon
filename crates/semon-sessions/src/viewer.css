@@ -506,16 +506,22 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .hcard { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 3px 10px; align-items: start; border: 0; border-left: 2px solid var(--h); background: none; border-radius: 0; padding: 6px 0 6px 12px; text-align: left; width: 100%; }
 .hcard > svg { width: 16px; height: 16px; margin-top: 2px; color: var(--h); }
 .hcard .ln { font-size: var(--fs-sm); min-width: 0; overflow-wrap: anywhere; }
+.hcard button.who, .hcard .child-head > button.ln, .hcard button.mach { position: relative; display: inline; appearance: none; border: 0; border-radius: 0; margin: 0; padding: 0; background: none; text-align: inherit; }
+.hcard button.who, .hcard .child-head > button.ln { color: inherit; }
+.hcard button.who { font-family: inherit; font-size: inherit; font-weight: 600; line-height: inherit; }
+.hcard .child-head > button.ln { font: inherit; line-height: 1.4; }
+.hcard button.mach { font: inherit; }
+.hcard button.who:focus-visible, .hcard .child-head > button.ln:focus-visible, .hcard button.mach:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.hcard button.who, .hcard .child-head > button.ln, .hcard button.mach { cursor: pointer; }
 /* A brief is markdown: three lines show, then it fades; Show more opens it in place. */
 .hcard .brief { grid-column: 2 / 4; font-size: var(--fs-ui); line-height: 1.45; color: var(--ink-2); max-height: 4.35em; overflow: hidden; }
 .hcard .brief.clipped, .hop .brief.clipped { -webkit-mask-image: linear-gradient(#000 calc(100% - 1.45em), transparent); mask-image: linear-gradient(#000 calc(100% - 1.45em), transparent); }
-.hcard { cursor: pointer; }
 .hcard.open .brief, .hop .brief.open { max-height: none; overflow: visible; -webkit-mask-image: none; mask-image: none; }
 .hcard .more { grid-column: 2 / 4; justify-self: start; border: 0; background: none; padding: 2px 0; margin: -2px 0 0; font-size: var(--fs-sm); color: var(--accent); }
 @media (hover: hover) { .hcard .more:hover { text-decoration: underline; } }
 .hcard .result { grid-column: 2 / 4; font-size: var(--fs-sm); color: var(--muted); }
 .hcard .result b { font-weight: 500; color: var(--ink-2); }
-@media (hover: hover) { .hcard:hover .ln .who { color: var(--accent); } }
+@media (hover: hover) { .hcard button.who:hover, .hcard .child-head > button.ln:hover, .hcard button.mach:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; } }
 .hcard.toyou { --h: var(--line); }
 .hcard.toyou.waiting { --h: var(--wait); }
 .hcard.toyou.answered { --h: var(--line); background: none; }
@@ -533,6 +539,9 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .child-head .ln { flex: 1 1 0; min-width: 0; line-height: 1.4; }
 .hcard.child-card .ln { font-size: var(--fs-ui); font-weight: 600; color: var(--ink); }
 .hcard.child-card .brief { max-height: 5.8em; }
+@media (max-width: 760px) {
+  .hcard button.who::before, .hcard .child-head > button.ln::before, .hcard button.mach::before { content: ""; position: absolute; top: 50%; left: -4px; width: calc(100% + 8px); height: 44px; transform: translateY(-50%); }
+}
 /* Open, the card's brief grows to fit: this rule is as specific as the clamp above and the open rule earlier in the file, and would lose to it. */
 .hcard.child-card.open .brief { max-height: none; }
 
