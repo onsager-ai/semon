@@ -5,7 +5,7 @@
 // "Faint" is not a text colour, and its ratio is about 2.6:1, so it fails here wherever it is used for words. Text that holds no
 // letter or digit (a separator such as "·" or "›") is a rule, not words, and isn't measured. Disabled controls and text that is
 // not drawn (hidden, closed drawer, under 2 px) are skipped.
-import { served, data, reporter, goto, ENV } from "../lib.mjs";
+import { served, data, reporter, goto, settled, ENV } from "../lib.mjs";
 import path from "node:path";
 
 const audit = (page) => page.evaluate(() => {
@@ -77,22 +77,38 @@ export default async function tokensCheck(browser) {
   const parent = Object.values(D.SESS).find((s) => Object.values(D.SESS).filter((c) => c.parent === s.id).length >= 5)?.id ?? harbor;
   const originFor = (sid) => D.H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === sid && h.from !== sid &&
     (h.kind === "spawn" || D.SESS[sid]?.kind === "Relayed" || !D.SESS[sid]?.lane));
-  const briefSessions = [...new Set(D.H.filter((h) => (h.kind === "spawn" || h.kind === "relay") && h.to && h.brief).sort((a, b) => b.brief.length - a.brief.length).map((h) => h.to))];
+  const introHandoff = D.H.find((h) => h.kind === "spawn" && h.to && h.brief && D.SESS[h.from] && D.SESS[h.to]);
   const headerSession = Object.keys(D.TX).find((sid) => D.TX[sid].some((entry) => {
     const h = entry.k === "h" ? D.H.find((item) => item.id === entry.id) : null;
     return h && h.to === sid && (h.kind === "spawn" || h.kind === "relay") && h.id !== originFor(sid)?.id;
   }));
   r.expect(!!headerSession, "the fixture needs a received turn header with a .turn-h .from control");
+  r.expect(!!introHandoff, "the fixture needs a received spawn brief for the Show more card");
   const turn = D.turns.find((t) => t.sent.length);
   const screens = [
     ["home", { v: "home" }], ["sessions", { v: "sessions" }], ["analytics", { v: "analytics" }], ["machines", { v: "machines" }],
     ["session-" + harbor, { v: "session", id: harbor }], ["session-" + parent, { v: "session", id: parent }],
     ...(headerSession ? [["inkaccent-header", { v: "session", id: headerSession }]] : []),
+    ...(introHandoff ? [["inkaccent-brief", { v: "session", id: introHandoff.to }]] : []),
     ...(turn ? [["trace", { v: "trace", sid: turn.sid, turn: turn.id }]] : []),
   ];
   for (const [size, dark] of [["phone", false], ["phone", true], ["desktop", false], ["desktop", true]]) {
     const width = size === "phone" ? 390 : 1280, scheme = dark ? "dark" : "light";
     const tag = size + (dark ? "-dark" : "-light"), rec = (results[tag] = {}), page = await served(browser, { size, dark });
+    if (introHandoff) {
+      await page.route("**/api/model*", async (route) => {
+        const response = await route.fetch(); let model;
+        try { model = await response.json(); } catch { return route.fulfill({ response }); }
+        const h = model.handoffs?.find((item) => item.id === introHandoff.id);
+        if (h) {
+          const continuation = "Keep the handoff scoped to this request, preserve its context, and report what changed before returning the result.";
+          h.brief = [h.brief, ...Array(8).fill(continuation)].filter(Boolean).join("\n\n");
+        }
+        return route.fulfill({ status: response.status(), contentType: "application/json", body: JSON.stringify(model) });
+      });
+      await page.reload({ waitUntil: "load" });
+      await settled(page);
+    }
     const tokens = await tokenColors(page);
     r.expect(tokens.accent === tokens.ink, tag + ": --accent does not compute to --ink: " + JSON.stringify(tokens));
     const judge = (where, a) => {
@@ -117,29 +133,23 @@ export default async function tokensCheck(browser) {
         const from = await styledText(page, ".turn-h .from");
         r.expect(!!from && from.color === tokens.ink && from.weight >= 500, tag + ": .turn-h .from is missing, not ink, or below weight 500: " + JSON.stringify(from));
       }
-    }
-    let brief = null, briefSid = null;
-    for (const sid of briefSessions) {
-      await goto(page, { v: "session", id: sid }, D);
-      await page.waitForTimeout(120);
-      const facts = await page.evaluate(() => {
-        const crumb = document.querySelector(".topbar .crumb"), more = document.querySelector(".child-intro .more"), open = document.querySelector(".child-intro .intro-open");
-        const drawn = (el) => !!el && !el.hidden && el.getClientRects().length > 0;
-        return { crumb: !!crumb, more: drawn(more), moreText: more?.textContent.trim() ?? null, open: drawn(open), openText: open?.textContent.trim() ?? null };
-      });
-      if (facts.crumb && facts.more && facts.moreText === "Show more" && facts.open && facts.openText.startsWith("Open in ")) { brief = facts; briefSid = sid; break; }
-    }
-    r.expect(!!brief, tag + ": no received brief card has a visible Show more, Open in, and breadcrumb: " + JSON.stringify({ briefSid, brief }));
-    if (brief) {
-      const crumb = await styledText(page, ".topbar .crumb"), more = await styledText(page, ".child-intro .more");
-      r.expect(crumb.color === tokens.ink && crumb.weight >= 500, tag + ": breadcrumb is not ink at weight 500: " + JSON.stringify(crumb));
-      r.expect(more.color === tokens.ink && more.weight >= 500, tag + ": handoff Show more is not ink at weight 500: " + JSON.stringify(more));
-      rec.briefSession = briefSid;
-      await page.screenshot({ path: path.join(ENV.out, "inkaccent-" + width + "-" + scheme + "-session.png"), fullPage: true });
-      if (size === "desktop") {
-        await page.locator(".child-intro .more").hover();
-        const hover = await page.locator(".child-intro .more").evaluate((el) => { const style = getComputedStyle(el); return { line: style.textDecorationLine, offset: style.textUnderlineOffset }; });
-        r.expect(hover.line.includes("underline") && hover.offset === "3px", tag + ": Show more is not underlined on hover: " + JSON.stringify(hover));
+      if (name === "inkaccent-brief") {
+        const facts = await page.evaluate(() => {
+          const crumb = document.querySelector(".topbar .crumb"), more = document.querySelector(".child-intro .more"), open = document.querySelector(".child-intro .intro-open");
+          const drawn = (el) => !!el && !el.hidden && el.getClientRects().length > 0;
+          return { crumb: !!crumb, more: drawn(more), moreText: more?.textContent.trim() ?? null, open: drawn(open), openText: open?.textContent.trim() ?? null };
+        });
+        r.expect(facts.crumb && facts.more && facts.moreText === "Show more" && facts.open && facts.openText.startsWith("Open in "), tag + ": received brief card must show Show more, Open in, and a breadcrumb: " + JSON.stringify(facts));
+        const crumb = await styledText(page, ".topbar .crumb"), more = await styledText(page, ".child-intro .more");
+        r.expect(crumb?.color === tokens.ink && crumb.weight >= 500, tag + ": breadcrumb is not ink at weight 500: " + JSON.stringify(crumb));
+        r.expect(more?.color === tokens.ink && more.weight >= 500, tag + ": handoff Show more is not ink at weight 500: " + JSON.stringify(more));
+        rec.briefSession = introHandoff.to;
+        await page.screenshot({ path: path.join(ENV.out, "inkaccent-" + width + "-" + scheme + "-session.png"), fullPage: true });
+        if (size === "desktop") {
+          await page.locator(".child-intro .more").hover();
+          const hover = await page.locator(".child-intro .more").evaluate((el) => { const style = getComputedStyle(el); return { line: style.textDecorationLine, offset: style.textUnderlineOffset }; });
+          r.expect(hover.line.includes("underline") && hover.offset === "3px", tag + ": Show more is not underlined on hover: " + JSON.stringify(hover));
+        }
       }
     }
     // The phone's navigation drawer is closed everywhere else; open it on Home. On desktop the sidebar is drawn beside every screen.
