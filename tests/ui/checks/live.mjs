@@ -180,6 +180,7 @@ async function scheme(browser, name, opts, r, protocol) {
   const pages = [];
   try {
     const S = await open(browser, srv, "/s/claude/harbor", opts); pages.push(S);
+    await S.waitForFunction(() => document.querySelectorAll("#page .turns .hcard.child-card .child-work").length >= 2, null, { timeout: 8000 });
     const AN = await open(browser, srv, "/analytics", opts); pages.push(AN);
     const Hm = await open(browser, srv, "/", opts); pages.push(Hm);
     const SP = await open(browser, srv, "/sessions", opts); pages.push(SP);

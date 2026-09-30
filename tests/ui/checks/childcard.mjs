@@ -9,6 +9,30 @@ import { ENV, served, data, goto, reporter } from "../lib.mjs";
 const OUT = path.join(ENV.out, "childcard");
 fs.mkdirSync(OUT, { recursive: true });
 const near = (a, b) => Math.abs(a - b) <= 1;
+function paintFixture(D) {
+  const candidates = [];
+  for (const h of D.H) {
+    if (h.kind !== "spawn" || !D.SESS[h.from] || !D.SESS[h.to]) continue;
+    const childTurn = D.turns.find((t) => t.sid === h.to && t.start === h.id), parentTurns = D.turns.filter((t) => t.sid === h.from);
+    const parentTurn = parentTurns.find((t) => t.sent.includes(h.id)), parentRank = parentTurns.indexOf(parentTurn);
+    if (!childTurn || !parentTurn || parentRank < 1) continue;
+    const activity = (D.TX[h.to] ?? []).filter((e) => e.turn === childTurn.id && !(e.k === "h" && e.id === h.id));
+    const handoffAt = (D.TX[h.from] ?? []).findIndex((e) => e.k === "h" && e.id === h.id);
+    if (activity.length && handoffAt >= 0) candidates.push({ parent: h.from, child: h.to, spawn: h.id, childTurn: childTurn.id, parentTurn: parentTurn.id, rank: handoffAt });
+  }
+  return candidates.sort((a, b) => b.rank - a.rank)[0] ?? null;
+}
+const childTurnRoute = (fixture) => (url) => url.pathname === "/api/tx" && url.searchParams.get("sid") === fixture.child && url.searchParams.get("turn") === fixture.childTurn;
+async function drawnWithoutChildWork(page, D, fixture, turn = null, timeout = 3000) {
+  return page.waitForFunction((x) => {
+    const card = [...document.querySelectorAll("#page .turns .hcard.child-card")].find((c) => c.dataset.h === x.spawn && !c.closest(".cw-body"));
+    return document.querySelector("#topbar .t")?.textContent === x.title
+      && !!document.querySelector("#page section[aria-label='Transcript'] .turn")
+      && (!x.turn || !!document.querySelector('.turn[data-turn="' + CSS.escape(x.turn) + '"]'))
+      && !!card && !card.querySelector(".child-work");
+  }, { title: D.SESS[fixture.parent].name, spawn: fixture.spawn, turn }, { timeout }).then(() => true, () => false);
+}
+async function frames(page) { await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))); }
 
 // The disclosure reads "Activity", with the count of steps quietly after it (the count "Show all N" uses), and names whose activity it is
 // only for assistive technology.
@@ -34,6 +58,8 @@ export default async function childcard(browser) {
       let m0 = null;
       for (const id of lanes) {
         await goto(page, { v: "session", id }, D);
+        const hasActivity = D.H.some((h) => h.kind === "spawn" && h.from === id && (D.TX[h.to] ?? []).some((e) => e.k !== "h" || e.id !== h.id));
+        if (hasActivity) await page.waitForFunction(() => [...document.querySelectorAll("#page .turns .hcard.child-card")].some((c) => !c.closest(".cw-body") && c.querySelector(".child-actions .cw-toggle")), null, { timeout: 5000 }).catch(() => {});
         m0 = await measure(page);
         if (m0) break;
       }
@@ -76,6 +102,89 @@ export default async function childcard(browser) {
       r.expect(page.errors.length === 0, name + ": page errors: " + page.errors.join(" | "));
       await page.context().close();
     }
+  }
+
+  const fixture = paintFixture(D);
+  r.expect(!!fixture, "paint first: the fixture needs a spawned child with activity in a later parent turn");
+  if (fixture) {
+    for (const [size, suffix] of [["phone", "390-light"], ["desktop", "1280-light"]]) {
+      const page = await served(browser, { size, dark: false });
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      let requested;
+      const requestSeen = new Promise((resolve) => { requested = resolve; });
+      await page.route(childTurnRoute(fixture), async (route) => { requested(); await gate; await route.continue(); });
+      const started = Date.now();
+      await goto(page, { v: "session", id: fixture.parent }, D);
+      const remaining = 3000 - (Date.now() - started), drawn = remaining > 0 && await drawnWithoutChildWork(page, D, fixture, null, remaining);
+      r.expect(drawn, suffix + ": the parent title and turns draw with the child card unfilled within 3 s");
+      const held = await Promise.race([requestSeen.then(() => true), page.waitForTimeout(3000).then(() => false)]);
+      r.expect(held, suffix + ": the child turn request was held");
+      const card = page.locator('#page .turns .hcard.child-card[data-h="' + fixture.spawn + '"]');
+      if (drawn) await card.screenshot({ path: path.join(OUT, "paintfirst-" + suffix + ".png") });
+      if (size === "phone" && held) {
+        await page.mouse.wheel(0, -10000); // End the existing open-at-end pin before measuring the reader's scroll.
+        const place = await page.evaluate((id) => {
+          const c = [...document.querySelectorAll("#page .turns .hcard.child-card")].find((x) => x.dataset.h === id);
+          window.scrollTo(0, 0);
+          return { top: c?.getBoundingClientRect().top ?? -1, height: innerHeight, y: window.scrollY };
+        }, fixture.spawn);
+        r.expect(place.top > place.height, "390-light: the held child card is below the viewport for the scroll check: " + JSON.stringify(place));
+        release();
+        const filled = await page.waitForFunction((id) => [...document.querySelectorAll("#page .turns .hcard.child-card")].find((c) => c.dataset.h === id)?.querySelector(".child-work"), fixture.spawn, { timeout: 5000 }).then(() => true, () => false);
+        await frames(page);
+        const after = await page.evaluate(() => window.scrollY);
+        r.expect(filled, "390-light: the child card's activity appears after release");
+        r.expect(Math.abs(after - place.y) <= 2, "390-light: window.scrollY stays put when activity below the viewport arrives: " + place.y + " then " + after);
+      } else release();
+      await page.context().close();
+    }
+
+    const deep = await served(browser, { size: "desktop", dark: true });
+    let releaseDeep;
+    const deepGate = new Promise((resolve) => { releaseDeep = resolve; });
+    let deepRequested;
+    const deepRequestSeen = new Promise((resolve) => { deepRequested = resolve; });
+    await deep.route(childTurnRoute(fixture), async (route) => { deepRequested(); await deepGate; await route.continue(); });
+    const deepStarted = Date.now();
+    await goto(deep, { v: "session", id: fixture.parent, turn: fixture.parentTurn }, D);
+    const deepRemaining = 3000 - (Date.now() - deepStarted), deepDrawn = deepRemaining > 0 && await drawnWithoutChildWork(deep, D, fixture, fixture.parentTurn, deepRemaining);
+    r.expect(deepDrawn, "1280-dark: the deep-linked parent turn draws with its child card unfilled within 3 s");
+    const deepHeld = await Promise.race([deepRequestSeen.then(() => true), deep.waitForTimeout(3000).then(() => false)]);
+    r.expect(deepHeld, "1280-dark: the deep-linked child turn request was held");
+    const anchor = deep.locator('.turn[data-turn="' + fixture.parentTurn + '"]');
+    const topBefore = await anchor.evaluate((n) => n.getBoundingClientRect().top);
+    releaseDeep();
+    const deepFilled = await deep.waitForFunction((id) => [...document.querySelectorAll("#page .turns .hcard.child-card")].find((c) => c.dataset.h === id)?.querySelector(".child-work"), fixture.spawn, { timeout: 5000 }).then(() => true, () => false);
+    await frames(deep);
+    const tops = await deep.evaluate((id) => ({ turn: document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]')?.getBoundingClientRect().top ?? null, bar: document.querySelector("#topbar").getBoundingClientRect().bottom }), fixture.parentTurn);
+    r.expect(deepFilled, "1280-dark: the child card's activity appears after release");
+    r.expect(tops.turn != null && Math.abs(tops.turn - topBefore) <= 8 && Math.abs(tops.turn - tops.bar - 8) <= 8, "1280-dark: the deep-linked parent turn stays at the top after its child fills: " + JSON.stringify({ before: topBefore, ...tops }));
+    if (deepFilled) {
+      const card = deep.locator('#page .turns .hcard.child-card[data-h="' + fixture.spawn + '"]');
+      await card.locator(".cw-toggle").click();
+      await deep.waitForFunction((id) => [...document.querySelectorAll("#page .turns .hcard.child-card")].find((c) => c.dataset.h === id)?.querySelector(".cw-body:not([hidden])"), fixture.spawn, { timeout: 3000 });
+      await card.screenshot({ path: path.join(OUT, "paintfirst-1280-dark.png") });
+    }
+    await deep.context().close();
+
+    const failedPage = await served(browser, { size: "phone", dark: false });
+    let failDone;
+    const failed = new Promise((resolve) => { failDone = resolve; });
+    let failRequested;
+    const failRequestSeen = new Promise((resolve) => { failRequested = resolve; });
+    await failedPage.route(childTurnRoute(fixture), async (route) => { failRequested(); await route.fulfill({ status: 500, contentType: "text/plain", body: "no" }); failDone(); });
+    const failedStarted = Date.now();
+    await goto(failedPage, { v: "session", id: fixture.parent }, D);
+    const failureRemaining = 3000 - (Date.now() - failedStarted), failureDrawn = failureRemaining > 0 && await drawnWithoutChildWork(failedPage, D, fixture, null, failureRemaining);
+    r.expect(failureDrawn, "child failure: the parent title and turns draw while its child request fails");
+    const failureRequested = await Promise.race([failRequestSeen.then(() => true), failedPage.waitForTimeout(3000).then(() => false)]);
+    r.expect(failureRequested, "child failure: the child's turn request was made");
+    const failureReturned = await Promise.race([failed.then(() => true), failedPage.waitForTimeout(3000).then(() => false)]);
+    await frames(failedPage);
+    const stillEmpty = await failedPage.evaluate((id) => { const c = [...document.querySelectorAll("#page .turns .hcard.child-card")].find((x) => x.dataset.h === id); return !!c && !c.querySelector(".child-work"); }, fixture.spawn);
+    r.expect(failureReturned && stillEmpty, "child failure: a 500 leaves the child card without inline work");
+    await failedPage.context().close();
   }
   return r.done();
 }
