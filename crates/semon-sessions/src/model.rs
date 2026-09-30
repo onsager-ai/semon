@@ -751,7 +751,9 @@ fn origin_of(record: &Value) -> Option<&Value> {
 }
 
 /// The body of a relay or hand-back: `origin.body`, else the tag's text.
-fn received_body(record: &Value, tag: &str, from: Option<&str>) -> Option<String> {
+/// With `from`, the `skip`th tag that agent sent (a record can batch
+/// several).
+fn received_body(record: &Value, tag: &str, from: Option<&str>, skip: usize) -> Option<String> {
     if let Some(body) = origin_of(record).and_then(|origin| field(origin, "body")) {
         return Some(body.trim().to_owned());
     }
@@ -782,15 +784,17 @@ fn received_body(record: &Value, tag: &str, from: Option<&str>) -> Option<String
         return Some(text.trim().to_owned());
     }
     let close = format!("</{tag}>");
-    for (attributes, end) in events::tags(&text, tag) {
-        if from.is_some()
-            && events::attributes(attributes)
-                .get("from")
-                .map(String::as_str)
-                != from
-        {
-            continue;
-        }
+    for (attributes, end) in events::tags(&text, tag)
+        .into_iter()
+        .filter(|(attributes, _)| {
+            from.is_none()
+                || events::attributes(attributes)
+                    .get("from")
+                    .map(String::as_str)
+                    == from
+        })
+        .skip(skip)
+    {
         let rest = &text[end..];
         let body = rest.find(&close).map_or(rest, |close| &rest[..close]);
         return Some(body.trim().to_owned());
@@ -1344,6 +1348,8 @@ struct Builder<'a> {
     ids: HashMap<String, usize>,
     /// Events a copy-resume duplicated: skipped everywhere.
     copied: BTreeSet<Ref>,
+    /// A subagent's send to `main`, and its receipt in the parent.
+    progress: HashMap<Ref, Ref>,
 }
 
 fn event(files: &[SourceFile], at: Ref) -> &Event {
@@ -1377,6 +1383,7 @@ impl<'a> Builder<'a> {
             tools: HashMap::new(),
             ids: HashMap::new(),
             copied: BTreeSet::new(),
+            progress: HashMap::new(),
         }
     }
 
@@ -1977,7 +1984,10 @@ impl<'a> Builder<'a> {
 
     fn claude_spawns(&mut self) {
         let mut notifications = HashMap::<String, Ref>::new();
-        let mut handbacks = HashMap::<String, Ref>::new();
+        // Every `<agent-message>` a subagent's parent received from it, in
+        // order: its sends to `main` first, then its hand-back.
+        let mut receipts = HashMap::<String, Vec<Ref>>::new();
+        let mut aliases = HashMap::<String, Vec<Ref>>::new();
         for (position, file) in self.files.iter().enumerate() {
             for (at, event) in file.summary.events.iter().enumerate() {
                 if self.copied.contains(&(position, at)) {
@@ -1989,17 +1999,24 @@ impl<'a> Builder<'a> {
                     {
                         notifications.insert(id.clone(), (position, at));
                     }
-                    // A hand-back names its sender by `senderTaskId` (the
-                    // agent id or the spawning call's id) and by `from`.
+                    // A receipt names its sender by `senderTaskId` (the
+                    // agent id or the spawning call's id), or by the tag's
+                    // `from` (the agent id), and by `from`.
                     (Kind::Agm, Some(id)) if file.harness() == "claude" => {
-                        handbacks.insert(id.clone(), (position, at));
+                        receipts.entry(id.clone()).or_default().push((position, at));
                         if let Some(from) = &event.n {
-                            handbacks.entry(from.clone()).or_insert((position, at));
+                            aliases
+                                .entry(from.clone())
+                                .or_default()
+                                .push((position, at));
                         }
                     }
                     _ => {}
                 }
             }
+        }
+        for list in receipts.values_mut().chain(aliases.values_mut()) {
+            list.sort_by_key(|at| (event(self.files, *at).t, *at));
         }
         let mut spawns = Vec::new();
         for (position, file) in self.files.iter().enumerate() {
@@ -2064,17 +2081,42 @@ impl<'a> Builder<'a> {
                 let failed = !matches!(status.as_str(), "completed" | "success" | "done");
                 result = Some((text, event(self.files, found).t, failed));
             }
+            // The first receipts answer the subagent's sends to `main`, one
+            // each, in order: each is that relay's received side. Only a
+            // receipt after them is its hand-back, the last one.
+            let received = [key.as_str()]
+                .into_iter()
+                .chain(tool_use_id.as_deref())
+                .find_map(|id| receipts.get(id))
+                .or_else(|| {
+                    [key.as_str()]
+                        .into_iter()
+                        .chain(tool_use_id.as_deref())
+                        .find_map(|id| aliases.get(id))
+                })
+                .cloned()
+                .unwrap_or_default();
+            let sends = self.sends_to_parent(child);
+            for (send, receipt) in sends.iter().zip(&received) {
+                self.progress.insert(*send, *receipt);
+            }
             if result.is_none()
-                && let Some(found) = handbacks
-                    .get(&key)
-                    .or_else(|| tool_use_id.as_deref().and_then(|id| handbacks.get(id)))
-                    .copied()
+                && let Some(found) = received.get(sends.len()..).and_then(<[Ref]>::last).copied()
             {
                 let from = key.clone();
-                let text = self.text(found, &format!("agm:{from}"), |record, _| {
+                // Earlier tags from this agent in the same record.
+                let skip = received
+                    .iter()
+                    .filter(|at| {
+                        at.0 == found.0
+                            && at.1 < found.1
+                            && event(self.files, **at).o == event(self.files, found).o
+                    })
+                    .count();
+                let text = self.text(found, &format!("agm:{from}:{skip}"), |record, _| {
                     // The sending agent's own body only: a batched record's
                     // first `<agent-message>` may be another agent's.
-                    received_body(record, "agent-message", Some(&from))
+                    received_body(record, "agent-message", Some(&from), skip)
                 });
                 result = Some((text, event(self.files, found).t, false));
             }
@@ -2284,7 +2326,7 @@ impl<'a> Builder<'a> {
                     });
                     if author.as_deref() == Some(path.as_str()) {
                         let text = self.text(at, "agent_message", |record, _| {
-                            received_body(record, "agent-message", None)
+                            received_body(record, "agent-message", None, 0)
                         });
                         result = Some((text, event(self.files, at).t));
                     }
@@ -2412,9 +2454,9 @@ impl<'a> Builder<'a> {
                 joined.extend(reply.m.clone());
                 (Some(self.of_file[receiver.0]), Some(receiver))
             } else if let Some(parent) = self.parent_addressed(from, at) {
-                // Its receipt in the parent carries no id to join on: the
-                // relay is placed at the send only, like a send by name.
-                (Some(parent), None)
+                // Received as the parent's `<agent-message>` that answers
+                // this send (paired in order when the spawn was read).
+                (Some(parent), self.progress.get(&at).copied())
             } else if failed {
                 // A failed or denied send reached no one: no receiver.
                 target = Some(self.send_target(at));
@@ -2498,7 +2540,7 @@ impl<'a> Builder<'a> {
                 self.stub(&identity, &name)
             });
             let body = self.text(at, "body", |record, _| {
-                received_body(record, "cross-session-message", None)
+                received_body(record, "cross-session-message", None, 0)
             });
             let handoff = Handoff {
                 unmatched: self.sessions[from].kind == SessKind::Stub,
@@ -2529,6 +2571,31 @@ impl<'a> Builder<'a> {
         }
         let parent = self.sessions[from].parent?;
         (plain_name(&self.send_target(at)) == PARENT_ADDRESS).then_some(parent)
+    }
+
+    /// A subagent's sends to `main` that weren't refused, in order: each
+    /// reaches its parent as one `<agent-message>`. A send still waiting
+    /// for its result counts, since its receipt may already be written.
+    fn sends_to_parent(&mut self, child: usize) -> Vec<Ref> {
+        if self.sessions[child].kind != SessKind::Agent {
+            return Vec::new();
+        }
+        let mut sends = Vec::new();
+        for at in self.events_of(child) {
+            let found = event(self.files, at);
+            if found.k != Kind::Tool || found.n.as_deref() != Some("SendMessage") {
+                continue;
+            }
+            if found.r.as_ref().is_some_and(|reply| {
+                reply.e || reply.f & (DENIED | SEND_FAILED | PIN) != 0 || reply.m.is_some()
+            }) {
+                continue;
+            }
+            if plain_name(&self.send_target(at)) == PARENT_ADDRESS {
+                sends.push(at);
+            }
+        }
+        sends
     }
 
     fn send_target(&mut self, at: Ref) -> String {

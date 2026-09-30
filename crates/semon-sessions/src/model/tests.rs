@@ -3499,3 +3499,153 @@ fn a_stubs_transcript_names_only_served_handoffs() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["id"], new.id.as_str());
 }
+
+/// A background subagent that sends `main` progress twice, then hands back:
+/// the parent receives three `<agent-message>`s from it. The first two are
+/// the two relays' received side, in order, and only the last is the spawn's
+/// result. With only progress so far, the spawn has no result.
+fn progress_home(hand_back: bool) -> Home {
+    let home = Home::new();
+    let receipt = |minute, body: &str| {
+        user(
+            "lead",
+            ts(20, minute),
+            &format!("<agent-message from=\"ap\">{body}</agent-message>"),
+        )
+    };
+    let mut lead = vec![
+        human("lead", ts(20, 0), "Start a background worker"),
+        assistant(
+            "lead",
+            ts(20, 1),
+            vec![tool("tp", "Agent", json!({"prompt":"progress brief"}))],
+        ),
+        result(
+            "lead",
+            ts(20, 1),
+            "tp",
+            "launched",
+            false,
+            json!({"status":"async_launched","agentId":"ap"}),
+        ),
+        receipt(3, "first progress note"),
+        assistant("lead", ts(20, 4), vec![text("noted one")]),
+        receipt(5, "second progress note"),
+        assistant("lead", ts(20, 6), vec![text("noted two")]),
+    ];
+    if hand_back {
+        lead.push(receipt(8, "[Subagent hand-back] the final answer"));
+        lead.push(assistant("lead", ts(20, 9), vec![text("all in")]));
+    }
+    home.top("lead", &lead);
+    let send = |id: &str, minute, message: &str| {
+        [
+            assistant(
+                "lead",
+                ts(20, minute),
+                vec![tool(
+                    id,
+                    "SendMessage",
+                    json!({"to":"main","message":message}),
+                )],
+            ),
+            result(
+                "lead",
+                ts(20, minute),
+                id,
+                "queued",
+                false,
+                json!({"success":true,"message":"Message queued for the main conversation's next turn."}),
+            ),
+        ]
+    };
+    let mut child = vec![user("lead", ts(20, 1), "progress brief")];
+    child.extend(send("p1", 3, "first progress note"));
+    child.extend(send("p2", 5, "second progress note"));
+    if hand_back {
+        child.push(assistant("lead", ts(20, 7), vec![text("the final answer")]));
+    }
+    home.agent("lead", "ap", "tp", &child);
+    home
+}
+
+#[test]
+fn progress_sends_to_main_are_relays_and_only_the_last_receipt_hands_back() {
+    let home = progress_home(true);
+    let built = home.build();
+    let spawn = only(&built, "spawn", "lead", "ap");
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref(), spawn.done),
+        (
+            "done",
+            Some("[Subagent hand-back] the final answer"),
+            Some(at(20, 8))
+        )
+    );
+    let lead = turns_of(&built, "lead");
+    for (minute, brief) in [(3, "first progress note"), (5, "second progress note")] {
+        // One handoff per message: the relay, sent by the subagent's turn
+        // and starting the parent's turn at its receipt.
+        let found: Vec<&Handoff> = built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.brief == brief)
+            .collect();
+        assert_eq!(found.len(), 1, "{brief}: {found:?}");
+        let relay = found[0];
+        assert_eq!(
+            (
+                relay.kind,
+                relay.from.as_str(),
+                relay.to.as_deref(),
+                relay.at
+            ),
+            ("relay", "ap", Some("lead"), at(20, minute))
+        );
+        assert!(
+            turns_of(&built, "ap")
+                .iter()
+                .any(|turn| turn.sent.contains(&relay.id))
+        );
+        assert_eq!(
+            lead.iter()
+                .filter(|turn| turn.start.as_deref() == Some(relay.id.as_str()))
+                .count(),
+            1,
+            "{brief}"
+        );
+    }
+    // The receipt is the relay's own entry in the parent's transcript, once.
+    let relays: BTreeSet<&str> = built
+        .handoffs
+        .iter()
+        .filter(|handoff| handoff.kind == "relay")
+        .map(|handoff| handoff.id.as_str())
+        .collect();
+    let drawn: Vec<&str> = built.tx["lead"]
+        .slots
+        .iter()
+        .filter_map(|slot| match &slot.kind {
+            SlotKind::H(id) if relays.contains(id.as_str()) => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(drawn.len(), 2, "{drawn:?}");
+    assert!(built.sessions.values().all(|session| !session.stub));
+}
+
+#[test]
+fn progress_before_a_hand_back_is_not_the_spawns_result() {
+    let home = progress_home(false);
+    let built = home.build();
+    let spawn = only(&built, "spawn", "lead", "ap");
+    assert_eq!((spawn.result.as_deref(), spawn.done), (None, None));
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.kind == "relay" && handoff.from == "ap")
+            .count(),
+        2
+    );
+}
