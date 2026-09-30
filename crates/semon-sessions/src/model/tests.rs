@@ -1,6 +1,7 @@
 //! One test per rule in the design's table, on synthetic homes only.
 
 use std::{
+    io::Write,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
@@ -3964,5 +3965,617 @@ fn identical_sends_claim_receipts_in_order() {
     assert_eq!(
         only(&built, "spawn", "lead", "ap").result.as_deref(),
         Some("[Subagent hand-back] same done")
+    );
+}
+
+#[derive(Clone, Debug)]
+enum EquivalenceStep {
+    Append {
+        sid: String,
+        records: Vec<Value>,
+    },
+    PartialStart {
+        sid: String,
+        prefix: String,
+    },
+    PartialFinish {
+        sid: String,
+        suffix: String,
+        record: Value,
+    },
+    NewTop {
+        sid: String,
+        records: Vec<Value>,
+    },
+    ChildBeforeSpawn {
+        parent: String,
+        agent: String,
+        tool_id: String,
+        records: Vec<Value>,
+    },
+    SpawnLine {
+        parent: String,
+        records: Vec<Value>,
+    },
+    ToolUse {
+        sid: String,
+        record: Value,
+    },
+    ToolResult {
+        sid: String,
+        record: Value,
+    },
+    Truncate {
+        sid: String,
+        records: Vec<Value>,
+    },
+    PidWrite {
+        pid: u32,
+        sid: String,
+    },
+    PidRemove {
+        pid: u32,
+    },
+    CopyResume {
+        source: String,
+        target: String,
+        continued: Value,
+        records: Vec<Value>,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut value = self.0;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+}
+
+const EQUIVALENCE_STEPS: usize = 20;
+const EQUIVALENCE_FILES: usize = 10;
+
+fn equivalence_root(seed: u64) -> Value {
+    uuid(
+        human("root", ts(0, 0), &format!("root for seed {seed}")),
+        &format!("eq-{seed}-0"),
+    )
+}
+
+fn identified(seed: u64, next_record: &mut u32, record: Value) -> Value {
+    *next_record += 1;
+    uuid(record, &format!("eq-{seed}-{}", *next_record))
+}
+
+fn generated_time(step: usize, offset: usize) -> String {
+    ts(18 + (step / 10) as i64, ((step * 3 + offset) % 60) as i64)
+}
+
+fn generated_records(
+    rng: &mut SplitMix64,
+    seed: u64,
+    step: usize,
+    sid: &str,
+    next_record: &mut u32,
+) -> Vec<Value> {
+    let count = (rng.next() % 3 + 1) as usize;
+    (0..count)
+        .map(|offset| {
+            let time = generated_time(step, offset);
+            let body = format!("seed {seed}, step {step}, record {offset}");
+            let record = match rng.next() % 3 {
+                0 => human(sid, time, &body),
+                1 => user(sid, time, &body),
+                _ => assistant(sid, time, vec![text(&body)]),
+            };
+            identified(seed, next_record, record)
+        })
+        .collect()
+}
+
+fn choose_sid(rng: &mut SplitMix64, histories: &BTreeMap<String, Vec<Value>>) -> String {
+    let sessions: Vec<&String> = histories.keys().collect();
+    sessions[(rng.next() as usize) % sessions.len()].clone()
+}
+
+fn note_generated_step(
+    step: &EquivalenceStep,
+    histories: &mut BTreeMap<String, Vec<Value>>,
+    log_files: &mut usize,
+) {
+    match step {
+        EquivalenceStep::Append { sid, records }
+        | EquivalenceStep::SpawnLine {
+            parent: sid,
+            records,
+        } => histories
+            .get_mut(sid)
+            .unwrap()
+            .extend(records.iter().cloned()),
+        EquivalenceStep::PartialFinish { sid, record, .. }
+        | EquivalenceStep::ToolUse { sid, record }
+        | EquivalenceStep::ToolResult { sid, record } => {
+            histories.get_mut(sid).unwrap().push(record.clone());
+        }
+        EquivalenceStep::NewTop { sid, records } => {
+            histories.insert(sid.clone(), records.clone());
+            *log_files += 1;
+        }
+        EquivalenceStep::ChildBeforeSpawn { .. } => *log_files += 1,
+        EquivalenceStep::Truncate { sid, records } => {
+            histories.insert(sid.clone(), records.clone());
+        }
+        EquivalenceStep::CopyResume {
+            source,
+            target,
+            continued,
+            records,
+        } => {
+            histories.get_mut(source).unwrap().push(continued.clone());
+            histories.insert(target.clone(), records.clone());
+            *log_files += 1;
+        }
+        EquivalenceStep::PartialStart { .. }
+        | EquivalenceStep::PidWrite { .. }
+        | EquivalenceStep::PidRemove { .. } => {}
+    }
+}
+
+fn generated_steps(seed: u64) -> Vec<EquivalenceStep> {
+    let mut rng = SplitMix64(seed);
+    let mut next_record = 0;
+    let mut next_top = 0;
+    let mut next_agent = 0;
+    let mut log_files = 1;
+    let mut histories = BTreeMap::from([("root".to_owned(), vec![equivalence_root(seed)])]);
+    let mut steps = Vec::with_capacity(EQUIVALENCE_STEPS);
+    let mut pending = None;
+
+    for index in 0..EQUIVALENCE_STEPS {
+        if let Some(step) = pending.take() {
+            note_generated_step(&step, &mut histories, &mut log_files);
+            steps.push(step);
+            continue;
+        }
+
+        let first_kind = (rng.next() % 8) as usize;
+        let mut selected = None;
+        for offset in 0..8 {
+            let kind = (first_kind + offset) % 8;
+            let paired_step_fits = index + 1 < EQUIVALENCE_STEPS;
+            let candidate = match kind {
+                0 => {
+                    let sid = choose_sid(&mut rng, &histories);
+                    Some((
+                        EquivalenceStep::Append {
+                            records: generated_records(
+                                &mut rng,
+                                seed,
+                                index,
+                                &sid,
+                                &mut next_record,
+                            ),
+                            sid,
+                        },
+                        None,
+                    ))
+                }
+                1 if paired_step_fits => {
+                    let sid = choose_sid(&mut rng, &histories);
+                    let record = identified(
+                        seed,
+                        &mut next_record,
+                        user(
+                            &sid,
+                            generated_time(index, 0),
+                            &format!("partial from seed {seed}, step {index}"),
+                        ),
+                    );
+                    let line = record.to_string();
+                    let split = line.len() / 2;
+                    Some((
+                        EquivalenceStep::PartialStart {
+                            sid: sid.clone(),
+                            prefix: line[..split].to_owned(),
+                        },
+                        Some(EquivalenceStep::PartialFinish {
+                            sid,
+                            suffix: line[split..].to_owned(),
+                            record,
+                        }),
+                    ))
+                }
+                2 if log_files < EQUIVALENCE_FILES => {
+                    let sid = format!("session-{next_top}");
+                    next_top += 1;
+                    Some((
+                        EquivalenceStep::NewTop {
+                            records: generated_records(
+                                &mut rng,
+                                seed,
+                                index,
+                                &sid,
+                                &mut next_record,
+                            ),
+                            sid,
+                        },
+                        None,
+                    ))
+                }
+                3 if log_files < EQUIVALENCE_FILES && paired_step_fits => {
+                    let parent = choose_sid(&mut rng, &histories);
+                    let agent = format!("agent-{next_agent}");
+                    next_agent += 1;
+                    let tool_id = format!("spawn-{seed}-{index}");
+                    let records = vec![identified(
+                        seed,
+                        &mut next_record,
+                        user(
+                            &parent,
+                            generated_time(index, 0),
+                            &format!("child brief for seed {seed}, step {index}"),
+                        ),
+                    )];
+                    let spawn = vec![
+                        identified(
+                            seed,
+                            &mut next_record,
+                            assistant(
+                                &parent,
+                                generated_time(index, 1),
+                                vec![tool(
+                                    &tool_id,
+                                    "Agent",
+                                    json!({"description":"generated child","prompt":"generated brief"}),
+                                )],
+                            ),
+                        ),
+                        identified(
+                            seed,
+                            &mut next_record,
+                            result(
+                                &parent,
+                                generated_time(index, 2),
+                                &tool_id,
+                                "launched",
+                                false,
+                                json!({"status":"async_launched","agentId":agent}),
+                            ),
+                        ),
+                    ];
+                    Some((
+                        EquivalenceStep::ChildBeforeSpawn {
+                            parent: parent.clone(),
+                            agent,
+                            tool_id,
+                            records,
+                        },
+                        Some(EquivalenceStep::SpawnLine {
+                            parent,
+                            records: spawn,
+                        }),
+                    ))
+                }
+                4 if paired_step_fits => {
+                    let sid = choose_sid(&mut rng, &histories);
+                    let tool_id = format!("tool-{seed}-{index}");
+                    let call = identified(
+                        seed,
+                        &mut next_record,
+                        assistant(
+                            &sid,
+                            generated_time(index, 0),
+                            vec![tool(
+                                &tool_id,
+                                "Bash",
+                                json!({"command":"printf generated"}),
+                            )],
+                        ),
+                    );
+                    let result_record = identified(
+                        seed,
+                        &mut next_record,
+                        result(
+                            &sid,
+                            generated_time(index, 1),
+                            &tool_id,
+                            "generated result",
+                            false,
+                            json!({}),
+                        ),
+                    );
+                    Some((
+                        EquivalenceStep::ToolUse {
+                            sid: sid.clone(),
+                            record: call,
+                        },
+                        Some(EquivalenceStep::ToolResult {
+                            sid,
+                            record: result_record,
+                        }),
+                    ))
+                }
+                5 => {
+                    let eligible: Vec<(&String, &Vec<Value>)> = histories
+                        .iter()
+                        .filter(|(_, records)| records.len() >= 2)
+                        .collect();
+                    if eligible.is_empty() {
+                        None
+                    } else {
+                        let (sid, records) = eligible[(rng.next() as usize) % eligible.len()];
+                        let keep = 1 + (rng.next() as usize % (records.len() - 1));
+                        Some((
+                            EquivalenceStep::Truncate {
+                                sid: sid.clone(),
+                                records: records[..keep].to_vec(),
+                            },
+                            None,
+                        ))
+                    }
+                }
+                6 if paired_step_fits => {
+                    let sid = choose_sid(&mut rng, &histories);
+                    let pid = 10_000 + (rng.next() % 50_000) as u32;
+                    Some((
+                        EquivalenceStep::PidWrite { pid, sid },
+                        Some(EquivalenceStep::PidRemove { pid }),
+                    ))
+                }
+                7 if log_files < EQUIVALENCE_FILES => {
+                    let source = choose_sid(&mut rng, &histories);
+                    let target = format!("copy-{next_top}");
+                    next_top += 1;
+                    let continued = identified(
+                        seed,
+                        &mut next_record,
+                        json!({"type":"continued-in","continuedInSessionId":target,"sessionId":source,"timestamp":generated_time(index, 0)}),
+                    );
+                    let mut records = histories[&source].clone();
+                    records.push(identified(
+                        seed,
+                        &mut next_record,
+                        human(
+                            &target,
+                            generated_time(index, 1),
+                            &format!("copied resume for seed {seed}, step {index}"),
+                        ),
+                    ));
+                    Some((
+                        EquivalenceStep::CopyResume {
+                            source,
+                            target,
+                            continued,
+                            records,
+                        },
+                        None,
+                    ))
+                }
+                _ => None,
+            };
+            if let Some((step, next)) = candidate {
+                selected = Some((step, next));
+                break;
+            }
+        }
+
+        let (step, next) = selected.unwrap_or_else(|| {
+            let sid = choose_sid(&mut rng, &histories);
+            (
+                EquivalenceStep::Append {
+                    records: generated_records(&mut rng, seed, index, &sid, &mut next_record),
+                    sid,
+                },
+                None,
+            )
+        });
+        note_generated_step(&step, &mut histories, &mut log_files);
+        steps.push(step);
+        pending = next;
+    }
+
+    assert!(pending.is_none());
+    steps
+}
+
+fn append_bytes(home: &Home, relative: &str, content: &str) {
+    let path = home.root.join(relative);
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+}
+
+fn append_records(home: &Home, sid: &str, records: &[Value]) {
+    let content = records
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    append_bytes(
+        home,
+        &format!("claude/projects/-work-proj/{sid}.jsonl"),
+        &content,
+    );
+}
+
+fn apply_equivalence_step(home: &Home, step: &EquivalenceStep) {
+    match step {
+        EquivalenceStep::Append { sid, records }
+        | EquivalenceStep::SpawnLine {
+            parent: sid,
+            records,
+        } => append_records(home, sid, records),
+        EquivalenceStep::PartialStart { sid, prefix } => append_bytes(
+            home,
+            &format!("claude/projects/-work-proj/{sid}.jsonl"),
+            prefix,
+        ),
+        EquivalenceStep::PartialFinish { sid, suffix, .. } => append_bytes(
+            home,
+            &format!("claude/projects/-work-proj/{sid}.jsonl"),
+            &format!("{suffix}\n"),
+        ),
+        EquivalenceStep::NewTop { sid, records } => {
+            home.top(sid, records);
+        }
+        EquivalenceStep::ChildBeforeSpawn {
+            parent,
+            agent,
+            tool_id,
+            records,
+        } => home.agent(parent, agent, tool_id, records),
+        EquivalenceStep::ToolUse { sid, record } | EquivalenceStep::ToolResult { sid, record } => {
+            append_records(home, sid, std::slice::from_ref(record));
+        }
+        EquivalenceStep::Truncate { sid, records } => {
+            home.lines(&format!("claude/projects/-work-proj/{sid}.jsonl"), records);
+        }
+        EquivalenceStep::PidWrite { pid, sid } => home.live(*pid, sid, "busy", json!({})),
+        EquivalenceStep::PidRemove { pid } => {
+            fs::remove_file(home.root.join(format!("claude/sessions/{pid}.json"))).unwrap();
+            fs::remove_file(home.root.join(format!("proc/{pid}/stat"))).unwrap();
+        }
+        EquivalenceStep::CopyResume {
+            source,
+            target,
+            continued,
+            records,
+        } => {
+            append_records(home, source, std::slice::from_ref(continued));
+            home.top(target, records);
+        }
+    }
+}
+
+fn assert_equivalent(
+    seed: u64,
+    index: usize,
+    steps: &[EquivalenceStep],
+    resumed: &Built,
+    fresh: &Built,
+) {
+    let context = format!("seed={seed}, step={index}, steps={steps:#?}");
+    assert_eq!(resumed.json(NOW), fresh.json(NOW), "{context}");
+    assert_eq!(
+        format!("{:?}", resumed.tx),
+        format!("{:?}", fresh.tx),
+        "{context}"
+    );
+    assert_eq!(
+        format!("{:?}", resumed.facts),
+        format!("{:?}", fresh.facts),
+        "{context}"
+    );
+    assert_eq!(
+        format!("{:?}", resumed.activity),
+        format!("{:?}", fresh.activity),
+        "{context}"
+    );
+    assert_eq!(resumed.version, fresh.version, "{context}");
+}
+
+fn replay(seed: u64) {
+    let home = Home::new();
+    home.top("root", &[equivalence_root(seed)]);
+    let steps = generated_steps(seed);
+    for (index, step) in steps.iter().enumerate() {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply_equivalence_step(&home, step);
+            let resumed = home.build_at(&home.options, NOW);
+            let mut fresh_options = home.options.clone();
+            fresh_options.cache = home.root.join(format!("fresh-{index}.json"));
+            let fresh = home.build_at(&fresh_options, NOW);
+            assert_equivalent(seed, index, &steps, &resumed, &fresh);
+        }));
+        if let Err(payload) = outcome {
+            let detail = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            panic!("seed={seed}, step={index}, steps={steps:#?}\n{detail}");
+        }
+    }
+}
+
+#[test]
+fn append_resumed_build_matches_fresh_build_for_seeded_sequences() {
+    for seed in 0..64 {
+        replay(seed);
+    }
+}
+
+#[test]
+#[ignore = "extended seeded append-resume equivalence run"]
+fn append_resumed_build_matches_fresh_build_for_1000_seeds() {
+    for seed in 0..1000 {
+        replay(seed);
+    }
+}
+
+fn mask_clock_fields(mut value: Value) -> Value {
+    let object = value.as_object_mut().unwrap();
+    object.remove("now");
+    if let Some(sessions) = object.get_mut("sessions").and_then(Value::as_object_mut) {
+        for session in sessions.values_mut() {
+            if let Some(activity) = session.get_mut("activity").and_then(Value::as_array_mut)
+                && activity.len() == 4
+            {
+                activity[2] = Value::Null;
+            }
+        }
+    }
+    value
+}
+
+#[test]
+fn unchanged_resumed_builds_only_change_clock_dependent_json_fields() {
+    let home = Home::new();
+    home.top(
+        "clock",
+        &[
+            human("clock", ts(23, 58), "start"),
+            assistant(
+                "clock",
+                ts(23, 59),
+                vec![tool(
+                    "clock-pending",
+                    "Bash",
+                    json!({"command":"printf clock"}),
+                )],
+            ),
+        ],
+    );
+
+    let mut options = home.options.clone();
+    options.all = false;
+    options.since = Duration::from_secs(30 * 24 * 60 * 60);
+    let first = home.build_at(&options, NOW).json(NOW);
+    let same_now = home.build_at(&options, NOW).json(NOW);
+    assert_eq!(first, same_now);
+    let one_minute_later = home.build_at(&options, NOW + 60_000).json(NOW + 60_000);
+    let first_value: Value = serde_json::from_str(&first).unwrap();
+    let later_value: Value = serde_json::from_str(&one_minute_later).unwrap();
+    assert!(
+        first_value["sessions"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|session| session["activity"].as_array().is_some())
+    );
+
+    // `Built::json` varies top-level `now` and `sessions.*.activity[2]` (running-tool age).
+    // The `describe` fallback is unused because these records have timestamps. The post-pass
+    // cutoff can trim sessions, handoffs, turns and busy intervals; this fixture's timestamps
+    // are after both 30-day cutoffs. Analytics is held in `Built::activity`, outside the JSON.
+    assert_ne!(first_value, later_value);
+    assert_eq!(
+        mask_clock_fields(first_value),
+        mask_clock_fields(later_value)
     );
 }
