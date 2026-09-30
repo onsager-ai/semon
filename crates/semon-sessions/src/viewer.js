@@ -1872,7 +1872,7 @@
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
-        if (e.live) { const r = keyed(el("div", "step live"), e); r.dataset.live = sid; r.append(el("span", "spin"), el("span", "sv", v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd tick", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs, key: e.key }); continue; }
+        if (e.live) { const r = keyed(el("div", "step live"), e); r.dataset.live = sid; if (e.since != null) r.dataset.since = e.since; r.append(el("span", "spin"), el("span", "sv", v === "Ran" ? "Running" : v), el("code", "sa", e.arg), el("span", "sd tick", e.secs)); run.push({ node: r, v, k: e.name, live: true, secs: e.secs, key: e.key }); continue; }
         const box = keyed(el("div", "step" + (e.ok || e.ok === null ? "" : " err")), e); const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
         b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs), icon(I.chev, "chev"));
         const out = el("div", "out"); out.hidden = true;
@@ -2871,17 +2871,24 @@
     if (!e.defaultPrevented && !e.target.closest?.("input, textarea, select, [contenteditable='true']") && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) cancelOpeningEndPin();
   });
 
-  // Every second: a running step's elapsed time, from its session's activity[3] (the call's start), and a running row's age.
+  // Every second: each running step's elapsed time and a running row's age.
   // A clock that stands still (the checks pin it) changes nothing.
   const running = (ms) => { const x = Math.max(0, Math.floor(ms / 1000)); return x < 60 ? x + "s" : Math.floor(x / 60) + "m " + (x % 60) + "s"; };
   function ticker() {
     if (!visible() || Date.now() === fetchedAt) return;
     tick();
-    const last = new Map(); for (const n of document.querySelectorAll(".step.live[data-live]")) last.set(n.dataset.live, n);
-    for (const [sid, n] of last) {
-      const a = SESS[sid]?.activity; if (!a || a[3] == null) continue; const text = running(NOW - a[3]), sd = n.querySelector(".sd");
+    const groups = new Map();
+    for (const n of document.querySelectorAll(".step.live[data-live]")) {
+      const a = SESS[n.dataset.live]?.activity, since = n.dataset.since != null ? Number(n.dataset.since) : a?.[3];
+      if (since == null || !Number.isFinite(since)) continue;
+      const text = running(NOW - since), sd = n.querySelector(".sd");
       if (sd && sd.textContent !== text) sd.textContent = text;
-      const tl = n.closest(".tgroup")?.querySelector(":scope > .tsum > .tl"); if (tl) tl.textContent = "· running " + text;
+      const group = n.closest(".tgroup"), earliest = group && groups.get(group);
+      if (group && (!earliest || since < earliest.since)) groups.set(group, { since, text });
+    }
+    for (const [group, live] of groups) {
+      const tl = group.querySelector(":scope > .tsum > .tl"), text = "· running " + live.text;
+      if (tl && tl.textContent !== text) tl.textContent = text;
     }
     for (const n of document.querySelectorAll(".nrow[data-id] .act .el")) { const a = SESS[n.closest(".nrow").dataset.id]?.activity; if (a) n.textContent = Math.max(0, a[2]) + "s"; }
   }
