@@ -1339,6 +1339,9 @@ struct Builder<'a> {
     head: HashMap<usize, usize>,
     after: HashMap<Ref, usize>,
     tools: HashMap<String, Ref>,
+    /// Background Bash calls and their first terminal notification, scoped to a session.
+    backgrounds: HashMap<Ref, Option<Ref>>,
+    bg_ends: HashMap<Ref, Ref>,
     ids: HashMap<String, usize>,
     /// Events a copy-resume duplicated: skipped everywhere.
     copied: BTreeSet<Ref>,
@@ -1373,6 +1376,8 @@ impl<'a> Builder<'a> {
             head: HashMap::new(),
             after: HashMap::new(),
             tools: HashMap::new(),
+            backgrounds: HashMap::new(),
+            bg_ends: HashMap::new(),
             ids: HashMap::new(),
             copied: BTreeSet::new(),
         }
@@ -1969,6 +1974,35 @@ impl<'a> Builder<'a> {
             .get(id)
             .copied()
             .filter(|at| self.of_file[at.0] == session)
+    }
+
+    /// Join background Bash calls once per build, in each session's event order.
+    /// Notifications preceding a call, or naming a call in another session, stay out.
+    fn background_commands(&mut self) {
+        for index in 0..self.sessions.len() {
+            let mut calls = HashMap::<String, Ref>::new();
+            for at in self.events_of(index) {
+                let found = event(self.files, at);
+                if self.files[at.0].harness() != "claude" {
+                    continue;
+                }
+                if found.k == Kind::Tool && found.script & events::BACKGROUND != 0 {
+                    if let Some(id) = &found.id {
+                        calls.insert(id.clone(), at);
+                        self.backgrounds.insert(at, None);
+                    }
+                } else if found.k == Kind::Tn
+                    && !matches!(found.n.as_deref(), None | Some("running" | "started"))
+                    && let Some(call) = found.id.as_ref().and_then(|id| calls.get(id)).copied()
+                    && (call.0 != at.0 || event(self.files, call).o < found.o)
+                    && let Some(end) = self.backgrounds.get_mut(&call)
+                    && end.is_none()
+                {
+                    *end = Some(at);
+                    self.bg_ends.insert(at, call);
+                }
+            }
+        }
     }
 
     // -- spawns --
@@ -3084,6 +3118,16 @@ impl<'a> Builder<'a> {
                 EntryKind::U => SlotKind::U,
                 EntryKind::A => SlotKind::A,
                 EntryKind::Gap => SlotKind::Gap,
+                EntryKind::BgEnd => {
+                    let at = entry.at.expect("background notification");
+                    let call = self.bg_ends[&at];
+                    let source = event(self.files, call);
+                    SlotKind::BgEnd {
+                        call: source.id.clone().unwrap_or_default(),
+                        status: event(self.files, at).n.clone().unwrap_or_default(),
+                        source: (call.0, source.o, source.b),
+                    }
+                }
                 EntryKind::Tool(state) => {
                     let found = entry.at.map(|at| event(self.files, at));
                     let running = session.out.state == "work"
@@ -3138,6 +3182,25 @@ impl<'a> Builder<'a> {
                                 .unwrap_or_else(|| "tool".into()),
                             reply: found.and_then(|found| found.r.clone()),
                             item: found.and_then(|found| found.item),
+                            bg: entry
+                                .at
+                                .and_then(|at| self.backgrounds.get(&at))
+                                .map(|end| Background {
+                                    tid: found
+                                        .and_then(|found| found.id.clone())
+                                        .unwrap_or_default(),
+                                    live: session.alive,
+                                    end: end.map(|at| {
+                                        let found = event(self.files, at);
+                                        BgEnd {
+                                            file: at.0,
+                                            offset: found.o,
+                                            t: found.t,
+                                            status: found.n.clone().unwrap_or_default(),
+                                            failed: found.script & events::BACKGROUND_FAILED != 0,
+                                        }
+                                    }),
+                                }),
                         },
                     }
                 }
@@ -3274,6 +3337,7 @@ impl<'a> Builder<'a> {
                     Kind::U => Some(EntryKind::U),
                     Kind::A => Some(EntryKind::A),
                     Kind::Gap => Some(EntryKind::Gap),
+                    Kind::Tn if self.bg_ends.contains_key(&at) => Some(EntryKind::BgEnd),
                     // A poll of a yielded command folds into the step the
                     // script that started it is, unless it sent input.
                     Kind::Tool
@@ -3664,6 +3728,7 @@ enum EntryKind {
     A,
     Tool(ToolState),
     Operation(ToolState),
+    BgEnd,
     Gap,
 }
 
@@ -3686,6 +3751,23 @@ pub(crate) struct SlotFile {
     pub(crate) cwd: Option<String>,
 }
 
+/// A background Bash call's lifecycle, separate from its immediate tool result.
+#[derive(Clone, Debug)]
+pub(crate) struct Background {
+    pub(crate) tid: String,
+    pub(crate) live: bool,
+    pub(crate) end: Option<BgEnd>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BgEnd {
+    pub(crate) file: usize,
+    pub(crate) offset: u64,
+    pub(crate) t: Option<i64>,
+    pub(crate) status: String,
+    pub(crate) failed: bool,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum SlotKind {
     H(String),
@@ -3698,6 +3780,13 @@ pub(crate) enum SlotKind {
         /// A plain Codex call's `CommandExecution` item line, when the logs
         /// have one: its output is the whole copy.
         item: Option<u64>,
+        bg: Option<Background>,
+    },
+    BgEnd {
+        call: String,
+        status: String,
+        /// The original call's file, offset and block, for its label.
+        source: (usize, u64, u32),
     },
     /// A Codex code-mode command or file change, drawn in place of its
     /// wrapper when exactly one code-mode call owns it.
@@ -3774,9 +3863,16 @@ impl Slot {
     /// count, so the errors badge and `/api/tx?errors=1` agree.
     pub(crate) fn failed_call(&self) -> Option<bool> {
         match &self.kind {
-            SlotKind::Tool { shown, .. }
-            | SlotKind::Yielded { shown, .. }
-            | SlotKind::Sent { shown, .. } => Some(matches!(shown, Shown::Err | Shown::Unfinished)),
+            SlotKind::Tool { shown, bg, .. } => Some(
+                matches!(shown, Shown::Err | Shown::Unfinished)
+                    || bg
+                        .as_ref()
+                        .and_then(|bg| bg.end.as_ref())
+                        .is_some_and(|end| end.failed),
+            ),
+            SlotKind::Yielded { shown, .. } | SlotKind::Sent { shown, .. } => {
+                Some(matches!(shown, Shown::Err | Shown::Unfinished))
+            }
             SlotKind::Operation { ok, .. } => Some(*ok == Some(false)),
             _ => None,
         }
@@ -4257,7 +4353,7 @@ pub(crate) fn build(
     texts: &mut Texts,
     now: i64,
 ) -> io::Result<Built> {
-    let mut timings = Vec::with_capacity(17);
+    let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
         ($name:literal, $body:expr) => {{
             let started = std::time::Instant::now();
@@ -4310,6 +4406,7 @@ pub(crate) fn build(
     let mut builder = Builder::new(&files, texts, now, machine.clone(), &facts, &reported_runs);
     timed!("sessions", builder.sessions(groups, &pids, &held));
     timed!("index_tools", builder.index_tools());
+    timed!("background_commands", builder.background_commands());
     timed!("claude_spawns", builder.claude_spawns());
     timed!("codex_spawns", builder.codex_spawns());
     timed!("relays", builder.relays());
@@ -4532,8 +4629,15 @@ pub(crate) fn build(
                 .iter()
                 .filter(|slot| {
                     matches!(
-                        slot.kind,
+                        &slot.kind,
                         SlotKind::Tool {
+                            bg: Some(Background {
+                                live: true,
+                                end: None,
+                                ..
+                            }),
+                            ..
+                        } | SlotKind::Tool {
                             shown: Shown::Live,
                             ..
                         } | SlotKind::Yielded {

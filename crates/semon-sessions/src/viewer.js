@@ -1747,6 +1747,13 @@
     Skill: ["stack", "Used skill", "used", "skill", "skills"] };
   const toolInfo = (name) => { if (TOOLS[name]) return TOOLS[name]; const m = /^mcp__(.+?)__/.exec(name); if (m) { const srv = m[1].replace(/^claude_ai_/, "").replace(/_/g, " "); return ["ext", "Used " + srv, "used " + srv, "time", "times"]; } return ["run", name, name, "step", "steps"]; };
   const verb = (name) => toolInfo(name).slice(0, 2);
+  const backgroundText = (bg) => {
+    if (bg.state === "running") return "background · running " + bg.secs;
+    if (bg.state === "unknown") return "background · no end recorded";
+    const outcome = bg.state === "failed" ? "failed" : bg.state === "killed" ? "stopped" : bg.exit != null ? "exit " + bg.exit : "done";
+    return "background · " + outcome + (bg.secs ? " · " + bg.secs : "");
+  };
+  const elapsedMs = (text) => { const m = /^(?:(\d+)m )?(\d+(?:\.\d+)?)s$/.exec(text ?? ""); return m ? (Number(m[1] ?? 0) * 60 + Number(m[2])) * 1000 : null; };
   function transcript(sid, opts = {}) {
     const sec = el("section", opts.nested ? "nested" : null); sec.setAttribute("aria-label", opts.nested ? SESS[sid].name + " transcript" : "Transcript"); Object.assign(sec.style, { display: "grid", gap: "10px", gridTemplateColumns: "minmax(0, 1fr)" });
     const entries = transcriptEntries(opts.entries ?? TX[sid] ?? [], sid);
@@ -1759,15 +1766,21 @@
     else if (!find && turnMode) box.append(startedDivider(sid));
     // Adjacent tool calls collapse into one summary line ("Ran 2 commands, read 1 file · 1 failed"),
     // expandable to the individual steps. A lone call stays a single line; while finding, matches show directly.
+    const endedCalls = new Set(entries.filter((e) => e.k === "bgend").map((e) => e.call));
     let run = []; const maskedIn = new WeakSet();
     const flush = () => {
       if (!run.length) return;
       const steps = el("div", "steps" + (run.length === 1 && !find ? " lone" : "")); run.forEach((r) => steps.append(r.node));
       if (run.length === 1 || find) { tx.append(steps); run = []; return; }
-      const counts = new Map(); for (const r of run) { const [, , p, one, many] = toolInfo(r.k), c = counts.get(p) ?? { n: 0, one, many }; c.n++; counts.set(p, c); }
+      const ends = run.filter((r) => r.end);
+      const counts = new Map(); for (const r of run.filter((r) => !r.end)) { const [, , p, one, many] = toolInfo(r.k), c = counts.get(p) ?? { n: 0, one, many }; c.n++; counts.set(p, c); }
       let text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
-      text = text[0].toUpperCase() + text.slice(1);
-      const failed = run.filter((r) => r.err).length, live = run.find((r) => r.live);
+      if (ends.length) {
+        const outcomes = [[ends.filter((r) => r.state === "failed").length, "failed"], [ends.filter((r) => r.state === "killed").length, "stopped"]].filter(([n]) => n).map(([n, word]) => n + " " + word);
+        text = "Finished " + ends.length + " background command" + (ends.length === 1 ? "" : "s") + (outcomes.length ? " (" + outcomes.join(", ") + ")" : "") + (text ? ", " + text : "");
+      } else text = text[0].toUpperCase() + text.slice(1);
+      const failed = run.filter((r) => !r.end && r.err && (!r.bg || !endedCalls.has(r.tid))).length;
+      const live = run.some((r) => r.bg) ? run.filter((r) => r.live).sort((a, b) => (elapsedMs(b.secs) ?? 0) - (elapsedMs(a.secs) ?? 0))[0] : run.find((r) => r.live);
       const g = el("div", "tgroup"); if (run[0].key) g.dataset.e = "g:" + run[0].key; const b = el("button", "tsum"); b.type = "button"; b.setAttribute("aria-expanded", "false");
       b.append(live ? el("span", "spin") : icon(I.stack), el("span", "tt", text));
       if (failed) b.append(el("span", "tf", "· " + failed + " failed"));
@@ -1797,10 +1810,15 @@
       else if (h && h.id !== opts.excludeH) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in)); const sender = SESS[h.from] && harnessIcon(SESS[h.from].harness, { size: 16 }); if (sender) hd.append(sender); hd.append(l, el("span", "tm", clock(h.at))); blk.append(hd); }
       tx = el("div", "tx"); blk.append(tx); box.append(blk); cur = { t, blk }; };
     const toolStep = (e, v, ic, live) => {
-      const box = keyed(el("div", "step" + (live ? " live" : e.ok || e.ok === null ? "" : " err")), e);
+      // A background call's launch returns at once: its own lifecycle (e.bg) says whether it runs, failed or ended.
+      const bg = e.bg, bgRunning = bg?.state === "running";
+      const box = keyed(el("div", "step" + (bg ? (bg.state === "failed" ? " err" : "") + " background" + (bgRunning ? " background-running" : "") : live ? " live" : e.ok || e.ok === null ? "" : " err")), e);
+      if (e.tid) box.dataset.tid = e.tid;
       if (live) { box.dataset.live = sid; if (e.since != null) box.dataset.since = e.since; }
+      else if (bgRunning) { box.dataset.live = sid; if (bg.since != null) box.dataset.since = bg.since; }
       const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
-      const status = live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
+      const bgSecs = bgRunning && bg.since != null ? running(NOW - bg.since) : bg?.secs;
+      const status = bg ? backgroundText({ ...bg, secs: bgSecs }) : live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
       const title = e.title ? String(e.title) : null;
       const command = e.in ?? e.arg;
       const firstNonemptyLine = typeof command === "string" ? command.split(/\r\n|\n|\r/).find((line) => line.trim()) : null;
@@ -1809,9 +1827,9 @@
         b.setAttribute("aria-label", "Ran: " + title);
         if (firstNonemptyLine != null) label.setAttribute("data-tip", firstNonemptyLine.slice(0, 200));
       }
-      b.append(live ? el("span", "spin") : icon(I[ic]));
+      b.append(live || bgRunning ? el("span", "spin") : icon(I[ic]));
       if (!title) b.append(el("span", "sv", live && v === "Ran" ? "Running" : v));
-      b.append(label, el("span", "sd" + (live ? " tick" : ""), status), icon(I.chev, "chev"));
+      b.append(label, el("span", "sd" + (live || bgRunning ? " tick" : ""), status), icon(I.chev, "chev"));
       const out = el("div", "out"); out.hidden = true;
       // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
       // eleven lines. When either is cut, "View all" opens the whole call in a sheet.
@@ -1829,6 +1847,7 @@
           }
           if (!e.changes.length) out.append(el("div", "noout", "No changes recorded"));
         } else if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) { out.append(outEl(e, "clip")); if (e.cut) out.append(el("div", "cutnote", cutNoteText(e.cut))); } else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
+        if (bg?.summary) out.append(el("div", "io", "Finished"), el("pre", "finished", bg.summary));
       }
       const actions = el("div", "step-actions");
       if (!live && e.script != null) { const script = el("button", "viewscript", "View script"); script.type = "button"; script.addEventListener("click", () => openScript(e)); actions.append(script); }
@@ -1860,11 +1879,33 @@
         if (!maskedIn.has(scope)) { maskedIn.add(scope); const m = keyed(el("div", "thought masked"), e); m.append(el("div", "think-label", "Thinking hidden by the harness")); tx.append(m); }
         continue;
       }
+      if (e.k === "bgend") {
+        if (!show.tools || !hit(e.label ?? "")) continue;
+        const word = e.state === "failed" ? "failed" : e.state === "killed" ? "stopped" : "completed";
+        const row = keyed(el("div", "step bgend" + (e.state === "failed" ? " err" : "")), e);
+        const loaded = entries.some((entry) => entry.k === "tool" && entry.tid === e.call);
+        const line = el(loaded ? "button" : "div", "bg-line");
+        line.append(icon(I.run), el("span", "bg-label", "Background command " + word + " · " + (e.label ?? "")));
+        if (loaded) {
+          line.type = "button";
+          line.addEventListener("click", () => {
+            const target = line.closest('section[aria-label="Transcript"], section.nested')?.querySelector('.step[data-tid="' + CSS.escape(e.call) + '"]'); if (!target) return;
+            stopOpeningEndPin();
+            for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+              const toggle = opener(parent) ?? (parent.classList.contains("turn") ? parent.querySelector(':scope > button[aria-expanded]') : null);
+              if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
+            }
+            centre(target); target.classList.add("flash"); setTimeout(() => target.classList.remove("flash"), 1500);
+          });
+        }
+        row.append(line); run.push({ node: row, end: true, state: e.state, key: e.key }); continue;
+      }
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + (e.title ?? "") + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
-        const box = toolStep(e, v, ic, !!e.live);
-        if (e.live) run.push({ node: box, v, k: e.name, live: true, secs: e.secs, key: e.key });
+        const box = toolStep(e, v, ic, !!e.live && !e.bg);
+        if (e.live && !e.bg) run.push({ node: box, v, k: e.name, live: true, secs: e.secs, key: e.key });
+        else if (e.bg) { const bgRunning = e.bg.state === "running"; run.push({ node: box, v, k: e.name, err: e.bg.state === "failed", bg: true, tid: e.tid, live: bgRunning, secs: bgRunning && e.bg.since != null ? running(NOW - e.bg.since) : e.bg.secs ?? e.secs, key: e.key }); }
         else run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key });
         continue;
       }
@@ -1945,6 +1986,7 @@
       } else if (e.diff) { section("Change", null); body.append(diffEl(e.diff)); }
       else { section("Output", e.out); if (e.out) { body.append(outEl(e)); cutNote(e.out); } else body.append(el("p", "vnote", e.live ? "Running · no output yet" : e.unfinished ? "No result recorded." : "No output.")); }
     }
+    if (e.bg?.summary) { section("Finished", e.bg.summary); body.append(el("pre", null, e.bg.summary)); }
     if (e.fullFailed) body.append(el("p", "vnote", "Couldn't load the full text: this is the preview."));
     if (e.fullCut?.length) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));
     d.append(head, body); document.body.append(d);
@@ -2587,7 +2629,7 @@
   // than five pages of new entries, loads the last page again instead.
   function tail(sid) {
     const es = TX[sid], m = TXM[sid], tok = TOK[sid];
-    let cut = es.findIndex((e) => e.live && e.slot != null); if (cut < 0) cut = es.length;
+    let cut = es.findIndex((e) => (e.live || e.bg?.state === "running") && e.slot != null); if (cut < 0) cut = es.length;
     for (let i = es.length - 1; i >= 0; i--) { if (es[i].unfinished && es[i].slot != null) cut = Math.min(cut, i); if (es[i].turn) break; }
     let got = [], last = null, n = 0;
     const page = (after) => api("/api/tx?sid=" + enc(sid) + "&after=" + after).then((p) => {
@@ -2862,18 +2904,19 @@
     if (!e.defaultPrevented && !e.target.closest?.("input, textarea, select, [contenteditable='true']") && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) cancelOpeningEndPin();
   });
 
-  // Every second: each running step's elapsed time and a running row's age.
+  // Every second: each running step uses its own start; a group shows its oldest running call.
   // A clock that stands still (the checks pin it) changes nothing.
   const running = (ms) => { const x = Math.max(0, Math.floor(ms / 1000)); return x < 60 ? x + "s" : Math.floor(x / 60) + "m " + (x % 60) + "s"; };
   function ticker() {
     if (!visible() || Date.now() === fetchedAt) return;
     tick();
     const groups = new Map();
-    for (const n of document.querySelectorAll(".step.live[data-live]")) {
+    for (const n of document.querySelectorAll(".step.live[data-live], .step.background-running[data-live]")) {
       const a = SESS[n.dataset.live]?.activity, since = n.dataset.since != null ? Number(n.dataset.since) : a?.[3];
       if (since == null || !Number.isFinite(since)) continue;
       const text = running(NOW - since), sd = n.querySelector(".sd");
-      if (sd && sd.textContent !== text) sd.textContent = text;
+      const label = n.classList.contains("background-running") ? spaced("background · running " + text) : text;
+      if (sd && sd.textContent !== label) sd.textContent = label;
       const group = n.closest(".tgroup"), earliest = group && groups.get(group);
       if (group && (!earliest || since < earliest.since)) groups.set(group, { since, text });
     }

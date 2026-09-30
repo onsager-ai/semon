@@ -277,6 +277,7 @@ fn build_records_each_phase_timing_in_order() {
         "facts",
         "sessions",
         "index_tools",
+        "background_commands",
         "claude_spawns",
         "codex_spawns",
         "relays",
@@ -777,6 +778,112 @@ fn spawn_results_come_from_four_sources_in_order() {
     let child = turns_of(&built, "a1");
     assert_eq!(child[0].start.as_deref(), Some(one.id.as_str()));
     assert_eq!(child[0].end.why, "returned");
+}
+
+#[test]
+fn background_bash_notifications_keep_their_position_and_spawn_notifications_stay_handoffs() {
+    let home = Home::new();
+    home.top(
+        "parent",
+        &[
+            human("parent", ts(1, 0), "Fetch and delegate"),
+            assistant(
+                "parent",
+                ts(1, 1),
+                vec![
+                    tool(
+                        "bash",
+                        "Bash",
+                        json!({"command":"git fetch","run_in_background":true}),
+                    ),
+                    tool(
+                        "agent",
+                        "Agent",
+                        json!({"prompt":"Review","run_in_background":true}),
+                    ),
+                ],
+            ),
+            result(
+                "parent",
+                ts(1, 2),
+                "bash",
+                "Command running in background",
+                false,
+                json!({}),
+            ),
+            result(
+                "parent",
+                ts(1, 2),
+                "agent",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"child"}),
+            ),
+            assistant("parent", ts(1, 3), vec![text("Waiting for results")]),
+            notification("parent", ts(1, 4), "bash", "completed", "Fetch finished"),
+            assistant("parent", ts(1, 5), vec![text("Fetch is done")]),
+            notification("parent", ts(1, 6), "agent", "completed", "Review finished"),
+        ],
+    );
+    home.agent(
+        "parent",
+        "child",
+        "agent",
+        &[
+            user("parent", ts(1, 1), "Review"),
+            assistant("parent", ts(1, 3), vec![text("Reviewing")]),
+        ],
+    );
+    home.top(
+        "other",
+        &[
+            human("other", ts(1, 0), "Other session"),
+            notification("other", ts(1, 7), "bash", "failed", "Must not attach"),
+        ],
+    );
+    // The second build reads the persisted index, including its background flag.
+    for _ in 0..2 {
+        let built = home.build();
+        let slots = &built.tx["parent"].slots;
+        let ends: Vec<_> = slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| matches!(slot.kind, SlotKind::BgEnd { .. }))
+            .collect();
+        assert_eq!(ends.len(), 1);
+        let (position, end) = ends[0];
+        assert_eq!(end.t, Some(at(1, 4)));
+        assert!(
+            matches!(&end.kind, SlotKind::BgEnd { call, status, .. } if call == "bash" && status == "completed")
+        );
+        assert!(matches!(slots[position - 1].kind, SlotKind::A));
+        assert_eq!(slots[position - 1].t, Some(at(1, 3)));
+        assert!(matches!(slots[position + 1].kind, SlotKind::A));
+        assert_eq!(slots[position + 1].t, Some(at(1, 5)));
+        let call = slots
+            .iter()
+            .find_map(|slot| match &slot.kind {
+                SlotKind::Tool { bg: Some(bg), .. } => Some(bg),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(call.tid, "bash");
+        assert_eq!(call.end.as_ref().unwrap().t, Some(at(1, 4)));
+        assert!(
+            built.tx["other"]
+                .slots
+                .iter()
+                .all(|slot| !matches!(slot.kind, SlotKind::BgEnd { .. }))
+        );
+        let spawn = only(&built, "spawn", "parent", "child");
+        assert_eq!(spawn.result.as_deref(), Some("Review finished"));
+        assert_eq!(spawn.done, Some(at(1, 6)));
+        assert!(
+            slots
+                .iter()
+                .any(|slot| matches!(&slot.kind, SlotKind::H(id) if id == &spawn.id))
+        );
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
 //! `/api/tx`: one session's transcript, a page at a time, in the mockup's
-//! `TX` entry shape (`{k:"a"|"tool"|"think"|"h"|"u"|"harness"|"end", …}`).
+//! `TX` entry shape (`{k:"a"|"tool"|"bgend"|"think"|"h"|"u"|"harness"|"end", …}`).
 //!
 //! The model keeps each session's transcript as offsets only (its slots);
 //! the text of a page is read back from the source lines here, capped as in
@@ -894,6 +894,72 @@ fn state_fields(
     }
 }
 
+/// The summary for this particular task in a possibly batched notification.
+fn background_summary(record: &Value, id: &str, status: &str) -> String {
+    let text = record
+        .get("attachment")
+        .and_then(|attachment| attachment.get("prompt"))
+        .or_else(|| {
+            record
+                .get("message")
+                .and_then(|message| message.get("content"))
+        })
+        .map(content_text)
+        .unwrap_or_default();
+    events::notifications(&text)
+        .into_iter()
+        .find(|(tool, state, _)| *tool == Some(id) && *state == Some(status))
+        .and_then(|(_, _, body)| events::inner(body, "summary"))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn background_state(status: &str, exit: Option<i64>) -> &'static str {
+    if matches!(status, "killed" | "stopped") {
+        "killed"
+    } else if status == "failed" || exit.is_some_and(|exit| exit != 0) {
+        "failed"
+    } else {
+        "done"
+    }
+}
+
+fn background_fields(
+    built: &Built,
+    lines: &mut Lines,
+    bg: &model::Background,
+    start: Option<i64>,
+    now: i64,
+) -> Value {
+    let Some(end) = &bg.end else {
+        return if bg.live {
+            let mut value = json!({"state": "running", "secs": start.map_or_else(|| "—".to_owned(), |t| running(now - t))});
+            if let Some(start) = start {
+                value["since"] = json!(start);
+            }
+            value
+        } else {
+            json!({"state": "unknown"})
+        };
+    };
+    let summary = built
+        .files
+        .get(end.file)
+        .and_then(|file| lines.get(&file.path, end.offset))
+        .map(|record| background_summary(&record, &bg.tid, &end.status))
+        .unwrap_or_default();
+    let exit = events::notification_exit(&summary);
+    let mut value = json!({
+        "state": background_state(&end.status, exit), "status": end.status,
+        "secs": match (start, end.t) { (Some(start), Some(end)) => secs(end - start), _ => "—".to_owned() },
+        "summary": clip(&summary, PREVIEW_MAX).0,
+    });
+    if let Some(exit) = exit {
+        value["exit"] = json!(exit);
+    }
+    value
+}
+
 /// A command that outlived its yield, as one `exec_command` step: its line,
 /// then its output as the polls printed it, and once it completed, its exit
 /// code, duration and whole output from the completing item.
@@ -1412,23 +1478,61 @@ fn render(
         SlotKind::Returned { to, at, failed } => {
             json!({"k": "end", "ret": {"to": to, "at": at, "failed": failed}})
         }
+        SlotKind::BgEnd {
+            call,
+            status,
+            source,
+        } => {
+            let summary = record()
+                .map(|record| background_summary(&record, call, status))
+                .unwrap_or_default();
+            let exit = events::notification_exit(&summary);
+            let source_file = built.files.get(source.0)?;
+            let input = lines
+                .get(&source_file.path, source.1)
+                .and_then(|record| tool_input(&record, source.2 as usize))
+                .unwrap_or(Value::Null);
+            let label = field(&input, "description")
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    arg_summary(
+                        "Bash",
+                        &input,
+                        source_file.cwd.as_deref(),
+                        built.home.as_deref(),
+                    )
+                });
+            let mut entry = json!({"k": "bgend", "call": call, "state": background_state(status, exit), "label": clip(&label, PREVIEW_MAX).0});
+            if let Some(exit) = exit {
+                entry["exit"] = json!(exit);
+            }
+            entry
+        }
         SlotKind::Tool {
             shown,
             name,
             reply,
             item,
-        } => tool_entry(
-            lines,
-            file?,
-            slot,
-            index,
-            *shown,
-            name,
-            reply.as_ref(),
-            *item,
-            now,
-            built.home.as_deref(),
-        ),
+            bg,
+        } => {
+            let mut entry = tool_entry(
+                lines,
+                file?,
+                slot,
+                index,
+                *shown,
+                name,
+                reply.as_ref(),
+                *item,
+                now,
+                built.home.as_deref(),
+            );
+            if let Some(bg) = bg {
+                entry["tid"] = json!(bg.tid);
+                entry["bg"] = background_fields(built, lines, bg, slot.t, now);
+            }
+            entry
+        }
         SlotKind::Operation {
             kind,
             ok,
@@ -2182,6 +2286,217 @@ mod tests {
         assert!(full_slot(&built, "nobody", 0, "in").is_err());
     }
 
+    fn task_notice(sid: &str, time: String, id: &str, status: &str, summary: &str) -> Value {
+        claude(
+            sid,
+            time,
+            "user",
+            json!({"message": {"role": "user", "content": format!(
+                "<task-notification><task-id>task</task-id><tool-use-id>{id}</tool-use-id><status>{status}</status><summary>{summary}</summary></task-notification>"
+            )}}),
+        )
+    }
+
+    #[test]
+    fn background_bash_tracks_the_notification_without_changing_its_tool_result() {
+        for (status, summary, state, exit) in [
+            (
+                "completed",
+                "Background command completed (exit code 0)",
+                "done",
+                Some(0),
+            ),
+            (
+                "completed",
+                "Background command completed (exit code 2)",
+                "failed",
+                Some(2),
+            ),
+            (
+                "failed",
+                "Background command failed (exit code 0)",
+                "failed",
+                Some(0),
+            ),
+            (
+                "killed",
+                "Background command stopped (exit code 137)",
+                "killed",
+                Some(137),
+            ),
+            (
+                "stopped",
+                "Background command stopped (exit code 137)",
+                "killed",
+                Some(137),
+            ),
+            ("completed", "Background command completed", "done", None),
+        ] {
+            let home = Home::new();
+            let output = "Command running in background with ID: task. Output is being written to: /tmp/task.output";
+            home.lines("claude/projects/-work-proj/bg.jsonl", &[
+                ask("bg", ts(1, 0, 0), "Fetch"),
+                task_notice("bg", ts(1, 0, 100), "bash", "failed", "Before the call (exit code 9)"),
+                said("bg", ts(1, 1, 0), json!([{"type":"tool_use","id":"bash","name":"Bash","input":{"command":"git fetch","description":"Fetch changes","run_in_background":true}}])),
+                result("bg", ts(1, 1, 500), "bash", output, false),
+                task_notice("bg", ts(1, 1, 600), "bash", "running", "Still running"),
+                task_notice("bg", ts(1, 1, 700), "other", "failed", "Wrong call (exit code 9)"),
+                task_notice("bg", ts(1, 2, 250), "bash", status, summary),
+                said("bg", ts(1, 3, 0), json!([{"type":"text","text":"After completion"}])),
+                task_notice("bg", ts(1, 4, 0), "bash", "failed", "Later notification (exit code 9)"),
+            ]);
+            let built = home.built(BASE + 86_400_000);
+            let page = page_of(&built, "bg", &Anchor::Last);
+            let entries = page["entries"].as_array().unwrap();
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|e| e["k"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["h", "tool", "bgend", "a"]
+            );
+            let step = &entries[1];
+            assert_eq!(step["tid"], "bash");
+            assert_eq!(step["ok"], true);
+            assert_eq!(step["secs"], "0.5s");
+            assert_eq!(step["out"], output);
+            assert_eq!(step["bg"]["state"], state);
+            assert_eq!(step["bg"]["status"], status);
+            assert_eq!(step["bg"]["exit"], json!(exit));
+            assert_eq!(step["bg"]["secs"], "1m 0s");
+            assert_eq!(step["bg"]["summary"], summary);
+            assert_eq!(entries[2]["call"], "bash");
+            assert_eq!(entries[2]["state"], state);
+            assert_eq!(entries[2]["exit"], json!(exit));
+            assert_eq!(entries[2]["label"], "Fetch changes");
+            assert_eq!(entries[2]["state"], step["bg"]["state"]);
+            assert_eq!(entries[2]["exit"], step["bg"]["exit"]);
+            let failed = state == "failed";
+            assert_eq!(page["errors"], json!(usize::from(failed)));
+            assert_eq!(built.sessions["bg"].errors, Some(usize::from(failed)));
+            let errors: Value =
+                serde_json::from_str(&super::errors(&built, "bg").unwrap()).unwrap();
+            assert_eq!(errors["slots"], if failed { json!([1]) } else { json!([]) });
+            // A later page retains the tool-use id even when the call is not on it.
+            let tail: Value = serde_json::from_str(
+                &page_limited(&built, "bg", &Anchor::After(2), BASE + 86_400_000, 1).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(tail["entries"][0]["call"], "bash");
+        }
+    }
+
+    #[test]
+    fn background_bash_without_an_end_runs_while_the_session_is_alive_after_its_turn() {
+        for status in [None, Some("busy"), Some("idle"), Some("shell")] {
+            let live = status.is_some();
+            let home = Home::new();
+            if live {
+                home.write(
+                    "proc/1/stat",
+                    &format!("1 (claude) {}\n", ["0"; 19].join(" ") + " 7"),
+                );
+                home.write(
+                    "claude/sessions/1.json",
+                    &json!({"pid":1,"sessionId":"bg","procStart":7,"status":status}).to_string(),
+                );
+            }
+            home.lines("claude/projects/-work-proj/bg.jsonl", &[
+                ask("bg", ts(1, 0, 0), "Fetch"),
+                said("bg", ts(1, 1, 0), json!([{"type":"tool_use","id":"bash","name":"Bash","input":{"command":"git fetch","run_in_background":true}}])),
+                result("bg", ts(1, 1, 500), "bash", "Command running in background with ID: task", false),
+                task_notice("bg", ts(1, 1, 600), "different", "completed", "Wrong call (exit code 0)"),
+                said("bg", ts(1, 1, 700), json!([{"type":"text","text":"Waiting for the background command"}])),
+                ask("bg", ts(1, 1, 800), "Start another turn"),
+            ]);
+            let now = BASE + 3_710_000;
+            let built = home.built(now);
+            let page: Value =
+                serde_json::from_str(&page(&built, "bg", &Anchor::Last, now).unwrap()).unwrap();
+            let step = &page["entries"][1];
+            assert_eq!(page["entries"].as_array().unwrap().len(), 4);
+            assert_eq!(
+                step["bg"]["state"],
+                if live { "running" } else { "unknown" }
+            );
+            if live {
+                assert_eq!(step["bg"]["secs"], "50s");
+                assert_eq!(step["bg"]["since"], BASE + 3_660_000);
+                if status != Some("busy") {
+                    assert_eq!(built.sessions["bg"].state, "idle");
+                }
+            } else {
+                assert_eq!(step["bg"], json!({"state":"unknown"}));
+            }
+            assert_eq!(step["ok"], true);
+            assert_eq!(step["secs"], "0.5s");
+            if live {
+                let before: Value = serde_json::from_str(&built.json(now)).unwrap();
+                fs::remove_file(home.root.join("proc/1/stat")).unwrap();
+                let stopped = home.built(BASE + 86_400_000);
+                let after: Value = serde_json::from_str(&stopped.json(BASE + 86_400_000)).unwrap();
+                assert_ne!(
+                    before["tx"]["bg"], after["tx"]["bg"],
+                    "the transcript refreshes when its background call ceases to be live without a new log line"
+                );
+                assert_eq!(
+                    page_of(&stopped, "bg", &Anchor::Last)["entries"][1]["bg"]["state"],
+                    "unknown"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn foreground_bash_has_no_background_fields_or_finish_row() {
+        let home = Home::new();
+        home.lines("claude/projects/-work-proj/fg.jsonl", &[
+            ask("fg", ts(1, 0, 0), "Fetch"),
+            said("fg", ts(1, 1, 0), json!([{"type":"tool_use","id":"bash","name":"Bash","input":{"command":"git fetch","run_in_background":false}}])),
+            result("fg", ts(1, 1, 500), "bash", "Fetched", false),
+            task_notice("fg", ts(1, 2, 0), "bash", "completed", "Completed (exit code 0)"),
+        ]);
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "fg", &Anchor::Last);
+        assert_eq!(page["entries"].as_array().unwrap().len(), 2);
+        assert!(page["entries"][1].get("bg").is_none());
+        assert!(page["entries"][1].get("tid").is_none());
+    }
+
+    #[test]
+    fn batched_background_notifications_use_each_calls_summary_and_label() {
+        let home = Home::new();
+        let long = format!("{} (exit code 2)", "é".repeat(PREVIEW_MAX));
+        let one = task_notice("bg", ts(1, 2, 0), "one", "completed", "One (exit code 0)");
+        let two = task_notice("bg", ts(1, 2, 0), "two", "completed", &long);
+        let mut notice = one.clone();
+        notice["message"]["content"] = json!(format!(
+            "{}{}",
+            one["message"]["content"].as_str().unwrap(),
+            two["message"]["content"].as_str().unwrap()
+        ));
+        home.lines("claude/projects/-work-proj/bg.jsonl", &[
+            ask("bg", ts(1, 0, 0), "Fetch"),
+            said("bg", ts(1, 1, 0), json!([
+                {"type":"tool_use","id":"one","name":"Bash","input":{"command":"git fetch one","run_in_background":true}},
+                {"type":"tool_use","id":"two","name":"Bash","input":{"command":"git fetch two","run_in_background":true}}
+            ])),
+            result("bg", ts(1, 1, 500), "one", "Command running in background", false),
+            result("bg", ts(1, 1, 500), "two", "Command running in background", false),
+            notice,
+        ]);
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "bg", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[1]["bg"]["summary"], "One (exit code 0)");
+        assert_eq!(entries[2]["bg"]["exit"], 2);
+        assert_eq!(entries[2]["bg"]["summary"], clip(&long, PREVIEW_MAX).0);
+        assert_eq!(entries[3]["label"], "git fetch one");
+        assert_eq!(entries[4]["label"], "git fetch two");
+        assert_eq!(entries[4]["state"], "failed");
+    }
+
     #[test]
     fn a_live_tool_entry_has_its_start_and_a_finished_entry_has_no_since() {
         let home = Home::new();
@@ -2204,6 +2519,7 @@ mod tests {
                 name: "Bash".to_owned(),
                 reply: None,
                 item: None,
+                bg: None,
             },
             file: Some(0),
             offset: 0,

@@ -57,7 +57,9 @@ thread_local! {
 /// v16: run settings, hook runs and permission denials are indexed as `signals`
 /// (PR 2 of the dropped-signals plan).
 /// v17: Claude assistant lines index their reasoning effort (`effort`, or `perTurnEffort` when set) as an `Effort` signal.
-const CACHE_VERSION: u32 = 17;
+/// v18: background Claude Bash calls retain their launch flag and terminal
+/// notifications retain their failure outcome.
+const CACHE_VERSION: u32 = 18;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1392,6 +1394,10 @@ pub(crate) struct Reply {
 pub(crate) const STDIN: u8 = 1;
 /// ...with `chars` that aren't an empty string: it sends input.
 pub(crate) const SENDS: u8 = 2;
+/// A Claude Bash call started with `run_in_background: true`.
+pub(crate) const BACKGROUND: u8 = 4;
+/// A task notification reports failure by status or a nonzero summary exit code.
+pub(crate) const BACKGROUND_FAILED: u8 = 8;
 
 /// Open yielded commands kept per file; past this the oldest is dropped.
 const YIELDS_MAX: usize = 64;
@@ -1453,7 +1459,9 @@ pub(crate) struct Event {
     /// open when the item completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<usize>,
-    /// Code-mode call: what its source calls, as [`STDIN`] and [`SENDS`].
+    /// Call flags: code-mode source calls ([`STDIN`], [`SENDS`]), or a
+    /// Claude Bash call launched in the [`BACKGROUND`], or a task notification
+    /// with a [`BACKGROUND_FAILED`] outcome.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub(crate) script: u8,
     /// Code-mode call: a command it started outlived its yield.
@@ -1787,6 +1795,17 @@ pub(crate) fn inner<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     Some(text[start..end].trim())
 }
 
+/// The exit code in a background task notification's summary.
+pub(crate) fn notification_exit(summary: &str) -> Option<i64> {
+    summary
+        .split_once("(exit code ")?
+        .1
+        .split_once(')')?
+        .0
+        .parse()
+        .ok()
+}
+
 /// Task-notification blocks: `(tool-use id, status, body)`.
 pub(crate) fn notifications(text: &str) -> Vec<(Option<&str>, Option<&str>, &str)> {
     let mut result = Vec::new();
@@ -1910,7 +1929,7 @@ fn prompt_events(
         );
         found = true;
     }
-    for (id, status, _) in notifications(text) {
+    for (id, status, body) in notifications(text) {
         push(
             summary,
             Event {
@@ -1919,6 +1938,16 @@ fn prompt_events(
                 t: time,
                 id: id.map(str::to_owned),
                 n: status.map(str::to_owned),
+                script: if !matches!(status, Some("killed" | "stopped"))
+                    && (status == Some("failed")
+                        || inner(body, "summary")
+                            .and_then(notification_exit)
+                            .is_some_and(|exit| exit != 0))
+                {
+                    BACKGROUND_FAILED
+                } else {
+                    0
+                },
                 ..Event::default()
             },
         );
@@ -2773,6 +2802,17 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                             t: time,
                             id: field(item, "id").map(str::to_owned),
                             n: field(item, "name").map(str::to_owned),
+                            script: if field(item, "name") == Some("Bash")
+                                && item
+                                    .get("input")
+                                    .and_then(|input| input.get("run_in_background"))
+                                    .and_then(Value::as_bool)
+                                    == Some(true)
+                            {
+                                BACKGROUND
+                            } else {
+                                0
+                            },
                             ..Event::default()
                         },
                     ),
