@@ -622,7 +622,7 @@
       syncJump();
       if (pendingFlashHandoff && r.v === "session" && HID.get(pendingFlashHandoff)?.from === r.id) {
         const id = pendingFlashHandoff; pendingFlashHandoff = null;
-        requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1500); });
+        requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); card.classList.add("flash"); setTimeout(() => { for (const n of document.querySelectorAll(".hcard.flash")) if (n.dataset.h === id) n.classList.remove("flash"); }, 1500); });
       }
     };
     // A transcript already in memory, still in TX or kept in the cache, needs no network: the top bar and the sidebar are drawn
@@ -2818,7 +2818,13 @@
     const keyOf = (n) => (n.classList.contains("turn") ? "t:" + n.dataset.turn : "x:" + n.className + ":" + n.textContent);
     const count = new Map(), tag = (n) => { const k = keyOf(n), i = count.get(k) ?? 0; count.set(k, i + 1); return k + "#" + i; };
     const old = new Map(); for (const n of box.children) old.set(tag(n), n); count.clear();
-    const next = [...fresh.children].map((n) => { const o = old.get(tag(n)); return o && sigOf(o) === sigOf(n) ? o : n; });
+    const next = [...fresh.children].map((n) => {
+      const o = old.get(tag(n)); if (!o || sigOf(o) === sigOf(n)) return o ?? n;
+      for (const f of o.querySelectorAll(".hcard.flash")) {
+        const replacement = [...n.querySelectorAll(".hcard")].find((x) => x.dataset.h === f.dataset.h); replacement?.classList.add("flash");
+      }
+      return n;
+    });
     const cur = [...box.children]; let i = 0; while (i < next.length && next[i] === cur[i]) i++;
     for (const n of cur.slice(i)) n.remove();
     box.append(...next.slice(i));
