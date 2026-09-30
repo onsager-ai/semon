@@ -2524,12 +2524,14 @@
   const viewed = () => { const v = new Set(); if (route.v !== "session") return v; v.add(route.id); for (const h of H) if (h.kind === "spawn" && h.from === route.id && h.to) v.add(h.to); return v; };
   function update(m) {
     const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
-    const hadOrigin = route.v === "session" && !!SESS[route.id] && !!originHandoff(route.id);
+    const hadOrigins = new Set(Object.keys(SESS).filter((sid) => !!originHandoff(sid)));
+    const hadOrigin = route.v === "session" && hadOrigins.has(route.id);
     adopt(m); remember(m);
+    for (const sid of Object.keys(SESS)) if (!hadOrigins.has(sid) && originHandoff(sid)) TXCACHE.delete(sid);
     // A page that had no origin and now has one (its parent's spawn arrived) loads its transcript again: the first prompt it drew as
     // a message is the brief, which the intro now shows. A failed request is retried on the next poll, which backs off, up to
     // LATE_TRIES requests in all; after that the page stays as drawn (the brief shows twice until a reload) and polls as usual.
-    if (LIVE.late !== route.id) LIVE.late = null;
+    if (LIVE.late !== route.id) { if (LIVE.late) TXCACHE.delete(LIVE.late); LIVE.late = null; }
     if (route.v === "session" && !hadOrigin && !!SESS[route.id] && !!originHandoff(route.id)) { LIVE.late = route.id; LIVE.lateTries = 0; }
     if (LIVE.late && !TX[LIVE.late]) LIVE.late = null; // nothing loaded to load again: the page loads it with its origin
     const changedH = new Set(H.filter((h) => oldH.get(h.id) !== handKey(h)).map((h) => h.id));
@@ -2585,7 +2587,10 @@
   const LATE_TRIES = 4;
   function reloadLate(sid) {
     return reload(sid).then((r) => { if (LIVE.late === sid) LIVE.late = null; return r; }, (err) => {
-      if (LIVE.late === sid) { if (++LIVE.lateTries >= LATE_TRIES) LIVE.late = null; else LIVE.retry = true; }
+      if (LIVE.late === sid) {
+        if (++LIVE.lateTries >= LATE_TRIES) { LIVE.late = null; console.warn("semon: gave up reloading the transcript of " + sid + " after its origin arrived"); }
+        else LIVE.retry = true;
+      }
       throw err;
     });
   }
