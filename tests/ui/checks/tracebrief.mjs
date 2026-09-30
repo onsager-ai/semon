@@ -102,7 +102,7 @@ export default async function tracebrief(browser) {
   let pick = null;
   for (const sid of spawners) {
     await goto(probe, { v: "session", id: sid }, D);
-    const turns = await probe.evaluate(() => [...document.querySelectorAll(".turn-end .tracebtn")].map((b) => b.closest(".turn").dataset.turn));
+    const turns = await probe.evaluate(() => [...document.querySelectorAll(".turn-end .link")].map((b) => b.closest(".turn").dataset.turn));
     for (const turn of turns) {
       await goto(probe, { v: "trace", sid, turn }, D);
       const n = await probe.evaluate(() => ({ clamped: [...document.querySelectorAll(".hop .body > .more")].filter((x) => !x.hidden).length, hops: document.querySelectorAll(".hop.child").length, chips: document.querySelectorAll(".hop .meta .chip-h").length }));

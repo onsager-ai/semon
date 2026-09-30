@@ -470,7 +470,7 @@ export default async function tooltipCheck(browser) {
       const traces = [];
       for (const s of Object.values(D.SESS)) {
         await goto(page, { v: "session", id: s.id }, D); await page.waitForTimeout(80); await scan("session-" + s.name);
-        if (traces.length < 3) { const t = await page.evaluate(() => document.querySelector(".turn-end .tracebtn")?.closest(".turn")?.dataset.turn ?? null); if (t) traces.push([s.id, t]); }
+        if (traces.length < 3) { const t = await page.evaluate(() => document.querySelector(".turn-end .link")?.closest(".turn")?.dataset.turn ?? null); if (t) traces.push([s.id, t]); }
       }
       for (const [sid, turn] of traces) { await goto(page, { v: "trace", sid, turn }, D); await page.waitForTimeout(100); await scan("trace-" + turn); }
       // The states around a session: the ⋯ menu, and the same menu opened at its runs.

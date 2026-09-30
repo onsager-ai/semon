@@ -279,6 +279,7 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .tx { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
 .tx > * { min-width: 0; }
 .turn-h { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: var(--fs-sm); line-height: 20px; color: var(--muted); margin-bottom: -6px; }
+.turn-h .hicon { align-self: center; }
 .turn-h .who-link { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .turn-h .tm, .ev-head .tm { margin-left: auto; padding-left: 8px; flex: none; font-size: var(--fs-cap); color: var(--muted); font-variant-numeric: tabular-nums; }
 .msg .body { overflow-wrap: anywhere; }
@@ -1651,7 +1652,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const openTurn = (t) => { closeTurn(); const blk = el("section", "turn"); blk.dataset.turn = t.id;
       const h = t.start;
       if (t.u || h?.kind === "ask") blk.setAttribute("aria-label", "Your message" + (h ? " at " + clock(h.at) : ""));
-      else if (h) { const hd = el("div", "turn-h"); const [, parts] = sentence(h, sid); hd.append(...parts, el("span", "tm", clock(h.at))); blk.append(hd); }
+      else if (h) { const hd = el("div", "turn-h"); const [, parts] = sentence(h, sid); const sender = SESS[h.from] && harnessIcon(SESS[h.from].harness, { size: 16 }); if (sender) hd.append(sender); hd.append(...parts, el("span", "tm", clock(h.at))); blk.append(hd); }
       tx = el("div", "tx"); blk.append(tx); box.append(blk); cur = { t, blk }; };
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i];
@@ -1705,7 +1706,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const b = btn("child-card"); b.dataset.h = h.id;
     const calls = (TX[c.id] ?? []).filter((e) => e.k === "tool").length;
     const head = el("span", "cc-head"); head.append(el("span", "cc-name", c.name), stateLabel(c.state), icon(I.chev, "chev"));
-    b.append(head, el("span", "cc-meta", [kindText(c), shortModel(c.model), dur(c.start, c.state === "work" ? null : c.last), calls + (calls === 1 ? " step" : " steps")].join(" · ")));
+    b.append(head, withHarnessIcon(el("span", "cc-meta", [kindText(c), shortModel(c.model), dur(c.start, c.state === "work" ? null : c.last), calls + (calls === 1 ? " step" : " steps")].join(" · ")), c.harness, { size: 14 }));
     b.append(rich("span", "cc-brief", preview(h.brief)));
     if (h.result) { const r = el("span", "cc-result" + (h.status === "err" ? " err" : "")); r.append(el("span", "rl", h.status === "err" ? "Result: " : "Returned: ")); inline(r, h.result); b.append(r); }
     else if (c.state === "work") { const last = (TX[c.id] ?? []).filter((e) => e.k === "tool").at(-1); if (last) { const n = el("span", "cc-now"); n.append(el("span", "spin"), el("span", null, (last.live ? verbNow(last.name) : verb(last.name)[1]))); n.append(el("code", null, last.arg)); b.append(n); } }

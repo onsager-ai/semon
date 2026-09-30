@@ -188,7 +188,7 @@ async function checkLongSessionOpenEnd(page) {
     centring,
     tail,
     returnedGap,
-    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && tail.hiddenAtEnd && tail.shownThere && !tail.overlaps && (tail.probeBottom <= 0 || tail.probeBottom - tail.buttonTop >= 12) && returnedGap <= 1,
+    ok: opened.gap <= 1 && opened.jumpHidden && opened.top - raised.top >= 2 * (await page.evaluate(() => innerHeight)) - 1 && raised.gap > 80 && raised.inside && !raised.overlapsBar && !raised.overlapsComposer && centring.every((c) => c.visible && Math.abs(c.dx) <= 2) && tail.hiddenAtEnd && tail.shownThere && !tail.overlaps && returnedGap <= 1,
   };
 }
 

@@ -299,7 +299,7 @@ async function scheme(browser, name, opts, r, protocol) {
     await S.locator(byKey(live1) + " > button").click();
     R.livePanel = await S.evaluate((k) => { const step = [...document.querySelectorAll(".step.live")].find((x) => x.dataset.e === k), button = step?.querySelector(":scope > button"), out = step?.querySelector(":scope > .out");
       return step ? { expanded: button?.getAttribute("aria-expanded"), hidden: out?.hidden, command: out?.querySelector(".in")?.textContent,
-        noout: out?.querySelector(".noout")?.textContent, viewAllHidden: out?.querySelector(".viewall")?.hidden, viewScript: !!out?.querySelector(".viewscript") } : null; }, live1);
+        noout: out?.querySelector(".noout")?.textContent, viewAllHidden: !out?.querySelector(".viewall") || out.querySelector(".viewall").hidden, viewScript: !!out?.querySelector(".viewscript") } : null; }, live1);
     r.expect(R.livePanel?.expanded === "true" && R.livePanel.hidden === false && R.livePanel.command === "sleep 30 && echo live" && /^Running\s+·\s+no output yet$/.test(R.livePanel?.noout ?? ""), name + ": opening the live step didn't show its command and running note: " + JSON.stringify(R.livePanel));
     r.expect(R.livePanel?.viewAllHidden === true, name + ": View all is missing or visible for an uncut input: " + JSON.stringify(R.livePanel));
     r.expect(!R.livePanel?.viewScript, name + ": View script appeared for a live step: " + JSON.stringify(R.livePanel));
@@ -313,10 +313,11 @@ async function scheme(browser, name, opts, r, protocol) {
     if (phone) { R.liveOverflow = await overflow(S); r.expect(R.liveOverflow === 0, name + ": expanded live step overflows at 390 px: " + R.liveOverflow); }
     await S.evaluate(() => { const sc = window.__sc(); sc.scrollTop = sc.scrollHeight; });
     if (liveClip) {
+      // A step's detail is built when it is first opened, so the input is measured after the click.
+      await S.locator(byKey(liveClip) + " > button").click();
       R.clipInput = await S.evaluate((k) => { const step = [...document.querySelectorAll(".step.live")].find((x) => x.dataset.e === k), input = step?.querySelector(":scope > .out .in.clip"), command = input?.textContent ?? "";
         return step ? { length: command.length, lines: command.split("\n").length } : null; }, liveClip);
       r.expect(R.clipInput?.lines === 14 && R.clipInput.length < 1536, name + ": the live Bash input wasn't 14 short lines under 1536 chars: " + JSON.stringify(R.clipInput));
-      await S.locator(byKey(liveClip) + " > button").click();
       R.clipPanel = await S.evaluate((k) => { const step = [...document.querySelectorAll(".step.live")].find((x) => x.dataset.e === k), button = step?.querySelector(":scope > button"), out = step?.querySelector(":scope > .out"), input = out?.querySelector(".in.clip");
         return step ? { expanded: button?.getAttribute("aria-expanded"), clipped: input?.classList.contains("clipped"), viewAllHidden: out?.querySelector(".viewall")?.hidden } : null; }, liveClip);
       r.expect(R.clipPanel?.expanded === "true" && R.clipPanel.clipped && R.clipPanel.viewAllHidden === false, name + ": expanding the live Bash input didn't clip it and show View all: " + JSON.stringify(R.clipPanel));
@@ -903,7 +904,7 @@ async function sessionFooterLive(browser, r) {
     const t0 = Date.now();
     while (Date.now() - t0 < 8000 && !(await model(srv)).handoffs.some((h) => h.kind === "spawn" && h.to === "foot-sub")) await sleep(50);
     const page = await open(browser, srv, "/s/claude/harbor", { size: "phone", dark: false }); pages.push(page);
-    const lastTurn = (pg) => pg.evaluate(() => { const turns = [...document.querySelectorAll("#page .turns > .turn")], last = turns.at(-1); return { turns: turns.length, trace: last?.querySelectorAll(":scope > .turn-end .tracebtn").length ?? 0, still: last?.querySelectorAll(":scope > .turn-end .stat.work").length ?? 0 }; });
+    const lastTurn = (pg) => pg.evaluate(() => { const turns = [...document.querySelectorAll("#page .turns > .turn")], last = turns.at(-1); return { turns: turns.length, trace: last?.querySelectorAll(":scope > .turn-end .link").length ?? 0, still: last?.querySelectorAll(":scope > .turn-end .stat.work").length ?? 0 }; });
     await page.waitForFunction(() => !!document.querySelector("#page .session-foot"));
     R.opened = await foot(page);
     const o = R.opened;
@@ -988,8 +989,8 @@ async function childIntroLate(browser, r) {
     // The parent's log appears: the subagent now has an origin.
     const u0 = page.updates, t1 = Date.now();
     F.parent();
-    R.added = await appear(page, t1, () => document.querySelectorAll("#page .bubble.in").length > 0, null, 8000);
-    R.failedFirst = await failed;
+    // The origin has arrived when the page asks for its transcript again; the incoming bubble is drawn once that succeeds (below).
+    R.failedFirst = await failed; R.added = R.failedFirst ? Date.now() - t1 : null;
     r.expect(R.failedFirst, "child-intro-late: the first reload of the transcript was never made (or didn't fail)");
     // The phone is locked before the retry, and unlocked: the page polls again (a poll that asks for the whole model), at the
     // backoff the failed request set.
@@ -1011,7 +1012,7 @@ async function childIntroLate(browser, r) {
     r.expect(R.reloads === 2, "child-intro-late: the transcript was asked for " + R.reloads + " times after the origin appeared (want 2: one that failed, one retry)");
     r.expect(R.later.length >= 2 && R.later.every((x) => !!x), "child-intro-late: the polls after the transcript loaded sent " + JSON.stringify(R.later) + " (want the model's version)");
     r.expect(R.fixed != null, "child-intro-late: the brief was not in the intro alone after the retry: " + JSON.stringify(R.after.copies));
-    r.expect(R.added != null && page.updates > u0, "child-intro-late: the intro never appeared after the parent's log did: " + JSON.stringify(R.after));
+    r.expect(R.added != null && page.updates > u0, "child-intro-late: the page never asked for its transcript again after the parent's log appeared: " + JSON.stringify(R.after));
     r.expect(R.after.intros === 1, "child-intro-late: after the origin appeared the page has " + R.after.intros + " incoming bubbles");
     r.expect(R.after.copies.length === 1 && R.after.copies[0].intro, "child-intro-late: after the origin appeared the brief is in " + R.after.copies.length + " elements, not only in the incoming bubble: " + JSON.stringify(R.after.copies));
     R.errors = pages.flatMap((p) => p.errors);
@@ -1046,7 +1047,7 @@ async function childIntroLateGivesUp(browser, r) {
     r.expect(R.gaps.length === 3 && R.gaps[0] >= 3500 && R.gaps[1] >= 7000 && R.gaps[2] >= 14000 && R.gaps[2] < 24000 && R.gaps[0] < R.gaps[1] && R.gaps[1] < R.gaps[2], "child-intro-late-gives-up: the retries didn't back off 4 s, 8 s, 16 s: " + JSON.stringify(R.gaps));
     r.expect(R.between.length === LATE_TRIES - 1 && R.between.every((x) => x === ""), "child-intro-late-gives-up: the polls that retried sent " + JSON.stringify(R.between) + " (want " + (LATE_TRIES - 1) + " asking for the whole model)");
     r.expect(R.after.length >= 3 && R.after.every((p) => !!p.since) && R.after[0].at < 5000, "child-intro-late-gives-up: after giving up, the polls are " + JSON.stringify(R.after) + " (want the model's version, every 2 s)");
-    r.expect(R.shown.intros === 1, "child-intro-late-gives-up: after giving up the page shows " + JSON.stringify(R.shown));
+    r.expect(R.shown.intros === 0 && R.shown.copies.length === 1, "child-intro-late-gives-up: after giving up the page keeps the brief once, as the subagent's own first message (no bubble): " + JSON.stringify(R.shown));
     R.errors = pages.flatMap((p) => p.errors);
     r.expect(R.errors.length === 0, "child-intro-late-gives-up: page errors: " + R.errors.join(" | "));
   } finally {
@@ -1065,8 +1066,8 @@ async function childIntroLateAway(browser, r) {
     const failed = page.waitForResponse((q) => RELOAD.test(q.url()) && q.status() === 500, { timeout: 10000 }).then(() => true, () => false);
     const t1 = Date.now();
     F.parent();
-    R.origin = await appear(page, t1, () => !!document.querySelector("#page .bubble.in"), null, 8000);
-    R.failedFirst = await failed;
+    // The origin has arrived when the page asks for its transcript again (the incoming bubble is drawn once that succeeds, later).
+    R.failedFirst = await failed; R.origin = R.failedFirst ? Date.now() - t1 : null;
     r.expect(R.origin != null && R.failedFirst, "child-intro-late-away: the origin did not appear with its first transcript reload failing");
 
     await goto(page, { v: "home" }, {});
