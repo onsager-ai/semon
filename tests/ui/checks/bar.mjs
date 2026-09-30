@@ -779,17 +779,26 @@ export default async function barCheck(browser) {
           const bar = document.querySelector("#topbar"), line = bar.querySelector(".l1"), lead = line.querySelector(".l1-state"), title = line.querySelector(".t"), more = bar.querySelector("#more-btn");
           const missing = [["state lead", lead], ["title", title], ["more button", more]].filter(([, node]) => !node).map(([name]) => name);
           if (missing.length) throw new Error("390px effort session bar is missing " + missing.join(", "));
-          const boxes = [lead, title, more].map((node) => node.getBoundingClientRect());
+          const leadBox = lead.getBoundingClientRect(), titleBox = title.getBoundingClientRect(), moreBox = more.getBoundingClientRect(), ranges = {
+            lead: [leadBox.top, leadBox.bottom], title: [titleBox.top, titleBox.bottom], more: [moreBox.top, moreBox.bottom],
+          };
           const effort = bar.querySelector(".meta-effort");
           return {
             width: innerWidth,
+            barHeight: bar.getBoundingClientRect().height,
             sideScroll: bar.scrollWidth > bar.clientWidth + 1 || document.documentElement.scrollWidth > innerWidth + 1,
-            wrapped: line.scrollHeight > line.clientHeight + 1 || Math.max(...boxes.map((box) => box.top)) >= Math.min(...boxes.map((box) => box.bottom)),
+            ranges,
+            rangesOverlap: Math.max(ranges.lead[0], ranges.title[0], ranges.more[0]) < Math.min(ranges.lead[1], ranges.title[1], ranges.more[1]),
+            titleHeight: titleBox.height,
             effortHidden: !effort || getComputedStyle(effort).display === "none",
           };
         });
         const scheme = dark ? "dark" : "light";
-        r.expect(facts.width === 390 && !facts.sideScroll && !facts.wrapped, "390px " + scheme + " session bar wrapped or overflowed with effort set: " + JSON.stringify(facts));
+        const rangeText = (range) => "[" + range.map((value) => value.toFixed(1)).join(", ") + "]";
+        r.expect(facts.width === 390 && !facts.sideScroll, "390px " + scheme + " session bar width/side-scroll: width=" + facts.width + ", sideScroll=" + facts.sideScroll);
+        r.expect(Math.round(facts.barHeight) <= 57, "390px " + scheme + " session bar height must be at most 57px: " + facts.barHeight.toFixed(1) + "px (rounded " + Math.round(facts.barHeight) + ")");
+        r.expect(facts.rangesOverlap, "390px " + scheme + " session bar vertical ranges must overlap: lead=" + rangeText(facts.ranges.lead) + ", title=" + rangeText(facts.ranges.title) + ", ⋯=" + rangeText(facts.ranges.more) + ", overlap=" + facts.rangesOverlap);
+        r.expect(facts.titleHeight <= 24, "390px " + scheme + " session bar title height must be at most 24px: " + facts.titleHeight.toFixed(1) + "px");
         r.expect(facts.effortHidden, "390px " + scheme + " effort suffix was not hidden at the phone breakpoint: " + JSON.stringify(facts));
         await page.screenshot({ path: path.join(ENV.out, "bar-effort-390-" + scheme + ".png") });
         r.expect(page.errors.length === 0, "390px " + scheme + " effort display page errors: " + page.errors.join(" | "));
