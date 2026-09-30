@@ -91,7 +91,7 @@ export default async function (browser) {
     const detail = await page.evaluate(() => {
       const step = [...document.querySelectorAll(".step")].find((item) => item.querySelector(".sa.st"));
       const out = step?.querySelector(":scope > .out");
-      return { labels: [...(out?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.textContent), command: out?.querySelector("pre.in")?.textContent ?? null };
+      return { labels: [...(out?.querySelectorAll(":scope > .io") ?? [])].map((label) => label.querySelector("span")?.textContent ?? label.textContent), command: out?.querySelector("pre.in")?.textContent ?? null };
     });
     r.expect(detail.labels[0] === "Command" && detail.command === titled.command, "expanding a titled step shows the full command under Command: " + JSON.stringify(detail));
 
@@ -291,7 +291,10 @@ export default async function (browser) {
       await page.click(".turns > .list > button.more"); await page.waitForFunction((n) => document.querySelectorAll(".turns > .turn").length > n || ![...document.querySelectorAll(".turns > .list > button.more")].some((b) => b.textContent === "Load earlier"), before.turns);
       await page.waitForTimeout(100);
       const after = await page.evaluate((id) => document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]')?.getBoundingClientRect().top ?? null, anchor.id);
-      P.clicks.push({ before: before.turns, after: (await count()).turns, anchorMoved: after == null ? null : Math.round(after - anchor.top) });
+      // Where the anchor is at later moments, so a drift that comes after the redraw shows in the failure message.
+      const later = [];
+      for (const ms of [150, 500, 1200]) { await page.waitForTimeout(ms); later.push(await page.evaluate((id) => Math.round((document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]')?.getBoundingClientRect().top ?? NaN) * 10) / 10, anchor.id) - Math.round(anchor.top * 10) / 10); }
+      P.clicks.push({ before: before.turns, after: (await count()).turns, anchorMoved: after == null ? null : Math.round(after - anchor.top), later, anchor: { id: anchor.id, top: Math.round(anchor.top) } });
     }
     P.done = { ...(await count()), pager: await pager(page) };
     r.expect(P.clicks.length > 0 && P.clicks.every((c) => c.after >= c.before), "Load earlier adds turns: " + JSON.stringify(P.clicks));
