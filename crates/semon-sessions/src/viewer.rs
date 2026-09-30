@@ -6629,10 +6629,11 @@ mod tests {
 
     /// `warm` builds every machine's model on the calling thread without
     /// counting as a read (no background check starts), and the first read
-    /// answers from it at once. After an idle spell it rebuilds only the
-    /// machine whose logs changed, and clears that machine's invalidation,
-    /// so the next read answers at once with the change. Closed, it builds
-    /// nothing.
+    /// answers from it at once. After an idle spell `warm_machine` rebuilds
+    /// the one machine it names and looks at no other, and clears that
+    /// machine's invalidation; `warm` rebuilds only the machines whose logs
+    /// changed. The reads after them answer at once with the changes.
+    /// Closed, neither builds anything.
     #[test]
     fn warm_builds_every_machine_without_a_read_and_the_first_read_answers_at_once() {
         let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
@@ -6662,27 +6663,52 @@ mod tests {
         for view in &views {
             until_idle(view);
         }
+        // Alpha's change is announced; bravo's isn't. Warming alpha alone
+        // rebuilds alpha and doesn't look at bravo.
         say(&alpha, "lane-a", 1, "warmed while idle");
+        say(&bravo, "lane-b", 1, "never announced");
         assert!(core.invalidate("a"));
-        core.warm().expect("alpha rebuilds");
+        let bravo_before = refresh_counts(&views[1]);
+        assert!(core.warm_machine("a").expect("alpha rebuilds"));
         assert_eq!(views[0].hooks.builds(), 2, "alpha's change, one rebuild");
-        assert_eq!(views[1].hooks.builds(), 1, "bravo didn't change");
+        assert_eq!(
+            refresh_counts(&views[1]),
+            bravo_before,
+            "warming alpha looked at bravo"
+        );
         assert!(
             !lock(&views[0].live.state).invalidated,
             "the warm covered it"
         );
-        let reads = views[0].hooks.refreshes_first.load(Ordering::SeqCst);
-        assert!(tx_has(&core, "lane-a", "warmed while idle"));
-        assert_eq!(
-            views[0].hooks.refreshes_first.load(Ordering::SeqCst),
-            reads,
-            "the read after the warm refreshed first"
+        assert!(
+            !core.warm_machine("c").unwrap(),
+            "no machine is served as c"
         );
+        // Warming them all: bravo's change is found by its stat pass, and
+        // alpha, unchanged since, isn't rebuilt again.
+        core.warm().expect("bravo rebuilds");
         assert_eq!(views[0].hooks.builds(), 2);
+        assert_eq!(views[1].hooks.builds(), 2, "bravo's change, one rebuild");
+        let reads: Vec<_> = views
+            .iter()
+            .map(|view| view.hooks.refreshes_first.load(Ordering::SeqCst))
+            .collect();
+        assert!(tx_has(&core, "lane-a", "warmed while idle"));
+        assert!(tx_has(&core, "lane-b", "never announced"));
+        for (view, reads) in views.iter().zip(reads) {
+            assert_eq!(
+                view.hooks.refreshes_first.load(Ordering::SeqCst),
+                reads,
+                "a read after the warm refreshed first"
+            );
+        }
+        assert_eq!(views[0].hooks.builds(), 2);
+        assert_eq!(views[1].hooks.builds(), 2);
 
         core.close();
         say(&alpha, "lane-a", 2, "after close");
         core.warm().expect("a closed core warms nothing");
+        assert!(!core.warm_machine("a").unwrap(), "a closed core warmed a");
         assert_eq!(views[0].hooks.builds(), 2, "a closed core built");
     }
 

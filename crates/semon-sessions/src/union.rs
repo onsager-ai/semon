@@ -1516,6 +1516,26 @@ impl ViewerCore {
         }
         first
     }
+
+    /// [`ViewerCore::warm`] for the one machine served under `machine`, as
+    /// [`ViewerCore::invalidate`] names it: the key given to
+    /// [`ViewerCore::with_machines`], a received machine's directory name,
+    /// or `""` for [`ViewerCore::new`]'s one. No other machine is looked
+    /// at, so an embedding server that warms the machine it just wrote
+    /// rebuilds nothing else. Returns whether a machine is served under
+    /// that key: false once the core is closed, and for a received machine
+    /// that is new since the last request.
+    pub fn warm_machine(&self, machine: &str) -> io::Result<bool> {
+        let Some(_entered) = self.open.enter() else {
+            return Ok(false);
+        };
+        let views = self.views();
+        let Some((_, view)) = views.iter().find(|(key, _)| key == machine) else {
+            return Ok(false);
+        };
+        view.warm()?;
+        Ok(true)
+    }
 }
 
 /// Whether the union these models and plan serve has the page the decoded
