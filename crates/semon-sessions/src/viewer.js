@@ -1467,12 +1467,12 @@
     const path = phone.matches ? lineageOf(s.id) : [];
     if (path.length > 1) {
       // The menu is rebuilt each time it opens, so this status uses the latest state and turn count.
-      const status = el("div", "menu-status"); status.setAttribute("role", "presentation"); status.append(dot(s.state, false), el("span", null, STATE[s.state] + " · " + turnsLabel(s)));
-      const group = el("div", "menu-path-group"), heading = el("div", "menu-section-heading", "Session path"); heading.setAttribute("role", "presentation"); group.append(heading);
+      const status = el("div", "menu-status"); status.setAttribute("role", "presentation"); const statusDot = dot(s.state, false); statusDot.setAttribute("aria-hidden", "true"); status.append(statusDot, el("span", null, STATE[s.state] + " · " + turnsLabel(s)));
+      const group = el("div", "menu-path-group"), heading = el("div", "menu-section-heading", "Session path"); heading.id = "menu-path-heading"; group.setAttribute("role", "group"); group.setAttribute("aria-labelledby", heading.id); group.append(heading);
       const ancestors = path.slice(0, -1);
       ancestors.forEach((ancestor, i) => {
         const item = btn("menu-item menu-path-item"); item.setAttribute("role", "menuitem");
-        if (i === ancestors.length - 1) { item.setAttribute("aria-label", "Up to " + ancestor.name); item.append(el("span", "menu-path-chevron")); }
+        const chevron = i === ancestors.length - 1, slot = el("span", "menu-path-chevron" + (chevron ? "" : " blank")); if (chevron) item.setAttribute("aria-label", "Up to " + ancestor.name); else slot.setAttribute("aria-hidden", "true"); item.append(slot);
         item.append(el("span", "menu-path-name", ancestor.name), harnessName(ancestor.harness));
         item.addEventListener("click", () => { d.close(); goSession(ancestor.id); }); group.append(item);
       });
