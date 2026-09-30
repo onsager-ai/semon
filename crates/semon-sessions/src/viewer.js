@@ -1167,7 +1167,8 @@
     const m = el("button", "ibtn lead"); m.id = "lead-btn"; m.type = "button"; m.setAttribute("aria-label", "Open navigation"); m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); put(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
     if (opts.lineage?.length) {
-      if (!phone.matches) opts.lineage.forEach((item) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); });
+      const ancestors = phone.matches ? opts.lineage.slice(-1) : opts.lineage;
+      ancestors.forEach((item) => { const c = el("button", "crumb", item.name); c.type = "button"; c.setAttribute("aria-label", "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "sep", "›")); });
     } else if (crumb) { const c = el("button", "crumb", crumb.label); c.type = "button"; c.setAttribute("aria-label", "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "sep", "›")); }
     const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; if (s && !(phone.matches && opts.lineage?.length)) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
     if (opts.line2) {
