@@ -5,7 +5,7 @@
 // filters popover, Find, the session-details sheet with its cost breakdown, the runs sheet, the session path in a child's
 // details menu and the View script sheet. It runs on the sample fixture and on the extras fixture (code mode, markdown, the payload lane).
 //
-// A tap target is more than a box, so each control's target (its box and its ::before reach) is hit-tested too: the point 1 px
+// A tap target is more than a box, so each control's target (its box and its ::before reach) is hit-tested too: the point 2 px (a pinned sidebar row clips its top pixel)
 // inside the midpoint of each of its four edges must land on the control, on something inside it, on the label around it, or on
 // another control (rows that stack share their edge). Anything else there (a result line, a card, a clipped ancestor) takes
 // the tap away from it, and the check fails. Points under a fixed or sticky bar are not judged: the page scrolls from under it.
@@ -81,7 +81,7 @@ function measure({ selector, min }) {
     if (it.allowed || it.short) continue;
     it.e.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
     const b = target(it.e), cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
-    for (const [side, x, y] of [["top", cx, b.top + 1], ["bottom", cx, b.bottom - 1], ["left", b.left + 1, cy], ["right", b.right - 1, cy]]) {
+    for (const [side, x, y] of [["top", cx, b.top + 2], ["bottom", cx, b.bottom - 2], ["left", b.left + 2, cy], ["right", b.right - 2, cy]]) {
       if (x < 0 || y < 0 || x >= vw || y >= vh) continue;
       const hit = document.elementFromPoint(x, y);
       if (!hit || hit === it.e || it.e.contains(hit)) continue;
