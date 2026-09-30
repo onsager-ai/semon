@@ -56,7 +56,8 @@ thread_local! {
 /// v15: a prompt that attaches only images, and no text, is indexed.
 /// v16: run settings, hook runs and permission denials are indexed as `signals`
 /// (PR 2 of the dropped-signals plan).
-const CACHE_VERSION: u32 = 16;
+/// v17: Claude assistant lines index their reasoning effort (`effort`, or `perTurnEffort` when set) as an `Effort` signal.
+const CACHE_VERSION: u32 = 17;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
