@@ -4543,7 +4543,7 @@ fn build_with_cache(
         cache.refresh_reported_runs(&options.claude_json, now, dirty);
     }
     let built = build(options, cache, dirty, texts, now).unwrap();
-    invariants(&built);
+    invariants(&built, options.all || options.scan_window);
     built
 }
 
