@@ -12,7 +12,7 @@
 //    subtitle names each machine once;
 //  - a chip and a move hop's machine names carry the full name as their tooltip, and a move hop says "from <short> to <short>";
 //  - each part of a hop's line (its state, its kind chip, its note) is one line tall, and the page does not scroll sideways;
-//  - the chip carries no harness-coloured mark.
+//  - the chip carries the harness's icon and no harness-coloured swatch of its own.
 // The fixture's hostnames are short, so the served model is rewritten on the way to the page: the machine names are made long, and for
 // two machines every session but the trace's root moves to a second one, and a move hop is added to the root's turn. Screenshots of the trace collapsed and opened are written
 // to out/tracebrief/ for the visual pass.
@@ -76,6 +76,7 @@ const lines = (page) => page.evaluate(() => [...document.querySelectorAll(".hop 
 const page_ = (page) => page.evaluate(() => ({
   metaText: [...document.querySelectorAll(".hop .meta")].map((m) => m.textContent.replace(/\s+/g, " ").trim()),
   chips: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => c.textContent.replace(/[\s\u2009\u00a0]+/g, " ").trim()),
+  chipIcons: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => !!c.querySelector(".hicon")),
   chipTips: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => c.dataset.tip ?? null),
   sent: [...document.querySelectorAll(".hop.k-move .sent")].map((c) => c.textContent.replace(/[\s\u2009\u00a0]+/g, " ").trim()),
   sentTips: [...document.querySelectorAll(".hop.k-move .sent .mach")].map((c) => c.dataset.tip ?? null),
@@ -157,6 +158,7 @@ export default async function tracebrief(browser) {
           r.expect(p.chips.every((c) => !c.includes(" · ")), name + ": a chip names a machine although the trace spans one: " + JSON.stringify(p.chips));
           r.expect(p.chipTips.every((t) => t == null), name + ": a chip has a machine tooltip although the trace spans one: " + JSON.stringify(p.chipTips));
         }
+        r.expect(p.chipIcons.length > 0 && p.chipIcons.every(Boolean), name + ": a chip has lost its harness icon: " + JSON.stringify(p.chipIcons));
         r.expect(p.chipMark.length === 0, name + ": a chip carries a coloured mark: " + JSON.stringify(p.chipMark));
 
         // Every part of every hop's line is one line, and nothing scrolls sideways.
