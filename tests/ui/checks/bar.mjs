@@ -776,7 +776,9 @@ export default async function barCheck(browser) {
         const page = await effortPage("phone", dark);
         await goto(page, { v: "session", id: withEffort.id }, D);
         const facts = await page.evaluate(() => {
-          const bar = document.querySelector("#topbar"), line = bar.querySelector(".l1"), lead = line.querySelector(".l1-state"), title = line.querySelector(".t"), more = line.querySelector("#more-btn");
+          const bar = document.querySelector("#topbar"), line = bar.querySelector(".l1"), lead = line.querySelector(".l1-state"), title = line.querySelector(".t"), more = bar.querySelector("#more-btn");
+          const missing = [["state lead", lead], ["title", title], ["more button", more]].filter(([, node]) => !node).map(([name]) => name);
+          if (missing.length) throw new Error("390px effort session bar is missing " + missing.join(", "));
           const boxes = [lead, title, more].map((node) => node.getBoundingClientRect());
           const effort = bar.querySelector(".meta-effort");
           return {
