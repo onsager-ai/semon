@@ -1248,7 +1248,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const dl = el("dl", "kv");
     const calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, errorCount = (TX[s.id] ?? []).filter((e) => e.k === "tool" && e.ok === false).length;
     const rows = [["Status", STATE[s.state] + " · " + turnsLabel(s)], ...(s.kind ? [["Kind", s.kind]] : []), ["Harness", withHarnessIcon(el("span", null, HARNESS[s.harness]), s.harness, { size: 16 })], ["Model", s.modelId, true], ["Machine", MACHINE[s.machine] + (hostOf(s) !== MACHINE[s.machine] ? " · " + hostOf(s) : "") + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Directory", dirOf(s), true], [s.worktree ? "Worktree" : "Branch", branchOf(s), true], ["Tool calls", String(calls)], ...(errorCount ? [["Errors", String(errorCount)]] : []), ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Process id", pidOf(s), true], ["Session id", sessionIdOf(s), true]];
-    for (const [k, v, mono] of rows) { if (v == null || v === "") continue; dl.append(el("dt", null, k), el("dd", mono ? "mono" : null, v)); }
+    for (const [k, v, mono] of rows) { if (v == null || v === "") continue; dl.append(el("dt", null, k), (() => { const d = el("dd", mono ? "mono" : null, v instanceof Node ? null : v); if (v instanceof Node) d.append(v); return d; })()); }
     det.append(dl); body.append(det, costSection(s, kids, d), el("p", "third-party", TRADEMARK_NOTICE));
     if (anchor) anchor.setAttribute("aria-expanded", "true");
     show(); if (scrollTo) body.querySelector(scrollTo)?.scrollIntoView({ block: "nearest" }); return d;

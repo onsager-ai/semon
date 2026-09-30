@@ -1467,7 +1467,7 @@
     const dl = el("dl", "kv"), machine = MACHINE[s.machine] ?? s.machine ?? "Unknown machine";
     const calls = countOf(s, "calls"), errorCount = countOf(s, "errors") ?? 0;
     const rows = [["Status", STATE[s.state] + " · " + turnsLabel(s)], ...(s.kind ? [["Kind", s.kind]] : []), ["Harness", withHarnessIcon(el("span", null, HARNESS[s.harness] ?? s.harness), s.harness, { size: 16 })], ["Model", modelIdOf(s), true], ["Machine", machine + (hostOf(s) !== machine ? " · " + hostOf(s) : "") + (s.movedFrom ? " (moved from " + (MACHINE[s.movedFrom] ?? s.movedFrom) + ")" : "")], ["Directory", s.cwd ?? s.dir ?? s.directory, true], [s.worktree ? "Worktree" : "Branch", branchOf(s), true], ["Tool calls", calls == null ? "—" : String(calls)], ...(errorCount ? [["Errors", String(errorCount)]] : []), ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Process id", s.pid, true], ["Session id", s.sessionId ?? s.id, true]];
-    for (const [k, v, mono] of rows) { if (v == null || v === "") continue; dl.append(el("dt", null, k), el("dd", mono ? "mono" : null, v instanceof Node ? v : String(v))); }
+    for (const [k, v, mono] of rows) { if (v == null || v === "") continue; dl.append(el("dt", null, k), (() => { const d = el("dd", mono ? "mono" : null, v instanceof Node ? null : String(v)); if (v instanceof Node) d.append(v); return d; })()); }
     det.append(dl); body.append(det, costSection(s, kids, d), el("p", "third-party", TRADEMARK_NOTICE));
     anchor?.setAttribute("aria-expanded", "true");
     open(); if (scrollTo) body.querySelector(scrollTo)?.scrollIntoView({ block: "nearest" }); return d;
