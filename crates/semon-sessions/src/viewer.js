@@ -64,10 +64,33 @@
   const shortHost = (s) => { const h = hostOf(s).split(".")[0]; return h.length > 14 ? h.slice(0, 14) + "…" : h; };
   const branchOf = (s) => s.worktree ?? s.branch ?? "No branch";
   const shortModel = (model) => String(model ?? "Unknown model").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
-  // A harness is named in plain text, never drawn: no logo and no vendor colour. "short" gives "Claude" where the line is tight.
-  // The harness is named in plain muted text (.hname); the word itself tells Claude and Codex apart, so its hue is not used here.
+  // A harness is named in plain muted text (.hname), never in a vendor colour; "short" gives "Claude" where the line is tight. The label itself
+  // holds text only: its official mark (harnessIcon) is drawn beside it, outside the span, so the word still tells Claude and Codex apart.
   // The short name ("Claude") gets the long one ("Claude Code") as its tooltip; the long one repeats itself, so it has none.
   const harnessName = (harness, short = false) => { const name = el("span", "hname h-" + harness, (short ? HARNESS_SHORT : HARNESS)[harness] ?? harness); if (short && HARNESS[harness] && HARNESS[harness] !== HARNESS_SHORT[harness]) name.dataset.tip = HARNESS[harness]; return name; };
+  // A harness's official mark, drawn unmodified from HARNESSES and served at /harness/*.svg. It says which harness a session belongs to (identity or
+  // source) and nothing about its state: the state dot is a separate control that a mark never replaces or merges with. Consistency comes from the
+  // container's size (`size`, px) and padding alone; the artwork is never recoloured or cropped. A mark with a light and a dark file draws both and CSS
+  // shows one, by the theme (prefers-color-scheme or an explicit data-theme), so the mark follows a theme switch with no script.
+  // `label` says whether the mark stands alone: when it does (true, or a string to name it), its container carries the accessible name and a tip, since
+  // nothing beside it names the harness. With text beside it the mark is decorative (aria-hidden), and the text is the name.
+  // `lead` puts a small gap after the mark, where it sits in running text. An id the registry doesn't know has no mark: null.
+  const darkTheme = () => { const t = document.documentElement.getAttribute("data-theme"); return t === "dark" || (t !== "light" && !!window.matchMedia?.("(prefers-color-scheme: dark)").matches); };
+  function harnessIcon(harness, { size = 16, label = false, lead = false } = {}) {
+    const def = Object.hasOwn(HARNESSES, harness) ? HARNESSES[harness] : null; if (!def) return null;
+    const box = el("span", "hicon" + (lead ? " hi-lead" : "")); box.dataset.harness = harness; box.style.setProperty("--hi", size + "px");
+    const same = def.icon.light === def.icon.dark, dark = darkTheme();
+    for (const [theme, src] of same ? [["", def.icon.light]] : [["light", def.icon.light], ["dark", def.icon.dark]]) {
+      const img = document.createElement("img"); img.alt = ""; img.draggable = false; img.decoding = "async";
+      if (theme) { img.className = "hi-" + theme; if ((theme === "dark") !== dark) img.loading = "lazy"; } // the variant hidden now loads when a theme change shows it; loading is set before src, which starts the fetch
+      img.src = src; box.append(img);
+    }
+    if (label) { const name = typeof label === "string" ? label : def.name; box.setAttribute("role", "img"); box.setAttribute("aria-label", name); box.dataset.tip = name; }
+    else box.setAttribute("aria-hidden", "true");
+    return box;
+  }
+  // Puts the mark first in `node` (text follows it, so the mark is decorative) and returns the node; nothing changes for a harness with no mark.
+  const withHarnessIcon = (node, harness, opts = {}) => { const mark = harnessIcon(harness, { lead: true, ...opts }); if (mark) node.prepend(mark); return node; };
   const facetLine = (s) => [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], where(s)].join(" · ");
   const parentOf = (sid) => SESS[sid]?.parent ?? H.find((h) => h.kind === "spawn" && h.to === sid)?.from;
   const originHandoff = (sid) => H.find((h) => (h.kind === "spawn" || h.kind === "relay") && h.to === sid && h.from !== sid && (h.kind === "spawn" || SESS[sid]?.kind === "Relayed" || !SESS[sid]?.lane));
@@ -1032,7 +1055,7 @@
     const parts = allKids.length ? childParts(allKids) : []; if (parts.length) row.setAttribute("aria-label", row.getAttribute("aria-label") + ", " + parts.join(", "));
     if (current === s.id) row.setAttribute("aria-current", "page");
     if (rail && ancestors.has(s.id)) { row.classList.add("on-path"); row.setAttribute("aria-current", "true"); }
-    const main = el("span", "srow-main"), ag = el("span", "ag", ago(s.last)), nm = el("span", "nm", s.name); nm.dataset.tip = s.name; nm.dataset.tipClipped = ""; main.append(dot(s.state, !rail), nm, ag); // in the rail the row has the tip (the name), and a dot inside it would answer first
+    const main = el("span", "srow-main"), ag = el("span", "ag", ago(s.last)), nm = el("span", "nm", s.name); nm.dataset.tip = s.name; nm.dataset.tipClipped = ""; main.append(dot(s.state, !rail), nm, ag); const mark = rail ? null : harnessIcon(s.harness, { size: 14, label: true }); if (mark) nm.after(mark); // the harness's mark stands alone after the name, its own control apart from the dot (the row's aria-label names the harness too); in the rail the row has the tip (the name), and a dot inside it would answer first
     if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work", false); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
     // A parent's row (open or collapsed) shows a small dot beside its time only when a session under it needs you (amber) or failed (red); the label says which, so the dot is decorative.
     const flag = kids.length && !rail ? (allKids.some((x) => x.state === "wait") ? "wait" : allKids.some((x) => x.state === "err") ? "err" : null) : null;
@@ -1351,7 +1374,9 @@
   }
   function childKindChip(s, meta = false) {
     const c = el("span", meta ? "meta-item meta-kind" : "child-kind"); c.style.setProperty("--h", "var(--" + s.harness + ")");
-    const mark = s.kind === "Subagent" ? icon(I.delegate, "kind-delegate") : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
+    // The top bar's badge (meta) keeps the delegation glyph for a Subagent. The card's badge names the harness by its mark and the kind by its word, so it has no glyph for one.
+    const mark = s.kind === "Subagent" ? (meta ? icon(I.delegate, "kind-delegate") : null) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
+    if (!meta) { const source = harnessIcon(s.harness, { size: 14 }); if (source) c.append(source); } // the top bar's badge (meta) is left to the session bar's own change
     if (mark) c.append(mark);
     const kindText = s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"); if (meta) c.dataset.tip = "Kind: " + kindText;
     c.append(el("span", meta ? "meta-value" : null, kindText)); return c;
@@ -1426,6 +1451,8 @@
     for (const [k, v] of [["Model", s.model], ["Machine", MACHINE[s.machine] + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Input + cache write", tok(s.tokens[0])], ["Output", tok(s.tokens[2])], ["Cache read", tok(s.tokens[1])], ["Session id", s.id]]) dl.append(el("dt", null, k), el("dd", "mono", v));
     m.append(dl); closeFilter(); $("#topbar").append(m); btn.setAttribute("aria-expanded", "true");
   }
+  // Shown once in the UI, in Session details' footer; NOTICE.md and the README carry it too. The harness marks are the property of their owners.
+  const TRADEMARK_NOTICE = "Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.";
   function openSessionDetails(s) {
     $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeAccountMenu(); closeFilter();
     const d = el("dialog", "session-details"); d.setAttribute("aria-labelledby", "session-details-title");
@@ -1436,7 +1463,7 @@
     const calls = countOf(s, "calls"), errors = countOf(s, "errors") ?? 0;
     const rows = [
       ...(s.kind ? [["Kind", s.kind]] : []), ["Status", STATE[s.state] + " · " + turnsLabel(s)],
-      ["Harness", HARNESS[s.harness] ?? s.harness], ["Model", s.model ?? s.modelId ?? "Unknown model"],
+      ["Harness", withHarnessIcon(el("span", null, HARNESS[s.harness] ?? s.harness), s.harness, { size: 16 })], ["Model", s.model ?? s.modelId ?? "Unknown model"],
       ["Machine", (MACHINE[s.machine] ?? s.machine ?? "Unknown machine") + (hostOf(s) !== (MACHINE[s.machine] ?? s.machine) ? " · " + hostOf(s) : "") + moved],
     ];
     const directory = s.cwd ?? s.dir ?? s.directory;
@@ -1445,7 +1472,7 @@
     if (errors) rows.push(["Errors", String(errors)]);
     if (s.pid != null && s.pid !== "") rows.push(["Process id", String(s.pid)]);
     rows.push(["Session id", s.sessionId ?? s.id], ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Last activity", clock(s.last)], ["Input + cache write", tok(s.tokens?.[0] ?? 0)], ["Output", tok(s.tokens?.[2] ?? 0)], ["Cache read", tok(s.tokens?.[1] ?? 0)]);
-    for (const [label, value] of rows) { const row = el("div", "detail-row"); row.append(el("span", "detail-label", label), el("span", "detail-value", String(value))); list.append(row); }
+    for (const [label, value] of rows) { const row = el("div", "detail-row"); const cell = el("span", "detail-value"); if (value instanceof Node) cell.append(value); else cell.textContent = String(value); row.append(el("span", "detail-label", label), cell); list.append(row); }
     const hasRuns = childSessions(s.id).length > 0;
     if (hasRuns) list.append(el("div", "tokens-own", "This session only; the table below includes its runs."));
     const ownCost = costForSession(s.id), allCost = costForSession(s.id, true);
@@ -1460,7 +1487,7 @@
     }
     const mismatch = [...(s.cost_check ?? [])].reverse().find((check) => check.ok === false && Number.isFinite(check.computed_usd) && Number.isFinite(check.reported_usd));
     if (mismatch) { const diff = Math.abs(mismatch.computed_usd - mismatch.reported_usd), pct = mismatch.reported_usd === 0 ? (diff === 0 ? 0 : 100) : Math.round(diff / Math.abs(mismatch.reported_usd) * 100); list.append(el("div", "cost-warning", "Differs from Claude Code's figure by " + pct + "%")); }
-    body.append(list); d.append(head, body); document.body.append(d);
+    body.append(list, el("p", "third-party", TRADEMARK_NOTICE)); d.append(head, body); document.body.append(d);
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); $("#more-btn")?.focus(); });
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
@@ -1564,7 +1591,7 @@
     const an = quiet ? answersOf(h) : null; if (an) r.append(el("span", "ans", an.length ? "You answered: " + an.join(" · ") : "Answered · reply not in these logs"));
     if (t) r.append(originLine(t));
     const ctx = el("span", "ctx"); const s = SESS[sid];
-    ctx.append(el("span", null, [HARNESS[s.harness], MACHINE[s.machine]].join(" · "))); if (t?.out.length) ctx.append(traceBtn(t));
+    ctx.append(withHarnessIcon(el("span", null, [HARNESS[s.harness], MACHINE[s.machine]].join(" · ")), s.harness, { size: 14 })); if (t?.out.length) ctx.append(traceBtn(t));
     r.append(ctx);
     const open = () => { if (isResult(h)) markSeenResults([h]); goSession(sid, t?.id); };
     r.addEventListener("click", () => { if (!getSelection().isCollapsed) return; open(); });
@@ -1575,7 +1602,8 @@
   // A session row: state, name, who it works for and on what (the start of its current turn), and its current tool call while it runs.
   function liveRow(s, showMachine) {
     const r = el("button", "nrow"); r.type = "button"; r.dataset.id = s.id; r.addEventListener("click", () => goSession(s.id));
-    r.append(dot(s.state), el("span", "nm", s.name), el("span", "ag", s.state === "work" ? HARNESS[s.harness] : ago(s.last)));
+    const ag = el("span", "ag", s.state === "work" ? HARNESS[s.harness] : ago(s.last)); if (s.state === "work") withHarnessIcon(ag, s.harness, { size: 14 });
+    r.append(dot(s.state), el("span", "nm", s.name), ag);
     const cur = (TURNS[s.id] ?? []).at(-1), msg = cur?.start?.brief ?? cur?.u?.text;
     const inb = cur?.start ?? (cur?.u ? { from: "you" } : H.find((h) => h.to === s.id && h.kind !== "move"));
     r.append(el("span", "for", [showMachine ? MACHINE[s.machine] : null, inb ? (inb.from === "you" ? "for you" : "for " + nameOf(inb.from)) : null, msg ? oneLine(msg) : null].filter(Boolean).join(" · ")));
@@ -1635,7 +1663,7 @@
   }
   function traceMeta(body, st, text, sid, turn, note) {
     const meta = el("div", "meta"), s = SESS[sid]; const sw = el("span", "stat " + st); sw.append(st === "work" ? el("span", "spin") : dot(st, false), text); meta.append(sw);
-    if (s) meta.append(el("span", "chip-h " + hcls(sid), (s.kind ?? HARNESS[s.harness]) + " · " + MACHINE[s.machine]));
+    if (s) meta.append(withHarnessIcon(el("span", "chip-h " + hcls(sid), (s.kind ?? HARNESS[s.harness]) + " · " + MACHINE[s.machine]), s.harness, { size: 14, lead: false }));
     if (note) meta.append(el("span", "gone", note));
     if (s && !s.stub) { const o = el("button", "open", "Open in " + s.name + " ›"); o.type = "button"; o.addEventListener("click", () => goSession(sid, turn?.id)); meta.append(o); }
     body.append(meta);
@@ -1776,7 +1804,7 @@
       // Your own message needs no header: the bubble is yours and its time sits under it. A relay or brief says who sent it.
       const h = t.start;
       if (t.u || h?.kind === "ask") blk.setAttribute("aria-label", "Your message" + (h ? " at " + clock(h.at) : ""));
-      else if (h && h.id !== opts.excludeH) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in), l, el("span", "tm", clock(h.at))); blk.append(hd); }
+      else if (h && h.id !== opts.excludeH) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in)); const sender = SESS[h.from] && harnessIcon(SESS[h.from].harness, { size: 16 }); if (sender) hd.append(sender); hd.append(l, el("span", "tm", clock(h.at))); blk.append(hd); }
       tx = el("div", "tx"); blk.append(tx); box.append(blk); cur = { t, blk }; };
     for (const e of entries) {
       if (owner && !opts.only.has(owner.get(e.key))) continue;
@@ -2133,7 +2161,8 @@
   function sessionRow(A, sid, cls, value, onOpen) {
     const open = !!SESS[sid], b = el(open ? "button" : "div", cls);
     if (open) { b.type = "button"; b.addEventListener("click", onOpen); }
-    b.append(el("span", "session-name", nameOfSid(A, sid)), harnessName(harnessOfSid(A, sid), true), el("span", "session-value", value));
+    const hid = harnessOfSid(A, sid), label = el("span", "hlabel"), mark = harnessIcon(hid, { size: 14 }); if (mark) label.append(mark); label.append(harnessName(hid, true)); // the mark and the label share the cell the label had
+    b.append(el("span", "session-name", nameOfSid(A, sid)), label, el("span", "session-value", value));
     return b;
   }
   const sessionFacetValue = (s, key) => key === "repo" ? s.repo ?? "__none__" : key === "model" ? s.model ?? s.modelId ?? "Unknown model" : s[key] ?? "";
@@ -2229,7 +2258,7 @@
     });
     svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart);
-    const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend); return panel;
+    const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(...[swatch, harnessIcon(h, { size: 14 }), label].filter(Boolean)); legend.append(item); } panel.append(legend); return panel;
   }
   function renderCostChart(A) {
     const panel = el("section", "analytics-panel"), title = el("h2", null, "Cost over time"); title.append(costInfoTip());
@@ -2247,7 +2276,7 @@
     });
     svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart); const legend = el("div", "analytics-legend");
-    for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(swatch, label); legend.append(item); } panel.append(legend);
+    for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(...[swatch, harnessIcon(h, { size: 14 }), label].filter(Boolean)); legend.append(item); } panel.append(legend);
     if (A.cost.unpriced_models.length) panel.append(el("div", "no-price", "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars.")); return panel;
   }
   function renderCodexAllowance(limits) {
@@ -2357,9 +2386,9 @@
       else { const key = { machine: (s) => MACHINE[s.machine], project: (s) => s.repo ?? "No repo (roles)", harness: (s) => HARNESS[s.harness] }[groupBy]; const keys = [...new Set(lanes.map(key))].sort((a, b) => a.startsWith("No repo") - b.startsWith("No repo") || a.localeCompare(b)); groups = keys.map((k) => { const xs = lanes.filter((s) => key(s) === k); return [k, orderList(order, "g:" + k, xs, byLast), xs.length]; }); }
       for (const [title, items, total] of groups) {
         if (!items.length && total) continue; // a group new to a list that is held: its sessions are counted in the pill
-        const box = el("div"); box.style.display = "grid"; if (title) box.append(secHead(title, total));
+        const box = el("div"); box.style.display = "grid"; if (title) { const head = secHead(title, total); if (groupBy === "harness") { const id = Object.keys(HARNESS).find((k) => HARNESS[k] === title); if (id) withHarnessIcon(head, id, { size: 14, lead: false }); } box.append(head); }
         const list = el("div", "list");
-        for (const s of items) { const r = el("button", "nrow"); r.type = "button"; r.dataset.id = s.id; r.append(dot(s.state), el("span", "nm", s.name), el("span", "ag", ago(s.last)), el("span", "for", [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], s.repo ? where(s) : "no repo"].join(" · "))); const k = childRuns(s.id); if (k) r.append(el("span", "kids", k)); r.addEventListener("click", () => goSession(s.id)); list.append(r); }
+        for (const s of items) { const r = el("button", "nrow"); r.type = "button"; r.dataset.id = s.id; r.append(dot(s.state), el("span", "nm", s.name), el("span", "ag", ago(s.last)), withHarnessIcon(el("span", "for", [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], s.repo ? where(s) : "no repo"].join(" · ")), s.harness, { size: 14 })); const k = childRuns(s.id); if (k) r.append(el("span", "kids", k)); r.addEventListener("click", () => goSession(s.id)); list.append(r); }
         box.append(list); out.append(box);
       }
       if (!lanes.length) out.append(el("p", "empty", "No sessions match “" + query + "”."));

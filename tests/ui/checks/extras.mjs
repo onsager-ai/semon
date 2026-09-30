@@ -10,7 +10,7 @@
 //     no note, and the sheet's text is longer than the preview's.
 //   - injection: on every screen reached (Home, Analytics, Sessions, Machines, every session including the payload lane,
 //     its subagent and the failed send's stub, with every step, card and child run opened, and the details menu, and
-//     every trace), the document holds exactly one script (/viewer.js), no img (but the viewer's own attachment
+//     every trace), the document holds exactly one script (/viewer.js), no img (but the viewer's own harness marks and attachment
 //     thumbnails, on /api/attachment) and no iframe,
 //     nothing set window.__xss, and the payload shows as text. The payload lane and the failed-send stub also load from
 //     their real URLs.
@@ -18,7 +18,7 @@
 //     "Codex cut this output before the model saw it" and none of the warning header; a code-mode command cut by the collection cap
 //     shows the same in View all. Neither says "Cut short in this copy of the logs". Screenshots at 390 and 1280, light and dark.
 //   - spawn cards: the kind badge and the title share one row (phone and desktop, light and dark, also with a long title, and never sideways),
-//     the title does not repeat the kind its badge shows, and the Subagent badge (card and top bar) carries the delegation icon, not the person icon.
+//     the title does not repeat the kind its badge shows, and the Subagent badge in the top bar carries the delegation icon, not the person icon, and the one on a card carries the harness mark and its word, with neither glyph.
 //   - no page errors.
 import path from "node:path";
 import { ENV, served, goto, data, reporter, overflow } from "../lib.mjs";
@@ -433,7 +433,7 @@ export default async function (browser) {
   {
     const X = { screens: 0, bad: [], payloadShown: 0 };
     const scan = async (page, where) => {
-      const s = await page.evaluate((text) => ({ scripts: [...document.querySelectorAll("script")].map((x) => x.getAttribute("src")), img: [...document.querySelectorAll("img")].filter((x) => !(x.matches("button.attach > img.attach-img, dialog.image-viewer img.attach-full") && /^\/api\/attachment\?sid=[^&]*&o=\d+&b=\d+&v=[0-9a-f]{16}$/.test(x.getAttribute("src") ?? "") && [...x.attributes].every((a) => ["class", "alt", "src", "width", "height", "loading", "decoding"].includes(a.name)))).length, iframe: document.querySelectorAll("iframe").length, xss: window.__xss ?? null, shown: document.body.textContent.includes(text) }), "<script>window.__xss=2</script>");
+      const s = await page.evaluate((text) => ({ scripts: [...document.querySelectorAll("script")].map((x) => x.getAttribute("src")), img: [...document.querySelectorAll("img")].filter((x) => !(x.matches("span.hicon > img") && /^\/harness\/(claude-code|codex|codex-black|opencode-light|opencode-dark)\.svg$/.test(x.getAttribute("src") ?? "") && x.getAttribute("alt") === "" && [null, "hi-light", "hi-dark"].includes(x.getAttribute("class")) && [...x.attributes].every((a) => ["class", "alt", "src", "draggable", "loading", "decoding"].includes(a.name))) && !(x.matches("button.attach > img.attach-img, dialog.image-viewer img.attach-full") && /^\/api\/attachment\?sid=[^&]*&o=\d+&b=\d+&v=[0-9a-f]{16}$/.test(x.getAttribute("src") ?? "") && [...x.attributes].every((a) => ["class", "alt", "src", "width", "height", "loading", "decoding"].includes(a.name)))).length, iframe: document.querySelectorAll("iframe").length, xss: window.__xss ?? null, shown: document.body.textContent.includes(text) }), "<script>window.__xss=2</script>");
       X.screens++; if (s.shown) X.payloadShown++;
       if (s.scripts.length !== 1 || s.scripts[0] !== "/viewer.js" || s.img || s.iframe || s.xss !== null) X.bad.push(where + ": " + JSON.stringify(s));
     };
@@ -487,7 +487,7 @@ export default async function (browser) {
             const head = c.querySelector(":scope > .child-head"), badge = head?.querySelector(".child-kind"), title = head?.querySelector(".ln");
             const b = badge?.getBoundingClientRect(), t = title?.getBoundingClientRect(), kind = badge?.textContent.trim() ?? "";
             const svg = badge?.querySelector("svg");
-            return { kind, title: title?.textContent ?? "", inHead: !!head, dTop: b && t ? Math.round(Math.abs(b.top - t.top) * 10) / 10 : null, badgeLeftOfTitle: b && t ? b.right <= t.left + 0.5 : false, badgeWraps: b ? b.height > 24 : true, delegate: svg?.classList.contains("kind-delegate") ?? false, person: !!svg && [...svg.querySelectorAll("path")].some((p) => p.getAttribute("d").includes(PERSON)) };
+            return { kind, title: title?.textContent ?? "", inHead: !!head, dTop: b && t ? Math.round(Math.abs(b.top - t.top) * 10) / 10 : null, badgeLeftOfTitle: b && t ? b.right <= t.left + 0.5 : false, badgeWraps: b ? b.height > 24 : true, delegate: svg?.classList.contains("kind-delegate") ?? false, mark: !!badge?.querySelector(":scope > .hicon"), person: !!svg && [...svg.querySelectorAll("path")].some((p) => p.getAttribute("d").includes(PERSON)) };
           });
         });
         const before = await probe();
@@ -496,7 +496,9 @@ export default async function (browser) {
         for (const c of before) {
           r.expect(c.inHead && c.dTop <= 3 && c.badgeLeftOfTitle && !c.badgeWraps, tag + ": the kind badge and the title share one row: " + JSON.stringify(c));
           r.expect(!c.title.includes(c.kind) && !/·\s*(Subagent|Codex run|Relayed)\s*$/.test(c.title), tag + ": the title repeats the kind its badge shows: " + JSON.stringify(c.title));
-          if (c.kind === "Subagent") r.expect(c.delegate && !c.person, tag + ": the Subagent badge should carry the delegation icon (class kind-delegate), not the person icon: " + JSON.stringify(c));
+          // The card's badge names the harness by its mark and the kind by its word: no delegation glyph and no person icon (the top bar's chip, below, keeps the glyph).
+          r.expect(c.mark, tag + ": the kind badge has no harness mark: " + JSON.stringify(c));
+          if (c.kind === "Subagent") r.expect(!c.delegate && !c.person, tag + ": the Subagent badge should carry the harness mark and its word, with no delegation glyph or person icon: " + JSON.stringify(c));
         }
         // A long title wraps beside the badge (the badge keeps its row and its width) and never widens the page.
         await page.evaluate(() => { for (const t of document.querySelectorAll(".hcard.child-card .child-head .ln")) t.textContent = "A deliberately long handoff title that has to wrap onto a second and a third line on a phone " + t.textContent; });

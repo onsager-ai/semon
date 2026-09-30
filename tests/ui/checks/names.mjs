@@ -1,7 +1,9 @@
-// The harness is named in plain text, never drawn, and never coloured. Every label (`.hname`) must read "Claude Code", "Claude"
+// The harness is named in plain text and never coloured. Every label (`.hname`) must read "Claude Code", "Claude"
 // or "Codex", be a text-only element (no svg, no img), stay on one line at 390 px, meet WCAG AA (4.5:1) against the colour
 // behind it in both colour schemes, and be painted in the neutral --muted ink, the same for Claude and Codex, so the word
-// itself is what tells them apart. Sidebar rows carry no label (the row's aria-label names the harness), and a top bar's kind
+// itself is what tells them apart. The harness's official mark (hicons.mjs checks it) is drawn beside a label, never inside it: where a
+// label has one (the ranked lists in Analytics) the mark comes first and is the label's own harness. Sidebar rows carry no label
+// (the row's aria-label names the harness; their mark stands alone and carries the name), and a top bar's kind
 // chip is neutral too. Screenshots of the sidebar, a session's top bar and Analytics are written to out/names/ for the visual pass.
 import fs from "node:fs";
 import path from "node:path";
@@ -24,7 +26,7 @@ const measure = (page, root) => page.evaluate((rootSelector) => {
   return [...document.querySelectorAll(rootSelector + " .hname")].filter((n) => n.getClientRects().length).map((n) => {
     const cs = getComputedStyle(n), box = n.getBoundingClientRect(), lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.2;
     const fg = rgba(cs.color), bg = backdrop(n.parentElement);
-    return { text: n.textContent, harness: [...n.classList].find((c) => c.startsWith("h-")), graphics: n.querySelectorAll("svg,img").length + n.children.length, tag: n.tagName, lines: Math.round(box.height / lh), fontSize: parseFloat(cs.fontSize), weight: cs.fontWeight, ratio: Math.round(ratio(fg, bg) * 100) / 100, color: cs.color, muted: n.closest('.lineage-menu button[aria-current="page"]') ? ink2 : muted, current: !!n.closest('.lineage-menu button[aria-current="page"]') };
+    return { text: n.textContent, harness: [...n.classList].find((c) => c.startsWith("h-")), graphics: n.querySelectorAll("svg,img").length + n.children.length, tag: n.tagName, mark: n.parentElement?.classList.contains("hlabel") ? n.previousElementSibling?.dataset?.harness ?? null : undefined, lines: Math.round(box.height / lh), fontSize: parseFloat(cs.fontSize), weight: cs.fontWeight, ratio: Math.round(ratio(fg, bg) * 100) / 100, color: cs.color, muted: n.closest('.lineage-menu button[aria-current="page"]') ? ink2 : muted, current: !!n.closest('.lineage-menu button[aria-current="page"]') };
   });
 }, root);
 
@@ -48,6 +50,7 @@ export default async function namesCheck(browser) {
         r.expect(l.color === l.muted, tag + " " + where + ": " + l.text + " is painted " + l.color + ", not the neutral " + (l.current ? "--ink-2 (the lineage menu's current row sits on --sunken, where --muted is under AA)" : "--muted") + " " + l.muted);
         if (seen[l.text] !== undefined) seen[l.text]++;
         r.expect((l.harness === "h-codex") === (l.text === "Codex"), tag + " " + where + ": " + l.text + " carries " + l.harness);
+        if (l.mark !== undefined) r.expect(l.mark === (l.text === "Codex" ? "codex" : "claude"), tag + " " + where + ": " + l.text + " has the mark of " + l.mark);
       }
     };
     const shot = (name) => page.screenshot({ path: path.join(OUT, "names-" + tag + "-" + name + ".png") });
@@ -97,6 +100,8 @@ export default async function namesCheck(browser) {
     // Sidebar rows carry no harness label: the row's aria-label names it for screen readers.
     r.expect((await measure(page, "#lanes")).length === 0 && await page.evaluate(() => document.querySelectorAll("#lanes .hname").length === 0), tag + ": a sidebar row still shows a harness label");
     r.expect(await page.evaluate(() => { const rows = [...document.querySelectorAll("#lanes .srow")]; return rows.length > 0 && rows.every((row) => /, (Claude|Codex)/.test(row.getAttribute("aria-label") ?? "")); }), tag + ": a sidebar row's aria-label does not name its harness");
+    // The mark stands alone in a sidebar row and names its harness itself, the same one the row's aria-label names.
+    r.expect(await page.evaluate(() => { const rows = [...document.querySelectorAll("#lanes .srow")]; return rows.length > 0 && rows.every((row) => { const mark = row.querySelector(".hicon"), name = { claude: "Claude", codex: "Codex" }[mark?.dataset.harness]; return !!mark && mark.getAttribute("role") === "img" && !!name && mark.getAttribute("aria-label").startsWith(name) && (row.getAttribute("aria-label") ?? "").includes(mark.getAttribute("aria-label")); }); }), tag + ": a sidebar row's mark is missing, or does not name the harness its aria-label names");
     r.expect(await page.evaluate(() => document.querySelectorAll(".hmark").length === 0 && !/[✳⌘]/.test(document.querySelector("#lanes").textContent + document.querySelector("#topbar").textContent)), tag + ": an old text glyph is still drawn");
     r.expect(await page.evaluate(() => [...document.querySelectorAll("#lanes .srow-meta")].every((m) => { const tops = [...m.children].filter((c) => c.getClientRects().length).map((c) => Math.round(c.getBoundingClientRect().top / 3)); return !tops.length || Math.max(...tops) - Math.min(...tops) <= 1; })), tag + ": a sidebar meta line has more than one line");
     await shot("sidebar");
