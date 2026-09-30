@@ -129,8 +129,9 @@ export default async function homeCheck(browser) {
     await page.evaluate((id) => [...document.querySelectorAll(".page .nrow")].find((x) => x.dataset.id === id)?.click(), longSid);
     await afterTitle(page, D.SESS[longSid].name);
     out.historyScroll.openEnd = await page.evaluate(() => { const s = document.querySelector("#main"); return s.scrollHeight - s.scrollTop - s.clientHeight; });
-    await page.mouse.move(640, 200); await page.mouse.wheel(0, -10000);
-    out.historyScroll.readerAt = await page.evaluate(() => { const s = document.querySelector("#main"), max = s.scrollHeight - s.clientHeight; s.scrollTop = Math.round(max * 0.45); return { top: s.scrollTop, max }; });
+    const historyTravel = await page.evaluate(() => { const s = document.querySelector("#main"); return s.scrollHeight - s.clientHeight; });
+    await page.mouse.move(640, 200); await page.mouse.wheel(0, -Math.round(historyTravel * 0.55));
+    out.historyScroll.readerAt = await page.evaluate(() => { const s = document.querySelector("#main"); return { top: s.scrollTop, max: s.scrollHeight - s.clientHeight }; });
     await page.waitForTimeout(100);
     await page.goBack(); await afterTitle(page, "Sessions"); await page.waitForTimeout(80);
     out.historyScroll.backTop = await page.evaluate(() => document.querySelector("#main").scrollTop);
