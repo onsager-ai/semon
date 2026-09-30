@@ -359,6 +359,25 @@ async function scheme(browser, name, opts, r) {
       say(same(ids(drawerAfter), lanesOld) && still(drawerTops, drawerAfter), "the drawer's rows moved or changed under a scrolled list: " + ids(drawerAfter).join(",") + " vs " + lanesOld.join(","));
       say(Math.abs((await scrollOf(page, "side")) - R.sideScrolled) <= 1, "the drawer's scroll position changed");
       await page.screenshot({ path: path.join(ENV.out, "order-" + name + "-side.png") });
+      console.log("DIAG174 " + JSON.stringify(await page.evaluate((name) => {
+        const pill = document.querySelector('.order-pill[data-order="side"]'), principal = document.querySelector('.srow[data-id="principal"]');
+        const identity = (e) => e ? { tag: e.tagName, id: e.id, class: e.className } : null;
+        const chain = (e) => { const out = []; for (; e; e = e.parentElement) out.push(identity(e)); return out; };
+        const facts = (e) => {
+          if (!e) return null;
+          const s = getComputedStyle(e);
+          return { ...identity(e), rect: e.getBoundingClientRect().toJSON(), scrollTop: e.scrollTop, scrollHeight: e.scrollHeight, clientHeight: e.clientHeight,
+            position: s.position, zIndex: s.zIndex, pointerEvents: s.pointerEvents, overflow: s.overflow, overflowX: s.overflowX, overflowY: s.overflowY,
+            transform: s.transform, contain: s.contain, isolation: s.isolation };
+        };
+        const rect = pill.getBoundingClientRect(), centre = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        const hit = document.elementFromPoint(centre.x, centre.y);
+        const scroller = (() => { for (let e = pill.parentElement; e; e = e.parentElement) if (/auto|scroll|hidden/.test(getComputedStyle(e).overflowY)) return e; return document.scrollingElement; })();
+        return { name, centre, pillWins: hit === pill || pill.contains(hit), hit: chain(hit), actualScrollContainer: identity(scroller),
+          elements: { slot: facts(document.querySelector(".order-slot")), pill: facts(pill), content: facts(document.querySelector(".side-content")),
+            lanes: facts(document.querySelector("#lanes")), list: facts(document.querySelector("#side-list")), sidebar: facts(document.querySelector("#sidebar")),
+            principal: facts(principal), principalTreeRow: facts(principal?.closest(".tree-row")), principalTreeItem: facts(principal?.closest(".treeitem")) } };
+      }, name)));
       await tapPill("side");
       await until(page, () => document.querySelector("#lanes > .treeitem")?.dataset.id === "order-c");
       const m = await model(srv), l = lastOf(m), side = ids(await sideRows(page));
