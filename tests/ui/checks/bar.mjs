@@ -34,6 +34,7 @@
 //    must actually be found (a trace child node, a Home item, a relay header), not silently skipped.
 //  - the sidebar shows the 8 most recent top-level tree rows with nested children; the Sessions page keeps all session rows,
 //    every grouping produces sections, search narrows to model matches, and opening a row lands at the end.
+//  - a visible working dot breathes, stops under reduced motion, and a waiting dot stays still.
 import path from "node:path";
 import { ENV, VIEWPORTS, settled, served, goto, data, reporter, overflow } from "../lib.mjs";
 
@@ -138,6 +139,40 @@ export default async function barCheck(browser) {
     const measure = async (name, expectedMeta = null) => { const c = await barCheckOnce(); R.pages++; if (c.deskLead != null && c.deskLead !== "none") R.deskLeadShown++;
       if (c.phoneBar) { const b = c.phoneBar; R.phoneBars++; R.phoneBarMaxH = Math.max(R.phoneBarMaxH, b.h); R.phoneBarOldH = Math.min(R.phoneBarOldH ?? Infinity, b.oldH); R.phoneBarTitleW.push(b.titleW); const bad = []; if (b.h > 57.5) bad.push("height " + b.h); if (b.oldH < b.h + 10) bad.push("no shorter than before: " + b.oldH + " -> " + b.h); if (!b.oneRow) bad.push("not one row"); if (b.l2Displayed) bad.push("line 2 is displayed"); if (!b.dot || !b.dotVisible) bad.push("no state dot"); if (!b.dotName || stateWord[b.dotState] !== b.dotName) bad.push("dot name " + b.dotName + " for " + b.dotState); if (!b.dotBeforeTitle || !b.dotAfterCrumb) bad.push("dot not between the crumb and the title"); if (!b.tip) bad.push("dot tip"); if (b.crumbW != null && (b.crumbW < 44 || b.crumbW > 48 || b.sepShown)) bad.push("crumb is " + b.crumbW + " px wide (44 to 48) or shows its separator " + b.sepShown); if (b.crumbH != null && b.crumbH < 35.5) bad.push("crumb tap height " + b.crumbH); if (b.leadW < 32 || b.leadH < 32 || b.leadOverlapsCrumb) bad.push("state dot tap area " + b.leadW + "x" + b.leadH + (b.leadOverlapsCrumb ? ", overlapping the crumb" : "")); if (bad.length) R.phoneBarFailures.push(name + ": " + bad.join(", ")); } if (!c.pinned) R.notPinned.push(name + (c.scrolled ? "" : "(no scroll)")); if (c.l2) { R.l2Pages++; if (!c.l2.oneLine) R.l2NotOneLine.push(name + ":" + c.l2.h); if (c.l2.overflows) R.l2Overflowing++; if (c.l2.ellipsis === false) R.l2NoEllipsis++; if (c.l2.sessionMeta) { R.sessionMetaPages++; const want = ["meta-kind", "meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", "meta-runs", "meta-tokens", "meta-cost"], got = c.l2.metaOrder, required = [...(expectedMeta?.kind ? ["meta-kind"] : []), "meta-state", "meta-model", "meta-machine", "meta-branch", "meta-tools", ...(expectedMeta?.runs ? ["meta-runs"] : []), "meta-tokens", "meta-cost"], ordered = got.every((x) => want.includes(x)) && got.every((x, i) => i === 0 || want.indexOf(got[i - 1]) < want.indexOf(x)); if (!ordered || required.some((x) => !got.includes(x))) R.metaOrderFailures.push(name + ":" + JSON.stringify(got)); const sizes = { errors: phone ? 40 : 28, runs: phone ? 44 : 30 }, needed = { errors: !!expectedMeta?.errors, runs: !!expectedMeta?.runs }; for (const key of Object.keys(sizes)) { const h = c.line2Targets[key]; if (needed[key] && h == null) R.line2TargetFailures.push(name + ": missing expected line-2 " + key + " target"); else if (h != null && !c.line2Hidden[key] && Math.abs(h - sizes[key]) > 1) R.line2TargetFailures.push(name + " " + key + ":" + h + "px, expected " + sizes[key] + "px"); else if (key === "runs" && needed.runs && c.line2Hidden.runs && !phone) R.line2TargetFailures.push(name + ": runs are hidden outside the phone menu"); } } } const mf = c.metaFacts; if (mf) { if (!mf.dot || !mf.dotInside || (mf.dotFirst && mf.ringRoom < 5.5) || Math.abs(mf.firstOffTitle) > 1) R.metaDotFailures.push(name + ": " + JSON.stringify({ first: mf.dotFirst, ringRoom: mf.ringRoom, inside: mf.dotInside, offTitle: mf.firstOffTitle })); if (mf.errsColor != null && mf.errsColor !== mf.toolsColor) R.metaDotFailures.push(name + ": errors are " + mf.errsColor + " where the other items are " + mf.toolsColor); if (mf.runsDot) R.metaDotFailures.push(name + ": the runs item has a state dot"); if (mf.hit) R.metaDotFailures.push(name + ": a whole-line .meta-hit button is back"); if (mf.errsWeight != null && mf.errsWeight > mf.toolsWeight) R.metaDotFailures.push(name + ": errors weigh " + mf.errsWeight + " over the other items' " + mf.toolsWeight); if (mf.buttons.some((b) => !/\b(errs|meta-runs)\b/.test(b))) R.metaDotFailures.push(name + ": a meta item other than errors and runs is a button: " + JSON.stringify(mf.buttons)); } R.sideways += c.side; if (c.small.length) R.smallControls.push(name + " " + c.small.join(",")); if (await over()) R.overflowScreens++; return c; };
     const sids = Object.keys(D.SESS), traceTurns = [];
+    const inspectStateDot = (state) => page.evaluate((state) => {
+      const dot = [...document.querySelectorAll(".dot." + state)].find((x) => {
+        const box = x.getBoundingClientRect(), style = getComputedStyle(x);
+        return box.width > 0 && box.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+      });
+      if (!dot) return null;
+      const style = getComputedStyle(dot);
+      return { animationName: style.animationName, animationDuration: style.animationDuration };
+    }, state);
+    const workSid = allSessions.find((s) => s.state === "work")?.id;
+    r.expect(!!workSid, mode + ": fixture has no working session for the dot animation check");
+    if (workSid) {
+      await goto(page, { v: "session", id: workSid }, D);
+      const workingDot = await inspectStateDot("work");
+      R.dotMotion = { work: workingDot };
+      r.expect(workingDot?.animationName === "dot-breathe" && parseFloat(workingDot.animationDuration) > 0,
+        mode + ": a visible .dot.work has no dot-breathe animation or a zero duration: " + JSON.stringify(workingDot));
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      const reducedDot = await inspectStateDot("work");
+      R.dotMotion.reduced = reducedDot;
+      r.expect(reducedDot?.animationName === "none",
+        mode + ": a visible .dot.work still animates under reduced motion: " + JSON.stringify(reducedDot));
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+    }
+    const waitSid = allSessions.find((s) => s.state === "wait")?.id;
+    r.expect(!!waitSid, mode + ": fixture has no waiting session for the still-dot check");
+    if (waitSid) {
+      await goto(page, { v: "session", id: waitSid }, D);
+      const waitingDot = await inspectStateDot("wait");
+      R.dotMotion ??= {};
+      R.dotMotion.wait = waitingDot;
+      r.expect(waitingDot?.animationName === "none",
+        mode + ": a visible .dot.wait has an animation: " + JSON.stringify(waitingDot));
+    }
     const F = { youTurns: 0, youWithHeader: 0, msgTimes: 0, relayHeaders: 0, gapMarkersBetweenTurns: 0, gapMarkersInsideTurns: 0, tables: 0, tsum: 0, tsumFallback: [], tsumLowercasedUnknown: 0 };
     for (const sid of sids) {
       await goto(page, { v: "session", id: sid }, D);
