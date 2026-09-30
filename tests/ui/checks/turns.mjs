@@ -288,10 +288,6 @@ export default async function turnsCheck(browser) {
       await page.locator(sel + " .child-actions > button").click(); await waitRoute(page, { v: "session", id: h.to });
       interaction.links.childOpenButton = await routeState(page);
       r.expect(interaction.links.childOpenButton.id === h.to, tag + ": existing child Open button did not open the child: " + JSON.stringify(interaction.links.childOpenButton));
-      await page.goBack(); await waitRoute(page, { v: "session", id: childCard.sid });
-      await page.locator(sel + " .child-head > button.ln").press("Enter"); await waitRoute(page, { v: "session", id: h.to });
-      interaction.links.childNameEnter = await routeState(page);
-      r.expect(interaction.links.childNameEnter.id === h.to, tag + ": Enter did not open the child: " + JSON.stringify(interaction.links.childNameEnter));
     }
 
     const plainSpawn = candidates["plain-spawn"];
@@ -322,6 +318,10 @@ export default async function turnsCheck(browser) {
       interaction.links.relayTarget = { labels, ownIsButton, target: recipient, turn: started };
       r.expect(labels.some((b) => b.text === recipient && b.label === "Open " + recipient + " at the turn this started"), tag + ": relay target button or aria-label is missing: " + JSON.stringify(labels));
       r.expect(!ownIsButton, tag + ": the viewer's own name became a button");
+      await target.filter({ hasText: recipient }).press("Enter"); await page.waitForTimeout(100);
+      interaction.links.relayTargetEnter = await routeState(page);
+      r.expect(interaction.links.relayTargetEnter.id === h.to && (!started || interaction.links.relayTargetEnter.turn === started), tag + ": Enter did not open the relay target at its started turn: " + JSON.stringify(interaction.links.relayTargetEnter));
+      await page.goBack(); await waitRoute(page, { v: "session", id: sentRelay.sid });
       await target.filter({ hasText: recipient }).click(); await waitRoute(page, { v: "session", id: h.to, turn: started });
       interaction.links.relayTargetOpens = await routeState(page);
       r.expect(interaction.links.relayTargetOpens.id === h.to && (!started || interaction.links.relayTargetOpens.turn === started), tag + ": relay target did not open its started turn: " + JSON.stringify(interaction.links.relayTargetOpens));
