@@ -533,7 +533,10 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .step .sa { font-family: var(--mono); font-size: var(--fs-sm); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; overflow-wrap: normal; }
 .step .sa.st { font: inherit; color: var(--ink-2); }
 .step .sd { margin-left: auto; font-family: var(--mono); font-size: var(--fs-cap); color: var(--muted); flex: none; padding-left: 8px; }
-.step.background .sd { flex: 0 1 auto; min-width: 0; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A background step's outcome never shrinks: the command (.sa) takes the ellipsis. On a phone the word "background" gives way to
+   a small ring before the verb (.bgmark, named "background"), so "running 8m 18s" or "failed · 2m 0s" shows whole. */
+.step.background .sd { white-space: nowrap; }
+.step .bgmark { display: none; }
 .step > button > .spin { flex: none; }
 .step.flash > button { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .step .bg-line { display: flex; align-items: center; gap: 8px; padding: 3px 6px; min-width: 0; color: var(--muted); font-size: var(--fs-sm); }
@@ -705,6 +708,13 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   .page { padding: 2px 16px calc(72px + env(safe-area-inset-bottom, 0px)); gap: 16px; }
   .msg.user { max-width: 88%; }
   .step > button { min-height: 36px; }
+  .step.background .bgw { display: none; }
+  .step.background .bgmark { display: block; flex: none; width: 5px; height: 5px; border: 1.5px solid currentColor; border-radius: 50%; margin: 0 -2px 0 -3px; }
+  .step.background-running .bgmark { color: var(--work); }
+  .step.err .bgmark { color: var(--err); }
+  /* A summary with finished background commands drops its long words and may take two lines, so its counts show. */
+  .tsum .tt .long { display: none; }
+  .tsum .tt.bgsum { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
   .menu { right: 10px; }
   .account-widget-desktop { display: none; }
   .account-widget-phone { position: relative; display: flex; flex: none; flex-direction: column; margin-top: auto; padding: 8px 8px 0; border-top: 1px solid var(--line); }

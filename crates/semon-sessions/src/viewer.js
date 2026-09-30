@@ -1403,7 +1403,8 @@
     const sessions = here.length + (here.length === 1 ? " session" : " sessions");
     l2.append(lab(up ? w + " working · " + sessions : movedOff(m).length ? movedOff(m).length + " moved off" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, sessions].filter(Boolean).join(" · "), null, 1)); };
   // What Find counts: the matches on the page when there is a search or a filter, else nothing.
-  const matchCount = () => find || !show.messages || !show.tools || !show.thinking ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : null;
+  // A background command's finish row shows beside its step but is not a match of its own.
+  const matchCount = () => find || !show.messages || !show.tools || !show.thinking ? $("#page").querySelectorAll(".turns .msg, .turns .step:not(.bgend), .turns .hcard").length : null;
   const matchText = (n) => n == null ? "" : n ? n + (n === 1 ? " match" : " matches") : "No matches";
   // Find and filter: one mode. Search takes over the bar and the filters sit under it as chips, one choice at a time.
   function findBar(bar, s, account) {
@@ -1747,11 +1748,13 @@
     Skill: ["stack", "Used skill", "used", "skill", "skills"] };
   const toolInfo = (name) => { if (TOOLS[name]) return TOOLS[name]; const m = /^mcp__(.+?)__/.exec(name); if (m) { const srv = m[1].replace(/^claude_ai_/, "").replace(/_/g, " "); return ["ext", "Used " + srv, "used " + srv, "time", "times"]; } return ["run", name, name, "step", "steps"]; };
   const verb = (name) => toolInfo(name).slice(0, 2);
+  // A background step's outcome ("running 8m 18s", "exit 0 · 1m 0s", "failed · 2m 0s"). Its `.sd` puts "background · " before it,
+  // in a span a phone hides in favour of a marker before the verb, so the outcome is never what gets cut.
   const backgroundText = (bg) => {
-    if (bg.state === "running") return "background · running " + bg.secs;
-    if (bg.state === "unknown") return "background · no end recorded";
+    if (bg.state === "running") return "running " + bg.secs;
+    if (bg.state === "unknown") return "no end recorded";
     const outcome = bg.state === "failed" ? "failed" : bg.state === "killed" ? "stopped" : bg.exit != null ? "exit " + bg.exit : "done";
-    return "background · " + outcome + (bg.secs ? " · " + bg.secs : "");
+    return outcome + (bg.secs ? " · " + bg.secs : "");
   };
   const elapsedMs = (text) => { const m = /^(?:(\d+)m )?(\d+(?:\.\d+)?)s$/.exec(text ?? ""); return m ? (Number(m[1] ?? 0) * 60 + Number(m[2])) * 1000 : null; };
   function transcript(sid, opts = {}) {
@@ -1774,15 +1777,19 @@
       if (run.length === 1 || find) { tx.append(steps); run = []; return; }
       const ends = run.filter((r) => r.end);
       const counts = new Map(); for (const r of run.filter((r) => !r.end)) { const [, , p, one, many] = toolInfo(r.k), c = counts.get(p) ?? { n: 0, one, many }; c.n++; counts.set(p, c); }
-      let text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
+      // With finished background commands: "Finished 3 background commands (1 failed, 1 stopped), ran 4 commands". A phone hides
+      // the long words (.long) and lets it take two lines, "3 background (1 failed, 1 stopped), 4 commands", so the counts show.
+      const tt = el("span", "tt");
       if (ends.length) {
         const outcomes = [[ends.filter((r) => r.state === "failed").length, "failed"], [ends.filter((r) => r.state === "killed").length, "stopped"]].filter(([n]) => n).map(([n, word]) => n + " " + word);
-        text = "Finished " + ends.length + " background command" + (ends.length === 1 ? "" : "s") + (outcomes.length ? " (" + outcomes.join(", ") + ")" : "") + (text ? ", " + text : "");
-      } else text = text[0].toUpperCase() + text.slice(1);
+        tt.classList.add("bgsum"); tt.append(el("span", "long", "Finished "), ends.length + " background", el("span", "long", " command" + (ends.length === 1 ? "" : "s")));
+        if (outcomes.length) tt.append(el("span", "tt-counts", " (" + outcomes.join(", ") + ")"));
+        for (const [p, c] of counts) tt.append(", ", p === "ran" ? el("span", "long", "ran ") : p + " ", c.n + " " + (c.n === 1 ? c.one : c.many));
+      } else { const text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", "); tt.textContent = text[0].toUpperCase() + text.slice(1); }
       const failed = run.filter((r) => !r.end && r.err && (!r.bg || !endedCalls.has(r.tid))).length;
       const live = run.some((r) => r.bg) ? run.filter((r) => r.live).sort((a, b) => (elapsedMs(b.secs) ?? 0) - (elapsedMs(a.secs) ?? 0))[0] : run.find((r) => r.live);
       const g = el("div", "tgroup"); if (run[0].key) g.dataset.e = "g:" + run[0].key; const b = el("button", "tsum"); b.type = "button"; b.setAttribute("aria-expanded", "false");
-      b.append(live ? el("span", "spin") : icon(I.stack), el("span", "tt", text));
+      b.append(live ? el("span", "spin") : icon(I.stack), tt);
       if (failed) b.append(el("span", "tf", "· " + failed + " failed"));
       if (live) b.append(el("span", "tl tick", "· running " + live.secs));
       b.append(icon(I.chev, "chev"));
@@ -1818,7 +1825,7 @@
       else if (bgRunning) { box.dataset.live = sid; if (bg.since != null) box.dataset.since = bg.since; }
       const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
       const bgSecs = bgRunning && bg.since != null ? running(NOW - bg.since) : bg?.secs;
-      const status = bg ? backgroundText({ ...bg, secs: bgSecs }) : live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
+      const status = bg ? null : live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
       const title = e.title ? String(e.title) : null;
       const command = e.in ?? e.arg;
       const firstNonemptyLine = typeof command === "string" ? command.split(/\r\n|\n|\r/).find((line) => line.trim()) : null;
@@ -1827,9 +1834,12 @@
         b.setAttribute("aria-label", "Ran: " + title);
         if (firstNonemptyLine != null) label.setAttribute("data-tip", firstNonemptyLine.slice(0, 200));
       }
+      const sd = el("span", "sd" + (live || bgRunning ? " tick" : ""), status);
       b.append(live || bgRunning ? el("span", "spin") : icon(I[ic]));
+      // A background step: "background · " then its outcome in `.sd`; a phone hides the word for the ring before the label.
+      if (bg) { const mark = el("span", "bgmark"); mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "background"); b.append(mark); sd.append(el("span", "bgw", "background · "), el("span", "bgo", backgroundText({ ...bg, secs: bgSecs }))); }
       if (!title) b.append(el("span", "sv", live && v === "Ran" ? "Running" : v));
-      b.append(label, el("span", "sd" + (live || bgRunning ? " tick" : ""), status), icon(I.chev, "chev"));
+      b.append(label, sd, icon(I.chev, "chev"));
       const out = el("div", "out"); out.hidden = true;
       // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
       // eleven lines. When either is cut, "View all" opens the whole call in a sheet.
@@ -2601,35 +2611,37 @@
     if (route.v === "session" && !hadOrigin && !!SESS[route.id] && !!originHandoff(route.id)) { LIVE.late = route.id; LIVE.lateTries = 0; }
     if (LIVE.late && !TX[LIVE.late]) LIVE.late = null; // nothing loaded to load again: the page loads it with its origin
     const changedH = new Set(H.filter((h) => oldH.get(h.id) !== handKey(h)).map((h) => h.id));
-    const view = viewed(), grown = new Set(), cuts = new Map();
+    const view = viewed(), grown = new Set(), cuts = new Map(), patched = new Map();
     let full = Object.values(SESS).some((x) => names.has(x.id) && names.get(x.id) !== x.name); // a new name shows in every turn
     for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
     // Only transcripts whose mark in the model moved are asked for, one at a time.
     let chain = Promise.resolve();
     for (const sid of view) if (TX[sid] && LIVE.late === sid) chain = chain.then(() => soft(reloadLate(sid).then(() => { grown.add(sid); full = true; })));
     else if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
-    else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.reload) full = true; })));
+    else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.patched?.length) patched.set(sid, r.patched); if (r.reload) full = true; })));
     if (route.v === "session" && TX[route.id]) chain = chain.then(() => newKids(route.id, grown));
-    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
+    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT, patched)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
   }
-  // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), those
-  // whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw them all.
-  function dirtyTurns(cuts, grown, changedH, oldT) {
+  // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), or a background
+  // call it updated, those whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw
+  // them all.
+  function dirtyTurns(cuts, grown, changedH, oldT, patched) {
     if (route.v !== "session" || !TX[route.id]) return null;
     const sid = route.id, dirty = new Set(), owner = new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id])));
     if (cuts.has(sid)) for (const e of TX[sid].slice(cuts.get(sid))) { if (isGap(e)) return null; if (owner.has(e)) dirty.add(owner.get(e)); }
+    for (const e of patched?.get(sid) ?? []) { if (!owner.has(e)) return null; dirty.add(owner.get(e)); }
     for (const t of TURNS[sid] ?? []) {
       if (oldT.get(t.id) !== LIVE.turns.get(t.id) || [t.start, ...t.sent].some((h) => h && changedH.has(h.id)) || t.entries.some((e) => e.k === "h" && changedH.has(e.id))) dirty.add(t.id);
     }
     for (const h of H) if (h.kind === "spawn" && h.from === sid && grown.has(h.to) && HOLDS.get(h.id)) dirty.add(HOLDS.get(h.id).id);
     return dirty;
   }
-  // The tail of a transcript loaded to its end: from its first call still running (anywhere), or the last turn's first call
+  // The tail of a transcript loaded to its end: from its first foreground call still running, or the last turn's first call
   // with no result yet, since its result may have landed; else from the end. A file that shrank or was rewritten, or more
   // than five pages of new entries, loads the last page again instead.
   function tail(sid) {
     const es = TX[sid], m = TXM[sid], tok = TOK[sid];
-    let cut = es.findIndex((e) => (e.live || e.bg?.state === "running") && e.slot != null); if (cut < 0) cut = es.length;
+    let cut = es.findIndex((e) => e.live && e.slot != null); if (cut < 0) cut = es.length;
     for (let i = es.length - 1; i >= 0; i--) { if (es[i].unfinished && es[i].slot != null) cut = Math.min(cut, i); if (es[i].turn) break; }
     let got = [], last = null, n = 0;
     const page = (after) => api("/api/tx?sid=" + enc(sid) + "&after=" + after).then((p) => {
@@ -2639,8 +2651,12 @@
     return page(cut < es.length ? es[cut].slot : m.to).then(() => {
       if (TX[sid] !== es) return { cut: null }; // "Load earlier" ran meanwhile: the next update catches up
       if (last.total < m.total || last.to < last.total || (cut < es.length && got[0]?.slot !== es[cut].slot)) return reload(sid);
+      // A background call loaded before the cut is not fetched again (it may be pages back): its finish row in the tail, or the
+      // page's list of calls still running (bg_running), says how it stands. Its turn is drawn again (patched).
+      const ends = new Map(got.filter((e) => e.k === "bgend" && e.bg).map((e) => [e.call, e.bg])), still = new Set(last.bg_running ?? []), patched = [];
+      for (const e of es.slice(0, cut)) if (e.bg?.state === "running" && !still.has(e.tid)) { e.bg = ends.get(e.tid) ?? { state: "unknown" }; patched.push(e); }
       TX[sid] = es.slice(0, cut).concat(got); Object.assign(m, { to: last.to, total: last.total, calls: last.calls, errors: last.errors, tok }); spread(sid);
-      return { cut };
+      return { cut, patched };
     });
   }
   // The page's own transcript loads its last page again; a child run's is dropped, and loads again as new child work.
@@ -2914,8 +2930,8 @@
     for (const n of document.querySelectorAll(".step.live[data-live], .step.background-running[data-live]")) {
       const a = SESS[n.dataset.live]?.activity, since = n.dataset.since != null ? Number(n.dataset.since) : a?.[3];
       if (since == null || !Number.isFinite(since)) continue;
-      const text = running(NOW - since), sd = n.querySelector(".sd");
-      const label = n.classList.contains("background-running") ? spaced("background · running " + text) : text;
+      const text = running(NOW - since), bg = n.classList.contains("background-running");
+      const sd = n.querySelector(bg ? ".sd > .bgo" : ".sd"), label = bg ? "running " + text : text;
       if (sd && sd.textContent !== label) sd.textContent = label;
       const group = n.closest(".tgroup"), earliest = group && groups.get(group);
       if (group && (!earliest || since < earliest.since)) groups.set(group, { since, text });

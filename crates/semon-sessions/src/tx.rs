@@ -948,11 +948,17 @@ fn background_fields(
         .and_then(|file| lines.get(&file.path, end.offset))
         .map(|record| background_summary(&record, &bg.tid, &end.status))
         .unwrap_or_default();
-    let exit = events::notification_exit(&summary);
+    ended_fields(&summary, &end.status, start, end.t)
+}
+
+/// An ended background call's `bg`: on its step, and on its finish row, so a
+/// viewer that loaded the step while it ran can update it from the row alone.
+fn ended_fields(summary: &str, status: &str, start: Option<i64>, end: Option<i64>) -> Value {
+    let exit = events::notification_exit(summary);
     let mut value = json!({
-        "state": background_state(&end.status, exit), "status": end.status,
-        "secs": match (start, end.t) { (Some(start), Some(end)) => secs(end - start), _ => "—".to_owned() },
-        "summary": clip(&summary, PREVIEW_MAX).0,
+        "state": background_state(status, exit), "status": status,
+        "secs": match (start, end) { (Some(start), Some(end)) => secs(end - start), _ => "—".to_owned() },
+        "summary": clip(summary, PREVIEW_MAX).0,
     });
     if let Some(exit) = exit {
         value["exit"] = json!(exit);
@@ -1482,6 +1488,7 @@ fn render(
             call,
             status,
             source,
+            start,
         } => {
             let summary = record()
                 .map(|record| background_summary(&record, call, status))
@@ -1502,7 +1509,10 @@ fn render(
                         built.home.as_deref(),
                     )
                 });
-            let mut entry = json!({"k": "bgend", "call": call, "state": background_state(status, exit), "label": clip(&label, PREVIEW_MAX).0});
+            let mut entry = json!({
+                "k": "bgend", "call": call, "state": background_state(status, exit), "label": clip(&label, PREVIEW_MAX).0,
+                "bg": ended_fields(&summary, status, *start, slot.t),
+            });
             if let Some(exit) = exit {
                 entry["exit"] = json!(exit);
             }
@@ -1803,7 +1813,7 @@ pub(crate) fn page_limited(
         }
         entries.push(entry);
     }
-    Ok(json!({
+    let mut page = json!({
         "sid": sid,
         "from": low,
         "to": high,
@@ -1811,8 +1821,29 @@ pub(crate) fn page_limited(
         "calls": transcript.calls,
         "errors": transcript.errors,
         "entries": entries,
-    })
-    .to_string())
+    });
+    // The background calls still running anywhere in the session: a viewer
+    // that loaded one on an earlier page learns it stopped without its
+    // process writing a line (and without fetching that page again).
+    let bg_running: Vec<&str> = slots
+        .iter()
+        .filter_map(|slot| match &slot.kind {
+            SlotKind::Tool {
+                bg:
+                    Some(model::Background {
+                        tid,
+                        live: true,
+                        end: None,
+                    }),
+                ..
+            } => Some(tid.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !bg_running.is_empty() {
+        page["bg_running"] = json!(bg_running);
+    }
+    Ok(page.to_string())
 }
 
 /// `/api/tx?errors=1` lists at most this many failed steps.
@@ -2371,6 +2402,10 @@ mod tests {
             assert_eq!(entries[2]["label"], "Fetch changes");
             assert_eq!(entries[2]["state"], step["bg"]["state"]);
             assert_eq!(entries[2]["exit"], step["bg"]["exit"]);
+            // The finish row carries the step's whole lifecycle, so a viewer
+            // holding the step from an earlier page updates it from the row.
+            assert_eq!(entries[2]["bg"], step["bg"]);
+            assert!(page.get("bg_running").is_none());
             let failed = state == "failed";
             assert_eq!(page["errors"], json!(usize::from(failed)));
             assert_eq!(built.sessions["bg"].errors, Some(usize::from(failed)));
@@ -2428,6 +2463,15 @@ mod tests {
             } else {
                 assert_eq!(step["bg"], json!({"state":"unknown"}));
             }
+            // Every page lists the calls still running, whichever it holds.
+            let tail: Value = serde_json::from_str(
+                &page_limited(&built, "bg", &Anchor::After(3), now, 1).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                tail["bg_running"],
+                if live { json!(["bash"]) } else { Value::Null }
+            );
             assert_eq!(step["ok"], true);
             assert_eq!(step["secs"], "0.5s");
             if live {
@@ -2443,6 +2487,190 @@ mod tests {
                     page_of(&stopped, "bg", &Anchor::Last)["entries"][1]["bg"]["state"],
                     "unknown"
                 );
+            }
+        }
+    }
+
+    /// A lane starts a background command, then restarts with `--resume`: the
+    /// new process writes a new file of the same session, and the old
+    /// process's shells died with it. Only a call in the file a live process
+    /// writes can still be running.
+    #[test]
+    fn a_background_call_runs_only_while_a_live_process_writes_its_own_file() {
+        for in_new in [false, true] {
+            let home = Home::new();
+            home.write(
+                "proc/1/stat",
+                &format!("1 (claude) {}\n", ["0"; 19].join(" ") + " 7"),
+            );
+            home.write(
+                "claude/sessions/1.json",
+                &json!({"pid":1,"sessionId":"new","procStart":7,"status":"shell"}).to_string(),
+            );
+            let sid = if in_new { "new" } else { "old" };
+            let call = [
+                said(
+                    sid,
+                    ts(1, if in_new { 6 } else { 1 }, 0),
+                    json!([{"type":"tool_use","id":"watch","name":"Bash","input":{"command":"gh pr checks --watch","run_in_background":true}}]),
+                ),
+                result(
+                    sid,
+                    ts(1, if in_new { 6 } else { 1 }, 500),
+                    "watch",
+                    "Command running in background with ID: watch",
+                    false,
+                ),
+            ];
+            let mut old = vec![ask("old", ts(1, 0, 0), "Watch the checks")];
+            let mut new = vec![ask("new", ts(1, 5, 0), "Carry on")];
+            if in_new {
+                new.extend(call)
+            } else {
+                old.extend(call)
+            }
+            old.push(json!({"type":"continued-in","continuedInSessionId":"new","sessionId":"old","timestamp":ts(1, 2, 0)}));
+            new.push(said(
+                "new",
+                ts(1, 7, 0),
+                json!([{"type":"text","text":"Still here"}]),
+            ));
+            home.lines("claude/projects/-work-proj/old.jsonl", &old);
+            home.lines("claude/projects/-work-proj/new.jsonl", &new);
+            let now = BASE + 3 * 3_600_000;
+            let built = home.built(now);
+            // One session, stitched from both files, and alive (not "done").
+            assert_eq!(built.tx.len(), 1);
+            assert_eq!(built.sessions["old"].state, "idle");
+            let page: Value =
+                serde_json::from_str(&page(&built, "old", &Anchor::Last, now).unwrap()).unwrap();
+            let step = page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["tid"] == "watch")
+                .unwrap();
+            let model: Value = serde_json::from_str(&built.json(now)).unwrap();
+            let mark = model["tx"]["old"].as_str().unwrap();
+            if in_new {
+                assert_eq!(step["bg"]["state"], "running");
+                assert_eq!(page["bg_running"], json!(["watch"]));
+                assert!(mark.ends_with(".1"), "{mark}");
+            } else {
+                assert_eq!(step["bg"], json!({"state":"unknown"}));
+                assert!(page.get("bg_running").is_none());
+                // Nothing runs, so the mark does not count it either.
+                assert!(mark.ends_with(".0"), "{mark}");
+            }
+        }
+    }
+
+    /// A live process for session `bg`, started at `started` (epoch ms), if given.
+    fn live_pid(home: &Home, started: Option<i64>) {
+        home.write(
+            "proc/1/stat",
+            &format!("1 (claude) {}\n", ["0"; 19].join(" ") + " 7"),
+        );
+        let mut record = json!({"pid":1,"sessionId":"bg","procStart":7,"status":"shell"});
+        if let Some(started) = started {
+            record["startedAt"] = json!(started);
+        }
+        home.write("claude/sessions/1.json", &record.to_string());
+    }
+
+    /// A background launch that was denied or blocked (an error result)
+    /// started nothing, and one with no result yet is an ordinary unfinished
+    /// call: neither runs as background, both count once as failed.
+    #[test]
+    fn a_background_launch_that_failed_or_never_returned_does_not_run() {
+        for failed in [true, false] {
+            let home = Home::new();
+            live_pid(&home, None);
+            let mut records = vec![
+                ask("bg", ts(1, 0, 0), "Watch the checks"),
+                said(
+                    "bg",
+                    ts(1, 1, 0),
+                    json!([{"type":"tool_use","id":"watch","name":"Bash","input":{"command":"gh pr checks --watch","run_in_background":true}}]),
+                ),
+            ];
+            if failed {
+                records.push(result(
+                    "bg",
+                    ts(1, 1, 500),
+                    "watch",
+                    "Permission to use Bash has been denied.",
+                    true,
+                ));
+            }
+            records.push(said(
+                "bg",
+                ts(1, 2, 0),
+                json!([{"type":"text","text":"Could not start it"}]),
+            ));
+            records.push(ask("bg", ts(1, 3, 0), "Next"));
+            home.lines("claude/projects/-work-proj/bg.jsonl", &records);
+            let now = BASE + 3 * 3_600_000;
+            let built = home.built(now);
+            let page: Value =
+                serde_json::from_str(&page(&built, "bg", &Anchor::Last, now).unwrap()).unwrap();
+            let step = &page["entries"][1];
+            assert_eq!(step["k"], "tool");
+            assert!(step.get("bg").is_none(), "{step}");
+            assert!(step.get("tid").is_none(), "{step}");
+            assert!(step.get("live").is_none(), "{step}");
+            if failed {
+                assert_eq!(step["ok"], false);
+            } else {
+                assert_eq!(step["unfinished"], true);
+            }
+            assert!(page.get("bg_running").is_none());
+            assert_eq!(page["errors"], 1);
+            assert_eq!(built.sessions["bg"].errors, Some(1));
+            let model: Value = serde_json::from_str(&built.json(now)).unwrap();
+            let mark = model["tx"]["bg"].as_str().unwrap();
+            assert!(mark.ends_with(".0"), "{mark}");
+        }
+    }
+
+    /// A session resumed into its own file: the live process started after
+    /// an older background call, whose shell died with the process that
+    /// launched it. Only a call at or after the process's start can run.
+    #[test]
+    fn a_background_call_older_than_its_files_live_process_does_not_run() {
+        let call = BASE + 3_660_000;
+        for (started, running) in [
+            (Some(call + 60_000), false),
+            (Some(call), true),
+            (Some(call - 60_000), true),
+            (None, true),
+        ] {
+            let home = Home::new();
+            live_pid(&home, started);
+            home.lines("claude/projects/-work-proj/bg.jsonl", &[
+                ask("bg", ts(1, 0, 0), "Watch the checks"),
+                said("bg", ts(1, 1, 0), json!([{"type":"tool_use","id":"watch","name":"Bash","input":{"command":"gh pr checks --watch","run_in_background":true}}])),
+                result("bg", ts(1, 1, 500), "watch", "Command running in background with ID: watch", false),
+                ask("bg", ts(1, 5, 0), "Carry on"),
+                said("bg", ts(1, 6, 0), json!([{"type":"text","text":"Still here"}])),
+            ]);
+            let now = BASE + 3 * 3_600_000;
+            let built = home.built(now);
+            assert_eq!(built.sessions["bg"].state, "idle");
+            let page: Value =
+                serde_json::from_str(&page(&built, "bg", &Anchor::Last, now).unwrap()).unwrap();
+            let step = &page["entries"][1];
+            assert_eq!(step["tid"], "watch");
+            let model: Value = serde_json::from_str(&built.json(now)).unwrap();
+            let mark = model["tx"]["bg"].as_str().unwrap();
+            if running {
+                assert_eq!(step["bg"]["state"], "running", "{started:?}");
+                assert_eq!(page["bg_running"], json!(["watch"]));
+                assert!(mark.ends_with(".1"), "{mark}");
+            } else {
+                assert_eq!(step["bg"], json!({"state":"unknown"}));
+                assert!(page.get("bg_running").is_none());
+                assert!(mark.ends_with(".0"), "{mark}");
             }
         }
     }

@@ -29,8 +29,37 @@
 //    with it on is wider than 68ch and fills its column.
 //  - the desktop dialog: at least one "View all" is visible on the sample's first expanded step, the dialog is not
 //    sideways-clipped off the 1280px viewport, and a backdrop click closes it (closedByBackdrop === true).
+//  - background commands (synthetic /api/tx pages and the bgcmd fixture), at 390 and 1280: each background step is one line
+//    whose outcome ("running 8m 18s", "exit 0 · 1m 0s", "failed · 2m 0s") shows whole (scrollWidth <= clientWidth); at 390
+//    the word "background" gives way to a marker named "background" before the verb, at 1280 the word stays; a summary
+//    with finished background commands shows its counts ("(1 failed, 1 stopped)") inside its box on both.
+//  - find counts a background command once: its finish row shows beside its step but is not a match of its own.
+//  - a live update of a transcript with a running background call on an earlier turn fetches only the new tail (one
+//    after= request, from the end), and the call still flips to its outcome when its finish row arrives, or to "no end
+//    recorded" when the page says it no longer runs.
 import path from "node:path";
 import { ENV, served, data, goto, reporter, wide, overflow } from "../lib.mjs";
+
+// The shown background steps' layout: the outcome as drawn (innerText, so the hidden word drops out), whether it shows whole
+// and on one line with the verb and command, and the marker and word that stand for "background".
+const backgroundRows = (page) => page.evaluate(() => [...document.querySelectorAll(".step.background")].filter((n) => n.getClientRects().length).map((n) => {
+  const b = n.querySelector(":scope > button"), sv = b.querySelector(".sv"), sa = b.querySelector(".sa"), sd = b.querySelector(".sd"), mark = b.querySelector(".bgmark");
+  const rect = (x) => x.getBoundingClientRect(), mid = (x) => rect(x).top + rect(x).height / 2, line = (x) => rect(x).height < 2.2 * parseFloat(getComputedStyle(x).fontSize);
+  return { tid: n.dataset.tid, shown: sd.innerText.replace(/\s+/g, " ").trim(), whole: sd.scrollWidth <= sd.clientWidth && rect(sd).right <= document.documentElement.clientWidth + 0.5,
+    oneLine: [sv, sa, sd].filter(Boolean).every((x) => line(x) && Math.abs(mid(x) - mid(sd)) < 4), // a titled step has no verb mark: !!mark && getComputedStyle(mark).display !== "none" && mark.getAttribute("role") === "img" && mark.getAttribute("aria-label") === "background",
+    word: getComputedStyle(sd.querySelector(".bgw")).display !== "none" };
+}));
+const expectRows = (r, label, size, rows, outcomes) => {
+  const phone = size === "phone";
+  r.expect(rows.length === outcomes.length && rows.every((x, i) => x.shown === (phone ? "" : "background · ") + outcomes[i] && x.whole && x.oneLine && x.mark === phone && x.word === !phone),
+    label + ": each background step shows its whole outcome on one line, " + (phone ? "with the marker in place of the word" : "after the word") + ": " + JSON.stringify(rows));
+};
+// A summary with finished background commands: its counts are inside its box (not clipped), and whether it is clamped.
+const backgroundSummaries = (page) => page.evaluate(() => [...document.querySelectorAll(".tsum .tt.bgsum")].filter((n) => n.getClientRects().length).map((tt) => {
+  const box = tt.getBoundingClientRect(), counts = tt.querySelector(".tt-counts");
+  const inside = !!counts && [...counts.getClientRects()].every((q) => q.left >= box.left - 0.5 && q.right <= box.right + 0.5 && q.top >= box.top - 0.5 && q.bottom <= box.bottom + 0.5);
+  return { shown: tt.innerText.replace(/\s+/g, " ").trim(), counts: counts?.textContent.trim() ?? null, inside, clamped: tt.scrollHeight > tt.clientHeight + 1 };
+}));
 
 // Synthetic /api/tx pages cover background lifecycles without reading another transcript fixture.
 async function backgroundCommands(browser, r) {
@@ -61,8 +90,11 @@ async function backgroundCommands(browser, r) {
       });
       r.expect(normal(running.sd) === "background · running 8m 18s" && running.spin === 1, size + ": running background label and spinner: " + JSON.stringify(running));
       r.expect(normal(running.summary).includes("Ran 2 commands, read 1 file") && normal(running.summary).includes("· running 8m 18s"), size + ": background command counts as running: " + running.summary);
+      const runningRows = await backgroundRows(page);
+      expectRows(r, size + " running", size, runningRows, ["running 8m 18s"]);
       await page.clock.setFixedTime(ENV.now + 2000);
       await page.waitForFunction(() => document.querySelector('.step[data-tid="running"] .sd')?.textContent.replace(/\s+/g, " ").trim() === "background · running 8m 20s");
+      expectRows(r, size + " ticked", size, await backgroundRows(page), ["running 8m 20s"]);
       const ticked = await page.locator(".tsum .tl").textContent();
       r.expect(normal(ticked) === "· running 8m 20s", size + ": the group ticker follows the background call: " + ticked);
       await page.clock.setFixedTime(ENV.now);
@@ -92,6 +124,12 @@ async function backgroundCommands(browser, r) {
       r.expect(normal(ended.summary) === "Finished 5 background commands (1 failed, 1 stopped), ran 7 commands, read 1 file", size + ": completion counts and tool verbs: " + ended.summary);
       r.expect(ended.ends.length === 5 && normal(ended.ends[0].text).startsWith("Background command completed · Fetch changes") && normal(ended.ends[1].text) === "Background command failed · Fetch failed" && ended.ends[1].err && normal(ended.ends[2].text) === "Background command stopped · Fetch stopped", size + ": arrival rows: " + JSON.stringify(ended.ends));
       r.expect(ended.ends.slice(0, 4).every((n) => n.button) && ended.ends[4].button === false, size + ": only loaded originating calls get a jump button");
+      const endedRows = await backgroundRows(page);
+      expectRows(r, size + " ended", size, endedRows, ["exit 0 · 12.0s", "failed · 3.0s", "stopped · 4.0s", "no end recorded", "done · 5.0s"]);
+      const endedSummary = await backgroundSummaries(page);
+      r.expect(endedSummary.length === 1 && endedSummary[0].counts === "(1 failed, 1 stopped)" && endedSummary[0].inside
+        && endedSummary[0].shown.startsWith(size === "phone" ? "5 background (1 failed, 1 stopped), 7 commands" : "Finished 5 background commands (1 failed, 1 stopped), ran 7 commands"),
+        size + ": the summary's counts show: " + JSON.stringify(endedSummary));
       const done = page.locator('.step[data-tid="done:1"]');
       await done.locator(":scope > button").click();
       const finished = await done.locator(".out .io").allTextContents();
@@ -102,6 +140,14 @@ async function backgroundCommands(browser, r) {
       const over = await overflow(page);
       r.expect(over === 0, size + ": background rows must not scroll sideways: " + over);
       r.expect(page.errors.length === 0, size + ": background page errors: " + page.errors.join(" | "));
+      // Find counts a background command once: its step matches, and its finish row shows beside it without adding a match.
+      let found = null;
+      if (size === "desktop") {
+        await page.click("#find-btn"); await page.keyboard.type("fetch failed", { delay: 10 }); await page.waitForTimeout(200);
+        found = await page.evaluate(() => ({ count: document.querySelector("#topbar .fcount")?.textContent, steps: document.querySelectorAll('.turns .step[data-tid="failed"]').length, ends: document.querySelectorAll(".turns .bgend").length }));
+        r.expect(found.count === "1 match" && found.steps === 1 && found.ends === 1, size + ": find counts a background command and its finish row as one match: " + JSON.stringify(found));
+        await page.click('#topbar [aria-label="Close find"]'); await page.waitForTimeout(150);
+      }
       // A finish in another run owns the failure count; a failed call without a loaded finish owns its own count.
       entries = [tool("late-failure", { state: "failed", exit: 2, secs: "3.0s" }), foreground,
         { k: "a", text: "The command finished during the next run." },
@@ -130,7 +176,7 @@ async function backgroundCommands(browser, r) {
       await page.waitForFunction(() => !!document.querySelector(".bgend > button"));
       r.expect(await page.locator('.step[data-tid="paged-call"]').count() === 1 && await page.locator(".bgend > button").count() === 1, size + ": loading the earlier page enables the completion link");
       r.expect(page.errors.length === 0, size + ": pagination background page errors: " + page.errors.join(" | "));
-      results[size] = { running, ticked, ended, finished, overflow: over, split };
+      results[size] = { running, ticked, ended, finished, overflow: over, split, runningRows, endedRows, endedSummary, found };
     } finally { await page.context().close(); }
   }
   return results;
@@ -162,10 +208,79 @@ async function backgroundScreenshots(browser, r) {
       r.expect(shown.ends.length === 3 && shown.summary.includes("Finished 3 background commands (1 failed, 1 stopped), ran 4 commands"), tag + ": screenshot includes completion rows and summary: " + JSON.stringify(shown));
       r.expect(shown.open && shown.visible && shown.finished === 'Background command "cargo build" completed (exit code 0)', tag + ": run and Finished summary are expanded for the screenshot");
       r.expect(await page.locator('.step[data-tid="bg-completed"] > button').getAttribute("aria-expanded") === "true" && await page.locator('.step[data-tid="bg-completed"] .finished').isVisible(), tag + ": completed command has its Finished summary open");
+      const rows = await backgroundRows(page);
+      expectRows(r, tag, size, rows, ["running 9m 0s", "exit 0 · 1m 0s", "failed · 2m 0s", "stopped · 3m 0s"]);
+      const summary = await backgroundSummaries(page);
+      r.expect(summary.length === 1 && summary[0].counts === "(1 failed, 1 stopped)" && summary[0].inside && !summary[0].clamped
+        && summary[0].shown === (size === "phone" ? "3 background (1 failed, 1 stopped), 4 commands" : "Finished 3 background commands (1 failed, 1 stopped), ran 4 commands"),
+        tag + ": the summary shows its counts, unclamped: " + JSON.stringify(summary));
       const over = await overflow(page);
       r.expect(over === 0 && page.errors.length === 0, tag + ": screenshot fixture has no overflow or page errors: " + JSON.stringify({ over, errors: page.errors }));
       await page.screenshot({ path: path.join(ENV.out, "bgcmd-" + tag + ".png") });
-      results[tag] = shown;
+      results[tag] = { ...shown, rows, summary };
+    } finally { await page.context().close(); }
+  }
+  return results;
+}
+
+// A live update with a running background call on an earlier turn: only the new tail is fetched (one after= request, from the
+// end), and the call flips to its outcome from the finish row, or to "no end recorded" when the page no longer lists it running.
+async function backgroundTail(browser, r) {
+  const results = {};
+  for (const size of ["phone", "desktop"]) {
+    const page = await served(browser, { size, path: "/s/claude/harbor" });
+    try {
+      const normal = (text) => text.replace(/\s+/g, " ").trim();
+      const turns = await page.evaluate(() => fetch("/api/model?since=", { credentials: "same-origin" }).then((x) => x.json()).then((m) => m.turns.filter((t) => t.sid === "harbor").map((t) => t.id)));
+      // The fixture's harbor has one turn: a second, later one is added to the served model (as bar.mjs's bare turns are), so
+      // the running calls and the tail that ends them are in different turns.
+      r.expect(turns.length >= 1, size + ": harbor has a turn to start the tail test in: " + turns.length);
+      const later = "bt-tail-later";
+      const since = ENV.now - 498000, launched = (tid, arg) => ({ k: "tool", name: "Bash", arg, tid, ok: true, secs: "0.3s", out: "Command running in background with ID: " + tid, bg: { state: "running", secs: "8m 18s", since } });
+      const rows = [
+        { k: "u", text: "Start the dev server and watch the checks", turn: turns[0] }, launched("early-dev", "npm run dev"), launched("early-watch", "gh pr checks --watch"),
+        { k: "a", text: "Both are running in the background." },
+        { k: "u", text: "Carry on", turn: later }, { k: "tool", name: "Read", arg: "README.md", ok: true, secs: "0.1s", out: "Read" }, { k: "a", text: "Read it." },
+      ].map((e, slot) => ({ ...e, slot }));
+      const finish = { k: "bgend", call: "early-dev", state: "done", exit: 0, label: "Dev server", slot: rows.length,
+        bg: { state: "done", status: "completed", exit: 0, secs: "9m 0s", summary: 'Background command "npm run dev" completed (exit code 0)' } };
+      let ended = false, bump = null; const afters = [];
+      await page.route(/\/api\/tx\?/, async (route) => {
+        const url = new URL(route.request().url()), q = url.searchParams;
+        if (q.get("sid") !== "harbor" || q.has("errors")) { await route.continue(); return; }
+        const all = ended ? [...rows, finish] : rows, running = ended ? [] : ["early-dev", "early-watch"];
+        if (q.has("after")) afters.push(q.get("after"));
+        const from = q.has("after") ? Math.min(Number(q.get("after")), all.length) : 0;
+        await route.fulfill({ json: { sid: "harbor", from, to: all.length, total: all.length, calls: 5, errors: 0, entries: all.slice(from), bg_running: running } });
+      });
+      // A moved mark for harbor, as when its log grows: the next poll's update fetches its tail.
+      // The page's first model is /api/model with no query; later polls add ?since=. Both get the added turn.
+      await page.route(/\/api\/model(\?|$)/, async (route) => {
+        const url = new URL(route.request().url()); if (bump) url.searchParams.set("since", "");
+        const response = await route.fetch({ url: url.toString() }); if (response.status() !== 200) { await route.fulfill({ response }); return; } // a 304 has no body
+        const m = await response.json(), base = m.turns.filter((t) => t.sid === "harbor").at(-1);
+        m.turns.push({ id: later, sid: "harbor", at: base?.at ?? 0, start: null, u: false, text: "", sent: [], end: null });
+        if (bump) { const [a, b, ...rest] = String(m.tx.harbor).split("."); m.version = bump; m.tx = { ...m.tx, harbor: [Number(a) + 1, Number(b) + 1, ...rest].join(".") }; }
+        await route.fulfill({ response, json: m });
+      });
+      await page.reload({ waitUntil: "load" });
+      await page.waitForFunction(() => document.querySelectorAll(".step[data-tid]").length === 2);
+      r.expect(await page.locator('section.turn[data-turn="' + later + '"]').count() === 1, size + ": the added later turn is drawn");
+      const sd = (tid) => page.evaluate((tid) => document.querySelector('.step[data-tid="' + tid + '"] .sd')?.textContent.replace(/\s+/g, " ").trim(), tid);
+      const before = [await sd("early-dev"), await sd("early-watch")];
+      r.expect(before.every((t) => t === "background · running 8m 18s"), size + ": both calls run before the update: " + JSON.stringify(before));
+      ended = true; bump = "bgtail-" + size;
+      await page.waitForFunction(() => document.querySelector('.step[data-tid="early-dev"] .sd')?.textContent.replace(/\s+/g, " ").trim() === "background · exit 0 · 9m 0s", null, { timeout: 15000 });
+      await page.waitForTimeout(300);
+      const after = await page.evaluate(() => ({ watch: document.querySelector('.step[data-tid="early-watch"] .sd')?.textContent.replace(/\s+/g, " ").trim(), spins: [...document.querySelectorAll(".step[data-tid] > button > .spin")].length,
+        finished: document.querySelector('.step[data-tid="early-dev"] .finished')?.textContent ?? null,
+        callTurn: document.querySelector('.step[data-tid="early-dev"]')?.closest("section.turn")?.dataset.turn ?? null, endTurn: document.querySelector(".bgend")?.closest("section.turn")?.dataset.turn ?? null, ends: [...document.querySelectorAll(".bgend")].map((n) => ({ text: n.textContent.replace(/\s+/g, " ").trim(), button: !!n.querySelector("button") })) }));
+      r.expect(after.watch === "background · no end recorded" && after.spins === 0, size + ": a call no longer listed as running stops, with no spinner left: " + JSON.stringify(after));
+      r.expect(after.finished === finish.bg.summary && after.ends.length === 1 && after.ends[0].button && normal(after.ends[0].text) === "Background command completed · Dev server", size + ": the finish row arrives and links its call: " + JSON.stringify(after));
+      r.expect(after.callTurn === turns[0] && after.endTurn === later, size + ": the finish row is drawn in the later turn, after the running calls' turn: " + JSON.stringify(after));
+      r.expect(afters.length === 1 && afters[0] === String(rows.length), size + ": the update fetches only the new tail, from the end (after=" + rows.length + "), not from the running call: " + JSON.stringify(afters));
+      r.expect(page.errors.length === 0, size + ": tail page errors: " + page.errors.join(" | "));
+      results[size] = { before, after, afters };
     } finally { await page.context().close(); }
   }
   return results;
@@ -287,6 +402,7 @@ export default async function viewerCheck(browser) {
 
   R.background = await backgroundCommands(browser, r);
   R.backgroundScreenshots = await backgroundScreenshots(browser, r);
+  R.backgroundTail = await backgroundTail(browser, r);
   r.results = R;
   r.expect((R.phoneErrors ?? []).length === 0, "phone page errors: " + (R.phoneErrors ?? []).join(" | "));
   r.expect((R.deskErrors ?? []).length === 0, "desktop page errors: " + (R.deskErrors ?? []).join(" | "));

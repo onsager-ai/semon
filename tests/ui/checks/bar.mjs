@@ -264,7 +264,7 @@ export default async function barCheck(browser) {
       await page.click("#find-btn"); await page.waitForTimeout(100);
       const S = { session: D.SESS[busy].name, word, turnsBefore, searching: await page.evaluate(() => !!document.querySelector("#topbar .find-row") && document.activeElement?.id === "find"), chips: await page.evaluate(() => [...document.querySelectorAll("#topbar .find-chips .chip")].map((c) => c.dataset.filter + ":" + c.getAttribute("aria-pressed"))) };
       await page.keyboard.type(word, { delay: 10 }); await page.waitForTimeout(200);
-      Object.assign(S, await page.evaluate(() => ({ count: document.querySelector(".fcount")?.textContent, hits: document.querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length, turns: document.querySelectorAll(".turns > .turn").length, focus: document.activeElement?.id, barH: document.querySelector("#topbar").offsetHeight })));
+      Object.assign(S, await page.evaluate(() => ({ count: document.querySelector(".fcount")?.textContent, hits: document.querySelectorAll(".turns .msg, .turns .step:not(.bgend), .turns .hcard").length, turns: document.querySelectorAll(".turns > .turn").length, focus: document.activeElement?.id, barH: document.querySelector("#topbar").offsetHeight })));
       S.countMatchesHits = S.count === S.hits + (S.hits === 1 ? " match" : " matches");
       // One choice at a time: Messages hides every step, Steps every message, and All brings both back.
       // A step is a row of its group, and a group is collapsed until opened: both count.
