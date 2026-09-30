@@ -248,6 +248,8 @@ code { overflow-wrap: anywhere; }
 .hop.k-move .node { color: var(--accent); }
 .hop .body { min-width: 0; padding-top: 3px; display: grid; gap: 4px; }
 .hop .sent { font-size: var(--fs-sm); overflow-wrap: anywhere; }
+/* A machine's short name in a move's sentence stays whole: the sentence wraps between words, never inside "build-…-east-2". */
+.mach { white-space: nowrap; }
 .hop .sent .tm { font-family: var(--mono); font-size: var(--fs-cap); color: var(--muted); margin-left: 6px; }
 .hop .brief { font-family: var(--serif); font-size: var(--fs-read); line-height: 1.5; color: var(--ink-2); max-height: 5.8em; overflow: hidden; }
 .hop .more { justify-self: start; min-height: 36px; margin: -8px 0; border: 0; background: none; padding: 0; color: var(--accent); font-size: var(--fs-sm); }

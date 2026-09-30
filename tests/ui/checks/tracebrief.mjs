@@ -10,7 +10,8 @@
 //    the root hop's line names the machine the root ran on;
 //  - with two whose short names would cut alike ("build-runner-east-1" and "-2"), the chips and the subtitle tell them apart, and the
 //    subtitle names each machine once;
-//  - a chip and a move hop's machine names carry the full name as their tooltip, and a move hop says "from <short> to <short>";
+//  - a chip and a move hop's machine names carry the full name as their tooltip, and a move hop says "from <short> to <short>", each
+//    name on one line (the sentence wraps between words, never inside a name);
 //  - each part of a hop's line (its state, its kind chip, its note) is one line tall, and the page does not scroll sideways;
 //  - the chip carries the harness's icon and no harness-coloured swatch of its own.
 // The fixture's hostnames are short, so the served model is rewritten on the way to the page: the machine names are made long, and for
@@ -79,6 +80,12 @@ const page_ = (page) => page.evaluate(() => ({
   chipIcons: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => !!c.querySelector(".hicon")),
   chipTips: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => c.dataset.tip ?? null),
   sent: [...document.querySelectorAll(".hop.k-move .sent")].map((c) => c.textContent.replace(/[\s\u2009\u00a0]+/g, " ").trim()),
+  sentLines: [...document.querySelectorAll(".hop.k-move .sent .mach")].map((n) => {
+    const lh = parseFloat(getComputedStyle(n).lineHeight) || parseFloat(getComputedStyle(n).fontSize) * 1.4, tops = [];
+    const walk = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+    for (let t = walk.nextNode(); t; t = walk.nextNode()) { const r = document.createRange(); r.selectNodeContents(t); for (const q of r.getClientRects()) if (q.width) tops.push(q.top); }
+    return { text: n.textContent, oneLine: tops.length > 0 && Math.max(...tops) - Math.min(...tops) < lh * 0.7 };
+  }),
   sentTips: [...document.querySelectorAll(".hop.k-move .sent .mach")].map((c) => c.dataset.tip ?? null),
   bar: (document.querySelector("#topbar")?.textContent ?? "").replace(/\s+/g, " ").trim(),
   chipMark: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => { const b = getComputedStyle(c, "::before"); return b.content !== "none" && b.content !== "normal" ? b.content : null; }).filter(Boolean),
@@ -153,6 +160,7 @@ export default async function tracebrief(browser) {
           r.expect(p.chipTips.every((t) => t === "Machine: " + mode.hosts[0] || t === "Machine: " + mode.hosts[1]), name + ": a chip's tooltip is not \"Machine: <full name>\": " + JSON.stringify(p.chipTips));
           r.expect(p.chipTips[0] === "Machine: " + mode.hosts[0] && p.chipTips.includes("Machine: " + mode.hosts[1]), name + ": the chips' tooltips do not name both machines in full: " + JSON.stringify(p.chipTips));
           r.expect(p.sent.length === 1 && p.sent[0].includes(" from " + s0 + " to " + s1), name + ": the move hop does not say from <short> to <short>: " + JSON.stringify(p.sent));
+          r.expect(p.sentLines.length === 2 && p.sentLines.every((l) => l.oneLine), name + ": a machine name in the move hop's sentence is split across lines: " + JSON.stringify(p.sentLines));
           r.expect(p.sentTips.join("|") === ["Machine: " + mode.hosts[0], "Machine: " + mode.hosts[1]].join("|"), name + ": the move hop's machine names lack their full-name tooltips: " + JSON.stringify(p.sentTips));
         } else {
           r.expect(p.chips.every((c) => !c.includes(" · ")), name + ": a chip names a machine although the trace spans one: " + JSON.stringify(p.chips));
