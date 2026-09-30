@@ -75,6 +75,9 @@ function measure({ selector, min }) {
   for (const x of document.body.querySelectorAll("*")) if (x.scrollHeight > x.clientHeight + 1 || x.scrollTop > 0) saved.push([x, x.scrollTop]);
   // A bar or a sheet the page scrolls from under: forgiven only when it does not hold the control itself (the drawer, a dialog and
   // a menu inside the sticky top bar hold theirs, so a hit inside them is judged like any other).
+  // A point on the control's own drawn box that lies outside a scroll container's or a clip's visible box is the part of the control that
+  // is scrolled out of it: nobody taps that. A point in its reach that a clip cuts off is not forgiven (the reach is what fails there).
+  const clipped = (e, x, y) => { const own = e.getBoundingClientRect(); if (x < own.left || x >= own.right || y < own.top || y >= own.bottom) return false; for (let n = e.parentElement; n && n !== document.documentElement; n = n.parentElement) { const o = getComputedStyle(n); if (o.overflowX === "visible" && o.overflowY === "visible") continue; const r = n.getBoundingClientRect(); if (x < r.left || x >= r.right || y < r.top || y >= r.bottom) return true; } return false; };
   const chrome = (n, e) => { for (; n && n !== document.documentElement; n = n.parentElement) { const p = getComputedStyle(n).position; if ((p === "fixed" || p === "sticky") && !n.contains(e)) return true; } return false; };
   const misses = [];
   for (const it of items) {
@@ -82,7 +85,7 @@ function measure({ selector, min }) {
     it.e.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
     const b = target(it.e), cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
     for (const [side, x, y] of [["top", cx, b.top + 2], ["bottom", cx, b.bottom - 2], ["left", b.left + 2, cy], ["right", b.right - 2, cy]]) {
-      if (x < 0 || y < 0 || x >= vw || y >= vh) continue;
+      if (x < 0 || y < 0 || x >= vw || y >= vh || clipped(it.e, x, y)) continue;
       const hit = document.elementFromPoint(x, y);
       if (!hit || hit === it.e || it.e.contains(hit)) continue;
       // Another control (one with no control inside it) takes the tap: rows that stack share their edge. So does the label around this one. A card that holds controls does not: tapping it is not tapping this.
