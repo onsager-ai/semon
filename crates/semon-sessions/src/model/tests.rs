@@ -267,6 +267,50 @@ fn turns_of<'a>(built: &'a Built, sid: &str) -> Vec<&'a Turn> {
     built.turns.iter().filter(|turn| turn.sid == sid).collect()
 }
 
+#[test]
+fn sessions_include_the_latest_effort_and_omit_it_when_missing() {
+    let home = Home::new();
+    let mut claude_high = assistant("claude-effort", ts(1, 0), Vec::new());
+    claude_high["effort"] = json!("high");
+    claude_high["perTurnEffort"] = Value::Null;
+    let mut claude_override = assistant("claude-effort", ts(1, 1), Vec::new());
+    claude_override["effort"] = json!("high");
+    claude_override["perTurnEffort"] = json!(" MAX ");
+    home.top("claude-effort", &[claude_high, claude_override]);
+    home.codex(
+        "codex-effort",
+        json!({"cwd":"/work/proj"}),
+        &[codex_line(
+            ts(1, 0),
+            "turn_context",
+            json!({"cwd":"/work/proj","model":"gpt-6-luna","effort":" XHIGH "}),
+        )],
+    );
+    home.top(
+        "claude-no-effort",
+        &[assistant("claude-no-effort", ts(1, 2), Vec::new())],
+    );
+
+    let built = home.build();
+    assert_eq!(
+        built.sessions["claude-effort"].effort.as_deref(),
+        Some("max")
+    );
+    assert_eq!(
+        built.sessions["codex-effort"].effort.as_deref(),
+        Some("xhigh")
+    );
+    assert_eq!(built.sessions["claude-no-effort"].effort, None);
+    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    assert_eq!(model["sessions"]["claude-effort"]["effort"], "max");
+    assert_eq!(model["sessions"]["codex-effort"]["effort"], "xhigh");
+    assert!(
+        model["sessions"]["claude-no-effort"]
+            .get("effort")
+            .is_none()
+    );
+}
+
 /// The Session details summary (`tokens`) and its per-model table (`tokens_by_model`, and the
 /// cost table's token counts) come from the same billed messages, so they add up to one total:
 /// in = input + cache write, cached = cache read, out = output.

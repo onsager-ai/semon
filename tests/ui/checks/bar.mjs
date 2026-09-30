@@ -711,5 +711,69 @@ export default async function barCheck(browser) {
     }
   }
 
+  // Reasoning effort is shown beside the model on desktop, stays in Session details on phones, and
+  // does not make the 390px session bar wrap or scroll sideways.
+  {
+    const sessions = Object.values(D.SESS).filter((s) => s.model), withEffort = sessions[0], withoutEffort = sessions.find((s) => s.id !== withEffort?.id);
+    r.expect(!!withEffort && !!withoutEffort, "the fixture must hold two sessions with models for the effort display check");
+    if (withEffort && withoutEffort) {
+      const page = await served(browser, { size: "desktop" });
+      await page.route("**/api/model*", async (route) => {
+        const response = await route.fetch();
+        if (response.status() !== 200 || new URL(route.request().url()).searchParams.has("since")) return route.fulfill({ response });
+        const model = await response.json();
+        for (const session of Object.values(model.sessions ?? {})) delete session.effort;
+        model.sessions[withEffort.id].effort = "max";
+        await route.fulfill({ response, json: model });
+      });
+      await page.reload({ waitUntil: "load" }); await settled(page);
+
+      await goto(page, { v: "session", id: withEffort.id }, D);
+      const effortBar = await page.evaluate(() => ({
+        suffix: document.querySelector("#topbar .meta-model .meta-effort")?.textContent ?? null,
+        tip: document.querySelector("#topbar .meta-model")?.dataset.tip ?? "",
+      }));
+      r.expect(!!effortBar.suffix && /·\s*max/.test(effortBar.suffix), "session bar omitted the · max suffix: " + JSON.stringify(effortBar));
+      r.expect(effortBar.tip.includes("Reasoning effort: max"), "model tooltip omitted the reasoning effort: " + JSON.stringify(effortBar));
+      await page.click("#more-btn");
+      await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
+      await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
+      let detailLabels = await page.locator("dialog.session-details .detail-label").allTextContents();
+      r.expect(detailLabels.includes("Model") && detailLabels.includes("Effort"), "Session details omitted the Effort row: " + JSON.stringify(detailLabels));
+      await page.locator("dialog.session-details .vclose").click();
+
+      await goto(page, { v: "session", id: withoutEffort.id }, D);
+      const plainBar = await page.evaluate(() => ({
+        suffix: document.querySelector("#topbar .meta-model .meta-effort")?.textContent ?? null,
+        tip: document.querySelector("#topbar .meta-model")?.dataset.tip ?? "",
+      }));
+      r.expect(plainBar.suffix === null && !plainBar.tip.includes("Reasoning effort:"), "session without effort gained extra model text: " + JSON.stringify(plainBar));
+      await page.click("#more-btn");
+      await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click();
+      await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
+      detailLabels = await page.locator("dialog.session-details .detail-label").allTextContents();
+      r.expect(!detailLabels.includes("Effort"), "Session details showed an Effort row without a value: " + JSON.stringify(detailLabels));
+      await page.locator("dialog.session-details .vclose").click();
+
+      await goto(page, { v: "session", id: withEffort.id }, D);
+      await page.setViewportSize({ width: 390, height: 844 });
+      const phoneBar = await page.evaluate(() => {
+        const bar = document.querySelector("#topbar"), line = bar.querySelector(".l1"), lead = line.querySelector(".l1-state"), title = line.querySelector(".t"), more = line.querySelector("#more-btn");
+        const rect = (node) => node.getBoundingClientRect();
+        const boxes = [lead, title, more].map(rect);
+        return {
+          width: innerWidth,
+          sideScroll: bar.scrollWidth > bar.clientWidth + 1 || document.documentElement.scrollWidth > innerWidth + 1,
+          wrapped: line.scrollHeight > line.clientHeight + 1 || Math.max(...boxes.map((b) => b.top)) >= Math.min(...boxes.map((b) => b.bottom)),
+          effortHidden: !bar.querySelector(".meta-effort") || getComputedStyle(bar.querySelector(".meta-effort")).display === "none",
+        };
+      });
+      r.expect(phoneBar.width === 390 && !phoneBar.sideScroll && !phoneBar.wrapped, "390px session bar wrapped or overflowed with effort set: " + JSON.stringify(phoneBar));
+      r.expect(phoneBar.effortHidden, "the effort suffix was not hidden at the phone breakpoint: " + JSON.stringify(phoneBar));
+      r.expect(page.errors.length === 0, "reasoning effort display check page errors: " + page.errors.join(" | "));
+      await page.context().close();
+    }
+  }
+
   return r.done();
 }
