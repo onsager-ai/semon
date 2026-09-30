@@ -17,6 +17,7 @@ import checkReal from "./check-real.mjs";
 import extras from "./extras.mjs";
 import attachCheck from "./attach.mjs";
 import shellCheck from "./shell.mjs";
+import embedSidebarCheck from "./embedsidebar.mjs";
 import namesCheck from "./names.mjs";
 import hiconsCheck from "./hicons.mjs";
 import sidebarCheck from "./sidebar.mjs";
@@ -43,6 +44,7 @@ const checks = [
   ["extras", extras],
   ["attach", attachCheck],
   ["shell", shellCheck],
+  ["embedsidebar", embedSidebarCheck],
   ["names", namesCheck],
   ["hicons", hiconsCheck],
   ["sidebar", sidebarCheck],

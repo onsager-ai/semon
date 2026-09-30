@@ -8,7 +8,7 @@ Serve the viewer's base stylesheet at `/viewer.css`, the component stylesheet at
 
 The brand mark is an image too. `.mark` paints `/mark.svg` as a CSS mask in the current text colour (`var(--ink)`), so a page that uses `.mark` must serve `semon_sessions::shell::MARK_SVG` at `/mark.svg` as `image/svg+xml`, or the mark is invisible. Serve `semon_sessions::shell::FAVICON_SVG` at `/favicon.svg` as `image/svg+xml` too and link it from the page's `<head>` with `<link rel="icon" href="/favicon.svg" type="image/svg+xml">`; its fill switches between light and dark with the browser's colour scheme. Serve both from the page's own origin: the content security policy allows same-origin assets only, so a `data:` URI or another host will not load.
 
-The Rust API exposes `semon_sessions::shell::{VIEWER_CSS, CSS, JS, MARK_SVG, FAVICON_SVG, FONT_FILES, font}`, the sidebar's header and navigation as `sidebar_head` and `NAV` (see [Signed-in page skeleton](#signed-in-page-skeleton)), and for the viewer page itself `VIEWER_JS`, `PAGE_HTML` and `is_page_path` (see [Embedding the viewer page](#embedding-the-viewer-page)). An embedding server can serve these bytes directly and use `font(name)` for font requests.
+The Rust API exposes `semon_sessions::shell::{VIEWER_CSS, CSS, JS, MARK_SVG, FAVICON_SVG, FONT_FILES, font}`, the sidebar's header and navigation as `sidebar_head` and `NAV` (see [Signed-in page skeleton](#signed-in-page-skeleton)), the viewer's own sidebar with its session list as `session_sidebar` and `SIDEBAR_ONLY` (see [The viewer's sidebar on an embedding page](#the-viewers-sidebar-on-an-embedding-page)), and for the viewer page itself `VIEWER_JS`, `PAGE_HTML` and `is_page_path` (see [Embedding the viewer page](#embedding-the-viewer-page)). An embedding server can serve these bytes directly and use `font(name)` for font requests.
 
 ## Embedding the viewer page
 
@@ -42,6 +42,44 @@ All three are on `window`.
 ### Account menu
 
 `window.semonEmbed.account` gives the account menu when the server's model carries none (a valid `account` in `/api/model` wins). It has the same shape and rules as that `account` field (see `docs/design/session-viewer.md`), and one invalid field or path rejects the whole menu, with a console warning. The viewer reads it each time it takes a new model (at load and on every changed update), keeps a validated copy, and renders it as text only; a getter that throws counts as no menu.
+
+## The viewer's sidebar on an embedding page
+
+A page of the embedding server's own, served beside the viewer on the same origin, can show the viewer's sidebar: the search field, the navigation with its badges (Home's count of what needs you, Machines' offline count), and the Recent list of sessions with its tree and state dots, drawn by the viewer's own script from `/api/model` and kept live as on the viewer's pages. Everything outside the sidebar stays the page's. A tap on a session opens its page in the viewer; the navigation's rows open the viewer's pages, and Enter in the search opens the viewer's Sessions page searching for the same text (`/sessions?q=`).
+
+- Draw the sidebar with `semon_sessions::shell::session_sidebar(name, nav)` inside `<aside class="sidebar" id="sidebar">`: the header `sidebar_head` draws, the viewer's search field, `<nav id="nav" aria-label="Pages">` holding `nav`, and the Recent heading with its list, as `viewer.html` has them (a test holds them together). `name` is escaped; `nav` is the page's own rows, drawn with `NavLink::html`, which stay if the script can't load and are replaced by the viewer's navigation when it does. Anything of the page's own, such as an account row, goes after it in the `<aside>`.
+- Mark the `.app` with `semon_sessions::shell::SIDEBAR_ONLY` (`data-viewer="sidebar"`), and name the current row with `data-viewer-nav`: `home`, `sessions` or `machines` (a page that is none of them leaves it out, and no row is current).
+- Load `/viewer.js` as a deferred script after `/shell.js`. Both scripts carry the tooltip and the Select, which run once however many pages load them. The embedding server serves `/viewer.js` and `/api/model` as it does for the viewer's own pages, behind the same access checks, so the list shows exactly what the viewer's pages would show that reader.
+- The rest of the page is free: it needs no `#main`, `#page` or `#topbar`. With the [signed-in skeleton](#signed-in-page-skeleton)'s top bar and menu button, `shell.js` opens and closes the drawer on a phone, and fires `semon:drawer-open` on `window` as it opens.
+
+This is the whole of a page that shows the sidebar beside its own content (`tests/ui/checks/embedsidebar.mjs` serves it, with the comment replaced by `session_sidebar`'s markup):
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Devices</title>
+<link rel="stylesheet" href="/viewer.css">
+<link rel="stylesheet" href="/shell.css">
+<script src="/shell.js" defer></script>
+<script src="/viewer.js" defer></script>
+</head>
+<body>
+<div class="app" data-viewer="sidebar" data-viewer-nav="machines">
+<aside class="sidebar" id="sidebar" aria-label="Navigation">
+<!-- session_sidebar("Semon", nav) -->
+<div class="account"><span class="account-login">sample.user@example.invalid</span></div>
+</aside>
+<div class="scrim" id="scrim"></div>
+<main class="main"><p class="own">The page's own content.</p></main>
+</div>
+</body>
+</html>
+```
+
+The viewer's script changes nothing outside the sidebar's own parts (its header, search, navigation and Recent list): it does not route, touch the address or the history, bind keys, add anything to the body, draw an account menu (the page has its own) or apply the viewer's wide-page or collapsed-rail settings (the sidebar stays whole, with no collapse toggle). The phone's "All N" sheet opens over the page as a dialog and leaves the history alone. When `/api/model` can't be loaded, the Recent list says so and the page's own navigation rows stay; when a poll is refused (403), polling stops and a note under the list says the sessions stopped updating (after `semon:ended`, which the page can cancel to show its own). `tests/ui/shell-sidebar.html` is a fuller example with a top bar, and `tests/ui/checks/embedsidebar.mjs` holds both pages' sidebars to the viewer's.
 
 ## Signed-in page skeleton
 
