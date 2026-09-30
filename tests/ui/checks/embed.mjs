@@ -233,7 +233,7 @@ export default async function embedCheck(browser) {
   };
   for (const dark of [false, true]) {
     const tag = "1280" + (dark ? "-dark" : "");
-    const page = await open(browser, { embed: { account: account() }, size: "desktop", dark });
+    const page = await open(browser, { embed: { account: account() }, size: "desktop", dark, at: "/s/claude/harbor" });
     const start = await page.evaluate(() => localStorage.getItem("semon.wide") === "1");
     await openMenu(page);
     const control = page.locator('#topbar .account-popover [role="menuitemcheckbox"][data-pref="wide"]');
