@@ -694,7 +694,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .sidebar-head .brandrow { flex: none; }
   .rail-toggle { display: none; }
   /* The bottom padding is the jump button's offset, height and a 16px gap, so the last content scrolls clear of it. */
-  .page { padding: 2px 16px calc(72px + env(safe-area-inset-bottom, 0px)); gap: 16px; }
+  .page { padding: 2px 16px calc(76px + env(safe-area-inset-bottom, 0px)); gap: 16px; }
   .msg.user { max-width: 88%; }
   .step > button, .step.live { min-height: 36px; }
   .menu, .filters.pop { right: 10px; }
@@ -712,11 +712,16 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .srow { min-height: 44px; }
   .jump-bottom { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 }
-/* Tap targets (#54): every control is at least 44×44 CSS px on a phone or under a coarse pointer. A text-link button that
-   sat in a tighter layout keeps that layout: the height it gains is taken back with a negative margin, so only its hit
-   area grows. tests/ui/checks/taps.mjs measures every interactive element on the phone screens. */
-@media (max-width: 760px), (pointer: coarse) {
+/* Tap targets (#54): every control is at least 44×44 CSS px on a phone. A text-link button that sat in a tighter layout keeps that
+   layout: the height it gains is taken back with a negative margin or a ::before reach, so only its hit area grows. A control that
+   overlaps a neighbour paints above it (position: relative; z-index: 1), or the neighbour's box would take the bottom of its
+   target. Rows that stack (the steps of a turn) share their edge and keep their pitch. A wider screen keeps its own sizes: a
+   tablet or a laptop with a touch screen has room the controls were drawn for. tests/ui/checks/taps.mjs measures every
+   interactive element on the phone screens, and hit-tests the midpoint of each edge of its target. */
+@media (max-width: 760px) {
   .jump-bottom { min-width: 44px; height: 44px; border-radius: 22px; }
+  /* 16px offset + the 44px button + 12px */
+  .jump-bottom:not([hidden]) ~ .livenote { bottom: calc(72px + env(safe-area-inset-bottom, 0px)); }
   .nav-item { min-height: 44px; }
   .brandrow .ibtn { width: 44px; height: 44px; }
   .page .groupby button { min-height: 44px; }
@@ -730,14 +735,18 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .turn-h { min-height: 44px; margin-bottom: -12px; }
   .turn-h .from { min-height: 44px; min-width: 44px; }
   .hop .open { min-height: 44px; min-width: 44px; margin: -4px 0; }
-  .hop .more { min-height: 44px; min-width: 44px; margin: -12px 0; }
-  .hcard:not(.child-card) .more { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 0; margin: -12px 0 -10px; }
+  .hop .more { position: relative; z-index: 1; min-height: 44px; min-width: 44px; margin: -12px 0; }
+  .hcard:not(.child-card) .more { position: relative; z-index: 1; display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 0; margin: -12px 0 -10px; }
   .list .more { display: flex; align-items: center; min-height: 44px; padding: 0; }
-  .step > button, .tsum { min-height: 44px; }
+  /* A step's row is 36px: its target reaches 44px past its box, whatever its height (a % here is the row's own height). */
+  .step > button, .tsum { position: relative; }
+  .step > button::before, .tsum::before { content: ""; position: absolute; inset: min(0px, calc((100% - 44px) / 2)) 0; }
   .viewscript { min-height: 44px; min-width: 44px; }
   .step .out .step-actions { min-height: 45px; padding-block: 0; }
   .step .out .step-actions > button { min-height: 44px; min-width: 44px; }
   .child-actions button, .child-intro .intro-title button, .child-return button, .child-work .cw-toggle, .child-work .show-all, .child-intro .more, .hcard.child-card .more, .child-intro .intro-open { min-width: 44px; min-height: 44px; }
+  /* The list-order chips are 24 or 28px: their reach makes up the rest, sideways too when the chip is down to its count. */
+  .order-chip::before, .side-h .order-chip::before { inset: min(0px, calc((100% - 44px) / 2)); }
 }
 @media (max-width: 760px) {
   .side-search, .find { height: 44px; min-height: 44px; }
