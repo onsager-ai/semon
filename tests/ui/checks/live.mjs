@@ -257,12 +257,17 @@ async function scheme(browser, name, opts, r, protocol) {
     r.expect(inner0.keys.length >= 1, name + ": no step open inside child work to close it over");
     await sleep(200); const top1 = await S.evaluate(() => window.__sc().scrollTop);
     t0 = Date.now();
+    const clipCommand = ["sleep 90 && echo line 01", ...Array.from({ length: 13 }, (_, i) => "echo line " + String(i + 2).padStart(2, "0"))].join("\n");
     harbor.append(harbor.tool(at(12, 42), "toolu-live1", "Bash", { command: "sleep 30 && echo live", description: "Wait" }),
-      harbor.tool(at(12, 42, 30), "toolu-live1b", "Bash", { command: "sleep 31 && echo live two", description: "Wait" }));
+      harbor.tool(at(12, 42, 30), "toolu-live1b", "Bash", { command: "sleep 31 && echo live two", description: "Wait" }),
+      harbor.tool(at(12, 42, 31), "toolu-liveclip", "Bash", { command: clipCommand, description: "Wait" }));
     R.call = await appear(S, t0, () => [...document.querySelectorAll(".step.live .sa")].some((x) => x.textContent.includes("sleep 30")));
     r.expect(R.call != null, name + ": the new call didn't appear within 4 s");
     R.call2 = await appear(S, t0, () => [...document.querySelectorAll(".step.live .sa")].some((x) => x.textContent.includes("sleep 31")));
     r.expect(R.call2 != null, name + ": the second parallel call didn't appear within 4 s");
+    R.clipCall = await appear(S, t0, () => [...document.querySelectorAll(".step.live .sa")].some((x) => x.textContent.includes("sleep 90 && echo line 01")));
+    r.expect(R.clipCall != null, name + ": the long live call didn't appear within 4 s");
+    const liveClip = await S.evaluate(() => [...document.querySelectorAll(".step.live")].find((x) => x.querySelector(".sa")?.textContent.includes("sleep 90 && echo line 01"))?.dataset.e ?? null);
     const liveKeys = await S.evaluate(() => [...document.querySelectorAll(".step.live")].filter((x) => x.querySelector(".sa")?.textContent.includes("sleep 30") || x.querySelector(".sa")?.textContent.includes("sleep 31")).map((x) => ({ key: x.dataset.e, command: x.querySelector(".sa")?.textContent, since: Number(x.dataset.since) })));
     const live1 = liveKeys.find((x) => x.command.includes("sleep 30"))?.key ?? null, live2 = liveKeys.find((x) => x.command.includes("sleep 31"))?.key ?? null;
     R.parallelStarts = [liveKeys.find((x) => x.key === live1)?.since, liveKeys.find((x) => x.key === live2)?.since];
@@ -273,17 +278,47 @@ async function scheme(browser, name, opts, r, protocol) {
     if (phone) await S.setViewportSize({ width: 390, height: 844 });
     R.liveStep = await S.evaluate((k) => { const step = [...document.querySelectorAll(".step.live")].find((x) => x.dataset.e === k), group = step?.closest(".tgroup"), summary = group?.querySelector(":scope > .tsum");
       if (summary?.getAttribute("aria-expanded") === "false") summary.click();
-      return step ? { expanded: step.querySelector(":scope > button")?.getAttribute("aria-expanded") } : null; }, live1);
+      return step ? { expanded: step.querySelector(":scope > button")?.getAttribute("aria-expanded"), summary: summary?.querySelector(":scope > .tl")?.textContent ?? null } : null; }, live1);
     r.expect(R.liveStep?.expanded === "false", name + ": the live step's disclosure button is missing or not initially closed: " + JSON.stringify(R.liveStep));
+    r.expect(R.liveStep?.summary?.includes("running"), name + ": the run summary didn't say running: " + JSON.stringify(R.liveStep));
+    await S.locator(byKey(live1)).scrollIntoViewIfNeeded();
+    const liveShot = (file) => S.screenshot({ path: path.join(ENV.out, file) });
+    const shotSize = phone ? "390" : "1280", shotColor = opts.dark ? "dark" : "light";
+    await liveShot("livestep-" + shotSize + "-" + shotColor + ".png");
+    if (!phone) {
+      await S.emulateMedia({ colorScheme: "dark" }); await S.waitForTimeout(120);
+      await liveShot("livestep-1280-dark.png");
+      await S.emulateMedia({ colorScheme: "light" }); await S.waitForTimeout(120);
+    }
     await S.locator(byKey(live1) + " > button").click();
     R.livePanel = await S.evaluate((k) => { const step = [...document.querySelectorAll(".step.live")].find((x) => x.dataset.e === k), button = step?.querySelector(":scope > button"), out = step?.querySelector(":scope > .out");
       return step ? { expanded: button?.getAttribute("aria-expanded"), hidden: out?.hidden, command: out?.querySelector(".in")?.textContent,
         noout: out?.querySelector(".noout")?.textContent, viewAllHidden: out?.querySelector(".viewall")?.hidden, viewScript: !!out?.querySelector(".viewscript") } : null; }, live1);
-    r.expect(R.livePanel?.expanded === "true" && R.livePanel.hidden === false && R.livePanel.command === "sleep 30 && echo live" && R.livePanel.noout === "Running · no output yet", name + ": opening the live step didn't show its command and running note: " + JSON.stringify(R.livePanel));
+    r.expect(R.livePanel?.expanded === "true" && R.livePanel.hidden === false && R.livePanel.command === "sleep 30 && echo live" && /^Running\s+·\s+no output yet$/.test(R.livePanel?.noout ?? ""), name + ": opening the live step didn't show its command and running note: " + JSON.stringify(R.livePanel));
     r.expect(R.livePanel?.viewAllHidden === true, name + ": View all is missing or visible for an uncut input: " + JSON.stringify(R.livePanel));
     r.expect(!R.livePanel?.viewScript, name + ": View script appeared for a live step: " + JSON.stringify(R.livePanel));
+    await S.locator(byKey(live1) + " > .out").scrollIntoViewIfNeeded();
+    if (phone && !opts.dark) await liveShot("livestep-open-390-light.png");
+    if (!phone) {
+      await S.emulateMedia({ colorScheme: "dark" }); await S.waitForTimeout(120);
+      await liveShot("livestep-open-1280-dark.png");
+      await S.emulateMedia({ colorScheme: "light" }); await S.waitForTimeout(120);
+    }
     if (phone) { R.liveOverflow = await overflow(S); r.expect(R.liveOverflow === 0, name + ": expanded live step overflows at 390 px: " + R.liveOverflow); }
     await S.evaluate(() => { const sc = window.__sc(); sc.scrollTop = sc.scrollHeight; });
+    if (liveClip) {
+      R.clipInput = await S.evaluate((k) => { const step = [...document.querySelectorAll(".step.live")].find((x) => x.dataset.e === k), input = step?.querySelector(":scope > .out .in.clip"), command = input?.textContent ?? "";
+        return step ? { length: command.length, lines: command.split("\n").length } : null; }, liveClip);
+      r.expect(R.clipInput?.lines === 14 && R.clipInput.length < 1536, name + ": the live Bash input wasn't 14 short lines under 1536 chars: " + JSON.stringify(R.clipInput));
+      await S.locator(byKey(liveClip) + " > button").click();
+      R.clipPanel = await S.evaluate((k) => { const step = [...document.querySelectorAll(".step.live")].find((x) => x.dataset.e === k), button = step?.querySelector(":scope > button"), out = step?.querySelector(":scope > .out"), input = out?.querySelector(".in.clip");
+        return step ? { expanded: button?.getAttribute("aria-expanded"), clipped: input?.classList.contains("clipped"), viewAllHidden: out?.querySelector(".viewall")?.hidden } : null; }, liveClip);
+      r.expect(R.clipPanel?.expanded === "true" && R.clipPanel.clipped && R.clipPanel.viewAllHidden === false, name + ": expanding the live Bash input didn't clip it and show View all: " + JSON.stringify(R.clipPanel));
+      await S.locator(byKey(liveClip) + " > button").click();
+      t0 = Date.now(); harbor.append(harbor.result(at(12, 42, 36), "toolu-liveclip", "clip check complete"));
+      R.clipDone = await appear(S, t0, (k) => { const n = document.querySelector('.step[data-e="' + k + '"]'); return !!n && !n.classList.contains("live"); }, liveClip);
+      r.expect(R.clipDone != null, name + ": the clipping check's live call didn't finish within 4 s");
+    } else r.expect(false, name + ": the clipping check's live call has no entry key");
     R.innerKept = await S.evaluate(({ cw, keys }) => { const w = document.querySelector('.child-work[data-e="' + cw + '"]'), t = w.querySelector(":scope > .cw-toggle"), closed = t.getAttribute("aria-expanded") === "false"; t.click();
       return { closed, open: keys.filter((k) => w.querySelector('.step[data-e="' + k + '"] > button')?.getAttribute("aria-expanded") === "true").length, of: keys.length }; }, inner0);
     r.expect(R.innerKept.closed && R.innerKept.open === R.innerKept.of, name + ": steps open inside closed child work didn't survive the redraw: " + JSON.stringify(R.innerKept));
