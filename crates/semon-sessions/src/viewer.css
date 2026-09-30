@@ -87,6 +87,8 @@ button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 svg { display: block; }
+/* The viewer places the reader itself (the open-at-end pin, and capture and restore around every redraw). The browser's own scroll anchoring adds a second, unpredictable placement on top: with reading text in the sans, a line cut by the top edge made Chrome move a reader at the end of a long transcript down 4px when 1200px was appended below them (tests/ui/checks/perf.mjs, "open-at-end pin (after)"), with no element moving. */
+html, #main { overflow-anchor: none; }
 code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); font-variant-numeric: tabular-nums; }
 code { overflow-wrap: anywhere; }
 
