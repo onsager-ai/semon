@@ -763,9 +763,10 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .child-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: var(--fs-cap); }
 .child-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
 .child-actions button { min-height: 36px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: var(--fs-sm); text-align: left; }
-.child-work { display: grid; grid-template-columns: minmax(0, 1fr); margin: 0; }
+.child-work { display: contents; }
 .child-work .cw-toggle { min-height: 36px; }
-.child-work .cw-body { margin: 2px 0 2px 2px; padding-left: 12px; border-left: 1px solid var(--line); }
+.child-work .cw-count { color: var(--muted); }
+.child-work .cw-body { flex: 1 1 100%; min-width: 0; margin: 2px 0 2px 2px; padding-left: 12px; border-left: 1px solid var(--line); }
 .child-work .show-all { justify-self: start; min-height: 36px; border: 0; background: none; padding: 4px 0; color: var(--accent); font-size: var(--fs-sm); }
 .child-intro, .child-return { min-width: 0; padding: 8px 0; }
 .child-return { border-top: 1px solid var(--line); }

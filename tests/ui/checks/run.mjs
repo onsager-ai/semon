@@ -27,6 +27,7 @@ import tooltipCheck from "./tooltip.mjs";
 import detailsCheck from "./details.mjs";
 import selectCheck from "./select.mjs";
 import filtersCheck from "./filters.mjs";
+import childcardCheck from "./childcard.mjs";
 
 const checks = [
   ["home", homeCheck],
@@ -50,6 +51,7 @@ const checks = [
   ["details", detailsCheck],
   ["select", selectCheck],
   ["filters", filtersCheck],
+  ["childcard", childcardCheck],
 ];
 
 const browser = await launch();
