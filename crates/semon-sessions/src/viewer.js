@@ -519,7 +519,7 @@
   }
   // An embedding page's sidebar has no rail and no toggle for it (shell::session_sidebar): the toggle is then a detached button.
   const railToggle = $("#rail-toggle") ?? el("button"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
-  let route = { v: "home" }; let groupBy = "recent"; let query = ""; let focusSessionsSearchOnRender = false; let analyticsRange = 7, analyticsMeasure = "hours";
+  let route = { v: "home" }; let groupBy = "recent"; let query = ""; let focusSessionsSearchOnRender = null; let analyticsRange = 7, analyticsMeasure = "hours";
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
   let pendingSessionOpen = null, pendingFlashHandoff = null;
   let accountOpen = false;
@@ -591,6 +591,7 @@
   // A deep link to a turn the loaded transcript doesn't hold yet.
   const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
   function go(r, fromHistory) {
+    if (r.v !== "sessions" || r !== focusSessionsSearchOnRender) focusSessionsSearchOnRender = null;
     if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
     stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
@@ -848,7 +849,9 @@
   }
   const sideRegion = () => $("#side-list") ?? $("#sidebar");
   const ordLive = el("div", "sr-only"); ordLive.id = "order-status"; ordLive.setAttribute("role", "status"); ordLive.setAttribute("aria-live", "polite");
-  { const slot = el("div", "order-slot"); slot.append(makeOrderButton("side", "order-pill")); sideRegion()?.prepend(slot);
+  { const content = el("div", "side-content"), slot = el("div", "order-slot"); slot.append(makeOrderButton("side", "order-pill"));
+    // Bound the sticky slot to the full list content, so it stays pinned through the entire scroll range.
+    content.append(slot, $("#lanes")); sideRegion().prepend(content);
     const pagePill = makeOrderButton("page", "order-pill"); if (SIDEBAR_ONLY) sideRegion().append(ordLive); else { $("#page").before(pagePill); document.body.append(ordLive); }
     makeOrderButton("side", "order-chip"); makeOrderButton("page", "order-chip"); } // the page's pill sits just before the page, so the tab order reaches it first
   function placeOrderPill() {
@@ -2131,13 +2134,14 @@
     return put;
   }
   function render() {
+    const focusSearch = focusSessionsSearchOnRender === route; focusSessionsSearchOnRender = null;
     if (SIDEBAR_ONLY) { CHILDREN = null; tick(); rendered = route; renderNav(); renderLanes(); return; } // the embedding page draws its own page and bar
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
     closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
     ordPageState = ordState("page"); tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; clearBox(page, r); page.classList.remove("child-page");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
-    else if (r.v === "sessions") { renderSessions(page); renderTopbar("Sessions"); }
+    else if (r.v === "sessions") { renderSessions(page, focusSearch); renderTopbar("Sessions"); }
     else if (r.v === "machines") { renderMachines(page); renderTopbar("Machines"); }
     else if (r.v === "machine") { renderMachine(page, r.id); renderTopbar(MACHINE[r.id], { label: "Machines", go: () => go({ v: "machines" }) }, { line2: machineLine(r.id) }); }
     else if (r.v === "trace") { const sum = renderTrace(page, r.turn) ?? ""; renderTopbar("Trace", { label: SESS[r.sid].name, go: () => goSession(r.sid, r.turn) }, { line2: (l2) => l2.append(el("span", "rest", sum)) }); }
@@ -2429,7 +2433,7 @@
     const kids = Object.values(SESS).filter((x) => x.id !== sid && laneOf(x.id) === sid), sub = kids.filter((x) => x.kind === "Subagent").length, cdx = kids.filter((x) => x.kind === "Codex run").length, other = kids.length - sub - cdx;
     return [sub ? sub + (sub === 1 ? " subagent" : " subagents") : null, cdx ? cdx + (cdx === 1 ? " Codex run" : " Codex runs") : null, other ? other + (other === 1 ? " other run" : " other runs") : null].filter(Boolean).join(" · ");
   }
-  function renderSessions(page) {
+  function renderSessions(page, focusSearch = false) {
     const all = Object.values(SESS).filter(matchesSessionFacets);
     const head = el("div", "ph"); const h1 = el("h1", null, "Sessions"); head.append(h1);
     const sub = el("div", "sub"); for (const [v, l] of [[all.length, all.length === 1 ? "session" : "sessions"], [all.filter((s) => s.state === "work").length, "working"], [all.filter((s) => s.state === "wait").length, "waiting on you"]]) { const x = el("span"); x.append(el("b", null, String(v)), l); sub.append(x); }
@@ -2464,7 +2468,7 @@
     };
     found.ctx.draw = grouped.ctx.draw = draw;
     put(renderFacetFilters(page, () => render()), fr, gb, out); put.done(); draw();
-    if (focusSessionsSearchOnRender) { focusSessionsSearchOnRender = false; fi.focus({ preventScroll: true }); }
+    if (focusSearch) fi.focus({ preventScroll: true });
   }
 
   // ---- Drawer (phone) ---------------------------------------------------------------------------------------------------------
@@ -2478,16 +2482,16 @@
     if (e.key === "Escape" && accountSheet) closeAccountMenu();
     else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); closeFilter(); }
     const target = document.activeElement;
-    if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey &&
+    if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey && !viewerEl && !accountOpen &&
+        !document.querySelector("dialog[open], .menu, .lineage-menu, .runs-popover") &&
         !/^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName ?? "") && !target?.isContentEditable) {
       e.preventDefault();
-      if (route.v === "sessions") {
-        const search = $("#sq");
-        if (search) search.focus({ preventScroll: true });
-        else focusSessionsSearchOnRender = true;
+      const search = route.v === "sessions" ? $("#sq") : null;
+      if (search) {
+        focusSessionsSearchOnRender = null; search.focus({ preventScroll: true });
       } else {
-        focusSessionsSearchOnRender = true;
-        go({ v: "sessions" });
+        const sessions = { v: "sessions" }; focusSessionsSearchOnRender = sessions;
+        go(sessions);
       }
     }
   });

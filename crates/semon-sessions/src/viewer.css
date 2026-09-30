@@ -573,7 +573,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
   to { box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--err) 55%, transparent), 0 0 0 14px transparent; }
 }
 @media (prefers-reduced-motion: reduce) { .step.err-ring > button { animation: none; } }
-/* ---- Sessions page and the sidebar's short list ---- */
+/* ---- Sessions page ---- */
 .page .groupby { margin: 0; gap: 6px; font-size: var(--fs-ui); }
 .page .groupby button { min-height: 36px; padding: 0 12px; border-radius: 9px; }
 .nrow .kids { grid-column: 2 / 4; font-size: var(--fs-sm); color: var(--muted); }
@@ -914,7 +914,8 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 .jump-bottom .new-count, .order-pill .new-count { font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; }
 @media (hover: hover) { .jump-bottom:hover, .order-pill:hover { background: var(--sunken); } }
 /* The list-order pill ("3 updated ↑") is the transcript's pill (the rules above) at the top of a list: in the sidebar it hangs from a
-   zero-height sticky slot above the rows, on a page it is fixed under the top bar, so showing it moves no row. */
+   zero-height sticky slot above the rows, bounded by their full content wrapper rather than the scroller's viewport height.
+   On a page it is fixed under the top bar, so showing it moves no row. */
 .order-pill { bottom: auto; top: var(--order-top, 64px); }
 .order-slot { position: sticky; top: 0; height: 0; z-index: 6; } /* above a stuck parent row (z-index 3), which comes later in the tree */
 .order-slot .order-pill { position: absolute; left: 50%; top: 8px; }

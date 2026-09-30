@@ -209,10 +209,10 @@ export default async function embedSidebarCheck(browser) {
       K.homeSlash = { ...homeSlash, focused };
       r.expect(wentToSessions && focused && homeSlash.path === "/sessions", P + ": \"/\" did not open Sessions with its search focused: " + JSON.stringify(K.homeSlash));
 
-      const beforeRows = await viewer.locator("#page .nrow").count(), query = (await viewer.locator("#page .nrow .nm").first().innerText()).trim();
+      const beforeRows = await viewer.locator("#page .nrow").count(), query = (await viewer.locator("#page .nrow .nm").first().textContent()).trim();
       const sideBefore = (await lanes(viewer)).map((x) => x.id);
       await viewer.fill("#sq", query);
-      const afterRows = await viewer.locator("#page .nrow").count(), visibleNames = (await viewer.locator("#page .nrow .nm").allInnerTexts()).map((x) => x.trim());
+      const afterRows = await viewer.locator("#page .nrow").count(), visibleNames = (await viewer.locator("#page .nrow .nm").allTextContents()).map((x) => x.trim());
       const sideAfter = (await lanes(viewer)).map((x) => x.id);
       K.sessionsSearch = { beforeRows, query, afterRows, visibleNames, sidebarUnchanged: JSON.stringify(sideBefore) === JSON.stringify(sideAfter) };
       r.expect(beforeRows > 1 && afterRows > 0 && afterRows < beforeRows && visibleNames.includes(query), P + ": the Sessions search did not filter its rows: " + JSON.stringify(K.sessionsSearch));
@@ -227,6 +227,23 @@ export default async function embedSidebarCheck(browser) {
       const sessionsSlash = await prefilled.evaluate(() => ({ path: location.pathname + location.search, focus: document.activeElement?.id ?? null }));
       K.sessionsSlash = sessionsSlash;
       r.expect(sessionsSlash.path === "/sessions?q=" + encodeURIComponent(query) && sessionsSlash.focus === "sq", P + ": \"/\" on Sessions changed the route or failed to focus its search: " + JSON.stringify(sessionsSlash));
+
+      // A modal owns focus: "/" must leave the filter sheet and its route alone.
+      await prefilled.click(".facet-btn");
+      await prefilled.waitForSelector("dialog.filters-sheet[open]");
+      await prefilled.focus("dialog.filters-sheet .vclose");
+      const modalBefore = await prefilled.evaluate(() => ({ path: location.pathname + location.search, route: history.state, focus: document.activeElement?.className }));
+      await prefilled.keyboard.press("/");
+      const modalAfter = await prefilled.evaluate(() => ({ path: location.pathname + location.search, route: history.state, focus: document.activeElement?.className, open: !!document.querySelector("dialog.filters-sheet[open]") }));
+      K.modalSlash = modalAfter;
+      r.expect(modalAfter.open && modalAfter.path === modalBefore.path && JSON.stringify(modalAfter.route) === JSON.stringify(modalBefore.route) && modalAfter.focus === modalBefore.focus, P + ": \"/\" changed the route or focus behind the filter sheet: " + JSON.stringify(modalAfter));
+      await prefilled.click("dialog.filters-sheet .vclose");
+      await prefilled.waitForFunction(() => !history.state?.sheet);
+
+      // Grouping redraws Sessions; it must preserve focus on the chosen control after the shortcut.
+      await prefilled.click('.groupby button[data-g="project"]');
+      const redrawFocus = await prefilled.evaluate(() => document.activeElement?.dataset.g ?? null);
+      r.expect(redrawFocus === "project", P + ": a later Sessions redraw stole focus into search: " + redrawFocus);
       r.expect(prefilled.errors.length === 0, P + ": errors on the prefilled Sessions page: " + JSON.stringify(prefilled.errors));
       await prefilled.context().close();
 

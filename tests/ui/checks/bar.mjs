@@ -255,7 +255,18 @@ export default async function barCheck(browser) {
       Object.assign(inert, { items: badges.length, clicked: badges.filter((b) => b.shown).length, titled: badges.every((b) => b.titled), overlaid: badges.filter((b) => b.shown && !b.underPointer).length });
       out.inertBadges = inert;
       // Details are reached from the ⋯ menu (PR B of the top-bar work redesigns them).
-      await page.click("#more-btn"); await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click(); await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
+      await page.click("#more-btn");
+      const menuBefore = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.id }));
+      await page.keyboard.press("/");
+      const menuAfter = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.id, open: !!document.querySelector(".session-menu") }));
+      out.menuSlash = menuAfter;
+      r.expect(menuAfter.open && JSON.stringify(menuAfter.route) === JSON.stringify(menuBefore.route) && menuAfter.path === menuBefore.path && menuAfter.focus === menuBefore.focus, mode + ": / navigated or moved focus while the session menu was open: " + JSON.stringify(menuAfter));
+      await page.locator(".session-menu [role=menuitem]").filter({ hasText: "Session details" }).click(); await page.waitForFunction(() => document.querySelector("dialog.session-details")?.open === true);
+      const dialogBefore = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.className }));
+      await page.keyboard.press("/");
+      const dialogAfter = await page.evaluate(() => ({ route: history.state, path: location.pathname, focus: document.activeElement?.className, open: !!document.querySelector("dialog.session-details[open]") }));
+      out.dialogSlash = dialogAfter;
+      r.expect(dialogAfter.open && JSON.stringify(dialogAfter.route) === JSON.stringify(dialogBefore.route) && dialogAfter.path === dialogBefore.path && dialogAfter.focus === dialogBefore.focus, mode + ": / navigated or moved focus behind Session details: " + JSON.stringify(dialogAfter));
       out.details = await page.evaluate((phone) => {
         const d = document.querySelector("dialog.session-details"), r = d.getBoundingClientRect(), labels = [...d.querySelectorAll(".detail-label")].map((x) => x.textContent), cost = d.querySelector(".cost-row");
         const normalize = (text) => text.replace(/\s+/g, " ").trim();
@@ -303,7 +314,7 @@ export default async function barCheck(browser) {
       // A relay header's sender link opens the sender's turn.
       const relaySid = sids.find((s) => D.TX[s]?.some((e) => e.k === "h" && D.H.find((h) => h.id === e.id && h.to === s && h.kind === "relay")));
       if (relaySid) { await goto(page, { v: "session", id: relaySid }, D); const has = await page.$(".turn-h .from"); if (has) { await has.click(); await page.waitForTimeout(250); out.relayHeaderLink = await page.evaluate(() => ({ v: history.state?.v, id: history.state?.id?.slice(0, 8), turn: history.state?.turn ?? null })); } }
-      // Sessions page: rows = top-level sessions; each grouping; search; the sidebar's short list.
+      // Sessions page: every session, each grouping and search; the sidebar's capped tree.
       await goto(page, { v: "sessions" }, D);
       const SP = { expected: allSessions.length, expectedRoots: Math.min(8, roots.length), expectedTreeRows, rows: await page.evaluate(() => document.querySelectorAll(".page .nrow").length), nav: await page.evaluate(() => [...document.querySelectorAll(".nav-item")].map((n) => n.textContent + (n.getAttribute("aria-current") ? "*" : ""))) };
       SP.groups = {};
