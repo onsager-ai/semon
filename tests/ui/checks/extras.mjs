@@ -39,6 +39,18 @@ export default async function (browser) {
     let titled;
     let untitled;
     let commandOverride = null;
+    const childRequests = new Set(), childIdle = [];
+    page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname === "/api/tx" && url.searchParams.has("turn")) childRequests.add(request); });
+    const childFinished = (request) => { if (childRequests.delete(request) && !childRequests.size) childIdle.splice(0).forEach((resolve) => resolve()); };
+    page.on("requestfinished", childFinished);
+    page.on("requestfailed", childFinished);
+    const childRequestsSettled = async () => {
+      for (;;) {
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        if (!childRequests.size) return;
+        await new Promise((resolve) => childIdle.push(resolve));
+      }
+    };
     await page.route("**/api/tx**", async (route) => {
       const url = new URL(route.request().url());
       const response = await route.fetch();
@@ -58,6 +70,7 @@ export default async function (browser) {
     });
     await page.reload({ waitUntil: "load" });
     await page.waitForFunction((value) => [...document.querySelectorAll(".step .sa.st")].some((title) => title.textContent === value), titleText);
+    await childRequestsSettled();
     const rows = await page.evaluate(({ titleText, plainArg }) => {
       document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click());
       const titleStep = [...document.querySelectorAll(".step")].find((step) => step.querySelector(".sa.st")?.textContent === titleText);

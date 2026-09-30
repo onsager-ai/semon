@@ -402,7 +402,7 @@
   function fillKids(r, signal) {
     if (r.v !== "session") return;
     const work = kids(r.id, signal);
-    if (work) lenient(work).then(() => { if (route === r && rendered === r) refresh(null); });
+    if (work) lenient(work).then(() => { if (route === r && rendered === r) { stopOpeningEndPin(); refresh(null); } });
   }
   // The last few transcripts opened, kept when the reader leaves them, so opening one again draws it at once. (A transcript
   // still in TX, which only a model update prunes, draws from there just the same.) A transcript is kept only when it was
@@ -437,7 +437,7 @@
   function revalidate(r) {
     const sid = r.id, m = TXM[sid], moved = m && m.to >= m.total && m.tok != null && TOK[sid] != null && m.tok !== TOK[sid];
     const job = moved ? (shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid)) : null, work = job ? job.then(() => kids(sid)) : kids(sid);
-    if (work) work.then(() => { if (route === r && rendered === r) refresh(null); }, () => {});
+    if (work) work.then(() => { if (route === r && rendered === r) { stopOpeningEndPin(); refresh(null); } }, () => {});
   }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
   function pager(sid, where, label) {
