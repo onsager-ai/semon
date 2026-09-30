@@ -127,9 +127,6 @@ fn brand_row(name: &str) -> String {
     )
 }
 
-/// The viewer's collapse toggle, after the brand row in its `.sidebar-head`. The viewer's script draws its icon.
-const RAIL_TOGGLE: &str = "<button class=\"ibtn rail-toggle\" id=\"rail-toggle\" type=\"button\" aria-label=\"Collapse sidebar\" aria-expanded=\"true\"></button>";
-
 /// The sidebar's search field, above the navigation. It narrows the Recent list as the reader types.
 const SIDEBAR_SEARCH: &str = "<label class=\"side-search\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\"><path d=\"M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM20 20l-4-4\"/></svg><input id=\"q\" type=\"search\" placeholder=\"Search\" autocomplete=\"off\"></label>";
 
@@ -137,7 +134,8 @@ const SIDEBAR_SEARCH: &str = "<label class=\"side-search\"><svg viewBox=\"0 0 24
 const SIDEBAR_RECENT: &str = "<div class=\"side-h\">Recent</div>\n<div class=\"side-list\" id=\"side-list\"><div id=\"lanes\" role=\"tree\" aria-label=\"Recent sessions\"></div></div>";
 
 /// The viewer's own sidebar, for a page that shows the viewer's session list beside its own content (docs/shell.md, "The
-/// viewer's sidebar on an embedding page"): the header with the collapse toggle, the search field, `nav` inside
+/// viewer's sidebar on an embedding page"): the header ([`sidebar_head`]: the rail and its collapse toggle are the viewer's own
+/// layout, which an embedding page doesn't take), the search field, `nav` inside
 /// `<nav id="nav">`, then the Recent heading and its list, each as `viewer.html` has it (a test holds them together).
 /// `name` is escaped here; `nav` is markup, the page's own rows (see [`NavLink::html`]), shown until the viewer's script
 /// draws its navigation in their place. The page adds anything of its own (an account row) after this, inside the
@@ -145,9 +143,9 @@ const SIDEBAR_RECENT: &str = "<div class=\"side-h\">Recent</div>\n<div class=\"s
 /// `/shell.js`.
 pub fn session_sidebar(name: &str, nav: &str) -> String {
     format!(
-        "<div class=\"sidebar-head\">{brand}{RAIL_TOGGLE}</div>\n{SIDEBAR_SEARCH}\n\
+        "{head}\n{SIDEBAR_SEARCH}\n\
          <nav id=\"nav\" aria-label=\"Pages\">\n{nav}</nav>\n{SIDEBAR_RECENT}",
-        brand = brand_row(name),
+        head = sidebar_head(name),
     )
 }
 
@@ -283,19 +281,23 @@ mod tests {
 
     #[test]
     fn the_viewer_page_has_the_exported_session_sidebar() {
+        // The viewer's collapse toggle, after the brand row in its header. An embedding page's sidebar has neither the rail
+        // nor the toggle, so the exported header is sidebar_head's; everything after it is the viewer's.
+        const RAIL_TOGGLE: &str = "<button class=\"ibtn rail-toggle\" id=\"rail-toggle\" type=\"button\" aria-label=\"Collapse sidebar\" aria-expanded=\"true\"></button>";
         let page = squeezed(super::PAGE_HTML);
-        let head = format!(
-            "<div class=\"sidebar-head\">{}{}</div>",
-            super::brand_row("Semon"),
-            super::RAIL_TOGGLE
-        );
+        let head = super::sidebar_head("Semon");
         let sidebar = squeezed(&super::session_sidebar("Semon", ""));
-        assert!(sidebar.starts_with(&head));
-        // The viewer's page has the same header, search and Recent list around its (empty) navigation.
-        let (before, after) = sidebar
+        let rest = sidebar
+            .strip_prefix(&head)
+            .expect("the exported sidebar starts with sidebar_head");
+        // The viewer's page has the same search and Recent list around its (empty) navigation, after its header.
+        let (before, after) = rest
             .split_once("<nav id=\"nav\" aria-label=\"Pages\"></nav>")
             .expect("the exported sidebar has its navigation");
-        let viewer = format!("{before}<div id=\"nav\"></div>{after}");
+        let viewer = format!(
+            "<div class=\"sidebar-head\">{}{RAIL_TOGGLE}</div>{before}<div id=\"nav\"></div>{after}",
+            super::brand_row("Semon")
+        );
         assert!(
             page.contains(&viewer),
             "viewer.html's sidebar is not the exported one:\n{viewer}"

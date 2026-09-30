@@ -11,7 +11,10 @@
 //     dot), as the viewer's own page, and only Machines is current;
 //   - nothing outside the sidebar's own parts (header, search, nav, Recent list) changes: the document, serialized without those
 //     parts, equals the page as served (so the body gets no new children and no element outside them a class, attribute or child),
-//     the address is the page's, and no page error is thrown; the same holds after a live poll.
+//     the address is the page's, and no page error is thrown. At 1280 a wide page and a collapsed rail are saved, as a desktop reader
+//     may have them: the page gets neither, and there is no rail toggle;
+//   - a live poll that changes the model (a lower row's session active just now) redraws the list without moving a row (#126 holds
+//     the reorder) and leaves the page as served; at 390 on "full", opening the drawer then re-sorts it, that row first.
 // On "full", light and dark: the search, nav, Recent label and first row sit where the viewer's do (on a phone, in the open drawer),
 // with the same type, and screenshots of both go to out/embedsidebar/. At 390 light: "/" opens no drawer and takes no focus; the
 // phone's "All N" sheet opens and closes (Esc, which leaves the drawer open) without a history entry; the search narrows the list as
@@ -32,10 +35,12 @@ const BARE = DOC.split("## The viewer's sidebar on an embedding page\n")[1].spli
   .replace('<!-- session_sidebar("Semon", nav) -->', SIDEBAR);
 const PAGES = { full: ["/__shell-sidebar.html", FULL], bare: ["/__shell-sidebar-bare.html", BARE] };
 
-async function embedPage(browser, which, { size, dark, wide = false }) {
+// `saved`: the viewer's own layout settings a desktop reader may have saved (the wide page and the collapsed rail), which must not
+// reach the embedding page.
+async function embedPage(browser, which, { size, dark, saved = false }) {
   const [at, html] = PAGES[which];
   const ctx = await context(browser, { size, dark });
-  if (wide) await ctx.addInitScript(() => { try { localStorage.setItem("semon.wide", "1"); } catch {} });
+  if (saved) await ctx.addInitScript(() => { try { localStorage.setItem("semon.wide", "1"); localStorage.setItem("semon.rail", "1"); } catch {} });
   const page = await ctx.newPage();
   page.errors = [];
   page.on("pageerror", (e) => page.errors.push(e.message.split("\n")[0]));
@@ -90,8 +95,39 @@ function differences(a, b, at = "") {
   if (a && b && typeof a === "object" && typeof b === "object") return [...new Set([...Object.keys(a), ...Object.keys(b)])].flatMap((k) => differences(a[k], b[k], at ? at + "." + k : k));
   return a === b ? [] : [at + ": " + JSON.stringify(a) + " vs " + JSON.stringify(b)];
 }
-const nextPoll = (page) => page.waitForResponse((res) => /\/api\/model\?since=/.test(res.url()), { timeout: 8000 }).then(() => true, () => false);
 const isPoll = (url) => url.pathname === "/api/model" && url.searchParams.has("since");
+
+// A live poll that changes something: every poll is answered with the model as it would be a moment later, the oldest top-level row's
+// session active just now (its `last` past every other's, so it would sort first), under a new version; a poll that asks since that
+// version gets a 304. It must reach the list (that row's age reads "now") without moving any row (a reorder is held), and leave the
+// rest of the page as served. At 390 on "full", opening the drawer then re-sorts: the row is first.
+async function grownPoll(r, browser, which, { size, dark, P, K, reopen }) {
+  const page = await embedPage(browser, which, { size, dark, saved: size === "desktop" });
+  const rows = () => page.evaluate(() => [...document.querySelectorAll("#lanes > .treeitem")].map((n) => ({ id: n.dataset.id, ag: n.querySelector(":scope > .tree-row .srow .ag")?.textContent })));
+  const before = await rows(), bumped = before.filter((x) => x.ag !== "now").at(-1)?.id;
+  let grown = null, served = 0;
+  await page.route(isPoll, async (route) => {
+    const url = new URL(route.request().url());
+    if (grown && url.searchParams.get("since") === grown) return route.fulfill({ status: 304 });
+    const headers = { ...route.request().headers() }; delete headers["if-none-match"]; url.search = "";
+    const res = await route.fetch({ url: url.toString(), headers }), m = await res.json();
+    m.sessions[bumped].last = Math.max(...Object.values(m.sessions).map((x) => x.last)) + 60000; m.version += "-grown"; grown = m.version; served++;
+    await route.fulfill({ response: res, json: m });
+  });
+  const drawn = !!bumped && await page.waitForFunction((id) => document.querySelector('#lanes .srow[data-id="' + CSS.escape(id) + '"] .ag')?.textContent === "now", bumped, { timeout: 10000 }).then(() => true, () => false);
+  await page.waitForTimeout(150);
+  const after = await rows(), kept = await untouched(page);
+  const G = (K.grown = { bumped, served, drawn, held: after.map((x) => x.id).join() === before.map((x) => x.id).join(), kept: kept.same });
+  r.expect(!!bumped && served >= 1 && drawn && G.held, P + ": a changed live poll did not reach the list, or moved a row: " + JSON.stringify({ ...G, before: before.map((x) => x.id), after: after.map((x) => x.id) }));
+  r.expect(kept.same, P + ": a changed live poll changed the page: " + JSON.stringify(kept));
+  if (reopen) {
+    await openDrawer(page);
+    G.first = await page.evaluate(() => document.querySelector("#lanes > .treeitem")?.dataset.id ?? null);
+    r.expect(G.first === bumped, P + ": opening the drawer did not re-sort the held list: " + JSON.stringify(G));
+  }
+  r.expect(page.errors.length === 0, P + ": page errors on the changed poll: " + JSON.stringify(page.errors));
+  await page.context().close();
+}
 
 // A row opens its session's page in the viewer by loading it: a marker set on the embedding page is gone afterwards.
 async function opensRow(r, page, key, how) {
@@ -114,7 +150,7 @@ export default async function embedSidebarCheck(browser) {
   const runs = [["full", "phone", false], ["full", "phone", true], ["full", "desktop", false], ["full", "desktop", true], ["bare", "phone", false], ["bare", "desktop", false]];
   for (const [which, size, dark] of runs) {
     const shot = (size === "phone" ? 390 : 1280) + "-" + (dark ? "dark" : "light"), P = which + "-" + shot, K = (R[P] = {});
-    const page = await embedPage(browser, which, { size, dark, wide: size === "desktop" });
+    const page = await embedPage(browser, which, { size, dark, saved: size === "desktop" });
     const viewer = await served(browser, { size, dark, path: "/" });
     await viewer.waitForSelector("#lanes .srow", { state: "attached" });
 
@@ -135,13 +171,13 @@ export default async function embedSidebarCheck(browser) {
     r.expect(ourNav.every((x) => x.tag === "BUTTON"), P + ": the viewer's script did not draw its navigation: " + JSON.stringify(ourNav));
     r.expect(JSON.stringify(ourNav.map((x) => x.current)) === JSON.stringify([null, null, null, "page"]), P + ": only Machines should be current: " + JSON.stringify(ourNav));
 
-    // Nothing outside the sidebar's own parts changed, before and after a live poll.
+    // Nothing outside the sidebar's own parts changed (at 1280 with a wide page and a collapsed rail saved), and there is no rail
+    // and no toggle for it.
     const before = await untouched(page);
     r.expect(before.same, P + ": the viewer's script changed the embedding page: " + JSON.stringify(before));
-    K.polled = await nextPoll(page);
-    await page.waitForTimeout(150);
-    const after = await untouched(page);
-    r.expect(K.polled && after.same && (await page.locator("#lanes .srow").count()) === ours.length, P + ": a live poll changed the page or lost the list: " + JSON.stringify({ polled: K.polled, ...after }));
+    K.rail = await page.evaluate(() => ({ toggle: !!document.querySelector("#rail-toggle"), rail: document.querySelector(".app").classList.contains("rail"), width: document.querySelector("#sidebar").getBoundingClientRect().width }));
+    r.expect(!K.rail.toggle && !K.rail.rail, P + ": the embedding page has the viewer's rail or its toggle: " + JSON.stringify(K.rail));
+    await grownPoll(r, browser, which, { size, dark, P, K, reopen: which === "full" && size === "phone" && !dark });
 
     if (which === "full" && size === "phone" && !dark) {
       // "/" belongs to the page: it opens no drawer and takes no focus.
@@ -194,7 +230,7 @@ export default async function embedSidebarCheck(browser) {
     if (which === "bare" && size === "desktop") {
       K.opened = await opensRow(r, page, P, "click");
       // A refused poll stops the list's updates, with a note under the list and nothing else on the page.
-      const refused = await embedPage(browser, "bare", { size, dark });
+      const refused = await embedPage(browser, "bare", { size, dark, saved: true });
       await refused.route(isPoll, (route) => route.fulfill({ status: 403, contentType: "text/plain", body: "Forbidden" }));
       const noted = await refused.waitForSelector("#side-list .livenote-side", { timeout: 8000 }).then(() => true, () => false);
       const kept = await untouched(refused);
@@ -205,9 +241,9 @@ export default async function embedSidebarCheck(browser) {
       const query = ours[0].text.slice(0, 4).trim();
       await refused.fill("#q", query); await refused.locator("#q").press("Enter");
       const went = await refused.waitForURL((u) => u.pathname === "/sessions", { timeout: 8000 }).then(() => true, () => false);
-      const field = went ? await refused.waitForSelector("#sq", { timeout: 8000 }).then(() => refused.evaluate(() => ({ value: document.querySelector("#sq").value, marker: window.__embedMarker ?? null })), () => null) : null;
+      const field = went ? await refused.waitForSelector("#sq", { timeout: 8000 }).then(() => refused.evaluate(() => ({ value: document.querySelector("#sq").value, marker: window.__embedMarker ?? null, search: location.search })), () => null) : null;
       K.enter = { query, went, field };
-      r.expect(went && field?.value === query && field.marker === null, P + ": Enter did not open the Sessions page with the search: " + JSON.stringify(K.enter));
+      r.expect(went && field?.value === query && field.marker === null && field.search === "?q=" + encodeURIComponent(query), P + ": Enter did not open the Sessions page with the search: " + JSON.stringify(K.enter));
       r.expect(refused.errors.length === 0, P + ": page errors on the refused page: " + JSON.stringify(refused.errors));
       await refused.context().close();
     }

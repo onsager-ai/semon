@@ -432,7 +432,7 @@
       adopt(m); LIVE.version = m.version; remember(m); if (SIDEBAR_ONLY) { render(); schedule(2000); return; } route = routeOf(location);
       if (route.v === "sessions") query = (new URLSearchParams(location.search).get("q") ?? "").trim(); // a search an embedding page's sidebar carried here
       if (route.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
-      try { history.replaceState({ ...route, scrollTop: 0 }, "", urlOf(route) + (route.v === "session" ? location.hash : "")); } catch {}
+      try { history.replaceState({ ...route, scrollTop: 0 }, "", urlOf(route) + (route.v === "session" ? location.hash : route.v === "sessions" && query ? "?q=" + enc(query) : "")); } catch {}
       const done = () => {
         render();
         if (route.v === "session" && route.turn) { revealTurn(route.turn, true); if (location.hash) requestAnimationFrame(() => requestAnimationFrame(revealEntryHash)); }
@@ -449,10 +449,10 @@
   const phone = window.matchMedia("(max-width: 760px)");
   let wideMode = false, railMode = false, treePrefs = {};
   try { wideMode = localStorage.getItem("semon.wide") === "1"; } catch {}
-  try { railMode = localStorage.getItem("semon.rail") === "1"; } catch {}
+  try { railMode = !SIDEBAR_ONLY && localStorage.getItem("semon.rail") === "1"; } catch {} // the rail is the viewer's own layout: an embedding page keeps its sidebar whole
   try { const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = pruneTreePrefs(saved); } catch {}
   const app = $(".app");
-  const syncLayoutPrefs = () => { app.classList.toggle("rail", railMode && !phone.matches); if (!SIDEBAR_ONLY) $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
+  const syncLayoutPrefs = () => { if (SIDEBAR_ONLY) return; app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches); };
   function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); }
   function setRailMode(on) { railMode = on; ORD.delete("side"); try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
   // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
@@ -467,7 +467,8 @@
     treePrefs = Object.fromEntries(Object.entries(treePrefs).sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0)).slice(0, 500));
     try { localStorage.setItem("semon.tree", JSON.stringify(treePrefs)); } catch {}
   }
-  const railToggle = $("#rail-toggle"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
+  // An embedding page's sidebar has no rail and no toggle for it (shell::session_sidebar): the toggle is then a detached button.
+  const railToggle = $("#rail-toggle") ?? el("button"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
   let route = { v: "home" }; let groupBy = "recent"; let query = ""; let analyticsRange = 7, analyticsMeasure = "hours";
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
   let pendingSessionOpen = null, pendingFlashHandoff = null;
@@ -2446,7 +2447,7 @@
   }
   // An embedding page can cancel `semon:ended` to draw its own note in place of this one.
   function ended(status) {
-    LIVE.ended = true; clearTimeout(LIVE.timer); LIVE.timer = null; if ($(".livenote")) return;
+    LIVE.ended = true; clearTimeout(LIVE.timer); LIVE.timer = null; if ($(".livenote, .livenote-side")) return;
     if (!window.dispatchEvent(new CustomEvent("semon:ended", { cancelable: true, detail: { status } }))) return;
     const n = el("p", SIDEBAR_ONLY ? "ghead livenote-side" : "livenote", SIDEBAR_ONLY ? "Sessions stopped updating: reload the page" : "Session ended: reload with the printed URL"); n.setAttribute("role", "status");
     if (SIDEBAR_ONLY) $("#lanes").after(n); else document.body.append(n); // on an embedding page, under the list that stopped
