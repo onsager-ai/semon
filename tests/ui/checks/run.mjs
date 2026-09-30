@@ -29,6 +29,7 @@ import detailsCheck from "./details.mjs";
 import selectCheck from "./select.mjs";
 import filtersCheck from "./filters.mjs";
 import childcardCheck from "./childcard.mjs";
+import breakdownCheck from "./breakdown.mjs";
 
 const checks = [
   ["home", homeCheck],
@@ -54,6 +55,7 @@ const checks = [
   ["select", selectCheck],
   ["filters", filtersCheck],
   ["childcard", childcardCheck],
+  ["breakdown", breakdownCheck],
 ];
 
 const browser = await launch();
