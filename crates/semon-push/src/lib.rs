@@ -7,7 +7,10 @@
 //! - A JSONL log is sent in complete lines only; its last, incomplete line
 //!   waits until it is complete.
 //! - Where each file stands is kept in a private state file, so an
-//!   interrupted push resumes.
+//!   interrupted push resumes. One push at a time holds it ([`StateLock`]).
+//! - A push, `--watch` included, ends cleanly on a [`Stop`], and its token
+//!   can come from memory ([`Credential::Memory`]), so an app can run it
+//!   in-process.
 //!
 //! The receiving side is here too, as the protocol's reference
 //! implementation: [`mirror::Receiver`] over a directory, its tokens
@@ -15,9 +18,10 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
+    fmt, fs,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -25,11 +29,17 @@ use std::{
 use semon_sessions::{Facts, FactsSource, Input, Options};
 use serde::{Deserialize, Serialize};
 
+mod lock;
 pub mod mirror;
 pub mod redact;
 pub mod serve;
+mod stop;
 pub mod tokens;
 pub mod wire;
+
+use lock::Hold;
+pub use lock::StateLock;
+pub use stop::Stop;
 
 use wire::{Append, CHUNK_BYTES, HEAD_BYTES, Length, base64_encode, head_sha256, sha256_hex};
 
@@ -49,13 +59,73 @@ thread_local! {
 
 pub type Result<T> = std::result::Result<T, String>;
 
+#[derive(Clone, Debug)]
 pub struct PushOptions {
     /// The receiver's base URL; requests go to `<url>/v1/mirror/…`.
     pub url: String,
-    pub token_file: PathBuf,
+    pub credential: Credential,
     pub sessions: Options,
-    /// Where to keep the cursor state (0600).
+    /// Where to keep the cursor state (0600). A push holds the lock beside
+    /// it ([`StateLock`]) while it runs.
     pub state: PathBuf,
+}
+
+/// Where a push's bearer token comes from.
+#[derive(Clone, Debug)]
+pub enum Credential {
+    /// A 0600 file, read once when the push starts ([`read_token`]).
+    File(PathBuf),
+    /// A token an embedding app holds in memory, from its OS credential
+    /// store for instance. It is never written to disk.
+    Memory(Token),
+}
+
+impl Credential {
+    fn token(&self) -> Result<Token> {
+        match self {
+            Self::File(path) => read_token(path).map(Token),
+            Self::Memory(token) => Ok(token.clone()),
+        }
+    }
+}
+
+/// A push's bearer token. It leaves this crate only in the `Authorization`
+/// header of a request to the receiver: it has no `Display`, its `Debug`
+/// shows `Token(<redacted>)`, and nothing here writes it to a file or a log.
+/// Its memory is not zeroised when dropped, and the HTTP client keeps its
+/// own copy of the header while a request runs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Token(String);
+
+impl Token {
+    /// A token as a token file holds it: surrounding whitespace is trimmed,
+    /// and an empty token, or one with a space or a control character, is
+    /// refused.
+    pub fn new(token: &str) -> Result<Self> {
+        let token = token.trim();
+        if usable_token(token) {
+            Ok(Self(token.to_owned()))
+        } else {
+            Err("the token is empty, or holds a space or a control character".to_owned())
+        }
+    }
+
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Token {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Token(<redacted>)")
+    }
+}
+
+fn usable_token(token: &str) -> bool {
+    !token.is_empty()
+        && !token
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b' ')
 }
 
 /// The default state file for a receiver URL, under the XDG state
@@ -68,8 +138,11 @@ pub fn default_state_path(url: &str) -> PathBuf {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local/state"));
+    // Keyed by the URL as a push uses it ([`check_url`]), so spellings of
+    // one receiver share one state file and one lock.
+    let key = check_url(url).unwrap_or_else(|_| url.to_owned());
     base.join("semon/push")
-        .join(format!("{}.json", &sha256_hex(url.as_bytes())[..16]))
+        .join(format!("{}.json", &sha256_hex(key.as_bytes())[..16]))
 }
 
 /// Reads a bearer token from `path`, refusing a file that anyone but its
@@ -93,24 +166,26 @@ pub fn read_token(path: &Path) -> Result<String> {
         .map_err(|error| format!("{}: {error}", path.display()))?
         .trim()
         .to_owned();
-    if token.is_empty()
-        || token
-            .bytes()
-            .any(|byte| byte.is_ascii_control() || byte == b' ')
-    {
+    if !usable_token(&token) {
         return Err(format!("{} holds no usable token", path.display()));
     }
     Ok(token)
 }
 
 /// Checks the receiver URL: https, or http on a loopback address only, and
-/// no query or fragment. Returns it without a trailing slash.
+/// no query or fragment. Returns it normalised: the scheme and host in
+/// lower case, and no trailing slash.
 pub fn check_url(url: &str) -> Result<String> {
     let url = url.trim_end_matches('/');
     let (scheme, rest) = url
         .split_once("://")
         .ok_or_else(|| format!("{url} is not a URL"))?;
+    let scheme = scheme.to_ascii_lowercase();
     let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let path = &rest[host.len()..];
+    let host = host.to_ascii_lowercase();
+    let host = host.as_str();
+    let normal = format!("{scheme}://{host}{path}");
     let hostname = host
         .rsplit_once(':')
         .filter(|(_, port)| port.bytes().all(|byte| byte.is_ascii_digit()))
@@ -121,9 +196,9 @@ pub fn check_url(url: &str) -> Result<String> {
     if url.contains(['?', '#']) {
         return Err(format!("{url}: no query or fragment allowed"));
     }
-    match scheme {
-        "https" => Ok(url.to_owned()),
-        "http" if loopback(hostname) => Ok(url.to_owned()),
+    match scheme.as_str() {
+        "https" => Ok(normal),
+        "http" if loopback(hostname) => Ok(normal),
         "http" => Err(format!(
             "{url}: plain http is allowed to a loopback address only"
         )),
@@ -244,8 +319,10 @@ enum Answer {
 
 pub struct Client {
     url: String,
-    token: String,
+    token: Token,
     http: reqwest::blocking::Client,
+    stop: Stop,
+    lock: Option<Arc<StateLock>>,
     state_path: PathBuf,
     state: State,
     chunk: usize,
@@ -255,7 +332,7 @@ pub struct Client {
 impl Client {
     pub fn new(options: &PushOptions) -> Result<Self> {
         let url = check_url(&options.url)?;
-        let token = read_token(&options.token_file)?;
+        let token = options.credential.token()?;
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(120))
             .user_agent(concat!("semon-push/", env!("CARGO_PKG_VERSION")))
@@ -274,6 +351,8 @@ impl Client {
             url,
             token,
             http,
+            stop: Stop::new(),
+            lock: None,
             state_path: options.state.clone(),
             state,
             chunk: CHUNK_BYTES,
@@ -288,50 +367,83 @@ impl Client {
         self
     }
 
-    fn post(&self, route: &str, body: String) -> Result<(u16, String)> {
-        let response = self
+    /// Ends passes and requests early once `stop` is stopped.
+    pub fn with_stop(mut self, stop: Stop) -> Self {
+        self.stop = stop;
+        self
+    }
+
+    /// Holds `lock` from each request's own thread too, so a request a stop
+    /// leaves running keeps the state locked until it ends.
+    pub(crate) fn with_lock(mut self, lock: Arc<StateLock>) -> Self {
+        self.lock = Some(lock);
+        self
+    }
+
+    /// One request to the receiver, made on a thread of its own so that a
+    /// stop doesn't wait for it (up to the 120 s timeout). A request a stop
+    /// leaves behind finishes there, holding the state lock (see
+    /// [`StateLock`]), and its answer is dropped.
+    fn post(&self, route: &str, body: String) -> std::result::Result<(u16, String), Failure> {
+        let request = self
             .http
             .post(format!("{}/v1/mirror/{route}", self.url))
-            .bearer_auth(&self.token)
+            .bearer_auth(self.token.expose())
             .header("content-type", "application/json")
-            .body(body)
-            .send()
-            .map_err(|error| format!("{route}: {error}"))?;
-        let status = response.status().as_u16();
-        let text = response.text().unwrap_or_default();
+            .body(body);
+        let lock = self.lock.clone();
+        let answer = self.stop.run(route, move || {
+            let _lock = lock;
+            request.send().map(|response| {
+                let status = response.status().as_u16();
+                (status, response.text().unwrap_or_default())
+            })
+        });
+        let (status, text) = match answer {
+            Ok(Some(Ok(answer))) => answer,
+            Ok(Some(Err(error))) => return Err(Failure::Remote(format!("{route}: {error}"))),
+            Ok(None) => return Err(Failure::Stopped),
+            Err(error) => return Err(Failure::Remote(error)),
+        };
         match status {
-            401 | 403 => Err(format!(
+            401 | 403 => Err(Failure::Remote(format!(
                 "{route}: the receiver refused the token ({status})"
-            )),
+            ))),
             _ => Ok((status, text)),
         }
     }
 
     /// Sends the machine's facts.
     pub fn send_facts(&self, facts: &Facts) -> Result<()> {
-        let body = serde_json::to_string(facts).map_err(|error| error.to_string())?;
+        self.post_facts(facts).map_err(Failure::message)
+    }
+
+    fn post_facts(&self, facts: &Facts) -> std::result::Result<(), Failure> {
+        let body =
+            serde_json::to_string(facts).map_err(|error| Failure::Remote(error.to_string()))?;
         match self.post("facts", body)? {
             (200..=299, _) => Ok(()),
-            (status, text) => Err(format!("facts: {status} {}", text.trim())),
+            (status, text) => Err(Failure::Remote(format!("facts: {status} {}", text.trim()))),
         }
     }
 
-    fn append(&self, append: &Append) -> Result<Answer> {
-        let body = serde_json::to_string(append).map_err(|error| error.to_string())?;
+    fn append(&self, append: &Append) -> std::result::Result<Answer, Failure> {
+        let body =
+            serde_json::to_string(append).map_err(|error| Failure::Remote(error.to_string()))?;
         let (status, text) = self.post("append", body)?;
         let parsed = || {
             serde_json::from_str::<Length>(&text)
-                .map_err(|_| format!("append: {status} with an unreadable body"))
+                .map_err(|_| Failure::Remote(format!("append: {status} with an unreadable body")))
         };
         match status {
             200..=299 => Ok(Answer::Ok(parsed()?.length)),
             409 => Ok(Answer::Conflict(parsed()?)),
-            _ => Err(format!(
+            _ => Err(Failure::Remote(format!(
                 "append {}/{}: {status} {}",
                 append.root,
                 append.path,
                 text.trim()
-            )),
+            ))),
         }
     }
 
@@ -345,12 +457,17 @@ impl Client {
 
     /// Brings the receiver up to date with every input file once. A file
     /// that can't be read now is reported and tried again next pass; any
-    /// error from the receiver ends the pass.
+    /// error from the receiver ends the pass. A stop ends it too, as `Ok`
+    /// with what was sent before it: a file it caught midway keeps its last
+    /// recorded place, and the rest wait for the next push.
     pub fn pass(&mut self, sessions: &Options) -> Result<Report> {
         let mut report = Report::default();
         let mut dirty = false;
         let inputs = semon_sessions::inputs(sessions).map_err(|error| error.to_string())?;
         for input in inputs {
+            if self.stop.is_stopped() {
+                break;
+            }
             let path = input.full_path(sessions);
             let key = Self::key(&input);
             let previous = self.state.files.get(&key).cloned();
@@ -379,6 +496,7 @@ impl Client {
                     self.save()?;
                     return Err(error);
                 }
+                Err(Failure::Stopped) => break,
             }
         }
         if dirty {
@@ -392,7 +510,7 @@ impl Client {
     }
 
     fn send(&self, append: &Append) -> std::result::Result<Answer, Failure> {
-        self.append(append).map_err(Failure::Remote)
+        self.append(append)
     }
 
     /// A small JSON file, sent whole whenever its content changes.
@@ -483,6 +601,9 @@ impl Client {
         let mut replaced = false;
         let mut conflicts = 0;
         loop {
+            if self.stop.is_stopped() {
+                return Err(Failure::Stopped);
+            }
             let (mut data, end) = complete_lines(path, sent, self.chunk).map_err(Failure::Local)?;
             if data.is_empty() && !replace {
                 break;
@@ -589,6 +710,17 @@ enum Failure {
     Local(String),
     /// The receiver failed or refused.
     Remote(String),
+    /// The push was stopped.
+    Stopped,
+}
+
+impl Failure {
+    fn message(self) -> String {
+        match self {
+            Self::Local(message) | Self::Remote(message) => message,
+            Self::Stopped => "stopped".to_owned(),
+        }
+    }
 }
 
 type Synced = std::result::Result<(u64, bool), Failure>;
@@ -723,16 +855,8 @@ fn complete_lines(path: &Path, from: u64, chunk: usize) -> Result<(Vec<u8>, u64)
 /// Writes `bytes` to `path` with mode 0600, atomically. A missing directory
 /// is created 0700; an existing one's mode is left alone.
 pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty() && !parent.exists())
-    {
-        fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        }
+    if let Some(parent) = path.parent() {
+        create_private_dir(parent)?;
     }
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
     let mut options = fs::OpenOptions::new();
@@ -751,11 +875,53 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::rename(&temporary, path)
 }
 
+/// Creates a missing directory 0700; an existing one's mode is left alone.
+fn create_private_dir(directory: &Path) -> io::Result<()> {
+    if directory.as_os_str().is_empty() || directory.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// `semon push`: one pass and one facts post, or, with `watch`, a pass every
-/// 2 s and facts every 10 s until interrupted.
+/// 2 s and facts every 10 s until the process ends. [`push_until`] with a
+/// [`Stop`] no one stops.
 pub fn push(options: &PushOptions, watch: bool) -> Result<()> {
-    let mut client = Client::new(options)?;
+    push_until(options, watch, &Stop::new())
+}
+
+/// [`push`], ended by `stop`: it returns `Ok(())` within about 40 ms of
+/// [`Stop::stop`], from the sleep between passes, a pass, a request to the
+/// receiver or a facts collection (see [`Stop`]). What the receiver
+/// acknowledged is in the state file by then, which is only ever replaced
+/// whole ([`write_private`]).
+///
+/// It holds the state file's [`StateLock`] while it runs, and fails at once
+/// when another push holds it. Work a stop left running keeps holding the
+/// lock until that work ends (at most the 120 s request timeout, or the
+/// facts collection in progress), so a push started again right after a
+/// stop can fail with a "still finishing" error; retry it shortly.
+///
+/// Call it from a plain thread, not from async code: the HTTP client is
+/// `reqwest::blocking`, which panics inside a tokio runtime (in an async
+/// Tauri command, say; use `spawn_blocking` or `std::thread::spawn`).
+pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()> {
+    // Declared first, so it is dropped last, after the client and the
+    // facts worker have let go of their shares.
+    let hold = Hold::new(StateLock::acquire(&options.state)?);
+    let mut client = Client::new(options)?
+        .with_stop(stop.clone())
+        .with_lock(hold.share());
     let report = client.pass(&options.sessions)?;
+    if stop.is_stopped() {
+        return Ok(());
+    }
     eprintln!(
         "semon push: {} files, {} bytes{}",
         report.files,
@@ -767,47 +933,120 @@ pub fn push(options: &PushOptions, watch: bool) -> Result<()> {
         }
     );
     if !watch {
-        let facts = semon_sessions::local_facts(&options.sessions).map_err(|e| e.to_string())?;
-        client.send_facts(&facts)?;
-        return Ok(());
+        let sessions = options.sessions.clone();
+        let lock = hold.share();
+        let Some(facts) = stop.run("facts", move || {
+            let _lock = lock;
+            semon_sessions::local_facts(&sessions).map_err(|error| error.to_string())
+        })?
+        else {
+            return Ok(());
+        };
+        return match client.post_facts(&facts?) {
+            Err(Failure::Stopped) => Ok(()),
+            result => result.map_err(Failure::message),
+        };
     }
 
-    let mut facts = FactsSource::new(&options.sessions);
-    let result = (|| {
-        let initial = facts.facts().map_err(|error| error.to_string())?;
-        client.send_facts(&initial)?;
-        let mut last_facts = Instant::now();
-        loop {
-            thread::sleep(PASS_EVERY);
-            match client.pass(&options.sessions) {
-                Ok(report) if report.files > 0 => {
-                    eprintln!("semon push: {} files, {} bytes", report.files, report.bytes);
-                }
-                Ok(_) => {}
-                Err(error) if error.contains("refused the token") => return Err(error),
-                Err(error) => eprintln!("semon push: {error}"),
-            }
-            if last_facts.elapsed() >= FACTS_EVERY {
-                match facts.facts() {
-                    Ok(current) => {
-                        if let Err(error) = client.send_facts(&current) {
-                            if error.contains("refused the token") {
-                                return Err(error);
-                            }
-                            eprintln!("semon push: {error}");
-                        }
-                    }
-                    Err(error) => eprintln!("semon push: {error}"),
-                }
-                last_facts = Instant::now();
-            }
+    let facts = FactsWorker::start(&options.sessions, hold.share())?;
+    let Some(initial) = facts.collect(stop)? else {
+        return Ok(());
+    };
+    match client.post_facts(&initial?) {
+        Err(Failure::Stopped) => return Ok(()),
+        result => result.map_err(Failure::message)?,
+    }
+    let mut last_facts = Instant::now();
+    loop {
+        if stop.sleep(PASS_EVERY) {
+            return Ok(());
         }
-    })();
-    let flush = facts.flush().map_err(|error| error.to_string());
-    match (result, flush) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+        if let Some(end) = after_pass(client.pass(&options.sessions), stop) {
+            return end;
+        }
+        if last_facts.elapsed() >= FACTS_EVERY {
+            match facts.collect(stop)? {
+                None => return Ok(()),
+                Some(Ok(current)) => match client.post_facts(&current) {
+                    Ok(()) => {}
+                    Err(Failure::Stopped) => return Ok(()),
+                    Err(failure) => {
+                        let error = failure.message();
+                        if error.contains("refused the token") {
+                            return Err(error);
+                        }
+                        eprintln!("semon push: {error}");
+                    }
+                },
+                Some(Err(error)) => eprintln!("semon push: {error}"),
+            }
+            last_facts = Instant::now();
+        }
+    }
+}
+
+/// What `--watch` does with a pass's result: `Some` ends the push with it.
+/// A refused token ends it as an error even when a stop came with the
+/// refusal; otherwise a stop ends it cleanly, and other errors are reported
+/// and tried again next pass.
+fn after_pass(result: Result<Report>, stop: &Stop) -> Option<Result<()>> {
+    match result {
+        Err(error) if error.contains("refused the token") => Some(Err(error)),
+        _ if stop.is_stopped() => Some(Ok(())),
+        Ok(report) => {
+            if report.files > 0 {
+                eprintln!("semon push: {} files, {} bytes", report.files, report.bytes);
+            }
+            None
+        }
+        Err(error) => {
+            eprintln!("semon push: {error}");
+            None
+        }
+    }
+}
+
+/// Collects `--watch`'s facts on a thread of its own, where its
+/// [`FactsSource`] lives, so a stop doesn't wait for a collection (the
+/// first can read every log's metadata). A collection a stop leaves behind
+/// finishes there, holding the state lock; the thread ends when this is
+/// dropped.
+struct FactsWorker {
+    ask: mpsc::Sender<()>,
+    answers: mpsc::Receiver<Result<Facts>>,
+}
+
+impl FactsWorker {
+    fn start(sessions: &Options, lock: Arc<StateLock>) -> Result<Self> {
+        let sessions = sessions.clone();
+        let (ask, asked) = mpsc::channel::<()>();
+        let (answer, answers) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("semon-push-facts".to_owned())
+            .spawn(move || {
+                let _lock = lock;
+                let mut source = FactsSource::new(&sessions);
+                for () in asked {
+                    let facts = source.facts().map_err(|error| error.to_string());
+                    if answer.send(facts).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| format!("facts: {error}"))?;
+        Ok(Self { ask, answers })
+    }
+
+    /// The machine's current facts, or `None` when stopped first. `Err`
+    /// only when the thread is gone.
+    fn collect(&self, stop: &Stop) -> Result<Option<Result<Facts>>> {
+        if stop.is_stopped() {
+            return Ok(None);
+        }
+        self.ask
+            .send(())
+            .map_err(|_| "facts: its thread ended".to_owned())?;
+        stop.wait("facts", &self.answers)
     }
 }
 
@@ -884,7 +1123,7 @@ mod tests {
         fn push_options(&self, url: &str) -> PushOptions {
             PushOptions {
                 url: url.to_owned(),
-                token_file: self.root.join("token"),
+                credential: Credential::File(self.root.join("token")),
                 sessions: self.options.clone(),
                 state: self.root.join("state/push.json"),
             }
@@ -1071,5 +1310,33 @@ mod tests {
         assert_eq!(client.pass(&fixture.options).unwrap().files, 0);
         assert!(input_opens().get(&path).copied().unwrap_or_default() > 0);
         assert!(client.state.files[key].has_stat());
+    }
+
+    #[test]
+    fn a_refused_token_ends_the_watch_as_an_error_even_with_a_stop() {
+        fn refused<T>() -> Result<T> {
+            Err("append: the receiver refused the token (401)".to_owned())
+        }
+        fn failed() -> Result<Report> {
+            Err("append: 500 down".to_owned())
+        }
+        let sent = || {
+            Ok(Report {
+                files: 1,
+                bytes: 5,
+                replaced: 0,
+            })
+        };
+
+        let stopped = Stop::new();
+        stopped.stop();
+        assert_eq!(after_pass(refused(), &stopped), Some(refused()));
+        assert_eq!(after_pass(failed(), &stopped), Some(Ok(())));
+        assert_eq!(after_pass(sent(), &stopped), Some(Ok(())));
+
+        let running = Stop::new();
+        assert_eq!(after_pass(refused(), &running), Some(refused()));
+        assert_eq!(after_pass(failed(), &running), None);
+        assert_eq!(after_pass(sent(), &running), None);
     }
 }
