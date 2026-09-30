@@ -195,8 +195,8 @@ impl AccountMenu {
 /// one second are one rebuild, and it is checked only while it is read: 30 s
 /// after its last read it goes idle, and its next read queues a check at
 /// once. A read waits for a build only when its machine has no model yet:
-/// once one is built, every read answers from it at once, never waiting for
-/// a rebuild in progress, a late check or failing rebuilds. While the pool
+/// once one is built, every read answers at once, never waiting for a
+/// rebuild in progress, a late check or failing rebuilds. While the pool
 /// keeps up, an answer is at most about 1 s plus one build behind the logs,
 /// and the first read after an idle spell answers from the model before it
 /// (a poll sees the change once the check it queued has rebuilt). When the
@@ -204,9 +204,11 @@ impl AccountMenu {
 /// and its answers are as far behind the logs as the pool's queue is.
 ///
 /// A background rebuild that fails leaves the last model served, with the
-/// error printed once, and each check tries again until a build works. The
-/// model and the V1 tree fail on their own: a tree that won't build never
-/// holds back the model.
+/// error printed once, and each check tries again; 3 s after rebuilds
+/// started failing, each read answers the error (500) instead, at once,
+/// without waiting for a build, until a build works again. The model and
+/// the V1 tree fail on their own: a tree that won't build never turns
+/// `/api/model` into an error.
 ///
 /// [`RefreshPool`]: crate::RefreshPool
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
