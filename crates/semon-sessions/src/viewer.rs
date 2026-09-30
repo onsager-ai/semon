@@ -1542,11 +1542,17 @@ impl MachineView {
     }
 
     /// Whether a page URL names something in the model: `/machines/<id>`,
-    /// `/s/<harness>/<id>` and `/trace/<harness>/<id>/<turn>`.
+    /// `/s/<harness>/<id>` and `/trace/<harness>/<id>/<turn>`. Checked
+    /// against the model brought up to date first (a stat pass, and a
+    /// rebuild if the logs changed), whatever the refresh mode: outside
+    /// OnRead only a URL the built model lacks comes here, and it may name
+    /// a session newer than that model, even one a warm in progress has
+    /// already taken the invalidation for. Such a check waits for that
+    /// warm, then finds the session.
     fn page_exists(&self, path: &str) -> io::Result<bool> {
         let parts = page_parts(path).ok_or_else(|| invalid_input("path"))?;
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let cache = self.served_model()?;
+        let cache = self.fresh_model(model::now_ms())?;
         Ok(has_page(&cache.built, &parts))
     }
 
@@ -6710,6 +6716,85 @@ mod tests {
         core.warm().expect("a closed core warms nothing");
         assert!(!core.warm_machine("a").unwrap(), "a closed core warmed a");
         assert_eq!(views[0].hooks.builds(), 2, "a closed core built");
+    }
+
+    /// A session newer than the built model, on a view that went idle, is
+    /// opened while a warm that already took its invalidation is still
+    /// building it. The page, which the built model lacks, is checked
+    /// against a fresh model: it waits for that warm, then finds the
+    /// session (200), where the model before the warm would answer 404.
+    fn a_new_session_opens_during_its_warm(mut core: ViewerCore, key: &str, fixture: &Fixture) {
+        core.set_refresh_pool(RefreshPool::new(1));
+        core.set_refresh(Refresh::OnInvalidate);
+        let core = Arc::new(core);
+        let views = core.machine_views();
+        for view in &views {
+            quick_idle(view);
+        }
+        assert_eq!(core.respond("GET", "/api/model", "", None).status, 200);
+        for view in &views {
+            until_idle(view);
+        }
+        fixture.claude(
+            "brand-new",
+            &[
+                json!({"type":"user","timestamp":"2026-09-24T00:04:00Z","sessionId":"brand-new","origin":{"kind":"human"},
+                    "message":{"role":"user","content":"a new session"}}),
+            ],
+        );
+        assert!(core.invalidate(key));
+        // The machine's view is the first: `key` is its only or first key.
+        let (starts, release) = views[0].hooks.hold();
+        let warming = {
+            let (core, key) = (core.clone(), key.to_owned());
+            thread::spawn(move || core.warm_machine(&key))
+        };
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the warm builds");
+        assert!(
+            !lock(&views[0].live.state).invalidated,
+            "the warm took the invalidation"
+        );
+        let page = {
+            let core = core.clone();
+            thread::spawn(move || core.respond("GET", "/s/claude/brand-new", "", None).status)
+        };
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            !page.is_finished(),
+            "the page answered from the model before the warm"
+        );
+        drop(release);
+        assert_eq!(page.join().expect("the page request panicked"), 200);
+        assert!(
+            warming
+                .join()
+                .expect("the warm panicked")
+                .expect("it built")
+        );
+        assert_eq!(
+            core.respond("GET", "/s/claude/not-even-new", "", None)
+                .status,
+            404
+        );
+        core.close();
+    }
+
+    #[test]
+    fn a_new_session_opens_during_its_warm_on_one_machine() {
+        let fixture = lane_fixture();
+        a_new_session_opens_during_its_warm(ViewerCore::new(fixture.options.clone()), "", &fixture);
+    }
+
+    #[test]
+    fn a_new_session_opens_during_its_warm_across_machines() {
+        let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
+        let core = ViewerCore::with_machines(vec![
+            ("a".into(), alpha.options.clone()),
+            ("b".into(), bravo.options.clone()),
+        ]);
+        a_new_session_opens_during_its_warm(core, "a", &alpha);
     }
 
     /// Background builds that keep failing aren't hidden forever behind

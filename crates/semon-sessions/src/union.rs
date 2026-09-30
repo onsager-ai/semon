@@ -1440,13 +1440,16 @@ impl ViewerCore {
     }
 
     /// A page URL that names something in the union: a machine, a session
-    /// or a trace.
+    /// or a trace. Checked against every model brought up to date first,
+    /// whatever the refresh mode: outside OnRead only a URL the built
+    /// models lack comes here, and it may name a session newer than them
+    /// (see [`ViewerCore::page_at_once`]).
     fn page(&self, views: &Views, path: &str) -> io::Result<ViewerReply> {
         let Some(parts) = page_parts(path) else {
             return Ok(text(400, "Invalid request"));
         };
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let (models, plan) = self.refresh_at(views, Reading::Served)?;
+        let (models, plan) = self.refresh_at(views, Reading::At(crate::model::now_ms()))?;
         Ok(if union_has_page(&plan, &models, &parts) {
             views[0].1.respond("GET", "/", "", None)
         } else {
@@ -1462,8 +1465,11 @@ impl ViewerCore {
     /// and when a machine has no model yet (the page's own `/api/model`
     /// builds it, and a URL that names nothing there shows the home screen).
     /// `None` leaves the answer to the usual route, which is exact:
-    /// refreshed on read, a URL the built models lack (a session newer than
-    /// them, or nothing at all: 404), and one that doesn't decode (400).
+    /// refreshed on read, a URL the built models lack (checked against
+    /// models brought up to date first, since it may name a session newer
+    /// than them, even one a warm in progress already took the invalidation
+    /// for; 404 if it still names nothing), and one that doesn't decode
+    /// (400).
     fn page_at_once(&self, views: &Views, path: &str) -> Option<ViewerReply> {
         if self.refresh == Refresh::OnRead || !is_named_page(path) {
             return None;
