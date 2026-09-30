@@ -18,6 +18,7 @@ import extras from "./extras.mjs";
 import attachCheck from "./attach.mjs";
 import shellCheck from "./shell.mjs";
 import namesCheck from "./names.mjs";
+import hiconsCheck from "./hicons.mjs";
 import sidebarCheck from "./sidebar.mjs";
 import tokensCheck from "./tokens.mjs";
 import scrollbarsCheck from "./scrollbars.mjs";
@@ -42,6 +43,7 @@ const checks = [
   ["attach", attachCheck],
   ["shell", shellCheck],
   ["names", namesCheck],
+  ["hicons", hiconsCheck],
   ["sidebar", sidebarCheck],
   ["tokens", tokensCheck],
   ["scrollbars", scrollbarsCheck],
