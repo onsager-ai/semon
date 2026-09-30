@@ -26,7 +26,7 @@
 //      rows in view do not move;
 //   9. wide screen, the sidebar's idle timer (IDLE, the hook's shortened time): with the pointer away it applies after IDLE and not
 //      before; keyboard focus inside the sidebar blocks it and the focus leaving starts the wait again; a pointer passing over it
-//      resets the wait; an open session menu (which hangs from the top bar) blocks it;
+//      resets the wait; an open session menu (which hangs from the top bar) blocks it; mouse focus left on a tree toggle doesn't block it;
 //   7. on the phone: with the drawer closed a held order stays in the (hidden) list; opening the drawer shows it in recency order at once;
 //      while it is open a change moves nothing; closing it applies the change.
 // 0 page errors on every page.
@@ -126,7 +126,7 @@ async function scheme(browser, name, opts, r) {
     // The Sessions page draws again for a new route: Home and back applies what it held.
     const hop = async () => { await go(page, { v: "home" }, "Home"); await go(page, { v: "sessions" }, "Sessions"); };
     // What every earlier step held is applied: the page by a route change; the wide screen's sidebar by leaving it alone for IDLE.
-    const applyAll = async () => { await hop(); await page.evaluate(() => document.activeElement?.blur?.()); /* (a click in the tree leaves focus there, which blocks the timer) */ if (!phone) { await page.mouse.move(640, 4); await sleep(IDLE + 1500); } };
+    const applyAll = async () => { await hop(); if (!phone) { await page.mouse.move(640, 4); await sleep(IDLE + 1500); } };
 
     // ---- 1. scrolled down: nothing moves; the held order applies when the list is out of sight ----
     const pageBefore = await pageRows(page), oldIds = ids(pageBefore), targets = OLD.filter((id) => oldIds.includes(id)).sort((a, b) => oldIds.indexOf(b) - oldIds.indexOf(a)).slice(0, 2);
@@ -383,6 +383,16 @@ async function scheme(browser, name, opts, r) {
       let h = await holdSide(); let tf = await waitFirst(h.newest, IDLE + 4000);
       R.idleMs = tf && tf - h.Td;
       say(tf !== null && tf - h.Td >= IDLE - 400 && tf - h.Td <= IDLE + 3000, "the idle sidebar applied after " + R.idleMs + " ms, not after " + IDLE + " ms");
+      // (a2) mouse focus left on a tree toggle doesn't block the held order once the pointer leaves
+      h = await holdSide();
+      const toggle = page.locator("#sidebar .tree-toggle").first(); await toggle.scrollIntoViewIfNeeded();
+      const toggleBox = await toggle.boundingBox();
+      await page.mouse.click(toggleBox.x + toggleBox.width / 2, toggleBox.y + toggleBox.height / 2);
+      say(await page.evaluate(() => document.activeElement?.matches("#sidebar .tree-toggle") && !document.activeElement.matches(":focus-visible")), "the mouse click didn't leave non-keyboard focus on a tree toggle, so the check below proves nothing");
+      await page.mouse.move(640, 4);
+      say((await sideFirst()) !== h.newest, "the sidebar has no held order after the mouse click, so the check below proves nothing");
+      tf = await waitFirst(h.newest, IDLE + 1500);
+      say(tf !== null, "the sidebar didn't apply what it held within IDLE + 1500 ms after a mouse click left focus on a tree toggle");
       // (b) keyboard focus inside it blocks it; taking the focus away starts the wait again
       h = await holdSide();
       await page.keyboard.press("Shift"); await page.locator("#lanes .srow").first().focus(); await sleep(IDLE * 2 + 500);
