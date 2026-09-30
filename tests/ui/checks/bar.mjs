@@ -483,7 +483,7 @@ export default async function barCheck(browser) {
     await page.keyboard.press("Escape"); await page.waitForTimeout(150);
     const focusAfter = await page.evaluate(() => document.activeElement?.id ?? document.activeElement?.tagName ?? null);
     const expectedRuns = Object.values(D.SESS).filter((s) => { let p = parentOf(s.id); while (p && p !== "harbor") p = parentOf(p); return p === "harbor"; }).length;
-    childAssertions.push({ size, introActions, pathNames, expectedPath, expectedAncestors, pathOk, childBar, pathStatus, pathMenuFacts, tappedUp, briefCard, openedParent, returnRow, returnParent, siblingNav, runs, runsViaMenu, runsFocus, expectedRuns });
+    childAssertions.push({ size, introActions, pathNames, expectedPath, expectedAncestors, pathOk, childBar, pathStatus, pathMenuFacts, tappedUp, briefCard, openedParent, returnRow, returnParent, siblingNav, runs, runsViaMenu, runsFocus, focusAfter, expectedRuns });
     await page.context().close();
   }
 
