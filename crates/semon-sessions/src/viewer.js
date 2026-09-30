@@ -2620,7 +2620,8 @@
       const host = a.id ? null : a.closest(HOSTS), sel = host && host !== a ? a.tagName.toLowerCase() + [...a.classList].map((c) => "." + CSS.escape(c)).join("") : null;
       // By id, else by its keyed block and place in it, else by its label, else by its place among the page's controls.
       st.focus = { id: a.id || null, host: host ? identOf(host) : null, sel, i: sel ? [...host.querySelectorAll(sel)].indexOf(a) : 0, range: null,
-        label: a.getAttribute("aria-label"), at: [...$("#page").querySelectorAll(FOCUSABLE)].indexOf(a), of: $("#page").querySelectorAll(FOCUSABLE).length };
+        label: a.getAttribute("aria-label"), at: [...$("#page").querySelectorAll(FOCUSABLE)].indexOf(a), of: $("#page").querySelectorAll(FOCUSABLE).length,
+        foot: a.closest("#page > .session-foot") ? a.closest("[data-foot]")?.dataset.foot ?? null : null };
       try { if (typeof a.selectionStart === "number") st.focus.range = [a.selectionStart, a.selectionEnd]; } catch {}
     }
     return st;
@@ -2651,6 +2652,9 @@
       let n = st.focus.id ? document.getElementById(st.focus.id) : null;
       if (!n && st.focus.host) { const host = [...document.querySelectorAll(HOSTS)].find((x) => identOf(x) === st.focus.host); n = host && st.focus.sel ? host.querySelectorAll(st.focus.sel)[st.focus.i] : host; }
       if (!n && st.focus.label) n = [...document.querySelectorAll("#page [aria-label], #topbar [aria-label]")].find((x) => x.getAttribute("aria-label") === st.focus.label);
+      // A session footer's item or button, by its kind: the footer's items change as the session runs and finishes, so its place
+      // among the page's controls can name another one (patchSession's footer rule: else the time item, never the button).
+      if (!n && st.focus.foot) { const f = $("#page > .session-foot"); n = f?.querySelector('[data-foot="' + st.focus.foot + '"]') ?? f?.querySelector('[data-foot="time"]') ?? null; }
       // By place only when it had no keyed block and the page has as many controls as before: never onto another row.
       if (!n && !st.focus.host && st.focus.at >= 0 && $("#page").querySelectorAll(FOCUSABLE).length === st.focus.of) n = $("#page").querySelectorAll(FOCUSABLE)[st.focus.at];
       if (n && n !== document.activeElement) { n.focus({ preventScroll: true }); if (st.focus.range) try { n.setSelectionRange(...st.focus.range); } catch {} }
