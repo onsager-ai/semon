@@ -296,6 +296,7 @@ const servedModel = async (browser, opts, patch, baselineData = null) => {
     await route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(m) });
   });
   await page.reload({ waitUntil: "load" }); await settled(page);
+  if (baselineData) await goto(page, { v: "sessions" }, baselineData);
   return { page, state, baseline };
 };
 const scrollSidebar = async (page, y) => { await page.evaluate((y) => { document.querySelector("#side-list").scrollTop = y; }, y); await page.waitForTimeout(80); };
