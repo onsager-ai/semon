@@ -364,6 +364,222 @@ pub(crate) fn image(record: &Value, block: usize, want: u64) -> Option<(&'static
     signature(media, &bytes).then_some((media, bytes))
 }
 
+/// A prompt's image metadata; never stores prompt text, base64 or decoded bytes.
+#[derive(Default)]
+pub(crate) struct PromptCache {
+    entries: std::sync::Mutex<std::collections::VecDeque<(u64, PromptMetadata)>>,
+}
+
+#[derive(Clone)]
+struct ImageRange {
+    block: usize,
+    start: u64,
+    end: u64,
+    prefix: usize,
+}
+
+#[derive(Clone)]
+struct PromptMetadata {
+    refs: Vec<Value>,
+    ranges: Vec<ImageRange>,
+    length: u64,
+}
+
+const PROMPT_LINE_MAX: u64 = 64 * 1024 * 1024;
+const PROMPT_CACHE_ENTRIES: usize = 16;
+const PROMPT_CACHE_BYTES: usize = 256 * 1024;
+
+fn raw_field<'a>(raw: &'a str, key: &str) -> Option<&'a serde_json::value::RawValue> {
+    let fields: std::collections::BTreeMap<String, &'a serde_json::value::RawValue> =
+        serde_json::from_str(raw).ok()?;
+    fields.get(key).copied()
+}
+
+fn raw_parts(raw: &str) -> Option<Vec<&serde_json::value::RawValue>> {
+    let parts = if let Some(attachment) = raw_field(raw, "attachment") {
+        raw_field(attachment.get(), "prompt")?
+    } else if let Some(message) = raw_field(raw, "message") {
+        raw_field(message.get(), "content")?
+    } else {
+        raw_field(raw_field(raw, "payload")?.get(), "content")?
+    };
+    serde_json::from_str(parts.get()).ok()
+}
+
+impl PromptMetadata {
+    fn of(record: &Value, raw: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(raw).ok()?;
+        let refs = refs(record);
+        let mut ranges = Vec::new();
+        if let Some(parts) = parts(record).filter(|parts| has_image(parts)) {
+            let raw_parts = raw_parts(text)?;
+            for (block, (part, raw_part)) in parts.iter().zip(raw_parts).enumerate() {
+                let Some(found) = inline(part) else { continue };
+                let data = match field(part, "type")? {
+                    "image" => raw_field(raw_field(raw_part.get(), "source")?.get(), "data")?,
+                    "input_image" => {
+                        let url = raw_field(raw_part.get(), "image_url")?;
+                        if url.get().starts_with('"') {
+                            url
+                        } else {
+                            raw_field(url.get(), "url")?
+                        }
+                    }
+                    _ => continue,
+                };
+                let decoded: String = serde_json::from_str(data.get()).ok()?;
+                let prefix = decoded.len().checked_sub(found.data.len())?;
+                let start = (data.get().as_ptr() as usize).checked_sub(raw.as_ptr() as usize)?;
+                let end = start.checked_add(data.get().len())?;
+                if end > raw.len() || !data.get().starts_with('"') || !data.get().ends_with('"') {
+                    return None;
+                }
+                ranges.push(ImageRange {
+                    block,
+                    start: (start + 1) as u64,
+                    end: (end - 1) as u64,
+                    prefix,
+                });
+            }
+        }
+        ranges.sort_by_key(|range| range.start);
+        Some(Self {
+            refs,
+            ranges,
+            length: raw.len() as u64,
+        })
+    }
+
+    fn bytes(&self) -> usize {
+        self.ranges.len() * std::mem::size_of::<ImageRange>()
+            + serde_json::to_vec(&self.refs).map_or(PROMPT_CACHE_BYTES, |bytes| bytes.len())
+    }
+}
+
+impl PromptCache {
+    fn metadata(&self, offset: u64) -> Option<PromptMetadata> {
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        entries
+            .iter()
+            .find(|(at, _)| *at == offset)
+            .map(|(_, metadata)| metadata.clone())
+    }
+
+    fn keep(&self, offset: u64, metadata: PromptMetadata) {
+        if metadata.bytes() > PROMPT_CACHE_BYTES {
+            return;
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        entries.retain(|(at, _)| *at != offset);
+        entries.push_back((offset, metadata));
+        while entries.len() > PROMPT_CACHE_ENTRIES
+            || entries.iter().map(|(_, meta)| meta.bytes()).sum::<usize>() > PROMPT_CACHE_BYTES
+        {
+            entries.pop_front();
+        }
+    }
+
+    /// Reconstructs a transient prompt record with its image strings empty.
+    /// Only metadata survives the request; subsequent pages skip the cached
+    /// image ranges instead of parsing megabytes of base64 again.
+    pub(crate) fn record(&self, path: &std::path::Path, offset: u64) -> Option<(Value, u64)> {
+        use std::io::{BufRead, Read, Seek, SeekFrom};
+        let mut file = crate::sealed::LogFile::open(path).ok()?;
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        if let Some(metadata) = self.metadata(offset) {
+            let mut bytes = Vec::new();
+            let mut cursor = 0;
+            for range in &metadata.ranges {
+                let length = range.start.checked_sub(cursor)?;
+                (&mut file).take(length).read_to_end(&mut bytes).ok()?;
+                file.seek(SeekFrom::Start(offset.checked_add(range.end)?))
+                    .ok()?;
+                cursor = range.end;
+            }
+            (&mut file)
+                .take(metadata.length.checked_sub(cursor)?)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            let read = bytes.len() as u64;
+            return serde_json::from_slice(&bytes)
+                .ok()
+                .map(|record| (record, read));
+        }
+        let mut bytes = Vec::new();
+        std::io::BufReader::new(file)
+            .take(PROMPT_LINE_MAX + 1)
+            .read_until(b'\n', &mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > PROMPT_LINE_MAX {
+            return None;
+        }
+        let record: Value = serde_json::from_slice(&bytes).ok()?;
+        if let Some(metadata) = PromptMetadata::of(&record, &bytes) {
+            self.keep(offset, metadata);
+        }
+        Some((record, bytes.len() as u64))
+    }
+
+    pub(crate) fn refs(&self, offset: u64) -> Option<Vec<Value>> {
+        self.metadata(offset).map(|metadata| metadata.refs)
+    }
+
+    /// Reads and decodes only the selected image string, checking its current
+    /// version and signature before serving it. Cached refs contain no bytes.
+    pub(crate) fn image(
+        &self,
+        path: &std::path::Path,
+        offset: u64,
+        block: usize,
+        want: u64,
+    ) -> Option<(&'static str, Vec<u8>)> {
+        use std::io::{Read, Seek, SeekFrom};
+        let metadata = match self.metadata(offset) {
+            Some(metadata) => metadata,
+            None => {
+                let (record, _) = self.record(path, offset)?;
+                match self.metadata(offset) {
+                    Some(metadata) => metadata,
+                    None => return image(&record, block, want),
+                }
+            }
+        };
+        let reference = metadata
+            .refs
+            .iter()
+            .find(|reference| reference["b"].as_u64() == Some(block as u64))?;
+        let media = allowed(reference["type"].as_str()?)?;
+        let range = metadata.ranges.iter().find(|range| range.block == block)?;
+        let length = range.end.checked_sub(range.start)?;
+        if length > PROMPT_LINE_MAX {
+            return None;
+        }
+        let mut file = crate::sealed::LogFile::open(path).ok()?;
+        file.seek(SeekFrom::Start(offset.checked_add(range.start)?))
+            .ok()?;
+        let mut encoded = Vec::with_capacity(length as usize + 2);
+        encoded.push(b'"');
+        file.take(length).read_to_end(&mut encoded).ok()?;
+        if encoded.len() != length as usize + 1 {
+            return None;
+        }
+        encoded.push(b'"');
+        let data: String = serde_json::from_slice(&encoded).ok()?;
+        let data = data.get(range.prefix..)?;
+        if version(data.as_bytes()) != want {
+            return None;
+        }
+        let bytes = decode(data.as_bytes(), IMAGE_MAX)?;
+        signature(media, &bytes).then_some((media, bytes))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -388,6 +604,92 @@ pub(crate) mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn long_prompts_reuse_only_refs_and_ranges_and_skip_image_data() {
+        let root = std::env::temp_dir().join(format!("semon-prompt-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("images.jsonl");
+        let mut png = vec![0xFF; 4 * 1024 * 1024];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let encoded = encode(&png);
+        let record = json!({"type":"user","message":{"role":"user","content":[
+            {"type":"text","text":"private prompt text"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":encoded}},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":encoded}},
+        ]}});
+        // JSON string escapes are legal: the cache must track the source
+        // range and decode its string before interpreting base64.
+        let raw = record.to_string().replace('/', "\\/") + "\n";
+        std::fs::write(&path, &raw).unwrap();
+        let cache = PromptCache::default();
+        let (first, first_bytes) = cache.record(&path, 0).unwrap();
+        let expected = refs(&first);
+        let (second, repeated_bytes) = cache.record(&path, 0).unwrap();
+        assert!(first_bytes > 9 * 1024 * 1024);
+        assert!(
+            repeated_bytes < 1024,
+            "repeated pages must skip the encoded images"
+        );
+        assert_eq!(
+            second["message"]["content"][0]["text"],
+            "private prompt text"
+        );
+        assert_eq!(second["message"]["content"][1]["source"]["data"], "");
+        assert_eq!(cache.refs(0).unwrap(), expected);
+        let metadata = cache.metadata(0).unwrap();
+        assert!(metadata.bytes() < 2048);
+        assert!(
+            !serde_json::to_string(&metadata.refs)
+                .unwrap()
+                .contains("private")
+        );
+        for block in [1, 2] {
+            assert_eq!(
+                cache
+                    .image(&path, 0, block, version(encoded.as_bytes()))
+                    .unwrap()
+                    .1,
+                png
+            );
+        }
+        // A stale range cannot serve bytes under an old content URL.
+        let changed = raw.replace("/", "A");
+        std::fs::write(&path, changed).unwrap();
+        assert!(
+            cache
+                .image(&path, 0, 1, version(encoded.as_bytes()))
+                .is_none()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_data_url_cache_reads_the_base64_range_only() {
+        let root =
+            std::env::temp_dir().join(format!("semon-codex-prompt-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("images.jsonl");
+        let png = b"\x89PNG\r\n\x1a\n";
+        let encoded = encode(png);
+        let record = json!({"type":"response_item","payload":{"type":"message","role":"user","content":[
+            {"type":"input_text","text":"look at this"},
+            {"type":"input_image","image_url":{"url":format!("data:image/png;base64,{encoded}")}},
+        ]}});
+        std::fs::write(&path, record.to_string() + "\n").unwrap();
+        let cache = PromptCache::default();
+        cache.record(&path, 0).unwrap();
+        let (skinny, _) = cache.record(&path, 0).unwrap();
+        assert_eq!(skinny["payload"]["content"][1]["image_url"]["url"], "");
+        assert_eq!(
+            cache
+                .image(&path, 0, 1, version(encoded.as_bytes()))
+                .unwrap()
+                .1,
+            png
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

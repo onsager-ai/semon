@@ -176,13 +176,30 @@ Run one cursor-aware capture pass with:
 cargo run --locked -p semon-codex -- --verbose
 ```
 
-By default, the adapter reads `~/.codex/sessions/**/*.jsonl` and
-`~/.codex/history.jsonl`, writes traces to
+On current Codex installations, the adapter captures session rollouts from
+`~/.codex/sessions/**/*.jsonl`. It also reads the legacy `~/.codex/history.jsonl`
+when that file exists, for compatibility with older versions, and writes traces to
 `~/.local/share/semon/traces.sqlite3`, and preserves the existing tailer's
 cursor location at `~/.local/state/devlog/codex-tailer.json`. The corresponding
 XDG base-directory variables override those roots.
 
-Recent Codex versions no longer write `~/.codex/history.jsonl`. When it is missing the adapter skips it without an error, so on a current install only the session rollouts are captured, and the history-derived intent traces never appear. Where Codex keeps that history now is unverified (#2).
+Command action traces keep the first parsed action/path for compatibility. A
+compound command additionally carries ordered `components: [{action, path}]`
+for every `parsed_cmd` entry; its exit code describes the whole command, not
+each component. Simple command identities are unchanged; compound identities
+include their complete projected component list. The path rule normalizes
+relative and absolute action paths and marks escapes as `<external>`.
+Human-authored intent/outcome text stays verbatim, including any paths the
+author typed, so machine independence applies to action projection rather than
+to arbitrary authored prose.
+
+Recent Codex versions do not write the legacy history file. Its absence is normal
+and the adapter skips it without an error. User turns recorded in session rollouts
+are still captured; separate legacy history-entry traces are absent. The adapter
+does not read Codex SQLite history databases. The isolated
+[resume spike](docs/codex-resume-spike.md) measures minimal paginated rollout
+replay and database reconstruction, rather than assuming a database is a drop-in
+replacement for the old history file.
 
 Useful source and destination overrides are:
 
@@ -474,7 +491,7 @@ counts, the new epoch, the transcript's last recorded `cwd` and `gitBranch`, a
 read-only branch warning from `git rev-parse`, every `tool_use` id and name that
 has no matching `tool_result`, and retained orphan groups by fenced epoch. It
 never prints prompts, responses, tool inputs, or tool results. Check real state
-before retrying any unfinished tool call. The final report line is the command
+before retrying any unfinished tool call. The report includes the command
 to run manually:
 
 ```sh
@@ -483,8 +500,14 @@ cd /path/to/target-worktree && claude --resume SESSION_ID
 
 Semon never starts Claude or switches branches. Uncommitted worktree changes
 are not restored; the old agent may still be running; and its git side effects
-are not fenced. Memory and sidecar snapshots remain out of scope, so
-`*.meta.json` and `custom-title.json` are not restored.
+are not fenced. Memory and sidecars are omitted unless you explicitly select an
+encrypted snapshot root with `--memory-root-id ROOT_SHA256 --memory-target NEW_DIR`
+(and optionally `--memory-manifest SHA256`). The new target is staged separately
+and never overwrites existing paths. JSON `recovery_status.memory` states whether
+memory was selected, restored or failed; sidecars outside that selected root are
+omitted. A selected memory failure reports partial recovery and suppresses the
+resume command. See [mutable memory snapshots](docs/memory-snapshots.md) for
+capture, session/epoch association, conflicts and limits.
 
 The receiver cannot verify encrypted chain values because each chain value is
 inside its frame ciphertext. It still enforces session mode, holder and epoch,
@@ -639,6 +662,30 @@ cargo run --locked -p semon-store --bin semon -- forget --forensic \
   --yes
 ```
 
+To delete the relay's stored session payloads too, add `--relay-endpoint URL
+--relay-state PATH --relay-config PATH` (and `--relay-ca CERT` for pinned HTTPS).
+Use the same state path, endpoint origin and enrolled identity as the running
+sender. `--session` and `--before` propagate; semantic `--trace` selectors cannot
+select replicated carrier frames. Each request is saved privately before it is
+sent, and offline requests remain visible as `pending_on_server` until a sender
+pass acknowledges them. Local-only deletion reports that server copies remain.
+
+The relay command also works independently of the forensic store:
+
+```sh
+semon-relay forget --session SESSION --endpoint https://receiver.example \
+  --state ~/.local/state/semon/relay.json --config ~/.config/semon --tls-ca receiver.pem
+```
+
+Relay deletion removes live and orphan frame payloads across generations and
+epochs. Body-free sequence tombstones, content hashes/tags, lease metadata and
+wrapped data-key envelopes remain so a sender can continue and old retransmits
+cannot restore forgotten bytes. Carrier files and copies another machine already
+restored are unaffected. `semon-relay forget --memory ROOT` (or `--memory-id ID`)
+queues a separate snapshot deletion; its cutoff is fixed when queued so retries
+do not delete newly created snapshots. Snapshot deletion requires a receiver
+with the snapshot protocol enabled.
+
 A bare `semon forget --forensic` with no selector is refused rather than
 deleting everything — this is the first destructive, irreversible command in
 the tool, so it never defaults to the maximal action.
@@ -684,6 +731,17 @@ cargo test --locked
 sh -n scripts/install-user-timer.sh
 ```
 
+Browser checks use the locked tooling in `tests/ui/` (`npm ci` and
+`npx playwright install --with-deps chromium`); `.github/workflows/ui.yml`
+contains the fixture and server setup. Capture pixel baselines in Ubuntu 24.04
+with that locked browser and its default fontconfig RGB subpixel rendering.
+The same vendored fonts and Chromium version produce different glyph pixels on
+Debian 13, whose fontconfig defaults to no subpixel rendering. The Linux browser
+launcher uses the checked-in `tests/ui/fontconfig.conf` to assign `rgba` to `rgb`,
+matching Ubuntu CI without changing the host configuration or system fonts.
+Review changed screenshots before updating affected baseline entries, and keep
+the pixel thresholds unchanged.
+
 ## Harness icons
 
 Semon shows each harness's official icon to identify where a session came from. The unmodified files are in
@@ -691,3 +749,10 @@ Semon shows each harness's official icon to identify where a session came from. 
 repository's Apache-2.0 license.
 
 Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.
+
+Encrypted relay session trees are available locally through
+`semon sessions --remote ENDPOINT [--remote-config PATH] [--remote-ca CERT]`.
+They decrypt and verify bounded pages locally and persist metadata only, with
+machine roots, exact cross-harness links, lease liveness and incremental reads.
+See [encrypted remote session trees](docs/encrypted-remote-sessions.md) for
+identity enrollment, snapshots and the content boundary.

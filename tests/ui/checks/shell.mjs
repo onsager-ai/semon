@@ -355,7 +355,7 @@ export default async function shellCheck(browser) {
           const longNameLength = await page.locator(".rows .row:last-child .sh-nm").evaluate((element) => element.textContent.length);
           results[key].longNameLength = longNameLength;
           r.expect(longNameLength === 90, key + " long row name length=" + longNameLength + " expected 90");
-          // A link styled as a button reads as a button: no underline, and the button's own ink, not the link accent.
+          // A link styled as a button reads as a button: no underline, and the same ink as the button beside it.
           const linkButton = await page.locator('a.btn[href="#learn-more"]').evaluate((element) => {
             const style = getComputedStyle(element), plain = getComputedStyle(document.querySelector(".btn-row button.btn:not(.primary)"));
             return { line: style.textDecorationLine, color: style.color, buttonColor: plain.color };

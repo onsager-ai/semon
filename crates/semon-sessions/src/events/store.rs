@@ -378,7 +378,7 @@ fn read_legacy(file: &fs::File) -> io::Result<(Identity, Result<Legacy, serde_js
 /// reading only those two fields as it streams past, and its rows commit
 /// with `synchronous = FULL`, so they are on disk before the file goes.
 ///
-/// Removal claims the file first, renaming it to `<name>.importing.<pid>.<n>`,
+/// Removal claims the file first, renaming it to `<name>.importing.<pid>.<n>.<16 hex digits>`,
 /// so no save an older semon makes to the path is ever removed or set aside
 /// unread: the claimed file is removed (or set aside) only if it is the one
 /// that was parsed, and read and imported first if it isn't. A claim left by
@@ -484,7 +484,12 @@ const O_NONBLOCK: i32 = if cfg!(any(target_os = "macos", target_os = "ios")) {
 /// never through a symlink, and never waiting on a FIFO. Anything else is
 /// left where it is and reported once; `None` too when it is gone or can't
 /// be opened.
-fn open_regular(path: &Path) -> Option<fs::File> {
+pub(crate) fn open_regular(path: &Path) -> Option<fs::File> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() {
+        warn_import(path, &"it isn't a regular file");
+        return None;
+    }
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -600,17 +605,17 @@ fn finish(
 /// `<legacy>.corrupt`, `<legacy>.corrupt.1`, …, never over an existing
 /// file: hard-linked there (a link fails rather than replaces), then
 /// unlinked from its claim. Where the filesystem has no hard links, it is
-/// renamed to the first name that doesn't exist. `None` when the claim is
+/// left intact and an error is returned; a check then rename could overwrite
+/// another process's archive. `None` when the claim is
 /// already gone: another process set it aside.
 fn set_aside_legacy(legacy: &Path, claimed: &Path) -> io::Result<Option<PathBuf>> {
-    let mut linking = true;
     for n in 0..1000 {
         let aside = if n == 0 {
             sibling(legacy, ".corrupt")
         } else {
             sibling(legacy, &format!(".corrupt.{n}"))
         };
-        if linking {
+        {
             match fs::hard_link(claimed, &aside) {
                 Ok(()) => {
                     match fs::remove_file(claimed) {
@@ -621,20 +626,36 @@ fn set_aside_legacy(legacy: &Path, claimed: &Path) -> io::Result<Option<PathBuf>
                     }
                     return Ok(Some(aside));
                 }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        if let (Ok(source), Ok(target)) =
+                            (fs::symlink_metadata(claimed), fs::symlink_metadata(&aside))
+                            && source.dev() == target.dev()
+                            && source.ino() == target.ino()
+                        {
+                            match fs::remove_file(claimed) {
+                                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                                    return Err(error);
+                                }
+                                _ => return Ok(Some(aside)),
+                            }
+                        }
+                    }
+                    continue;
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                // No hard links here (EPERM, unsupported): rename instead.
-                Err(_) => linking = false,
+                // No hard links here (EPERM, unsupported): preserve the claim.
+                Err(_) => {}
             }
         }
-        if fs::symlink_metadata(&aside).is_ok() {
-            continue;
-        }
-        return match fs::rename(claimed, &aside) {
-            Ok(()) => Ok(Some(aside)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
-        };
+        // Refuse to rename on filesystems without hard links: rename can
+        // replace another process's archive after a check for existence.
+        // Keep the original claim intact rather than risk losing either file.
+        return Err(io::Error::other(
+            "cannot archive the claim safely: this filesystem has no hard links",
+        ));
     }
     Err(io::Error::other("no free .corrupt name"))
 }
@@ -741,11 +762,11 @@ impl IndexStore for SqliteStore {
         &mut self,
         path: &str,
         expected: Option<&Ledger>,
-        base: Option<&FileIndex>,
+        changes: Option<&super::DirtyRows>,
         ledger: &Ledger,
         index: &FileIndex,
     ) -> Result<Outcome, StoreError> {
-        self.write_one(path, expected, base, ledger, index)
+        self.write_one_dirty(path, expected, changes, ledger, index)
             .map_err(failure)
     }
 
@@ -891,11 +912,24 @@ impl SqliteStore {
     /// only the rows that differ from it are written: the appended ones, and
     /// earlier ones a line resolved in place (a tool call's result). Without
     /// it the file's rows are replaced.
+    #[cfg(test)]
     fn write_one(
         &mut self,
         path: &str,
         expected: Option<&Ledger>,
         base: Option<&FileIndex>,
+        ledger: &Ledger,
+        index: &FileIndex,
+    ) -> rusqlite::Result<Outcome> {
+        let changes = base.map(|base| super::DirtyRows::between(base, index));
+        self.write_one_dirty(path, expected, changes.as_ref(), ledger, index)
+    }
+
+    fn write_one_dirty(
+        &mut self,
+        path: &str,
+        expected: Option<&Ledger>,
+        changes: Option<&super::DirtyRows>,
         ledger: &Ledger,
         index: &FileIndex,
     ) -> rusqlite::Result<Outcome> {
@@ -909,17 +943,16 @@ impl SqliteStore {
         if found.as_ref().map(|(_, ledger)| ledger) != expected {
             return Ok(Outcome::Conflict);
         }
-        let empty = FileIndex::default();
-        let old = match (base, &found) {
-            (Some(base), Some(_)) => base,
-            (_, found) => {
-                if let Some((file_id, _)) = found {
-                    clear(&transaction, *file_id)?;
-                }
-                &empty
-            }
+        if changes.is_none()
+            && let Some((file_id, _)) = found
+        {
+            clear(&transaction, file_id)?;
+        }
+        let full = super::DirtyRows {
+            usage: index.usage_by_id.keys().cloned().collect(),
+            ..super::DirtyRows::default()
         };
-        write_file(&transaction, path, ledger, old, index)?;
+        write_file(&transaction, path, ledger, changes.unwrap_or(&full), index)?;
         transaction.commit()?;
         Ok(Outcome::Written)
     }
@@ -1398,6 +1431,7 @@ fn read_file(
     }
 
     let index = FileIndex {
+        dirty_rows: None,
         events,
         extras,
         signals,
@@ -1545,20 +1579,23 @@ fn clear(transaction: &Transaction<'_>, file_id: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Writes the rows of `new` that differ from `old`, the rows the store
-/// holds for the file now, and deletes the ones `new` no longer has.
-fn changed<T: PartialEq>(
-    old: &[T],
+/// Writes touched rows and the appended tail, deleting a truncated tail
+/// only for synthetic deltas (the append parser never removes rows).
+fn changed<T>(
+    before: usize,
+    touched: &std::collections::BTreeSet<usize>,
     new: &[T],
     mut put: impl FnMut(usize, &T) -> rusqlite::Result<()>,
     cut: impl FnOnce(usize) -> rusqlite::Result<()>,
 ) -> rusqlite::Result<()> {
-    for (seq, row) in new.iter().enumerate() {
-        if old.get(seq) != Some(row) {
+    let mut rows = touched.clone();
+    rows.extend(before..new.len());
+    for seq in rows {
+        if let Some(row) = new.get(seq) {
             put(seq, row)?;
         }
     }
-    if new.len() < old.len() {
+    if new.len() < before {
         cut(new.len())?;
     }
     Ok(())
@@ -1570,10 +1607,11 @@ fn write_file(
     transaction: &Transaction<'_>,
     path: &str,
     ledger: &Ledger,
-    old: &FileIndex,
+    changes: &super::DirtyRows,
     index: &FileIndex,
 ) -> rusqlite::Result<()> {
     let FileIndex {
+        dirty_rows: _,
         events,
         extras,
         signals,
@@ -1645,9 +1683,13 @@ fn write_file(
     let mut put = transaction.prepare(PUT_EVENT)?;
     let mut cut = transaction
         .prepare("DELETE FROM events WHERE file_id = ?1 AND extra = ?2 AND seq >= ?3")?;
-    for (extra, old_rows, new_rows) in [(false, &old.events, events), (true, &old.extras, extras)] {
+    for (extra, before, touched, new_rows) in [
+        (false, changes.before_events, &changes.events, events),
+        (true, changes.before_extras, &changes.extras, extras),
+    ] {
         changed(
-            old_rows,
+            before,
+            touched,
             new_rows,
             |seq, event| put_event(&mut put, file_id, extra, seq, event),
             |from| {
@@ -1659,7 +1701,8 @@ fn write_file(
 
     let mut put = transaction.prepare(PUT_SIGNAL)?;
     changed(
-        &old.signals,
+        changes.before_signals,
+        &changes.signals,
         signals,
         |seq, signal| {
             let Signal { k, o, t, at, n, v } = signal;
@@ -1686,13 +1729,10 @@ fn write_file(
     )?;
 
     let mut put = transaction.prepare(PUT_USAGE)?;
-    for (id, usage) in usage_by_id {
-        if old.usage_by_id.get(id) != Some(usage) {
+    for id in &changes.usage {
+        if let Some(usage) = usage_by_id.get(id) {
             put_usage(&mut put, file_id, id, usage)?;
-        }
-    }
-    for id in old.usage_by_id.keys() {
-        if !usage_by_id.contains_key(id) {
+        } else {
             transaction.execute(
                 "DELETE FROM usage WHERE file_id = ?1 AND message_id = ?2",
                 params![file_id, id],
@@ -1702,7 +1742,8 @@ fn write_file(
 
     let mut put = transaction.prepare(PUT_CODEX_USAGE)?;
     changed(
-        &old.codex_usage_events,
+        changes.before_codex_usage,
+        &changes.codex_usage,
         codex_usage_events,
         |seq, usage| {
             let CodexUsageEvent {
@@ -1938,6 +1979,50 @@ mod tests {
         root
     }
 
+    #[test]
+    fn finishing_the_same_corrupt_claim_keeps_one_archive() {
+        let root = scratch("same-corrupt-claim");
+        let legacy = root.join("index.events.json");
+        let claim = root.join("claim");
+        let aside = sibling(&legacy, ".corrupt");
+        fs::write(&claim, b"damaged cache").unwrap();
+        fs::hard_link(&claim, &aside).unwrap();
+        assert_eq!(
+            set_aside_legacy(&legacy, &claim).unwrap(),
+            Some(aside.clone())
+        );
+        assert!(!claim.exists());
+        assert!(!sibling(&legacy, ".corrupt.1").exists());
+        assert_eq!(fs::read(&aside).unwrap(), b"damaged cache");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn different_corrupt_claims_never_replace_each_other() {
+        let root = scratch("different-corrupt-claims");
+        let legacy = root.join("index.events.json");
+        let claims: Vec<_> = (0..8)
+            .map(|index| {
+                let claim = root.join(format!("claim-{index}"));
+                fs::write(&claim, index.to_string()).unwrap();
+                claim
+            })
+            .collect();
+        let workers: Vec<_> = claims
+            .into_iter()
+            .map(|claim| {
+                let legacy = legacy.clone();
+                std::thread::spawn(move || set_aside_legacy(&legacy, &claim).unwrap().unwrap())
+            })
+            .collect();
+        let contents: BTreeSet<_> = workers
+            .into_iter()
+            .map(|worker| fs::read_to_string(worker.join().unwrap()).unwrap())
+            .collect();
+        assert_eq!(contents, (0..8).map(|index| index.to_string()).collect());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn opened(path: &Path) -> (SqliteStore, Loaded) {
         match SqliteStore::attempt(path, None) {
             Ok(opened) => opened,
@@ -1965,6 +2050,7 @@ mod tests {
     /// then proves it is persisted.
     fn full() -> FileIndex {
         FileIndex {
+            dirty_rows: None,
             events: vec![
                 Event {
                     k: Kind::Tool,

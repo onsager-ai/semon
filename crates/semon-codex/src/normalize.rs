@@ -249,7 +249,28 @@ fn parse_u32(value: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_iso_timestamp;
+    use super::{apply_path_rule, parse_iso_timestamp};
+
+    #[test]
+    fn path_rule_normalizes_relative_and_absolute_escapes() {
+        assert_eq!(
+            apply_path_rule("../../elsewhere/secrets.env", "/work/repo"),
+            "<external>"
+        );
+        assert_eq!(
+            apply_path_rule("src/../../secrets.env", "/work/repo"),
+            "<external>"
+        );
+        assert_eq!(apply_path_rule("src/../main.rs", "/work/repo"), "main.rs");
+        assert_eq!(
+            apply_path_rule("/work/repo/../secrets.env", "/work/repo"),
+            "<external>"
+        );
+        assert_eq!(
+            apply_path_rule("/work/repo/src/../main.rs", "/work/repo"),
+            "main.rs"
+        );
+    }
 
     #[test]
     fn rejects_fraction_without_decimal_separator() {
@@ -746,11 +767,14 @@ pub fn normalize_record(
         // mirror — is the source of message content, so the mirror (which
         // also carries injections, such as `<recommended_plugins>`, that
         // never appear in the item stream at all) is no longer projected.
-        if role == "developer" || context.has_item_stream {
+        if !matches!(role.as_str(), "user" | "assistant") || context.has_item_stream {
             return base("legacy_message", EventFields::default());
         }
         let content = message_text(payload.get("content").unwrap_or(&Value::Null));
         if role == "user" {
+            if is_harness_prompt(&content) {
+                return base("legacy_message", EventFields::default());
+            }
             return base(
                 "user_prompt",
                 EventFields {
@@ -859,6 +883,30 @@ fn item_completed_event(
                 .unwrap_or(Value::Null);
             event.insert("action".into(), Value::String(action));
             event.insert("path".into(), path);
+            if let Some(parsed) = item.get("parsed_cmd").and_then(Value::as_array)
+                && parsed.len() > 1
+            {
+                // Preserve parser order without storing raw commands. The
+                // overall exit code applies to the compound command, not to
+                // any individual component's execution status.
+                let components = parsed
+                    .iter()
+                    .map(|entry| {
+                        let action = entry
+                            .get("type")
+                            .filter(|value| truthy(value))
+                            .map(py_string)
+                            .unwrap_or_else(|| "unknown".into());
+                        let path = entry
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .map(|path| Value::String(apply_path_rule(path, cwd)))
+                            .unwrap_or(Value::Null);
+                        serde_json::json!({"action":action,"path":path})
+                    })
+                    .collect();
+                event.insert("components".into(), Value::Array(components));
+            }
             // Codex has emitted `exit_code` on every observed CommandExecution
             // item; -1 marks the (unobserved) absent case distinctly from a
             // genuine zero (success) exit code.
@@ -923,31 +971,73 @@ fn map_file_change_kind(value: &str) -> String {
     .to_owned()
 }
 
+/// Known carrier framing is not a work prompt, including on older streams
+/// without typed items. Ordinary prose and unknown XML remain user content.
+fn is_harness_prompt(text: &str) -> bool {
+    let Some(rest) = text.trim_start().strip_prefix('<') else {
+        return false;
+    };
+    [
+        "environment_context",
+        "user_instructions",
+        "recommended_plugins",
+        "skills_instructions",
+        "multi_agent_mode",
+        "multi_agent_role",
+        "user_shell_command",
+        "turn_aborted",
+    ]
+    .iter()
+    .any(|tag| {
+        rest.strip_prefix(tag)
+            .is_some_and(|tail| tail.starts_with(['>', ' ', '\n']))
+    })
+}
+
 /// Applies the semantic region's path rule to one absolute or relative path.
 ///
 /// The semantic region is content-addressed and must stay machine
 /// independent, so an absolute path can never enter it as-is:
 ///
-/// - A path already relative (as Codex's own `parsed_cmd` paths are) is kept
-///   unchanged — it carries no machine-specific prefix to strip.
+/// - Relative paths are normalized by their text; a `..` that leaves the
+///   working directory becomes `"<external>"`. No filesystem is consulted.
 /// - An absolute path under `cwd` is rewritten relative to `cwd`.
 /// - An absolute path outside `cwd` (or when `cwd` itself is unknown) becomes
 ///   the literal string `"<external>"` — never a basename, which would still
 ///   leak the file's name.
 pub fn apply_path_rule(raw_path: &str, cwd: &str) -> String {
-    if !raw_path.starts_with('/') {
-        return raw_path.to_owned();
+    fn normalized(path: &str) -> Option<String> {
+        let mut parts = Vec::new();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                other => parts.push(other),
+            }
+        }
+        Some(parts.join("/"))
     }
-    if cwd.is_empty() {
+    let Some(path) = normalized(raw_path) else {
+        return "<external>".to_owned();
+    };
+    if !raw_path.starts_with('/') {
+        return path;
+    }
+    if !cwd.starts_with('/') {
         return "<external>".to_owned();
     }
-    let cwd = cwd.trim_end_matches('/');
-    if raw_path == cwd {
+    let Some(base) = normalized(cwd) else {
+        return "<external>".to_owned();
+    };
+    if path == base {
         return String::new();
     }
-    let prefix = format!("{cwd}/");
-    raw_path
-        .strip_prefix(prefix.as_str())
+    if base.is_empty() {
+        return path;
+    }
+    path.strip_prefix(&format!("{base}/"))
         .map(str::to_owned)
         .unwrap_or_else(|| "<external>".to_owned())
 }
@@ -1267,6 +1357,27 @@ mod item_stream_tests {
                 kind.starts_with("item_") && kind != "item_user_message",
                 "unexpected kind for {item_type}: {kind}"
             );
+        }
+    }
+
+    #[test]
+    fn legacy_harness_user_and_system_messages_are_never_projected() {
+        for (role, text) in [
+            (
+                "user",
+                "<recommended_plugins>injected</recommended_plugins>",
+            ),
+            ("user", "<environment_context>machine</environment_context>"),
+            ("system", "system framing"),
+        ] {
+            let mut context = context_with_cwd("/work/repo");
+            let event = normalize_record(
+                &json!({"type":"response_item", "payload": {"type":"message", "role":role,
+                "content":[{"type":"input_text", "text":text}]}}),
+                &mut context,
+                "",
+            );
+            assert_eq!(event["kind"], "legacy_message");
         }
     }
 

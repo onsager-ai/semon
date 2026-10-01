@@ -14,6 +14,7 @@ use serde_json::Value;
 
 mod analytics;
 mod attachments;
+pub mod comparison;
 mod events;
 mod facts;
 mod handoff;
@@ -21,11 +22,16 @@ pub mod harness;
 mod inputs;
 mod mcp;
 mod model;
+mod parent_links;
 pub mod pricing;
 mod query;
+mod read_path;
+pub(crate) use read_path::open_input;
+mod model_delta;
 mod received;
 mod refresh;
 mod repo;
+pub mod sealed;
 pub mod shell;
 mod tx;
 mod union;
@@ -44,7 +50,9 @@ pub use refresh::RefreshPool;
 pub use union::{
     AccountLink, AccountMenu, AccountWorkspace, AdminLink, Extras, LinkMethod, Refresh, ViewerCore,
 };
-pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve};
+mod remote;
+pub use remote::{RemoteLease, collect_remote};
+pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve, serve_listener};
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -132,9 +140,15 @@ pub struct ToolCall {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Node {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease: Option<RemoteLease>,
     pub harness: String,
     pub kind: String,
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
     pub state: String,
     pub pid: Option<u32>,
     pub models: Vec<String>,
@@ -148,6 +162,8 @@ pub struct Node {
     pub open_tools: Vec<ToolCall>,
     pub claude_link: Option<String>,
     pub via_tool: Option<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_source: Option<String>,
     pub unlinked: bool,
     pub children: Vec<Node>,
 }
@@ -156,9 +172,12 @@ impl Node {
     fn new(id: String, harness: &str, kind: &str) -> Self {
         Self {
             id,
+            machine: None,
+            lease: None,
             harness: harness.into(),
             kind: kind.into(),
             label: None,
+            agent_type: None,
             state: "ended".into(),
             pid: None,
             models: Vec::new(),
@@ -172,6 +191,7 @@ impl Node {
             open_tools: Vec::new(),
             claude_link: None,
             via_tool: None,
+            parent_source: None,
             unlinked: false,
             children: Vec::new(),
         }
@@ -223,7 +243,8 @@ struct Summary {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Marker {
-    claude_id: String,
+    harness: String,
+    parent_id: String,
     tool_id: Option<String>,
     handoff: Option<String>,
 }
@@ -298,7 +319,7 @@ pub(crate) fn read_regular_at_most(path: &Path, max: u64) -> io::Result<Vec<u8>>
     if linked.len() > max {
         return Err(io::ErrorKind::FileTooLarge.into());
     }
-    let file = fs::File::open(path)?;
+    let file = open_input(path)?;
     let opened = file.metadata()?;
     if !opened.is_file() {
         return Err(io::ErrorKind::InvalidInput.into());
@@ -367,7 +388,7 @@ pub(crate) fn save_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
     temporary.push(format!(".{}.{save}.tmp", std::process::id()));
     let temporary = PathBuf::from(temporary);
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     let file = options.open(&temporary)?;
@@ -412,7 +433,7 @@ fn summarize(
             && entry.modified_ns == modified_ns
         {
             let mut result = entry.summary.clone();
-            if harness == "codex" {
+            {
                 // The marker is never persisted (it can carry a handoff
                 // prompt path), so it must be recomputed even when the rest
                 // of the file is unchanged. This is a bounded first-turn
@@ -432,7 +453,7 @@ fn summarize(
         }
     }
     *dirty = true;
-    let mut file = fs::File::open(path)?;
+    let mut file = sealed::LogFile::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
@@ -461,9 +482,7 @@ fn summarize(
             update_codex(&mut summary, &record);
         }
     }
-    if harness == "codex" {
-        summary.marker = read_first_marker(path)?;
-    }
+    summary.marker = read_first_marker(path)?;
     index.files.insert(
         key,
         Entry {
@@ -553,6 +572,15 @@ fn update_claude(summary: &mut Summary, record: &Value) {
 }
 
 fn user_text(record: &Value) -> Option<&str> {
+    if field(record, "type") == Some("user") {
+        let content = &record["message"]["content"];
+        return content.as_str().or_else(|| {
+            content
+                .as_array()?
+                .iter()
+                .find_map(|part| field(part, "text"))
+        });
+    }
     let payload = record.get("payload")?;
     if field(record, "type") == Some("response_item") && field(payload, "role") == Some("user") {
         let content = payload.get("content")?.as_array()?;
@@ -566,6 +594,9 @@ fn user_text(record: &Value) -> Option<&str> {
 }
 
 fn is_agent_output(record: &Value) -> bool {
+    if field(record, "type") == Some("assistant") {
+        return true;
+    }
     let payload = &record["payload"];
     match field(record, "type") {
         Some("response_item") => {
@@ -585,21 +616,17 @@ fn is_agent_output(record: &Value) -> bool {
 
 fn parse_marker(message: &str) -> Option<Marker> {
     let mut lines = message.lines();
-    let first = lines.next()?.strip_prefix("Semon-Parent: claude:")?.trim();
-    let (claude_id, tool_id) = match first.split_once(':') {
-        Some((session, tool)) => (session, Some(tool.to_owned())),
-        None => (first, None),
-    };
-    if claude_id.is_empty() {
-        return None;
-    }
+    let first = lines.next()?.strip_prefix("Semon-Parent: ")?.trim();
+    let (key, tool_id) = parent_links::parse(first)?;
+    let (harness, parent_id) = key.split_once(':')?;
     let handoff = lines
         .next()
         .and_then(|line| line.strip_prefix("Semon-Handoff: "))
         .filter(|path| path.starts_with('/'))
         .map(str::to_owned);
     Some(Marker {
-        claude_id: claude_id.into(),
+        harness: harness.into(),
+        parent_id: parent_id.into(),
         tool_id,
         handoff,
     })
@@ -656,7 +683,7 @@ fn update_codex(summary: &mut Summary, record: &Value) {
 }
 
 fn read_first_marker(path: &Path) -> io::Result<Option<Marker>> {
-    let mut reader = BufReader::new(fs::File::open(path)?);
+    let mut reader = BufReader::new(sealed::LogFile::open(path)?);
     let mut line = Vec::new();
     while reader.read_until(b'\n', &mut line)? != 0 {
         if let Ok(record) = serde_json::from_slice::<Value>(&line)
@@ -677,7 +704,7 @@ fn read_first_marker(path: &Path) -> io::Result<Option<Marker>> {
 }
 
 fn codex_meta(path: &Path) -> io::Result<Option<Value>> {
-    let mut reader = BufReader::new(fs::File::open(path)?);
+    let mut reader = BufReader::new(sealed::LogFile::open(path)?);
     let mut line = Vec::new();
     reader.read_until(b'\n', &mut line)?;
     let meta = serde_json::from_slice::<Value>(&line).ok().filter(|value| {
@@ -973,6 +1000,7 @@ pub(crate) fn collect_with_index(
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                 .filter(Value::is_object)
             {
+                node.agent_type = field(&meta, "agentType").map(str::to_owned);
                 node.label = field(&meta, "description")
                     .or_else(|| field(&meta, "agentType"))
                     .map(str::to_owned);
@@ -1119,6 +1147,7 @@ pub(crate) fn collect_with_index(
         };
         if let Some(summary) = &summary {
             apply_summary(&mut node, summary, now);
+            summaries.insert(key.clone(), summary.clone());
         } else {
             node.state = "unknown".into();
         }
@@ -1132,10 +1161,10 @@ pub(crate) fn collect_with_index(
         {
             parents.insert(key.clone(), format!("codex:{parent_id}"));
         } else if let Some(marker) = summary.as_ref().and_then(|summary| summary.marker.as_ref()) {
-            let parent_key = format!("claude:{}", marker.claude_id);
+            let parent_key = format!("{}:{}", marker.harness, marker.parent_id);
             if flat.contains_key(&parent_key) {
                 if let Some(prompt) = &marker.handoff {
-                    if let Some(parent_path) = claude_paths.get(&marker.claude_id) {
+                    if let Some(parent_path) = claude_paths.get(&marker.parent_id) {
                         node.via_tool = handoff::find(
                             std::slice::from_ref(parent_path),
                             prompt,
@@ -1152,7 +1181,7 @@ pub(crate) fn collect_with_index(
                             name: name.clone(),
                         });
                 }
-                parents.insert(key.clone(), parent_key);
+                // General markers are resolved after every harness node is known.
             } else {
                 node.unlinked = true;
             }
@@ -1169,6 +1198,55 @@ pub(crate) fn collect_with_index(
             node.pid = Some(pid);
             node
         });
+    }
+
+    let known = flat.keys().cloned().collect();
+    let processes = flat
+        .iter()
+        .filter_map(|(key, node)| {
+            node.pid.map(|pid| {
+                (
+                    key.clone(),
+                    parent_links::Process {
+                        pid,
+                        start: machine.proc_start(options, pid),
+                    },
+                )
+            })
+        })
+        .collect();
+    let markers = summaries
+        .iter()
+        .filter_map(|(key, summary)| summary.marker.clone().map(|marker| (key.clone(), marker)))
+        .collect();
+    let links = parent_links::resolve(
+        options,
+        &machine,
+        &processes,
+        &markers,
+        &known,
+        &parents,
+        i64::try_from(now.saturating_mul(1000)).unwrap_or(i64::MAX),
+    );
+    for (child, link) in links {
+        parents.insert(child.clone(), link.parent.clone());
+        let via_tool = link.call.as_ref().and_then(|call| {
+            summaries
+                .get(&link.parent)?
+                .tools
+                .get(call)
+                .map(|name| ToolCall {
+                    id: call.clone(),
+                    name: name.clone(),
+                })
+        });
+        if let Some(node) = flat.get_mut(&child) {
+            node.parent_source = Some(link.source);
+            node.unlinked = false;
+            if via_tool.is_some() {
+                node.via_tool = via_tool;
+            }
+        }
     }
 
     if let Some(id) = &options.session {
@@ -1215,6 +1293,13 @@ pub fn render_json(nodes: &[Node]) -> String {
 
 pub fn render_text(nodes: &[Node]) -> String {
     fn draw(node: &Node, depth: usize, output: &mut String) {
+        if node.kind == "machine" {
+            output.push_str(&format!("{}machine {}\n", "  ".repeat(depth), node.id));
+            for child in &node.children {
+                draw(child, depth + 1, output);
+            }
+            return;
+        }
         let home = env::var("HOME").unwrap_or_default();
         let cwd = node
             .cwd
@@ -1262,7 +1347,7 @@ pub fn render_text(nodes: &[Node]) -> String {
         } else {
             String::new()
         };
-        let line = format!(
+        let mut line = format!(
             "{}{} {} {} [{}] models={} cwd={} branch={} age={} in={} out={} open={}{}{}{}{}{}",
             "  ".repeat(depth),
             node.harness,
@@ -1286,6 +1371,15 @@ pub fn render_text(nodes: &[Node]) -> String {
             unlinked,
             malformed
         );
+        if let Some(agent_type) = &node.agent_type {
+            line.push_str(&format!(" agentType={agent_type}"));
+        }
+        if let Some(machine) = &node.machine {
+            line.push_str(&format!(" machine={machine}"));
+            if let Some(lease) = &node.lease {
+                line.push_str(&format!(" epoch={}", lease.epoch));
+            }
+        }
         output.extend(line.chars().map(|character| {
             if character.is_control() {
                 ' '

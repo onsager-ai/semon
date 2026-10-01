@@ -7,6 +7,7 @@ publish = false
 description = "Content-addressed SQLite storage for carrier-neutral traces."
 
 [dependencies]
+semon-relay = { path = "../semon-relay" }
 semon-push = { path = "../semon-push" }
 semon-sessions = { path = "../semon-sessions" }
 hex.workspace = true

@@ -2,13 +2,18 @@
 
 mod auth;
 mod crypto;
+mod deletion;
 mod discovery;
+pub use deletion::{
+    ForgetFlushReport, ForgetReport, ForgetSelector, flush_forgets, forget_before_day, queue_forget,
+};
 mod identity;
 mod lease;
 mod protocol;
 mod receiver;
 mod restore;
 mod sender;
+mod snapshots;
 mod state;
 
 pub use auth::{AuthError, REPLAY_WINDOW_MS, RequestSigner, RequestVerifier, SignedHeaders};
@@ -17,7 +22,9 @@ pub use crypto::{
     content_tag, decrypt_envelope, decrypt_frame, encrypt_envelope, encrypt_frame,
     generate_data_key,
 };
-pub use discovery::{DiscoveredStream, discover_streams, filter_by_session};
+pub use discovery::{
+    DiscoveredStream, discover_codex_streams, discover_streams, filter_by_session,
+};
 pub use identity::{
     AGE_IDENTITY_FILE, IdentityError, InitOutcome, MACHINES_FILE, MachineIdentity, RECIPIENTS_FILE,
     SIGNING_KEY_FILE, enroll_machine, enroll_recipient, fingerprint, init, load_age_identity,
@@ -43,6 +50,14 @@ pub use sender::{
     HttpTransport, LagSummary, PassReport, RelayError, Sender, StreamReport, TakeoverCommandError,
     Transport, TransportError, VerifyError, VerifyReport, initialize_takeover_state,
     read_machine_identity, run_pass, takeover_session, takeover_session_encrypted,
-    verify_encrypted_frames, verify_encrypted_session, verify_takeover_source,
+    verify_encrypted_frame, verify_encrypted_frames, verify_encrypted_session,
+    verify_takeover_source,
 };
 pub use state::{RelayState, StateError, StreamState, load_state, save_state};
+
+pub use snapshots::{
+    SnapshotCache, SnapshotPacket, capture_snapshot, inspect_snapshot_manifest,
+    list_snapshot_heads, list_snapshot_history, list_snapshot_roots, load_snapshot_packet,
+    persist_snapshot_packet, publish_snapshot, read_snapshot_file, restore_snapshot,
+    restore_snapshot_for_session, snapshot_root_id,
+};

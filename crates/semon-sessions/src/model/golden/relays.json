@@ -1,6 +1,6 @@
 {
   "api": 1,
-  "version": "cd7c82e5dafb564f",
+  "version": "d0c50d1a25e7fa6e",
   "now": 1790294400000,
   "machine": {
     "id": "testbox",
@@ -535,6 +535,7 @@
       "start": "ref4c0b08d7c3afaa",
       "at": 1790226060000,
       "end": {
+        "at": 1790226180000,
         "st": "done",
         "why": "replied"
       },

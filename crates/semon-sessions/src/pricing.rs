@@ -484,6 +484,13 @@ mod tests {
     }
 
     #[test]
+    fn dotted_gpt_version_does_not_borrow_another_models_price() {
+        assert_eq!(normalize_model_id("gpt-6.1-sol"), "gpt-6.1-sol");
+        assert!(super::price_for("gpt-6.1-sol").is_none());
+        assert!(super::price_for("gpt-6-sol").is_some());
+    }
+
+    #[test]
     fn suffix_maps_to_the_base_price_and_compatibility_shape_stays_stable() {
         assert_eq!(normalize_model_id("claude-opus-5[1m]"), "claude-opus-5");
         let json = serde_json::to_value(table()).unwrap();

@@ -75,6 +75,8 @@ pub(crate) struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) parent_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) branch: Option<String>,
@@ -85,6 +87,10 @@ pub(crate) struct Session {
     /// in epoch ms]`. A client that keeps a model across 304s computes the
     /// age from `activity[3]`.
     pub(crate) activity: Option<(String, String, i64, i64)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) waiting_for: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) waiting_since: Option<i64>,
     pub(crate) busy: Vec<(i64, i64)>,
     /// The transcript's tool calls, and those that failed or never
     /// finished: the same numbers `/api/tx` reports, so a page needn't fetch
@@ -99,6 +105,24 @@ pub(crate) struct Session {
     /// most [`TOOL_NAME_MAX`] characters. Absent when there are none.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) tool_calls: BTreeMap<String, usize>,
+    /// Counts of the content-free annotations served in transcript pages.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) signals: BTreeMap<events::SignalKind, usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) wait_edges: Vec<WaitEdge>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub(crate) wait_edges_truncated: bool,
+}
+
+/// A recorded wait tool's interval, with only exact uniquely resolved targets.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct WaitEdge {
+    pub(crate) call: String,
+    pub(crate) tool: String,
+    pub(crate) targets: Vec<String>,
+    pub(crate) start: i64,
+    pub(crate) end: Option<i64>,
+    pub(crate) turn: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -173,6 +197,10 @@ pub(crate) struct Handoff {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct End {
+    /// Last recorded response or tool completion in a closed turn. Live turns
+    /// and missing timestamps have no observed end, rather than a guessed one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) at: Option<i64>,
     pub(crate) st: &'static str,
     pub(crate) why: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,11 +302,9 @@ pub(crate) struct Built {
     pub(crate) home: Option<String>,
     /// This machine's id, as sessions name it.
     pub(crate) machine_id: String,
-    /// Every source file, by position: what transcript slots point into.
-    pub(crate) files: Vec<SlotFile>,
     /// Each session's transcript index, for `/api/tx`: metadata and offsets
     /// only, the text is read back per page.
-    pub(crate) tx: BTreeMap<String, Transcript>,
+    pub(crate) tx: BTreeMap<String, Arc<Transcript>>,
     /// Each session's facts for the agent read surface, by session key.
     pub(crate) facts: BTreeMap<String, SessionFacts>,
     /// Where the scan window started (epoch ms): files last modified before
@@ -428,13 +454,13 @@ struct TextKey {
     what: String,
 }
 
+/// The most working directories whose repository [`Texts`] remembers.
+const REPO_CACHE_MAX: usize = 512;
+
 /// Memoized reads of source lines, bounded by [`TEXT_BUDGET`] and evicted
 /// least recently used first. A line at an offset stays valid while its file
 /// only grows (the event cache's own rule); a replaced, truncated or
 /// rewritten file starts a new generation, so stale text is never returned.
-/// The most working directories whose repository [`Texts`] remembers.
-const REPO_CACHE_MAX: usize = 512;
-
 #[derive(Default)]
 pub(crate) struct Texts {
     memo: HashMap<TextKey, (Option<String>, u64)>,
@@ -442,6 +468,10 @@ pub(crate) struct Texts {
     tick: u64,
     generations: HashMap<PathBuf, (Stamp, u64)>,
     next_generation: u64,
+    /// Owned derivations, evicted when their session leaves the scan.
+    derived_sessions: HashMap<String, (SessionInputs, SessionDerived)>,
+    descriptions: HashMap<String, (DescriptionInputs, Description)>,
+    prompt_caches: HashMap<PathBuf, (u64, Arc<crate::attachments::PromptCache>)>,
     repos: HashMap<String, Option<String>>,
     markers: HashMap<PathBuf, (Stamp, Option<Marker>)>,
     /// Each Codex file's `session_meta` and each subagent's `.meta.json`, by
@@ -457,13 +487,15 @@ thread_local! {
     pub(crate) static META_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Builds on this thread.
     pub(crate) static BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SESSION_DESCRIPTIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+    static SESSION_DERIVATIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
     /// Runs once right after the scan read the files: a test appends there,
     /// as a writer would while a build runs.
     pub(crate) static AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
-    let mut file = fs::File::open(path).ok()?;
+    let mut file = crate::sealed::LogFile::open(path).ok()?;
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut reader = BufReader::new(file).take(MAX_LINE);
     let mut bytes = Vec::new();
@@ -472,6 +504,13 @@ pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
 }
 
 impl Texts {
+    fn invalidate(&mut self, path: &Path) {
+        if self.generations.remove(path).is_some() {
+            self.metas.remove(path);
+            self.markers.remove(path);
+        }
+    }
+
     fn generation(&mut self, path: &Path, stamp: Stamp) -> u64 {
         if let Some((seen, number)) = self.generations.get_mut(path)
             && seen.dev == stamp.dev
@@ -877,7 +916,7 @@ pub(crate) fn local_hostname(options: &Options) -> String {
 
 // ---- Scan: every file's metadata summary --------------------------------------------------
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct AgentMeta {
     parent: String,
     tool_use_id: Option<String>,
@@ -887,7 +926,7 @@ struct AgentMeta {
     branch: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct CodexMeta {
     parent_thread: Option<String>,
     nickname: Option<String>,
@@ -897,13 +936,17 @@ struct CodexMeta {
     guardian_review: bool,
 }
 
+#[derive(Debug)]
 enum Role {
     Top { slug: String },
     Agent(AgentMeta),
     Codex(CodexMeta),
 }
 
+type FileRevision = events::FileRevision;
+
 struct SourceFile {
+    revision: FileRevision,
     path: PathBuf,
     stamp: Stamp,
     id: String,
@@ -931,10 +974,15 @@ pub(crate) struct PidFile {
     pub(crate) alive: bool,
     /// The process start time the file records.
     pub(crate) start: Option<u64>,
+    /// When the process started, in epoch milliseconds (`startedAt`): a
+    /// process that resumed a session into the same file ran none of the
+    /// background calls logged before it.
+    started: Option<i64>,
     status: Option<String>,
     /// What the process is waiting on you for, when it says so
     /// (`input needed`, `permission prompt`): the record's `waitingFor`.
     waiting_for: Option<String>,
+    waiting_since: Option<i64>,
     name: Option<String>,
 }
 
@@ -1003,10 +1051,15 @@ pub(crate) fn pid_files(options: &Options, machine: &MachineFacts) -> Vec<PidFil
             session: session.to_owned(),
             alive: start.is_some() && machine.proc_start(options, pid) == start,
             start,
+            started: record.get("startedAt").and_then(Value::as_i64),
             status: field(&record, "status").map(str::to_owned),
             waiting_for: field(&record, "waitingFor")
                 .filter(|reason| !reason.is_empty())
                 .map(str::to_owned),
+            waiting_since: record
+                .get("statusUpdatedAt")
+                .and_then(Value::as_i64)
+                .or_else(|| field(&record, "statusUpdatedAt").and_then(events::parse_ms)),
             name: field(&record, "name").map(str::to_owned),
         });
     }
@@ -1133,13 +1186,20 @@ fn scan(
         let Ok(summary) = events::scan_file(&path, "claude", cache, dirty) else {
             continue;
         };
+        if cache.replaced(&path) {
+            texts.invalidate(&path);
+        }
+        // Observe every scan, including one that builds no text for this
+        // file, so a later append cannot hide an intervening truncation.
+        texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
+            revision: cache.revision(&path).expect("scanned file has a ledger"),
             stamp,
             id: id.to_owned(),
             first: summary.first,
             last: summary.last,
-            marker: None,
+            marker: texts.marker(&path, stamp),
             path,
             role,
             summary,
@@ -1167,9 +1227,16 @@ fn scan(
         let Ok(summary) = events::scan_file(&path, "codex", cache, dirty) else {
             continue;
         };
+        let meta = if cache.replaced(&path) {
+            texts.invalidate(&path);
+            texts.meta(&path, true, codex_meta)?.unwrap_or(Value::Null)
+        } else {
+            meta.unwrap_or(Value::Null)
+        };
+        texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
-        let meta = meta.unwrap_or(Value::Null);
         files.push(SourceFile {
+            revision: cache.revision(&path).expect("scanned file has a ledger"),
             marker: texts.marker(&path, stamp),
             stamp,
             id,
@@ -1197,6 +1264,9 @@ fn scan(
     }
     cache.retain(&seen, dirty);
     cache.end_scan();
+    texts
+        .prompt_caches
+        .retain(|path, _| seen.contains(path.to_string_lossy().as_ref()));
     // Metadata of files that are gone is dropped with them.
     texts.metas.retain(|path, _| {
         let file = if path.extension().is_some_and(|ext| ext == "json") {
@@ -1335,8 +1405,51 @@ enum Place {
     Out,
 }
 
+/// Owned inputs to the session derivation. File membership and content use
+/// complete-line ledgers, so touching a log or writing a partial line does
+/// not invalidate the derivation. Global joins are represented by their
+/// stable source offsets and handoff ids, never positions in this build.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SessionInputs {
+    files: Vec<(PathBuf, FileRevision)>,
+    baseline: String,
+    links: Vec<String>,
+    root_alive: bool,
+    background_liveness: Vec<(PathBuf, Option<i64>)>,
+    liveness: (bool, bool, bool),
+    clock: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DescriptionInputs {
+    files: Vec<(PathBuf, FileRevision)>,
+    metadata: Vec<String>,
+    baseline: String,
+    names: BTreeSet<String>,
+    reports: String,
+    repos: Vec<(String, Option<Option<String>>)>,
+    clock: Option<i64>,
+}
+
+#[derive(Clone)]
+struct Description {
+    out: Session,
+    names: BTreeSet<String>,
+    tokens: crate::Tokens,
+    first: Option<i64>,
+    last: Option<i64>,
+}
+
+#[derive(Clone)]
+struct SessionDerived {
+    out: Session,
+    turns: Vec<Turn>,
+    transcript: Arc<Transcript>,
+}
+
 struct Builder<'a> {
     files: &'a [SourceFile],
+    slot_files: Vec<Arc<SlotFile>>,
     texts: &'a mut Texts,
     now: i64,
     machine: String,
@@ -1351,6 +1464,13 @@ struct Builder<'a> {
     head: HashMap<usize, usize>,
     after: HashMap<Ref, usize>,
     tools: HashMap<String, Ref>,
+    /// Background Bash calls and their first terminal notification, scoped to a session.
+    backgrounds: HashMap<Ref, Option<Ref>>,
+    bg_ends: HashMap<Ref, Ref>,
+    /// Top-level log files a live process writes, with the earliest such
+    /// process's start (None: not recorded). An alive pid file names each
+    /// file by its session id; a resumed session's older files are not here.
+    live_files: BTreeMap<usize, Option<i64>>,
     ids: HashMap<String, usize>,
     /// Events a copy-resume duplicated: skipped everywhere.
     copied: BTreeSet<Ref>,
@@ -1372,6 +1492,33 @@ impl<'a> Builder<'a> {
         reported_runs: &'a [ReportedRunSnapshot],
     ) -> Self {
         Self {
+            slot_files: files
+                .iter()
+                .map(|file| {
+                    let generation = texts.generation(&file.path, file.stamp);
+                    let cached =
+                        texts
+                            .prompt_caches
+                            .entry(file.path.clone())
+                            .or_insert_with(|| {
+                                (
+                                    generation,
+                                    Arc::new(crate::attachments::PromptCache::default()),
+                                )
+                            });
+                    if cached.0 != generation {
+                        *cached = (
+                            generation,
+                            Arc::new(crate::attachments::PromptCache::default()),
+                        );
+                    }
+                    Arc::new(SlotFile {
+                        path: file.path.clone(),
+                        cwd: file.summary.cwd.clone(),
+                        prompts: Arc::clone(&cached.1),
+                    })
+                })
+                .collect(),
             files,
             texts,
             now,
@@ -1387,6 +1534,9 @@ impl<'a> Builder<'a> {
             head: HashMap::new(),
             after: HashMap::new(),
             tools: HashMap::new(),
+            backgrounds: HashMap::new(),
+            bg_ends: HashMap::new(),
+            live_files: BTreeMap::new(),
             ids: HashMap::new(),
             copied: BTreeSet::new(),
             progress: HashMap::new(),
@@ -1412,15 +1562,21 @@ impl<'a> Builder<'a> {
             cost_check: Vec::new(),
             rate_limits: None,
             parent: None,
+            parent_source: None,
             repo: None,
             branch: None,
             start: 0,
             last: 0,
             activity: None,
             busy: Vec::new(),
+            waiting_for: None,
+            waiting_since: None,
             calls: None,
             errors: None,
             tool_calls: BTreeMap::new(),
+            wait_edges: Vec::new(),
+            wait_edges_truncated: false,
+            signals: BTreeMap::new(),
         }
     }
 
@@ -1721,6 +1877,22 @@ impl<'a> Builder<'a> {
             }
         }
         for pid in pids {
+            if pid.alive {
+                let files = self.files;
+                for file in (0..files.len()).filter(|&file| {
+                    matches!(files[file].role, Role::Top { .. }) && files[file].id == pid.session
+                }) {
+                    self.live_files
+                        .entry(file)
+                        .and_modify(|since| {
+                            *since = match (*since, pid.started) {
+                                (Some(a), Some(b)) => Some(a.min(b)),
+                                _ => None,
+                            }
+                        })
+                        .or_insert(pid.started);
+                }
+            }
             let Some(&index) = self
                 .files
                 .iter()
@@ -1744,6 +1916,10 @@ impl<'a> Builder<'a> {
                 session.busy = pid.status.as_deref() == Some("busy");
                 session.waiting =
                     pid.status.as_deref() == Some("waiting") || pid.waiting_for.is_some();
+                if session.waiting {
+                    session.out.waiting_for = pid.waiting_for.clone();
+                    session.out.waiting_since = pid.waiting_since;
+                }
                 if let Some(name) = &pid.name {
                     session.out.name = name.clone();
                 }
@@ -1755,8 +1931,89 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Name, model, effort, tokens, repo, branch, start, last and busy.
     fn describe(&mut self, index: usize) {
+        let session = &self.sessions[index];
+        let mut files = Vec::new();
+        let mut metadata = Vec::new();
+        let mut repos = Vec::new();
+        for position in &session.files {
+            let file = &self.files[*position];
+            files.push((file.path.clone(), file.revision));
+            metadata.push(format!("{:?}", file.role));
+            let cwd = match &file.role {
+                Role::Agent(meta) => meta.cwd.as_ref().or(file.summary.cwd.as_ref()),
+                Role::Codex(meta) => meta.cwd.as_ref().or(file.summary.cwd.as_ref()),
+                Role::Top { .. } => file.summary.cwd.as_ref(),
+            };
+            if let Some(cwd) = cwd {
+                repos.push((cwd.clone(), self.facts.recorded_repo(cwd)));
+            }
+        }
+        let reports: Vec<_> = self
+            .reported_runs
+            .iter()
+            .filter(|report| {
+                session
+                    .files
+                    .iter()
+                    .any(|position| self.files[*position].id == report.last_session_id)
+            })
+            .collect();
+        let inputs = DescriptionInputs {
+            files,
+            metadata,
+            repos,
+            baseline: serde_json::to_string(&session.out).expect("session serializes"),
+            names: session.names.clone(),
+            reports: serde_json::to_string(&reports).expect("reports serialize"),
+            clock: session
+                .files
+                .iter()
+                .all(|position| self.files[*position].first.is_none())
+                .then_some(self.now),
+        };
+        let key = session.key.clone();
+        let cached = self
+            .texts
+            .descriptions
+            .get(&key)
+            .filter(|(seen, _)| inputs.clock.is_none() && *seen == inputs)
+            .map(|(_, description)| description.clone());
+        if let Some(description) = cached {
+            let session = &mut self.sessions[index];
+            session.out = description.out;
+            session.names = description.names;
+            session.tokens = description.tokens;
+            session.first = description.first;
+            session.last = description.last;
+        } else {
+            self.describe_uncached(index);
+            let session = &self.sessions[index];
+            self.texts.descriptions.insert(
+                key,
+                (
+                    inputs,
+                    Description {
+                        out: session.out.clone(),
+                        names: session.names.clone(),
+                        tokens: session.tokens.clone(),
+                        first: session.first,
+                        last: session.last,
+                    },
+                ),
+            );
+        }
+    }
+
+    /// Name, model, effort, tokens, repo, branch, start, last and busy.
+    fn describe_uncached(&mut self, index: usize) {
+        #[cfg(test)]
+        SESSION_DESCRIPTIONS.with(|counts| {
+            *counts
+                .borrow_mut()
+                .entry(self.sessions[index].key.clone())
+                .or_default() += 1
+        });
         let files: Vec<&SourceFile> = self.sessions[index]
             .files
             .iter()
@@ -1992,6 +2249,54 @@ impl<'a> Builder<'a> {
             .get(id)
             .copied()
             .filter(|at| self.of_file[at.0] == session)
+    }
+
+    /// Whether a background call's shell can still be running: only while a
+    /// live process writes the call's own log file, and started no later
+    /// than the call (`t`). A resumed session is stitched from several files,
+    /// or resumed into the same one, and the process that logged an older
+    /// call (and its shells) is gone, however long the newer one lives. A
+    /// subagent's file is its own session, alive while the subagent works.
+    fn background_live(&self, file: usize, session: &Sess, t: Option<i64>) -> bool {
+        match self.files[file].role {
+            Role::Top { .. } => self
+                .live_files
+                .get(&file)
+                .is_some_and(|since| match (since, t) {
+                    (Some(since), Some(t)) => t >= *since,
+                    _ => true,
+                }),
+            _ => session.alive,
+        }
+    }
+
+    /// Join background Bash calls once per build, in each session's event order.
+    /// Notifications preceding a call, or naming a call in another session, stay out.
+    fn background_commands(&mut self) {
+        for index in 0..self.sessions.len() {
+            let mut calls = HashMap::<String, Ref>::new();
+            for at in self.events_of(index) {
+                let found = event(self.files, at);
+                if self.files[at.0].harness() != "claude" {
+                    continue;
+                }
+                if found.k == Kind::Tool && found.script & events::BACKGROUND != 0 {
+                    if let Some(id) = &found.id {
+                        calls.insert(id.clone(), at);
+                        self.backgrounds.insert(at, None);
+                    }
+                } else if found.k == Kind::Tn
+                    && !matches!(found.n.as_deref(), None | Some("running" | "started"))
+                    && let Some(call) = found.id.as_ref().and_then(|id| calls.get(id)).copied()
+                    && (call.0 != at.0 || event(self.files, call).o < found.o)
+                    && let Some(end) = self.backgrounds.get_mut(&call)
+                    && end.is_none()
+                {
+                    *end = Some(at);
+                    self.bg_ends.insert(at, call);
+                }
+            }
+        }
     }
 
     // -- spawns --
@@ -2234,11 +2539,30 @@ impl<'a> Builder<'a> {
         let Some(marker) = file.marker.clone() else {
             return (None, None, false);
         };
-        let Some(parent_file) = self.files.iter().position(|file| {
-            matches!(file.role, Role::Top { .. } | Role::Agent(_))
-                && file.harness() == "claude"
-                && file.id == marker.claude_id
-        }) else {
+        let mut seen = BTreeSet::from([format!("{}:{}", file.harness(), file.id)]);
+        let mut next = Some(format!("{}:{}", marker.harness, marker.parent_id));
+        for _ in 0..64 {
+            let Some(parent) = next.take() else {
+                break;
+            };
+            if !seen.insert(parent.clone()) {
+                return (None, None, false);
+            }
+            next = self
+                .files
+                .iter()
+                .find(|file| format!("{}:{}", file.harness(), file.id) == parent)
+                .and_then(|file| file.marker.as_ref())
+                .map(|marker| format!("{}:{}", marker.harness, marker.parent_id));
+        }
+        if next.is_some() {
+            return (None, None, false);
+        }
+        let Some(parent_file) = self
+            .files
+            .iter()
+            .position(|file| file.harness() == marker.harness && file.id == marker.parent_id)
+        else {
             return (None, None, false);
         };
         let spawner = self.of_file[parent_file];
@@ -2771,6 +3095,120 @@ impl<'a> Builder<'a> {
         }
     }
 
+    fn observed_parents(
+        &mut self,
+        options: &Options,
+        pids: &[PidFile],
+        locks: &BTreeMap<String, u32>,
+    ) {
+        use crate::parent_links::Process;
+        let key = |index: usize| {
+            format!(
+                "{}:{}",
+                self.sessions[index].out.harness, self.sessions[index].key
+            )
+        };
+        let keys: BTreeMap<String, usize> = (0..self.sessions.len())
+            .filter(|index| self.sessions[*index].kind != SessKind::Stub)
+            .map(|index| (key(index), index))
+            .collect();
+        let known = keys.keys().cloned().collect();
+        let native = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, session)| session.parent.map(|parent| (key(index), key(parent))))
+            .collect();
+        let mut processes = BTreeMap::new();
+        for pid in pids.iter().filter(|pid| pid.alive) {
+            if let Some(index) = self
+                .files
+                .iter()
+                .position(|file| file.id == pid.session && matches!(file.role, Role::Top { .. }))
+                .map(|file| self.of_file[file])
+            {
+                processes.insert(
+                    key(index),
+                    Process {
+                        pid: pid.pid,
+                        start: pid.start,
+                    },
+                );
+            }
+        }
+        for (id, pid) in locks {
+            if let Some(&index) = self.by_key.get(id) {
+                processes.insert(
+                    key(index),
+                    Process {
+                        pid: *pid,
+                        start: None,
+                    },
+                );
+            }
+        }
+        let markers = self
+            .files
+            .iter()
+            .enumerate()
+            .filter_map(|(position, file)| {
+                file.marker
+                    .clone()
+                    .map(|marker| (key(self.of_file[position]), marker))
+            })
+            .collect();
+        let links = crate::parent_links::resolve(
+            options, self.facts, &processes, &markers, &known, &native, self.now,
+        );
+        for (child_key, link) in links {
+            let (Some(&child), Some(&parent)) = (keys.get(&child_key), keys.get(&link.parent))
+            else {
+                continue;
+            };
+            self.sessions[child].out.parent_source = Some(link.source);
+            if self.sessions[child].parent == Some(parent) {
+                continue;
+            }
+            self.sessions[child].parent = Some(parent);
+            self.sessions[child].out.lane = false;
+            let call = link.call.as_deref().and_then(|id| self.find_in(parent, id));
+            if let Some(existing) = self
+                .handoffs
+                .iter()
+                .position(|handoff| handoff.out.kind == "spawn" && handoff.to == Some(child))
+            {
+                self.handoffs[existing].from = Some(parent);
+                self.handoffs[existing].out.from = self.sessions[parent].key.clone();
+                for placed in self.placed.values_mut() {
+                    placed.retain(|(handoff, _)| *handoff != existing);
+                }
+                if let Some(call) = call {
+                    self.place(call, existing, Place::Out);
+                }
+                continue;
+            }
+            let handoff = Handoff::new(
+                stable_id("s", &format!("observed-parent:{child_key}")),
+                "spawn",
+                (
+                    self.sessions[parent].key.clone(),
+                    self.sessions[child].key.clone(),
+                ),
+                self.sessions[child].out.start,
+                if self.sessions[child].alive {
+                    "work"
+                } else {
+                    self.sessions[child].out.state
+                },
+                "(observed child run)",
+            );
+            let handoff = self.add_handoff(handoff, Some(parent), Some(child));
+            if let Some(call) = call {
+                self.place(call, handoff, Place::Out);
+            }
+        }
+    }
+
     // -- your messages and messages to you --
 
     fn asks(&mut self) {
@@ -2856,7 +3294,10 @@ impl<'a> Builder<'a> {
                     // output for the call beyond an acknowledgement, and no
                     // later user message.
                     _ if codex => {
-                        let reply = found.r.as_ref().filter(|reply| reply.f & ACK == 0);
+                        let reply = found.r.as_ref().filter(|reply| {
+                            reply.f & ACK == 0
+                                || found.n.as_deref() == Some("request_user_input_async")
+                        });
                         let following = refs[position + 1..]
                             .iter()
                             .map(|later| event(self.files, *later))
@@ -2914,6 +3355,42 @@ impl<'a> Builder<'a> {
     fn lineage_states(&mut self) {
         for index in 0..self.sessions.len() {
             let session = &self.sessions[index];
+            if session.kind == SessKind::Codex {
+                // A completed root Codex reply can be a result even after
+                // the process exits. Linked child prompts aren't human asks.
+                if session.out.state != "work"
+                    && session.parent.is_none()
+                    && session.out.kind != Some("Approval review")
+                    && session.files.iter().all(|file| self.files[*file].marker.is_none()
+                        && matches!(&self.files[*file].role, Role::Codex(meta) if meta.parent_thread.is_none()))
+                    && let Some(at) = self
+                        .events_of(index)
+                        .into_iter()
+                        .rev()
+                        .find(|at| event(self.files, *at).k == Kind::A)
+                    && self.reply_started_by_you(index, at)
+                {
+                    let text = self.text(at, "a", assistant_text);
+                    let file = &self.files[at.0];
+                    let found = event(self.files, at);
+                    let handoff = Handoff {
+                        ask: Some("result"),
+                        ..Handoff::new(
+                            stable_id(
+                                "q",
+                                &format!("toyou:result:{}:{}:{}", file.id, found.o, found.b),
+                            ),
+                            "toyou",
+                            (self.sessions[index].key.clone(), "you".into()),
+                            found.t.unwrap_or(self.sessions[index].out.last),
+                            "new",
+                            text.as_deref().unwrap_or(""),
+                        )
+                    };
+                    self.add_handoff(handoff, Some(index), None);
+                }
+                continue;
+            }
             if session.kind != SessKind::Lineage {
                 continue;
             }
@@ -3011,12 +3488,18 @@ impl<'a> Builder<'a> {
         else {
             return false;
         };
-        let Some(start) = group
+        let start = group
             .start
-            .filter(|start| self.handoffs[*start].out.kind == "ask")
-        else {
+            .filter(|start| self.handoffs[*start].out.kind == "ask");
+        let codex_prompt = self.sessions[index].kind == SessKind::Codex
+            && self.sessions[index].parent.is_none()
+            && group
+                .entries
+                .first()
+                .is_some_and(|position| entries[*position].kind == EntryKind::U);
+        if start.is_none() && !codex_prompt {
             return false;
-        };
+        }
         let Some(start_at) = group
             .entries
             .iter()
@@ -3038,58 +3521,160 @@ impl<'a> Builder<'a> {
             let event = event(self.files, *at);
             matches!(event.k, Kind::Xsm | Kind::Agm | Kind::Tn)
                 || event.k == Kind::Tool && event.n.as_deref() == Some("SubagentHandback")
-        }) && self.handoffs[start].out.from == "you"
+        }) && start.is_none_or(|start| self.handoffs[start].out.from == "you")
     }
 
-    fn activity(&mut self) {
-        for index in 0..self.sessions.len() {
-            if self.sessions[index].out.state != "work" {
-                continue;
-            }
-            // Only the last turn can still be running a tool.
-            let entries = self.entries(index);
-            let Some(at) = self.groups(index, &entries).last().and_then(|turn| {
-                turn.entries.iter().rev().find_map(|position| {
-                    let entry = &entries[*position];
-                    matches!(entry.kind, EntryKind::Tool(ToolState::Pending))
-                        .then_some(entry.at)
-                        .flatten()
-                })
-            }) else {
-                continue;
-            };
-            let found = event(self.files, at).clone();
-            // The start time: the age and the 30-minute expiry are applied
-            // when the model is served, so they never freeze between builds.
-            let Some(time) = found.t else {
-                continue;
-            };
-            // A command that outlived its yield runs on after its script.
-            if found.y.is_some() {
-                let arg = self
-                    .text(at, "yield:cmd", |record, block| {
-                        tool_input(record, block)
-                            .and_then(|input| events::script_command(input.as_str()?))
-                            .map(|command| one_line(&command, 160))
-                    })
-                    .unwrap_or_default();
-                self.sessions[index].out.activity = Some(("exec_command".into(), arg, 0, time));
-                continue;
-            }
-            let name = found.n.clone().unwrap_or_else(|| "tool".into());
-            let cwd = self.files[at.0].summary.cwd.clone();
-            let summary_name = name.clone();
-            let home = self.home.clone();
+    fn activity(&mut self, index: usize) {
+        if self.sessions[index].out.state != "work" {
+            return;
+        }
+        // Only the last turn can still be running a tool.
+        let entries = self.entries(index);
+        let Some(at) = self.groups(index, &entries).last().and_then(|turn| {
+            turn.entries.iter().rev().find_map(|position| {
+                let entry = &entries[*position];
+                matches!(entry.kind, EntryKind::Tool(ToolState::Pending))
+                    .then_some(entry.at)
+                    .flatten()
+            })
+        }) else {
+            return;
+        };
+        let found = event(self.files, at).clone();
+        // The start time: the age and the 30-minute expiry are applied
+        // when the model is served, so they never freeze between builds.
+        let Some(time) = found.t else {
+            return;
+        };
+        // A command that outlived its yield runs on after its script.
+        if found.y.is_some() {
             let arg = self
-                .text(at, "arg", move |record, block| {
-                    tool_input(record, block).map(|input| {
-                        arg_summary(&summary_name, &input, cwd.as_deref(), home.as_deref())
-                    })
+                .text(at, "yield:cmd", |record, block| {
+                    tool_input(record, block)
+                        .and_then(|input| events::script_command(input.as_str()?))
+                        .map(|command| one_line(&command, 160))
                 })
                 .unwrap_or_default();
-            // The age is filled when served, so `version` depends on the
-            // logs alone.
-            self.sessions[index].out.activity = Some((name, arg, 0, time));
+            self.sessions[index].out.activity = Some(("exec_command".into(), arg, 0, time));
+            return;
+        }
+        let name = found.n.clone().unwrap_or_else(|| "tool".into());
+        let cwd = self.files[at.0].summary.cwd.clone();
+        let summary_name = name.clone();
+        let home = self.home.clone();
+        let arg = self
+            .text(at, "arg", move |record, block| {
+                tool_input(record, block).map(|input| {
+                    arg_summary(&summary_name, &input, cwd.as_deref(), home.as_deref())
+                })
+            })
+            .unwrap_or_default();
+        // The age is filled when served, so `version` depends on the
+        // logs alone.
+        self.sessions[index].out.activity = Some((name, arg, 0, time));
+    }
+
+    fn wait_edges(&mut self, transcripts: &BTreeMap<String, Arc<Transcript>>) {
+        const MAX_WAITS: usize = 4096;
+        for index in 0..self.sessions.len() {
+            if self.sessions[index].kind == SessKind::Stub {
+                continue;
+            }
+            let mut waits = Vec::new();
+            for at in self.events_of(index) {
+                let found = event(self.files, at).clone();
+                if found.k != Kind::Tool
+                    || !matches!(found.n.as_deref(), Some("wait" | "wait_agent" | "wait_all"))
+                {
+                    continue;
+                }
+                let Some(start) = found.t else {
+                    continue;
+                };
+                if waits.len() == MAX_WAITS {
+                    self.sessions[index].out.wait_edges_truncated = true;
+                    break;
+                }
+                let input = self
+                    .text(at, "json:wait-targets", |record, block| {
+                        let input = tool_input(record, block)?;
+                        // Keep only structural target lists; unrelated wait-tool
+                        // inputs can include text and are never retained here.
+                        let values: Vec<String> =
+                            ["receiver_ids", "agent_ids", "targets", "ids", "target"]
+                                .iter()
+                                .flat_map(|key| input.get(key).into_iter())
+                                .flat_map(|value| {
+                                    value
+                                        .as_array()
+                                        .map(|values| {
+                                            values
+                                                .iter()
+                                                .filter_map(Value::as_str)
+                                                .map(str::to_owned)
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .or_else(|| {
+                                            value.as_str().map(|value| vec![value.to_owned()])
+                                        })
+                                        .unwrap_or_default()
+                                })
+                                .take(128)
+                                .collect();
+                        serde_json::to_string(&values).ok()
+                    })
+                    .and_then(|input| serde_json::from_str::<Vec<String>>(&input).ok())
+                    .unwrap_or_default();
+                let mut targets = BTreeSet::new();
+                for target in input {
+                    let candidates: Vec<usize> = (0..self.sessions.len())
+                        .filter(|candidate| {
+                            if *candidate == index || self.root(*candidate) != self.root(index) {
+                                return false;
+                            }
+                            let session = &self.sessions[*candidate];
+                            session.key == target
+                                || session.files.iter().any(|file| {
+                                    matches!(&self.files[*file].role,
+                            Role::Codex(meta) if meta.path.as_deref()==Some(target.as_str()))
+                                })
+                        })
+                        .collect();
+                    if let [candidate] = candidates.as_slice() {
+                        targets.insert(self.sessions[*candidate].key.clone());
+                    }
+                }
+                let turn = transcripts
+                    .get(&self.sessions[index].key)
+                    .and_then(|transcript| {
+                        transcript
+                            .slots
+                            .iter()
+                            .find(|slot| {
+                                slot.file.as_ref().is_some_and(|source| {
+                                    Arc::ptr_eq(source, &self.slot_files[at.0])
+                                }) && slot.offset == found.o
+                                    && slot.block == found.b
+                            })
+                            .and_then(|slot| slot.turn.clone())
+                    });
+                waits.push(WaitEdge {
+                    call: found
+                        .id
+                        .unwrap_or_else(|| format!("{}:{}", self.files[at.0].id, found.o)),
+                    tool: found.n.unwrap(),
+                    targets: targets.into_iter().collect(),
+                    start,
+                    end: found
+                        .r
+                        .as_ref()
+                        .and_then(|reply| reply.t)
+                        .filter(|end| *end >= start),
+                    turn,
+                });
+            }
+            waits.shrink_to_fit();
+            self.sessions[index].out.wait_edges = waits;
         }
     }
 
@@ -3124,28 +3709,138 @@ impl<'a> Builder<'a> {
 
     /// Every session's turns, and its transcript index: the entries the
     /// turns were split from, with the transcript-only extras merged in.
-    fn turns(&mut self) -> (Vec<Turn>, BTreeMap<String, Transcript>) {
+    fn link_digests(&self) -> Vec<Vec<String>> {
+        let mut links = vec![Vec::new(); self.sessions.len()];
+        for handoff in &self.handoffs {
+            let digest = serde_json::to_string(&handoff.out).expect("handoff serializes");
+            for endpoint in [handoff.from, handoff.to].into_iter().flatten() {
+                let ordinal = links[endpoint].len();
+                links[endpoint].push(format!("link:{ordinal}:{digest}"));
+            }
+        }
+        for (at, placed) in &self.placed {
+            let event = event(self.files, *at);
+            for (ordinal, (handoff, place)) in placed.iter().enumerate() {
+                links[self.of_file[at.0]].push(format!(
+                    "placed:{ordinal}:{:?}:{}:{}:{}:{}",
+                    self.files[at.0].path,
+                    event.o,
+                    event.b,
+                    u8::from(*place == Place::Out),
+                    self.handoffs[*handoff].out.id
+                ));
+            }
+        }
+        for (index, handoff) in &self.head {
+            links[*index].push(format!("head:{}", self.handoffs[*handoff].out.id));
+        }
+        for (at, handoff) in &self.after {
+            let event = event(self.files, *at);
+            links[self.of_file[at.0]].push(format!(
+                "after:{:?}:{}:{}:{}",
+                self.files[at.0].path, event.o, event.b, self.handoffs[*handoff].out.id
+            ));
+        }
+        for digest in &mut links {
+            digest.sort();
+        }
+        links
+    }
+
+    fn session_inputs(&self, index: usize, links: Vec<String>) -> SessionInputs {
+        let session = &self.sessions[index];
+        let mut files: Vec<_> = session
+            .files
+            .iter()
+            .map(|file| {
+                let source = &self.files[*file];
+                (source.path.clone(), source.revision)
+            })
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut background_liveness: Vec<_> = session
+            .files
+            .iter()
+            .filter_map(|file| {
+                self.live_files
+                    .get(file)
+                    .map(|since| (self.files[*file].path.clone(), *since))
+            })
+            .collect();
+        background_liveness.sort_by(|a, b| a.0.cmp(&b.0));
+        SessionInputs {
+            files,
+            background_liveness,
+            baseline: serde_json::to_string(&session.out).expect("session serializes"),
+            links,
+            root_alive: self.sessions[self.root(index)].alive,
+            liveness: (session.alive, session.busy, session.waiting),
+            clock: session.first.is_none().then_some(self.now),
+        }
+    }
+
+    fn derive_session(&mut self, index: usize, _inputs: &SessionInputs) -> SessionDerived {
+        #[cfg(test)]
+        SESSION_DERIVATIONS.with(|counts| {
+            *counts
+                .borrow_mut()
+                .entry(self.sessions[index].key.clone())
+                .or_default() += 1
+        });
+        self.activity(index);
+        let entries = self.entries(index);
+        let (mut turns, owners, prompts) = self.split(index, &entries);
+        for (turn, at) in prompts {
+            turns[turn].text = self
+                .text(at, "user", |record, _| prompt_text(record))
+                .map(|text| cap(&text, MSG_MAX));
+        }
+        let transcript = Arc::new(self.slots(index, &entries, &owners, &turns));
+        self.sessions[index].out.signals = transcript.signals.clone();
+        SessionDerived {
+            out: self.sessions[index].out.clone(),
+            turns,
+            transcript,
+        }
+    }
+
+    fn turns(&mut self) -> (Vec<Turn>, BTreeMap<String, Arc<Transcript>>) {
         let mut turns = Vec::new();
         let mut transcripts = BTreeMap::new();
-        for index in 0..self.sessions.len() {
+        let digests = self.link_digests();
+        for (index, digest) in digests.into_iter().enumerate() {
             if self.sessions[index].kind == SessKind::Stub {
                 transcripts.insert(
                     self.sessions[index].key.clone(),
-                    self.stub_transcript(index),
+                    Arc::new(self.stub_transcript(index)),
                 );
                 continue;
             }
-            let entries = self.entries(index);
-            let (mut split, owners, prompts) = self.split(index, &entries);
-            for (turn, at) in prompts {
-                split[turn].text = self
-                    .text(at, "user", |record, _| prompt_text(record))
-                    .map(|text| cap(&text, MSG_MAX));
-            }
-            let slots = self.slots(index, &entries, &owners, &split);
-            transcripts.insert(self.sessions[index].key.clone(), slots);
-            turns.extend(split);
+            let inputs = self.session_inputs(index, digest);
+            let key = self.sessions[index].key.clone();
+            let cached = self
+                .texts
+                .derived_sessions
+                .get(&key)
+                .filter(|(seen, _)| inputs.clock.is_none() && *seen == inputs)
+                .map(|(_, derived)| derived.clone());
+            let derived = cached.unwrap_or_else(|| {
+                let derived = self.derive_session(index, &inputs);
+                self.texts
+                    .derived_sessions
+                    .insert(key, (inputs, derived.clone()));
+                derived
+            });
+            self.sessions[index].out = derived.out;
+            transcripts.insert(self.sessions[index].key.clone(), derived.transcript);
+            turns.extend(derived.turns);
         }
+        self.texts
+            .derived_sessions
+            .retain(|key, _| self.by_key.contains_key(key));
+        self.texts
+            .descriptions
+            .retain(|key, _| self.by_key.contains_key(key));
         (turns, transcripts)
     }
 
@@ -3182,7 +3877,7 @@ impl<'a> Builder<'a> {
         turns: &[Turn],
     ) -> Transcript {
         let session = &self.sessions[index];
-        let mut extras: BTreeMap<usize, std::collections::VecDeque<&Event>> = BTreeMap::new();
+        let mut extras: BTreeMap<usize, std::collections::VecDeque<Annotation>> = BTreeMap::new();
         let mut operation_parents = BTreeSet::new();
         for file in &session.files {
             for extra in &self.files[*file].summary.extras {
@@ -3194,49 +3889,117 @@ impl<'a> Builder<'a> {
             }
         }
         for file in &session.files {
-            extras.insert(*file, self.files[*file].summary.extras.iter().collect());
+            let mut annotations: Vec<_> = self.files[*file]
+                .summary
+                .extras
+                .iter()
+                .map(Annotation::Extra)
+                .collect();
+            let copied_offset = self
+                .copied
+                .iter()
+                .filter(|(source, _)| source == file)
+                .map(|(_, at)| self.files[*file].summary.events[*at].o)
+                .max();
+            annotations.extend(
+                self.files[*file]
+                    .summary
+                    .signals
+                    .iter()
+                    .filter(|signal| copied_offset.is_none_or(|last| signal.o > last))
+                    .map(Annotation::Signal),
+            );
+            annotations.sort_by_key(|extra| extra.pos());
+            extras.insert(*file, annotations.into());
         }
         let mut slots = Vec::with_capacity(entries.len());
         let mut owner: Option<usize> = None;
         let mut started = BTreeSet::new();
         let turn_id = |turn: Option<usize>| turn.map(|turn| turns[turn].id.clone());
-        let extra_slot =
-            |event: &Event, file: usize, owner: Option<usize>, started: &mut BTreeSet<usize>| {
-                let kind = match event.k {
-                    Kind::Harness => SlotKind::Harness(event.n.clone().unwrap_or_default()),
-                    Kind::Operation => {
-                        let ok = event
-                            .r
-                            .as_ref()
-                            .and_then(|reply| (reply.f & events::UNKNOWN == 0).then_some(!reply.e));
-                        let script_offset = event
-                            .parent
-                            .and_then(|parent| self.files[file].summary.events.get(parent))
-                            .filter(|parent| parent.k == Kind::Tool && parent.code_mode)
-                            .map(|parent| parent.o);
-                        SlotKind::Operation {
-                            kind: event.n.clone().unwrap_or_default(),
-                            ok,
-                            script_offset,
-                        }
-                    }
-                    _ => SlotKind::Think,
-                };
-                let mut slot = Slot::new(kind, Some(file), event.o, event.b, event.t);
+        let extra_slot = |annotation: Annotation,
+                          file: usize,
+                          owner: Option<usize>,
+                          started: &mut BTreeSet<usize>| {
+            if let Annotation::Signal(signal) = annotation {
+                let tool = matches!(
+                    signal.k,
+                    events::SignalKind::Denial | events::SignalKind::Hook
+                )
+                .then(|| {
+                    signal
+                        .v
+                        .and_then(|at| self.files[file].summary.events.get(at as usize))
+                        .and_then(|event| event.n.as_deref())
+                        .map(tool_label)
+                })
+                .flatten();
+                let mut slot = Slot::new(
+                    SlotKind::Signal(SignalData {
+                        kind: signal.k,
+                        tag: signal.n.clone(),
+                        previous: None,
+                        value: (signal.k == events::SignalKind::Compact)
+                            .then_some(signal.v)
+                            .flatten(),
+                        tool,
+                    }),
+                    Some(Arc::clone(&self.slot_files[file])),
+                    signal.o,
+                    0,
+                    signal.t,
+                );
                 slot.turn = turn_id(owner);
-                if event.k == Kind::Operation
-                    && let Some(owner) = owner
-                {
-                    slot.first = started.insert(owner);
-                }
-                slot
+                return slot;
+            }
+            let Annotation::Extra(event) = annotation else {
+                unreachable!()
             };
+            let kind = match event.k {
+                Kind::Harness => SlotKind::Harness(event.n.clone().unwrap_or_default()),
+                Kind::Operation => {
+                    let ok = event
+                        .r
+                        .as_ref()
+                        .and_then(|reply| (reply.f & events::UNKNOWN == 0).then_some(!reply.e));
+                    let script_offset = event
+                        .parent
+                        .and_then(|parent| self.files[file].summary.events.get(parent))
+                        .filter(|parent| parent.k == Kind::Tool && parent.code_mode)
+                        .map(|parent| parent.o);
+                    SlotKind::Operation {
+                        kind: event.n.clone().unwrap_or_default(),
+                        ok,
+                        script_offset,
+                    }
+                }
+                _ => SlotKind::Think,
+            };
+            let mut slot = Slot::new(
+                kind,
+                Some(Arc::clone(&self.slot_files[file])),
+                event.o,
+                event.b,
+                event.t,
+            );
+            slot.turn = turn_id(owner);
+            if event.k == Kind::Operation
+                && let Some(owner) = owner
+            {
+                slot.first = started.insert(owner);
+            }
+            slot
+        };
         for (position, entry) in entries.iter().enumerate() {
             if let Some(queue) = extras.get_mut(&entry.file) {
                 let at = entry.pos;
-                while queue.front().is_some_and(|extra| (extra.o, extra.b) < at) {
+                while queue.front().is_some_and(|extra| extra.pos() < at) {
                     let extra = queue.pop_front().expect("front");
-                    slots.push(extra_slot(extra, entry.file, owner, &mut started));
+                    slots.push(extra_slot(
+                        extra,
+                        entry.file,
+                        owner.or(owners[position]),
+                        &mut started,
+                    ));
                 }
             }
             owner = owners[position];
@@ -3244,7 +4007,7 @@ impl<'a> Builder<'a> {
                 let operation = extras.get_mut(&entry.file).and_then(|queue| {
                     let position = queue
                         .iter()
-                        .position(|extra| extra.k == Kind::Operation && extra.o == entry.offset)?;
+                        .position(|extra| matches!(extra, Annotation::Extra(event) if event.k == Kind::Operation && event.o == entry.offset))?;
                     queue.remove(position)
                 });
                 if let Some(operation) = operation {
@@ -3267,9 +4030,20 @@ impl<'a> Builder<'a> {
                 EntryKind::U => SlotKind::U,
                 EntryKind::A => SlotKind::A,
                 EntryKind::Gap => SlotKind::Gap,
+                EntryKind::BgEnd => {
+                    let at = entry.at.expect("background notification");
+                    let call = self.bg_ends[&at];
+                    let source = event(self.files, call);
+                    SlotKind::BgEnd {
+                        call: source.id.clone().unwrap_or_default(),
+                        status: event(self.files, at).n.clone().unwrap_or_default(),
+                        source: (Arc::clone(&self.slot_files[call.0]), source.o, source.b),
+                        start: source.t,
+                    }
+                }
                 EntryKind::Tool(state) => {
                     let found = entry.at.map(|at| event(self.files, at));
-                    let running = session.out.state == "work"
+                    let running = matches!(session.out.state, "work" | "wait")
                         && owner.is_some_and(|turn| turn + 1 == turns.len() && turns[turn].last);
                     let shown = match state {
                         ToolState::Ok => Shown::Ok,
@@ -3321,22 +4095,57 @@ impl<'a> Builder<'a> {
                                 .unwrap_or_else(|| "tool".into()),
                             reply: found.and_then(|found| found.r.clone()),
                             item: found.and_then(|found| found.item),
+                            // Only a launch that returned: one denied or blocked
+                            // (an error result) started nothing, and one with
+                            // no result yet is running or unfinished as any call.
+                            bg: entry
+                                .at
+                                .filter(|_| state == ToolState::Ok)
+                                .and_then(|at| self.backgrounds.get(&at))
+                                .map(|end| Background {
+                                    tid: found
+                                        .and_then(|found| found.id.clone())
+                                        .unwrap_or_default(),
+                                    live: entry.at.is_some_and(|at| {
+                                        self.background_live(
+                                            at.0,
+                                            session,
+                                            found.and_then(|found| found.t),
+                                        )
+                                    }),
+                                    end: end.map(|at| {
+                                        let found = event(self.files, at);
+                                        BgEnd {
+                                            file: Arc::clone(&self.slot_files[at.0]),
+                                            offset: found.o,
+                                            t: found.t,
+                                            status: found.n.clone().unwrap_or_default(),
+                                            failed: found.script & events::BACKGROUND_FAILED != 0,
+                                        }
+                                    }),
+                                }),
                         },
                     }
                 }
                 EntryKind::Operation(_) => unreachable!("operation slots are read from extras"),
             };
-            let mut slot = Slot::new(kind, Some(entry.file), entry.offset, block, entry.t);
+            let mut slot = Slot::new(
+                kind,
+                Some(Arc::clone(&self.slot_files[entry.file])),
+                entry.offset,
+                block,
+                entry.t,
+            );
             slot.turn = turn_id(owner);
             slot.first = owner.is_some_and(|turn| started.insert(turn));
             slots.push(slot);
         }
         // Markers after the last entry, from every file, in time order.
-        let mut rest: Vec<(usize, &Event)> = extras
+        let mut rest: Vec<(usize, Annotation)> = extras
             .into_iter()
             .flat_map(|(file, queue)| queue.into_iter().map(move |extra| (file, extra)))
             .collect();
-        rest.sort_by_key(|(file, extra)| (extra.t, *file, extra.o, extra.b));
+        rest.sort_by_key(|(file, extra)| (extra.time(), *file, extra.pos()));
         for (file, extra) in rest {
             slots.push(extra_slot(extra, file, owner, &mut started));
         }
@@ -3360,6 +4169,22 @@ impl<'a> Builder<'a> {
             );
             slot.turn = turn_id(owner);
             slots.push(slot);
+        }
+        let mut previous = BTreeMap::new();
+        for slot in &mut slots {
+            if let SlotKind::Signal(signal) = &mut slot.kind
+                && matches!(
+                    signal.kind,
+                    events::SignalKind::Model
+                        | events::SignalKind::Effort
+                        | events::SignalKind::Approval
+                        | events::SignalKind::Sandbox
+                        | events::SignalKind::Permission
+                )
+                && let Some(tag) = &signal.tag
+            {
+                signal.previous = previous.insert(signal.kind, tag.clone());
+            }
         }
         Transcript::from_slots(slots)
     }
@@ -3457,6 +4282,7 @@ impl<'a> Builder<'a> {
                     Kind::U => Some(EntryKind::U),
                     Kind::A => Some(EntryKind::A),
                     Kind::Gap => Some(EntryKind::Gap),
+                    Kind::Tn if self.bg_ends.contains_key(&at) => Some(EntryKind::BgEnd),
                     // A poll of a yielded command folds into the step the
                     // script that started it is, unless it sent input.
                     Kind::Tool
@@ -3625,7 +4451,7 @@ impl<'a> Builder<'a> {
                     _ => None,
                 })
                 .collect();
-            let Some(end) = self.end(
+            let Some(mut end) = self.end(
                 index,
                 &turn.entries,
                 entries,
@@ -3636,6 +4462,25 @@ impl<'a> Builder<'a> {
             ) else {
                 continue;
             };
+            if !matches!(end.st, "work" | "wait")
+                && !matches!(end.why, "unfinished_step" | "no_reply")
+            {
+                end.at = turn
+                    .entries
+                    .iter()
+                    .filter_map(|position| {
+                        let entry = &entries[*position];
+                        let at = entry.at?;
+                        let found = event(self.files, at);
+                        match entry.kind {
+                            EntryKind::A => found.t,
+                            EntryKind::Tool(_) => found.r.as_ref().and_then(|reply| reply.t),
+                            EntryKind::Operation(_) => found.t,
+                            _ => None,
+                        }
+                    })
+                    .max();
+            }
             for position in &turn.entries {
                 owners[*position] = Some(turns.len());
             }
@@ -3700,8 +4545,22 @@ impl<'a> Builder<'a> {
         if start.is_none() && !u && content.is_empty() && !has_h {
             return None;
         }
+        if last && self.sessions[index].out.waiting_for.is_some() {
+            return Some(End {
+                at: None,
+                st: "wait",
+                why: if self.sessions[index].out.waiting_for.as_deref() == Some("permission prompt")
+                {
+                    "permission"
+                } else {
+                    "input"
+                },
+                h: None,
+            });
+        }
         if last && self.sessions[index].out.state == "work" {
             return Some(End {
+                at: None,
                 st: "work",
                 why: "working",
                 h: None,
@@ -3714,6 +4573,7 @@ impl<'a> Builder<'a> {
         {
             let found = &self.handoffs[*handoff].out;
             return Some(End {
+                at: None,
                 st: if found.status == "wait" {
                     "wait"
                 } else {
@@ -3726,6 +4586,7 @@ impl<'a> Builder<'a> {
         let start = start.map(|handoff| &self.handoffs[handoff].out);
         if start.is_some_and(|start| start.status == "err") {
             return Some(End {
+                at: None,
                 st: "err",
                 why: "failed",
                 h: None,
@@ -3735,6 +4596,7 @@ impl<'a> Builder<'a> {
         match last_content.map(|entry| entry.kind) {
             Some(EntryKind::Operation(ToolState::Err)) => {
                 return Some(End {
+                    at: None,
                     st: "err",
                     why: "failed_step",
                     h: None,
@@ -3742,6 +4604,7 @@ impl<'a> Builder<'a> {
             }
             Some(EntryKind::Tool(ToolState::Err)) => {
                 return Some(End {
+                    at: None,
                     st: "err",
                     why: "failed_step",
                     h: None,
@@ -3755,6 +4618,7 @@ impl<'a> Builder<'a> {
                     .is_some_and(|at| self.live_yield(index, at)) =>
             {
                 return Some(End {
+                    at: None,
                     st: "err",
                     why: "unfinished_step",
                     h: None,
@@ -3762,6 +4626,7 @@ impl<'a> Builder<'a> {
             }
             Some(EntryKind::H(handoff)) if self.handoffs[handoff].out.status == "err" => {
                 return Some(End {
+                    at: None,
                     st: "err",
                     why: "handoff_failed",
                     h: Some(self.handoffs[handoff].out.id.clone()),
@@ -3771,6 +4636,7 @@ impl<'a> Builder<'a> {
         }
         if start.is_some_and(|start| start.kind == "spawn" && start.status == "done") {
             return Some(End {
+                at: None,
                 st: "done",
                 why: "returned",
                 h: None,
@@ -3781,12 +4647,14 @@ impl<'a> Builder<'a> {
             .any(|entry| matches!(entry.kind, EntryKind::A))
         {
             return Some(End {
+                at: None,
                 st: "done",
                 why: "replied",
                 h: None,
             });
         }
         Some(End {
+            at: None,
             st: "idle",
             why: "no_reply",
             h: None,
@@ -3847,6 +4715,7 @@ enum EntryKind {
     A,
     Tool(ToolState),
     Operation(ToolState),
+    BgEnd,
     Gap,
 }
 
@@ -3863,10 +4732,38 @@ pub(crate) enum Shown {
 }
 
 /// A source file a transcript slot points into.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct SlotFile {
     pub(crate) path: PathBuf,
     pub(crate) cwd: Option<String>,
+    pub(crate) prompts: Arc<crate::attachments::PromptCache>,
+}
+
+impl std::fmt::Debug for SlotFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SlotFile")
+            .field("path", &self.path)
+            .field("cwd", &self.cwd)
+            .finish()
+    }
+}
+
+/// A background Bash call's lifecycle, separate from its immediate tool result.
+#[derive(Clone, Debug)]
+pub(crate) struct Background {
+    pub(crate) tid: String,
+    pub(crate) live: bool,
+    pub(crate) end: Option<BgEnd>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BgEnd {
+    pub(crate) file: Arc<SlotFile>,
+    pub(crate) offset: u64,
+    pub(crate) t: Option<i64>,
+    pub(crate) status: String,
+    pub(crate) failed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -3881,6 +4778,15 @@ pub(crate) enum SlotKind {
         /// A plain Codex call's `CommandExecution` item line, when the logs
         /// have one: its output is the whole copy.
         item: Option<u64>,
+        bg: Option<Background>,
+    },
+    BgEnd {
+        call: String,
+        status: String,
+        /// The original call's file, offset and block, for its label.
+        source: (Arc<SlotFile>, u64, u32),
+        /// The original call's time, for how long it ran.
+        start: Option<i64>,
     },
     /// A Codex code-mode command or file change, drawn in place of its
     /// wrapper when exactly one code-mode call owns it.
@@ -3915,6 +4821,7 @@ pub(crate) enum SlotKind {
     Gap,
     Think,
     Harness(String),
+    Signal(SignalData),
     /// A spawned run's return to the session that started it.
     Returned {
         to: String,
@@ -3925,11 +4832,45 @@ pub(crate) enum SlotKind {
     NoActivity,
 }
 
+/// Content-free signal metadata. Source event indices never leave the model.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SignalData {
+    pub(crate) kind: events::SignalKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) previous: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) value: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum Annotation<'a> {
+    Extra(&'a Event),
+    Signal(&'a events::Signal),
+}
+impl Annotation<'_> {
+    fn pos(self) -> (u64, u32) {
+        match self {
+            Self::Extra(event) => (event.o, event.b),
+            Self::Signal(signal) => (signal.o, u32::MAX),
+        }
+    }
+    fn time(self) -> Option<i64> {
+        match self {
+            Self::Extra(event) => event.t,
+            Self::Signal(signal) => signal.t,
+        }
+    }
+}
+
 /// One transcript entry, as offsets: `/api/tx` reads its text per page.
 #[derive(Clone, Debug)]
 pub(crate) struct Slot {
     pub(crate) kind: SlotKind,
-    pub(crate) file: Option<usize>,
+    pub(crate) file: Option<Arc<SlotFile>>,
     pub(crate) offset: u64,
     pub(crate) block: u32,
     pub(crate) t: Option<i64>,
@@ -3940,7 +4881,13 @@ pub(crate) struct Slot {
 }
 
 impl Slot {
-    fn new(kind: SlotKind, file: Option<usize>, offset: u64, block: u32, t: Option<i64>) -> Self {
+    fn new(
+        kind: SlotKind,
+        file: Option<Arc<SlotFile>>,
+        offset: u64,
+        block: u32,
+        t: Option<i64>,
+    ) -> Self {
         Self {
             kind,
             file,
@@ -3957,9 +4904,16 @@ impl Slot {
     /// count, so the errors badge and `/api/tx?errors=1` agree.
     pub(crate) fn failed_call(&self) -> Option<bool> {
         match &self.kind {
-            SlotKind::Tool { shown, .. }
-            | SlotKind::Yielded { shown, .. }
-            | SlotKind::Sent { shown, .. } => Some(matches!(shown, Shown::Err | Shown::Unfinished)),
+            SlotKind::Tool { shown, bg, .. } => Some(
+                matches!(shown, Shown::Err | Shown::Unfinished)
+                    || bg
+                        .as_ref()
+                        .and_then(|bg| bg.end.as_ref())
+                        .is_some_and(|end| end.failed),
+            ),
+            SlotKind::Yielded { shown, .. } | SlotKind::Sent { shown, .. } => {
+                Some(matches!(shown, Shown::Err | Shown::Unfinished))
+            }
             SlotKind::Operation { ok, .. } => Some(*ok == Some(false)),
             _ => None,
         }
@@ -4030,6 +4984,7 @@ pub(crate) struct Transcript {
     /// The calls by tool name, bounded (see [`capped_tool_counts`]); they add
     /// up to `calls`.
     pub(crate) tools: BTreeMap<String, usize>,
+    pub(crate) signals: BTreeMap<events::SignalKind, usize>,
 }
 
 impl Transcript {
@@ -4037,7 +4992,11 @@ impl Transcript {
         let mut calls = 0;
         let mut errors = 0;
         let mut tools = BTreeMap::<String, usize>::new();
+        let mut signals = BTreeMap::new();
         for slot in &slots {
+            if let SlotKind::Signal(signal) = &slot.kind {
+                *signals.entry(signal.kind).or_default() += 1;
+            }
             let Some(failed) = slot.failed_call() else {
                 continue;
             };
@@ -4053,6 +5012,7 @@ impl Transcript {
             calls,
             errors,
             tools,
+            signals,
         }
     }
 }
@@ -4440,7 +5400,7 @@ pub(crate) fn build(
     texts: &mut Texts,
     now: i64,
 ) -> io::Result<Built> {
-    let mut timings = Vec::with_capacity(17);
+    let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
         ($name:literal, $body:expr) => {{
             let started = std::time::Instant::now();
@@ -4493,17 +5453,22 @@ pub(crate) fn build(
     let mut builder = Builder::new(&files, texts, now, machine.clone(), &facts, &reported_runs);
     timed!("sessions", builder.sessions(groups, &pids, &held));
     timed!("index_tools", builder.index_tools());
+    timed!("background_commands", builder.background_commands());
     timed!("claude_spawns", builder.claude_spawns());
     timed!("codex_spawns", builder.codex_spawns());
+    timed!(
+        "observed_parents",
+        builder.observed_parents(options, &pids, &lock_pids.clone().unwrap_or_default())
+    );
     timed!("relays", builder.relays());
     timed!("codex_relays", builder.codex_relays());
     timed!("asks", builder.asks());
     timed!("questions", builder.questions());
     timed!("lineage_states", builder.lineage_states());
-    timed!("activity", builder.activity());
     #[cfg(test)]
     let texts = builder.texts_by_turn();
     let (mut turns, mut tx) = timed!("turns", builder.turns());
+    timed!("wait_edges", builder.wait_edges(&tx));
 
     // Stubs span the handoffs that name them.
     timed!("stubs", {
@@ -4626,10 +5591,12 @@ pub(crate) fn build(
         // window can name handoffs the window left out.
         for (key, transcript) in &mut tx {
             if sessions.get(key).is_some_and(|session| session.stub) {
-                transcript.slots.retain(|slot| match &slot.kind {
-                    SlotKind::H(id) => kept.contains(id),
-                    _ => true,
-                });
+                Arc::make_mut(transcript)
+                    .slots
+                    .retain(|slot| match &slot.kind {
+                        SlotKind::H(id) => kept.contains(id),
+                        _ => true,
+                    });
             }
         }
         for session in sessions.values_mut() {
@@ -4695,7 +5662,7 @@ pub(crate) fn build(
                 Some(handoff.at),
             )
         }));
-        tx.insert(key, Transcript::from_slots(slots));
+        tx.insert(key, Arc::new(Transcript::from_slots(slots)));
     }
     // Each session's totals come from its transcript index, built above from
     // the same slots `/api/tx` counts.
@@ -4703,22 +5670,26 @@ pub(crate) fn build(
         if let Some(transcript) = tx.get(key) {
             session.calls = Some(transcript.calls);
             session.errors = Some(transcript.errors);
+            session.signals = transcript.signals.clone();
             session.tool_calls = transcript.tools.clone();
         }
     }
     let busy = BTreeMap::from([(machine.clone(), all_busy)]);
+    let file_sizes: HashMap<&Path, u64> = files
+        .iter()
+        .map(|file| (file.path.as_path(), file.stamp.size))
+        .collect();
     let marks: BTreeMap<&str, String> = tx
         .iter()
         .map(|(sid, transcript)| {
-            let sources: BTreeSet<usize> = transcript
+            let sources: BTreeSet<&Path> = transcript
                 .slots
                 .iter()
-                .filter_map(|slot| slot.file)
+                .filter_map(|slot| slot.file.as_ref().map(|file| file.path.as_path()))
                 .collect();
             let bytes: u64 = sources
                 .iter()
-                .filter_map(|file| files.get(*file))
-                .map(|file| file.stamp.size)
+                .filter_map(|path| file_sizes.get(path).copied())
                 .sum();
             // A call stops running when its process dies, which writes no
             // line: the running count moves the mark all the same.
@@ -4727,8 +5698,15 @@ pub(crate) fn build(
                 .iter()
                 .filter(|slot| {
                     matches!(
-                        slot.kind,
+                        &slot.kind,
                         SlotKind::Tool {
+                            bg: Some(Background {
+                                live: true,
+                                end: None,
+                                ..
+                            }),
+                            ..
+                        } | SlotKind::Tool {
                             shown: Shown::Live,
                             ..
                         } | SlotKind::Yielded {
@@ -4780,13 +5758,6 @@ pub(crate) fn build(
         ))
     );
     let pids = pids.iter().map(|pid| pid.pid).collect();
-    let slot_files = files
-        .iter()
-        .map(|file| SlotFile {
-            path: file.path.clone(),
-            cwd: file.summary.cwd.clone(),
-        })
-        .collect();
     let mut built = Built {
         version,
         machine,
@@ -4795,7 +5766,6 @@ pub(crate) fn build(
         pids,
         home,
         machine_id,
-        files: slot_files,
         tx,
         facts: session_facts,
         window_start,

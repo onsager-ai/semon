@@ -816,3 +816,191 @@ fn assert_takeover_state(path: &Path, epoch: u64, streams: usize) {
     assert_eq!(state.streams.len(), streams);
     assert!(state.streams.values().all(|stream| stream.epoch == epoch));
 }
+
+#[test]
+fn codex_rollout_discovery_rewrite_restore_and_writer_lock() {
+    let temp = TempDir::new("codex-rollout");
+    let source = temp.path().join("source/sessions");
+    let relative = "2026/10/01/rollout-2026-10-01T10-00-00-thread-a.jsonl";
+    let path = source.join(relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let meta = b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-a\",\"cwd\":\"/synthetic/source\",\"git\":{\"branch\":\"synthetic\"}}}\n";
+    let mut first = meta.to_vec();
+    first.extend_from_slice(b"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"call-a\",\"name\":\"exec_command\"}}\n");
+    fs::write(&path, &first).unwrap();
+    fs::write(source.join("state_5.sqlite"), b"not a transcript").unwrap();
+    fs::write(path.parent().unwrap().join("rollout-invalid.jsonl"), meta).unwrap();
+    let streams = semon_relay::discover_streams(&source).unwrap();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].stream, format!("codex/{relative}"));
+    let receiver = Receiver::open(temp.path().join("receiver")).unwrap();
+    let transport = ReceiverTransport(&receiver);
+    let state = temp.path().join("source-state.json");
+    let mut sender = Sender::with_machine("machine-a");
+    let (claude_root, _) = source_session(&temp, b"synthetic main\n", b"synthetic child\n");
+    sender.add_root(claude_root);
+    sender.set_session_filter(["thread-a".to_owned()].into_iter().collect());
+    assert!(
+        !sender
+            .run_pass(&source, &state, &transport)
+            .unwrap()
+            .had_failures()
+    );
+    // Same-path rewrite is a generation bump, not a second stream.
+    let mut rewritten = meta.to_vec();
+    rewritten.extend_from_slice(b"{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"pending\",\"name\":\"apply_patch\"}}\n");
+    fs::write(&path, &rewritten).unwrap();
+    assert!(
+        !sender
+            .run_pass(&source, &state, &transport)
+            .unwrap()
+            .had_failures()
+    );
+    let target = temp.path().join("target/sessions");
+    let target_state = temp.path().join("target-state.json");
+    let cwd = temp.path().join("target work");
+    fs::create_dir_all(&cwd).unwrap();
+    let lockdir = temp.path().join("target/thread-writer-locks");
+    fs::create_dir_all(&lockdir).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lockdir.join("thread-a.lock"))
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+    }
+    #[cfg(not(unix))]
+    lock.lock().unwrap();
+    let err = restore_session(
+        &target,
+        &target_state,
+        &cwd,
+        "thread-a",
+        "machine-b",
+        true,
+        false,
+        &transport,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("active writer"));
+    assert!(!target.join(relative).exists());
+    drop(lock);
+    // A caller's live SQLite remains byte-identical throughout restore.
+    let database = temp.path().join("target/state_5.sqlite");
+    fs::write(&database, b"target-local-index").unwrap();
+    let report = restore_session(
+        &target,
+        &target_state,
+        &cwd,
+        "thread-a",
+        "machine-b",
+        true,
+        false,
+        &transport,
+    )
+    .unwrap();
+    assert_eq!(report.harness, "codex");
+    assert_eq!(report.streams[0].generation, 1);
+    assert_eq!(fs::read(target.join(relative)).unwrap(), rewritten);
+    assert_eq!(fs::read(database).unwrap(), b"target-local-index");
+    assert_eq!(report.recorded_cwd.as_deref(), Some("/synthetic/source"));
+    assert_eq!(report.recorded_git_branch.as_deref(), Some("synthetic"));
+    assert_eq!(report.unfinished_tool_calls.len(), 1);
+    assert_eq!(report.unfinished_tool_calls[0].id, "pending");
+    assert!(
+        report
+            .next_step()
+            .unwrap()
+            .contains("codex resume thread-a")
+    );
+    assert!(!report.to_text().contains("apply_patch arguments"));
+    assert!(
+        !Sender::with_machine("machine-b")
+            .run_pass(&target, &target_state, &transport)
+            .unwrap()
+            .had_failures()
+    );
+}
+
+#[test]
+fn encrypted_codex_restore_rejects_symlink_and_preserves_rollout_bytes() {
+    let temp = TempDir::new("codex-encrypted");
+    let source = temp.path().join("source/sessions");
+    let relative = "2024/02/29/rollout-2024-02-29T12-00-00-thread-b.jsonl";
+    let path = source.join(relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let content =
+        b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-b\",\"cwd\":\"/synthetic\"}}\n";
+    fs::write(&path, content).unwrap();
+    let invalid = source.join("2023/02/29/rollout-invalid-thread-b.jsonl");
+    fs::create_dir_all(invalid.parent().unwrap()).unwrap();
+    fs::write(invalid, content).unwrap();
+    assert_eq!(
+        semon_relay::discover_codex_streams(&source).unwrap().len(),
+        1
+    );
+    let receiver = Receiver::open(temp.path().join("receiver")).unwrap();
+    let transport = ReceiverTransport(&receiver);
+    let old = x25519::Identity::generate();
+    let new = x25519::Identity::generate();
+    let recipients = vec![old.to_public(), new.to_public()];
+    Sender::encrypted("machine-a", old, recipients)
+        .run_pass(&source, &temp.path().join("source-state.json"), &transport)
+        .unwrap();
+    let target = temp.path().join("target/sessions");
+    fs::create_dir_all(&target).unwrap();
+    let state = temp.path().join("target-state.json");
+    let cwd = temp.path().join("work");
+    fs::create_dir_all(&cwd).unwrap();
+    #[cfg(unix)]
+    {
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, target.join("2024")).unwrap();
+        assert!(matches!(
+            restore_session_encrypted(
+                &target,
+                &state,
+                &cwd,
+                "thread-b",
+                "machine-b",
+                true,
+                false,
+                &new,
+                &transport
+            ),
+            Err(RestoreError::TargetType(_))
+        ));
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        fs::remove_file(target.join("2024")).unwrap();
+    }
+    let report = restore_session_encrypted(
+        &target,
+        &state,
+        &cwd,
+        "thread-b",
+        "machine-b",
+        true,
+        false,
+        &new,
+        &transport,
+    )
+    .unwrap();
+    assert_eq!(fs::read(target.join(relative)).unwrap(), content);
+    assert!(report.next_step().unwrap().contains("CODEX_HOME="));
+    assert_eq!(report.codex_home, Some(temp.path().join("target")));
+    assert!(
+        report.to_json()["compatibility"]
+            .as_str()
+            .unwrap()
+            .contains("0.159.0-alpha.3")
+    );
+}

@@ -12,6 +12,17 @@ explicit rather than hiding it. The telemetry pipeline is abandoned: OTLP,
 ClickHouse, the collector, and the analytics queries are removed. Only the
 Codex/Claude record parsers survive, re-scoped as carrier adapters.**
 
+## Implementation status
+
+This document states the intended carrier interface, not the current API.
+Capture and forensic retention are implemented, with ordered occurrences
+specified separately in [trace-identity-and-occurrences.md](trace-identity-and-occurrences.md).
+Capability references, declared capability sets, reactivation with loss reports,
+and cue retrieval remain unfinished. The three field classes below are distinct
+from the store's three tables/regions; the occurrence table does not implement
+capability references. The unresolved reactivation behavior and cue mechanism
+remain design decisions before those interfaces can ship.
+
 ## Constraints
 
 | Tag | Constraint |

@@ -14,7 +14,7 @@
 //     focuses it; the open list is not saved (a reload starts short); navigating to a row under the sticky row scrolls it clear.
 //   - opening a nested parent's "All N" inside an open parent leaves the ancestors listed and open and sticks only the innermost
 //     row; on a wide screen "All N" reveals exactly its number (every descendant, under its own parent, open); a live update keeps
-//     the whole list open, its rows in place and focus on "Show fewer" (the pill then reorders it); crossing 760 px, the rail, collapsing the parent or an ancestor, and a list with
+//     the whole list open, its rows in place and focus on "Show fewer" (what was held applies when the tab returns); crossing 760 px, the rail, collapsing the parent or an ancestor, and a list with
 //     nothing left to fold all drop the open list; Esc in a phone's sheet leaves the drawer open; the sheet says which parent a
 //     grandchild is under.
 //   - no parent row shows a count pill, open or collapsed (the chevron says there are children), and a collapsed row says it is collapsed (aria-expanded); the row's aria-label still breaks the total down as text (runs, needs you, working, failed). A patched model puts a waiting and a failed run, and a grandchild, under Fan-out.
@@ -80,7 +80,7 @@ const toggleBox = (page, id) => page.evaluate((id) => {
   const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id), t = item?.querySelector(":scope > .tree-row .tree-toggle"), row = item?.querySelector(":scope > .tree-row .srow");
   if (!t || !row) return null;
   const a = t.getBoundingClientRect(), b = row.getBoundingClientRect(), line = item.querySelector(":scope > .tree-row").getBoundingClientRect();
-  return { w: Math.round(a.width * 10) / 10, h: Math.round(a.height * 10) / 10, right: a.right <= b.right + 0.5 && a.right >= b.right - 12, lower: (a.top + a.bottom) / 2 >= (line.top + line.bottom) / 2 - 1 && a.bottom <= line.bottom + 0.5, color: getComputedStyle(t).color, bg: getComputedStyle(t).backgroundColor };
+  return { w: Math.round(a.width * 10) / 10, h: Math.round(a.height * 10) / 10, right: a.right <= line.right + 0.5 && a.right >= line.right - 12, separate: a.left >= b.right - 0.5, lower: (a.top + a.bottom) / 2 >= (line.top + line.bottom) / 2 - 1 && a.bottom <= line.bottom + 0.5, color: getComputedStyle(t).color, bg: getComputedStyle(t).backgroundColor };
 }, id);
 
 // Every top-level parent with children, collapsed in turn (and put back as it was): whether a count pill shows in its row, open
@@ -299,6 +299,12 @@ const servedModel = async (browser, opts, patch, baselineData = null) => {
   if (baselineData) await goto(page, { v: "sessions" }, baselineData);
   return { page, state, baseline };
 };
+const waitModelEdit = async (page, state) => {
+  const until = Date.now() + 15000;
+  while (state.edit && Date.now() < until) await page.waitForTimeout(50);
+  if (state.edit) throw new Error("mock model edit was not polled");
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+};
 const scrollSidebar = async (page, y) => { await page.evaluate((y) => { document.querySelector("#side-list").scrollTop = y; }, y); await page.waitForTimeout(80); };
 
 export default async function sidebarCheck(browser) {
@@ -374,9 +380,9 @@ export default async function sidebarCheck(browser) {
     r.expect(defaultList.count === expectedDefaultCount && defaultList.ids.includes(approvalHelperId) && defaultList.ids.includes(approvalBridgeId) && defaultList.ids.includes(approvalRootWorkerId) && !approvalReviewIds.some((id) => defaultList.ids.includes(id)), size + " " + theme + ": session totals hide exact review kinds but retain their ordinary descendants: " + JSON.stringify([defaultList.count, expectedDefaultCount, defaultList.ids.filter((id) => [approvalHelperId, approvalBridgeId, approvalRootWorkerId].includes(id)), approvalReviewIds.filter((id) => defaultList.ids.includes(id))]));
     const fanRow = page.locator("#page .nrow[data-id=\"" + fan.id + "\"]");
     const otherCount = (text) => Number(text.match(/(\d+) other runs?/)?.[1] ?? 0);
-    const codexCount = (text) => Number(text.match(/(\d+) Codex runs?/)?.[1] ?? 0);
-    r.expect(otherCount(await fanRow.locator(".kids").innerText().catch(() => "")) === baseOtherRuns, size + " " + theme + ": default child counts exclude the two hidden review rows");
-    r.expect(codexCount(await fanRow.locator(".kids").innerText().catch(() => "")) === baseCodexRuns + 2, size + " " + theme + ": child counts include the ordinary worker beneath the hidden review");
+    const codexCount = (text) => Number(text.match(/(\d+) (?:Codex )?runs?/)?.[1] ?? 0);
+    r.expect(otherCount(await fanRow.locator(".row-counts").innerText().catch(() => "")) === baseOtherRuns, size + " " + theme + ": default child counts exclude the two hidden review rows");
+    r.expect(codexCount(await fanRow.locator(".row-counts").innerText().catch(() => "")) === baseCodexRuns + 2, size + " " + theme + ": child counts include the ordinary worker beneath the hidden review");
     await page.locator("#sq").fill("Approval review");
     const searchIds = await page.locator("#page .nrow").evaluateAll((rows) => rows.map((x) => x.dataset.id));
     r.expect(searchIds.includes(approvalHelperId) && !approvalReviewIds.some((id) => searchIds.includes(id)), size + " " + theme + ": session search returns the misleading ordinary child without exposing hidden reviews: " + JSON.stringify(searchIds));
@@ -389,9 +395,9 @@ export default async function sidebarCheck(browser) {
       ids: [...document.querySelectorAll("#page .nrow")].map((x) => x.dataset.id),
       reviewLabels: [...document.querySelectorAll("#page .nrow")].filter((x) => x.dataset.id.startsWith("guardian-review-")).map((x) => ({ name: x.querySelector(".nm")?.textContent, label: x.querySelector(".for")?.textContent })),
     }));
-    r.expect(shownList.count === expectedDefaultCount + 3 && approvalReviewIds.every((id) => shownList.ids.includes(id)) && [approvalHelperId, approvalBridgeId, approvalRootWorkerId].every((id) => shownList.ids.includes(id)) && shownList.reviewLabels.length === approvalReviewIds.length && shownList.reviewLabels.every((x) => x.name === "Approval review" && x.label.includes("Approval review")), size + " " + theme + ": the toggle reveals all labeled reviews and retains their ordinary descendants: " + JSON.stringify([shownList.count, shownList.reviewLabels]));
-    r.expect(otherCount(await fanRow.locator(".kids").innerText().catch(() => "")) === baseOtherRuns + fanReviewIds.length, size + " " + theme + ": child counts include the Fan-out reviews only while enabled");
-    r.expect(codexCount(await fanRow.locator(".kids").innerText().catch(() => "")) === baseCodexRuns + 2, size + " " + theme + ": child counts retain both ordinary Fan-out descendants");
+    r.expect(shownList.count === expectedDefaultCount + 3 && approvalReviewIds.every((id) => shownList.ids.includes(id)) && [approvalHelperId, approvalBridgeId, approvalRootWorkerId].every((id) => shownList.ids.includes(id)) && shownList.reviewLabels.length === approvalReviewIds.length && shownList.reviewLabels.every((x) => x.name === "Approval review"), size + " " + theme + ": the toggle reveals all labeled reviews and retains their ordinary descendants: " + JSON.stringify([shownList.count, shownList.reviewLabels]));
+    r.expect(otherCount(await fanRow.locator(".row-counts").innerText().catch(() => "")) === baseOtherRuns + fanReviewIds.length, size + " " + theme + ": child counts include the Fan-out reviews only while enabled");
+    r.expect(codexCount(await fanRow.locator(".row-counts").innerText().catch(() => "")) === baseCodexRuns + 2, size + " " + theme + ": child counts retain both ordinary Fan-out descendants");
     if (size === "phone") await openDrawer(page);
     const shownGroup = await groupOf(page, fan.id);
     r.expect(shownGroup?.allIds.includes(approvalBridgeId) && shownGroup?.all?.text === "All 11" && shownGroup.label?.includes("11 runs"), size + " " + theme + ": the enabled sidebar keeps the ordinary descendant and includes reviews in count and state summary: " + JSON.stringify(shownGroup));
@@ -505,7 +511,7 @@ export default async function sidebarCheck(browser) {
 
       const movedLast = newest + 100;
       state.edit = (m) => { patchApprovalReviews(m, fan.id, fanKids[0].id); m.sessions[orderRoot.id].last = movedLast; };
-      await page.waitForFunction(() => document.querySelector("#order-status")?.textContent.includes("updated"), null, { timeout: 15000 });
+      await waitModelEdit(page, state);
       fixture.sessions[orderRoot.id].last = movedLast;
       await activateToggle(false, "ordering disable");
       const disabledIds = await page.locator("#page .nrow").evaluateAll((rows) => rows.map((x) => x.dataset.id));
@@ -530,23 +536,20 @@ export default async function sidebarCheck(browser) {
       await page.waitForFunction(() => document.querySelector('#page .groupby[aria-label="Session visibility"] button[data-show-approval-reviews]')?.getAttribute("aria-pressed") === "true");
       const movedLast = newest + 100;
       state.edit = (m) => { m.sessions[orderRoot.id].last = movedLast; };
-      await page.waitForFunction(() => document.querySelector("#order-status")?.textContent.includes("updated"), null, { timeout: 15000 });
+      await waitModelEdit(page, state);
       fixture.sessions[orderRoot.id].last = movedLast;
-      const chipHit = await page.evaluate(() => {
-        const chip = document.querySelector('#page .groupby[aria-label="Group by"] .order-chip[data-order="page"]'), review = document.querySelector('#page .groupby[aria-label="Session visibility"] button[data-show-approval-reviews]'), harness = document.querySelector('#page .groupby[aria-label="Group by"] button[data-g="harness"]');
-        if (!chip) return null;
-        const box = chip.getBoundingClientRect(), target = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2), rb = review?.getBoundingClientRect(), hb = harness?.getBoundingClientRect();
-        const overlaps = (a, b) => !!a && !!b && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-        return { visible: !chip.hidden && !!chip.getClientRects().length, hit: chip.contains(target), reviewOverlap: overlaps(box, rb), harnessOverlap: overlaps(box, hb) };
-      });
-      r.expect(chipHit?.visible && chipHit.hit && !chipHit.reviewOverlap && !chipHit.harnessOverlap, "phone: the review toggle sits outside the held order chip's hit target: " + JSON.stringify(chipHit));
-      await page.locator('#page .groupby[aria-label="Group by"] .order-chip[data-order="page"]').click();
-      await page.waitForFunction(() => ![...document.querySelectorAll('[data-order="page"]')].some((b) => !b.hidden && b.getClientRects().length));
+      const reviewHit = await page.locator('[data-show-approval-reviews]').evaluate((control) => { const box = control.getBoundingClientRect(); return { width:box.width,height:box.height,hit:control.contains(document.elementFromPoint(box.left+box.width/2,box.top+box.height/2)) }; });
+      r.expect(reviewHit.hit && reviewHit.height >= 44, "phone: approval review toggle remains reachable while session order is held: " + JSON.stringify(reviewHit));
+      r.expect(await page.locator('[data-order="page"]').count() === 0, "phone: held orders apply automatically without an order chip");
+      await page.locator('.nav-item[data-go="home"]').evaluate((control) => control.click());
+      await page.waitForFunction(() => history.state?.v === "home");
+      await page.locator('.nav-item[data-go="sessions"]').evaluate((control) => control.click());
+      await page.waitForFunction(() => history.state?.v === "sessions" && !!document.querySelector('#page .nrow'));
       const actual = await page.locator("#page .nrow").evaluateAll((rows) => rows.map((x) => x.dataset.id));
       const added = [...approvalFixtureIds].sort((a, b) => fixture.sessions[b].last - fixture.sessions[a].last);
       const expected = [orderRoot.id, ...added, ...baseline.ids.filter((id) => id !== orderRoot.id)];
-      r.expect(JSON.stringify(actual) === JSON.stringify(expected), "phone: activating the order chip clears the page hold and restores last-activity order");
-      r.expect(page.errors.length === 0 && await overflow(page) === 0, "phone: order chip clearing with approval reviews has no browser errors or horizontal overflow");
+      r.expect(JSON.stringify(actual) === JSON.stringify(expected), "phone: leaving and reopening Sessions applies its held last-activity order");
+      r.expect(page.errors.length === 0 && await overflow(page) === 0, "phone: automatic order applying with approval reviews has no browser errors or horizontal overflow");
       await page.close();
     }
   }
@@ -582,7 +585,8 @@ export default async function sidebarCheck(browser) {
     const box = await toggleBox(page, fan.id);
     R.phoneToggle = box;
     r.expect(box && box.w >= 44 && box.h >= 44, "phone: the toggle is at least 44x44: " + JSON.stringify(box));
-    r.expect(box?.right && box.lower, "phone: the toggle sits over the right end of the row's meta line: " + JSON.stringify(box));
+    r.expect(box?.right && box.lower, "phone: the toggle sits at the right end of the row's meta line: " + JSON.stringify(box));
+    r.expect(box?.separate, "phone: the navigation and toggle targets do not overlap: " + JSON.stringify(box));
     r.expect(box?.color === "rgb(93, 101, 97)", "phone: the chevron is --muted (5.3:1 on the light sidebar): " + box?.color);
     r.expect(box?.bg === "rgba(0, 0, 0, 0)", "phone: the toggle has no background until hover or focus: " + box?.bg);
     const g = await gutters(page);
@@ -968,32 +972,29 @@ export default async function sidebarCheck(browser) {
       r.expect(await page.evaluate((id) => document.activeElement?.classList.contains("srow") && document.activeElement.dataset.id === id, c1), "nested " + tag + ": focus is on Reader 1's row after folding");
 
       if (!dark) {
-        // A live update while Swarm's whole list is open: it stays open with its rows where they were and focus on "Show fewer"; the
-        // new child (Worker 13) is held and Worker 10's finish is a move, so the sidebar's pill counts them (worked out below from the
-        // edited model, by a plain dynamic programme); the pill sits above the parent's stuck row; the pill then reorders the list.
+        // A live update while Swarm's whole list is open: it stays open with its rows where they were and focus on "Show fewer" (the new
+        // child, Worker 13, is held, and so is Worker 10's finish); the redraw is proved by the rows being new elements. The held order
+        // applies when the tab comes back from the background (a visibilitychange): the list is then in order with all 13 rows.
         await page.evaluate(() => { document.querySelector("#side-list").scrollTop = 0; });
         await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
         await page.waitForTimeout(150);
-        await page.evaluate(() => { document.querySelector("#side-list").scrollTop = 40; }); // the list's top is out of view, so the pill shows
+        await page.evaluate(() => { document.querySelector("#side-list").scrollTop = 40; });
         await page.waitForTimeout(150);
         const held = await groupOf(page, swarm.id);
+        await page.evaluate(() => { document.querySelectorAll("#lanes .treeitem").forEach((x) => { x.__drawn = true; }); }); // (a redraw makes new elements)
         state.edit = finishSwarm;
-        await page.waitForFunction(() => document.querySelector('.order-pill[data-order="side"]:not([hidden])'), null, { timeout: 15000 });
+        await page.waitForFunction(() => !document.querySelector("#lanes .treeitem")?.__drawn, null, { timeout: 15000 });
         await page.waitForTimeout(100);
         const after = await groupOf(page, swarm.id);
         R.liveAfter = after;
-        r.expect(after && JSON.stringify(after.ids) === JSON.stringify(held?.ids), "live: the open list keeps its rows in place (Worker 13 is held): " + JSON.stringify(after?.ids.map((id) => nname(id))));
-        const post = finishSwarm(nest(structuredClone(D.model))).sessions, kidRank = (x) => (x.state === "wait" ? 0 : x.state === "work" ? 1 : 2), cmp = (a, b) => kidRank(post[a]) - kidRank(post[b]) || post[b].last - post[a].last;
-        const dp = (order) => { const d = order.map(() => 1); let best = 0; for (let i = 0; i < order.length; i++) { for (let j = 0; j < i; j++) if (cmp(order[j], order[i]) <= 0) d[i] = Math.max(d[i], d[j] + 1); best = Math.max(best, d[i]); } return order.length - best; };
-        const want = 1 + dp(held?.ids ?? []);
-        r.expect(await page.evaluate(() => document.querySelector('.order-pill[data-order="side"]')?.textContent.trim()) === want + " updated", "live: the pill counts Worker 13 (held) and the rows that move (" + want + ")");
-        r.expect(await page.evaluate(() => { const b = document.querySelector('.order-pill[data-order="side"]'), r = b.getBoundingClientRect(), e = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return b.contains(e) && !!document.querySelector("#lanes .tree-row.stuck"); }), "live: the pill isn't on top of the parent's stuck row");
+        r.expect(after && JSON.stringify(after.ids) === JSON.stringify(held?.ids), "live: the open list keeps its rows in place (Worker 13 and Worker 10's finish are held): " + JSON.stringify(after?.ids.map((id) => nname(id))));
         r.expect(after?.stuck === true && after.fewer === "Show fewer" && after.dialogs === 0, "live: the list is still open and sticky after the update: " + JSON.stringify([after?.stuck, after?.fewer]));
         r.expect(await page.evaluate((id) => { const a = document.activeElement; return a?.classList.contains("tree-fewer") && a.closest(".treeitem").dataset.id === id; }, swarm.id), "live: focus stays on 'Show fewer' through the redraw");
-        await page.click('.order-pill[data-order="side"]');
+        r.expect(await page.evaluate(() => !document.querySelector(".order-pill, .order-chip")), "live: a chip or pill was drawn for held order");
+        await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))); // the tab returns: what was held applies
         await page.waitForFunction((id) => document.querySelectorAll('#lanes .treeitem[data-id="' + id + '"] > .tree-group > .treeitem').length === 13, swarm.id, { timeout: 5000 });
         const sorted = await groupOf(page, swarm.id);
-        r.expect(sorted && JSON.stringify(sorted.ids) === JSON.stringify(live) && sorted.stuck === true, "live: the pill reorders the open list (Worker 10 finished) and takes Worker 13: " + JSON.stringify(sorted?.ids.map((id) => finishSwarm(nest(structuredClone(D.model))).sessions[id].name)));
+        r.expect(sorted && JSON.stringify(sorted.ids) === JSON.stringify(live) && sorted.stuck === true, "live: the held order applies when the tab returns (Worker 10 finished, Worker 13 in): " + JSON.stringify(sorted?.ids.map((id) => finishSwarm(nest(structuredClone(D.model))).sessions[id].name)));
         await page.click("#lanes .tree-row.stuck .tree-fewer");
       }
       r.expect(page.errors.length === 0, "nested " + tag + ": page errors " + page.errors.join("; "));

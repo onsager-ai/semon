@@ -212,6 +212,53 @@ fn encrypted_duplicate_uses_tag_and_collision_is_rejected() {
 }
 
 #[test]
+fn encrypted_forget_survives_restart_and_retries_without_restoring_ciphertext() {
+    let temp = TempDir::new("encrypted-forget");
+    let root = temp.path().join("receiver");
+    let receiver = Receiver::open(&root).unwrap();
+    let key = generate_data_key();
+    let recipient = x25519::Identity::generate();
+    let envelope = encrypt_envelope(&key, &[recipient.to_public()]).unwrap();
+    receiver.acquire("session", "machine-a").unwrap();
+    receiver
+        .put_envelope("session", "machine-a", &envelope, false, false)
+        .unwrap();
+    let (first, chain) =
+        encrypted_frame(&key, "machine-a", "session", 0, 0, &ZERO_CHAIN, b"secret\n");
+    receiver.accept(&first).unwrap();
+    let selector = semon_relay::ForgetSelector {
+        session: Some("session".into()),
+        ..Default::default()
+    };
+    let id = "a".repeat(64);
+    assert_eq!(receiver.forget(&id, &selector).unwrap().frames, 1);
+    let mut stored = Vec::new();
+    collect_files(&root, &mut stored);
+    let stored = stored.concat();
+    let ciphertext = hex::encode(&first.encrypted_payload().unwrap().ciphertext);
+    assert!(!String::from_utf8_lossy(&stored).contains(&ciphertext));
+    drop(receiver);
+    let receiver = Receiver::open(&root).unwrap();
+    let (retry, _) = encrypted_frame(&key, "machine-a", "session", 0, 0, &ZERO_CHAIN, b"secret\n");
+    assert_eq!(receiver.accept(&retry).unwrap(), ReceiveOutcome::Duplicate);
+    assert!(
+        receiver
+            .read_frame("session", "main", 0, 0, 0)
+            .unwrap()
+            .is_none()
+    );
+    let (next, _) = encrypted_frame(&key, "machine-a", "session", 0, 1, &chain, b"later\n");
+    assert_eq!(receiver.accept(&next).unwrap(), ReceiveOutcome::Stored);
+    assert_eq!(receiver.forget(&id, &selector).unwrap().frames, 1);
+    assert!(
+        receiver
+            .read_frame("session", "main", 0, 0, 1)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
 fn receiver_storage_contains_no_plaintext_and_client_verifies_chain() {
     let temp = TempDir::new("ciphertext-storage");
     let root = temp.path().join("receiver");
@@ -526,8 +573,14 @@ fn https_round_trip_covers_encryption_takeover_and_orphans() {
         )
         .unwrap();
     });
-    thread::sleep(Duration::from_millis(100));
+    wait_for_receiver(port);
     let endpoint = format!("https://127.0.0.1:{port}/v1/frames");
+    // Neither socket completes a TLS ClientHello. They must not hold the
+    // accept loop while the enrolled sender performs its normal handshake.
+    let idle_tls_peers = [
+        TcpStream::connect(listen).unwrap(),
+        TcpStream::connect(listen).unwrap(),
+    ];
     let transport_a = HttpTransport::secure(
         endpoint.clone(),
         Duration::from_secs(5),
@@ -543,6 +596,7 @@ fn https_round_trip_covers_encryption_takeover_and_orphans() {
         .run_pass(&old_projects, &old_state, &transport_a)
         .unwrap();
     assert!(!report.had_failures(), "{report:?}");
+    drop(idle_tls_peers);
 
     let transport_b = HttpTransport::secure(
         endpoint,
@@ -601,6 +655,112 @@ fn https_round_trip_covers_encryption_takeover_and_orphans() {
     let tips = verify_encrypted_frames("session-a", frames, &key).unwrap();
     assert_eq!(tips[0].seq, 2);
     assert_eq!(tips[0].epoch, 1);
+    let (_, observed, before_deletion) = transport_b.lease_observation(&machine_b).unwrap();
+    assert!(observed.abs_diff(unix_ms()) < 10_000);
+    let selector = semon_relay::ForgetSelector {
+        session: Some("session-a".into()),
+        ..Default::default()
+    };
+    let request_id = "b".repeat(64);
+    let outsider = HttpTransport::secure(
+        format!("https://127.0.0.1:{port}"),
+        Duration::from_secs(5),
+        RequestSigner::new(signing(99)),
+        Some(&fixture("test-cert.pem")),
+    )
+    .unwrap();
+    let outsider_machine = RequestSigner::new(signing(99)).machine().to_owned();
+    assert!(
+        outsider
+            .forget(&request_id, &selector, &outsider_machine)
+            .is_err()
+    );
+    assert_eq!(
+        transport_b
+            .list_frames("session-a", &machine_b)
+            .unwrap()
+            .len(),
+        3
+    );
+    let deleted = transport_b
+        .forget(&request_id, &selector, &machine_b)
+        .unwrap();
+    assert_eq!(deleted.frames, 4);
+    let (_, _, after_deletion) = transport_b.lease_observation(&machine_b).unwrap();
+    assert_ne!(before_deletion, after_deletion);
+
+    assert_eq!(
+        transport_b
+            .forget(&request_id, &selector, &machine_b)
+            .unwrap(),
+        deleted
+    );
+    assert!(
+        transport_b
+            .list_frames("session-a", &machine_b)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(transport_b.list_orphans(&machine_b).unwrap().is_empty());
+}
+
+#[test]
+fn bounded_connections_reject_excess_peers_and_release_idle_slots() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tiny_http::Server::from_listener_with_limits(
+        listener,
+        None,
+        tiny_http::ConnectionLimits {
+            max_connections: Some(2),
+            read_timeout: Some(Duration::from_millis(250)),
+            write_timeout: Some(Duration::from_secs(1)),
+        },
+    )
+    .unwrap();
+    thread::spawn(move || {
+        if let Some(request) = server.recv_timeout(Duration::from_secs(5)).unwrap() {
+            request
+                .respond(tiny_http::Response::from_string("ready"))
+                .unwrap();
+        }
+    });
+    let mut peers = [
+        TcpStream::connect(address).unwrap(),
+        TcpStream::connect(address).unwrap(),
+    ];
+    for peer in &mut peers {
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        peer.write_all(b"GET / HTTP/1.1\r\nHost: local\r\n")
+            .unwrap();
+    }
+    let mut excess = TcpStream::connect(address).unwrap();
+    excess
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let _ = excess.write_all(b"GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n");
+    let mut response = String::new();
+    let _ = excess.read_to_string(&mut response);
+    assert!(
+        !response.contains("200 OK"),
+        "excess connection was serviced: {response}"
+    );
+    for peer in &mut peers {
+        let _ = peer.read_to_end(&mut Vec::new());
+    }
+    let mut recovered = TcpStream::connect(address).unwrap();
+    recovered
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    recovered
+        .write_all(b"GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    recovered.read_to_string(&mut response).unwrap();
+    assert!(
+        response.contains("200 OK") && response.contains("ready"),
+        "idle slots did not expire: {response}"
+    );
 }
 
 #[test]
@@ -640,6 +800,43 @@ fn http_transport_parses_lease_status_larger_than_four_kibibytes() {
     assert!(format!("{status:?}").len() > 4096);
 }
 
+#[test]
+fn receiver_answers_bursts_while_other_connections_are_idle() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::{Arc, Barrier};
+    let temp = TempDir::new("receiver-burst");
+    let port = start_http_receiver(temp.path().join("receiver"));
+    let mut held: Vec<TcpStream> = Vec::new();
+    for _ in 0..40 {
+        for stream in held.drain(..2.min(held.len())) {
+            drop(stream);
+        }
+        thread::sleep(Duration::from_millis(20));
+        let barrier = Arc::new(Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    write!(stream, "GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+                    let mut status = String::new();
+                    BufReader::new(&stream).read_line(&mut status).unwrap();
+                    assert!(status.contains("404"), "{status}");
+                    stream
+                })
+            })
+            .collect();
+        held.extend(workers.into_iter().map(|worker| worker.join().unwrap()));
+        for stream in held.drain(..held.len().saturating_sub(32)) {
+            drop(stream);
+        }
+    }
+}
+
 fn collect_files(path: &Path, output: &mut Vec<Vec<u8>>) {
     for entry in fs::read_dir(path).unwrap() {
         let entry = entry.unwrap();
@@ -663,8 +860,19 @@ fn start_http_receiver(root: PathBuf) -> u16 {
     thread::spawn(move || {
         serve_configured(listen, &root, ServeConfig::default()).unwrap();
     });
-    thread::sleep(Duration::from_millis(100));
+    wait_for_receiver(port);
     port
+}
+
+fn wait_for_receiver(port: u16) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "receiver did not listen"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn declared_request(port: u16, machine: &str, content_length: usize) -> TcpStream {

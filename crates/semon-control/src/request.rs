@@ -144,6 +144,16 @@ pub struct Source {
 }
 
 impl Source {
+    /// Bound a client-supplied window id before retaining it in request state.
+    pub(crate) fn capped(mut self) -> Self {
+        let mut end = self.window.len().min(128);
+        while !self.window.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.window.truncate(end);
+        self
+    }
+
     /// The source for a journal line; the window id, which the client
     /// chooses, is cut to 128 bytes.
     pub(crate) fn to_json(&self) -> Value {
@@ -471,6 +481,8 @@ pub struct PendingRequest {
     /// When it reached its final state, on the monotonic clock, not the
     /// epoch; never shown as a wall time.
     pub ended_ms: Option<u64>,
+    /// Wall-clock time when the final state was observed, for display only.
+    pub ended_wall_ms: Option<u64>,
     /// Whether a tool-run report has been matched to it.
     pub tool_run_matched: bool,
     /// Whether a later request with the same session and match key was

@@ -25,9 +25,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{Tokens, attachments, field};
+use crate::{Tokens, attachments, field, sealed::LogFile};
 
 mod store;
+pub(crate) use store::open_regular;
 
 #[cfg(test)]
 thread_local! {
@@ -57,7 +58,9 @@ thread_local! {
 /// v16: run settings, hook runs and permission denials are indexed as `signals`
 /// (PR 2 of the dropped-signals plan).
 /// v17: Claude assistant lines index their reasoning effort (`effort`, or `perTurnEffort` when set) as an `Effort` signal.
-const CACHE_VERSION: u32 = 17;
+/// v18: background Claude Bash calls retain their launch flag and terminal
+/// notifications retain their failure outcome.
+const CACHE_VERSION: u32 = 18;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,10 +129,64 @@ pub(crate) struct RateLimits {
     pub(crate) windows: Vec<RateLimitWindow>,
 }
 
+pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32]);
+
+/// Rows touched while parsing, plus the append boundary of each table.
+/// This is transient write metadata, never persisted with the index.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DirtyRows {
+    pub(crate) events: BTreeSet<usize>,
+    pub(crate) extras: BTreeSet<usize>,
+    pub(crate) signals: BTreeSet<usize>,
+    pub(crate) codex_usage: BTreeSet<usize>,
+    pub(crate) usage: BTreeSet<String>,
+    pub(crate) before_events: usize,
+    pub(crate) before_extras: usize,
+    pub(crate) before_signals: usize,
+    pub(crate) before_codex_usage: usize,
+}
+
+impl DirtyRows {
+    fn begin(index: &FileIndex) -> Self {
+        Self {
+            before_events: index.events.len(),
+            before_extras: index.extras.len(),
+            before_signals: index.signals.len(),
+            before_codex_usage: index.codex_usage_events.len(),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn between(old: &FileIndex, new: &FileIndex) -> Self {
+        fn changed<T: PartialEq>(old: &[T], new: &[T]) -> BTreeSet<usize> {
+            new.iter()
+                .enumerate()
+                .filter_map(|(seq, row)| (old.get(seq) != Some(row)).then_some(seq))
+                .collect()
+        }
+        Self {
+            events: changed(&old.events, &new.events),
+            extras: changed(&old.extras, &new.extras),
+            signals: changed(&old.signals, &new.signals),
+            codex_usage: changed(&old.codex_usage_events, &new.codex_usage_events),
+            usage: old
+                .usage_by_id
+                .keys()
+                .chain(new.usage_by_id.keys())
+                .filter(|id| old.usage_by_id.get(*id) != new.usage_by_id.get(*id))
+                .cloned()
+                .collect(),
+            ..Self::begin(old)
+        }
+    }
+}
+
 /// One file's event index and the facts the model needs about it. Metadata
 /// only (risk:secret).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileIndex {
+    pub(crate) dirty_rows: Option<DirtyRows>,
     pub(crate) events: Vec<Event>,
     /// Transcript-only items the model's rules never read: thinking blocks,
     /// harness text added before a Codex prompt, and completed Codex operations.
@@ -190,7 +247,7 @@ pub(crate) struct Signal {
     pub(crate) v: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum SignalKind {
     Compact,
@@ -467,17 +524,19 @@ fn hook(
         let head = format!("{event}:");
         let same = summary
             .signals
-            .iter_mut()
+            .iter()
+            .enumerate()
             .rev()
             .take(HOOK_LOOKBACK)
-            .find(|signal| {
+            .find(|(_, signal)| {
                 signal.k == SignalKind::Hook
                     && signal
                         .n
                         .as_deref()
                         .is_some_and(|n| n.starts_with(&head) && n.ends_with(key.as_str()))
-            });
-        if let Some(signal) = same {
+            })
+            .map(|(index, _)| index);
+        if let Some(signal) = same.and_then(|index| summary.signal_mut(index)) {
             let earlier = signal
                 .n
                 .as_deref()
@@ -526,6 +585,20 @@ fn claude_hook(summary: &mut FileIndex, attachment: &Value, o: u64, t: Option<i6
 }
 
 impl FileIndex {
+    fn signal_mut(&mut self, index: usize) -> Option<&mut Signal> {
+        if let Some(dirty) = &mut self.dirty_rows {
+            dirty.signals.insert(index);
+        }
+        self.signals.get_mut(index)
+    }
+
+    fn event_mut(&mut self, index: usize) -> Option<&mut Event> {
+        if let Some(dirty) = &mut self.dirty_rows {
+            dirty.events.insert(index);
+        }
+        self.events.get_mut(index)
+    }
+
     /// Claude usage by message id, for merging across a lineage's files.
     pub(crate) fn usage(&self) -> &BTreeMap<String, MessageUsage> {
         &self.usage_by_id
@@ -565,7 +638,10 @@ pub(crate) struct Stat {
 
 impl Stat {
     fn of(path: &Path) -> io::Result<Self> {
-        let metadata = fs::metadata(path)?;
+        Self::from_metadata(&fs::metadata(path)?)
+    }
+
+    fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
         let modified_ns = metadata
             .modified()?
             .duration_since(UNIX_EPOCH)
@@ -606,7 +682,7 @@ impl Ledger {
     /// offset: the same identity, at least as long, and both hashed windows
     /// unchanged. That covers a file that grew and one only touched; any
     /// other change (a rewrite, a truncation, a new inode) rereads it.
-    fn resumes(&self, stat: &Stat, file: &fs::File) -> bool {
+    fn resumes(&self, stat: &Stat, file: &mut LogFile) -> bool {
         self.stat.dev == stat.dev
             && self.stat.ino == stat.ino
             && self.offset <= stat.size
@@ -617,7 +693,7 @@ impl Ledger {
 
 /// The hashes a [`Ledger`] keeps for `offset`: two reads of at most
 /// [`WINDOW`] bytes.
-fn window_hashes(mut file: &fs::File, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
+fn window_hashes(file: &mut LogFile, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
     let width = offset.min(WINDOW);
     let mut hash = |start: u64| -> io::Result<[u8; 32]> {
         let mut bytes = vec![0; width as usize];
@@ -687,14 +763,13 @@ pub(crate) trait IndexStore: Send {
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError>;
 
     /// Commits `path`'s new ledger and index if its ledger is still
-    /// `expected`. `base` is the index `expected` recorded and `index` grew
-    /// from, when it did; the store then writes only what differs from it.
-    /// Without it the file's rows are replaced.
+    /// `expected`. `changes` names rows the append parser touched. Without
+    /// it the file's rows are replaced; no previous index is needed.
     fn commit_file(
         &mut self,
         path: &str,
         expected: Option<&Ledger>,
-        base: Option<&FileIndex>,
+        changes: Option<&DirtyRows>,
         ledger: &Ledger,
         index: &FileIndex,
     ) -> Result<Outcome, StoreError>;
@@ -740,6 +815,9 @@ pub(crate) struct EventCache {
     gone: Vec<(String, Option<Ledger>)>,
     /// Time spent cloning a cached index during the current scan.
     index_clone: Duration,
+    /// Files reread from byte zero this scan: offsets in cached text may
+    /// now refer to different records, even if their new size is larger.
+    replaced: BTreeSet<String>,
     /// Reported runs the store didn't take: saved at the next refresh.
     runs_unsaved: bool,
     /// Files whose change is in memory only (the store was busy, or other
@@ -863,8 +941,28 @@ impl EventCache {
     /// every [`REOPEN_EVERY`]. Once it opens, the store's rows replace this
     /// process's: a file the store lacks or holds at another ledger is read
     /// again when next scanned.
+    pub(crate) fn revision(&self, path: &Path) -> Option<FileRevision> {
+        self.files
+            .get(path.to_string_lossy().as_ref())
+            .map(|entry| {
+                let ledger = &entry.ledger;
+                (
+                    ledger.stat.dev,
+                    ledger.stat.ino,
+                    ledger.offset,
+                    ledger.head,
+                    ledger.tail,
+                )
+            })
+    }
+
+    pub(crate) fn replaced(&self, path: &Path) -> bool {
+        self.replaced.contains(path.to_string_lossy().as_ref())
+    }
+
     pub(crate) fn begin_scan(&mut self) {
         self.index_clone = Duration::ZERO;
+        self.replaced.clear();
         if self.store.is_some() || self.reopen_at.is_none_or(|at| Instant::now() < at) {
             return;
         }
@@ -998,7 +1096,7 @@ impl EventCache {
             }
             return;
         }
-        let Ok(file) = fs::File::open(path) else {
+        let Ok(file) = crate::open_input(path) else {
             return;
         };
         let Ok(root) = serde_json::from_reader::<_, ClaudeJson>(file) else {
@@ -1146,7 +1244,7 @@ impl EventCache {
         &mut self,
         path: &str,
         expected: Option<&Ledger>,
-        base: Option<&FileIndex>,
+        changes: Option<&DirtyRows>,
         ledger: &Ledger,
         index: &FileIndex,
     ) -> bool {
@@ -1160,7 +1258,7 @@ impl EventCache {
         let committed = self
             .store
             .as_mut()
-            .map(|store| store.commit_file(path, expected, base, ledger, index));
+            .map(|store| store.commit_file(path, expected, changes, ledger, index));
         match committed {
             Some(Ok(Outcome::Written)) => {
                 self.unpersisted.remove(path);
@@ -1222,12 +1320,12 @@ pub(crate) fn scan_file(
         let last = attempt >= COMMIT_ATTEMPTS;
         // Stat'ed before reading: a line that lands during the read makes
         // the next check see a change.
-        let stat = Stat::of(path)?;
-        let file = fs::File::open(path)?;
+        let mut file = LogFile::open(path)?;
+        let stat = Stat::from_metadata(&file.metadata()?)?;
         let recorded = cache.recorded(&key);
         let mut base = None;
         if let Some(ledger) = &recorded
-            && (ledger.stat == stat || ledger.resumes(&stat, &file))
+            && (ledger.stat == stat || ledger.resumes(&stat, &mut file))
         {
             match cache.base(&key, ledger) {
                 Base::Found(index) => base = Some(index),
@@ -1256,11 +1354,28 @@ pub(crate) fn scan_file(
             _ => 0,
         };
         trace(if base.is_some() { "append" } else { "replace" });
+        if base.is_none() {
+            cache.replaced.insert(key.clone());
+        }
+        let append = base.is_some();
+        // The cache owns the previous index, and a served model owns only
+        // stable transcript metadata. Drop that cache owner before COW so
+        // ordinary appends mutate the sole Arc without cloning the index.
+        cache.files.remove(&key);
+        let mut index = base.unwrap_or_else(|| Arc::new(FileIndex::default()));
         let clone_started = Instant::now();
-        let mut index = base.as_deref().cloned().unwrap_or_default();
-        cache.index_clone += clone_started.elapsed();
-        let offset = parse(&file, from, harness, &mut index)?;
-        let (head, tail) = window_hashes(&file, offset)?;
+        let shared = Arc::strong_count(&index) > 1;
+        let writable = Arc::make_mut(&mut index);
+        if shared {
+            cache.index_clone += clone_started.elapsed();
+        }
+        writable.dirty_rows = Some(DirtyRows::begin(writable));
+        let offset = parse(&mut file, from, harness, writable)?;
+        let changes = writable
+            .dirty_rows
+            .take()
+            .expect("parser tracks dirty rows");
+        let (head, tail) = window_hashes(&mut file, offset)?;
         let ledger = Ledger {
             stat,
             offset,
@@ -1273,11 +1388,17 @@ pub(crate) fn scan_file(
                 hook();
             }
         }
-        if cache.commit(&key, recorded.as_ref(), base.as_deref(), &ledger, &index) && !last {
+        if cache.commit(
+            &key,
+            recorded.as_ref(),
+            append.then_some(&changes),
+            &ledger,
+            &index,
+        ) && !last
+        {
             trace("conflict");
             continue;
         }
-        let index = Arc::new(index);
         cache.files.insert(
             key,
             CachedFile {
@@ -1292,7 +1413,7 @@ pub(crate) fn scan_file(
 /// Folds the complete lines of `file` from `from` into `index`, and returns
 /// the offset they end at. A last line without its newline is left for the
 /// next read.
-fn parse(file: &fs::File, from: u64, harness: &str, index: &mut FileIndex) -> io::Result<u64> {
+fn parse(file: &mut LogFile, from: u64, harness: &str, index: &mut FileIndex) -> io::Result<u64> {
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from))?;
     let mut offset = from;
@@ -1392,6 +1513,10 @@ pub(crate) struct Reply {
 pub(crate) const STDIN: u8 = 1;
 /// ...with `chars` that aren't an empty string: it sends input.
 pub(crate) const SENDS: u8 = 2;
+/// A Claude Bash call started with `run_in_background: true`.
+pub(crate) const BACKGROUND: u8 = 4;
+/// A task notification reports failure by status or a nonzero summary exit code.
+pub(crate) const BACKGROUND_FAILED: u8 = 8;
 
 /// Open yielded commands kept per file; past this the oldest is dropped.
 const YIELDS_MAX: usize = 64;
@@ -1453,7 +1578,9 @@ pub(crate) struct Event {
     /// open when the item completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<usize>,
-    /// Code-mode call: what its source calls, as [`STDIN`] and [`SENDS`].
+    /// Call flags: code-mode source calls ([`STDIN`], [`SENDS`]), or a
+    /// Claude Bash call launched in the [`BACKGROUND`], or a task notification
+    /// with a [`BACKGROUND_FAILED`] outcome.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub(crate) script: u8,
     /// Code-mode call: a command it started outlived its yield.
@@ -1590,11 +1717,14 @@ fn signal(
         .map(str::to_owned);
     let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
     if k == SignalKind::Compact
-        && let Some(last) = summary
+        && let Some(index) = summary
             .signals
-            .iter_mut()
+            .iter()
+            .enumerate()
             .rev()
-            .find(|signal| !signal.k.annotates())
+            .find(|(_, signal)| !signal.k.annotates())
+            .map(|(index, _)| index)
+        && let Some(last) = summary.signal_mut(index)
         && last.k == SignalKind::Compact
         && last.at == at
     {
@@ -1787,6 +1917,17 @@ pub(crate) fn inner<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     Some(text[start..end].trim())
 }
 
+/// The exit code in a background task notification's summary.
+pub(crate) fn notification_exit(summary: &str) -> Option<i64> {
+    summary
+        .split_once("(exit code ")?
+        .1
+        .split_once(')')?
+        .0
+        .parse()
+        .ok()
+}
+
 /// Task-notification blocks: `(tool-use id, status, body)`.
 pub(crate) fn notifications(text: &str) -> Vec<(Option<&str>, Option<&str>, &str)> {
     let mut result = Vec::new();
@@ -1910,7 +2051,7 @@ fn prompt_events(
         );
         found = true;
     }
-    for (id, status, _) in notifications(text) {
+    for (id, status, body) in notifications(text) {
         push(
             summary,
             Event {
@@ -1919,6 +2060,16 @@ fn prompt_events(
                 t: time,
                 id: id.map(str::to_owned),
                 n: status.map(str::to_owned),
+                script: if !matches!(status, Some("killed" | "stopped"))
+                    && (status == Some("failed")
+                        || inner(body, "summary")
+                            .and_then(notification_exit)
+                            .is_some_and(|exit| exit != 0))
+                {
+                    BACKGROUND_FAILED
+                } else {
+                    0
+                },
                 ..Event::default()
             },
         );
@@ -2009,7 +2160,7 @@ fn resolve(summary: &mut FileIndex, id: &str, reply: impl FnOnce(Option<&str>) -
     let Some(index) = summary.pending.remove(id) else {
         return;
     };
-    if let Some(event) = summary.events.get_mut(index)
+    if let Some(event) = summary.event_mut(index)
         && event.k == Kind::Tool
     {
         event.r = Some(reply(event.n.as_deref()));
@@ -2020,7 +2171,7 @@ fn resolve(summary: &mut FileIndex, id: &str, reply: impl FnOnce(Option<&str>) -
 /// Stops unresolved code-mode calls from claiming items in a later turn.
 fn close_code_mode(summary: &mut FileIndex) {
     for index in summary.pending.values().copied().collect::<Vec<_>>() {
-        if let Some(event) = summary.events.get_mut(index)
+        if let Some(event) = summary.event_mut(index)
             && event.k == Kind::Tool
             && event.code_mode
         {
@@ -2381,7 +2532,7 @@ fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, off
         .and_then(|session| summary.yields.get(session).copied())
         .filter(|start| *start < index);
     if operations || failed {
-        summary.events[index].poll = None;
+        summary.event_mut(index).expect("event exists").poll = None;
         if let Some(start) = known {
             push_poll(summary, start, offset);
         }
@@ -2415,23 +2566,23 @@ fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, off
                 summary.yields.remove(&oldest);
             }
             summary.yields.insert(session, index);
-            summary.events[index].poll = None;
-            summary.events[index].y = Some(Box::default());
+            summary.event_mut(index).expect("event exists").poll = None;
+            summary.event_mut(index).expect("event exists").y = Some(Box::default());
             return;
         }
     };
     let Some(start) = start.filter(|start| *start < index) else {
-        summary.events[index].poll = None;
+        summary.event_mut(index).expect("event exists").poll = None;
         return;
     };
-    summary.events[index].poll = Some(start);
+    summary.event_mut(index).expect("event exists").poll = Some(start);
     push_poll(summary, start, offset);
 }
 
 /// Adds a poll's output line to the yielded command it polled, up to
 /// [`POLLS_MAX`]; past that the command's output is marked cut.
 fn push_poll(summary: &mut FileIndex, start: usize, offset: u64) {
-    if let Some(found) = summary.events.get_mut(start)
+    if let Some(found) = summary.event_mut(start)
         && let Some(yielded) = found.y.as_mut()
     {
         if yielded.polls.len() < POLLS_MAX {
@@ -2462,13 +2613,15 @@ fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Op
         return;
     }
     // A later structured exit code settles an unknown outcome.
-    if let Some(event) = summary
+    if let Some(index) = summary
         .events
-        .iter_mut()
+        .iter()
+        .enumerate()
         .rev()
         .take(512)
-        .find(|event| event.k == Kind::Tool && event.id.as_deref() == Some(id))
-        && let Some(reply) = &mut event.r
+        .find(|(_, event)| event.k == Kind::Tool && event.id.as_deref() == Some(id))
+        .map(|(index, _)| index)
+        && let Some(reply) = summary.event_mut(index).and_then(|event| event.r.as_mut())
     {
         reply.e = code != 0;
         reply.f &= !UNKNOWN;
@@ -2487,7 +2640,7 @@ fn link_item(summary: &mut FileIndex, id: &str, offset: u64) {
     }) else {
         return;
     };
-    summary.events[index].item = Some(offset);
+    summary.event_mut(index).expect("event exists").item = Some(offset);
 }
 
 fn tool_event(summary: &mut FileIndex, event: Event) {
@@ -2517,13 +2670,16 @@ fn number(value: &Value, key: &str) -> u64 {
 pub(crate) fn claude(summary: &mut FileIndex, record: &Value, offset: u64) {
     claude_events(summary, record, offset);
     if let Some(uuid) = field(record, "uuid") {
-        for event in summary
+        let indices: Vec<_> = summary
             .events
-            .iter_mut()
+            .iter()
+            .enumerate()
             .rev()
-            .take_while(|event| event.o == offset)
-        {
-            event.u = Some(uuid.to_owned());
+            .take_while(|(_, event)| event.o == offset)
+            .map(|(index, _)| index)
+            .collect();
+        for index in indices {
+            summary.event_mut(index).expect("event exists").u = Some(uuid.to_owned());
         }
     }
 }
@@ -2566,6 +2722,9 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let timestamp = time;
+        if let Some(dirty) = &mut summary.dirty_rows {
+            dirty.usage.insert(id.to_owned());
+        }
         summary.usage_by_id.insert(
             id.to_owned(),
             MessageUsage {
@@ -2773,6 +2932,17 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                             t: time,
                             id: field(item, "id").map(str::to_owned),
                             n: field(item, "name").map(str::to_owned),
+                            script: if field(item, "name") == Some("Bash")
+                                && item
+                                    .get("input")
+                                    .and_then(|input| input.get("run_in_background"))
+                                    .and_then(Value::as_bool)
+                                    == Some(true)
+                            {
+                                BACKGROUND
+                            } else {
+                                0
+                            },
                             ..Event::default()
                         },
                     ),
@@ -2991,7 +3161,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                 None
             };
             if let Some(start) = yielded {
-                if let Some(found) = summary.events.get_mut(start)
+                if let Some(found) = summary.event_mut(start)
                     && let Some(started) = found.y.as_mut()
                 {
                     started.done = Some(Reply {
@@ -3002,7 +3172,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                         ..Reply::default()
                     });
                 }
-                if let Some(poll) = open.and_then(|open| summary.events.get_mut(open)) {
+                if let Some(poll) = open.and_then(|open| summary.event_mut(open)) {
                     poll.poll = Some(start);
                 }
             }
@@ -4732,25 +4902,118 @@ mod tests {
     }
 
     #[test]
+    fn an_append_mutates_the_unique_index_and_persists_changed_rows() {
+        let root = scratch("unique-append");
+        let path = root.join("log.jsonl");
+        let cache_path = root.join("index.json");
+        write_lines(&path, &[claude_tool("call")]);
+        let mut cache = EventCache::open(&cache_path);
+        let mut dirty = false;
+        let first = scan_file(&path, "claude", &mut cache, &mut dirty).unwrap();
+        let address = Arc::as_ptr(&first);
+        drop(first);
+        append_lines(&path, &[claude_result("call"), claude_tool("next")]);
+        touch(&path, 1);
+        cache.begin_scan();
+        let grown = scan_file(&path, "claude", &mut cache, &mut dirty).unwrap();
+        assert_eq!(
+            address,
+            Arc::as_ptr(&grown),
+            "sole-owned append must not clone the index"
+        );
+        assert_eq!(cache.index_clone_duration(), Duration::ZERO);
+        assert!(grown.events[0].r.is_some());
+        assert!(grown.dirty_rows.is_none());
+        let mut restarted = EventCache::open(&cache_path);
+        let loaded = scan_file(&path, "claude", &mut restarted, &mut dirty).unwrap();
+        assert_eq!(format!("{grown:?}"), format!("{loaded:?}"));
+        drop(cache);
+        drop(restarted);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_ledger_hashes_at_most_4_kib_at_each_end() {
         let root = scratch("windows");
         let path = root.join("big.jsonl");
         let bytes: Vec<u8> = (0..10_000u32).map(|n| (n % 251) as u8).collect();
         fs::write(&path, &bytes).unwrap();
-        let file = fs::File::open(&path).unwrap();
+        let mut file = LogFile::open(&path).unwrap();
+        let file = &mut file;
         let digest = |bytes: &[u8]| -> [u8; 32] { Sha256::digest(bytes).into() };
         // Past 4 KiB: the first 4 KiB, and the 4 KiB before the offset.
-        let (head, tail) = window_hashes(&file, 9_000).unwrap();
+        let (head, tail) = window_hashes(file, 9_000).unwrap();
         assert_eq!(head, digest(&bytes[..4096]));
         assert_eq!(tail, digest(&bytes[9_000 - 4096..9_000]));
         // Within the first 4 KiB both cover everything before the offset.
-        let (head, tail) = window_hashes(&file, 100).unwrap();
+        let (head, tail) = window_hashes(file, 100).unwrap();
         assert_eq!(head, digest(&bytes[..100]));
         assert_eq!(tail, head);
-        let (head, tail) = window_hashes(&file, 0).unwrap();
+        let (head, tail) = window_hashes(file, 0).unwrap();
         assert_eq!((head, tail), (digest(&[]), digest(&[])));
         // An offset past the end is an error, never a short hash.
-        assert!(window_hashes(&file, 20_000).is_err());
+        assert!(window_hashes(file, 20_000).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Sealing keeps the log's stat and bytes: the ledger shares or resumes
+    /// as before, reading the sealed range through its segments.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_ledger_resumes_across_a_seal() {
+        let root = scratch("ledger-seal");
+        let v1 = root.join("index.json");
+        let log = root.join("session.jsonl");
+        let text = "x".repeat(300);
+        let lines: Vec<Value> = (0..400)
+            .flat_map(|n| {
+                [
+                    said(&format!("m{n}"), &[text.as_str()]),
+                    claude_tool(&format!("t{n}")),
+                ]
+            })
+            .collect();
+        write_lines(&log, &lines);
+        touch(&log, 1);
+        let mut cache = EventCache::open(&v1);
+        let scan = |cache: &mut EventCache| scan_file(&log, "claude", cache, &mut false).unwrap();
+        ledger_trace();
+        scan(&mut cache);
+        assert_eq!(ledger_trace(), ["replace"]);
+        let unsealed = cold(&log);
+
+        // Sealed: the same stat, so shared as it is, in this process or a
+        // new one, and a cold read finds the same index.
+        assert!(crate::sealed::seal(&log, 1, u64::MAX).unwrap().punched);
+        ledger_trace();
+        let before = parsed();
+        scan(&mut cache);
+        scan(&mut EventCache::open(&v1));
+        assert_eq!(ledger_trace(), ["unchanged", "unchanged"]);
+        assert_eq!(parsed(), before);
+        assert_eq!(cold(&log), unsealed);
+
+        // Grown past the seal: it resumes at the offset, its hashed windows
+        // read back from the segment, and only the new lines are parsed.
+        append_lines(&log, &[claude_result("t399"), said("m-last", &["bb"])]);
+        touch(&log, 2);
+        ledger_trace();
+        let before = parsed();
+        scan(&mut cache);
+        assert_eq!(ledger_trace(), ["append"]);
+        assert_eq!(parsed(), before + 2);
+        assert_eq!(stored(&v1, &log), cold(&log));
+
+        // Sealed again, the new lines too: still unchanged.
+        assert!(
+            crate::sealed::seal(&log, 1, u64::MAX)
+                .unwrap()
+                .added
+                .is_some()
+        );
+        ledger_trace();
+        scan(&mut cache);
+        assert_eq!(ledger_trace(), ["unchanged"]);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -5460,7 +5723,10 @@ mod tests {
             if case == "legacy fifo" {
                 let made = std::process::Command::new("mkfifo").arg(&special).status();
                 if !made.is_ok_and(|status| status.success()) {
-                    // No mkfifo here: nothing to test for this case.
+                    #[cfg(target_os = "linux")]
+                    panic!("Linux CI must exercise the FIFO case");
+                    // No mkfifo on another platform: skip this case.
+                    #[cfg(not(target_os = "linux"))]
                     continue;
                 }
             } else {
