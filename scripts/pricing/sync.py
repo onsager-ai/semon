@@ -530,6 +530,25 @@ def parse_openai(html: str) -> dict[str, dict[str, object]]:
             web_search_per_1k=web_search_per_1k,
             source=OPENAI_URL,
         )
+        if model_id == "gpt-6.1-sol":
+            # The threshold is documented separately from the pricing table:
+            # https://developers.openai.com/api/docs/models/gpt-6.1-sol
+            row = next(row for row in standard_tables[0].rows if row and row[0] == model_id)
+            context = f"OpenAI standard long context {model_id}"
+            models[model_id]["long_context"] = {
+                "threshold_tokens": 272_000,
+                "input": _required_price(row, 5, context),
+                "output": _required_price(row, 8, context),
+                "cache_read": _required_price(row, 6, context),
+                "cache_write_5m": _required_price(row, 7, context),
+                "cache_write_1h": None,
+            }
+            if fast_multiplier is not None:
+                fast_row = next(row for row in fast_tables[0].rows if row and row[0] == model_id)
+                for index in range(5, 9):
+                    multiplier = _ratio(_required_price(fast_row, index, context), _required_price(row, index, context), context)
+                    if multiplier != fast_multiplier["multiplier"]:
+                        raise PricingParseError(f"OpenAI: long-context fast multiplier disagrees for {model_id}")
     return models
 
 

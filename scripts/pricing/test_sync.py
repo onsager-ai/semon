@@ -56,6 +56,15 @@ class PricingParserTests(unittest.TestCase):
         self.assertEqual(self.parsed["gpt-6-luna"]["web_search_per_1k"], 10.0)
         self.assertIsNone(self.parsed["gpt-6-luna"]["long_context"])
 
+    def test_gpt_61_preserves_long_context_and_rejects_missing_rates(self) -> None:
+        tier = self.parsed["gpt-6.1-sol"]["long_context"]
+        self.assertEqual(tier, {"threshold_tokens": 272_000, "input": 4.0, "output": 15.0,
+                                "cache_read": 0.2, "cache_write_5m": 5.0, "cache_write_1h": None})
+        broken = self.openai_html.replace("<td>$0.10</td><td>$2.50</td><td>$10.00</td><td>$4.00</td>",
+                                          "<td>$0.10</td><td>$2.50</td><td>$10.00</td><td>-</td>", 1)
+        with self.assertRaises(sync.PricingParseError):
+            sync.parse_openai(broken)
+
 
 if __name__ == "__main__":
     unittest.main()
