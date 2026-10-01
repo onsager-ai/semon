@@ -1502,3 +1502,37 @@ fn candidate_files_are_sorted_with_history_last() {
     assert_eq!(files.last(), Some(&history));
     assert!(files[0] < files[1]);
 }
+
+#[test]
+fn compound_action_identity_keeps_every_normalized_component_without_raw_commands() {
+    let mut context = NormalizeContext {
+        cwd: "/work/repo".into(),
+        ..NormalizeContext::default()
+    };
+    let compound = normalize_record(
+        &json!({"type":"event_msg","payload":{"type":"item_completed","item":{
+            "type":"CommandExecution","command":["/bin/bash","-c","read && write secret"],"exit_code":0,
+            "parsed_cmd":[{"type":"read","path":"src/main.rs","cmd":"read secret"},{"type":"write","path":"../../secret.env","cmd":"write secret"}]
+        }}}),
+        &mut context,
+        "",
+    );
+    assert_eq!(
+        compound["components"],
+        json!([{"action":"read","path":"src/main.rs"},{"action":"write","path":"<external>"}])
+    );
+    let core = semantic_core(&compound).unwrap().unwrap();
+    let mut single = compound.clone();
+    single.as_object_mut().unwrap().remove("components");
+    let single_core = semantic_core(&single).unwrap().unwrap();
+    assert_ne!(core.trace_id().unwrap(), single_core.trace_id().unwrap());
+    assert_eq!(
+        single_core.value(),
+        &json!({"kind":"action","action":"read","path":"src/main.rs","exit_code":0})
+    );
+    assert!(
+        !serde_json::to_string(core.value())
+            .unwrap()
+            .contains("secret")
+    );
+}

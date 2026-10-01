@@ -134,7 +134,7 @@ The model endpoint returns the mockup's globals verbatim in shape; other shapes 
   - The reply carries `Cache-Control: private, max-age=86400`: the URL names the content, so a line rewritten under the same offset is a new URL. Images are cached in the browser for up to a day, and redacting the logs doesn't clear a copy already fetched. It also carries `X-Content-Type-Options: nosniff` and a CSP of its own (`default-src 'none'; style-src 'unsafe-inline'; sandbox`), as `ViewerReply::headers` gives them. Every other reply now carries `nosniff` too.
 - **`GET /api/analytics?range=24h|7d|30d`** (#102) returns what the Analytics page draws for that range, computed on the server, because the model holds only its own window (a day):
   - The headline figures for the range and the one before it (`current`, `previous`), the longest current wait, the agent-hours columns and the cost per UTC day (none for 24 h), each column with its sessions for the drill-in (at most 100, then `more`), the breakdowns by repo, machine, and harness and model, the top-five lists, the names of the sessions they cite, the latest Codex allowance, and the filters' values in the range.
-  - **Waited on you** is the time a session's questions to you were open: from an `AskUserQuestion` call (or a Codex `request_user_input`) to its answer or decline, summed over the range and counted once where a session's questions overlap. A Codex question that only acknowledges the call ends at your next message. A question still open counts to now and is the **longest current wait**. Answered ones are kept for the 60 days a build keeps. A result (`ask: result`) and idle time at the end of a turn are not waits. Permission prompts and Codex approvals aren't in the model, so they aren't counted.
+  - **Waited on you** is the time a session's questions to you were open: from an `AskUserQuestion` call (or a Codex `request_user_input` / `request_user_input_async`) to its answer or decline, summed over the range and counted once where a session's questions overlap. A synchronous Codex question that only acknowledges the call ends at your next message; an asynchronous call ends its blocking interval at the acknowledgement. An unanswered question in a dead run counts no open wait. A question still open counts to now and is the **longest current wait**. Answered ones are kept for the 60 days a build keeps, capped at 4,096 answered spans and 4,096 open spans per session. An overflow returns the affected session ids in `waits_truncated`; wait figures then cover retained spans only. A result (`ask: result`) and idle time at the end of a turn are not waits. A live process permission/input prompt counts from `statusUpdatedAt` when that timestamp is known; historical process waits and Codex approvals are not yet captured. Median and longest wait figures describe merged, non-overlapping spans rather than individual questions.
   - It takes the page's filters too, each at most once: `repo` (empty for no repo), `machine`, `harness` and `model`. Anything else, a key named twice, or a value over 256 bytes is a 400.
   - A build keeps what it reads of every session active in the last 60 days before it trims the model to its window, so a request builds nothing. Answers are kept per range and filters until the model changes (at most once a second) or for 30 s as time moves; the `ETag` hashes the body and `If-None-Match` answers 304. `version` is the model version the answer was computed from.
 - **Pages:**
@@ -145,7 +145,7 @@ The model endpoint returns the mockup's globals verbatim in shape; other shapes 
 
 - **`viewer.html`:** the mockup's `<body>` shell (sidebar, scrim, main and top bar). There is no inline script or style.
 - **`viewer.css`:** the mockup's `<style>` block, unchanged.
-- **Fonts:** the mockup loads Instrument Sans, Source Serif 4 and JetBrains Mono from Google Fonts. The CSP and #47's no-CDN rule forbid that, so the fonts are vendored as woff2 (all three are OFL) and served from the binary with `@font-face`. That's decision D1.
+- **Fonts:** the mockup loaded Instrument Sans, Source Serif 4 and JetBrains Mono from Google Fonts. The CSP and #47's no-CDN rule forbid that, so the fonts are vendored as woff2 (all OFL) and served from the binary with `@font-face`. That's decision D1. Source Serif 4 is no longer used: agent text is set in Instrument Sans (see the Type section of `overhaul.md`), so two families are served.
 - **`viewer.js`:** the mockup's script, with its data block replaced by a loader:
   - `boot()` fetches `/api/model`, assigns the globals and renders.
   - `transcript()` asks for `TX[sid]` on demand, with a `Load earlier` control at the top.
@@ -156,13 +156,13 @@ The model endpoint returns the mockup's globals verbatim in shape; other shapes 
 
 Home, Timeline, Sessions and Machines poll `/api/model?since=` every 2 s, paused while the tab is hidden. A session page follows its tail with `/api/tx?after=`.
 
-On the server no poll waits for a rebuild (#29). `--serve` answers every request from each machine's last built model, a snapshot shared by every request in flight, and the `ETag` is that snapshot's version. While requests keep coming, each machine is checked in the background: a stat pass over the watched files every 250 ms, and a rebuild only when something changed, at most once a second, so the changes of one second are one rebuild. An answer is then at most about 1 s plus one build behind the logs. A machine is checked until 30 s after its last request; the next request after that, like the first, refreshes before it answers (a stat pass, and a build only if something changed). A background rebuild that fails leaves the last model served and prints its error once; if rebuilds still fail 3 s after they started failing, each request refreshes itself again and answers the error (500) until a build works, so a broken machine isn't shown as a model that silently stopped moving. An embedding server chooses this with `ViewerCore::set_refresh(Refresh::Background)`; the default, `Refresh::OnRead`, rebuilds before the read that finds a change, for one-shot and tool callers.
+On the server no poll waits for a rebuild (#29). `--serve` answers every request from each machine's last built model, a snapshot shared by every request in flight, and the `ETag` is that snapshot's version. While requests keep coming, each machine is checked in the background: a stat pass over the watched files every 250 ms, and a rebuild only when something changed, at most once a second, so the changes of one second are one rebuild. An answer is then at most about 1 s plus one build behind the logs. A machine is checked until 30 s after its last request; the next request after that answers from the last model at once and queues a check right away, so the poll after that check's rebuild sees the change. Once a machine's model is built, an API request never waits for a build. A request waits only when there is nothing built to answer it from: a machine's first model request, its first V1 tree request (`/api/tree`, `/api/transcript`), which may wait behind a model rebuild, and a page URL the built models lack, which is checked against models brought up to date first. A background rebuild that fails leaves the last model served and prints its error once; if rebuilds still fail 3 s after they were first seen failing, each request answers the error (500) at once, without waiting for a build, until a build works, so a broken machine isn't shown as a model that silently stopped moving. An error recorded before an idle spell isn't answered again until the check the next request queues has tried a build. An embedding server chooses this with `ViewerCore::set_refresh(Refresh::Background)`; the default, `Refresh::OnRead`, rebuilds before the read that finds a change, for one-shot and tool callers.
 
 The checks run on a refresh pool, not a thread per machine, so an embedding server with many machines (and many cores, each over its own) has a fixed bound on refresh threads. `RefreshPool::shared()` is the process-wide default, with as many threads as the process has cores, at most four; `ViewerCore::set_refresh_pool` gives a core another. Each machine in the background puts one entry in its pool's queue, due when its next check is; a worker takes the entry once it is due, checks the machine (and rebuilds what changed), and queues its next check. A machine is queued once at most: a read or an invalidation only moves its entry earlier, and a machine being checked is queued again by the worker that checks it. The queue therefore never holds more entries than machines, and a machine's entry leaves with it when it is closed, stops being served, or is dropped. Threads start only when an entry is queued and none is free, up to the pool's size, and each stops after 30 s with nothing to run. When several entries are due at once (a burst of invalidations), a worker that takes one wakes the others that wait, or, with none waiting, starts another thread up to the pool's size, so a burst is spread over the whole pool rather than run one after another. A check that panics leaves the machine's last model served and its next check queued, and its worker is replaced.
 
-When the pool falls behind (every worker busy, entries waiting past their time), a machine's reads go on answering from its last model until its queued check is a second late. Then the pool can't hold the bound, and the next read refreshes that machine itself, as the first read of a machine does: it waits for a stat pass and, if something changed, a build, and queues the machine's next check. An answer is then still at most about 1 s plus one build behind the logs, but the reads that find their checks overdue pay for the builds, as they all did before #29. The pool's size is the trade: more threads keep reads off the build path under more machines, at the cost of more builds at once.
+When the pool falls behind (every worker busy, entries waiting past their time), a machine's reads go on answering from its last model at once. A read that finds its machine's check a second late nudges the pool, which starts a worker if it has room for one (it has, for example, after the system refused a thread); with every worker busy the check waits its turn. Reads never pay for builds once a model is built (before, a read that found its check overdue rebuilt the machine itself and waited for that build, which on a busy machine took up to tens of seconds). The cost is staleness: while the pool is behind, an answer is as far behind the logs as the pool's queue is, not at most about 1 s plus one build. The pool's size is the trade: more threads keep that bound under more machines, at the cost of more builds at once. A backlog never grows the pool, however late the checks it holds up. Builds that hang must not freeze every other machine, though: once every worker has been running its check for 5 s, a request that finds its machine's check overdue starts a thread past the pool's size, up to twice it, and each such thread stops as soon as nothing is due, so the pool shrinks back once the hang ends. A machine whose check is a minute late (counted from when it was due or queued, whichever is later), or whose build has run a minute since it took the machine's build lock, answers each request with an error (500) at once, so a stalled machine isn't shown as a model that silently stopped moving either.
 
-An embedding server that receives the logs itself knows when a machine's data changed, and needn't stat every machine's files four times a second to find out. `Refresh::OnInvalidate` takes that word instead: the server calls `ViewerCore::invalidate(key)` once a machine's new data is written where its `Options` read it, with the key it gave `ViewerCore::with_machines`, or a received machine's directory name. The call never blocks or touches a file. It queues the machine's check for as soon as the one-second spacing after its last rebuild allows; every call until then is the same check, and one that comes while the check runs is one more check a second after it, so any burst of pushes is at most two rebuilds a second. The check is a stat pass, so an invalidation that changed nothing costs no build. With no invalidation a machine that is read is checked only every 30 s, a safety net for a writer that bypasses `invalidate`. An invalidation of a machine no one read in the last 30 s rebuilds nothing (a check it still has queued is moved up); the next read refreshes first. A machine that went idle without one answers its next read at once, and is checked at its next safety check, or right away if none is queued, so a writer that bypasses `invalidate` is still seen within 30 s. `Refresh::Background` stays for the local viewer, whose logs change on disk with no one to say so, and both modes run on the same pool.
+An embedding server that receives the logs itself knows when a machine's data changed, and needn't stat every machine's files four times a second to find out. `Refresh::OnInvalidate` takes that word instead: the server calls `ViewerCore::invalidate(key)` once a machine's new data is written where its `Options` read it, with the key it gave `ViewerCore::with_machines`, or a received machine's directory name. The call never blocks or touches a file. It queues the machine's check for as soon as the one-second spacing after its last rebuild allows; every call until then is the same check, and one that comes while the check runs is one more check a second after it, so any burst of pushes is at most two rebuilds a second. The check is a stat pass, so an invalidation that changed nothing costs no build. With no invalidation a machine that is read is checked only every 30 s, a safety net for a writer that bypasses `invalidate`. An invalidation of a machine no one read in the last 30 s rebuilds nothing (a check it still has queued is moved up); the next read answers from the last model at once and queues a check right away. A machine that went idle without one answers its next read at once too, and is checked at its next safety check, or right away if none is queued, so a writer that bypasses `invalidate` is still seen within 30 s. `Refresh::Background` stays for the local viewer, whose logs change on disk with no one to say so, and both modes run on the same pool.
 
 A page never waits for a build either. In both background modes, a page URL that names a machine, session or trace (`/machines/…`, `/s/…`, `/trace/…`) is answered from the models already built, with no stat pass and no rebuild: the page is the same shell whatever it names, and it asks for `/api/model` itself, which is where a refresh happens. It is served when the built models have what it names, and when a machine has no model yet (after a start, say): the page's own `/api/model` builds it, and a URL that names nothing there shows the home screen. Only a URL the built models lack takes the usual route, which brings the models up to date first (a stat pass, and a rebuild if the logs changed, whatever the mode or the invalidations) and answers 404 if it still names nothing, so a session newer than the last build still opens, even while a warm is building it. Refreshed on read, a page is checked against a fresh model, as before. An embedding server that wants models built before anyone reads them calls `ViewerCore::warm`, which builds, or rebuilds if its logs changed, every machine's model on the calling thread without counting as a read, at start, say; `ViewerCore::warm_machine(key)` does the same for the one machine it just wrote, looking at no other, spaced out as the server sees fit. A warm clears the invalidations it covers, so the first read after an idle spell answers at once from what it built.
 
@@ -234,8 +234,83 @@ M1 and M2 can overlap once the `/api/model` shape is frozen. That shape is the m
 
 ## Decisions (the user, 2026-09-26, Semon session)
 
-- **D1, fonts:** bundle. The three OFL fonts are vendored as woff2 in the binary.
+- **D1, fonts:** bundle. The OFL fonts are vendored as woff2 in the binary (two since the serif was dropped).
 - **D2, CI browser job:** add it. Node, Playwright and Chromium run in CI only, for the pixel and behaviour suites.
 - **D3, relays by name:** resolve a unique name only. Otherwise the other end is "not matched".
 - **D4, resume chains:** if M0 finds no exact link, each file is its own session. There is no stitching by timing. M0 found `session_id` and `continued-in`, which are exact, so those chains are one session.
 - **D5, Remote Control sessions:** files that share a `bridgeSessionId` are one session, even across a process restart.
+
+### Models on your own work
+
+Analytics' `models` section compares exactly linked launched runs, using their
+per-message `tokens_by_model` and verified model costs already derived by the
+incremental index. Each band/model row includes its item count, a small-sample
+flag, and a separate sample count for every reported measure. These are lifetime
+facts for work items active in the selected range, rather than token deltas for
+that range. A run that used multiple models contributes tokens/cost to each
+observed model, but its PR acceptance, review rounds and elapsed time are not
+arbitrarily attributed to one of those models.
+
+PR metadata is optional. Set `SEMON_MODEL_COMPARISON_FILE` to a regular JSON
+metadata file (at most 1 MiB), with `bands` and `items`, keyed by session id.
+This is an explicit join of precomputed PR facts; the viewer never scans raw
+transcripts for verdict words or contacts GitHub using an ambient credential.
+For example:
+
+```json
+{
+  "bands": {"medium_lines":400,"medium_files":5,"hard_lines":1500,"hard_files":20,"risky_hard_lines":400,"small_sample":5},
+  "items": {
+    "SESSION_ID": {"lines":120,"files":3,"risk":false,"first_pass_accepted":true,"review_rounds":1,"red_ci_heads":0,"ci_wait_ms":12000,"pr_url":"https://github.com/owner/repository/pull/123"}
+  }
+}
+```
+
+Only supply evidence-backed fields. Omitted PR review/check-run facts, allowance
+deltas and CI waits remain JSON `null` with a reason. Difficulty is `unknown`
+until changed lines, files and risk are all supplied. Account-wide allowance
+readings are never assigned to an individual run. A supplied `ci_wait_ms` must
+be the union of check-run durations within that run's window; absent or invalid
+CI time leaves model time unknown. PR URLs are linked only when they name an
+exact HTTPS GitHub pull request. Facts have the same 60-day retention as the
+analytics rows and disappear when their source session is no longer indexed.
+
+### Exact parent links across harnesses
+
+Both Claude and Codex prompts accept `Semon-Parent: <harness>:<session-id>[:<call-id>]`
+on their first user prompt (`claude` and `codex` are supported harness ids).
+A current marker overrides `SEMON_PARENT` in a live process's environment;
+that explicit environment link overrides process ancestry. Ancestry walks at
+most 64 parent pids and links only to a unique known live session. Native
+subagent/parent-thread metadata remains valid without observing either process.
+Cycles and ambiguous shared-process parents are left unlinked.
+
+Observed links are retained in a separate `parent-links.json` cache beside the
+session index, written atomically with mode 0600. It retains only harness ids,
+session ids, call ids, the evidence source and an observation time, never prompt
+text or handoff paths. At most 4,096 links are retained (oldest observed first
+on overflow); reads are capped at 1 MiB. This makes live ancestry/environment
+links survive process exit. The model/tree's `parent_source` identifies marker,
+environment or ancestry evidence. Deleting this cache is safe, but a live-only
+link can be rediscovered only while its processes still exist.
+
+Mirrored facts include optional `process_ancestors` and the strictly validated
+`SEMON_PARENT` allowlist entry, so receiving machines use observed facts rather
+than their own process tree. A short-lived child that finishes between polls may
+be missed; a marker is the after-the-fact route for that case.
+
+### Recorded waits and runtime spans
+
+Sessions expose `wait_edges` for indexed `wait`, `wait_agent` and `wait_all`
+calls: `{call, tool, targets, start, end, turn}`. Timestamps are recorded epoch
+milliseconds; missing completion stays `null`. Targets come only from explicit
+structured target ids that uniquely name a session in the same tree. A wait
+with no explicit or resolvable targets still exposes its interval with an empty
+list; a spawn alone never establishes a wait dependency. At most 4,096 wait
+calls per session are retained, with `wait_edges_truncated` marking overflow.
+
+A closed turn's optional `end.at` is its last recorded assistant response or
+tool/item completion, rather than a guessed `task_complete` time. Live turns,
+stops on an unfinished step, and records with no completion timestamp omit it.
+These intervals support a shared runtime axis; multiple-target waits do not
+identify which child resolved the call and do not establish a critical path.

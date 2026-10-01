@@ -8,6 +8,7 @@ description = "The mirror protocol: the client that sends the session logs' inpu
 
 [dependencies]
 hex.workspace = true
+httpdate = "1.0"
 reqwest.workspace = true
 # Already built for reqwest (same version and features); used directly for
 # `semon receive`'s TLS listener and its token randomness.

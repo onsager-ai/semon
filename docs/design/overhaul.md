@@ -10,14 +10,16 @@ The reference is `tests/ui/reference/overhaul.html`; the previous mockup, `semon
 
 ### Type
 
-One sans for the interface, one serif for what agents write, one mono for code. Sizes are tokens in the mockup's `:root`.
+One sans for the interface and for what agents write, one mono for code. Agent text keeps its larger reading size (`--fs-read`), its line height and the 68-character measure, so it still reads as content. Sizes are tokens in the mockup's `:root`.
+
+This reverses the overhaul's original "serif for what agents write" rule. Marvin, asked whether to align with the other Semon pages' fonts, chose "All sans, one family" in the Semon session on 2026-09-30. Source Serif 4 is no longer vendored, and the reference mockups' reading text is set in the same sans.
 
 | Token | Size / line | Used for |
 |---|---|---|
 | `--fs-cap` | 12 / 18 | Labels, meta lines, timestamps, captions, chart axes |
 | `--fs-sm` | 13 / 20 | Secondary UI: step rows, event headers, filters, links in rows |
 | `--fs-ui` | 14 / 20 desktop, 15 / 22 phone | Interface body: list rows, names, buttons |
-| `--fs-read` | 16 / 1.5 serif | Messages from agents, briefs and questions on Home |
+| `--fs-read` | 16 / 1.5 sans | Messages from agents, briefs and questions on Home |
 | `--fs-title` | 16 desktop, 17 phone, 600 | The top bar's title, the only page title |
 | `--fs-fig` | 22 / 28, 600 | Figures: Analytics headlines, the session's cost |
 
@@ -42,7 +44,7 @@ Colour is for content and state, not decoration. No coloured borders anywhere.
 | `--faint` | #8a918d | #6f7773 | Rules, separators and icons only. Never text |
 | `--line`, `--line-2` | #e5e7e3, #d3d7d2 | #2a302d, #3d4541 | Hairlines; control and card outlines |
 | `--ground`, `--side`, `--sunken` | #fff, #f7f7f5, #f1f2ef | #141817, #181c1b, #222725 | Page, sidebar, fills (inputs, bubbles, code) |
-| `--accent` | #3b4dbf | #98a4f3 | Links and the pressed state of controls. Nothing else |
+| `--accent` | = `--ink` | = `--ink` | Links and the pressed state of controls, by weight 500 and a hover underline; no hue |
 | `--work` | #1d6db0 | #66b0ef | The working dot and spinner |
 | `--wait` / `--wait-dot` | #8f5700 / #d08f1a | #e4a53f | "Needs you": its dot, word and badge |
 | `--err` | #b53232 | #f27c77 | Failed: its dot and word |

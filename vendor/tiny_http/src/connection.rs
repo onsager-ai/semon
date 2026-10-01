@@ -78,6 +78,23 @@ impl std::io::Write for Connection {
     }
 }
 impl Connection {
+    pub(crate) fn set_timeouts(
+        &self,
+        read: Option<std::time::Duration>,
+        write: Option<std::time::Duration>,
+    ) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => {
+                stream.set_read_timeout(read)?;
+                stream.set_write_timeout(write)
+            }
+            #[cfg(unix)]
+            Self::Unix(stream) => {
+                stream.set_read_timeout(read)?;
+                stream.set_write_timeout(write)
+            }
+        }
+    }
     /// Gets the peer's address. Some for TCP, None for Unix sockets.
     pub(crate) fn peer_addr(&mut self) -> std::io::Result<Option<SocketAddr>> {
         match self {

@@ -58,6 +58,7 @@ function serve(dir, now) {
     const proc = spawn(BIN, [
       "sessions", "--serve", "--listen", "127.0.0.1:0",
       "--claude-home", path.join(dir, "claude"),
+      "--claude-json", path.join(dir, ".claude.json"),
       "--codex-home", path.join(dir, "codex"),
       "--proc-root", path.join(dir, "proc"),
       "--cache", path.join(dir, "index.json"),
@@ -262,24 +263,30 @@ const scenarios = {
     const opened = await sessionOpened(page, rec);
     const out = { "session-open": await row(page, rec, 0, { firstEntryMs: opened.firstEntryMs }, opened) };
 
-    // Older pages: the viewer offers "Load earlier" at the top of the transcript; press it until it is gone. This half has
+    // Older pages: scrolling to the top loads automatically; the fallback control can also start a page. This half has
     // its own catch: a failure here keeps the session-open row above.
     try {
       const since = await nowIn(page);
       await rec.reset();
-      let presses = 0, stuck = false;
-      for (; presses < 60; presses++) {
-        await scrollTop(page);
-        const button = page.locator(LOAD_EARLIER).first();
-        if (!(await button.count())) break;
-        const handle = await button.elementHandle();
-        await handle.evaluate((b) => b.click());
-        if (!(await softly(page.waitForFunction((b) => !b.isConnected, handle, { timeout: 30_000 })))) { stuck = true; break; }
-      }
+      let presses = 0, loads = 0, stuck = false;
+      const olderRequest = (request) => { const url = new URL(request.url()); if (url.pathname === "/api/tx" && url.searchParams.get("sid") === "marathon" && url.searchParams.has("before")) loads++; };
+      page.on("request", olderRequest);
+      try {
+        for (let step = 0; step < 60; step++) {
+          await scrollTop(page);
+          const button = page.locator(LOAD_EARLIER).first();
+          if (!(await button.count())) break;
+          const handle = await button.elementHandle();
+          if (!handle) continue; // an automatic load already replaced the control
+          if (await handle.evaluate((b) => { if (!b.isConnected || b.disabled) return false; b.click(); return true; })) presses++;
+          if (!(await softly(page.waitForFunction((b) => !b.isConnected, handle, { timeout: 30_000 })))) { stuck = true; break; }
+          await handle.dispose();
+        }
+      } finally { page.off("request", olderRequest); }
       const quiet = await rec.idle();
-      // A press can fetch more than one /api/tx (the page and the child runs it shows), so presses and requests differ.
-      // No press at all means the control was not found: the row measured nothing, and is listed as not settled.
-      out["session-older"] = await row(page, rec, since, { olderPresses: presses }, { quiet, stuck, noOlder: presses === 0 });
+      // Count actual earlier requests as well as fallback presses: the observer can win the race to the button.
+      // Child runs still belong to the recorder's request/byte totals; no request ceiling changes.
+      out["session-older"] = await row(page, rec, since, { olderPresses: presses, olderLoads: loads }, { quiet, stuck, noOlder: loads === 0 });
     } catch (error) {
       warn("session-older", error);
     }

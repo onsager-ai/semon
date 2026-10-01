@@ -22,7 +22,7 @@ pub const FACTS_VERSION: u32 = 2;
 /// name: Ostrom's run contract (its `docs/loops.md`, "The run environment is
 /// a contract"). Every other entry of the environment is dropped as it is
 /// parsed, never kept, logged or compared beyond its name.
-pub const RUN_VARIABLES: [&str; 2] = ["OSTROM_RUN_ID", "OSTROM_WORK_ORDER_ID"];
+pub const RUN_VARIABLES: [&str; 3] = ["OSTROM_RUN_ID", "OSTROM_WORK_ORDER_ID", "SEMON_PARENT"];
 
 /// The most of `/proc/<pid>/environ` that is read. A larger environment
 /// isn't read at all: a cut one could hold a cut value.
@@ -54,6 +54,10 @@ pub struct Facts {
     /// its environment couldn't be read whole.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub runs: BTreeMap<u32, BTreeMap<String, String>>,
+    /// Parent pid chains observed for live known session processes, nearest first.
+    /// Optional in v2 facts, so existing receivers remain compatible.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub process_ancestors: BTreeMap<u32, Vec<u32>>,
     /// Extracted run snapshots from the sibling Claude state file. The
     /// reader retains only the session/run fields and model usage allowlist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -178,7 +182,11 @@ fn collect_facts(
     // whose start time matches, and each Codex writer lock's holder.
     let machine = MachineFacts::Local;
     let mut runs = BTreeMap::new();
-    for pid in model::pid_files(options, &machine) {
+    let live_pids: Vec<_> = model::pid_files(options, &machine)
+        .into_iter()
+        .filter(|pid| pid.alive)
+        .collect();
+    for pid in &live_pids {
         if pid.alive
             && let Some(run) = machine.run(options, pid.pid, pid.start)
         {
@@ -190,7 +198,20 @@ fn collect_facts(
             runs.insert(*pid, run);
         }
     }
+    let process_ancestors = live_pids
+        .iter()
+        .map(|pid| pid.pid)
+        .chain(codex_locks.values().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|pid| {
+            machine
+                .ancestors(options, pid)
+                .map(|ancestors| (pid, ancestors))
+        })
+        .collect();
     Ok(Facts {
+        process_ancestors,
         version: FACTS_VERSION,
         hostname: model::local_hostname(options),
         home: env_home(),
@@ -254,7 +275,7 @@ fn codex_locks(options: &Options) -> BTreeMap<String, u32> {
 /// Where the builder learns about the machine: this one, or a facts file.
 pub(crate) enum MachineFacts {
     Local,
-    Recorded(Facts),
+    Recorded(Box<Facts>),
 }
 
 /// A Codex writer lock's state, as the V1 tree reports it.
@@ -270,7 +291,7 @@ impl MachineFacts {
     pub(crate) fn of(options: &Options) -> Self {
         match &options.facts {
             None => Self::Local,
-            Some(path) => Self::Recorded(read_facts(path).unwrap_or_default()),
+            Some(path) => Self::Recorded(Box::new(read_facts(path).unwrap_or_default())),
         }
     }
 
@@ -321,6 +342,33 @@ impl MachineFacts {
                 .is_ok()
                 .then(|| codex_locks(options)),
             Self::Recorded(facts) => Some(facts.codex_locks.clone()),
+        }
+    }
+
+    pub(crate) fn ancestors(&self, options: &Options, pid: u32) -> Option<Vec<u32>> {
+        match self {
+            Self::Recorded(facts) => facts.process_ancestors.get(&pid).cloned(),
+            Self::Local => {
+                let initial = proc_start(&options.proc_root, pid)?;
+                let mut ancestors = Vec::new();
+                let mut seen = BTreeSet::new();
+                let mut current = pid;
+                // A bounded /proc walk, no environ or command line reads here.
+                while ancestors.len() < 64 && seen.insert(current) {
+                    let text = fs::read_to_string(
+                        options.proc_root.join(current.to_string()).join("stat"),
+                    )
+                    .ok()?;
+                    let tail = text.rsplit_once(')')?.1;
+                    let parent = tail.split_whitespace().nth(1)?.parse::<u32>().ok()?;
+                    if parent == 0 {
+                        break;
+                    }
+                    ancestors.push(parent);
+                    current = parent;
+                }
+                (proc_start(&options.proc_root, pid) == Some(initial)).then_some(ancestors)
+            }
         }
     }
 
@@ -449,6 +497,9 @@ fn run_of(environ: &[u8]) -> Option<BTreeMap<String, String>> {
             continue;
         }
         let value = std::str::from_utf8(&entry[equals + 1..]).ok()?;
+        if name == "SEMON_PARENT" && crate::parent_links::parse(value).is_none() {
+            continue;
+        }
         run.insert(name.to_owned(), value.to_owned());
     }
     Some(run)

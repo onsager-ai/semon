@@ -577,13 +577,18 @@ fn command_execution_core(event: &Value) -> Result<Option<SemanticCore>, StoreEr
         .unwrap_or("unknown");
     let path = event.get("path").cloned().unwrap_or(Value::Null);
     let exit_code = event.get("exit_code").and_then(Value::as_i64).unwrap_or(-1);
-    SemanticCore::from_value(json!({
+    let mut core = json!({
         "kind": "action",
         "action": action,
         "path": path,
         "exit_code": exit_code,
-    }))
-    .map(Some)
+    });
+    if let Some(components) = event.get("components").and_then(Value::as_array)
+        && components.len() > 1
+    {
+        core["components"] = Value::Array(components.clone());
+    }
+    SemanticCore::from_value(core).map(Some)
 }
 
 fn file_change_core(event: &Value) -> Result<Option<SemanticCore>, StoreError> {

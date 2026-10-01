@@ -428,7 +428,7 @@ impl View {
     fn summary(&self, id: &str, session: &Value) -> Value {
         let facts = self.facts.get(id);
         let field = |key: &str| session.get(key).cloned().unwrap_or(Value::Null);
-        json!({
+        let mut row = json!({
             "id": id,
             "harness": field("harness"),
             "kind": facts.map(|facts| facts.kind),
@@ -458,7 +458,11 @@ impl View {
             })),
             // The live process's run ids (RUN_VARIABLES only), or null.
             "run": facts.and_then(|facts| facts.run.clone()),
-        })
+        });
+        if let Some(signals) = session.get("signals") {
+            row["signals"] = signals.clone();
+        }
+        row
     }
 
     fn last(&self, id: &str) -> Option<i64> {

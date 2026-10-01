@@ -11,7 +11,8 @@
 // comparison or the gap check): what the mockup's markdown check page (mkmd.js) added (one message in harbor using every
 // markdown construct, and an answered two-part question from ledger); a lane whose prompts attach images (attach); a harbor step whose command is longer than its
 // summary; a yielded Codex command with a poll that sends input; a Codex call with no exit status in deps; a `backlog` lane of 460 entries (paging); and a lane whose key, name,
-// branch, messages, tools, relay, question, answer and subagent all carry an injection payload (XSS).
+// branch, messages, tools, relay, question, answer and subagent all carry an injection payload (XSS);
+// and plain Claude background Bash calls covering running, completed, failed and killed outcomes.
 //
 // What the model's rules can't reproduce is listed in gaps.json, and checked by gaps.mjs.
 import fs from "node:fs";
@@ -532,6 +533,29 @@ export function write(out, { extras = false } = {}) {
     }
   }
   if (extras) {
+    // Plain Claude background Bash calls, without a Codex run card replacing them.
+    // The session is idle but alive after returning its answer; the dev server keeps running.
+    {
+      const c = claude("bgcmd", { cwd: repo("bgcmd"), model: "opus-5.5", tokens: [0, 0, 0] });
+      c.title(ms(T(12, 30)), "Background commands");
+      c.ask(ms(T(12, 30)), "Keep the dev server running and report how the checks ended.");
+      for (const [id, command, description] of [
+        ["bg-running", "npm run dev", "Dev server"],
+        ["bg-completed", "cargo build", "Build"],
+        ["bg-failed", "cargo test integration", "Integration tests"],
+        ["bg-killed", "cargo watch", "File watcher"],
+      ]) {
+        c.tool(ms(T(12, 31)), id, "Bash", { command, description, run_in_background: true });
+        c.result(ms(T(12, 31), 0, 300), id, "Command running in background with ID: " + id + ". Output is being written to: /tmp/" + id + ".output");
+      }
+      for (const [id, status, minute, summary] of [
+        ["bg-completed", "completed", 32, 'Background command "cargo build" completed (exit code 0)'],
+        ["bg-failed", "failed", 33, 'Background command "cargo test integration" failed (exit code 2)'],
+        ["bg-killed", "killed", 34, 'Background command "cargo watch" stopped (exit code 137)'],
+      ]) c.prompt(ms(T(12, minute)), "<task-notification><task-id>" + id + "</task-id><tool-use-id>" + id + "</tool-use-id><status>" + status + "</status><summary>" + summary + "</summary></task-notification>");
+      c.text(ms(T(12, 38)), "The dev server is still running. Build completed, integration tests failed, and the file watcher stopped.");
+      c.save(); live("bgcmd", "shell", "Background commands");
+    }
     // result-card: an idle session that replied to your own message.
     {
       const c = claude("result-card", { cwd: role("result-card"), model: "opus-5.5", tokens: [0, 0, 0] });

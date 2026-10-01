@@ -50,6 +50,8 @@ pub struct GitBranchCheck {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RestoreReport {
     pub session: String,
+    pub harness: String,
+    pub codex_home: Option<PathBuf>,
     pub cwd: PathBuf,
     pub streams: Vec<RestoredStream>,
     pub lines: u64,
@@ -66,10 +68,19 @@ pub struct RestoreReport {
 impl RestoreReport {
     pub fn next_step(&self) -> Option<String> {
         (!self.incomplete).then(|| {
+            let command = if let Some(home) = &self.codex_home {
+                format!(
+                    "CODEX_HOME={} codex resume",
+                    shell_quote(&home.to_string_lossy())
+                )
+            } else {
+                "claude --resume".into()
+            };
             format!(
-                "cd {} && claude --resume {}",
-                self.cwd.display(),
-                self.session
+                "cd {} && {} {}",
+                shell_quote(&self.cwd.to_string_lossy()),
+                command,
+                shell_quote(&self.session)
             )
         })
     }
@@ -159,15 +170,38 @@ impl RestoreReport {
                     .map_or(Value::Null, |value| Value::String(value.clone())),
             ),
             ("session".into(), Value::String(self.session.clone())),
+            ("harness".into(), Value::String(self.harness.clone())),
+            (
+                "codex_home".into(),
+                self.codex_home.as_ref().map_or(Value::Null, |home| {
+                    Value::String(home.to_string_lossy().into_owned())
+                }),
+            ),
+            (
+                "compatibility".into(),
+                if self.harness == "codex" {
+                    Value::String("synthetic rollout-only resume tested with codex-cli 0.159.0-alpha.3; complex threads and older versions untested; SQLite state is not restored".into())
+                } else {
+                    Value::Null
+                },
+            ),
             ("streams".into(), Value::Array(streams)),
             ("unfinished_tool_calls".into(), Value::Array(unfinished)),
             (
                 "not_restored".into(),
                 Value::Array(
-                    ["*.meta.json", "custom-title.json"]
-                        .into_iter()
-                        .map(|value| Value::String(value.into()))
-                        .collect(),
+                    (if self.harness == "codex" {
+                        vec![
+                            "SQLite databases",
+                            "authentication and configuration",
+                            "attachments and memory",
+                        ]
+                    } else {
+                        vec!["*.meta.json", "custom-title.json"]
+                    })
+                    .into_iter()
+                    .map(|value| Value::String(value.into()))
+                    .collect(),
                 ),
             ),
             (
@@ -206,6 +240,9 @@ impl RestoreReport {
                 stream.stream, stream.generation, stream.lines, stream.lines_written, truncated
             ));
         }
+        if self.harness == "codex" {
+            lines.push("Codex compatibility: synthetic rollout-only resume tested with 0.159.0-alpha.3; SQLite indexes are not restored or overwritten; prefer a fresh CODEX_HOME to avoid stale rollout paths".into());
+        }
         lines.push(format!(
             "recorded cwd={} gitBranch={}",
             display_optional(&self.recorded_cwd),
@@ -234,7 +271,7 @@ impl RestoreReport {
                 orphan.last_seq
             ));
         }
-        lines.push("not restored: *.meta.json and custom-title.json".into());
+        lines.push(if self.harness == "codex" { "not restored: SQLite databases, authentication, configuration, attachments and memory" } else { "not restored: *.meta.json and custom-title.json" }.into());
         lines.push("limit: uncommitted worktree changes are not restored".into());
         lines.push("limit: the old agent may still be running".into());
         lines.push("limit: the old agent's git side effects are not fenced".into());
@@ -446,6 +483,32 @@ fn restore(
     transport: &impl Transport,
 ) -> Result<RestoreReport, RestoreError> {
     validate_session(session)?;
+    let initial =
+        transport
+            .lease_tips(session, machine)
+            .map_err(|source| RestoreError::Transport {
+                what: "restore layout",
+                session: session.into(),
+                source,
+            })?;
+    let codex = initial
+        .tips
+        .iter()
+        .any(|tip| tip.stream.starts_with("codex/"));
+    if codex
+        && initial
+            .tips
+            .iter()
+            .any(|tip| !tip.stream.starts_with("codex/"))
+    {
+        return Err(RestoreError::Stream("mixed harness streams".into()));
+    }
+    // Hold the local writer lock through verification, installation and takeover.
+    let _writer = if codex {
+        Some(lock_codex_writer(projects_root, session)?)
+    } else {
+        None
+    };
     let cwd = absolute_path(cwd)?;
     let orphans = transport
         .list_orphans(machine)
@@ -598,21 +661,55 @@ fn fetch_and_materialize(
         return Err(RestoreError::NoFrames(session.to_owned()));
     }
 
-    let slug = cwd_slug(cwd)?;
-    let project_dir = projects_root.join(slug);
-    refuse_other_slug(projects_root, &project_dir, session)?;
-    create_private_dir(projects_root)?;
-    create_private_dir(&project_dir)?;
+    let codex = selected.keys().any(|stream| stream.starts_with("codex/"));
+    if codex && (selected.len() != 1 || selected.keys().any(|s| !s.starts_with("codex/"))) {
+        return Err(RestoreError::Stream(
+            "Codex requires exactly one rollout stream".into(),
+        ));
+    }
+    let project_dir = if codex {
+        projects_root.to_path_buf()
+    } else {
+        projects_root.join(cwd_slug(cwd)?)
+    };
+    if !codex {
+        refuse_other_slug(projects_root, &project_dir, session)?;
+    } else if projects_root.exists() {
+        for existing in crate::discover_codex_streams(projects_root)
+            .map_err(|error| RestoreError::Verification(error.to_string()))?
+        {
+            if existing.session == session && !selected.contains_key(&existing.stream) {
+                return Err(RestoreError::OtherSlug {
+                    session: session.into(),
+                    path: existing.path,
+                });
+            }
+        }
+    }
+    if codex {
+        private_codex_parents(projects_root, projects_root)?;
+    } else {
+        create_private_dir(projects_root)?;
+        create_private_dir(&project_dir)?;
+    }
 
     let mut staged = Vec::with_capacity(selected.len());
-    let mut metadata = TranscriptMetadata::default();
+    let mut metadata = TranscriptMetadata {
+        codex,
+        codex_home: codex
+            .then(|| absolute_path(projects_root.parent().unwrap_or(projects_root)))
+            .transpose()?,
+        ..TranscriptMetadata::default()
+    };
     let mut had_gaps = false;
     for (stream, receiver_tip) in selected {
         validate_stream(&stream)?;
         let generation = receiver_tip.generation;
         let target = stream_path(&project_dir, session, &stream)?;
         let parent = target.parent().expect("restore path has a parent");
-        if parent != project_dir {
+        if codex {
+            private_codex_parents(&project_dir, parent)?;
+        } else if parent != project_dir {
             create_private_dir(&project_dir.join(session))?;
         }
         create_private_dir(parent)?;
@@ -717,6 +814,20 @@ fn fetch_and_materialize(
                     path: temporary.clone(),
                     source,
                 })?;
+                if codex && seq == 0 {
+                    let value: Value = serde_json::from_slice(&line).map_err(|_| {
+                        RestoreError::Verification("invalid Codex session_meta".into())
+                    })?;
+                    if value["type"] != "session_meta"
+                        || value["payload"]["id"].as_str() != Some(session)
+                        || !stream.ends_with(&format!("-{session}.jsonl"))
+                    {
+                        return Err(RestoreError::WrongSession {
+                            expected: session.into(),
+                            actual: value["payload"]["id"].as_str().unwrap_or("missing").into(),
+                        });
+                    }
+                }
                 metadata.ingest(&stream, &line);
                 previous_epoch = Some(epoch);
                 lines = lines.saturating_add(1);
@@ -965,6 +1076,8 @@ fn build_report(
         .map(|branch| check_git_branch(&cwd, branch));
     RestoreReport {
         session: session.to_owned(),
+        harness: if metadata.codex { "codex" } else { "claude" }.into(),
+        codex_home: metadata.codex_home.clone(),
         cwd,
         streams: streams.to_vec(),
         lines: streams.iter().map(|stream| stream.lines).sum(),
@@ -981,6 +1094,8 @@ fn build_report(
 
 #[derive(Default)]
 struct TranscriptMetadata {
+    codex: bool,
+    codex_home: Option<PathBuf>,
     cwd: Option<String>,
     git_branch: Option<String>,
     uses: Vec<UnfinishedToolCall>,
@@ -1001,6 +1116,39 @@ impl TranscriptMetadata {
             }
             if let Some(branch) = object.get("gitBranch").and_then(Value::as_str) {
                 self.git_branch = Some(branch.to_owned());
+            }
+        }
+        if stream.starts_with("codex/") {
+            self.codex = true;
+            let payload = &value["payload"];
+            if matches!(
+                value["type"].as_str(),
+                Some("session_meta" | "turn_context")
+            ) {
+                if let Some(cwd) = payload["cwd"].as_str() {
+                    self.cwd = Some(cwd.into());
+                }
+                if let Some(branch) = payload["git"]["branch"].as_str() {
+                    self.git_branch = Some(branch.into());
+                }
+            }
+            match payload["type"].as_str() {
+                Some("function_call" | "custom_tool_call") => {
+                    if let (Some(id), Some(name)) =
+                        (payload["call_id"].as_str(), payload["name"].as_str())
+                    {
+                        self.uses.push(UnfinishedToolCall {
+                            id: id.into(),
+                            name: name.into(),
+                        });
+                    }
+                }
+                Some("function_call_output" | "custom_tool_call_output") => {
+                    if let Some(id) = payload["call_id"].as_str() {
+                        self.results.insert(id.into());
+                    }
+                }
+                _ => {}
             }
         }
         find_tool_blocks(&value, self);
@@ -1088,6 +1236,12 @@ fn validate_session(session: &str) -> Result<(), RestoreError> {
 }
 
 fn validate_stream(stream: &str) -> Result<(), RestoreError> {
+    if stream
+        .strip_prefix("codex/")
+        .is_some_and(crate::discovery::valid_codex_path)
+    {
+        return Ok(());
+    }
     if stream == "main" {
         return Ok(());
     }
@@ -1125,6 +1279,10 @@ fn cwd_slug(cwd: &Path) -> Result<String, RestoreError> {
 }
 
 fn stream_path(project_dir: &Path, session: &str, stream: &str) -> Result<PathBuf, RestoreError> {
+    if let Some(path) = stream.strip_prefix("codex/") {
+        validate_stream(stream)?;
+        return Ok(project_dir.join(path));
+    }
     match stream {
         "main" => Ok(project_dir.join(format!("{session}.jsonl"))),
         _ => {
@@ -1367,5 +1525,106 @@ fn commit_staged(stage: &mut StagedStream) -> Result<u64, RestoreError> {
             )?;
             Ok(lines_written)
         }
+    }
+}
+
+fn private_codex_parents(root: &Path, parent: &Path) -> Result<(), RestoreError> {
+    let mut path = root.to_path_buf();
+    for part in std::iter::once(None).chain(
+        parent
+            .strip_prefix(root)
+            .expect("validated relative rollout path")
+            .components()
+            .map(Some),
+    ) {
+        if let Some(part) = part {
+            path.push(part);
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
+                return Err(RestoreError::TargetType(path));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => create_private_dir(&path)?,
+            Err(source) => return Err(RestoreError::Io { path, source }),
+        }
+    }
+    Ok(())
+}
+
+// Closing one descriptor is insufficient if a concurrent child inherited a duplicate before exec.
+// Unlock the shared open-file description explicitly when restore leaves any success/error path.
+struct CodexWriterGuard {
+    file: File,
+}
+impl Drop for CodexWriterGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+fn lock_codex_writer(root: &Path, session: &str) -> Result<CodexWriterGuard, RestoreError> {
+    if root.file_name().and_then(|name| name.to_str()) != Some("sessions") {
+        return Err(RestoreError::Verification(
+            "Codex restore target must be CODEX_HOME/sessions".into(),
+        ));
+    }
+    let home = root
+        .parent()
+        .ok_or_else(|| RestoreError::TargetType(root.into()))?;
+    let locks = home.join("thread-writer-locks");
+    private_codex_parents(home, &locks)?;
+    let path = locks.join(format!("{session}.lock"));
+    if fs::symlink_metadata(&path)
+        .is_ok_and(|meta| !meta.is_file() || meta.file_type().is_symlink())
+    {
+        return Err(RestoreError::TargetType(path));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    let file = options.open(&path).map_err(|source| RestoreError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    file.try_lock().map_err(|_| {
+        RestoreError::Verification("Codex thread has an active writer; restore refused".into())
+    })?;
+    Ok(CodexWriterGuard { file })
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+    {
+        value.into()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod codex_writer_tests {
+    use super::*;
+    #[test]
+    fn restore_guard_unlocks_even_with_an_inherited_file_description() {
+        let base = std::env::temp_dir().join(format!(
+            "semon-codex-writer-{}-{}",
+            process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let root = base.join("sessions");
+        let guard = lock_codex_writer(&root, "synthetic-thread").unwrap();
+        // dup/fork share the OS open-file description. Keep that duplicate alive across guard drop.
+        let inherited = guard.file.try_clone().unwrap();
+        assert!(lock_codex_writer(&root, "synthetic-thread").is_err());
+        drop(guard);
+        let next = lock_codex_writer(&root, "synthetic-thread").unwrap();
+        drop(next);
+        drop(inherited);
+        fs::remove_dir_all(base).unwrap();
     }
 }

@@ -1,5 +1,5 @@
 //! `/api/tx`: one session's transcript, a page at a time, in the mockup's
-//! `TX` entry shape (`{k:"a"|"tool"|"think"|"h"|"u"|"harness"|"end", …}`).
+//! `TX` entry shape (`{k:"a"|"tool"|"bgend"|"think"|"h"|"u"|"harness"|"end", …}`).
 //!
 //! The model keeps each session's transcript as offsets only (its slots);
 //! the text of a page is read back from the source lines here, capped as in
@@ -7,7 +7,6 @@
 
 use std::{
     collections::VecDeque,
-    fs,
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     rc::Rc,
@@ -80,7 +79,7 @@ pub(crate) fn read_record(path: &Path, offset: u64) -> Option<Value> {
 
 /// The record at `offset`, and how many bytes were read for it.
 fn read_sized(path: &Path, offset: u64) -> (Option<Value>, u64) {
-    let Ok(mut file) = fs::File::open(path) else {
+    let Ok(mut file) = crate::sealed::LogFile::open(path) else {
         return (None, 0);
     };
     if file.seek(SeekFrom::Start(offset)).is_err() {
@@ -894,6 +893,76 @@ fn state_fields(
     }
 }
 
+/// The summary for this particular task in a possibly batched notification.
+fn background_summary(record: &Value, id: &str, status: &str) -> String {
+    let text = record
+        .get("attachment")
+        .and_then(|attachment| attachment.get("prompt"))
+        .or_else(|| {
+            record
+                .get("message")
+                .and_then(|message| message.get("content"))
+        })
+        .map(content_text)
+        .unwrap_or_default();
+    events::notifications(&text)
+        .into_iter()
+        .find(|(tool, state, _)| *tool == Some(id) && *state == Some(status))
+        .and_then(|(_, _, body)| events::inner(body, "summary"))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn background_state(status: &str, exit: Option<i64>) -> &'static str {
+    if matches!(status, "killed" | "stopped") {
+        "killed"
+    } else if status == "failed" || exit.is_some_and(|exit| exit != 0) {
+        "failed"
+    } else {
+        "done"
+    }
+}
+
+fn background_fields(
+    _built: &Built,
+    lines: &mut Lines,
+    bg: &model::Background,
+    start: Option<i64>,
+    now: i64,
+) -> Value {
+    let Some(end) = &bg.end else {
+        return if bg.live {
+            let mut value = json!({"state": "running", "secs": start.map_or_else(|| "—".to_owned(), |t| running(now - t))});
+            if let Some(start) = start {
+                value["since"] = json!(start);
+            }
+            value
+        } else {
+            json!({"state": "unknown"})
+        };
+    };
+    let summary = lines
+        .get(&end.file.path, end.offset)
+        .map(|record| background_summary(&record, &bg.tid, &end.status))
+        .unwrap_or_default();
+    ended_fields(&summary, &end.status, start, end.t)
+}
+
+/// An ended background call's `bg`: on its step, and on its finish row, so a
+/// viewer that loaded the step while it ran can update it from the row alone.
+fn ended_fields(summary: &str, status: &str, start: Option<i64>, end: Option<i64>) -> Value {
+    let exit = events::notification_exit(summary);
+    let mut value = json!({
+        "state": background_state(status, exit), "status": status,
+        "secs": match (start, end) { (Some(start), Some(end)) => secs(end - start), _ => "—".to_owned() },
+        "summary": clip(summary, PREVIEW_MAX).0,
+    });
+    if let Some(exit) = exit {
+        value["exit"] = json!(exit);
+    }
+    value
+}
+
 /// A command that outlived its yield, as one `exec_command` step: its line,
 /// then its output as the polls printed it, and once it completed, its exit
 /// code, duration and whole output from the completing item.
@@ -940,7 +1009,7 @@ fn yielded_entry(
         .or_else(|| {
             // This step does not carry the previous command's completion, so use the call start.
             match (slot.t, done.and_then(|done| done.t)) {
-                (Some(start), Some(end)) => Some(secs(end - start)),
+                (Some(start), Some(end)) => Some(format!("~{}", secs(end - start))),
                 _ => None,
             }
         })
@@ -1276,12 +1345,13 @@ fn operation_entry(
         if kind != "CommandExecution" {
             return None;
         }
-        // The previous command's completion is not carried here, so use the owning call's time.
+        // The script may contain sequential or parallel commands. Its start
+        // provides only an approximate span, which is marked in the display.
         let start = script_offset
             .and_then(|offset| lines.get(&file.path, offset))
             .and_then(|record| events::record_time(&record));
         match (start, slot.t) {
-            (Some(start), Some(end)) => Some(secs(end - start)),
+            (Some(start), Some(end)) => Some(format!("~{}", secs(end - start))),
             _ => None,
         }
     });
@@ -1365,21 +1435,27 @@ fn render(
     index: usize,
     now: i64,
 ) -> Option<Value> {
-    let file = slot.file.and_then(|file| built.files.get(file));
+    let file = slot.file.as_deref();
     let mut record = || file.and_then(|file| lines.get(&file.path, slot.offset));
     let entry = match &slot.kind {
         // Your message is drawn from the model's ask, with the images its
         // line attaches.
         SlotKind::H(id) if model::is_ask(id) => {
-            let record = prompt_record(record(), file, slot.offset);
-            with_images(json!({"k": "h", "id": id}), record.as_deref(), slot.offset)
+            let record = prompt_record(lines, file, slot.offset);
+            with_images(
+                json!({"k": "h", "id": id}),
+                record.as_deref(),
+                file,
+                slot.offset,
+            )
         }
         SlotKind::H(id) => json!({"k": "h", "id": id}),
         SlotKind::U => {
-            let record = prompt_record(record(), file, slot.offset);
+            let record = prompt_record(lines, file, slot.offset);
             with_images(
                 json!({"k": "u", "text": cap(&record.as_deref().and_then(prompt_text).unwrap_or_default(), MSG_MAX)}),
                 record.as_deref(),
+                file,
                 slot.offset,
             )
         }
@@ -1405,6 +1481,9 @@ fn render(
             entry
         }
         SlotKind::Harness(label) => json!({"k": "harness", "label": label}),
+        SlotKind::Signal(signal) => {
+            json!({"k": "signal", "signal": signal, "at": slot.t, "turn":slot.turn,"slot":index})
+        }
         SlotKind::Gap => {
             json!({"k": "end", "text": "Some entries not included: the log has unreadable lines here"})
         }
@@ -1412,23 +1491,65 @@ fn render(
         SlotKind::Returned { to, at, failed } => {
             json!({"k": "end", "ret": {"to": to, "at": at, "failed": failed}})
         }
+        SlotKind::BgEnd {
+            call,
+            status,
+            source,
+            start,
+        } => {
+            let summary = record()
+                .map(|record| background_summary(&record, call, status))
+                .unwrap_or_default();
+            let exit = events::notification_exit(&summary);
+            let source_file = &source.0;
+            let input = lines
+                .get(&source_file.path, source.1)
+                .and_then(|record| tool_input(&record, source.2 as usize))
+                .unwrap_or(Value::Null);
+            let label = field(&input, "description")
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    arg_summary(
+                        "Bash",
+                        &input,
+                        source_file.cwd.as_deref(),
+                        built.home.as_deref(),
+                    )
+                });
+            let mut entry = json!({
+                "k": "bgend", "call": call, "state": background_state(status, exit), "label": clip(&label, PREVIEW_MAX).0,
+                "bg": ended_fields(&summary, status, *start, slot.t),
+            });
+            if let Some(exit) = exit {
+                entry["exit"] = json!(exit);
+            }
+            entry
+        }
         SlotKind::Tool {
             shown,
             name,
             reply,
             item,
-        } => tool_entry(
-            lines,
-            file?,
-            slot,
-            index,
-            *shown,
-            name,
-            reply.as_ref(),
-            *item,
-            now,
-            built.home.as_deref(),
-        ),
+            bg,
+        } => {
+            let mut entry = tool_entry(
+                lines,
+                file?,
+                slot,
+                index,
+                *shown,
+                name,
+                reply.as_ref(),
+                *item,
+                now,
+                built.home.as_deref(),
+            );
+            if let Some(bg) = bg {
+                entry["tid"] = json!(bg.tid);
+                entry["bg"] = background_fields(built, lines, bg, slot.t, now);
+            }
+            entry
+        }
         SlotKind::Operation {
             kind,
             ok,
@@ -1475,20 +1596,26 @@ fn render(
 /// A prompt's line as a page reads it or, when it is longer than a page reads
 /// of one line ([`LINE_MAX`]), as the model reads it: its images can make it
 /// that long, and its text and images still show.
-fn prompt_record(
-    read: Option<Rc<Value>>,
-    file: Option<&SlotFile>,
-    offset: u64,
-) -> Option<Rc<Value>> {
-    read.or_else(|| model::read_line(&file?.path, offset).map(Rc::new))
+fn prompt_record(lines: &mut Lines, file: Option<&SlotFile>, offset: u64) -> Option<Rc<Value>> {
+    let file = file?;
+    let (record, bytes) = file.prompts.record(&file.path, offset)?;
+    lines.bytes += bytes;
+    Some(Rc::new(record))
 }
 
 /// `entry` with `img`: the images its prompt's line (at `offset`) attaches,
 /// by reference ([`attachments::refs`], each with the line's offset `o`),
 /// when there are any. Their bytes are served one at a time by
 /// `/api/attachment?sid=&o=&b=`, never here.
-fn with_images(mut entry: Value, record: Option<&Value>, offset: u64) -> Value {
-    let mut refs = record.map(attachments::refs).unwrap_or_default();
+fn with_images(
+    mut entry: Value,
+    record: Option<&Value>,
+    file: Option<&SlotFile>,
+    offset: u64,
+) -> Value {
+    let mut refs = file
+        .and_then(|file| file.prompts.refs(offset))
+        .unwrap_or_else(|| record.map(attachments::refs).unwrap_or_default());
     if !refs.is_empty() {
         for image in &mut refs {
             image["o"] = json!(offset);
@@ -1526,11 +1653,11 @@ fn strings(value: &Value, out: &mut String) {
 /// A handoff's text is the model's (its brief, result and answer), so a
 /// handoff slot has none here; neither do markers.
 pub(crate) fn slot_texts(
-    built: &Built,
+    _built: &Built,
     lines: &mut Lines,
     slot: &Slot,
 ) -> Vec<(&'static str, String)> {
-    let Some(file) = slot.file.and_then(|file| built.files.get(file)) else {
+    let Some(file) = slot.file.as_deref() else {
         return Vec::new();
     };
     let block = slot.block as usize;
@@ -1699,7 +1826,7 @@ pub(crate) fn page_limited(
         }
         entries.push(entry);
     }
-    Ok(json!({
+    let mut page = json!({
         "sid": sid,
         "from": low,
         "to": high,
@@ -1707,8 +1834,29 @@ pub(crate) fn page_limited(
         "calls": transcript.calls,
         "errors": transcript.errors,
         "entries": entries,
-    })
-    .to_string())
+    });
+    // The background calls still running anywhere in the session: a viewer
+    // that loaded one on an earlier page learns it stopped without its
+    // process writing a line (and without fetching that page again).
+    let bg_running: Vec<&str> = slots
+        .iter()
+        .filter_map(|slot| match &slot.kind {
+            SlotKind::Tool {
+                bg:
+                    Some(model::Background {
+                        tid,
+                        live: true,
+                        end: None,
+                    }),
+                ..
+            } => Some(tid.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !bg_running.is_empty() {
+        page["bg_running"] = json!(bg_running);
+    }
+    Ok(page.to_string())
 }
 
 /// `/api/tx?errors=1` lists at most this many failed steps.
@@ -1720,6 +1868,24 @@ pub(crate) const ERRORS_MAX: usize = 10_000;
 /// holding slot `s` is `after=s` (it starts there) or `before=s+1` (it ends
 /// there). `errors` is the whole count; `truncated` says the list stops
 /// short of it, at [`ERRORS_MAX`]. `version` is the model's, for `since=`.
+pub(crate) fn signals(built: &Built, sid: &str) -> io::Result<String> {
+    let transcript = built.tx.get(sid).ok_or(io::ErrorKind::NotFound)?;
+    let count: usize = transcript.signals.values().sum();
+    let slots: Vec<_> = transcript
+        .slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| matches!(slot.kind, SlotKind::Signal(_)))
+        .map(|(index, _)| index)
+        .take(ERRORS_MAX)
+        .collect();
+    Ok(
+        json!({"version":built.version,"total":transcript.slots.len(),"signals":count,
+        "truncated":count>slots.len(),"slots":slots})
+        .to_string(),
+    )
+}
+
 pub(crate) fn errors(built: &Built, sid: &str) -> io::Result<String> {
     errors_limited(built, sid, ERRORS_MAX)
 }
@@ -1755,7 +1921,7 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
         .ok_or(io::ErrorKind::NotFound)?;
     let file = slot
         .file
-        .and_then(|file| built.files.get(file))
+        .as_deref()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a tool call"))?;
     if part == "script"
         && let SlotKind::Operation {
@@ -1946,7 +2112,7 @@ fn full(path: &Path, offset: u64, block: usize, part: &str) -> io::Result<String
 #[cfg(test)]
 mod tests {
     use std::{
-        env,
+        env, fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
         time::Duration,
@@ -2182,6 +2348,414 @@ mod tests {
         assert!(full_slot(&built, "nobody", 0, "in").is_err());
     }
 
+    fn task_notice(sid: &str, time: String, id: &str, status: &str, summary: &str) -> Value {
+        claude(
+            sid,
+            time,
+            "user",
+            json!({"message": {"role": "user", "content": format!(
+                "<task-notification><task-id>task</task-id><tool-use-id>{id}</tool-use-id><status>{status}</status><summary>{summary}</summary></task-notification>"
+            )}}),
+        )
+    }
+
+    #[test]
+    fn background_bash_tracks_the_notification_without_changing_its_tool_result() {
+        for (status, summary, state, exit) in [
+            (
+                "completed",
+                "Background command completed (exit code 0)",
+                "done",
+                Some(0),
+            ),
+            (
+                "completed",
+                "Background command completed (exit code 2)",
+                "failed",
+                Some(2),
+            ),
+            (
+                "failed",
+                "Background command failed (exit code 0)",
+                "failed",
+                Some(0),
+            ),
+            (
+                "killed",
+                "Background command stopped (exit code 137)",
+                "killed",
+                Some(137),
+            ),
+            (
+                "stopped",
+                "Background command stopped (exit code 137)",
+                "killed",
+                Some(137),
+            ),
+            ("completed", "Background command completed", "done", None),
+        ] {
+            let home = Home::new();
+            let output = "Command running in background with ID: task. Output is being written to: /tmp/task.output";
+            home.lines("claude/projects/-work-proj/bg.jsonl", &[
+                ask("bg", ts(1, 0, 0), "Fetch"),
+                task_notice("bg", ts(1, 0, 100), "bash", "failed", "Before the call (exit code 9)"),
+                said("bg", ts(1, 1, 0), json!([{"type":"tool_use","id":"bash","name":"Bash","input":{"command":"git fetch","description":"Fetch changes","run_in_background":true}}])),
+                result("bg", ts(1, 1, 500), "bash", output, false),
+                task_notice("bg", ts(1, 1, 600), "bash", "running", "Still running"),
+                task_notice("bg", ts(1, 1, 700), "other", "failed", "Wrong call (exit code 9)"),
+                task_notice("bg", ts(1, 2, 250), "bash", status, summary),
+                said("bg", ts(1, 3, 0), json!([{"type":"text","text":"After completion"}])),
+                task_notice("bg", ts(1, 4, 0), "bash", "failed", "Later notification (exit code 9)"),
+            ]);
+            let built = home.built(BASE + 86_400_000);
+            let page = page_of(&built, "bg", &Anchor::Last);
+            let entries = page["entries"].as_array().unwrap();
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|e| e["k"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["h", "tool", "bgend", "a"]
+            );
+            let step = &entries[1];
+            assert_eq!(step["tid"], "bash");
+            assert_eq!(step["ok"], true);
+            assert_eq!(step["secs"], "0.5s");
+            assert_eq!(step["out"], output);
+            assert_eq!(step["bg"]["state"], state);
+            assert_eq!(step["bg"]["status"], status);
+            assert_eq!(step["bg"]["exit"], json!(exit));
+            assert_eq!(step["bg"]["secs"], "1m 0s");
+            assert_eq!(step["bg"]["summary"], summary);
+            assert_eq!(entries[2]["call"], "bash");
+            assert_eq!(entries[2]["state"], state);
+            assert_eq!(entries[2]["exit"], json!(exit));
+            assert_eq!(entries[2]["label"], "Fetch changes");
+            assert_eq!(entries[2]["state"], step["bg"]["state"]);
+            assert_eq!(entries[2]["exit"], step["bg"]["exit"]);
+            // The finish row carries the step's whole lifecycle, so a viewer
+            // holding the step from an earlier page updates it from the row.
+            assert_eq!(entries[2]["bg"], step["bg"]);
+            assert!(page.get("bg_running").is_none());
+            let failed = state == "failed";
+            assert_eq!(page["errors"], json!(usize::from(failed)));
+            assert_eq!(built.sessions["bg"].errors, Some(usize::from(failed)));
+            let errors: Value =
+                serde_json::from_str(&super::errors(&built, "bg").unwrap()).unwrap();
+            assert_eq!(errors["slots"], if failed { json!([1]) } else { json!([]) });
+            // A later page retains the tool-use id even when the call is not on it.
+            let tail: Value = serde_json::from_str(
+                &page_limited(&built, "bg", &Anchor::After(2), BASE + 86_400_000, 1).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(tail["entries"][0]["call"], "bash");
+        }
+    }
+
+    #[test]
+    fn background_bash_without_an_end_runs_while_the_session_is_alive_after_its_turn() {
+        for status in [None, Some("busy"), Some("idle"), Some("shell")] {
+            let live = status.is_some();
+            let home = Home::new();
+            if live {
+                home.write(
+                    "proc/1/stat",
+                    &format!("1 (claude) {}\n", ["0"; 19].join(" ") + " 7"),
+                );
+                home.write(
+                    "claude/sessions/1.json",
+                    &json!({"pid":1,"sessionId":"bg","procStart":7,"status":status}).to_string(),
+                );
+            }
+            home.lines("claude/projects/-work-proj/bg.jsonl", &[
+                ask("bg", ts(1, 0, 0), "Fetch"),
+                said("bg", ts(1, 1, 0), json!([{"type":"tool_use","id":"bash","name":"Bash","input":{"command":"git fetch","run_in_background":true}}])),
+                result("bg", ts(1, 1, 500), "bash", "Command running in background with ID: task", false),
+                task_notice("bg", ts(1, 1, 600), "different", "completed", "Wrong call (exit code 0)"),
+                said("bg", ts(1, 1, 700), json!([{"type":"text","text":"Waiting for the background command"}])),
+                ask("bg", ts(1, 1, 800), "Start another turn"),
+            ]);
+            let now = BASE + 3_710_000;
+            let built = home.built(now);
+            let page: Value =
+                serde_json::from_str(&page(&built, "bg", &Anchor::Last, now).unwrap()).unwrap();
+            let step = &page["entries"][1];
+            assert_eq!(page["entries"].as_array().unwrap().len(), 4);
+            assert_eq!(
+                step["bg"]["state"],
+                if live { "running" } else { "unknown" }
+            );
+            if live {
+                assert_eq!(step["bg"]["secs"], "50s");
+                assert_eq!(step["bg"]["since"], BASE + 3_660_000);
+                if status != Some("busy") {
+                    assert_eq!(built.sessions["bg"].state, "idle");
+                }
+            } else {
+                assert_eq!(step["bg"], json!({"state":"unknown"}));
+            }
+            // Every page lists the calls still running, whichever it holds.
+            let tail: Value = serde_json::from_str(
+                &page_limited(&built, "bg", &Anchor::After(3), now, 1).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                tail["bg_running"],
+                if live { json!(["bash"]) } else { Value::Null }
+            );
+            assert_eq!(step["ok"], true);
+            assert_eq!(step["secs"], "0.5s");
+            if live {
+                let before: Value = serde_json::from_str(&built.json(now)).unwrap();
+                fs::remove_file(home.root.join("proc/1/stat")).unwrap();
+                let stopped = home.built(BASE + 86_400_000);
+                let after: Value = serde_json::from_str(&stopped.json(BASE + 86_400_000)).unwrap();
+                assert_ne!(
+                    before["tx"]["bg"], after["tx"]["bg"],
+                    "the transcript refreshes when its background call ceases to be live without a new log line"
+                );
+                assert_eq!(
+                    page_of(&stopped, "bg", &Anchor::Last)["entries"][1]["bg"]["state"],
+                    "unknown"
+                );
+            }
+        }
+    }
+
+    /// A lane starts a background command, then restarts with `--resume`: the
+    /// new process writes a new file of the same session, and the old
+    /// process's shells died with it. Only a call in the file a live process
+    /// writes can still be running.
+    #[test]
+    fn a_background_call_runs_only_while_a_live_process_writes_its_own_file() {
+        for in_new in [false, true] {
+            let home = Home::new();
+            home.write(
+                "proc/1/stat",
+                &format!("1 (claude) {}\n", ["0"; 19].join(" ") + " 7"),
+            );
+            home.write(
+                "claude/sessions/1.json",
+                &json!({"pid":1,"sessionId":"new","procStart":7,"status":"shell"}).to_string(),
+            );
+            let sid = if in_new { "new" } else { "old" };
+            let call = [
+                said(
+                    sid,
+                    ts(1, if in_new { 6 } else { 1 }, 0),
+                    json!([{"type":"tool_use","id":"watch","name":"Bash","input":{"command":"gh pr checks --watch","run_in_background":true}}]),
+                ),
+                result(
+                    sid,
+                    ts(1, if in_new { 6 } else { 1 }, 500),
+                    "watch",
+                    "Command running in background with ID: watch",
+                    false,
+                ),
+            ];
+            let mut old = vec![ask("old", ts(1, 0, 0), "Watch the checks")];
+            let mut new = vec![ask("new", ts(1, 5, 0), "Carry on")];
+            if in_new {
+                new.extend(call)
+            } else {
+                old.extend(call)
+            }
+            old.push(json!({"type":"continued-in","continuedInSessionId":"new","sessionId":"old","timestamp":ts(1, 2, 0)}));
+            new.push(said(
+                "new",
+                ts(1, 7, 0),
+                json!([{"type":"text","text":"Still here"}]),
+            ));
+            home.lines("claude/projects/-work-proj/old.jsonl", &old);
+            home.lines("claude/projects/-work-proj/new.jsonl", &new);
+            let now = BASE + 3 * 3_600_000;
+            let built = home.built(now);
+            // One session, stitched from both files, and alive (not "done").
+            assert_eq!(built.tx.len(), 1);
+            assert_eq!(built.sessions["old"].state, "idle");
+            let page: Value =
+                serde_json::from_str(&page(&built, "old", &Anchor::Last, now).unwrap()).unwrap();
+            let step = page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["tid"] == "watch")
+                .unwrap();
+            let model: Value = serde_json::from_str(&built.json(now)).unwrap();
+            let mark = model["tx"]["old"].as_str().unwrap();
+            if in_new {
+                assert_eq!(step["bg"]["state"], "running");
+                assert_eq!(page["bg_running"], json!(["watch"]));
+                assert!(mark.ends_with(".1"), "{mark}");
+            } else {
+                assert_eq!(step["bg"], json!({"state":"unknown"}));
+                assert!(page.get("bg_running").is_none());
+                // Nothing runs, so the mark does not count it either.
+                assert!(mark.ends_with(".0"), "{mark}");
+            }
+        }
+    }
+
+    /// A live process for session `bg`, started at `started` (epoch ms), if given.
+    fn live_pid(home: &Home, started: Option<i64>) {
+        home.write(
+            "proc/1/stat",
+            &format!("1 (claude) {}\n", ["0"; 19].join(" ") + " 7"),
+        );
+        let mut record = json!({"pid":1,"sessionId":"bg","procStart":7,"status":"shell"});
+        if let Some(started) = started {
+            record["startedAt"] = json!(started);
+        }
+        home.write("claude/sessions/1.json", &record.to_string());
+    }
+
+    /// A background launch that was denied or blocked (an error result)
+    /// started nothing, and one with no result yet is an ordinary unfinished
+    /// call: neither runs as background, both count once as failed.
+    #[test]
+    fn a_background_launch_that_failed_or_never_returned_does_not_run() {
+        for failed in [true, false] {
+            let home = Home::new();
+            live_pid(&home, None);
+            let mut records = vec![
+                ask("bg", ts(1, 0, 0), "Watch the checks"),
+                said(
+                    "bg",
+                    ts(1, 1, 0),
+                    json!([{"type":"tool_use","id":"watch","name":"Bash","input":{"command":"gh pr checks --watch","run_in_background":true}}]),
+                ),
+            ];
+            if failed {
+                records.push(result(
+                    "bg",
+                    ts(1, 1, 500),
+                    "watch",
+                    "Permission to use Bash has been denied.",
+                    true,
+                ));
+            }
+            records.push(said(
+                "bg",
+                ts(1, 2, 0),
+                json!([{"type":"text","text":"Could not start it"}]),
+            ));
+            records.push(ask("bg", ts(1, 3, 0), "Next"));
+            home.lines("claude/projects/-work-proj/bg.jsonl", &records);
+            let now = BASE + 3 * 3_600_000;
+            let built = home.built(now);
+            let page: Value =
+                serde_json::from_str(&page(&built, "bg", &Anchor::Last, now).unwrap()).unwrap();
+            let step = &page["entries"][1];
+            assert_eq!(step["k"], "tool");
+            assert!(step.get("bg").is_none(), "{step}");
+            assert!(step.get("tid").is_none(), "{step}");
+            assert!(step.get("live").is_none(), "{step}");
+            if failed {
+                assert_eq!(step["ok"], false);
+            } else {
+                assert_eq!(step["unfinished"], true);
+            }
+            assert!(page.get("bg_running").is_none());
+            assert_eq!(page["errors"], 1);
+            assert_eq!(built.sessions["bg"].errors, Some(1));
+            let model: Value = serde_json::from_str(&built.json(now)).unwrap();
+            let mark = model["tx"]["bg"].as_str().unwrap();
+            assert!(mark.ends_with(".0"), "{mark}");
+        }
+    }
+
+    /// A session resumed into its own file: the live process started after
+    /// an older background call, whose shell died with the process that
+    /// launched it. Only a call at or after the process's start can run.
+    #[test]
+    fn a_background_call_older_than_its_files_live_process_does_not_run() {
+        let call = BASE + 3_660_000;
+        for (started, running) in [
+            (Some(call + 60_000), false),
+            (Some(call), true),
+            (Some(call - 60_000), true),
+            (None, true),
+        ] {
+            let home = Home::new();
+            live_pid(&home, started);
+            home.lines("claude/projects/-work-proj/bg.jsonl", &[
+                ask("bg", ts(1, 0, 0), "Watch the checks"),
+                said("bg", ts(1, 1, 0), json!([{"type":"tool_use","id":"watch","name":"Bash","input":{"command":"gh pr checks --watch","run_in_background":true}}])),
+                result("bg", ts(1, 1, 500), "watch", "Command running in background with ID: watch", false),
+                ask("bg", ts(1, 5, 0), "Carry on"),
+                said("bg", ts(1, 6, 0), json!([{"type":"text","text":"Still here"}])),
+            ]);
+            let now = BASE + 3 * 3_600_000;
+            let built = home.built(now);
+            assert_eq!(built.sessions["bg"].state, "idle");
+            let page: Value =
+                serde_json::from_str(&page(&built, "bg", &Anchor::Last, now).unwrap()).unwrap();
+            let step = &page["entries"][1];
+            assert_eq!(step["tid"], "watch");
+            let model: Value = serde_json::from_str(&built.json(now)).unwrap();
+            let mark = model["tx"]["bg"].as_str().unwrap();
+            if running {
+                assert_eq!(step["bg"]["state"], "running", "{started:?}");
+                assert_eq!(page["bg_running"], json!(["watch"]));
+                assert!(mark.ends_with(".1"), "{mark}");
+            } else {
+                assert_eq!(step["bg"], json!({"state":"unknown"}));
+                assert!(page.get("bg_running").is_none());
+                assert!(mark.ends_with(".0"), "{mark}");
+            }
+        }
+    }
+
+    #[test]
+    fn foreground_bash_has_no_background_fields_or_finish_row() {
+        let home = Home::new();
+        home.lines("claude/projects/-work-proj/fg.jsonl", &[
+            ask("fg", ts(1, 0, 0), "Fetch"),
+            said("fg", ts(1, 1, 0), json!([{"type":"tool_use","id":"bash","name":"Bash","input":{"command":"git fetch","run_in_background":false}}])),
+            result("fg", ts(1, 1, 500), "bash", "Fetched", false),
+            task_notice("fg", ts(1, 2, 0), "bash", "completed", "Completed (exit code 0)"),
+        ]);
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "fg", &Anchor::Last);
+        assert_eq!(page["entries"].as_array().unwrap().len(), 2);
+        assert!(page["entries"][1].get("bg").is_none());
+        assert!(page["entries"][1].get("tid").is_none());
+    }
+
+    #[test]
+    fn batched_background_notifications_use_each_calls_summary_and_label() {
+        let home = Home::new();
+        let long = format!("{} (exit code 2)", "é".repeat(PREVIEW_MAX));
+        let one = task_notice("bg", ts(1, 2, 0), "one", "completed", "One (exit code 0)");
+        let two = task_notice("bg", ts(1, 2, 0), "two", "completed", &long);
+        let mut notice = one.clone();
+        notice["message"]["content"] = json!(format!(
+            "{}{}",
+            one["message"]["content"].as_str().unwrap(),
+            two["message"]["content"].as_str().unwrap()
+        ));
+        home.lines("claude/projects/-work-proj/bg.jsonl", &[
+            ask("bg", ts(1, 0, 0), "Fetch"),
+            said("bg", ts(1, 1, 0), json!([
+                {"type":"tool_use","id":"one","name":"Bash","input":{"command":"git fetch one","run_in_background":true}},
+                {"type":"tool_use","id":"two","name":"Bash","input":{"command":"git fetch two","run_in_background":true}}
+            ])),
+            result("bg", ts(1, 1, 500), "one", "Command running in background", false),
+            result("bg", ts(1, 1, 500), "two", "Command running in background", false),
+            notice,
+        ]);
+        let built = home.built(BASE + 86_400_000);
+        let page = page_of(&built, "bg", &Anchor::Last);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[1]["bg"]["summary"], "One (exit code 0)");
+        assert_eq!(entries[2]["bg"]["exit"], 2);
+        assert_eq!(entries[2]["bg"]["summary"], clip(&long, PREVIEW_MAX).0);
+        assert_eq!(entries[3]["label"], "git fetch one");
+        assert_eq!(entries[4]["label"], "git fetch two");
+        assert_eq!(entries[4]["state"], "failed");
+    }
+
     #[test]
     fn a_live_tool_entry_has_its_start_and_a_finished_entry_has_no_since() {
         let home = Home::new();
@@ -2195,6 +2769,7 @@ mod tests {
             )],
         );
         let file = SlotFile {
+            prompts: Default::default(),
             path,
             cwd: Some("/work/proj".to_owned()),
         };
@@ -2204,8 +2779,9 @@ mod tests {
                 name: "Bash".to_owned(),
                 reply: None,
                 item: None,
+                bg: None,
             },
-            file: Some(0),
+            file: Some(std::sync::Arc::new(file.clone())),
             offset: 0,
             block: 0,
             t: Some(start),
@@ -2579,11 +3155,11 @@ mod tests {
         let page = page_of(&built, "command-duration", &Anchor::Last);
         let entries = page["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 4);
-        assert_eq!(entries[0]["secs"], "0.1s");
+        assert_eq!(entries[0]["secs"], "~0.1s");
         assert_eq!(entries[1]["secs"], "0.6s");
         assert_eq!(entries[2]["secs"], "1.7s");
         // No prior completion is carried into this step, so the span starts at the call record.
-        assert_eq!(entries[3]["secs"], "4.1s");
+        assert_eq!(entries[3]["secs"], "~4.1s");
     }
 
     #[test]
@@ -2793,6 +3369,53 @@ mod tests {
 
     fn codex_line(time: String, kind: &str, payload: Value) -> Value {
         json!({"timestamp": time, "type": kind, "payload": payload})
+    }
+
+    #[test]
+    fn signals_keep_positions_turns_counts_and_setting_history_content_free() {
+        let home = Home::new();
+        home.lines("codex/sessions/2026/09/24/rollout-signals.jsonl", &[
+            codex_line(ts(6,0,0), "session_meta", json!({"id":"signals","cwd":"/work/proj"})),
+            codex_line(ts(6,0,1), "response_item", json!({"type":"message","role":"user","content":[{"type":"input_text","text":"Work"}]})),
+            codex_line(ts(6,0,2), "turn_context", json!({"model":"gpt-a","collaboration_mode":{"settings":{"reasoning_effort":"high"}}})),
+            codex_line(ts(6,0,3), "response_item", json!({"type":"function_call","name":"shell","call_id":"c1","arguments":"{}"})),
+            codex_line(ts(6,0,4), "event_msg", json!({"type":"context_compacted","private":"must-not-escape"})),
+            codex_line(ts(6,0,5), "turn_context", json!({"model":"gpt-b","collaboration_mode":{"settings":{"reasoning_effort":"max"}}})),
+            codex_line(ts(6,0,6), "response_item", json!({"type":"function_call_output","call_id":"c1","output":"ok"})),
+            codex_line(ts(6,0,7), "response_item", json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]})),
+        ]);
+        let built = home.built(BASE + 6 * 3_600_000 + 60_000);
+        let page: Value = serde_json::from_str(
+            &super::page(
+                &built,
+                "signals",
+                &Anchor::Last,
+                BASE + 6 * 3_600_000 + 60_000,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let entries = page["entries"].as_array().unwrap();
+        let signals: Vec<_> = entries.iter().filter(|e| e["k"] == "signal").collect();
+        assert_eq!(signals.len(), 5);
+        assert!(
+            signals
+                .iter()
+                .all(|e| e["slot"].is_number() && e["turn"].is_string()),
+            "{signals:?}"
+        );
+        let change = signals
+            .iter()
+            .find(|e| e["signal"]["kind"] == "effort" && e["signal"]["tag"] == "max")
+            .unwrap();
+        assert_eq!(change["signal"]["previous"], "high");
+        assert_eq!(built.sessions["signals"].signals.values().sum::<usize>(), 5);
+        let listed: Value =
+            serde_json::from_str(&super::signals(&built, "signals").unwrap()).unwrap();
+        assert_eq!(listed["signals"], 5);
+        assert_eq!(listed["slots"].as_array().unwrap().len(), 5);
+        assert_eq!(page["calls"], 1);
+        assert!(!page.to_string().contains("must-not-escape"));
     }
 
     #[test]

@@ -56,3 +56,7 @@ The answer is 200 when it is stored. A receiver that hasn't had facts for a whil
 - **Deleted files** are not deleted on the receiver.
 - **Cadence.** One pass and one facts post, then exit. With `--watch`, a pass every 2 s and facts every 10 s.
 - **Token.** It is read from `--token-file`, which must be mode 0600; the client refuses anything else. The token is sent only in the `Authorization` header.
+
+## Sealed copies on the receiver
+
+A receiver may seal an idle copy to save space (`semon_sessions::sealed`). Its bytes up to its last complete line go into zstd segments in `<file>.seal/`, and that range is punched out of the copy as a hole. The copy keeps its path, inode, length and modified time, so every offset, length and `head_sha256` in this protocol stays what it was. Anything that reads a copy's bytes, the receiver's own 409 hash included, reads them through `sealed::LogFile`. Appends land after the sealed range as plain bytes, and a later seal adds a segment. A `replace` renames a fresh file over the copy, and the next seal retires the old segments.

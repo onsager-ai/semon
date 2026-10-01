@@ -330,7 +330,7 @@ fn read_only_requests_refuse_answers() {
         .register(
             NewRequest {
                 payload: json!({"tool_input": {"command": "sleep", "n": 9_007_199_254_740_993_u64}}),
-                ..permission("s2", "sleep")
+                ..unhooked("s2")
             },
             T0,
         )
@@ -1605,7 +1605,7 @@ fn a_deny_message_is_capped_before_the_claim() {
 }
 
 #[test]
-fn a_malformed_hash_is_a_mismatch_and_is_journalled_cut() {
+fn a_malformed_hash_is_bad_input_and_is_journalled_cut() {
     let (store, path) = new_store("hash-format");
     let id = store.register(permission("s1", "ls"), T0).unwrap();
     let upper = digest(&store, id).to_uppercase();
@@ -1614,7 +1614,7 @@ fn a_malformed_hash_is_a_mismatch_and_is_journalled_cut() {
         let error = store
             .answer(&adapter, id, Answer::Allow, &bad, source("w"), &|| T0 + 1)
             .unwrap_err();
-        assert_eq!(error.http_status(), 412);
+        assert_eq!(error.http_status(), 400);
     }
     assert!(
         lines(&path).iter().all(
@@ -1635,10 +1635,55 @@ fn a_claude_request_without_a_match_key_is_refused() {
             },
             T0
         ),
-        Err(RegisterError::KindMismatch)
+        Err(RegisterError::MissingMatchKey)
     );
     let id = store.register(permission("s2", "ls"), T0).unwrap();
     let request = store.get(id, T0).unwrap();
     assert_eq!(request.created_ms, T0);
     assert_eq!(request.created_wall_ms, WALL);
+}
+
+#[test]
+fn unsafe_claude_input_is_refused_without_an_unrelated_match_key() {
+    let (store, _) = new_store("unsafe-claude-input");
+    let input = json!({"command": "sleep", "n": 9_007_199_254_740_993_u64});
+    let match_key = MatchKey::claude("Bash", &input).ok();
+    assert!(match_key.is_none());
+    assert_eq!(
+        store.register(
+            NewRequest {
+                payload: json!({"tool_name": "Bash", "tool_input": input}),
+                match_key,
+                ..permission("s1", "sleep")
+            },
+            T0
+        ),
+        Err(RegisterError::MissingMatchKey)
+    );
+    assert!(store.snapshot(T0).requests.is_empty());
+}
+
+#[test]
+fn final_request_keeps_bounded_source_and_observed_wall_end_time() {
+    let (store, _) = new_store("end-wall-source");
+    let id = store.register(permission("s1", "ls"), T0).unwrap();
+    let hash = digest(&store, id);
+    assert_eq!(store.get(id, T0).unwrap().ended_wall_ms, None);
+    let answer = store
+        .answer(
+            &Fake::new(Delivery::Written),
+            id,
+            Answer::Allow,
+            &hash,
+            source(&"é".repeat(4000)),
+            &|| T0 + 1,
+        )
+        .unwrap();
+    match answer {
+        State::Answered { source, .. } => assert!(source.window.len() <= 128),
+        other => panic!("unexpected state: {other:?}"),
+    }
+    let request = store.get(id, T0 + 2).unwrap();
+    assert_eq!(request.ended_wall_ms, Some(WALL));
+    assert_eq!(request.ended_ms, Some(T0 + 1));
 }

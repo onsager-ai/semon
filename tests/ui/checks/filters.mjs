@@ -87,7 +87,7 @@ export default async function filtersCheck(browser) {
       await shot("open");
       // Tab stays inside the sheet (both ways), and Escape closes it and gives the focus back to the button.
       const stray = [];
-      for (let i = 0; i < 12; i++) { await page.keyboard.press(i % 4 === 3 ? "Shift+Tab" : "Tab"); if (!(await page.evaluate((sel) => { const d = document.querySelector(sel); return document.activeElement === document.body || d.contains(document.activeElement); }, FILTER_SHEET))) stray.push(i); }
+      for (let i = 0; i < 12; i++) { await page.keyboard.press(i % 4 === 3 ? "Shift+Tab" : "Tab"); if (!(await page.evaluate((sel) => { const d = document.querySelector(sel); return document.activeElement !== document.body && d.contains(document.activeElement); }, FILTER_SHEET))) stray.push(i); }
       rec.stray = stray; r.expect(stray.length === 0, key + " Tab left the sheet at step(s) " + stray.join());
       await page.keyboard.press("Escape"); await page.waitForFunction((sel) => document.querySelector(sel).open === false, FILTER_SHEET);
       rec.afterEscape = await page.evaluate((btn) => ({ focus: document.activeElement === document.querySelector(btn), y: scrollY }), FILTER_BUTTON);

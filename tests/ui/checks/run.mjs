@@ -11,6 +11,7 @@ import viewerCheck from "./viewer.mjs";
 import turnsCheck from "./turns.mjs";
 import barCheck from "./bar.mjs";
 import mdCheck from "./md.mjs";
+import agentFontCheck from "./agentfont.mjs";
 import homeCheck from "./home.mjs";
 import analyticsCheck from "./analytics.mjs";
 import checkReal from "./check-real.mjs";
@@ -29,17 +30,36 @@ import tooltipCheck from "./tooltip.mjs";
 import detailsCheck from "./details.mjs";
 import selectCheck from "./select.mjs";
 import filtersCheck from "./filters.mjs";
-import childcardCheck from "./childcard.mjs";
 import breakdownCheck from "./breakdown.mjs";
 import tracebriefCheck from "./tracebrief.mjs";
+import runView from "./runview.mjs";
+import deepLinkLive from "./deeplink-live.mjs";
+import codexThinkingCheck from "./codex-thinking.mjs";
+import tapsCheck from "./taps.mjs";
+
+import backlogCheck from "./viewer-backlog.mjs";
+import modelsCheck from "./models.mjs";
+import stepNamesCheck from "./stepnames.mjs";
+import sidebarFocusCheck from "./sidebarfocus.mjs";
+
+import signalsCheck from "./signals.mjs";
 
 const checks = [
+  ["runview", runView],
+  ["signals", signalsCheck],
+  ["viewer-backlog", backlogCheck],
+  ["models", modelsCheck],
+  ["stepnames", stepNamesCheck],
+  ["sidebarfocus", sidebarFocusCheck],
+  ["deeplink-live", deepLinkLive],
+  ["codex-thinking", codexThinkingCheck],
   ["home", homeCheck],
   ["bar", barCheck],
   ["turns", turnsCheck],
   ["viewer", viewerCheck],
   ["analytics", analyticsCheck],
   ["md", mdCheck],
+  ["agentfont", agentFontCheck],
   ["full", full],
   ["check-real", checkReal],
   ["extras", extras],
@@ -57,9 +77,9 @@ const checks = [
   ["details", detailsCheck],
   ["select", selectCheck],
   ["filters", filtersCheck],
-  ["childcard", childcardCheck],
   ["breakdown", breakdownCheck],
   ["tracebrief", tracebriefCheck],
+  ["taps", tapsCheck],
 ];
 
 const browser = await launch();

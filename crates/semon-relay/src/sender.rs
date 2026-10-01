@@ -36,6 +36,25 @@ pub const MAX_SUCCESS_RESPONSE_BYTES: usize = 65 * 1024 * 1024;
 /// Delivery seam. The source file remains the queue; transports may opt into
 /// small bounded batches without turning the full backlog into an in-memory queue.
 pub trait Transport {
+    fn deletion_scope(&self) -> String {
+        "local".into()
+    }
+    fn forget(
+        &self,
+        _id: &str,
+        _selector: &crate::ForgetSelector,
+        _machine: &str,
+    ) -> Result<crate::ForgetReport, TransportError> {
+        Err(TransportError::Unavailable(
+            "transport does not implement deletion".into(),
+        ))
+    }
+    fn snapshot_request(&self, _route: &str, _request: &Value) -> Result<Value, TransportError> {
+        Err(TransportError::Unavailable(
+            "transport does not implement snapshots".into(),
+        ))
+    }
+
     fn send(&self, frame: &Frame) -> Result<u64, TransportError>;
 
     /// Delivery batching is opt-in so single-frame test and embedded
@@ -70,6 +89,16 @@ pub trait Transport {
         _machine: &str,
     ) -> Result<LeaseStatus, TransportError> {
         Ok(LeaseStatus::default())
+    }
+
+    /// Receiver clock and deletion revision for read-only encrypted views.
+    fn lease_observation(
+        &self,
+        _machine: &str,
+    ) -> Result<(LeaseStatus, u64, String), TransportError> {
+        Err(TransportError::Unavailable(
+            "transport does not expose receiver lease time".into(),
+        ))
     }
 
     fn acquire(&self, session: &str, machine: &str) -> Result<LeaseRow, TransportError> {
@@ -296,6 +325,24 @@ impl HttpTransport {
 }
 
 impl Transport for HttpTransport {
+    fn deletion_scope(&self) -> String {
+        self.endpoint.origin().ascii_serialization()
+    }
+    fn forget(
+        &self,
+        id: &str,
+        selector: &crate::ForgetSelector,
+        machine: &str,
+    ) -> Result<crate::ForgetReport, TransportError> {
+        let value = self.post(
+            "/v1/delete",
+            &serde_json::json!({"id":id,"selector":selector.to_value(),"machine":machine}),
+        )?;
+        crate::ForgetReport::from_value(&value, id)
+    }
+    fn snapshot_request(&self, route: &str, request: &Value) -> Result<Value, TransportError> {
+        self.post(route, request)
+    }
     fn frame_batch_limits(&self) -> (usize, usize) {
         (FRAME_BATCH_MAX_FRAMES, FRAME_BATCH_MAX_BYTES)
     }
@@ -368,6 +415,22 @@ impl Transport for HttpTransport {
             ])),
         )?;
         Ok(LeaseStatus::from_value(&value)?)
+    }
+
+    fn lease_observation(
+        &self,
+        machine: &str,
+    ) -> Result<(LeaseStatus, u64, String), TransportError> {
+        let value = self.post("/v1/lease/status", &serde_json::json!({"machine":machine}))?;
+        let now = value["receiver_wall_ms"].as_u64().ok_or_else(|| {
+            TransportError::InvalidResponse(
+                "receiver does not expose remote-view lease time".into(),
+            )
+        })?;
+        let revision = value["deletion_revision"].as_str().ok_or_else(|| {
+            TransportError::InvalidResponse("receiver does not expose deletion revision".into())
+        })?;
+        Ok((LeaseStatus::from_value(&value)?, now, revision.to_owned()))
     }
 
     fn acquire(&self, session: &str, machine: &str) -> Result<LeaseRow, TransportError> {
@@ -845,6 +908,7 @@ pub struct StreamReport {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PassReport {
     pub streams: Vec<StreamReport>,
+    pub deletions: crate::ForgetFlushReport,
     pub lag: LagSummary,
     pub pass_duration: Duration,
 }
@@ -863,6 +927,7 @@ pub struct Sender {
     /// session's files are left alone, and a stream that appears later for
     /// a matching session is still picked up on the next pass.
     session_filter: Option<BTreeSet<String>>,
+    additional_roots: Vec<PathBuf>,
 }
 
 struct SenderCrypto {
@@ -937,7 +1002,7 @@ struct SendContext<'a, T> {
 
 impl PassReport {
     pub fn had_failures(&self) -> bool {
-        self.streams.iter().any(|stream| stream.failure.is_some())
+        self.deletions.pending > 0 || self.streams.iter().any(|stream| stream.failure.is_some())
     }
 
     pub fn totals(&self) -> (u64, u64, u64, u64) {
@@ -1089,7 +1154,7 @@ pub fn verify_encrypted_frames(
     Ok(tips.into_values().collect())
 }
 
-pub(crate) fn verify_encrypted_frame(
+pub fn verify_encrypted_frame(
     session: &str,
     key: &DataKey,
     previous: &mut Option<StreamTip>,
@@ -1462,6 +1527,11 @@ impl Sender {
     /// Restricts this sender to only the named sessions. Call before the
     /// first `run_pass`; every discovered stream outside the set is left
     /// untouched on every pass, including ones that appear later.
+    /// Adds another explicitly selected transcript root (e.g. Codex sessions).
+    pub fn add_root(&mut self, root: PathBuf) {
+        self.additional_roots.push(root);
+    }
+
     pub fn set_session_filter(&mut self, sessions: BTreeSet<String>) {
         self.session_filter = Some(sessions);
     }
@@ -1477,13 +1547,29 @@ impl Sender {
         }
         let machine = self.machine.clone().expect("machine identity was set");
         let pass_started = Instant::now();
+        let deletions = crate::flush_forgets(state_path, &machine, transport)?;
         let pass_observation = Observation {
             instant: pass_started,
             wall_ns: wall_time_ns()?,
             mono_ns: monotonic_time_ns()?,
             boot_id: read_boot_id()?,
         };
-        let discovered = discover_streams(projects_root)?;
+        let mut discovered = discover_streams(projects_root)?;
+        for root in &self.additional_roots {
+            discovered.extend(discover_streams(root)?);
+        }
+        let mut identities = BTreeSet::new();
+        for stream in &discovered {
+            if !identities.insert((&stream.session, &stream.stream)) {
+                return Err(DiscoveryError::Duplicate {
+                    session: stream.session.clone(),
+                    stream: stream.stream.clone(),
+                    first: projects_root.into(),
+                    second: stream.path.clone(),
+                }
+                .into());
+            }
+        }
         let discovered = match &self.session_filter {
             Some(sessions) => {
                 let filtered = filter_by_session(discovered, sessions);
@@ -1657,6 +1743,7 @@ impl Sender {
             all_lags.merge(&lags);
         }
         Ok(PassReport {
+            deletions,
             streams: reports,
             lag: all_lags.summary(),
             pass_duration: pass_started.elapsed(),

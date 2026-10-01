@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use semon_sessions::{Options, ServeOptions, serve};
+use semon_sessions::{Options, ServeOptions, serve_listener};
 
 /// Bursts to open. Each races the server's hand-off of new connections.
 const ROUNDS: usize = 40;
@@ -22,19 +22,13 @@ const BURST: usize = 8;
 /// Held connections closed before each burst, so a few server threads are
 /// idle when it arrives rather than none or many.
 const FREED: usize = 2;
+/// Leave room for both client and server descriptors under macOS's 256 cap.
+const HELD_MAX: usize = 48;
 /// Well under the 9 s stall, well over a loopback answer on a busy runner.
 const BOUND: Duration = Duration::from_secs(2);
 /// How long a stuck connection is given, once the held ones close, to show
 /// that it was queued rather than lost.
 const LATE_BOUND: Duration = Duration::from_secs(15);
-
-fn free_port() -> u16 {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 fn options(root: &Path) -> Options {
     let options = Options {
@@ -58,15 +52,19 @@ fn options(root: &Path) -> Options {
 fn start_viewer() -> u16 {
     let root = std::env::temp_dir().join(format!("semon-viewer-server-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
-    let port = free_port();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
     let sessions = options(&root);
     thread::spawn(move || {
-        serve(ServeOptions {
-            sessions,
-            machines: Vec::new(),
-            received: None,
-            listen: format!("127.0.0.1:{port}"),
-        })
+        serve_listener(
+            ServeOptions {
+                sessions,
+                machines: Vec::new(),
+                received: None,
+                listen: format!("127.0.0.1:{port}"),
+            },
+            listener,
+        )
         .unwrap();
     });
     let started = Instant::now();
@@ -153,6 +151,9 @@ fn every_connection_of_a_burst_is_answered_while_others_are_held() {
         let stuck = answers.iter().filter(|(_, answer)| answer.is_err()).count();
         if stuck == 0 {
             held.extend(answers.into_iter().map(|(stream, _)| stream));
+            for stream in held.drain(..held.len().saturating_sub(HELD_MAX)) {
+                close(stream);
+            }
             continue;
         }
         // Closing every other connection frees the server's threads. An
@@ -185,4 +186,9 @@ fn every_connection_of_a_burst_is_answered_while_others_are_held() {
             "round {round}: {stuck} of {BURST} connections unanswered while {open} others were open: {late:?}"
         );
     }
+    for stream in held {
+        close(stream);
+    }
+    let root = std::env::temp_dir().join(format!("semon-viewer-server-{}", std::process::id()));
+    fs::remove_dir_all(root).unwrap();
 }

@@ -2,7 +2,7 @@
 <title>Semon</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
 :root {
   --ground: #ffffff; --side: #f7f7f5; --sunken: #f0f1ee; --bubble: #eeefeb;
@@ -11,7 +11,6 @@
   --work: #1f78c1; --wait: #b9740b; --wait-soft: #faf0da; --err: #c23b3b; --done: #8b928e;
   --diff-add: #e3f3e8; --diff-del: #fbe8e6;
   --sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --serif: "Source Serif 4", "Iowan Old Style", Georgia, serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   color-scheme: light;
 }
@@ -204,7 +203,7 @@ code { overflow-wrap: anywhere; }
 .ib > svg { width: 18px; height: 18px; margin-top: 1px; color: var(--wait); }
 .ib .ln { min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
 .ib .tm { font-family: var(--mono); font-size: 12px; color: var(--faint); padding-top: 1px; }
-.ib .q { grid-column: 2 / 4; font-family: var(--serif); font-size: 16px; line-height: 1.45; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.ib .q { grid-column: 2 / 4; font-family: var(--sans); font-size: 16px; line-height: 1.45; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .ib .ctx { grid-column: 2 / 4; font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: center; }
 .ib { cursor: pointer; }
 /* Where the work came from: the message of yours at the root of its trace, one line. */
@@ -251,7 +250,7 @@ code { overflow-wrap: anywhere; }
 .hop .body { min-width: 0; padding-top: 3px; display: grid; gap: 4px; }
 .hop .sent { font-size: 14px; overflow-wrap: anywhere; }
 .hop .sent .tm { font-family: var(--mono); font-size: 12px; color: var(--faint); margin-left: 6px; }
-.hop .brief { font-family: var(--serif); font-size: 15.5px; line-height: 1.45; color: var(--ink-2); max-height: 5.8em; overflow: hidden; }
+.hop .brief { font-family: var(--sans); font-size: 15.5px; line-height: 1.45; color: var(--ink-2); max-height: 5.8em; overflow: hidden; }
 .hop .more { justify-self: start; min-height: 36px; margin: -8px 0; border: 0; background: none; padding: 0; color: var(--accent); font-size: 13px; }
 .hop .result { font-size: 13.5px; color: var(--ink-2); }
 .hop .result .rl { color: var(--muted); margin-right: 4px; }
@@ -262,6 +261,86 @@ code { overflow-wrap: anywhere; }
 .hop.k-root .node { color: var(--h); background: color-mix(in srgb, var(--h) 16%, var(--ground)); }
 /* A handoff whose receiving turn is not in these logs: a hollow node, nothing below it. */
 .hop.stub .node { background: var(--ground); border: 1.5px dashed var(--faint); }
+
+/* A turn's agents share one time axis; the transcript rail below remains its own view. */
+.agents-panel { min-width: 0; margin: 3px 0 2px; }
+.agents-title { margin: 0 0 3px; font-size: 15px; line-height: 1.35; font-weight: 600; }
+.agents-summary { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 2px 10px; margin-bottom: 8px; color: var(--muted); font-size: 12px; }
+.agents-summary span { white-space: nowrap; }
+.agents-axis, .agent-row { display: grid; grid-template-columns: minmax(0, 1fr) 56px; min-width: 0; }
+.agents-axis { align-items: end; }
+.agent-axis-track { position: relative; min-width: 0; height: 34px; }
+.agent-axis-time { position: absolute; top: 0; color: var(--muted); font: 10.5px/1.2 var(--mono); white-space: nowrap; }
+.agent-axis-time.start { left: 0; }
+.agent-axis-time.end { right: 0; }
+.agent-axis-tick { position: absolute; top: 14px; bottom: 0; width: 1px; background: var(--line); }
+.agent-axis-tick span { position: absolute; bottom: 0; left: 3px; color: var(--faint); font: 9.5px/1.2 var(--mono); white-space: nowrap; }
+.agent-axis-tick.near-end span { left: auto; right: 3px; }
+.agents-legend { display: flex; align-items: center; gap: 6px; min-height: 22px; margin: 0 0 2px; color: var(--muted); font-size: 11.5px; }
+.agents-legend-swatch { width: 13px; height: 4px; border-radius: 2px; background: var(--accent); flex: none; }
+.agents-chart { position: relative; min-width: 0; }
+.agent-row { position: relative; align-items: center; width: 100%; min-width: 0; height: 36px; padding: 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: none; color: var(--ink); text-align: left; }
+.agent-row[data-depth="1"], .agent-row[data-depth="2"], .agent-row[data-depth="3"] { height: 32px; }
+.agent-label { display: flex; flex-direction: column; justify-content: center; min-width: 0; height: 100%; overflow: hidden; }
+.agent-identity { display: flex; align-items: center; gap: 6px; min-width: 0; height: 16px; }
+.agent-indent { width: 0; height: 1px; flex: none; }
+.agent-harness-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--h); }
+.agent-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 500; }
+.agent-relay-icon { width: 12px; height: 12px; flex: none; color: var(--muted); }
+.agent-meta { display: flex; align-items: center; gap: 6px; min-width: 0; height: 13px; padding-left: 13px; overflow: hidden; color: var(--muted); font-size: 10.5px; line-height: 1; }
+.agent-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-status.stat { gap: 3px; font-size: 10px; line-height: 1; }
+.agent-status .dot { width: 6px; height: 6px; }
+.agent-duration, .agent-cost { min-width: 0; color: var(--muted); font: 10.5px var(--mono); white-space: nowrap; }
+.agent-duration { text-align: center; }
+.agent-cost { padding-right: 4px; text-align: right; }
+.agent-track { position: relative; align-self: stretch; min-width: 0; height: 100%; overflow: hidden; }
+.agent-gridline { position: absolute; z-index: 0; top: 0; bottom: 0; width: 1px; background: var(--line); opacity: .75; }
+.agent-segment { position: absolute; z-index: 1; top: 50%; min-width: 1px; transform: translateY(-50%); border-radius: 2px; }
+.agent-segment.busy { height: 8px; background: var(--ink-2); }
+.agent-segment.idle { height: 2px; background: var(--ink-2); opacity: .72; }
+.agent-row[data-critical="true"] .agent-segment { background: var(--accent); opacity: 1; }
+.agent-spawn-tick { display: none; position: absolute; z-index: 2; top: 50%; width: 1px; height: 8px; background: var(--muted); transform: translateY(-50%); }
+.agent-edges { position: absolute; z-index: 3; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.agent-edge { fill: none; stroke: var(--muted); stroke-width: 1; opacity: .72; vector-effect: non-scaling-stroke; }
+.agent-edge-arrow { fill: var(--muted); opacity: .82; }
+.agent-edge.hot, .agent-edge-arrow.hot { stroke: var(--accent); fill: var(--accent); opacity: 1; }
+.agent-more { color: var(--accent); font-size: 11.5px; }
+.agent-more .agent-name { color: var(--accent); }
+.agent-relayed-heading { display: flex; align-items: end; min-height: 23px; padding: 3px 0 3px; color: var(--muted); font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase; }
+.agents-panel [hidden] { display: none !important; }
+@media (hover: hover) {
+  .agent-row:hover { background: color-mix(in srgb, var(--sunken) 62%, transparent); }
+  .agent-row:hover .agent-segment { filter: brightness(1.2); }
+}
+@media (min-width: 720px) {
+  .agents-axis, .agent-row { grid-template-columns: 240px 56px 64px minmax(0, 1fr); }
+  .agents-axis { align-items: end; }
+  .agents-axis > :first-child, .agents-axis > :nth-child(2), .agents-axis > :nth-child(3) { min-width: 0; }
+  .agent-axis-track { grid-column: 4; }
+  .agent-row { gap: 0; }
+  .agent-row .agent-label { grid-column: 1; grid-row: 1; }
+  .agent-row .agent-duration { grid-column: 2; grid-row: 1; }
+  .agent-row .agent-cost { grid-column: 3; grid-row: 1; }
+  .agent-row .agent-track { grid-column: 4; grid-row: 1; }
+  .agent-row[data-depth="1"] .agent-identity, .agent-row[data-depth="2"] .agent-identity, .agent-row[data-depth="3"] .agent-identity { height: 14px; }
+  .agent-row[data-depth="1"] .agent-meta, .agent-row[data-depth="2"] .agent-meta, .agent-row[data-depth="3"] .agent-meta { height: 12px; }
+}
+@media (max-width: 719px) {
+  .agents-axis { grid-template-columns: minmax(0, 1fr) 56px; }
+  .agent-row { grid-template-columns: minmax(0, 1fr) 56px; grid-template-rows: 20px 19px; height: 41px; }
+  .agent-row[data-depth="1"], .agent-row[data-depth="2"], .agent-row[data-depth="3"] { height: 41px; }
+  .agent-row .agent-label { grid-column: 1; grid-row: 1; flex-direction: row; align-items: center; overflow: hidden; }
+  .agent-row .agent-identity { flex: 1 1 auto; min-width: 0; height: 20px; gap: 5px; }
+  .agent-row .agent-name { font-size: 12px; }
+  .agent-row .agent-meta { flex: none; gap: 4px; height: 20px; max-width: 112px; padding-left: 5px; font-size: 9.5px; }
+  .agent-row .agent-status.stat { gap: 0; }
+  .agent-row .agent-duration { grid-column: 2; grid-row: 2; align-self: center; font-size: 11px; text-align: right; }
+  .agent-row .agent-cost { grid-column: 2; grid-row: 1; align-self: center; font-size: 10px; }
+  .agent-row .agent-track { grid-column: 1; grid-row: 2; align-self: stretch; }
+  .agent-spawn-tick { display: block; }
+  .agent-edges { display: none; }
+}
 
 /* ---- Session page ----------------------------------------------------------------- */
 /* An opaque bar: content scrolls under it without showing through. */
@@ -343,7 +422,7 @@ code { overflow-wrap: anywhere; }
 .msg.user .body { font-size: 15px; line-height: 1.45; }
 .msg.user .body code { background: color-mix(in srgb, var(--ink) 7%, transparent); }
 .msg.assistant { max-width: 68ch; }
-.msg.assistant .body { font-family: var(--serif); font-size: 16px; color: var(--ink); }
+.msg.assistant .body { font-family: var(--sans); font-size: 16px; color: var(--ink); }
 .thought { display: grid; gap: 3px; max-width: 68ch; padding-left: 12px; border-left: 1px solid var(--line-2); color: var(--muted); font-family: var(--sans); }
 .thought.masked { padding-block: 0; }
 .think-label { font-size: 12px; font-weight: 600; letter-spacing: .04em; line-height: 1.4; color: var(--muted); }
@@ -481,6 +560,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .hcard.child-card .ln { font-size: 14px; font-weight: 600; }
 .hcard.child-card .ln { color: var(--ink); }
 .hcard.child-card .brief { max-height: 5.8em; }
+.hcard.child-card.open .brief { max-height: none; }
 .child-kind { display: inline-flex; align-items: center; gap: 5px; width: fit-content; max-width: 100%; color: var(--h); font-size: 12px; }
 .child-kind svg { width: 15px; height: 15px; flex: none; color: var(--h); }
 .child-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 12px; }
@@ -495,7 +575,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
 .child-intro .intro-title { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--ink-2); font-weight: 600; }
 .child-intro .intro-title button, .child-return button { min-height: 36px; min-width: 0; border: 0; background: none; padding: 4px 0; color: var(--accent); font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .child-intro .intro-title .tm { margin-left: auto; flex: none; color: var(--faint); font: 11.5px var(--mono); }
-.child-intro .brief { max-height: 5.8em; margin-top: 3px; overflow: hidden; color: var(--ink-2); font: 15px/1.45 var(--serif); }
+.child-intro .brief { max-height: 5.8em; margin-top: 3px; overflow: hidden; color: var(--ink-2); font: 15px/1.45 var(--sans); }
 .child-intro .brief.open { max-height: none; }
 .child-intro .more { min-height: 36px; border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: 13px; }
 .child-intro .intro-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0 16px; }
@@ -694,7 +774,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .sidebar-head .brandrow { flex: none; }
   .rail-toggle { display: none; }
   /* The bottom padding is the jump button's offset, height and a 16px gap, so the last content scrolls clear of it. */
-  .page { padding: 2px 16px calc(72px + env(safe-area-inset-bottom, 0px)); gap: 16px; }
+  .page { padding: 2px 16px calc(76px + env(safe-area-inset-bottom, 0px)); gap: 16px; }
   .msg.user { max-width: 88%; }
   .step > button, .step.live { min-height: 36px; }
   .menu, .filters.pop { right: 10px; }
@@ -711,6 +791,49 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
   .tree-all { min-height: 44px; margin-inline: 4px; }
   .srow { min-height: 44px; }
   .jump-bottom { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+}
+/* Tap targets (#54): every control is at least 44×44 CSS px on a phone. A text-link button that sat in a tighter layout keeps that
+   layout: the height it gains is taken back with a negative margin or a ::before reach, so only its hit area grows. A control that
+   overlaps a neighbour paints above it (position: relative; z-index: 1), or the neighbour's box would take the bottom of its
+   target. Rows that stack (the steps of a turn) share their edge and keep their pitch. A wider screen keeps its own sizes: a
+   tablet or a laptop with a touch screen has room the controls were drawn for. tests/ui/checks/taps.mjs measures every
+   interactive element on the phone screens, and hit-tests the midpoint of each edge of its target. */
+@media (max-width: 760px) {
+  .jump-bottom { min-width: 44px; height: 44px; border-radius: 22px; }
+  /* 16px offset + the 44px button + 12px */
+  .jump-bottom:not([hidden]) ~ .livenote { bottom: calc(72px + env(safe-area-inset-bottom, 0px)); }
+  .nav-item { min-height: 44px; }
+  .brandrow .ibtn { width: 44px; height: 44px; }
+  .page .groupby button { min-height: 44px; }
+  .topbar .l1 .crumb { min-width: 44px; padding: 12px 0; margin: -12px 0; }
+  .topbar .l2.session-meta .errs { min-height: 44px; min-width: 44px; }
+  .cost-info { position: relative; }
+  .cost-info::before { content: ""; position: absolute; inset: -13px; }
+  .analytics-metric .label > span.cost-info { overflow: visible; } /* the label's spans clip: the reach would be cut to the glyph */
+  .tracebtn { min-height: 44px; min-width: 44px; }
+  .turn-end { min-height: 44px; margin-bottom: -14px; }
+  .ib .ctx .tracebtn { margin: -12px -10px -12px auto; }
+  .turn-h { min-height: 44px; margin-bottom: -12px; }
+  .turn-h .from { min-height: 44px; min-width: 44px; }
+  .hop button.open { min-height: 44px; min-width: 44px; margin: -4px 0; }
+  .hop .more { position: relative; z-index: 1; min-height: 44px; min-width: 44px; margin: -12px 0; }
+  .hcard:not(.child-card) .more { position: relative; z-index: 1; display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 0; margin: -12px 0 -10px; }
+  .list .more { display: flex; align-items: center; min-height: 44px; padding: 0; }
+  /* A step's row is 36px: its target reaches 44px past its box, whatever its height (a % here is the row's own height). */
+  .step > button, .tsum { position: relative; }
+  .step > button::before, .tsum::before { content: ""; position: absolute; inset: min(0px, calc((100% - 44px) / 2)) 0; }
+  /* 4px of padding keeps the 44px buttons off the divider and the card's edge. */
+  .step .out .step-actions { min-height: 0; padding-block: 4px; }
+  .step .out .step-actions > button { min-height: 44px; min-width: 44px; }
+  .child-actions button, .child-intro .intro-title button, .session-foot button, .child-return button, .child-work .cw-toggle, .child-work .show-all, .child-intro .more, .hcard.child-card .more, .child-intro .intro-open { min-width: 44px; min-height: 44px; }
+  /* The list-order chips are 24 or 28px: their reach makes up the rest, sideways too when the chip is down to its count. */
+  .order-chip::before { inset: min(0px, calc((100% - 44px) / 2)); }
+  /* In the drawer the chip hangs from the header's right edge, which clips: its reach goes left. */
+  .side-h .order-chip::before { inset: min(0px, calc((100% - 44px) / 2)) 0 min(0px, calc((100% - 44px) / 2)) min(0px, calc(100% - 44px)); }
+}
+@media (max-width: 760px) {
+  .side-search, .find { height: 44px; min-height: 44px; }
+  .side-search input, .find input { height: calc(44px / .9375); }
 }
 </style>
 
@@ -764,6 +887,13 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     "q-plan":  { busy: [[T(10, 40), T(11, 15)]], name: "Draft the migration plan", repo: "quill", kind: "Subagent", harness: "claude", machine: "studio", model: "opus-5.5", state: "done", start: T(10, 40), last: T(11, 15), tokens: [0.12, 5.3, 0.03] },
     "q-codex": { busy: [[T(11, 20), T(12, 5)]], name: "feat/pdf-export", repo: "quill", branch: "feat/pdf-export", kind: "Codex run", harness: "codex", machine: "studio", model: "gpt-6-luna", state: "err", start: T(11, 20), last: T(12, 5), tokens: [0.7, 9.8, 0.05] },
     atlas:     { busy: [[T(10, 30), T(11, 2)], [T(11, 7), T(11, 8)]], name: "atlas", repo: "atlas", branch: "infra/staging-net", lane: true, harness: "claude", machine: "laptop", movedFrom: "buildbox", model: "opus-5.5", state: "wait", start: T(10, 30), last: T(11, 8), tokens: [0.18, 12.6, 0.07] },
+    "atlas-ingest": { busy: [[T(11, 10), T(11, 24)], [T(12, 5), T(12, 8)], [T(12, 18), T(12, 31)]], name: "atlas · ingest", repo: "atlas", lane: true, harness: "claude", machine: "laptop", model: "opus-5.5", state: "idle", start: T(11, 10), last: T(12, 31), tokens: [0.45, 0.18, 0.12] },
+    "a-scan":  { busy: [[T(11, 12), T(11, 17)]], name: "Survey ingest call sites", repo: "atlas", kind: "Subagent", harness: "claude", machine: "laptop", model: "sonnet-5", state: "done", start: T(11, 12), last: T(11, 20), tokens: [0.36, 0.12, 0.05] },
+    "a-parse": { busy: [[T(11, 22), T(11, 46)], [T(11, 50), T(12, 5)]], name: "feat/ingest-parser", repo: "atlas", branch: "feat/ingest-parser", kind: "Codex run", harness: "codex", machine: "laptop", model: "gpt-6-luna", state: "done", start: T(11, 22), last: T(12, 5), tokens: [18, 6, 4] },
+    "a-store": { busy: [[T(11, 22), T(11, 36)], [T(11, 40), T(11, 48)]], name: "feat/ingest-store", repo: "atlas", branch: "feat/ingest-store", kind: "Codex run", harness: "codex", machine: "laptop", model: "gpt-6-luna", state: "done", start: T(11, 22), last: T(11, 48), tokens: [12, 4, 2] },
+    "a-index": { busy: [[T(11, 23), T(11, 50)], [T(11, 56), T(12, 18)]], name: "feat/ingest-index", repo: "atlas", branch: "feat/ingest-index", kind: "Codex run", harness: "codex", machine: "laptop", model: "gpt-6-luna", state: "err", start: T(11, 23), last: T(12, 18), tokens: [21, 8, 5] },
+    "a-review": { busy: [[T(12, 6), T(12, 13)], [T(12, 17), T(12, 26)]], name: "Review the parser diff", repo: "atlas", kind: "Subagent", harness: "claude", machine: "laptop", model: "opus-5.5", state: "done", start: T(12, 6), last: T(12, 26), tokens: [0.62, 0.24, 0.19] },
+    "a-review-grep": { busy: [[T(12, 10), T(12, 13)]], name: "Find parse_frame callers", repo: "atlas", kind: "Subagent", harness: "claude", machine: "laptop", model: "haiku-4.5", state: "done", start: T(12, 10), last: T(12, 14), tokens: [0.08, 0.03, 0.02] },
     deps:      { busy: [[T(12, 20), NOW]], name: "deps audit", repo: "meridian", branch: "chore/deps-audit", lane: true, harness: "codex", machine: "laptop", model: "gpt-6-luna", state: "work", start: T(12, 20), last: NOW, tokens: [0.3, 2.2, 0.02], activity: ["shell", "cargo audit --json", 11], rate_limits: { recorded_at: "2026-09-28T12:38:00+08:00", five_hour: { used_percent: 64, resets_at: "2026-09-28T16:30:00+08:00" }, weekly: { used_percent: 37, resets_at: "2026-10-02T09:00:00+08:00" } } },
     ledger:    { busy: [[T(7, 10), T(7, 23)], [T(7, 31), T(8, 2)]], name: "ledger", repo: "ledger", branch: "fix/rounding", lane: true, harness: "claude", machine: "laptop", model: "opus-5.5", state: "idle", start: T(7, 10), last: T(8, 2), tokens: [0.06, 3.9, 0.03] },
     "l-sub":   { busy: [[T(7, 22), T(7, 31)]], name: "Find rounding call sites", repo: "ledger", kind: "Subagent", harness: "claude", machine: "laptop", model: "haiku-4.5", state: "done", start: T(7, 22), last: T(7, 31), tokens: [0.02, 0.6, 0.01] },
@@ -813,6 +943,15 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     { id: "h16", t: "t6", kind: "ask", from: "you", to: "ledger", at: T(7, 10), status: "done", brief: "Invoice totals are off by a cent in some currencies. Find where we round." },
     { id: "h17", t: "t6", kind: "spawn", from: "ledger", to: "l-sub", at: T(7, 22), status: "done", done: T(7, 31), brief: "List every place that rounds money, and whether it rounds before or after summing.", result: "4 call sites; only `money.rs:31` rounds before summing." },
     { id: "h18", t: "t6", kind: "toyou", ask: "result", from: "ledger", to: "you", at: T(8, 2), status: "done", brief: "Rounding now happens once, after summing. 42 tests pass. Committed on `fix/rounding`." },
+    { id: "a-ask", t: "a-ask", kind: "ask", from: "you", to: "atlas-ingest", at: T(11, 10), status: "done", brief: "Split the ingest rewrite: survey first, then parser and storage in parallel, then review." },
+    { id: "a-h-scan", t: "a-ask", kind: "spawn", from: "atlas-ingest", to: "a-scan", at: T(11, 12), done: T(11, 20), status: "done", brief: "Survey the ingest call sites.", result: "Found the parser entry points in `ingest.rs` and two callers that need the new frame shape." },
+    { id: "a-h-parse", t: "a-ask", kind: "spawn", from: "atlas-ingest", to: "a-parse", at: T(11, 22), done: T(12, 5), status: "done", brief: "Implement the ingest parser on `feat/ingest-parser` using the survey's call-site map.", result: "Parser changes are ready on `feat/ingest-parser`; the focused parse cases pass." },
+    { id: "a-h-store", t: "a-ask", kind: "spawn", from: "atlas-ingest", to: "a-store", at: T(11, 22), done: T(11, 48), status: "done", brief: "Implement ingest storage on `feat/ingest-store` in parallel with the parser work.", result: "Storage changes are ready on `feat/ingest-store`; round-trip coverage is in place." },
+    { id: "a-h-index", t: "a-ask", kind: "spawn", from: "atlas-ingest", to: "a-index", at: T(11, 23), done: T(12, 18), status: "err", brief: "Rebuild the ingest index on `feat/ingest-index` and check the index behavior.", result: "CI fails on `index_rebuild`." },
+    { id: "a-h-review", t: "a-ask", kind: "spawn", from: "atlas-ingest", to: "a-review", at: T(12, 6), done: T(12, 26), status: "done", brief: "Review the parser diff.", result: "The parser diff is sound; the review found no blocking issue." },
+    { id: "a-h-grep", t: "a-review", kind: "spawn", from: "a-review", to: "a-review-grep", at: T(12, 10), done: T(12, 14), status: "done", brief: "Find every caller of `parse_frame`.", result: "Found four callers; all are covered by the parser change or its tests." },
+    { id: "a-relay", t: "a-ask", kind: "relay", from: "atlas-ingest", to: "harbor", at: T(12, 20), done: T(12, 20), status: "done", brief: "The ingest parser lands today; rebase feat/offline-sync after it." },
+    { id: "a-result", t: "a-ask", kind: "toyou", ask: "result", from: "atlas-ingest", to: "you", at: T(12, 30), status: "done", brief: "The ingest parser and storage work are ready. Review is clear; the index run needs a CI fix.", result: "The parser review is clear. The ingest parser lands today; rebase `feat/offline-sync` after it." },
   ];
   // Topic titles from an earlier design. Unused: topics aren't recorded in the logs, so nothing groups by them.
   const THREADS = {
@@ -830,7 +969,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       {k:"tool",name:"Bash",arg:"cargo test -p harbor-sync",ok:true,secs:"41.6s",out:"test result: ok. 128 passed; 0 failed"},
       {k:"h",id:"h2"}, {k:"h",id:"h3"}, {k:"h",id:"h20"},
       {k:"a",text:"The backoff overflow is fixed: **128 passed**. Codex is implementing the offline flush, and a reviewer subagent checks its diff as it lands. I'll rerun the suite once both finish."},
-      {k:"tool",name:"Bash",arg:"cargo test -p harbor-sync",live:true,secs:"42s"} ],
+      {k:"tool",name:"Bash",arg:"cargo test -p harbor-sync",live:true,secs:"42s"}, {k:"h",id:"a-relay"} ],
     "h-codex": [ {k:"h",id:"h2"}, {k:"harness",label:"recommended_plugins"}, {k:"think",started_at_ms:ST(11,52),completed_at_ms:ST(11,52,18),text:"Keep the flush oldest-first and stop at the first Nack."},
       {k:"tool",name:"apply_patch",arg:"crates/sync/src/flush.rs",ok:true,secs:"0.0s",diff:[["del","-pub fn flush(_queue: &mut Queue) -> Result<()> { todo!() }"],["add","+pub fn flush(queue: &mut Queue, client: &Client) -> Result<Flushed> {"],["add","+    while let Some(batch) = queue.oldest() { /* push; commit on Ack */ }"],["add","+}"]]},
       {k:"tool",name:"shell",arg:"cargo test -p harbor-sync flush",ok:false,secs:"19.4s",out:"test flush::stops_at_first_nack ... FAILED\nexpected Paused(2s), got Done"},
@@ -872,6 +1011,20 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       {k:"tool",name:"Bash",arg:"cargo test money",ok:true,secs:"6.8s",out:"test result: ok. 42 passed"},
       {k:"h",id:"h18"} ],
     "l-sub": [ {k:"h",id:"h17"}, {k:"tool",name:"Grep",arg:"\\.round\\(",ok:true,secs:"0.2s",out:"src/money.rs:31\nsrc/invoice.rs:77\nsrc/report.rs:12\nsrc/report.rs:40"}, {k:"a",text:"4 call sites. Only `src/money.rs:31` rounds **before** summing."}, {k:"end",text:"Returned to ledger · 07:31"} ],
+    "atlas-ingest": [ {k:"h",id:"a-ask"},
+      {k:"a",text:"Survey first; the parser and storage runs can work in parallel. I'll review the parser once it lands."},
+      {k:"tool",name:"Agent",arg:"Survey the ingest call sites",ok:true,secs:"8m"}, {k:"h",id:"a-h-scan"},
+      {k:"tool",name:"shell",arg:"codex run --branch feat/ingest-parser",ok:true,secs:"43m"}, {k:"h",id:"a-h-parse"},
+      {k:"tool",name:"shell",arg:"codex run --branch feat/ingest-store",ok:true,secs:"26m"}, {k:"h",id:"a-h-store"},
+      {k:"tool",name:"shell",arg:"codex run --branch feat/ingest-index",ok:false,secs:"55m"}, {k:"h",id:"a-h-index"},
+      {k:"tool",name:"Agent",arg:"Review the parser diff",ok:true,secs:"20m"}, {k:"h",id:"a-h-review"},
+      {k:"h",id:"a-relay"}, {k:"h",id:"a-result"} ],
+    "a-scan": [ {k:"h",id:"a-h-scan"}, {k:"tool",name:"Grep",arg:"ingest call sites",ok:true,secs:"1.4s",out:"ingest.rs:42 · decoder.rs:18 · stream.rs:77"}, {k:"a",text:"Mapped the ingest entry points and callers for the parser and storage work."} ],
+    "a-parse": [ {k:"h",id:"a-h-parse"}, {k:"tool",name:"shell",arg:"cargo test -p ingest parse",ok:true,secs:"28.1s",out:"test result: ok. 34 passed"}, {k:"a",text:"Parser is ready on `feat/ingest-parser`; the focused parse cases pass."} ],
+    "a-store": [ {k:"h",id:"a-h-store"}, {k:"tool",name:"shell",arg:"cargo test -p ingest storage",ok:true,secs:"19.7s",out:"test result: ok. 21 passed"}, {k:"a",text:"Storage is ready on `feat/ingest-store`; round-trip coverage is in place."} ],
+    "a-index": [ {k:"h",id:"a-h-index"}, {k:"tool",name:"shell",arg:"gh pr checks --watch",ok:false,secs:"4m 12s",out:"index_rebuild   fail"}, {k:"a",text:"CI fails on `index_rebuild`. The index run needs a follow-up fix."} ],
+    "a-review": [ {k:"h",id:"a-h-review"}, {k:"tool",name:"Agent",arg:"Find every caller of parse_frame",ok:true,secs:"4m"}, {k:"h",id:"a-h-grep"} ],
+    "a-review-grep": [ {k:"h",id:"a-h-grep"}, {k:"tool",name:"Grep",arg:"parse_frame",ok:true,secs:"0.3s",out:"src/ingest.rs · src/decoder.rs · tests/frames.rs · src/compat.rs"}, {k:"a",text:"Found four callers of `parse_frame`; the compatibility caller is covered by the parser update."} ],
   };
 
   // ====================================================================================
@@ -1549,6 +1702,171 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
     if (s && !s.stub) { const o = el("button", "open", "Open in " + s.name + " ›"); o.type = "button"; o.addEventListener("click", () => goSession(sid, turn?.id)); meta.append(o); }
     body.append(meta);
   }
+  // Walk only the turns connected by recorded spawns and relays; the relay rows remain peers in the view.
+  function traceAgentTree(root) {
+    const rootNode = { sid: root.sid, turn: root, handoff: null, kind: "root", depth: 0, children: [] };
+    const peers = [], handoffs = [], spawns = [], seenTurns = new Set(), seenSessions = new Set([root.sid]);
+    const walk = (node) => {
+      const turn = node.turn;
+      if (!turn || seenTurns.has(turn.id)) return;
+      seenTurns.add(turn.id);
+      const sent = [...(turn.sent ?? [])].sort((a, b) => a.at - b.at);
+      handoffs.push(...sent);
+      const children = [];
+      for (const h of sent) {
+        if (h.kind === "spawn") {
+          spawns.push(h);
+          const childTurn = STARTS.get(h.id);
+          if (!SESS[h.to] || seenSessions.has(h.to)) continue;
+          seenSessions.add(h.to);
+          const child = { sid: h.to, turn: childTurn ?? null, handoff: h, kind: "spawn", depth: node.depth + 1, children: [] };
+          node.children.push(child); children.push(child);
+        } else if (h.kind === "relay" && SESS[h.to] && !seenSessions.has(h.to)) {
+          const peerTurn = STARTS.get(h.id);
+          seenSessions.add(h.to);
+          const peer = { sid: h.to, turn: peerTurn ?? null, handoff: h, kind: "relay", depth: 0, children: [] };
+          peers.push(peer); children.push(peer);
+        }
+      }
+      for (const child of children) walk(child);
+    };
+    walk(rootNode);
+    return { rootNode, peers, handoffs, spawns };
+  }
+  // Walk back from the run end: choose the latest return with done <= t, recurse into that child at done, then resume this session at the spawn's at. This is exact only for spawn and return times the logs record.
+  function traceCriticalPath(root, runEnd) {
+    const marked = new Set(), visited = new Set();
+    const walk = (turn, t) => {
+      if (!turn) return;
+      const key = turn.id + "@" + t;
+      if (visited.has(key)) return;
+      visited.add(key);
+      const h = (turn.sent ?? []).filter((x) => x.kind === "spawn" && Number.isFinite(x.done) && x.done <= t)
+        .sort((a, b) => b.done - a.done || b.at - a.at)[0];
+      if (!h) return;
+      marked.add(h.id);
+      walk(STARTS.get(h.id), h.done);
+      walk(turn, h.at);
+    };
+    walk(root, runEnd);
+    return marked;
+  }
+  function renderAgents(root) {
+    const model = traceAgentTree(root), session = SESS[root.sid];
+    const start = Number.isFinite(root.start?.at) ? root.start.at : session.start;
+    const end = Math.max(session.last ?? start, ...model.handoffs.map((h) => h.done).filter(Number.isFinite));
+    const span = Math.max(1, end - start), critical = traceCriticalPath(root, end);
+    const pct = (m) => Math.max(0, Math.min(100, ((m - start) / span) * 100));
+    const steps = [5, 10, 15, 30, 60].map((step) => ({ step, count: Math.floor((span - 1) / step) })).filter((x) => x.count >= 3 && x.count <= 6)
+      .sort((a, b) => Math.abs(a.count - 5) - Math.abs(b.count - 5) || a.step - b.step);
+    const step = steps[0]?.step ?? [5, 10, 15, 30, 60].sort((a, b) => Math.abs(Math.floor((span - 1) / a) - 5) - Math.abs(Math.floor((span - 1) / b) - 5))[0];
+    const ticks = []; for (let offset = step; offset < span; offset += step) ticks.push(offset);
+    const rowCount = (node) => 1 + node.children.reduce((n, child) => n + rowCount(child), 0);
+    const allNodes = (node, into = []) => { into.push(node); for (const child of node.children) allNodes(child, into); return into; };
+    const totalRows = rowCount(model.rootNode) + model.peers.reduce((n, peer) => n + rowCount(peer), 0), foldRows = totalRows > 12;
+    const spawned = model.spawns.map((h) => ({ start: h.at, end: h.done ?? (SESS[h.to]?.state === "work" ? NOW : SESS[h.to]?.last ?? h.at) }));
+    const points = spawned.flatMap((x) => [{ at: x.start, change: 1 }, { at: x.end, change: -1 }]).sort((a, b) => a.at - b.at || a.change - b.change);
+    let active = 0, peak = 0; for (const p of points) { active += p.change; peak = Math.max(peak, active); }
+    const totalCost = costForSession(root.sid, true);
+    const panel = el("section", "agents-panel"); panel.setAttribute("aria-label", "Agents");
+    panel.append(el("h2", "agents-title", "Agents"));
+    const summary = el("div", "agents-summary");
+    for (const item of [allNodes(model.rootNode).length + " agents", dur(start, end), costText(totalCost), "up to " + peak + " at once"]) summary.append(el("span", null, item));
+    panel.append(summary);
+    const axis = el("div", "agents-axis");
+    const axisTrack = el("div", "agent-axis-track");
+    axisTrack.append(el("span", "agent-axis-time start", clock(start)), el("span", "agent-axis-time end", clock(end)));
+    for (const offset of ticks) {
+      const mark = el("span", "agent-axis-tick" + (offset / span > .86 ? " near-end" : "")); mark.style.left = pct(start + offset) + "%";
+      mark.append(el("span", null, "+" + offset + "m")); axisTrack.append(mark);
+    }
+    axis.append(axisTrack); panel.append(axis);
+    const legend = el("div", "agents-legend"); legend.append(el("span", "agents-legend-swatch"), el("span", null, "What the run's end waited on")); panel.append(legend);
+    const chart = el("div", "agents-chart"); panel.append(chart);
+    const expandedMore = new Set(); let chartResizeObserver = null;
+    const drawRows = () => {
+      chart.replaceChildren();
+      const rows = new Map(), edgeDefs = [];
+      const axisGridlines = (track) => { for (const offset of ticks) { const line = el("span", "agent-gridline"); line.style.left = pct(start + offset) + "%"; line.setAttribute("aria-hidden", "true"); track.append(line); } };
+      const addRow = (node, depth, parentSid = null) => {
+        const s = SESS[node.sid]; if (!s) return;
+        const handoff = node.handoff, from = node.kind === "root" ? start : handoff.at;
+        const to = node.kind === "root" ? end : s.state === "work" ? NOW : handoff.done ?? s.last ?? from;
+        const duration = dur(from, to), ownCost = costForSession(node.sid), rollup = node.kind === "relay" ? costForSessions(allNodes(node).map((x) => SESS[x.sid]).filter(Boolean)) : costForSession(node.sid, true);
+        const isCritical = node.kind === "root" || (handoff && critical.has(handoff.id));
+        const row = el("button", "agent-row"); row.type = "button"; row.dataset.agentId = node.sid; row.dataset.depth = String(Math.min(3, depth)); row.dataset.critical = String(isCritical);
+        const kind = s.kind ?? HARNESS[s.harness], status = STATE[s.state] ?? s.state;
+        row.setAttribute("aria-label", [s.name, kind, status, duration, costText(rollup)].join(", "));
+        const label = el("span", "agent-label"), identity = el("span", "agent-identity"), indent = el("span", "agent-indent"); indent.style.width = Math.min(3, depth) * 12 + "px";
+        const harnessDot = el("span", "agent-harness-dot " + hcls(node.sid)); harnessDot.setAttribute("aria-hidden", "true");
+        identity.append(indent, harnessDot);
+        if (node.kind === "relay") { const relayIcon = icon(I.relay, "agent-relay-icon"); relayIcon.setAttribute("aria-hidden", "true"); identity.append(relayIcon); }
+        identity.append(el("span", "agent-name", s.name));
+        const meta = el("span", "agent-meta"); meta.append(el("span", "agent-model", s.model ?? "Unknown model"));
+        const statusMark = el("span", "agent-status stat " + s.state); statusMark.title = status; statusMark.append(dot(s.state)); meta.append(statusMark);
+        label.append(identity, meta);
+        const durationCell = el("span", "agent-duration", duration), costCell = el("span", "agent-cost", rollup.usd == null ? "—" : shortMoney(rollup.usd));
+        costCell.title = "Own cost: " + costText(ownCost);
+        const track = el("span", "agent-track"); track.setAttribute("aria-hidden", "true"); axisGridlines(track);
+        const intervals = (s.busy ?? []).map(([a, b]) => [Math.max(from, a), Math.min(to, b)]).filter(([a, b]) => b > a).sort((a, b) => a[0] - b[0]);
+        let cursor = from;
+        const segment = (a, b, type) => { if (b <= a) return; const bar = el("span", "agent-segment " + type); bar.style.left = pct(a) + "%"; bar.style.width = Math.max(.2, pct(b) - pct(a)) + "%"; track.append(bar); };
+        for (const [a, b] of intervals) { if (a > cursor) segment(cursor, a, "idle"); segment(a, b, "busy"); cursor = Math.max(cursor, b); }
+        if (to > cursor) segment(cursor, to, "idle");
+        if (node.kind === "root") for (const child of node.children) { const tick = el("span", "agent-spawn-tick"); tick.style.left = pct(child.handoff.at) + "%"; tick.setAttribute("aria-hidden", "true"); track.append(tick); }
+        row.append(label, durationCell, costCell, track); row.addEventListener("click", () => goSession(node.sid, node.turn?.id));
+        const related = (on) => { for (const edge of chart.querySelectorAll(".agent-edge, .agent-edge-arrow")) if (edge.dataset.parent === node.sid || edge.dataset.child === node.sid) edge.classList.toggle("hot", on); };
+        row.addEventListener("pointerenter", () => related(true)); row.addEventListener("pointerleave", () => related(false));
+        row.addEventListener("focus", () => related(true)); row.addEventListener("blur", () => related(false));
+        chart.append(row); rows.set(node.sid, row);
+        if (parentSid) edgeDefs.push({ parentSid, childSid: node.sid, handoff, critical: critical.has(handoff.id) });
+        const fold = foldRows && node.children.length > 8 && !expandedMore.has(node.sid), visible = fold ? node.children.slice(0, 8) : node.children;
+        for (const child of visible) addRow(child, Math.min(3, depth + 1), node.sid);
+        if (fold) {
+          const hidden = node.children.slice(8), more = el("button", "agent-row agent-more"); more.type = "button"; more.dataset.depth = String(Math.min(3, depth + 1));
+          const moreLabel = el("span", "agent-label"), moreIdentity = el("span", "agent-identity"), moreIndent = el("span", "agent-indent"); moreIndent.style.width = Math.min(3, depth + 1) * 12 + "px";
+          moreIdentity.append(moreIndent, el("span", "agent-name", "+" + hidden.length + " more")); moreLabel.append(moreIdentity);
+          const hiddenIds = new Set(); for (const n of hidden) for (const x of allNodes(n)) hiddenIds.add(x.sid);
+          const hiddenCost = costForSessions([...hiddenIds].map((sid) => SESS[sid]).filter(Boolean));
+          const moreCost = el("span", "agent-cost", hiddenCost.usd == null ? "—" : shortMoney(hiddenCost.usd)); moreCost.title = "Hidden agents' rollup cost: " + costText(hiddenCost);
+          more.setAttribute("aria-label", "Show " + hidden.length + " more agents under " + s.name);
+          more.append(moreLabel, el("span", "agent-duration"), moreCost, el("span", "agent-track"));
+          more.addEventListener("click", () => { expandedMore.add(node.sid); drawRows(); }); chart.append(more);
+        }
+      };
+      addRow(model.rootNode, 0);
+      if (model.peers.length) {
+        const heading = el("div", "agent-relayed-heading", "Relayed to"); chart.append(heading);
+        for (const peer of model.peers) addRow(peer, 0);
+      }
+      const edges = svgEl("svg", { class: "agent-edges", "aria-hidden": "true", preserveAspectRatio: "none" }); chart.append(edges);
+      const drawEdges = () => {
+        if (!chart.isConnected || !edges.isConnected) return;
+        const rect = chart.getBoundingClientRect(), width = rect.width, height = rect.height;
+        edges.setAttribute("viewBox", "0 0 " + width + " " + height); edges.replaceChildren();
+        if (!window.matchMedia("(min-width: 720px)").matches || !width || !height) return;
+        for (const edge of edgeDefs) {
+          const parent = rows.get(edge.parentSid), child = rows.get(edge.childSid); if (!parent || !child) continue;
+          const parentTrack = parent.querySelector(".agent-track"), childTrack = child.querySelector(".agent-track");
+          const pr = parent.getBoundingClientRect(), cr = child.getBoundingClientRect(), ptr = parentTrack.getBoundingClientRect(), ctr = childTrack.getBoundingClientRect();
+          const yParent = pr.top - rect.top + pr.height / 2, yChild = cr.top - rect.top + cr.height / 2;
+          const xAt = ptr.left - rect.left + ptr.width * pct(edge.handoff.at) / 100;
+          const endAt = edge.handoff.done ?? (SESS[edge.childSid].state === "work" ? NOW : SESS[edge.childSid].last);
+          const xDone = ctr.left - rect.left + ctr.width * pct(endAt) / 100;
+          const klass = "agent-edge" + (edge.critical ? " critical" : "");
+          const related = { "data-parent": edge.parentSid, "data-child": edge.childSid };
+          edges.append(svgEl("path", { ...related, class: klass, d: "M " + xAt + " " + yParent + " V " + yChild }));
+          edges.append(svgEl("path", { ...related, class: klass, d: "M " + xAt + " " + (yParent - 4) + " V " + (yParent + 4) }));
+          edges.append(svgEl("path", { ...related, class: klass, d: "M " + xDone + " " + yChild + " V " + (yParent + 4) }));
+          edges.append(svgEl("path", { ...related, class: "agent-edge-arrow" + (edge.critical ? " critical" : ""), d: "M " + (xDone - 3) + " " + (yParent + 4) + " L " + xDone + " " + yParent + " L " + (xDone + 3) + " " + (yParent + 4) }));
+        }
+      };
+      requestAnimationFrame(drawEdges);
+      if (typeof ResizeObserver !== "undefined") { chartResizeObserver?.disconnect(); chartResizeObserver = new ResizeObserver(drawEdges); chartResizeObserver.observe(chart); }
+    };
+    drawRows();
+    return panel;
+  }
   function renderTrace(page, id) {
     const root = TURN.get(id);
     const head = el("div", "ph sr"); const h1 = el("h1", null, "Trace"); head.append(h1); page.append(head); observeTitle(h1);
@@ -1575,7 +1893,7 @@ dialog.session-details::backdrop { background: color-mix(in srgb, var(--ink) 45%
       }
     };
     walk(root);
-    page.append(flow);
+    page.append(renderAgents(root), flow);
     // The bar's summary line.
     return [sess.size + (sess.size === 1 ? " session" : " sessions"), n + (n === 1 ? " handoff" : " handoffs"), [...new Set([...sess].map((x) => MACHINE[SESS[x]?.machine]).filter(Boolean))].join(", ")].join(" · ");
   }

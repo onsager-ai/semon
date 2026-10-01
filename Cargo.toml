@@ -29,11 +29,14 @@ libc = "0.2.189"
 # Held at 0.39: its libsqlite3-sys ^0.37 must fit the embedding server's sqlx 0.9 (<0.38); both link sqlite3.
 rusqlite = { version = "0.39.0", default-features = false, features = ["bundled"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
-serde_json = { version = "1.0.150", features = ["preserve_order"] }
+serde_json = { version = "1.0.150", features = ["preserve_order", "raw_value"] }
 serde_json_canonicalizer = "0.3.2"
 sha2 = "0.10.9"
 thiserror = "2"
 tiny_http = { version = "=0.12.0", features = ["ssl-rustls"] }
+# Seekable zstd segments for sealed logs (the reference C library, built by
+# zstd-sys). Default features off: no legacy formats, no dictionary builder.
+zstd = { version = "0.13.3", default-features = false }
 
 # tiny_http 0.12.0 with one fix to its connection pool; see
 # vendor/tiny_http/SEMON-PATCH.md.

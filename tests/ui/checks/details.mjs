@@ -71,7 +71,8 @@ export default async function detailsCheck(browser) {
         if (order !== "menu after the update") { await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu[open]"); }
         let polled = 0;
         // Every poll now gets the model as it would be a moment later: 400k more cache reads, in the summary and in the table.
-        await page.route(/\/api\/model\?since=/, async (route) => {
+        await page.route("**/api/model**", async (route) => {
+          if (!new URL(route.request().url()).searchParams.has("since")) return route.fallback();
           const url = new URL(route.request().url()), headers = { ...route.request().headers() }; url.search = ""; delete headers["if-none-match"];
           const res = await route.fetch({ url: url.toString(), headers }), m = await res.json(), s = m.sessions[claude.id];
           s.tokens = [s.tokens[0], Math.round((s.tokens[1] + more / 1e6) * 1000) / 1000, s.tokens[2]];

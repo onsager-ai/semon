@@ -246,3 +246,112 @@ fn literal_match_in_another_file_beats_cwd_and_only_launch_tools_are_candidates(
     );
     assert_eq!(cache.parent(&literal).unwrap().calls.len(), 1);
 }
+
+#[test]
+fn prompt_names_override_ambiguous_worktrees_and_generic_cwds_do_not_link() {
+    let home = Home::new();
+    let path = home.file(
+        "parent",
+        &(call(
+            "one",
+            "P=$S/codex-one-prompt.md; codex -C /work/repo exec - < $P",
+        ) + &call(
+            "two",
+            "P=$S/codex-two-prompt.md; codex -C /work/repo exec - < $P",
+        )),
+    );
+    let mut cache = ScanCache::default();
+    let start = events::parse_ms("2026-09-24T00:00:01Z").unwrap();
+    assert_eq!(
+        cache
+            .find(
+                std::slice::from_ref(&path),
+                "/tmp/codex-one-prompt.md",
+                Some("/work/repo"),
+                Some(start)
+            )
+            .unwrap()
+            .id,
+        "one"
+    );
+    assert!(
+        cache
+            .find(
+                std::slice::from_ref(&path),
+                "/tmp/absent.md",
+                Some("/work/repo"),
+                Some(start)
+            )
+            .is_none()
+    );
+    assert!(
+        cache
+            .find(
+                std::slice::from_ref(&path),
+                "/tmp/absent.md",
+                Some("/work"),
+                Some(start)
+            )
+            .is_none()
+    );
+    assert!(
+        cache
+            .find(
+                &[path],
+                "/tmp/one-prompt.md",
+                Some("/work/repo"),
+                Some(start)
+            )
+            .is_none()
+    );
+}
+
+#[test]
+fn final_complete_record_without_newline_and_literal_codex_wrapper_are_read() {
+    let home = Home::new();
+    let record = call("wrapper", "codex -C /work/repo -m model exec - < /tmp/p.md");
+    let path = home.file("parent", record.trim_end());
+    let mut cache = ScanCache::default();
+    assert_eq!(
+        cache.find(&[path], "/tmp/p.md", None, None).unwrap().id,
+        "wrapper"
+    );
+}
+
+#[test]
+fn retained_call_inputs_have_a_byte_budget() {
+    let home = Home::new();
+    let command = format!("codex {}", "x".repeat(MAX_INPUT_BYTES / 2));
+    let path = home.file(
+        "parent",
+        &(call("one", &command) + &call("two", &command) + &call("three", &command)),
+    );
+    let mut cache = ScanCache::default();
+    let parent = cache.parent(&path).unwrap();
+    assert!(parent.input_bytes <= MAX_INPUT_BYTES);
+    assert_eq!(parent.calls.len(), 1);
+    assert_eq!(parent.calls.front().unwrap().tool.id, "three");
+}
+
+#[test]
+fn oversized_unfinished_records_are_bounded_and_skip_to_next_record() {
+    let home = Home::new();
+    let path = home.file("parent", &"codex".repeat(MAX_INPUT_BYTES / 5 + 100));
+    let mut cache = ScanCache::default();
+    let parent = cache.parent(&path).unwrap();
+    assert!(parent.discarding);
+    assert!(parent.partial.len() <= MAX_INPUT_BYTES);
+    assert!(parent.partial.capacity() <= MAX_INPUT_BYTES + 1);
+    assert!(parent.calls.is_empty());
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(format!("\n{}", call("good", "codex exec -C /work/project")).as_bytes())
+        .unwrap();
+    let parent = cache.parent(&path).unwrap();
+    assert!(!parent.discarding);
+    assert!(parent.partial.is_empty());
+    assert_eq!(parent.calls.len(), 1);
+    assert_eq!(parent.calls[0].tool.id, "good");
+}
