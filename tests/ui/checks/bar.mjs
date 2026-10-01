@@ -669,7 +669,10 @@ export default async function barCheck(browser) {
         await route.fulfill({ response, json: body });
       });
       await page.reload({ waitUntil: "load" });
-      try { await goto(page, { v: "session", id: "principal" }, D); }
+      try {
+        await settled(page); // DOM load precedes async model adoption; wait for the initial Home render before navigating.
+        await goto(page, { v: "session", id: "principal" }, D);
+      }
       catch (error) { throw new Error("lone-step fixture could not open Principal: " + (error?.message ?? error) + "; page errors: " + (page.errors.join(" | ") || "none")); }
       const selector = '.turn[data-turn="bt-lone-line"] .steps.lone .step > button';
       try { await page.waitForSelector(selector, { state: "attached" }); }
@@ -718,6 +721,10 @@ export default async function barCheck(browser) {
   let missingHandoff = null;
   if (D.SESS.harbor) {
     const page = await served(browser, { size: "phone" });
+    const missingHandoffStacks = [];
+    page.on("pageerror", (error) => {
+      if (missingHandoffStacks.length < 3) missingHandoffStacks.push(String(error?.stack ?? error?.message ?? error).slice(0, 2500));
+    });
     await page.route("**/api/model*", async (route) => {
       const response = await route.fetch(); if (response.status() !== 200) return route.fulfill({ response }); // a 304 has no body
       const body = await response.json();
@@ -732,8 +739,15 @@ export default async function barCheck(browser) {
       body.entries.push({ k: "h", id: "mh-no-such-handoff", slot, turn: "mh-missing-handoff" }, { k: "a", text: "Reply after a missing handoff", slot: slot + 1 });
       await route.fulfill({ response, json: body });
     });
-    await page.reload({ waitUntil: "load" }); // served() loaded the model before these routes existed
-    await goto(page, { v: "session", id: "harbor" }, D);
+    try {
+      await page.reload({ waitUntil: "load" }); // served() loaded the model before these routes existed
+      await settled(page); // DOM load precedes async model adoption; wait for the initial Home render before navigating.
+      await goto(page, { v: "session", id: "harbor" }, D);
+    } catch (error) {
+      if (!missingHandoffStacks.length) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error((message + "\npage error stacks:\n" + missingHandoffStacks.join("\n---\n")).slice(0, 10000));
+    }
     await page.waitForSelector('section.turn[data-turn="mh-missing-handoff"]', { timeout: 8000 }).catch(() => {});
     missingHandoff = await page.evaluate(() => {
       const b = document.querySelector('section.turn[data-turn="mh-missing-handoff"]');
