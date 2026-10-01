@@ -49,3 +49,8 @@ dialog.sh-select-sheet::before { position: absolute; top: 8px; left: 50%; width:
   .sh-select-trigger:hover { background: var(--hover); }
   .sh-select-close:hover { background: var(--hover); }
 }
+
+/* Coarse pointers keep the desktop layout and finger-sized shared controls. */
+@media (pointer: coarse) and (min-width: 761px) {
+  .sh-select-trigger, .sh-select-option { min-height: 44px; min-width: 44px; }
+}

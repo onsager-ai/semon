@@ -1,6 +1,7 @@
 //! One test per rule in the design's table, on synthetic homes only.
 
 use std::{
+    io::Write,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
@@ -293,15 +294,17 @@ fn build_records_each_phase_timing_in_order() {
         "facts",
         "sessions",
         "index_tools",
+        "background_commands",
         "claude_spawns",
         "codex_spawns",
+        "observed_parents",
         "relays",
         "codex_relays",
         "asks",
         "questions",
         "lineage_states",
-        "activity",
         "turns",
+        "wait_edges",
         "stubs",
         "session_facts",
         "post",
@@ -793,6 +796,112 @@ fn spawn_results_come_from_four_sources_in_order() {
     let child = turns_of(&built, "a1");
     assert_eq!(child[0].start.as_deref(), Some(one.id.as_str()));
     assert_eq!(child[0].end.why, "returned");
+}
+
+#[test]
+fn background_bash_notifications_keep_their_position_and_spawn_notifications_stay_handoffs() {
+    let home = Home::new();
+    home.top(
+        "parent",
+        &[
+            human("parent", ts(1, 0), "Fetch and delegate"),
+            assistant(
+                "parent",
+                ts(1, 1),
+                vec![
+                    tool(
+                        "bash",
+                        "Bash",
+                        json!({"command":"git fetch","run_in_background":true}),
+                    ),
+                    tool(
+                        "agent",
+                        "Agent",
+                        json!({"prompt":"Review","run_in_background":true}),
+                    ),
+                ],
+            ),
+            result(
+                "parent",
+                ts(1, 2),
+                "bash",
+                "Command running in background",
+                false,
+                json!({}),
+            ),
+            result(
+                "parent",
+                ts(1, 2),
+                "agent",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"child"}),
+            ),
+            assistant("parent", ts(1, 3), vec![text("Waiting for results")]),
+            notification("parent", ts(1, 4), "bash", "completed", "Fetch finished"),
+            assistant("parent", ts(1, 5), vec![text("Fetch is done")]),
+            notification("parent", ts(1, 6), "agent", "completed", "Review finished"),
+        ],
+    );
+    home.agent(
+        "parent",
+        "child",
+        "agent",
+        &[
+            user("parent", ts(1, 1), "Review"),
+            assistant("parent", ts(1, 3), vec![text("Reviewing")]),
+        ],
+    );
+    home.top(
+        "other",
+        &[
+            human("other", ts(1, 0), "Other session"),
+            notification("other", ts(1, 7), "bash", "failed", "Must not attach"),
+        ],
+    );
+    // The second build reads the persisted index, including its background flag.
+    for _ in 0..2 {
+        let built = home.build();
+        let slots = &built.tx["parent"].slots;
+        let ends: Vec<_> = slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| matches!(slot.kind, SlotKind::BgEnd { .. }))
+            .collect();
+        assert_eq!(ends.len(), 1);
+        let (position, end) = ends[0];
+        assert_eq!(end.t, Some(at(1, 4)));
+        assert!(
+            matches!(&end.kind, SlotKind::BgEnd { call, status, .. } if call == "bash" && status == "completed")
+        );
+        assert!(matches!(slots[position - 1].kind, SlotKind::A));
+        assert_eq!(slots[position - 1].t, Some(at(1, 3)));
+        assert!(matches!(slots[position + 1].kind, SlotKind::A));
+        assert_eq!(slots[position + 1].t, Some(at(1, 5)));
+        let call = slots
+            .iter()
+            .find_map(|slot| match &slot.kind {
+                SlotKind::Tool { bg: Some(bg), .. } => Some(bg),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(call.tid, "bash");
+        assert_eq!(call.end.as_ref().unwrap().t, Some(at(1, 4)));
+        assert!(
+            built.tx["other"]
+                .slots
+                .iter()
+                .all(|slot| !matches!(slot.kind, SlotKind::BgEnd { .. }))
+        );
+        let spawn = only(&built, "spawn", "parent", "child");
+        assert_eq!(spawn.result.as_deref(), Some("Review finished"));
+        assert_eq!(spawn.done, Some(at(1, 6)));
+        assert!(
+            slots
+                .iter()
+                .any(|slot| matches!(&slot.kind, SlotKind::H(id) if id == &spawn.id))
+        );
+    }
 }
 
 #[test]
@@ -2643,7 +2752,7 @@ fn same_name_codex_spawns_stay_unplaced_and_questions_wait_only_while_unanswered
         codex_line(
             ts(22, minute),
             "response_item",
-            json!({"type":"function_call","name":"request_user_input_async","call_id":id,
+            json!({"type":"function_call","name":"request_user_input","call_id":id,
                 "arguments":format!("{{\"questions\":[{{\"title\":\"{title}\"}}]}}")}),
         )
     };
@@ -2955,6 +3064,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         offline_since: None,
         runs: BTreeMap::new(),
         reported_runs: Vec::new(),
+        process_ancestors: BTreeMap::new(),
     };
     crate::write_facts(&path, &facts).unwrap();
     let mut options = home.options.clone();
@@ -3122,6 +3232,12 @@ fn input_paths_are_the_builders_and_nothing_else() {
         ("codex", "auth.json"),
         ("codex", "thread-writer-locks/x.lock"),
         ("codex", "sessions/.jsonl"),
+        ("claude", "projects/p/x.jsonl.seal/y.jsonl"),
+        (
+            "claude",
+            "projects/p/x.jsonl.seal/subagents/agent-a.meta.json",
+        ),
+        ("codex", "sessions/2026/r.jsonl.seal/r.jsonl"),
         ("elsewhere", "sessions/1.json"),
     ] {
         assert!(!crate::is_input_path(root, path), "{root}/{path:?}");
@@ -3345,7 +3461,7 @@ fn a_codex_question_is_time_waited_on_you() {
         codex_line(
             ts(hour, minute),
             "response_item",
-            json!({"type":"function_call","name":"request_user_input_async","call_id":id,
+            json!({"type":"function_call","name":"request_user_input","call_id":id,
                 "arguments":format!("{{\"questions\":[{{\"title\":\"{title}\"}}]}}")}),
         )
     };
@@ -3395,6 +3511,373 @@ fn a_codex_question_is_time_waited_on_you() {
         week["longest_current_wait"],
         json!({ "sid": "cx-open", "ms": open })
     );
+}
+
+#[test]
+fn wait_edges_keep_only_exact_targets_and_recorded_intervals_with_turn_identity() {
+    let home = Home::new();
+    home.codex("root",json!({}), &[
+        codex_user(ts(10,0),"Run the child"),
+        codex_line(ts(10,1),"response_item",json!({"type":"function_call","name":"wait","call_id":"targeted", "arguments":"{\"receiver_ids\":[\"child\",\"unknown\"]}"})),
+        codex_line(ts(10,2),"response_item",json!({"type":"function_call_output","call_id":"targeted","output":"{}"})),
+        codex_line(ts(10,3),"response_item",json!({"type":"function_call","name":"wait_agent","call_id":"untargeted", "arguments":"{\"timeout_ms\":1000}"})),
+        codex_line(ts(10,4),"response_item",json!({"type":"function_call_output","call_id":"untargeted","output":"{}"})),
+        codex_reply(ts(10,5),"Finished"),
+    ]);
+    home.codex(
+        "child",
+        json!({"parent_thread_id":"root"}),
+        &[codex_user(ts(10, 0), "Work")],
+    );
+    let built = home.build();
+    let waits = &built.sessions["root"].wait_edges;
+    assert_eq!(waits.len(), 2);
+    assert_eq!(waits[0].targets, vec!["child"]);
+    assert_eq!((waits[0].start, waits[0].end), (at(10, 1), Some(at(10, 2))));
+    assert!(waits[1].targets.is_empty());
+    let turn = &turns_of(&built, "root")[0];
+    assert_eq!(waits[0].turn.as_deref(), Some(turn.id.as_str()));
+    assert_eq!(turn.end.at, Some(at(10, 5)));
+}
+
+#[cfg(unix)]
+#[test]
+fn local_ancestry_is_exact_and_environment_overrides_it_without_retaining_other_variables() {
+    let home = Home::new();
+    home.top("ancestor", &[human("ancestor", ts(10, 0), "launch")]);
+    home.live(10, "ancestor", "busy", json!({}));
+    home.codex("explicit", json!({}), &[codex_user(ts(10, 0), "parent")]);
+    home.codex("child", json!({}), &[codex_user(ts(10, 1), "child")]);
+    hold_lock(&home, "child");
+    let mut fields = vec!["0"; 20];
+    fields[1] = "10";
+    fields[19] = "777";
+    home.write(
+        "proc/4242/stat",
+        &format!("4242 (codex with parentheses) {}\n", fields.join(" ")),
+    );
+    let ancestor = home.build();
+    assert_eq!(
+        ancestor.sessions["child"].parent.as_deref(),
+        Some("ancestor")
+    );
+    let captured = crate::local_facts(&home.options).unwrap();
+    assert_eq!(captured.process_ancestors[&4242], vec![10]);
+    home.write(
+        "proc/4242/environ",
+        "SEMON_PARENT=codex:explicit\0TOKEN=secret-never-retained\0",
+    );
+    let explicit = home.build();
+    assert_eq!(
+        explicit.sessions["child"].parent.as_deref(),
+        Some("explicit")
+    );
+    assert_eq!(
+        explicit.sessions["child"].parent_source.as_deref(),
+        Some("environment")
+    );
+    let captured = crate::local_facts(&home.options).unwrap();
+    assert_eq!(
+        captured.runs[&4242],
+        BTreeMap::from([("SEMON_PARENT".into(), "codex:explicit".into())])
+    );
+}
+
+#[test]
+fn process_ancestry_links_every_harness_pair_and_survives_process_exit() {
+    for (parent_harness, child_harness) in
+        [("claude", "codex"), ("codex", "claude"), ("codex", "codex")]
+    {
+        let home = Home::new();
+        let mut facts = crate::Facts {
+            version: crate::FACTS_VERSION,
+            hostname: "machine".into(),
+            process_ancestors: BTreeMap::from([(20, vec![10])]),
+            ..Default::default()
+        };
+        for (id, harness, pid) in [("parent", parent_harness, 10), ("child", child_harness, 20)] {
+            if harness == "claude" {
+                home.top(id, &[human(id, ts(10, 0), "secret prompt never cached")]);
+                home.live(pid, id, "busy", json!({}));
+                facts.proc_starts.insert(pid, 777);
+            } else {
+                home.codex(
+                    id,
+                    json!({}),
+                    &[codex_user(ts(10, 0), "secret prompt never cached")],
+                );
+                facts.codex_locks.insert(id.into(), pid);
+            }
+        }
+        let path = home.root.join("facts.json");
+        crate::write_facts(&path, &facts).unwrap();
+        let mut options = home.options.clone();
+        options.facts = Some(path.clone());
+        let built = home.build_at(&options, NOW);
+        assert_eq!(
+            built.sessions["child"].parent.as_deref(),
+            Some("parent"),
+            "{parent_harness}->{child_harness}"
+        );
+        assert_eq!(
+            built.sessions["child"].parent_source.as_deref(),
+            Some("ancestry")
+        );
+        let journal =
+            fs::read_to_string(options.cache.with_extension("parent-links.json")).unwrap();
+        assert!(!journal.contains("secret prompt"));
+        facts.proc_starts.clear();
+        facts.codex_locks.clear();
+        facts.process_ancestors.clear();
+        crate::write_facts(&path, &facts).unwrap();
+        assert_eq!(
+            home.build_at(&options, NOW).sessions["child"]
+                .parent
+                .as_deref(),
+            Some("parent")
+        );
+    }
+}
+
+#[test]
+fn a_general_marker_overrides_environment_and_native_parent_and_cycles_stay_unlinked() {
+    let home = Home::new();
+    home.codex(
+        "native",
+        json!({}),
+        &[codex_user(ts(10, 0), "native parent")],
+    );
+    home.codex(
+        "environment",
+        json!({}),
+        &[codex_user(ts(10, 0), "env parent")],
+    );
+    home.codex(
+        "marked",
+        json!({}),
+        &[codex_user(ts(10, 0), "marker parent")],
+    );
+    home.codex(
+        "child",
+        json!({"parent_thread_id":"native"}),
+        &[codex_user(ts(10, 1), "Semon-Parent: codex:marked\nWork")],
+    );
+    home.top(
+        "claude-child",
+        &[human(
+            "claude-child",
+            ts(10, 1),
+            "Semon-Parent: codex:marked\nWork",
+        )],
+    );
+    home.codex(
+        "cycle-a",
+        json!({}),
+        &[codex_user(ts(10, 0), "Semon-Parent: codex:cycle-b\nWork")],
+    );
+    home.codex(
+        "cycle-b",
+        json!({}),
+        &[codex_user(ts(10, 0), "Semon-Parent: codex:cycle-a\nWork")],
+    );
+    let facts = crate::Facts {
+        version: crate::FACTS_VERSION,
+        hostname: "machine".into(),
+        codex_locks: BTreeMap::from([("child".into(), 20)]),
+        runs: BTreeMap::from([(
+            20,
+            BTreeMap::from([("SEMON_PARENT".into(), "codex:environment".into())]),
+        )]),
+        ..Default::default()
+    };
+    let path = home.root.join("facts.json");
+    crate::write_facts(&path, &facts).unwrap();
+    let mut options = home.options.clone();
+    options.facts = Some(path);
+    let built = home.build_at(&options, NOW);
+    assert_eq!(built.sessions["child"].parent.as_deref(), Some("marked"));
+    assert_eq!(
+        built.sessions["claude-child"].parent.as_deref(),
+        Some("marked")
+    );
+    assert_eq!(
+        built.sessions["child"].parent_source.as_deref(),
+        Some("marker")
+    );
+    assert!(built.sessions["cycle-a"].parent.is_none());
+    assert!(built.sessions["cycle-b"].parent.is_none());
+    let tree = crate::collect(&options).unwrap();
+    let marked = tree.iter().find(|node| node.id == "marked").unwrap();
+    assert!(
+        marked.children.iter().any(
+            |node| node.id == "claude-child" && node.parent_source.as_deref() == Some("marker")
+        )
+    );
+    assert!(marked.children.iter().any(|node| node.id == "child"));
+    assert!(tree.iter().any(|node| node.id == "cycle-a"));
+    assert!(tree.iter().any(|node| node.id == "cycle-b"));
+}
+
+#[test]
+fn model_comparison_uses_indexed_per_message_models_for_launched_work() {
+    let home = Home::new();
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(10, 0), "Launch"),
+            assistant(
+                "lead",
+                ts(10, 1),
+                vec![tool(
+                    "launch",
+                    "Agent",
+                    json!({"description":"Implement", "prompt":"Work"}),
+                )],
+            ),
+        ],
+    );
+    let mut reply = assistant("lead", ts(10, 2), vec![text("Done")]);
+    reply["message"]["model"] = json!("claude-sonnet-4-6");
+    reply["message"]["usage"] = json!({"input_tokens":123, "output_tokens":45});
+    home.agent("lead", "child", "launch", &[reply]);
+    let built = home.build();
+    let analytics = week(&built);
+    let group = &analytics["models"]["groups"][0];
+    assert_eq!(group["model"], "claude-sonnet-4-6");
+    assert_eq!(group["n"], 1);
+    assert_eq!(group["tokens"]["input"], 123);
+    assert_eq!(group["tokens"]["output"], 45);
+    assert_eq!(group["band"], "unknown");
+    assert!(group["first_pass_acceptance"].is_null());
+    assert!(group["median_model_ms"].is_null());
+}
+
+#[test]
+fn analytics_answered_question_history_has_an_explicit_bound() {
+    let home = Home::new();
+    let mut records = vec![human("many-questions", ts(12, 0), "Ask")];
+    for index in 0..4100 {
+        let id = format!("q-{index}");
+        records.push(assistant(
+            "many-questions",
+            ts(12, 1),
+            vec![tool(
+                &id,
+                "AskUserQuestion",
+                json!({"questions":[question("Pick?", &["Yes"], false)]}),
+            )],
+        ));
+        records.push(result(
+            "many-questions",
+            ts(12, 2),
+            &id,
+            "",
+            false,
+            json!({"answers":{"Pick?":"Yes"}}),
+        ));
+    }
+    home.top("many-questions", &records);
+    let built = home.build();
+    let activity = &built.activity["many-questions"];
+    assert_eq!(activity.answered.len(), 4096);
+    assert_eq!(activity.answered.capacity(), activity.answered.len());
+    assert!(activity.waits_truncated);
+    assert_eq!(week(&built)["waits_truncated"], json!(["many-questions"]));
+}
+
+#[test]
+fn codex_root_human_reply_is_a_new_result_but_harness_context_is_not() {
+    let home = Home::new();
+    home.codex(
+        "human-root",
+        json!({}),
+        &[
+            codex_user(ts(12, 0), "Fix the bug"),
+            codex_reply(ts(12, 1), "Fixed the bug"),
+        ],
+    );
+    home.codex(
+        "context-root",
+        json!({}),
+        &[
+            codex_user(
+                ts(12, 0),
+                "<environment_context>machine</environment_context>",
+            ),
+            codex_reply(ts(12, 1), "Context read"),
+        ],
+    );
+    home.codex(
+        "missing-parent",
+        json!({}),
+        &[
+            codex_user(ts(12, 0), "Semon-Parent: claude:missing\nWork"),
+            codex_reply(ts(12, 1), "Done"),
+        ],
+    );
+    let built = home.build();
+    let results: Vec<_> = built
+        .handoffs
+        .iter()
+        .filter(|h| h.ask == Some("result"))
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        (results[0].from.as_str(), results[0].status),
+        ("human-root", "new")
+    );
+    assert!(matches!(built.tx["human-root"].slots[0].kind, SlotKind::U));
+}
+
+#[cfg(unix)]
+#[test]
+fn acknowledged_async_codex_question_does_not_count_continued_work_as_waiting() {
+    let home = Home::new();
+    home.codex("async", json!({}), &[
+        codex_user(ts(12, 0), "Go"),
+        codex_line(ts(12, 1), "response_item", json!({"type":"function_call","name":"request_user_input_async","call_id":"q", "arguments":"{\"questions\":[{\"title\":\"Which?\"}]}"})),
+        codex_line(ts(12, 2), "response_item", json!({"type":"function_call_output","call_id":"q","output":"{\"accepted\":true}"})),
+    ]);
+    hold_lock(&home, "async");
+    let built = home.build();
+    assert_eq!(by_brief(&built, "Which?").status, "done");
+    assert_eq!(week(&built)["current"]["wait_ms"], MINUTE);
+}
+
+#[test]
+fn a_permission_wait_keeps_the_pending_tool_live_and_counts_the_known_wait() {
+    let home = Home::new();
+    home.top(
+        "permission",
+        &[
+            human("permission", ts(16, 0), "touch it"),
+            assistant(
+                "permission",
+                ts(16, 1),
+                vec![tool("pending", "Bash", json!({"command":"touch file"}))],
+            ),
+        ],
+    );
+    home.live(
+        39,
+        "permission",
+        "waiting",
+        json!({"waitingFor":"permission prompt", "statusUpdatedAt":at(16, 2)}),
+    );
+    let built = home.build();
+    let tx = &built.tx["permission"];
+    assert_eq!(tx.errors, 0);
+    assert!(tx.slots.iter().any(|slot| matches!(
+        slot.kind,
+        SlotKind::Tool {
+            shown: Shown::Live,
+            ..
+        }
+    )));
+    let turns = turns_of(&built, "permission");
+    assert_eq!((turns[0].end.st, turns[0].end.why), ("wait", "permission"));
+    assert_eq!(built.sessions["permission"].waiting_since, Some(at(16, 2)));
+    assert_eq!(week(&built)["current"]["wait_ms"], NOW - at(16, 2));
 }
 
 /// "Top sessions · waited on" lists the sessions that waited longest first.
@@ -4054,4 +4537,1188 @@ fn identical_sends_claim_receipts_in_order() {
         only(&built, "spawn", "lead", "ap").result.as_deref(),
         Some("[Subagent hand-back] same done")
     );
+}
+
+#[test]
+fn a_changed_session_reuses_other_sessions_with_stable_source_references() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "root prompt")]);
+    home.top("other", &[human("other", ts(0, 0), "other prompt")]);
+    let mut cache = EventCache::open(&home.options.cache);
+    let mut dirty = false;
+    let mut texts = Texts::default();
+    SESSION_DERIVATIONS.with(|counts| counts.borrow_mut().clear());
+    SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
+    let first = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+    append_records(
+        &home,
+        "root",
+        &[assistant("root", ts(0, 1), vec![text("root updated")])],
+    );
+    // Adding a file before existing files changes their positions in the
+    // scan. A reused transcript must still read its original source path.
+    home.top("aaa", &[human("aaa", ts(0, 0), "new session")]);
+    let second = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+    assert!(Arc::ptr_eq(&first.tx["other"], &second.tx["other"]));
+    assert!(!Arc::ptr_eq(&first.tx["root"], &second.tx["root"]));
+    SESSION_DERIVATIONS.with(|counts| {
+        assert_eq!(
+            *counts.borrow(),
+            BTreeMap::from([
+                ("root".to_owned(), 2),
+                ("other".to_owned(), 1),
+                ("aaa".to_owned(), 1),
+            ])
+        )
+    });
+    SESSION_DESCRIPTIONS.with(|counts| {
+        assert_eq!(
+            *counts.borrow(),
+            BTreeMap::from([
+                ("root".to_owned(), 2),
+                ("other".to_owned(), 1),
+                ("aaa".to_owned(), 1),
+            ])
+        )
+    });
+    assert_equivalent(&second, &home.build(), NOW);
+    let other = second.tx["other"]
+        .slots
+        .iter()
+        .find_map(|slot| slot.file.as_ref())
+        .unwrap();
+    assert!(other.path.ends_with("other.jsonl"));
+    fs::remove_file(home.root.join("claude/projects/-work-proj/other.jsonl")).unwrap();
+    build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+    assert!(!texts.derived_sessions.contains_key("other"));
+}
+
+#[test]
+fn rewritten_growing_logs_invalidate_cached_prompt_text() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "old prompt")]);
+    let mut cache = EventCache::open(&home.options.cache);
+    let mut dirty = false;
+    let mut texts = Texts::default();
+    let first = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+    assert_eq!(by_brief(&first, "old prompt").kind, "ask");
+
+    // Rewrite in place to a longer record: growing size alone must never
+    // make the offset memoizer reuse the previous line's contents.
+    home.top(
+        "root",
+        &[human(
+            "root",
+            ts(0, 0),
+            "replacement prompt longer than the old prompt",
+        )],
+    );
+    let resumed = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+    assert_eq!(
+        by_brief(&resumed, "replacement prompt longer than the old prompt").kind,
+        "ask"
+    );
+    assert_equivalent(&resumed, &home.build(), NOW);
+}
+
+#[derive(Clone, Debug)]
+enum EquivalenceStep {
+    Append {
+        sid: String,
+        records: Vec<Value>,
+    },
+    PartialStart {
+        sid: String,
+        prefix: String,
+    },
+    PartialFinish {
+        sid: String,
+        suffix: String,
+        record: Value,
+    },
+    NewTop {
+        sid: String,
+        records: Vec<Value>,
+    },
+    ChildBeforeSpawn {
+        parent: String,
+        agent: String,
+        tool_id: String,
+        records: Vec<Value>,
+    },
+    SpawnLine {
+        parent: String,
+        records: Vec<Value>,
+    },
+    ToolUse {
+        sid: String,
+        record: Value,
+    },
+    ToolResult {
+        sid: String,
+        record: Value,
+    },
+    Truncate {
+        sid: String,
+        records: Vec<Value>,
+    },
+    PidWrite {
+        pid: u32,
+        sid: String,
+    },
+    PidRemove {
+        pid: u32,
+    },
+    PidDies {
+        pid: u32,
+    },
+    CopyResume {
+        source: String,
+        target: String,
+        continued: Value,
+        records: Vec<Value>,
+    },
+    LockReleased {
+        id: String,
+    },
+    CodexPair {
+        parent: String,
+        child: String,
+        records: Vec<Value>,
+    },
+    CodexAppend {
+        sid: String,
+        records: Vec<Value>,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut value = self.0;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+}
+
+const EQUIVALENCE_STEPS: usize = 20;
+const EQUIVALENCE_FILES: usize = 10;
+const EQUIVALENCE_KINDS: usize = 17;
+
+fn equivalence_root(seed: u64) -> Value {
+    uuid(
+        human("root", ts(0, 0), &format!("root for seed {seed}")),
+        &format!("eq-{seed}-0"),
+    )
+}
+
+fn identified(seed: u64, next_record: &mut u32, record: Value) -> Value {
+    *next_record += 1;
+    uuid(record, &format!("eq-{seed}-{}", *next_record))
+}
+
+fn generated_time(step: usize, offset: usize) -> String {
+    ts(18 + (step / 10) as i64, ((step * 3 + offset) % 60) as i64)
+}
+
+fn generated_records(
+    rng: &mut SplitMix64,
+    seed: u64,
+    step: usize,
+    sid: &str,
+    next_record: &mut u32,
+) -> Vec<Value> {
+    let count = (rng.next() % 3 + 1) as usize;
+    (0..count)
+        .map(|offset| {
+            let time = generated_time(step, offset);
+            let body = format!("seed {seed}, step {step}, record {offset}");
+            let record = match rng.next() % 3 {
+                0 => human(sid, time, &body),
+                1 => user(sid, time, &body),
+                _ => assistant(sid, time, vec![text(&body)]),
+            };
+            identified(seed, next_record, record)
+        })
+        .collect()
+}
+
+fn choose_sid(rng: &mut SplitMix64, histories: &BTreeMap<String, Vec<Value>>) -> String {
+    let sessions: Vec<&String> = histories.keys().collect();
+    sessions[(rng.next() as usize) % sessions.len()].clone()
+}
+
+fn note_generated_step(
+    step: &EquivalenceStep,
+    histories: &mut BTreeMap<String, Vec<Value>>,
+    log_files: &mut usize,
+    live_pids: &mut BTreeSet<u32>,
+    lock_held: &mut bool,
+) {
+    match step {
+        EquivalenceStep::Append { sid, records }
+        | EquivalenceStep::SpawnLine {
+            parent: sid,
+            records,
+        } => histories
+            .get_mut(sid)
+            .unwrap()
+            .extend(records.iter().cloned()),
+        EquivalenceStep::PartialFinish { sid, record, .. }
+        | EquivalenceStep::ToolUse { sid, record }
+        | EquivalenceStep::ToolResult { sid, record } => {
+            histories.get_mut(sid).unwrap().push(record.clone());
+        }
+        EquivalenceStep::NewTop { sid, records } => {
+            histories.insert(sid.clone(), records.clone());
+            *log_files += 1;
+        }
+        EquivalenceStep::ChildBeforeSpawn { .. } => *log_files += 1,
+        EquivalenceStep::Truncate { sid, records } => {
+            histories.insert(sid.clone(), records.clone());
+        }
+        EquivalenceStep::CopyResume {
+            source,
+            target,
+            continued,
+            records,
+        } => {
+            histories.get_mut(source).unwrap().push(continued.clone());
+            histories.insert(target.clone(), records.clone());
+            *log_files += 1;
+        }
+        EquivalenceStep::PidWrite { pid, .. } => {
+            live_pids.insert(*pid);
+        }
+        EquivalenceStep::PidRemove { pid } | EquivalenceStep::PidDies { pid } => {
+            live_pids.remove(pid);
+        }
+        EquivalenceStep::LockReleased { .. } => *lock_held = false,
+        EquivalenceStep::CodexPair { .. } => *log_files += 2,
+        EquivalenceStep::PartialStart { .. } | EquivalenceStep::CodexAppend { .. } => {}
+    }
+}
+
+fn generated_steps(seed: u64) -> Vec<EquivalenceStep> {
+    let mut rng = SplitMix64(seed);
+    let mut next_record = 0;
+    let mut next_top = 0;
+    let mut next_agent = 0;
+    let mut log_files = if cfg!(unix) { 2 } else { 1 };
+    let mut histories = BTreeMap::from([("root".to_owned(), vec![equivalence_root(seed)])]);
+    let mut live_pids = BTreeSet::new();
+    let mut lock_held = cfg!(unix);
+    let mut steps = Vec::with_capacity(EQUIVALENCE_STEPS);
+    let mut pending = None;
+
+    for index in 0..EQUIVALENCE_STEPS {
+        if let Some(step) = pending.take() {
+            note_generated_step(
+                &step,
+                &mut histories,
+                &mut log_files,
+                &mut live_pids,
+                &mut lock_held,
+            );
+            steps.push(step);
+            continue;
+        }
+
+        let first_kind = (rng.next() % EQUIVALENCE_KINDS as u64) as usize;
+        let mut selected = None;
+        for offset in 0..EQUIVALENCE_KINDS {
+            let kind = (first_kind + offset) % EQUIVALENCE_KINDS;
+            let paired_step_fits = index + 1 < EQUIVALENCE_STEPS;
+            let candidate = match kind {
+                0 => {
+                    let sid = choose_sid(&mut rng, &histories);
+                    Some((
+                        EquivalenceStep::Append {
+                            records: generated_records(
+                                &mut rng,
+                                seed,
+                                index,
+                                &sid,
+                                &mut next_record,
+                            ),
+                            sid,
+                        },
+                        None,
+                    ))
+                }
+                1 if paired_step_fits => {
+                    let sid = choose_sid(&mut rng, &histories);
+                    let record = identified(
+                        seed,
+                        &mut next_record,
+                        user(
+                            &sid,
+                            generated_time(index, 0),
+                            &format!("partial from seed {seed}, step {index}"),
+                        ),
+                    );
+                    let line = record.to_string();
+                    let split = line.len() / 2;
+                    Some((
+                        EquivalenceStep::PartialStart {
+                            sid: sid.clone(),
+                            prefix: line[..split].to_owned(),
+                        },
+                        Some(EquivalenceStep::PartialFinish {
+                            sid,
+                            suffix: line[split..].to_owned(),
+                            record,
+                        }),
+                    ))
+                }
+                2 if log_files < EQUIVALENCE_FILES => {
+                    let sid = format!("session-{next_top}");
+                    next_top += 1;
+                    Some((
+                        EquivalenceStep::NewTop {
+                            records: generated_records(
+                                &mut rng,
+                                seed,
+                                index,
+                                &sid,
+                                &mut next_record,
+                            ),
+                            sid,
+                        },
+                        None,
+                    ))
+                }
+                3 if log_files < EQUIVALENCE_FILES && paired_step_fits => {
+                    let parent = choose_sid(&mut rng, &histories);
+                    let agent = format!("a{next_agent}");
+                    next_agent += 1;
+                    let tool_id = format!("spawn-{seed}-{index}");
+                    let records = vec![identified(
+                        seed,
+                        &mut next_record,
+                        user(
+                            &parent,
+                            generated_time(index, 0),
+                            &format!("child brief for seed {seed}, step {index}"),
+                        ),
+                    )];
+                    // A child can relay to its parent before the spawn result
+                    // provides the join; the global link digest must then change.
+                    let send_id = format!("child-send-{seed}-{index}");
+                    let mut records = records;
+                    records.extend([
+                        identified(seed, &mut next_record, assistant(&parent, generated_time(index, 1),
+                            vec![tool(&send_id, "SendMessage", json!({"to":"main","message":"child progress","type":"message"}))])),
+                        identified(seed, &mut next_record, result(&parent, generated_time(index, 2),
+                            &send_id, "queued", false, json!({"success":true}))),
+                    ]);
+                    let spawn = vec![
+                        identified(
+                            seed,
+                            &mut next_record,
+                            assistant(
+                                &parent,
+                                generated_time(index, 1),
+                                vec![tool(
+                                    &tool_id,
+                                    "Agent",
+                                    json!({"description":"generated child","prompt":"generated brief"}),
+                                )],
+                            ),
+                        ),
+                        identified(
+                            seed,
+                            &mut next_record,
+                            result(
+                                &parent,
+                                generated_time(index, 2),
+                                &tool_id,
+                                "launched",
+                                false,
+                                json!({"status":"async_launched","agentId":agent}),
+                            ),
+                        ),
+                    ];
+                    Some((
+                        EquivalenceStep::ChildBeforeSpawn {
+                            parent: parent.clone(),
+                            agent,
+                            tool_id,
+                            records,
+                        },
+                        Some(EquivalenceStep::SpawnLine {
+                            parent,
+                            records: spawn,
+                        }),
+                    ))
+                }
+                4 if paired_step_fits => {
+                    let sid = choose_sid(&mut rng, &histories);
+                    let tool_id = format!("tool-{seed}-{index}");
+                    let call = identified(
+                        seed,
+                        &mut next_record,
+                        assistant(
+                            &sid,
+                            generated_time(index, 0),
+                            vec![tool(
+                                &tool_id,
+                                "Bash",
+                                json!({"command":"printf generated"}),
+                            )],
+                        ),
+                    );
+                    let result_record = identified(
+                        seed,
+                        &mut next_record,
+                        result(
+                            &sid,
+                            generated_time(index, 1),
+                            &tool_id,
+                            "generated result",
+                            false,
+                            json!({}),
+                        ),
+                    );
+                    Some((
+                        EquivalenceStep::ToolUse {
+                            sid: sid.clone(),
+                            record: call,
+                        },
+                        Some(EquivalenceStep::ToolResult {
+                            sid,
+                            record: result_record,
+                        }),
+                    ))
+                }
+                5 => {
+                    let eligible: Vec<(&String, &Vec<Value>)> = histories
+                        .iter()
+                        .filter(|(_, records)| records.len() >= 2)
+                        .collect();
+                    if eligible.is_empty() {
+                        None
+                    } else {
+                        let (sid, records) = eligible[(rng.next() as usize) % eligible.len()];
+                        let keep = 1 + (rng.next() as usize % (records.len() - 1));
+                        Some((
+                            EquivalenceStep::Truncate {
+                                sid: sid.clone(),
+                                records: records[..keep].to_vec(),
+                            },
+                            None,
+                        ))
+                    }
+                }
+                6 => {
+                    let sid = choose_sid(&mut rng, &histories);
+                    let pid = 10_000 + (rng.next() % 50_000) as u32;
+                    Some((EquivalenceStep::PidWrite { pid, sid }, None))
+                }
+                7 if !live_pids.is_empty() => {
+                    let pids: Vec<u32> = live_pids.iter().copied().collect();
+                    Some((
+                        EquivalenceStep::PidRemove {
+                            pid: pids[(rng.next() as usize) % pids.len()],
+                        },
+                        None,
+                    ))
+                }
+                8 if !live_pids.is_empty() => {
+                    let pids: Vec<u32> = live_pids.iter().copied().collect();
+                    Some((
+                        EquivalenceStep::PidDies {
+                            pid: pids[(rng.next() as usize) % pids.len()],
+                        },
+                        None,
+                    ))
+                }
+                9 if log_files < EQUIVALENCE_FILES => {
+                    let source = choose_sid(&mut rng, &histories);
+                    let target = format!("copy-{next_top}");
+                    next_top += 1;
+                    let continued = identified(
+                        seed,
+                        &mut next_record,
+                        json!({"type":"continued-in","continuedInSessionId":target,"sessionId":source,"timestamp":generated_time(index, 0)}),
+                    );
+                    let mut records = histories[&source].clone();
+                    records.push(identified(
+                        seed,
+                        &mut next_record,
+                        human(
+                            &target,
+                            generated_time(index, 1),
+                            &format!("copied resume for seed {seed}, step {index}"),
+                        ),
+                    ));
+                    Some((
+                        EquivalenceStep::CopyResume {
+                            source,
+                            target,
+                            continued,
+                            records,
+                        },
+                        None,
+                    ))
+                }
+                10 if cfg!(unix) && lock_held => Some((
+                    EquivalenceStep::LockReleased {
+                        id: "lock".to_owned(),
+                    },
+                    None,
+                )),
+                11 if log_files < EQUIVALENCE_FILES && paired_step_fits => {
+                    let sender = choose_sid(&mut rng, &histories);
+                    let receiver = format!("peer-{next_top}");
+                    next_top += 1;
+                    let msg_id = format!("message-{seed}-{index}");
+                    let call_id = format!("send-{seed}-{index}");
+                    let body = format!("relay seed {seed} step {index}");
+                    Some((
+                        EquivalenceStep::NewTop {
+                            sid: receiver.clone(),
+                            records: vec![identified(
+                                seed,
+                                &mut next_record,
+                                peer(
+                                    &receiver,
+                                    generated_time(index, 1),
+                                    &msg_id,
+                                    &sender,
+                                    123,
+                                    &body,
+                                ),
+                            )],
+                        },
+                        Some(EquivalenceStep::Append {
+                            sid: sender.clone(),
+                            records: vec![
+                                identified(
+                                    seed,
+                                    &mut next_record,
+                                    assistant(
+                                        &sender,
+                                        generated_time(index, 0),
+                                        vec![tool(
+                                            &call_id,
+                                            "SendMessage",
+                                            json!({"to":receiver,"message":body,"type":"message"}),
+                                        )],
+                                    ),
+                                ),
+                                identified(
+                                    seed,
+                                    &mut next_record,
+                                    result(
+                                        &sender,
+                                        generated_time(index, 1),
+                                        &call_id,
+                                        "sent",
+                                        false,
+                                        json!({"success":true,"msg_id":msg_id}),
+                                    ),
+                                ),
+                            ],
+                        }),
+                    ))
+                }
+                12 if paired_step_fits => {
+                    let sid = choose_sid(&mut rng, &histories);
+                    let call_id = format!("question-{seed}-{index}");
+                    Some((
+                        EquivalenceStep::ToolUse {
+                            sid: sid.clone(),
+                            record: identified(
+                                seed,
+                                &mut next_record,
+                                assistant(
+                                    &sid,
+                                    generated_time(index, 0),
+                                    vec![tool(
+                                        &call_id,
+                                        "AskUserQuestion",
+                                        json!({"questions":[question("Ship generated change?", &["Yes", "No"], false)]}),
+                                    )],
+                                ),
+                            ),
+                        },
+                        Some(EquivalenceStep::ToolResult {
+                            sid: sid.clone(),
+                            record: identified(
+                                seed,
+                                &mut next_record,
+                                result(
+                                    &sid,
+                                    generated_time(index, 1),
+                                    &call_id,
+                                    "Yes",
+                                    false,
+                                    json!({"answers":{"Ship generated change?":"Yes"}}),
+                                ),
+                            ),
+                        }),
+                    ))
+                }
+                13 if paired_step_fits => {
+                    let sid = choose_sid(&mut rng, &histories);
+                    Some((
+                        EquivalenceStep::Append {
+                            sid: sid.clone(),
+                            records: vec![identified(
+                                seed,
+                                &mut next_record,
+                                assistant(
+                                    &sid,
+                                    generated_time(index, 0),
+                                    vec![text("Generated work finished. Please review.")],
+                                ),
+                            )],
+                        },
+                        Some(EquivalenceStep::Append {
+                            sid: sid.clone(),
+                            records: vec![identified(
+                                seed,
+                                &mut next_record,
+                                human(&sid, generated_time(index, 1), "Continue after review"),
+                            )],
+                        }),
+                    ))
+                }
+                14 if log_files < EQUIVALENCE_FILES && paired_step_fits => {
+                    let source = choose_sid(&mut rng, &histories);
+                    let target = format!("lineage-{next_top}");
+                    next_top += 1;
+                    let bridge = format!("bridge-{seed}-{index}");
+                    Some((
+                        EquivalenceStep::Append {
+                            sid: source.clone(),
+                            records: vec![identified(
+                                seed,
+                                &mut next_record,
+                                json!({"type":"bridge-session","bridgeSessionId":bridge,"sessionId":source}),
+                            )],
+                        },
+                        Some(EquivalenceStep::NewTop {
+                            sid: target.clone(),
+                            records: vec![
+                                identified(
+                                    seed,
+                                    &mut next_record,
+                                    json!({"type":"bridge-session","bridgeSessionId":bridge,"sessionId":target}),
+                                ),
+                                identified(
+                                    seed,
+                                    &mut next_record,
+                                    json!({"type":"user","sessionId":target,"session_id":source,"timestamp":generated_time(index, 1),
+                                    "origin":{"kind":"human"},"message":{"role":"user","content":"generated clear/resume"}}),
+                                ),
+                            ],
+                        }),
+                    ))
+                }
+                15 if log_files + 2 <= EQUIVALENCE_FILES && paired_step_fits => {
+                    let parent = format!("codex-{next_top}");
+                    let child = format!("codex-child-{next_top}");
+                    next_top += 1;
+                    let call_id = format!("codex-spawn-{seed}-{index}");
+                    let name = format!("worker-{index}");
+                    Some((
+                        EquivalenceStep::CodexPair {
+                            parent: parent.clone(),
+                            child: child.clone(),
+                            records: vec![
+                                codex_user(
+                                    generated_time(index, 0),
+                                    "Coordinate generated Codex child",
+                                ),
+                                codex_line(
+                                    generated_time(index, 1),
+                                    "response_item",
+                                    json!({"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":call_id,
+                                    "arguments":json!({"task_name":name,"message":"generated Codex work"}).to_string()}),
+                                ),
+                                codex_line(
+                                    generated_time(index, 1),
+                                    "response_item",
+                                    json!({"type":"function_call_output","call_id":call_id,"output":json!({"task_name":name}).to_string()}),
+                                ),
+                                codex_line(
+                                    generated_time(index, 1),
+                                    "response_item",
+                                    json!({"type":"function_call","namespace":"collaboration","name":"send_message",
+                                        "call_id":format!("relay-{call_id}"), "arguments":json!({"target":format!("{parent}/{name}"),"message":"generated Codex relay"}).to_string()}),
+                                ),
+                                codex_line(
+                                    generated_time(index, 1),
+                                    "response_item",
+                                    json!({"type":"function_call_output","call_id":format!("relay-{call_id}"),"output":"sent"}),
+                                ),
+                            ],
+                        },
+                        Some(EquivalenceStep::CodexAppend {
+                            sid: parent.clone(),
+                            records: vec![codex_line(
+                                generated_time(index, 2),
+                                "response_item",
+                                json!({"type":"agent_message","author":format!("{parent}/{name}"),"recipient":parent,
+                                "content":[{"type":"input_text","text":"generated Codex hand-back"}]}),
+                            )],
+                        }),
+                    ))
+                }
+                16 if paired_step_fits => {
+                    let sid = choose_sid(&mut rng, &histories);
+                    let call_id = format!("background-{seed}-{index}");
+                    Some((
+                        EquivalenceStep::ToolUse {
+                            sid: sid.clone(),
+                            record: identified(
+                                seed,
+                                &mut next_record,
+                                assistant(
+                                    &sid,
+                                    generated_time(index, 0),
+                                    vec![tool(
+                                        &call_id,
+                                        "Bash",
+                                        json!({"command":"sleep 1","run_in_background":true}),
+                                    )],
+                                ),
+                            ),
+                        },
+                        Some(EquivalenceStep::Append {
+                            sid: sid.clone(),
+                            records: vec![
+                                identified(
+                                    seed,
+                                    &mut next_record,
+                                    result(
+                                        &sid,
+                                        generated_time(index, 1),
+                                        &call_id,
+                                        "running",
+                                        false,
+                                        json!({"backgroundTaskId":call_id}),
+                                    ),
+                                ),
+                                identified(
+                                    seed,
+                                    &mut next_record,
+                                    notification(
+                                        &sid,
+                                        generated_time(index, 2),
+                                        &call_id,
+                                        "completed",
+                                        "background done",
+                                    ),
+                                ),
+                            ],
+                        }),
+                    ))
+                }
+                _ => None,
+            };
+            if let Some((step, next)) = candidate {
+                selected = Some((step, next));
+                break;
+            }
+        }
+
+        let (step, next) = selected.unwrap_or_else(|| {
+            let sid = choose_sid(&mut rng, &histories);
+            (
+                EquivalenceStep::Append {
+                    records: generated_records(&mut rng, seed, index, &sid, &mut next_record),
+                    sid,
+                },
+                None,
+            )
+        });
+        note_generated_step(
+            &step,
+            &mut histories,
+            &mut log_files,
+            &mut live_pids,
+            &mut lock_held,
+        );
+        steps.push(step);
+        pending = next;
+    }
+
+    assert!(pending.is_none());
+    steps
+}
+
+fn append_bytes(home: &Home, relative: &str, content: &str) {
+    let path = home.root.join(relative);
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+}
+
+fn append_records(home: &Home, sid: &str, records: &[Value]) {
+    let content = records
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    append_bytes(
+        home,
+        &format!("claude/projects/-work-proj/{sid}.jsonl"),
+        &content,
+    );
+}
+
+fn apply_equivalence_step(home: &Home, step: &EquivalenceStep) {
+    match step {
+        EquivalenceStep::Append { sid, records }
+        | EquivalenceStep::SpawnLine {
+            parent: sid,
+            records,
+        } => append_records(home, sid, records),
+        EquivalenceStep::PartialStart { sid, prefix } => append_bytes(
+            home,
+            &format!("claude/projects/-work-proj/{sid}.jsonl"),
+            prefix,
+        ),
+        EquivalenceStep::PartialFinish { sid, suffix, .. } => append_bytes(
+            home,
+            &format!("claude/projects/-work-proj/{sid}.jsonl"),
+            &format!("{suffix}\n"),
+        ),
+        EquivalenceStep::NewTop { sid, records } => {
+            home.top(sid, records);
+        }
+        EquivalenceStep::ChildBeforeSpawn {
+            parent,
+            agent,
+            tool_id,
+            records,
+        } => home.agent(parent, agent, tool_id, records),
+        EquivalenceStep::ToolUse { sid, record } | EquivalenceStep::ToolResult { sid, record } => {
+            append_records(home, sid, std::slice::from_ref(record));
+        }
+        EquivalenceStep::Truncate { sid, records } => {
+            home.lines(&format!("claude/projects/-work-proj/{sid}.jsonl"), records);
+        }
+        EquivalenceStep::PidWrite { pid, sid } => home.live(*pid, sid, "busy", json!({})),
+        EquivalenceStep::PidRemove { pid } => {
+            fs::remove_file(home.root.join(format!("claude/sessions/{pid}.json"))).unwrap();
+            fs::remove_file(home.root.join(format!("proc/{pid}/stat"))).unwrap();
+        }
+        EquivalenceStep::PidDies { pid } => {
+            fs::remove_file(home.root.join(format!("proc/{pid}/stat"))).unwrap();
+        }
+        EquivalenceStep::CopyResume {
+            source,
+            target,
+            continued,
+            records,
+        } => {
+            append_records(home, source, std::slice::from_ref(continued));
+            home.top(target, records);
+        }
+        EquivalenceStep::CodexPair {
+            parent,
+            child,
+            records,
+        } => {
+            home.codex(parent, json!({}), records);
+            let name = records[1]["payload"]["arguments"].as_str().unwrap();
+            let name: Value = serde_json::from_str(name).unwrap();
+            let name = name["task_name"].as_str().unwrap();
+            home.codex(
+                child,
+                json!({"parent_thread_id":parent,"thread_source":"subagent",
+                "agent_nickname":name,"agent_path":format!("{parent}/{name}")}),
+                &[
+                    codex_user(generated_time(0, 1), "generated Codex work"),
+                    codex_reply(generated_time(0, 2), "done"),
+                ],
+            );
+        }
+        EquivalenceStep::CodexAppend { sid, records } => {
+            let content = records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            append_bytes(
+                home,
+                &format!("codex/sessions/2026/09/24/rollout-{sid}.jsonl"),
+                &content,
+            );
+        }
+        EquivalenceStep::LockReleased { id } => {
+            #[cfg(unix)]
+            {
+                let lock_path = home
+                    .root
+                    .join(format!("codex/thread-writer-locks/{id}.lock"));
+                assert!(lock_path.exists());
+                // The writer-lock file may remain after the process releases its flock.
+                home.write("proc/locks", "");
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = id;
+                unreachable!("Codex writer locks are only generated on Unix");
+            }
+        }
+    }
+}
+
+fn assert_equivalent(resumed: &Built, fresh: &Built, now: i64) {
+    assert_eq!(resumed.json(now), fresh.json(now));
+    assert_eq!(format!("{:?}", resumed.tx), format!("{:?}", fresh.tx));
+    assert_eq!(format!("{:?}", resumed.facts), format!("{:?}", fresh.facts));
+    assert_eq!(
+        format!("{:?}", resumed.activity),
+        format!("{:?}", fresh.activity)
+    );
+    assert_eq!(resumed.version, fresh.version);
+    assert_eq!(resumed.texts, fresh.texts);
+}
+
+fn build_with_cache(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+) -> Built {
+    if options.facts.is_none() {
+        cache.refresh_reported_runs(&options.claude_json, now, dirty);
+    }
+    let built = build(options, cache, dirty, texts, now).unwrap();
+    invariants(&built, options.all || options.scan_window);
+    built
+}
+
+fn with_equivalence_context<T>(
+    seed: u64,
+    index: usize,
+    steps: &[EquivalenceStep],
+    action: impl FnOnce() -> T,
+) -> T {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action));
+    match outcome {
+        Ok(value) => value,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            panic!("seed={seed}, step={index}, steps={steps:#?}\n{detail}");
+        }
+    }
+}
+
+fn replay(seed: u64) {
+    let home = Home::new();
+    home.top("root", &[equivalence_root(seed)]);
+    #[cfg(unix)]
+    {
+        home.codex("lock", json!({}), &[codex_user(ts(0, 0), "locked fixture")]);
+        hold_lock(&home, "lock");
+    }
+    let steps = generated_steps(seed);
+    let mut cache = EventCache::open(&home.options.cache);
+    let mut dirty = false;
+    let mut texts = Texts::default();
+
+    // Seed the long-lived event cache before the first append, so step zero
+    // reads the persisted ledger's offsets in its restarted-cache build.
+    with_equivalence_context(seed, 0, &steps, || {
+        build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+    });
+
+    for (index, step) in steps.iter().enumerate() {
+        with_equivalence_context(seed, index, &steps, || {
+            apply_equivalence_step(&home, step);
+            let resumed = home.build_at(&home.options, NOW);
+            let long_lived =
+                build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+            let mut fresh_options = home.options.clone();
+            fresh_options.cache = home.root.join(format!("fresh-{index}.json"));
+            let fresh = home.build_at(&fresh_options, NOW);
+
+            assert_equivalent(&resumed, &fresh, NOW);
+            assert_equivalent(&long_lived, &fresh, NOW);
+
+            let unchanged =
+                build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+            assert_equivalent(&long_lived, &unchanged, NOW);
+        });
+    }
+}
+
+#[test]
+fn append_resumed_build_matches_fresh_build_for_seeded_sequences() {
+    for seed in 0..64 {
+        replay(seed);
+    }
+}
+
+#[test]
+#[ignore = "extended seeded append-resume equivalence run"]
+fn append_resumed_build_matches_fresh_build_for_1000_seeds() {
+    for seed in 0..1000 {
+        replay(seed);
+    }
+}
+
+#[test]
+#[ignore = "set SEMON_EQUIV_SEED=<n> to replay one generated case"]
+fn replay_equivalence_seed_from_env() {
+    let seed = std::env::var("SEMON_EQUIV_SEED")
+        .expect("set SEMON_EQUIV_SEED to the seed to replay")
+        .parse()
+        .expect("SEMON_EQUIV_SEED must be an unsigned integer");
+    replay(seed);
+}
+
+fn mask_clock_fields(mut value: Value) -> Value {
+    let object = value.as_object_mut().unwrap();
+    object.remove("now");
+    if let Some(sessions) = object.get_mut("sessions").and_then(Value::as_object_mut) {
+        for session in sessions.values_mut() {
+            if let Some(activity) = session.get_mut("activity").and_then(Value::as_array_mut)
+                && activity.len() == 4
+            {
+                activity[2] = Value::Null;
+            }
+        }
+    }
+    value
+}
+
+#[test]
+fn unchanged_resumed_builds_only_change_clock_dependent_json_fields() {
+    let home = Home::new();
+    home.top(
+        "clock",
+        &[
+            human("clock", ts(23, 58), "start"),
+            assistant(
+                "clock",
+                ts(23, 59),
+                vec![tool(
+                    "clock-pending",
+                    "Bash",
+                    json!({"command":"printf clock"}),
+                )],
+            ),
+        ],
+    );
+    home.live(42, "clock", "busy", json!({}));
+
+    let mut options = home.options.clone();
+    options.all = false;
+    options.since = Duration::from_secs(30 * 24 * 60 * 60);
+    let first = home.build_at(&options, NOW);
+    let same_now = home.build_at(&options, NOW);
+    assert_eq!(first.json(NOW), same_now.json(NOW));
+    assert_eq!(format!("{:?}", first.tx), format!("{:?}", same_now.tx));
+    assert_eq!(
+        format!("{:?}", first.facts),
+        format!("{:?}", same_now.facts)
+    );
+    assert_eq!(
+        format!("{:?}", first.activity),
+        format!("{:?}", same_now.activity)
+    );
+
+    let one_minute_later = home.build_at(&options, NOW + 60_000);
+    assert_eq!(
+        format!("{:?}", first.tx),
+        format!("{:?}", one_minute_later.tx)
+    );
+    assert_eq!(
+        format!("{:?}", first.facts),
+        format!("{:?}", one_minute_later.facts)
+    );
+    // Analytics `activity` is windowed by `now - KEEP_MS`: rows and their
+    // busy, turns, cost_by_day, waits and answered values can cross that
+    // cutoff. No fixture event crosses it in this one-minute interval.
+    assert_eq!(
+        format!("{:?}", first.activity),
+        format!("{:?}", one_minute_later.activity)
+    );
+
+    let first_value: Value = serde_json::from_str(&first.json(NOW)).unwrap();
+    let later_value: Value = serde_json::from_str(&one_minute_later.json(NOW + 60_000)).unwrap();
+    assert!(
+        first_value["sessions"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|session| session["activity"].as_array().is_some())
+    );
+
+    // `Built::json` varies top-level `now` and `sessions.*.activity[2]` (running-tool age).
+    // The `describe` fallback is unused because these records have timestamps. The post-pass
+    // cutoff can trim sessions, handoffs, turns and busy intervals; this fixture's timestamps
+    // are after both 30-day cutoffs. Analytics is held in `Built::activity`, outside the JSON.
+    assert_ne!(first_value, later_value);
+    assert_eq!(
+        mask_clock_fields(first_value),
+        mask_clock_fields(later_value)
+    );
+}
+
+#[test]
+fn resumed_process_start_invalidates_cached_background_liveness() {
+    let home = Home::new();
+    home.top(
+        "root",
+        &[
+            human("root", ts(1, 0), "Start a worker"),
+            assistant(
+                "root",
+                ts(1, 1),
+                vec![tool(
+                    "shell",
+                    "Bash",
+                    json!({"command":"sleep 60","run_in_background":true}),
+                )],
+            ),
+            result(
+                "root",
+                ts(1, 1),
+                "shell",
+                "Running in background",
+                false,
+                json!({}),
+            ),
+        ],
+    );
+    home.live(30, "root", "busy", json!({"startedAt":at(1, 0)}));
+    let mut cache = EventCache::open(&home.options.cache);
+    let mut dirty = false;
+    let mut texts = Texts::default();
+    let before = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+    let live = |built: &Built| {
+        built.tx["root"]
+            .slots
+            .iter()
+            .find_map(|slot| match &slot.kind {
+                SlotKind::Tool { bg: Some(bg), .. } => Some(bg.live),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert!(live(&before));
+    home.live(30, "root", "busy", json!({"startedAt":at(1, 2)}));
+    let after = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
+    assert!(!live(&after));
+    assert!(!Arc::ptr_eq(&before.tx["root"], &after.tx["root"]));
+    assert_equivalent(&after, &home.build(), NOW);
 }

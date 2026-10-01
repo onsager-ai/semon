@@ -95,6 +95,7 @@ export function gaps({ model, tx }) {
       if (f === "secs" && k === "think") continue;
       if (e[f] !== undefined) x[f] = e[f];
     }
+    if (e.k === "signal") x.signal = e.signal;
     if (e.k === "h") x.id = ids.get(e.id) ?? e.id;
     if (e.ret) x.text = "Returned to " + (model.sessions[e.ret.to]?.name ?? e.ret.to) + (e.ret.failed ? " · failed" : "") + " · " + new Date(e.ret.at).toISOString().slice(11, 16);
     return J(x);

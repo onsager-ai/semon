@@ -2,25 +2,24 @@
 <title>Semon</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
 /* ==== Visual system (docs/design/overhaul.md) ==================================================================
    Colour: ink for content, muted for chrome text, faint only for rules and icons (never text). One accent, for links
    and controls. State colours only where state is shown: work (a dot), wait and err (a dot and their words). Harness
    tints appear in Analytics charts only; everywhere else a harness is named in plain text. No coloured borders.
-   Type: 12 caption, 13 secondary, 14 UI (15 on phones), 16 reading serif, 16/17 title, 22 figures.
+   Type: 12 caption, 13 secondary, 14 UI (15 on phones), 16 reading (the sans), 16/17 title, 22 figures.
    Space: 4 8 12 16 24 32. Radius: 6 10 14. Tap: 36 desktop, 44 phone. */
 :root {
   --ground: #ffffff; --side: #f7f7f5; --sunken: #f1f2ef; --raised: #ffffff; --sk: #eceeea;
   --ink: #191d1b; --ink-2: #3d4440; --muted: #5d6561; --faint: #8a918d; --line: #e5e7e3; --line-2: #d3d7d2;
-  --accent: #3b4dbf; --accent-soft: #eceefb;
+  --accent: var(--ink); --accent-soft: var(--sunken);
   --work: #1d6db0; --wait: #8f5700; --wait-dot: #d08f1a; --wait-soft: #fbf1dc; --err: #b53232; --err-soft: #fbeaea; --done: #8a918d;
   --h-claude: #c0643f; --h-codex: #2b8070;
   --diff-add: #e3f3e8; --diff-del: #fbe8e6;
   --hover: color-mix(in srgb, var(--ink) 5%, transparent);
   --shadow: 0 12px 32px color-mix(in srgb, #000 14%, transparent);
   --sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --serif: "Source Serif 4", "Iowan Old Style", Georgia, serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --fs-cap: 12px; --fs-sm: 13px; --fs-ui: 14px; --fs-read: 16px; --fs-title: 16px; --fs-fig: 22px;
   --lh-ui: 20px; --lh-cap: 18px;
@@ -33,7 +32,7 @@
   :root:not([data-theme="light"]) {
     --ground: #141817; --side: #181c1b; --sunken: #222725; --raised: #1b201e; --sk: #252b28;
     --ink: #e6e9e7; --ink-2: #c5cbc7; --muted: #9ba39f; --faint: #6f7773; --line: #2a302d; --line-2: #3d4541;
-    --accent: #98a4f3; --accent-soft: #252a45;
+    --accent: var(--ink); --accent-soft: var(--sunken);
     --work: #66b0ef; --wait: #e4a53f; --wait-dot: #e4a53f; --wait-soft: #33280f; --err: #f27c77; --err-soft: #3a1f1d; --done: #7f8783;
     --h-claude: #de8a63; --h-codex: #4fb5a0;
     --diff-add: #173022; --diff-del: #381d1b;
@@ -45,7 +44,7 @@
 :root[data-theme="dark"] {
   --ground: #141817; --side: #181c1b; --sunken: #222725; --raised: #1b201e; --sk: #252b28;
   --ink: #e6e9e7; --ink-2: #c5cbc7; --muted: #9ba39f; --faint: #6f7773; --line: #2a302d; --line-2: #3d4541;
-  --accent: #98a4f3; --accent-soft: #252a45;
+  --accent: var(--ink); --accent-soft: var(--sunken);
   --work: #66b0ef; --wait: #e4a53f; --wait-dot: #e4a53f; --wait-soft: #33280f; --err: #f27c77; --err-soft: #3a1f1d; --done: #7f8783;
   --h-claude: #de8a63; --h-codex: #4fb5a0;
   --diff-add: #173022; --diff-del: #381d1b;
@@ -174,7 +173,8 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .meta-line .lab.state { color: var(--ink-2); }
 .meta-line .lab.state.wait { color: var(--wait); } .meta-line .lab.state.err { color: var(--err); }
 .meta-line .lab[hidden] { display: none; }
-.meta-line .meta-effort { white-space: nowrap; }
+.meta-line .meta-effort { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.meta-line .meta-effort .meta-sep { color: var(--faint); }
 /* A label that leads somewhere looks like the others. Its hit area is padded to the tap size inside the line, whose own box grows by the same amount (the margins cancel it), and only the buttons take clicks. */
 .topbar .l1-state { display: none; }
 .menu-item .dot { margin: 0 4px; }
@@ -232,6 +232,9 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .notice .btn { grid-row: 1 / 3; grid-column: 3; align-self: center; }
 .divider { display: flex; align-items: center; gap: 10px; font-size: var(--fs-cap); color: var(--muted); }
 .divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); min-width: 16px; }
+.divider .dv-text { display: flex; flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+.divider .dv-lead { flex: none; }
+.divider .dv-machine { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- Rows in lists: two lines, the name first, the whole row is the link ------------------------------------- */
 .nrow { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; column-gap: 12px; row-gap: 2px; align-items: center; width: 100%; min-width: 0; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 11px 8px; margin: 0; text-align: left; border-radius: 0; }
@@ -258,7 +261,7 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .ib .ln { min-width: 0; font-size: var(--fs-sm); line-height: 20px; color: var(--muted); }
 .ib .ln .who { color: var(--ink); font-weight: 600; }
 .ib .tm { font-size: var(--fs-cap); line-height: 20px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.ib .q { grid-column: 2 / 4; font: var(--fs-read)/1.45 var(--serif); color: var(--ink); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.ib .q { grid-column: 2 / 4; font: var(--fs-read)/1.45 var(--sans); color: var(--ink); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .ib.quiet .q { color: var(--ink-2); font-size: 15px; -webkit-line-clamp: 2; }
 .ib .ctx { grid-column: 2 / 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-cap); line-height: var(--lh-cap); color: var(--muted); }
 .ib .ans { grid-column: 2 / 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); color: var(--ink-2); }
@@ -275,6 +278,7 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .tx { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
 .tx > * { min-width: 0; }
 .turn-h { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: var(--fs-sm); line-height: 20px; color: var(--muted); margin-bottom: -6px; }
+.turn-h .hicon { align-self: center; }
 .turn-h .who-link { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .turn-h .tm, .ev-head .tm { margin-left: auto; padding-left: 8px; flex: none; font-size: var(--fs-cap); color: var(--muted); font-variant-numeric: tabular-nums; }
 .msg .body { overflow-wrap: anywhere; }
@@ -287,7 +291,7 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .page.wide .msg.assistant { max-width: none; }
 .page.wide .msg.user, .page.wide .bubble { max-width: 85%; }
 .page.wide .bubble.in { max-width: 92%; }
-.msg.assistant .body { font: var(--fs-read)/1.5 var(--serif); color: var(--ink); }
+.msg.assistant .body { font: var(--fs-read)/1.5 var(--sans); color: var(--ink); }
 .body p { margin: 0 0 8px; } .body > :last-child { margin-bottom: 0; }
 .body code, .cc-brief code, .ev-text code, .ib code { font-size: .86em; background: color-mix(in srgb, var(--ink) 6%, transparent); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }
 .md p { margin: 0 0 8px; } .md ul, .md ol { margin: 0 0 8px; padding-left: 22px; } .md li + li { margin-top: 2px; }
@@ -307,14 +311,18 @@ code, .mono { font-family: var(--mono); font-size: max(.88em, var(--fs-cap)); fo
 .md th { font-weight: 600; background: var(--sunken); }
 .answer ol { margin: 2px 0 0; padding-left: 20px; } .answer.none { color: var(--muted); }
 .harness-note { font-size: var(--fs-cap); color: var(--muted); }
-.thought { display: grid; justify-items: start; }
-.think { display: inline-flex; align-items: center; gap: 4px; min-height: var(--tap); margin: -8px 0; border: 0; background: none; padding: 0; color: var(--muted); font-size: var(--fs-sm); }
+.thought { display: grid; gap: 3px; max-width: 68ch; padding-left: 12px; border-left: 1px solid var(--line-2); color: var(--muted); font-family: var(--sans); }
+.thought.masked { padding-block: 0; }
+.think-label { font-size: var(--fs-cap); font-weight: 600; letter-spacing: .04em; line-height: 1.4; color: var(--muted); }
+.thought.masked .think-label { font-weight: 400; letter-spacing: 0; font-size: var(--fs-sm); }
 .think-pending { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--fs-sm); }
-.think-text { margin: 8px 0 0; padding: 2px 0 2px 14px; border-left: 2px solid var(--line); color: var(--ink-2); font: 15px/1.5 var(--serif); }
+.think-text { min-width: 0; overflow-wrap: anywhere; color: var(--muted); font: calc(var(--fs-sm) + 1px)/1.55 var(--sans); }
+.think-text .mh { color: var(--ink-2); }
+.think-text code { font-size: .88em; background: var(--sunken); padding: 1px 5px; border-radius: 5px; }
 
 /* ---- Session: steps. A run of calls folds into one line; a step opens in place, command first --------------- */
 .tgroup { display: grid; grid-template-columns: minmax(0, 1fr); }
-.tsum, .step > button, .step.live { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: var(--tap); border: 0; background: none; margin: -4px 0; padding: 4px 8px; margin-left: -8px; width: calc(100% + 16px); border-radius: 8px; text-align: left; color: var(--ink-2); font-size: var(--fs-sm); line-height: 20px; }
+.tsum, .step > button { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: var(--tap); border: 0; background: none; margin: -4px 0; padding: 4px 8px; margin-left: -8px; width: calc(100% + 16px); border-radius: 8px; text-align: left; color: var(--ink-2); font-size: var(--fs-sm); line-height: 20px; }
 @media (hover: hover) { .tsum:hover, .step > button:hover { background: var(--hover); } }
 .tsum > svg:first-child, .step > button > svg:first-child { width: 16px; height: 16px; flex: none; color: var(--muted); }
 .tsum .tt { flex: 0 1 auto; min-width: 0; }
@@ -630,6 +638,25 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   .loading { animation-duration: 1ms; }
   .sidebar, .scrim, .chev, .turn { transition: none !important; }
 }
+/* Accepted #200 ink accent, #141 recorded signals, #203 linked card names and #48 run-view backlinks.
+   Coarse targets stay in flow (#58/#190): names and crumbs must not overlap adjacent content. */
+html, #main { overflow-anchor:none; }
+.turn { content-visibility:auto; contain-intrinsic-block-size:auto 180px; }
+.turn.flash, .turn:focus-within { content-visibility:visible; }
+.signal-marker { color:var(--muted); font-size:12px; padding:8px 12px; border-left:2px solid var(--line); margin:4px 0; overflow-wrap:anywhere; }
+.cc-run { justify-self:start; margin-top:5px; }
+.tsum .tl { flex:none; color:var(--work); }
+.step .sa.st { font:inherit; color:var(--ink-2); }
+@media (max-width:760px), (pointer:coarse) {
+  .who-link, .turn-h .who-link, .cc-name, .ev-more, .chip { min-height:44px; min-width:44px; margin:0; }
+  .who-link { padding-block:8px; }
+  .topbar .l1 .crumb { min-height:44px; min-width:44px; margin-block:0; padding-block:8px; }
+  .cc-run { min-height:44px; min-width:44px; }
+  .step > button, .tsum { min-height:44px; min-width:44px; width:100%; margin:0; padding-inline:0; }
+  .turn-end { min-height:44px; margin-bottom:-14px; }
+  .turn-h { min-height:44px; margin-bottom:-12px; }
+  .topbar.session-bar .l1-state { padding:12px; margin:-12px -6px; }
+}
 </style>
 </head><body>
 
@@ -944,7 +971,9 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
       if (isGap(e)) { t = null; return; }
       const h = e.k === "h" ? HID.get(e.id) : null;
       const inc = h ? h.to === sid && /^(ask|relay|spawn)$/.test(h.kind) && !STARTS.has(h.id) : e.k === "u";
-      if (inc || !t) { t = { id: inc && h ? h.id : sid + ":" + i, sid, start: inc ? h : null, u: inc && !h ? e : null, entries: [], out: [], sent: [] }; ts.push(t); TURN.set(t.id, t); if (inc && h) STARTS.set(h.id, t); }
+      // Initial model/approval markers belong to the incoming turn, rather than creating a separate empty turn.
+      if (inc && t && t.entries.every((entry) => entry.k === "signal")) { TURN.delete(t.id); t.id = h ? h.id : sid + ":" + i; t.start = h; t.u = h ? null : e; TURN.set(t.id, t); if (h) STARTS.set(h.id, t); }
+      else if (inc || !t) { t = { id: inc && h ? h.id : sid + ":" + i, sid, start: inc ? h : null, u: inc && !h ? e : null, entries: [], out: [], sent: [] }; ts.push(t); TURN.set(t.id, t); if (inc && h) STARTS.set(h.id, t); }
       t.entries.push(e);
       if (h && !inc && (h.from === sid || h.kind === "move")) { HOLDS.set(h.id, t); t.sent.push(h); if (h.kind !== "move") t.out.push(h); }
     });
@@ -956,6 +985,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   // A masked thought (redacted, encrypted, or an empty summary) has nothing to read, so it isn't drawn at all.
   // 739,682 reads "740k" and 12,422,228 "12.4M"; the exact figure is the cell's tooltip.
   const compactCount = (n) => { if (n < 1e3) return String(n); if (n < 1e4) return +(n / 1e3).toFixed(1) + "k"; const k = Math.round(n / 1e3); return k < 1e3 ? k + "k" : +(n / 1e6).toFixed(1) + "M"; };
+  const thoughtLabel = (secs) => { const n = Number.isFinite(secs) ? Math.round(secs) : 0; return n < 1 ? "Thinking" : "Thinking · " + (n >= 60 ? Math.floor(n / 60) + "m " + (n % 60) + "s" : n + "s"); };
   const isMaskedThought = (e) => isThought(e) && !isPendingThought(e) && !thoughtText(e);
   function entryTimeMs(e) { if (e?.k === "h") return Number.isFinite(HID.get(e.id)?.at) ? HID.get(e.id).at * 60000 : null; return Number.isFinite(e?.atMs) ? e.atMs : null; }
   function thoughtSeconds(entries, i, sid) {
@@ -1135,7 +1165,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const es = TX[s.id] ?? [], failed = es.filter((e) => e.k === "tool" && e.ok === false).length;
     const st = el("span", "lab state " + s.state); st.append(dot(s.state), el("span", null, STATE[s.state])); l2.append(st);
     l2.append(lab(kindText(s), s.kind ? s.kind + " · " + HARNESS[s.harness] : null, 2));
-    const model = lab(shortModel(s.model), "Model: " + s.modelId + (s.effort ? ". Reasoning effort: " + s.effort : ""), 3, "meta-model"); if (s.effort) model.append(el("span", "meta-effort", " · " + s.effort)); l2.append(model);
+    const model = lab(shortModel(s.model), "Model: " + s.modelId + (s.effort ? ". Reasoning effort: " + s.effort : ""), 3, "meta-model"); if (s.effort) { const eff = el("span", "meta-effort"); eff.append(el("span", "meta-sep", "·"), s.effort); model.append(eff); } l2.append(model);
     // Failed steps and runs are the two labels that lead somewhere, so they are the last two the fitter drops.
     const runs = descendantsOf(s.id, sessionChildren());
     if (failed) l2.append(lab(failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ": step through them", 0, "lab-errs", () => { findOpen = true; show = { messages: false, tools: false, thinking: false, failures: true }; render(); }));
@@ -1244,10 +1274,14 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const kids = descendantsOf(s.id, sessionChildren());
     const { d, body, show } = panel(s.name, { cls: "anchored session-menu", label: "Session menu for " + s.name, sub: [STATE[s.state], kindText(s), shortModel(s.model)].join(" · "), onClose: () => anchor?.setAttribute("aria-expanded", "false") });
     const acts = el("div", "menu-list"); acts.setAttribute("role", "menu");
+    const traceTurn = route.v === "trace" ? TURN.get(route.turn) : (() => { const top = $("#topbar").getBoundingClientRect().bottom; const nodes = [...document.querySelectorAll("#page .turn[data-turn]")]; const visible = nodes.find((n) => n.getBoundingClientRect().bottom > top); return TURN.get(visible?.dataset.turn) ?? (TURNS[s.id] ?? []).at(-1); })();
+    if (traceTurn?.out.length) { const b = btn("menu-item menu-trace"); b.setAttribute("role", "menuitem"); b.append(icon(I.trace, "icon"), el("span", null, "Trace this turn")); b.addEventListener("click", () => { d.close(); goTrace(traceTurn.id); }); acts.append(b); }
     const cmd = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + sessionIdOf(s);
     const copy = btn("menu-item"); copy.setAttribute("role", "menuitem"); copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command")); copy.addEventListener("click", () => { navigator.clipboard?.writeText(cmd).then(() => { copy.children[1].textContent = "Copied"; }, () => { copy.children[1].textContent = cmd; }); }); acts.append(copy);
     if (s.harness === "claude") { const a = btn("menu-item"); a.setAttribute("role", "menuitem"); a.append(icon(I.ext, "icon"), el("span", null, "Open in claude.ai")); acts.append(a); }
     if (!phone.matches) { const w = btn("menu-item"); w.setAttribute("role", "menuitemcheckbox"); w.setAttribute("aria-checked", String(wideMode)); w.append(icon(I.wide, "icon"), el("span", null, "Wide transcript"), el("span", "switch")); w.addEventListener("click", () => { setWideMode(!wideMode); w.setAttribute("aria-checked", String(wideMode)); }); acts.append(w); }
+    const signals = Object.values(s.signals ?? {}).reduce((n,x)=>n+x,0);
+    if (signals) { const b = btn("menu-item menu-signals"); b.setAttribute("role", "menuitem"); b.append(el("span", null, signals + " signals"), el("span", "menu-note", "Step through")); acts.append(b); }
     // On a phone the line of labels is not in the bar, so what it held that leads somewhere is reached here.
     if (phone.matches) {
       const failed = (TX[s.id] ?? []).filter((e) => e.k === "tool" && e.ok === false).length;
@@ -1278,6 +1312,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const calls = (TX[s.id] ?? []).filter((e) => e.k === "tool").length, errorCount = (TX[s.id] ?? []).filter((e) => e.k === "tool" && e.ok === false).length;
     const rows = [["Status", STATE[s.state] + " · " + turnsLabel(s)], ...(s.kind ? [["Kind", s.kind]] : []), ["Harness", withHarnessIcon(el("span", null, HARNESS[s.harness]), s.harness, { size: 16 })], ["Model", s.modelId, true], ...(s.effort ? [["Effort", s.effort]] : []), ["Machine", MACHINE[s.machine] + (hostOf(s) !== MACHINE[s.machine] ? " · " + hostOf(s) : "") + (s.movedFrom ? " (moved from " + MACHINE[s.movedFrom] + ")" : "")], ["Directory", dirOf(s), true], [s.worktree ? "Worktree" : "Branch", branchOf(s), true], ["Tool calls", String(calls)], ...(errorCount ? [["Errors", String(errorCount)]] : []), ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Process id", pidOf(s), true], ["Session id", sessionIdOf(s), true]];
     for (const [k, v, mono] of rows) { if (v == null || v === "") continue; dl.append(el("dt", null, k), (() => { const d = el("dd", mono ? "mono" : null, v instanceof Node ? null : v); if (v instanceof Node) d.append(v); return d; })()); }
+    for (const [kind,n] of Object.entries(s.signals ?? {})) dl.append(el("dt", null, "Signals · " + kind), el("dd", null, String(n)));
     det.append(dl); body.append(det, costSection(s, kids, d), el("p", "third-party", TRADEMARK_NOTICE));
     if (anchor) anchor.setAttribute("aria-expanded", "true");
     show(); if (scrollTo) body.querySelector(scrollTo)?.scrollIntoView({ block: "nearest" }); return d;
@@ -1421,7 +1456,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const kindOf = (id) => SESS[id]?.kind === "Subagent" ? "subagent" : SESS[id]?.kind ?? "";
     if (h.kind === "ask") return [I.ask, [W("you"), el("span", "verb", " asked "), to()]];
     if (h.kind === "spawn") return viewer === h.to ? [I.in, [el("span", "verb", "Brief from "), from()]] : [I.out, [from(), el("span", "verb", " handed off to " + kindOf(h.to) + " "), to()]];
-    if (h.kind === "relay") return viewer === h.to ? [I.in, [el("span", "verb", "Relay from "), from()]] : [I.relay, [from(), el("span", "verb", " relayed to "), to()]];
+    if (h.kind === "relay") return viewer === h.to ? [I.in, [el("span", "verb", "Relay from "), from()]] : [I.out, [from(), el("span", "verb", " relayed to "), to()]];
     if (h.kind === "move") { const mb = links ? btn("who-link", MACHINE[h.fromMachine], "Open " + MACHINE[h.fromMachine]) : el("span", "who", MACHINE[h.fromMachine]); if (links) mb.addEventListener("click", (e) => { e.stopPropagation(); go({ v: "machine", id: h.fromMachine }); }); return [I.move, [el("span", "verb", "Semon moved "), el("span", "who", nameOf(h.to)), el("span", "verb", " from "), mb, el("span", "verb", " to " + MACHINE[h.toMachine])]]; }
     const what = { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h.ask];
     const answered = h.status === "done" && (h.ask === "question" || h.ask === "decision");
@@ -1557,11 +1592,13 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
   }
 
   // ---- Session page --------------------------------------------------------------------------------------------------
+  // "Started 21:57 on <machine>" stays on one line: a long machine name ellipsises, and its tip (only while it is cut off) has the whole name.
+  const startedDivider = (sid) => { const d = el("div", "divider started"), name = MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine], line = el("span", "dv-text"), m = el("span", "dv-machine", name); m.dataset.tip = name; m.dataset.tipClipped = ""; line.append(el("span", "dv-lead", "Started " + clock(SESS[sid].start) + " on\u00a0"), m); d.append(line); return d; };
   function renderSession(page, sid) {
     errorNotice(page);
     if (!SESS[sid]) { page.append(emptyState("This session isn't here", "It isn't in the logs on this machine. It may have ended before the scan window, or run on a machine that isn't sending its logs.", (() => { const b = btn("btn", "All sessions"); b.addEventListener("click", () => go({ v: "sessions" })); return b; })())); return; }
-    page.append(transcript(sid));
-    page.append(jumpWrap);
+    // The jump button sits in the transcript's own grid, so its row adds no page gap when it appears.
+    const t = transcript(sid); t.append(jumpWrap); page.append(t);
   }
 
   // What a tool call did: an icon and verb for its step row, and a phrase and nouns for a group summary.
@@ -1612,10 +1649,10 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const entries = TX[sid] ?? [], box = el("div", "turns"); let tx = box;
     const q = find.trim().toLowerCase(), hit = (s) => !q || String(s).toLowerCase().includes(q);
     const filtering = !!q || show.failures || !show.messages || !show.tools || !show.thinking;
-    if (!filtering) box.append(el("div", "divider", "Started " + clock(SESS[sid].start) + " on " + MACHINE[SESS[sid].movedFrom ?? SESS[sid].machine]));
+    if (!filtering) box.append(startedDivider(sid));
     // Adjacent tool calls fold into one summary line, expandable to the steps. A lone call stays a single line; while
     // finding or filtering, matches show directly.
-    let run = [];
+    let run = []; const maskedIn = new WeakSet();
     const flush = () => {
       if (!run.length) return;
       const steps = el("div", "steps"); run.forEach((r) => steps.append(r.node));
@@ -1626,6 +1663,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
       const g = el("div", "tgroup"), b = btn("tsum"); b.setAttribute("aria-expanded", "false");
       b.append(live ? el("span", "spin") : icon(I.stack), el("span", "tt", text));
       if (failed) b.append(el("span", "tf", "· " + failed + " failed"));
+      if (live) b.append(el("span", "tl tick", "· running " + live.secs));
       b.append(icon(I.chev, "chev")); steps.hidden = true;
       b.addEventListener("click", () => { steps.hidden = !steps.hidden; b.setAttribute("aria-expanded", String(!steps.hidden)); });
       g.append(b, steps); tx.append(g); run = [];
@@ -1640,20 +1678,26 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     const openTurn = (t) => { closeTurn(); const blk = el("section", "turn"); blk.dataset.turn = t.id;
       const h = t.start;
       if (t.u || h?.kind === "ask") blk.setAttribute("aria-label", "Your message" + (h ? " at " + clock(h.at) : ""));
-      else if (h) { const hd = el("div", "turn-h"); const [, parts] = sentence(h, sid); hd.append(...parts, el("span", "tm", clock(h.at))); blk.append(hd); }
+      else if (h) { const hd = el("div", "turn-h"); const [, parts] = sentence(h, sid); const sender = SESS[h.from] && harnessIcon(SESS[h.from].harness, { size: 16 }); if (sender) hd.append(sender); hd.append(...parts, el("span", "tm", clock(h.at))); blk.append(hd); }
       tx = el("div", "tx"); blk.append(tx); box.append(blk); cur = { t, blk }; };
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i];
       if (isGap(e)) { closeTurn(); if (!filtering) box.append(el("div", "divider", e.text)); continue; }
       if (firsts.has(e)) openTurn(firsts.get(e));
-      if (isThought(e) && (isMaskedThought(e) || !show.thinking || q || show.failures)) continue;
+      if (isThought(e) && (!show.thinking || q || show.failures)) continue;
+      // Masked thinking is one quiet line per turn, at the first masked thought's place; later ones draw nothing.
+      if (isThought(e) && isMaskedThought(e)) {
+        const scope = cur ?? box;
+        if (!maskedIn.has(scope)) { maskedIn.add(scope); const m = el("div", "thought masked"); m.append(el("div", "think-label", "Thinking hidden by the harness")); tx.append(m); }
+        continue;
+      }
       if (e.k === "tool") {
         if (show.failures ? e.ok !== false || e.live : !show.tools) continue;
         if (!hit(e.name + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
-        if (e.live) { const r = el("div", "step live"); r.append(el("span", "spin"), el("span", "sv", verbNow(e.name)), el("code", "sa", e.arg), el("span", "sd", e.secs)); run.push({ node: r, k: e.name, live: true }); continue; }
+        if (e.live) { const r = el("div", "step live"), b = btn(); b.setAttribute("aria-expanded", "false"); b.append(el("span", "spin"), el("span", "sv", verbNow(e.name)), el("code", "sa", e.arg), el("span", "sd", e.secs), icon(I.chev, "chev")); r.append(b); run.push({ node: r, k: e.name, live: true, secs:e.secs }); continue; }
         const box2 = el("div", "step" + (e.ok ? "" : " err")), b = btn(); b.setAttribute("aria-expanded", "false");
-        b.append(icon(I[ic]), el("span", "sv", v), el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "No result" : e.ok ? e.secs : "Failed · " + e.secs), icon(I.chev, "chev"));
+        b.append(icon(I[ic])); if (!e.title) b.append(el("span", "sv", v)); b.append(e.title ? el("span", "sa st", e.title) : el("code", "sa", e.arg), el("span", "sd", e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs), icon(I.chev, "chev"));
         let out = null; b.addEventListener("click", () => { if (!out) { out = stepDetail(e, v, ic); out.hidden = true; box2.append(out); } out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden)); });
         box2.append(b); run.push({ node: box2, k: e.name, err: !e.ok }); continue;
       }
@@ -1663,16 +1707,18 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
       else if (e.k === "a") { if (!show.messages || !hit(e.text)) continue; const m = el("div", "msg assistant"); m.append(markdown(e.text)); tx.append(m); }
       else if (isThought(e)) {
         if (isPendingThought(e)) { const p = el("div", "think-pending"); p.append(el("span", "spin"), el("span", null, "Thinking…")); tx.append(p); continue; }
-        const secs = thoughtSeconds(entries, i, sid), g = el("div", "thought"), b = btn("think"); b.setAttribute("aria-expanded", "false"); b.append(el("span", null, secs == null ? "Thought" : "Thought for " + secs + "s"), icon(I.chev, "chev"));
-        const text = markdown(thoughtText(e), "think-text"); text.hidden = true; b.addEventListener("click", () => { text.hidden = !text.hidden; b.setAttribute("aria-expanded", String(!text.hidden)); }); g.append(b, text); tx.append(g);
+        // Readable thinking sits in the flow, in full and quietly styled, with nothing to open.
+        const secs = thoughtSeconds(entries, i, sid), g = el("div", "thought");
+        g.append(el("div", "think-label", thoughtLabel(secs)), markdown(thoughtText(e), "think-text")); tx.append(g);
       }
       else if (e.k === "harness") { if (!show.messages || q) continue; tx.append(el("div", "harness-note", "Harness text added before the prompt (" + e.label + ")")); }
       else if (e.k === "end") { if (filtering) continue; tx.append(el("div", "divider", e.text)); }
+      else if (e.k === "signal") { const label = signalLabel(e); if (hit(label)) tx.append(el("div", "signal-marker", label)); }
       else if (e.k === "h") {
         const h = HID.get(e.id); if (!h || !hit(h.brief + " " + (h.result ?? ""))) continue;
         if (h.kind === "ask") { if (!show.messages) continue; const m = el("div", "msg user"); m.append(markdown(h.brief)); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
         // A relay or brief that starts a turn is that turn's incoming message, under the header that names its sender.
-        if (cur && cur.t.start === h && e === cur.t.entries[0]) { if (!show.messages) continue; const m = el("div", "bubble in"); m.dataset.h = h.id; m.append(markdown(h.brief)); tx.append(m); continue; }
+        if (cur && cur.t.start === h) { if (!show.messages) continue; const m = el("div", "bubble in"); m.dataset.h = h.id; m.append(markdown(h.brief)); tx.append(m); continue; }
         if (h.kind === "spawn" && h.from === sid && SESS[h.to]) { if (!show.tools) continue; tx.append(childCard(h, SESS[h.to])); continue; }
         if (!show.messages && h.kind !== "move") continue;
         tx.append(eventRow(h, sid));
@@ -1682,17 +1728,25 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
     if (!box.querySelector(CONTENT)) box.append(el("p", "empty", q ? "Nothing matches “" + find.trim() + "”." : "Nothing to show with these filters."));
     sec.append(box); return sec;
   }
+  const signalLabel = (e) => {
+    const s = e.signal ?? {}, tag = s.tag ?? "", kind = s.kind;
+    if (kind === "compact") return "Context compacted" + (s.value != null ? " · " + compactCount(s.value) + " tokens before" : "");
+    if (kind === "interrupt") return "Interrupted by you";
+    if (kind === "denial") return (s.tool ?? "Tool call") + " denied";
+    if (kind === "hook") return "Hook " + (tag.includes("block") ? "blocked" : tag || "ran") + (s.tool ? " " + s.tool : "");
+    const name = {model:"Model", effort:"Effort", approval:"Approval policy", sandbox:"Sandbox", permission:"Permission mode"}[kind] ?? "Signal";
+    return name + (s.previous ? " " + s.previous + " → " : " → ") + tag;
+  };
   // A session this one started: a card that opens it. Its state, what it is, the brief, and what it is doing or returned.
   function childCard(h, c) {
-    const b = btn("child-card"); b.dataset.h = h.id;
-    const calls = (TX[c.id] ?? []).filter((e) => e.k === "tool").length;
-    const head = el("span", "cc-head"); head.append(el("span", "cc-name", c.name), stateLabel(c.state), icon(I.chev, "chev"));
-    b.append(head, el("span", "cc-meta", [kindText(c), shortModel(c.model), dur(c.start, c.state === "work" ? null : c.last), calls + (calls === 1 ? " step" : " steps")].join(" · ")));
+    const b = el("div", "child-card"); b.dataset.h = h.id;
+    const calls = c.calls ?? (TX[c.id] ?? []).filter((e) => e.k === "tool").length;
+    const head = el("span", "cc-head"), name = btn("cc-name who-link", c.name, "Open " + c.name); name.addEventListener("click", () => goSession(c.id, STARTS.get(h.id)?.id)); head.append(name, stateLabel(c.state), icon(I.chev, "chev"));
+    b.append(head, withHarnessIcon(el("span", "cc-meta", [kindText(c), shortModel(c.model), dur(c.start, c.state === "work" ? null : c.last), calls + (calls === 1 ? " step" : " steps"), costText(costForSession(c.id, true))].join(" · ")), c.harness, { size: 14 }));
     b.append(rich("span", "cc-brief", preview(h.brief)));
     if (h.result) { const r = el("span", "cc-result" + (h.status === "err" ? " err" : "")); r.append(el("span", "rl", h.status === "err" ? "Result: " : "Returned: ")); inline(r, h.result); b.append(r); }
     else if (c.state === "work") { const last = (TX[c.id] ?? []).filter((e) => e.k === "tool").at(-1); if (last) { const n = el("span", "cc-now"); n.append(el("span", "spin"), el("span", null, (last.live ? verbNow(last.name) : verb(last.name)[1]))); n.append(el("code", null, last.arg)); b.append(n); } }
-    b.setAttribute("aria-label", "Open " + c.name + ": " + kindText(c) + ", " + STATE[c.state]);
-    b.addEventListener("click", () => goSession(c.id));
+    const holder = HOLDS.get(h.id); if (holder) { const run = btn("link cc-run", "Run view", "Open run view for " + nameOf(h.from)); run.addEventListener("click", () => goTrace(holder.id)); b.append(run); }
     return b;
   }
   // A relay, a message to you, or a machine move: who, when, the text, and what came back.

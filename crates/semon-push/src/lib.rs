@@ -385,31 +385,78 @@ impl Client {
     /// leaves behind finishes there, holding the state lock (see
     /// [`StateLock`]), and its answer is dropped.
     fn post(&self, route: &str, body: String) -> std::result::Result<(u16, String), Failure> {
-        let request = self
-            .http
-            .post(format!("{}/v1/mirror/{route}", self.url))
-            .bearer_auth(self.token.expose())
-            .header("content-type", "application/json")
-            .body(body);
-        let lock = self.lock.clone();
-        let answer = self.stop.run(route, move || {
-            let _lock = lock;
-            request.send().map(|response| {
-                let status = response.status().as_u16();
-                (status, response.text().unwrap_or_default())
-            })
-        });
-        let (status, text) = match answer {
-            Ok(Some(Ok(answer))) => answer,
-            Ok(Some(Err(error))) => return Err(Failure::Remote(format!("{route}: {error}"))),
-            Ok(None) => return Err(Failure::Stopped),
-            Err(error) => return Err(Failure::Remote(error)),
-        };
-        match status {
-            401 | 403 => Err(Failure::Remote(format!(
-                "{route}: the receiver refused the token ({status})"
-            ))),
-            _ => Ok((status, text)),
+        self.post_wait(route, body, |delay| self.stop.sleep(delay))
+    }
+
+    fn post_wait(
+        &self,
+        route: &str,
+        body: String,
+        mut wait: impl FnMut(Duration) -> bool,
+    ) -> std::result::Result<(u16, String), Failure> {
+        let mut retries = 0;
+        loop {
+            let request = self
+                .http
+                .post(format!("{}/v1/mirror/{route}", self.url))
+                .bearer_auth(self.token.expose())
+                .header("content-type", "application/json")
+                .body(body.clone());
+            let lock = self.lock.clone();
+            let answer = self.stop.run(route, move || {
+                let _lock = lock;
+                request.send().map(|response| {
+                    let status = response.status().as_u16();
+                    let retry = response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| {
+                            value.parse::<u64>().ok().or_else(|| {
+                                httpdate::parse_http_date(value).ok().map(|date| {
+                                    date.duration_since(std::time::SystemTime::now())
+                                        .unwrap_or_default()
+                                        .as_secs()
+                                })
+                            })
+                        })
+                        .unwrap_or(2);
+                    (status, response.text().unwrap_or_default(), retry)
+                })
+            });
+            let (status, text, retry) = match answer {
+                Ok(Some(Ok(answer))) => answer,
+                Ok(Some(Err(error))) => return Err(Failure::Remote(format!("{route}: {error}"))),
+                Ok(None) => return Err(Failure::Stopped),
+                Err(error) => return Err(Failure::Remote(error)),
+            };
+            if status == 429 && error_kind(&text).as_deref() == Some("rate_limited") {
+                retries += 1;
+                if retries == 2 {
+                    eprintln!("semon push: rate limited; retrying after {retry} seconds");
+                }
+                if wait(Duration::from_secs(retry)) {
+                    return Err(Failure::Stopped);
+                }
+                continue;
+            }
+            return match status {
+                401 | 403 => Err(Failure::Remote(format!(
+                    "{route}: the receiver refused the token ({status})"
+                ))),
+                413 if error_kind(&text).as_deref() == Some("storage_limit") => {
+                    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                    Err(Failure::Remote(format!(
+                        "storage is full (used {} of {}); nothing more is sent until space is freed; nothing already sent was deleted",
+                        value["used"], value["limit"]
+                    )))
+                }
+                423 if error_kind(&text).as_deref() == Some("paused") => Err(Failure::Remote(
+                    "pushes are paused by the owner; they resume when the owner resumes them"
+                        .into(),
+                )),
+                _ => Ok((status, text)),
+            };
         }
     }
 
@@ -705,6 +752,7 @@ impl Client {
 }
 
 /// Why a file wasn't brought up to date.
+#[derive(Debug)]
 enum Failure {
     /// Reading the local file failed: try again next pass.
     Local(String),
@@ -918,7 +966,16 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
     let mut client = Client::new(options)?
         .with_stop(stop.clone())
         .with_lock(hold.share());
-    let report = client.pass(&options.sessions)?;
+    let initial_pass = client.pass(&options.sessions);
+    if let Err(error) = &initial_pass
+        && error.contains("refused the token")
+    {
+        return Err(error.clone());
+    }
+    if !watch && let Err(error) = &initial_pass {
+        return Err(error.clone());
+    }
+    let report = initial_pass.as_ref().copied().unwrap_or_default();
     if stop.is_stopped() {
         return Ok(());
     }
@@ -949,22 +1006,35 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
     }
 
     let facts = FactsWorker::start(&options.sessions, hold.share())?;
-    let Some(initial) = facts.collect(stop)? else {
-        return Ok(());
-    };
-    match client.post_facts(&initial?) {
-        Err(Failure::Stopped) => return Ok(()),
-        result => result.map_err(Failure::message)?,
-    }
-    let mut last_facts = Instant::now();
+    let mut backoff = WatchBackoff::default();
+    let mut pass = initial_pass;
+    let mut last_facts = Instant::now() - FACTS_EVERY;
     loop {
-        if stop.sleep(PASS_EVERY) {
+        if let Err(error) = &pass
+            && error.contains("refused the token")
+        {
+            return Err(error.clone());
+        }
+        if stop.is_stopped() {
             return Ok(());
         }
-        if let Some(end) = after_pass(client.pass(&options.sessions), stop) {
+        // An idle pass made no request, so it cannot prove the receiver
+        // resumed accepting appends. Keep the restriction until a real ack.
+        let idle = matches!(&pass, Ok(report) if report.files == 0);
+        let messages = if idle && backoff.state.is_some() {
+            Vec::new()
+        } else {
+            backoff.observe(pass.as_ref().err().map(String::as_str))
+        };
+        for message in messages {
+            eprintln!("semon push: {message}");
+        }
+        if backoff.state.is_none()
+            && let Some(end) = after_pass(pass, stop)
+        {
             return end;
         }
-        if last_facts.elapsed() >= FACTS_EVERY {
+        if backoff.state != Some("paused") && last_facts.elapsed() >= FACTS_EVERY {
             match facts.collect(stop)? {
                 None => return Ok(()),
                 Some(Ok(current)) => match client.post_facts(&current) {
@@ -975,12 +1045,109 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
                         if error.contains("refused the token") {
                             return Err(error);
                         }
-                        eprintln!("semon push: {error}");
+                        if !(backoff.state == Some("storage full")
+                            && error.starts_with("storage is full"))
+                        {
+                            for message in backoff.observe(Some(&error)) {
+                                eprintln!("semon push: {message}");
+                            }
+                        }
+                        if backoff.state.is_none() {
+                            eprintln!("semon push: {error}");
+                        }
                     }
                 },
                 Some(Err(error)) => eprintln!("semon push: {error}"),
             }
             last_facts = Instant::now();
+        }
+        let deadline = Instant::now() + backoff.delay();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if stop.sleep(remaining.min(FACTS_EVERY)) {
+                return Ok(());
+            }
+            if backoff.state == Some("storage full") && last_facts.elapsed() >= FACTS_EVERY {
+                match facts.collect(stop)? {
+                    None => return Ok(()),
+                    Some(Ok(current)) => match client.post_facts(&current) {
+                        Ok(()) => {}
+                        Err(Failure::Stopped) => return Ok(()),
+                        Err(failure) => {
+                            let error = failure.message();
+                            if error.contains("refused the token") {
+                                return Err(error);
+                            }
+                            if error.starts_with("pushes are paused") {
+                                for message in backoff.observe(Some(&error)) {
+                                    eprintln!("semon push: {message}");
+                                }
+                            }
+                        }
+                    },
+                    Some(Err(error)) => eprintln!("semon push: {error}"),
+                }
+                last_facts = Instant::now();
+            }
+        }
+        pass = client.pass(&options.sessions);
+    }
+}
+
+fn error_kind(text: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()?
+        .get("error")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+#[derive(Default)]
+struct WatchBackoff {
+    state: Option<&'static str>,
+    delay: Duration,
+}
+impl WatchBackoff {
+    fn observe(&mut self, error: Option<&str>) -> Vec<String> {
+        let next = error.and_then(|error| {
+            if error.starts_with("storage is full") {
+                Some("storage full")
+            } else if error.starts_with("pushes are paused") {
+                Some("paused")
+            } else {
+                self.state
+            }
+        });
+        let mut messages = Vec::new();
+        if next != self.state {
+            if let Some(previous) = self.state {
+                messages.push(
+                    if previous == "paused" {
+                        "resumed"
+                    } else {
+                        "sending again"
+                    }
+                    .into(),
+                );
+            }
+            if next.is_some() {
+                messages.push(error.unwrap().into());
+            }
+            self.delay = Duration::from_secs(60);
+        } else if next.is_some() {
+            self.delay = (self.delay * 2).min(Duration::from_secs(600));
+        }
+        self.state = next;
+        messages
+    }
+    fn delay(&self) -> Duration {
+        if self.state.is_some() {
+            self.delay
+        } else {
+            PASS_EVERY
         }
     }
 }
@@ -1193,6 +1360,147 @@ mod tests {
             server,
             appends,
         }
+    }
+
+    #[test]
+    fn limits_have_clear_messages_and_rate_limit_retries_the_same_body() {
+        let fixture = Fixture::new();
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let worker = thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for (status, body) in [
+                (413, r#"{"error":"storage_limit","used":12,"limit":20}"#),
+                (423, r#"{"error":"paused"}"#),
+                (429, r#"{"error":"rate_limited"}"#),
+                (429, r#"{"error":"rate_limited"}"#),
+                (200, "{}"),
+                (413, r#"{"error":"body_too_large"}"#),
+            ] {
+                let mut request = server.recv().unwrap();
+                let mut input = String::new();
+                request.as_reader().read_to_string(&mut input).unwrap();
+                bodies.push(input);
+                request
+                    .respond(
+                        Response::from_string(body)
+                            .with_status_code(status)
+                            .with_header(Header::from_bytes("Retry-After", "17").unwrap()),
+                    )
+                    .unwrap();
+            }
+            bodies
+        });
+        let client = Client::new(&fixture.push_options(&url)).unwrap();
+        let mut waits = Vec::new();
+        let mut request = || {
+            client.post_wait("append", "same request".into(), |duration| {
+                waits.push(duration);
+                false
+            })
+        };
+        assert!(
+            request()
+                .err()
+                .unwrap()
+                .message()
+                .contains("storage is full (used 12 of 20)")
+        );
+        assert!(
+            request()
+                .err()
+                .unwrap()
+                .message()
+                .contains("paused by the owner")
+        );
+        assert_eq!(request().unwrap().0, 200);
+        assert_eq!(
+            request().unwrap().0,
+            413,
+            "oversized body is distinct from storage full"
+        );
+        assert_eq!(waits, vec![Duration::from_secs(17); 2]);
+        assert!(
+            worker
+                .join()
+                .unwrap()
+                .iter()
+                .all(|body| body == "same request")
+        );
+    }
+
+    #[test]
+    fn watch_does_not_exit_on_the_first_paused_or_storage_full_pass() {
+        for (status, body) in [
+            (423, r#"{"error":"paused"}"#),
+            (413, r#"{"error":"storage_limit","used":12,"limit":20}"#),
+        ] {
+            let fixture = Fixture::new();
+            fixture.write("claude/projects/-work/transcript.jsonl", b"hello\n");
+            let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+            let url = format!("http://{}", server.server_addr());
+            let options = fixture.push_options(&url);
+            let stop = Stop::new();
+            let stopped = stop.clone();
+            let (ended, result) = mpsc::channel();
+            let push = thread::spawn(move || {
+                ended.send(push_until(&options, true, &stopped)).unwrap();
+            });
+            let request = server
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.url(), "/v1/mirror/append");
+            request
+                .respond(Response::from_string(body).with_status_code(status))
+                .unwrap();
+            if status == 413 {
+                let facts = server
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    facts.url(),
+                    "/v1/mirror/facts",
+                    "storage full still sends its heartbeat"
+                );
+                facts.respond(Response::from_string("{}")).unwrap();
+            } else {
+                assert!(
+                    server
+                        .recv_timeout(Duration::from_millis(100))
+                        .unwrap()
+                        .is_none(),
+                    "paused skips facts"
+                );
+            }
+            assert!(matches!(
+                result.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            stop.stop();
+            assert!(result.recv_timeout(Duration::from_secs(2)).unwrap().is_ok());
+            push.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn watch_limit_backoff_logs_only_transitions_and_recovers() {
+        let mut state = WatchBackoff::default();
+        let full = "storage is full (used 12 of 20)";
+        assert_eq!(state.observe(Some(full)), vec![full]);
+        assert_eq!(state.delay(), Duration::from_secs(60));
+        for expected in [120, 240, 480, 600, 600] {
+            assert!(state.observe(Some(full)).is_empty());
+            assert_eq!(state.delay(), Duration::from_secs(expected));
+        }
+        assert_eq!(state.observe(None), vec!["sending again"]);
+        assert_eq!(state.delay(), PASS_EVERY);
+        let paused = "pushes are paused by the owner";
+        assert_eq!(state.observe(Some(paused)), vec![paused]);
+        assert!(state.observe(Some(paused)).is_empty());
+        assert_eq!(state.observe(None), vec!["resumed"]);
+        assert!(state.observe(None).is_empty());
     }
 
     fn decode(append: &Append) -> Vec<u8> {

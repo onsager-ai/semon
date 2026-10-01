@@ -272,7 +272,13 @@ impl ReceivedMachines {
             }
             .offline(modified_ms(&root)),
         };
-        if let Err(error) = crate::write_facts(&self.state.join(name).join("facts.json"), &facts) {
+        let copy = self.state.join(name).join("facts.json");
+        // A heartbeat refreshes the receiver's liveness stamp, but identical
+        // normalized facts must not rewrite this copy and rebuild every model.
+        if read_facts(&copy).is_ok_and(|previous| previous == facts) {
+            return;
+        }
+        if let Err(error) = crate::write_facts(&copy, &facts) {
             eprintln!("semon: received machine {name}: can't keep its facts: {error}");
         }
     }

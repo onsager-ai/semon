@@ -286,6 +286,8 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         file.flush()?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {

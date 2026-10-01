@@ -4,7 +4,7 @@
 //
 //   node pushed-parity.mjs --home DIR --received DIR --scratch DIR
 //
-//   --home DIR      the fixture machine: HOME, with claude/, codex/, proc/ and .claude.json, read directly.
+//   --home DIR      the fixture machine, with claude/, codex/, proc/ and .claude.json, read directly.
 //   --received DIR  the receiver's --dir. Read with `--machines DIR --no-local`, from an empty home of the reader's own.
 //   --scratch DIR   the reader's own state: its empty home, its caches. Written to.
 //
@@ -31,7 +31,7 @@ const arg = (name) => {
   if (i < 0 || !process.argv[i + 1]) { console.error("pushed-parity: --" + name + " is required"); process.exit(2); }
   return path.resolve(process.argv[i + 1]);
 };
-const home = arg("home"), received = arg("received"), scratch = arg("scratch");
+const fixtureRoot = arg("home"), received = arg("received"), scratch = arg("scratch");
 const bin = path.resolve(process.env.SEMON_BIN ?? "../../target/debug/semon");
 const out = path.resolve(process.env.SEMON_UI_OUT ?? "out");
 const DEADLINE_MS = 90_000;
@@ -47,16 +47,16 @@ function model(args, env) {
 
 // The machine as it is: its own homes, its own /proc, read directly.
 const local = () => model(
-  ["--claude-home", home + "/claude", "--codex-home", home + "/codex", "--proc-root", home + "/proc", "--cache", scratch + "/local-index.json"],
-  { HOME: home, XDG_STATE_HOME: scratch + "/local-state" },
+  ["--claude-home", fixtureRoot + "/claude", "--claude-json", fixtureRoot + "/.claude.json", "--codex-home", fixtureRoot + "/codex", "--proc-root", fixtureRoot + "/proc", "--cache", scratch + "/local-index.json"],
+  { XDG_STATE_HOME: scratch + "/local-state" },
 );
 
 // The machine as a receiver holds it: nothing of the reader's own (an empty home), only DIR/machines/.
 fs.mkdirSync(scratch + "/reader/proc", { recursive: true });
 const pushed = () => model(
-  ["--machines", received, "--no-local", "--claude-home", scratch + "/reader/claude", "--codex-home", scratch + "/reader/codex",
+  ["--machines", received, "--no-local", "--claude-home", scratch + "/reader/claude", "--claude-json", scratch + "/reader/.claude.json", "--codex-home", scratch + "/reader/codex",
     "--proc-root", scratch + "/reader/proc", "--cache", scratch + "/reader/index.json"],
-  { HOME: scratch + "/reader", XDG_STATE_HOME: scratch + "/reader/state" },
+  { XDG_STATE_HOME: scratch + "/reader/state" },
 );
 
 function normalise(value, at = []) {

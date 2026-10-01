@@ -15,7 +15,7 @@
 // Screenshots with a tooltip open go to out/tooltip/ for the visual pass.
 import fs from "node:fs";
 import path from "node:path";
-import { ENV, VIEWPORTS, served, goto, data, reporter } from "../lib.mjs";
+import { ENV, VIEWPORTS, served, goto, data, reporter, closePage } from "../lib.mjs";
 
 const OUT = path.join(ENV.out, "tooltip");
 fs.mkdirSync(OUT, { recursive: true });
@@ -154,7 +154,7 @@ async function behaviour(page, tag, r, rec, { first, second, third }) {
 // whole run once the context is gone.
 async function guard(r, name, page, fn) {
   try { await fn(); } catch (e) { r.expect(false, name + ": threw " + String(e?.message ?? e).split("\n")[0]); }
-  finally { await page.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {}); await page.context().close().catch(() => {}); }
+  finally { await closePage(page); }
 }
 
 export default async function tooltipCheck(browser) {
@@ -355,13 +355,14 @@ export default async function tooltipCheck(browser) {
       await goto(page, { v: "session", id: parent.id }, D); await page.waitForTimeout(250);
       // Every poll for changes gets the whole model back under a new version, so the bar and the sidebar are rebuilt each time.
       let polls = 0;
-      await page.route("**/api/model?since=*", async (route) => {
+      await page.route("**/api/model**", async (route) => {
+        if (!new URL(route.request().url()).searchParams.has("since")) return route.fallback();
         const response = await route.fetch({ url: ENV.base + "/api/model" });
         const body = await response.json(); body.version = "tip-live-" + (++polls);
         await route.fulfill({ response, json: body });
       });
       results[tag] = {};
-      for (const [name, selector] of [["a badge in the top bar", "#topbar .meta-line > span.lab[data-tip]"], ["a row's host in the sidebar", "#lanes .srow-meta .host"]]) {
+      for (const [name, selector] of [["a badge in the top bar", "#topbar .meta-line > span.lab[data-tip]"], ["a row's model in the sidebar", "#lanes .session-row-meta .row-model"]]) {
         await away(page); await page.waitForTimeout(450);
         const t = await hover(page, selector, 1500);
         r.expect(t != null, tag + ": " + name + " never showed a tooltip");
@@ -470,7 +471,7 @@ export default async function tooltipCheck(browser) {
       const traces = [];
       for (const s of Object.values(D.SESS)) {
         await goto(page, { v: "session", id: s.id }, D); await page.waitForTimeout(80); await scan("session-" + s.name);
-        if (traces.length < 3) { const t = await page.evaluate(() => document.querySelector(".turn-end .tracebtn")?.closest(".turn")?.dataset.turn ?? null); if (t) traces.push([s.id, t]); }
+        if (traces.length < 3) { const t = await page.evaluate(() => document.querySelector(".turn-end .link")?.closest(".turn")?.dataset.turn ?? null); if (t) traces.push([s.id, t]); }
       }
       for (const [sid, turn] of traces) { await goto(page, { v: "trace", sid, turn }, D); await page.waitForTimeout(100); await scan("trace-" + turn); }
       // The states around a session: the ⋯ menu, and the same menu opened at its runs.

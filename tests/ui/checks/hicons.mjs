@@ -31,7 +31,7 @@ const NOTICE = "Third-party trademarks are the property of their respective owne
 // text beside the mark must read, for the places where that is the harness's own name.
 const PLACES = {
   sidebar: { selector: "#lanes .srow .hicon", alone: true, size: 14 },
-  "sessions-row": { selector: ".page .nrow .for > .hicon", size: 14 },
+  "sessions-row": { selector: ".page .nrow .session-row-meta > .hicon", alone: true, size: 14 },
   "sessions-group": { selector: ".page .sec-h > .hicon", size: 14, text: (h) => NAME[h] },
   "home-working": { selector: ".page .nrow .ag > .hicon", size: 14, text: (h) => NAME[h] },
   "home-inbox": { selector: ".page .ib .ctx > span > .hicon", size: 14, text: (h) => NAME[h] },
@@ -40,7 +40,7 @@ const PLACES = {
   details: { selector: "dialog.session-menu dl.kv dd .hicon", size: 16, text: (h) => NAME[h] },
   trace: { selector: ".page .chip-h > .hicon", size: 14 },
   "turn-header": { selector: ".page .turn-h > .hicon", size: 16 },
-  "child-kind": { selector: ".page .child-kind > .hicon", size: 14 },
+  "child-kind": { selector: ".page .child-card .cc-meta > .hicon", size: 14 },
 };
 
 // Every mark matching `selector` that is drawn (a collapsed sidebar group holds marks that are not), as the page shows it.
@@ -136,7 +136,7 @@ export default async function hiconsCheck(browser) {
     const side = await read(page, PLACES.sidebar.selector);
     const seen = judge("sidebar", side, { need: 3 });
     r.expect(["claude", "codex", "opencode"].every((h) => seen.has(h)), tag + " sidebar: marks for " + [...seen].join(", ") + ", expected claude, codex and opencode");
-    const dots = await page.evaluate(() => ({ rows: document.querySelectorAll("#lanes .srow").length, dots: document.querySelectorAll("#lanes .srow-main > .dot").length, marks: document.querySelectorAll("#lanes .srow-main > .hicon").length, dotFirst: [...document.querySelectorAll("#lanes .srow-main")].every((m) => m.firstElementChild?.classList.contains("dot")) }));
+    const dots = await page.evaluate(() => ({ rows: document.querySelectorAll("#lanes .srow").length, dots: document.querySelectorAll("#lanes .srow-main > .dot").length, marks: document.querySelectorAll("#lanes .session-row-meta > .hicon").length, dotFirst: [...document.querySelectorAll("#lanes .srow-main")].every((m) => m.firstElementChild?.classList.contains("dot")) }));
     rec.dots = dots;
     r.expect(dots.rows > 0 && dots.dots === dots.rows && dots.marks === dots.rows && dots.dotFirst, tag + " sidebar: every row keeps its state dot first and has one mark: " + JSON.stringify(dots));
     // The explicit theme override wins over the browser's scheme, and removing it hands the choice back.
@@ -223,8 +223,8 @@ export default async function hiconsCheck(browser) {
       const marks = await read(page, PLACES["child-kind"].selector);
       if (!marks.length) continue;
       judge("child-kind", marks);
-      const badge = await page.evaluate(() => [...document.querySelectorAll(".page .child-kind")].every((c) => { const b = c.getBoundingClientRect(), t = c.closest(".child-head")?.querySelector(".ln")?.getBoundingClientRect(); return b.height <= 24 && (!t || b.right <= t.left + 0.5); }));
-      r.expect(badge, tag + " child-kind: a kind badge wraps or overlaps its title");
+      const badge = await page.evaluate(() => [...document.querySelectorAll(".page .child-card .cc-meta")].every((m) => { const mk = m.querySelector(":scope > .hicon")?.getBoundingClientRect(), b = m.getBoundingClientRect(); return !!mk && mk.top >= b.top - 2 && mk.bottom <= b.top + 24; }));
+      r.expect(badge, tag + " child-kind: a card's mark is not on the first line of its kind line");
       carded = true; await shot("child-card"); break;
     }
     r.expect(carded, tag + " child-kind: no session that handed work off shows a child card with a mark");

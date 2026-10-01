@@ -59,6 +59,7 @@ impl HomeArgs {
     ) -> Result<bool, String> {
         match argument {
             "--claude-home" => self.options.claude_home = value()?.into(),
+            "--claude-json" => self.options.claude_json = value()?.into(),
             "--codex-home" => self.options.codex_home = value()?.into(),
             "--proc-root" => self.options.proc_root = value()?.into(),
             "--cache" => self.options.cache = value()?.into(),
@@ -113,7 +114,14 @@ enum ReceiveArgs {
     TokenList { dir: PathBuf },
 }
 
+struct RemoteSessionsArgs {
+    endpoint: String,
+    config: PathBuf,
+    tls_ca: Option<PathBuf>,
+}
+
 struct SessionsArgs {
+    remote: Option<RemoteSessionsArgs>,
     options: semon_sessions::Options,
     /// `--machine DIR`, repeated: several machines' homes in one model.
     machines: Vec<PathBuf>,
@@ -168,6 +176,15 @@ struct ForgetArgs {
     session: Option<String>,
     before: Option<String>,
     yes: bool,
+    relay: Option<RelayForgetArgs>,
+}
+
+#[derive(Debug)]
+struct RelayForgetArgs {
+    endpoint: String,
+    state: PathBuf,
+    config: PathBuf,
+    tls_ca: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Command, String> {
@@ -201,16 +218,30 @@ fn parse_sessions_args(
     let mut machines = Vec::new();
     let mut received = None;
     let mut local = true;
+    let mut remote_endpoint = None;
+    let mut remote_config = None;
+    let mut remote_ca = None;
+    let mut local_sources_given = false;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
                 .next()
                 .ok_or_else(|| format!("{argument} requires a value"))
         };
+        if matches!(
+            argument.as_str(),
+            "--claude-home" | "--claude-json" | "--codex-home" | "--proc-root" | "--facts"
+        ) {
+            local_sources_given = true;
+        }
         match argument.as_str() {
+            "--remote" => remote_endpoint = Some(value()?),
+            "--remote-config" => remote_config = Some(PathBuf::from(value()?)),
+            "--remote-ca" | "--tls-ca" => remote_ca = Some(PathBuf::from(value()?)),
             "--machines" => received = Some(PathBuf::from(value()?)),
             "--no-local" => local = false,
             "--claude-home" => options.claude_home = value()?.into(),
+            "--claude-json" => options.claude_json = value()?.into(),
             "--codex-home" => options.codex_home = value()?.into(),
             "--proc-root" => options.proc_root = value()?.into(),
             "--cache" => options.cache = value()?.into(),
@@ -231,6 +262,38 @@ fn parse_sessions_args(
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
+    let remote = if let Some(endpoint) = remote_endpoint {
+        if serve
+            || model_json
+            || !machines.is_empty()
+            || received.is_some()
+            || !local
+            || local_sources_given
+        {
+            return Err("--remote supports the metadata tree (--json/--watch/--all/--since/--session); local machine roots, --serve and --model-json are exclusive".into());
+        }
+        let config = match remote_config {
+            Some(config) => config,
+            None => {
+                let root = env::var_os("XDG_CONFIG_HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+                    .ok_or("--remote-config is required when HOME is unset")?;
+                root.join("semon")
+            }
+        };
+        Some(RemoteSessionsArgs {
+            endpoint,
+            config,
+            tls_ca: remote_ca,
+        })
+    } else {
+        if remote_config.is_some() || remote_ca.is_some() {
+            return Err("--remote-config and --remote-ca require --remote".into());
+        }
+        None
+    };
     if serve && (json || watch) {
         return Err("--serve cannot be combined with --json or --watch".into());
     }
@@ -259,6 +322,7 @@ fn parse_sessions_args(
         return Err("--no-local requires --machines".into());
     }
     Ok(SessionsArgs {
+        remote,
         options,
         machines,
         received,
@@ -379,6 +443,7 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
             "--token-file" => token_file = Some(PathBuf::from(value()?)),
             "--state" => state = Some(PathBuf::from(value()?)),
             "--claude-home" => sessions.claude_home = value()?.into(),
+            "--claude-json" => sessions.claude_json = value()?.into(),
             "--codex-home" => sessions.codex_home = value()?.into(),
             "--proc-root" => sessions.proc_root = value()?.into(),
             "--cache" => sessions.cache = value()?.into(),
@@ -667,6 +732,10 @@ fn parse_forget_args(mut arguments: impl Iterator<Item = String>) -> Result<Forg
     let mut session = None;
     let mut before = None;
     let mut yes = false;
+    let mut relay_endpoint = None;
+    let mut relay_state = None;
+    let mut relay_config = None;
+    let mut relay_ca = None;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -680,6 +749,10 @@ fn parse_forget_args(mut arguments: impl Iterator<Item = String>) -> Result<Forg
             "--session" => session = Some(value()?),
             "--before" => before = Some(value()?),
             "--yes" => yes = true,
+            "--relay-endpoint" => relay_endpoint = Some(value()?),
+            "--relay-state" => relay_state = Some(PathBuf::from(value()?)),
+            "--relay-config" => relay_config = Some(PathBuf::from(value()?)),
+            "--relay-ca" => relay_ca = Some(PathBuf::from(value()?)),
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown argument: {argument}")),
         }
@@ -707,12 +780,35 @@ fn parse_forget_args(mut arguments: impl Iterator<Item = String>) -> Result<Forg
         ));
     }
 
+    let relay = match relay_endpoint {
+        Some(endpoint) => {
+            if trace.is_some() {
+                return Err("--trace cannot select replicated carrier frames; use --session or --before for server deletion".into());
+            }
+            Some(RelayForgetArgs {
+                endpoint,
+                state: relay_state
+                    .ok_or("--relay-endpoint requires --relay-state (the sender state path)")?,
+                config: relay_config.ok_or(
+                    "--relay-endpoint requires --relay-config (the enrolled identity directory)",
+                )?,
+                tls_ca: relay_ca,
+            })
+        }
+        None => {
+            if relay_state.is_some() || relay_config.is_some() || relay_ca.is_some() {
+                return Err("relay options require --relay-endpoint".into());
+            }
+            None
+        }
+    };
     Ok(ForgetArgs {
         store,
         trace,
         session,
         before,
         yes,
+        relay,
     })
 }
 
@@ -930,6 +1026,9 @@ fn machine_options(
 }
 
 fn run_sessions(args: SessionsArgs) -> Result<(), String> {
+    if let Some(remote) = &args.remote {
+        return run_remote_sessions(&args, remote);
+    }
     if let Some(dir) = args.received.clone() {
         if !args.serve {
             return print_received(&args, &dir);
@@ -971,6 +1070,52 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
             print!("{}", semon_sessions::render_text(&nodes));
         }
         io::stdout().flush().map_err(|error| error.to_string())?;
+        if !args.watch {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+fn run_remote_sessions(args: &SessionsArgs, remote: &RemoteSessionsArgs) -> Result<(), String> {
+    let identity =
+        semon_relay::MachineIdentity::load(&remote.config).map_err(|error| error.to_string())?;
+    let transport = semon_relay::HttpTransport::secure(
+        remote.endpoint.clone(),
+        std::time::Duration::from_secs(10),
+        semon_relay::RequestSigner::new(identity.signing.clone()),
+        remote.tls_ca.as_deref(),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut last = None;
+    let mut last_error = None;
+    loop {
+        match semon_sessions::collect_remote(&args.options, &identity, &transport) {
+            Ok(nodes) => {
+                last_error = None;
+                let rendered = if args.json {
+                    semon_sessions::render_json(&nodes)
+                } else {
+                    semon_sessions::render_text(&nodes)
+                };
+                if last.as_ref() != Some(&rendered) {
+                    if args.watch {
+                        print!("\x1b[2J\x1b[H");
+                    }
+                    println!("{rendered}");
+                    io::stdout().flush().map_err(|error| error.to_string())?;
+                    last = Some(rendered);
+                }
+            }
+            Err(error) if args.watch => {
+                let error = error.to_string();
+                if last_error.as_ref() != Some(&error) {
+                    eprintln!("remote view unavailable: {error}");
+                    last_error = Some(error);
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        }
         if !args.watch {
             return Ok(());
         }
@@ -1228,7 +1373,8 @@ fn run_forget(args: ForgetArgs) -> Result<(), String> {
     let count = store
         .count_forensic_forget(selector)
         .map_err(|error| error.to_string())?;
-    if count == 0 {
+    if count == 0 && args.relay.is_none() {
+        println!("Server copies are unaffected; configure --relay-endpoint to propagate deletion.");
         println!("forget --forensic: no matching raw records; nothing to do");
         return Ok(());
     }
@@ -1244,7 +1390,7 @@ fn run_forget(args: ForgetArgs) -> Result<(), String> {
 
         eprint!(
             "forget --forensic: this will permanently delete {count} raw record(s) from \
-             raw_carrier_records. This cannot be undone. canonical_traces and occurrences \
+             raw_carrier_records and request any configured relay deletion. This cannot be undone. canonical_traces and occurrences \
              (the log) are not affected. Proceed? [y/N] "
         );
         io::stderr().flush().map_err(|error| error.to_string())?;
@@ -1260,6 +1406,42 @@ fn run_forget(args: ForgetArgs) -> Result<(), String> {
         }
     }
 
+    if let Some(relay) = &args.relay {
+        use semon_relay::Transport;
+        let identity =
+            semon_relay::MachineIdentity::load(&relay.config).map_err(|error| error.to_string())?;
+        let transport = semon_relay::HttpTransport::secure(
+            relay.endpoint.clone(),
+            std::time::Duration::from_secs(10),
+            semon_relay::RequestSigner::new(identity.signing.clone()),
+            relay.tls_ca.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        let server_selector = semon_relay::ForgetSelector {
+            session: args.session.clone(),
+            before_ns: args
+                .before
+                .as_deref()
+                .map(semon_relay::forget_before_day)
+                .transpose()?,
+            memory_root: None,
+        };
+        // Persist before local deletion so offline receivers are retried by the sender.
+        semon_relay::queue_forget(&relay.state, &transport.deletion_scope(), &server_selector)
+            .map_err(|error| error.to_string())?;
+        let result = semon_relay::flush_forgets(&relay.state, &identity.fingerprint(), &transport)
+            .map_err(|error| error.to_string())?;
+        println!(
+            "forget relay: acknowledged={} pending_on_server={}",
+            result.acknowledged, result.pending
+        );
+        for failure in result.failures {
+            eprintln!("forget relay pending: {failure}");
+        }
+        println!("Copies already restored on another machine cannot be erased remotely.");
+    } else {
+        println!("Server copies are unaffected; configure --relay-endpoint to propagate deletion.");
+    }
     let deleted = store
         .forget_forensic(selector)
         .map_err(|error| error.to_string())?;
@@ -1324,7 +1506,7 @@ fn query_usage() -> String {
         })
         .collect();
     format!(
-        "Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
+        "Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
          The agent read surface: one tool's answer as JSON (one line with --json). It reads the log files modified\n\
          within the window, --since (30d by default), or all of them with --all. A tool's own since argument is\n\
          --newer-than, a filter inside the window. The tools:\n{}",
@@ -1334,7 +1516,7 @@ fn query_usage() -> String {
 
 fn usage() -> String {
     format!(
-        "Usage: semon sessions [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
+        "Usage: semon sessions [--remote ENDPOINT --remote-config PATH --remote-ca CERT] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json | --model-json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
          Shows a read-only tree of local Claude Code and Codex sessions. --model-json writes the viewer's\n\
          session model (sessions, handoffs, turns, busy) instead; it reads every log, --all/--since trim the output.\n\
          --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
@@ -1346,11 +1528,11 @@ fn usage() -> String {
          The agent read surface over the same session model: list_sessions, get_session, read_transcript, find,\n\
          stalls. `semon query` alone lists each tool's arguments.\n\
          \n\
-         Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
+         Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
          The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener. Both read\n\
          the log files modified within the window, --since (30d by default), or all of them with --all.\n\
          \n\
-         Usage: semon push --to URL --token-file PATH [--watch] [--state PATH] [--claude-home PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
+         Usage: semon push --to URL --token-file PATH [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\
          (docs/mirror-protocol.md), appending as they grow. The token file must be mode 0600. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s.\n\
@@ -1378,7 +1560,7 @@ fn usage() -> String {
          of --trace, --session, --day is required. Without --out, writes to\n\
          stdout; with it, writes to FILE created 0600 instead.\n\
          \n\
-         Usage: semon forget --forensic [--store PATH] (--before YYYY-MM-DD | --session ID | --trace ID) [--yes]\n\
+         Usage: semon forget --forensic [--store PATH] (--before YYYY-MM-DD | --session ID | --trace ID) [--yes] [--relay-endpoint URL --relay-state PATH --relay-config PATH [--relay-ca CERT]]\n\
          Permanently deletes matching rows from raw_carrier_records only;\n\
          canonical_traces and occurrences (the log) are never touched.\n\
          Irreversible. --forensic is required. Exactly one selector is\n\
@@ -1399,6 +1581,44 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn remote_sessions_accept_metadata_flags_and_refuse_local_surface_combinations() {
+        let args = parse_sessions_args(
+            [
+                "--remote",
+                "https://receiver",
+                "--remote-config",
+                "/keys",
+                "--remote-ca",
+                "/ca",
+                "--json",
+                "--watch",
+                "--session",
+                "s",
+                "--since",
+                "2h",
+            ]
+            .map(str::to_owned)
+            .into_iter(),
+        )
+        .unwrap();
+        assert!(args.remote.is_some() && args.json && args.watch);
+        assert_eq!(args.options.session.as_deref(), Some("s"));
+        for flag in ["--serve", "--model-json", "--no-local"] {
+            assert!(
+                parse_sessions_args(
+                    ["--remote", "https://receiver", flag]
+                        .map(str::to_owned)
+                        .into_iter()
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            parse_sessions_args(["--remote-ca", "/ca"].map(str::to_owned).into_iter()).is_err()
+        );
+    }
 
     #[test]
     fn model_json_refuses_flags_it_cannot_honour() {
@@ -1886,6 +2106,7 @@ mod tests {
             session: None,
             before: None,
             yes: true,
+            relay: None,
         })
         .unwrap();
 
@@ -1962,6 +2183,7 @@ mod tests {
             session: Some("session-a".to_owned()),
             before: None,
             yes: true,
+            relay: None,
         })
         .unwrap();
 
@@ -2057,6 +2279,7 @@ mod tests {
             session: None,
             before: None,
             yes: false,
+            relay: None,
         })
         .unwrap_err();
 
@@ -2073,6 +2296,108 @@ mod tests {
     }
 
     #[test]
+    fn offline_relay_forget_deletes_local_records_and_keeps_the_server_request() {
+        let (store_path, trace) = store_with_one_capture("forget-offline-relay", "session-a", 0);
+        let config = store_path.with_extension("relay-keys");
+        let state = store_path.with_extension("relay-state");
+        semon_relay::init(&config).unwrap();
+        // Reserve a closed endpoint: listener is dropped before connecting.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        run_forget(ForgetArgs {
+            store: store_path.clone(),
+            trace: None,
+            session: Some("session-a".into()),
+            before: None,
+            yes: true,
+            relay: Some(RelayForgetArgs {
+                endpoint: endpoint.clone(),
+                state: state.clone(),
+                config: config.clone(),
+                tls_ca: None,
+            }),
+        })
+        .unwrap();
+        let store = TraceStore::open(&store_path).unwrap();
+        assert!(
+            store
+                .fetch_raw_carrier_records(&TraceId::from_str(&trace).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        let identity = semon_relay::MachineIdentity::load(&config).unwrap();
+        let transport = semon_relay::HttpTransport::secure(
+            endpoint,
+            std::time::Duration::from_secs(1),
+            semon_relay::RequestSigner::new(identity.signing.clone()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            semon_relay::flush_forgets(&state, &identity.fingerprint(), &transport)
+                .unwrap()
+                .pending,
+            1
+        );
+        drop(store);
+        let _ = std::fs::remove_file(store_path);
+        std::fs::remove_dir_all(config).unwrap();
+        let mut queue = state.as_os_str().to_owned();
+        queue.push(".forget");
+        std::fs::remove_dir_all(PathBuf::from(queue)).unwrap();
+    }
+
+    #[test]
+    fn relay_forget_requires_explicit_sender_paths_and_rejects_trace_selectors() {
+        let base = [
+            "--forensic",
+            "--session",
+            "session-a",
+            "--relay-endpoint",
+            "http://127.0.0.1:8734",
+        ];
+        assert!(
+            parse_forget_args(base.map(str::to_owned).into_iter())
+                .unwrap_err()
+                .contains("--relay-state")
+        );
+        let valid = [
+            "--forensic",
+            "--session",
+            "session-a",
+            "--relay-endpoint",
+            "http://127.0.0.1:8734",
+            "--relay-state",
+            "/state",
+            "--relay-config",
+            "/keys",
+        ];
+        assert!(
+            parse_forget_args(valid.map(str::to_owned).into_iter())
+                .unwrap()
+                .relay
+                .is_some()
+        );
+        let trace = [
+            "--forensic",
+            "--trace",
+            "trace-a",
+            "--relay-endpoint",
+            "http://127.0.0.1:8734",
+            "--relay-state",
+            "/state",
+            "--relay-config",
+            "/keys",
+        ];
+        assert!(
+            parse_forget_args(trace.map(str::to_owned).into_iter())
+                .unwrap_err()
+                .contains("cannot select replicated")
+        );
+    }
+
+    #[test]
     fn forget_with_no_matching_records_is_a_no_op() {
         let (store_path, _) = store_with_one_capture("forget-no-match", "session-a", 0);
 
@@ -2086,6 +2411,7 @@ mod tests {
             session: Some("no-such-session".to_owned()),
             before: None,
             yes: false,
+            relay: None,
         })
         .unwrap();
 
@@ -2152,6 +2478,7 @@ mod tests {
             session: None,
             before: Some(format!("{year:04}-{month:02}-{day:02}")),
             yes: true,
+            relay: None,
         })
         .unwrap();
 

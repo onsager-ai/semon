@@ -6,6 +6,7 @@
 //   SEMON_UI_OUT where reports, screenshots and diffs go (default: ./out)
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 export const ENV = {
@@ -21,7 +22,12 @@ export const ENV = {
 };
 fs.mkdirSync(ENV.out, { recursive: true });
 
-export const launch = () => chromium.launch({ args: ["--disable-gpu", "--font-render-hinting=none"] });
+export const launch = () => chromium.launch({
+  args: ["--disable-gpu", "--font-render-hinting=none"],
+  ...(process.platform === "linux" ? {
+    env: { ...process.env, FONTCONFIG_FILE: fileURLToPath(new URL("./fontconfig.conf", import.meta.url)) },
+  } : {}),
+});
 
 // The three screens every check and comparison covers.
 export const VIEWPORTS = {
@@ -29,8 +35,8 @@ export const VIEWPORTS = {
   desktop: { viewport: { width: 1280, height: 860 }, deviceScaleFactor: 1, isMobile: false, hasTouch: false },
 };
 
-export async function context(browser, { size = "phone", dark = false } = {}) {
-  return browser.newContext({ ...VIEWPORTS[size], colorScheme: dark ? "dark" : "light", timezoneId: "UTC", locale: "en-US", reducedMotion: "no-preference" });
+export async function context(browser, { size = "phone", dark = false, viewport } = {}) {
+  return browser.newContext({ ...VIEWPORTS[size], ...(viewport ? { viewport } : {}), colorScheme: dark ? "dark" : "light", timezoneId: "UTC", locale: "en-US", reducedMotion: "no-preference" });
 }
 
 // A page on the served viewer at `path` (such as "/" or "/s/claude/harbor"), signed in with the token. Only the served
@@ -57,8 +63,23 @@ export function titleOf(route, D) {
     ?? (route.v === "machine" ? D.MACHINE[route.id] : D.SESS[route.id]?.name);
 }
 export async function settled(page) {
-  await page.waitForFunction(() => document.querySelector("#topbar .t, #topbar #find") && document.querySelector("#page").childElementCount > 0);
+  await page.waitForFunction(() => {
+    const panel = document.querySelector("#page");
+    // The HTML shell can already contain a title and loading text while boot's
+    // first model fetch is pending. Navigation before history is adopted can
+    // be overwritten by boot when that request finishes.
+    return history.state?.v && document.querySelector("#topbar .t, #topbar #find")
+      && panel?.childElementCount > 0 && !panel.hasAttribute("aria-busy")
+      && (history.state.v !== "session" || panel.querySelector("section[aria-label='Transcript']"));
+  });
   await page.evaluate(() => document.fonts.ready);
+}
+
+// Stop mocked polls before disposing their responses. ignoreErrors also releases
+// handlers deliberately held behind a gate by an embedding test.
+export async function closePage(page) {
+  await page.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+  await page.context().close().catch(() => {});
 }
 
 // Goes to a route the way the mockup's check scripts did: a history entry and a popstate, then waits for its screen.

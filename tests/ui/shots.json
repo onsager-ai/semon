@@ -62,6 +62,14 @@
         "eval": "document.querySelector('[aria-label=\"Trace what this turn set off\"]').click()"
       },
       {
+        "name": "run-view",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"atlas-ingest\"]').click(); document.querySelector('.turn[data-turn=\"a-ask\"] [aria-label=\"Trace what this turn set off\"]').click();"
+      },
+      {
+        "name": "run-view-bottom",
+        "eval": "document.querySelector('button[data-go=\"sessions\"]').click(); document.querySelector('.nrow[data-id=\"atlas-ingest\"]').click(); document.querySelector('.turn[data-turn=\"a-ask\"] [aria-label=\"Trace what this turn set off\"]').click(); document.querySelector('.flow').scrollIntoView({ block: 'start' });"
+      },
+      {
         "name": "desktop-rail",
         "eval": "document.querySelector('#rail-toggle').click()"
       },
