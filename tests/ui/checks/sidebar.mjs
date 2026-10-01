@@ -18,7 +18,7 @@
 //     nothing left to fold all drop the open list; Esc in a phone's sheet leaves the drawer open; the sheet says which parent a
 //     grandchild is under.
 //   - no parent row shows a count pill, open or collapsed (the chevron says there are children), and a collapsed row says it is collapsed (aria-expanded); the row's aria-label still breaks the total down as text (runs, needs you, working, failed). A patched model puts a waiting and a failed run, and a grandchild, under Fan-out.
-//   - the toggle sits over the right end of its row's meta line, and only rows with children have one: no row has a left gutter.
+//   - the toggle sits at the right end, vertically centred on its session row, and only rows with children have one: no row has a left gutter.
 //   - the toggle's box is at least 44x44 at 390 px and at least 28x36 at 1280 px.
 //   - the header puts the logo first and the collapse toggle at the right end of the row (on a phone, the drawer's close button
 //     there instead), both at least 44x44; in the rail the toggle shows with the logo mark above it, and keyboard focus reaches
@@ -71,7 +71,8 @@ const gutters = (page) => page.evaluate(() => {
     if (rows.length < 2) continue;
     const lefts = rows.map((r) => Math.round(r.nm.left * 10) / 10), ends = [...new Set(rows.map((r) => Math.round(r.item.querySelector(":scope > .tree-row .ag").getBoundingClientRect().right * 10) / 10))], parents = rows.filter((r) => r.item.querySelector(":scope > .tree-row .tree-toggle")).length;
     if (parents && parents < rows.length) mixed++;
-    groups.push({ depth: box.dataset.depth ?? "0", lefts: [...new Set(lefts)], ends, rows: rows.length, parents });
+    const timeEnds = (hasToggle) => [...new Set(rows.filter((r) => !!r.item.querySelector(":scope > .tree-row .tree-toggle") === hasToggle).map((r) => Math.round(r.item.querySelector(":scope > .tree-row .ag").getBoundingClientRect().right * 10) / 10))];
+    groups.push({ depth: box.dataset.depth ?? "0", lefts: [...new Set(lefts)], ends, parentEnds: timeEnds(true), leafEnds: timeEnds(false), rows: rows.length, parents });
   }
   return { groups, mixed, spacers: document.querySelectorAll("#lanes .tree-spacer").length };
 });
@@ -81,7 +82,7 @@ const toggleBox = (page, id) => page.evaluate((id) => {
   if (!t || !row) return null;
   const a = t.getBoundingClientRect(), b = row.getBoundingClientRect(), line = item.querySelector(":scope > .tree-row").getBoundingClientRect();
   const hit = document.elementFromPoint((a.left + a.right) / 2, (a.top + a.bottom) / 2);
-  return { w: Math.round(a.width * 10) / 10, h: Math.round(a.height * 10) / 10, right: a.right <= line.right + 0.5 && a.right >= line.right - 12, fullWidth: Math.abs(b.left - line.left) < 0.5 && Math.abs(b.right - line.right) < 0.5, toggleTappable: hit === t || t.contains(hit), lower: (a.top + a.bottom) / 2 >= (line.top + line.bottom) / 2 - 1 && a.bottom <= line.bottom + 0.5, color: getComputedStyle(t).color, bg: getComputedStyle(t).backgroundColor };
+  return { w: Math.round(a.width * 10) / 10, h: Math.round(a.height * 10) / 10, right: a.right <= line.right + 0.5 && a.right >= line.right - 12, fullWidth: Math.abs(b.left - line.left) < 0.5 && Math.abs(b.right - line.right) < 0.5, toggleTappable: hit === t || t.contains(hit), centered: Math.abs((a.top + a.bottom) / 2 - (b.top + b.bottom) / 2) < 0.5, timeClear: row.querySelector(".ag").getBoundingClientRect().right <= a.left, color: getComputedStyle(t).color, bg: getComputedStyle(t).backgroundColor };
 }, id);
 
 // Every top-level parent with children, collapsed in turn (and put back as it was): whether a count pill shows in its row, open
@@ -586,7 +587,7 @@ export default async function sidebarCheck(browser) {
     const box = await toggleBox(page, fan.id);
     R.phoneToggle = box;
     r.expect(box && box.w >= 44 && box.h >= 44, "phone: the toggle is at least 44x44: " + JSON.stringify(box));
-    r.expect(box?.right && box.lower, "phone: the toggle sits at the right end of the row's meta line: " + JSON.stringify(box));
+    r.expect(box?.right && box.centered && box.timeClear, "phone: the toggle is centred at the right end and clears the timestamp: " + JSON.stringify(box));
     r.expect(box?.fullWidth && box.toggleTappable, "phone: the session fills its row and the overlaid toggle takes a tap: " + JSON.stringify(box));
     r.expect(box?.color === "rgb(93, 101, 97)", "phone: the chevron is --muted (5.3:1 on the light sidebar): " + box?.color);
     r.expect(box?.bg === "rgba(0, 0, 0, 0)", "phone: the toggle has no background until hover or focus: " + box?.bg);
@@ -595,7 +596,7 @@ export default async function sidebarCheck(browser) {
     r.expect(g.spacers === 0, "phone: no .tree-spacer remains");
     r.expect(g.mixed >= 1, "phone: no group mixes rows with and without children, so the gutter check proves nothing");
     r.expect(g.groups.every((x) => x.lefts.length === 1), "phone: names in a group start at different x: " + JSON.stringify(g.groups));
-    r.expect(g.groups.every((x) => x.ends.length === 1), "phone: times in a group end at different x: " + JSON.stringify(g.groups));
+    r.expect(g.groups.every((x) => x.parentEnds.length <= 1 && x.leafEnds.length <= 1), "phone: times in each row kind end at different x: " + JSON.stringify(g.groups));
     const cut = await page.evaluate(() => [...document.querySelectorAll("#lanes .srow-meta .repo-short")].filter((e) => e.getClientRects().length && e.scrollWidth > e.clientWidth + 1).map((e) => e.textContent + " " + e.clientWidth + "/" + e.scrollWidth));
     R.phoneRepoCut = cut;
     r.expect(cut.length === 0, "phone: repo names are cut on the meta line: " + cut.join(", "));
@@ -723,10 +724,10 @@ export default async function sidebarCheck(browser) {
       const box = await toggleBox(page, fan.id);
       R.desktopToggle = box;
       r.expect(box && box.w >= 28 && box.h >= 36, "desktop: the toggle's hit area is at least 28x36: " + JSON.stringify(box));
-      r.expect(box?.right && box.lower, "desktop: the toggle sits over the right end of the row's meta line: " + JSON.stringify(box));
+      r.expect(box?.right && box.centered && box.timeClear, "desktop: the toggle is centred at the right end and clears the timestamp: " + JSON.stringify(box));
       const g = await gutters(page);
       R.desktopGutters = g;
-      r.expect(g.spacers === 0 && g.mixed >= 1 && g.groups.every((x) => x.lefts.length === 1 && x.ends.length === 1), "desktop: names in a group start at one x and times end at one x: " + JSON.stringify(g));
+      r.expect(g.spacers === 0 && g.mixed >= 1 && g.groups.every((x) => x.lefts.length === 1 && x.parentEnds.length <= 1 && x.leafEnds.length <= 1), "desktop: names in a group start at one x and times align within each row kind: " + JSON.stringify(g));
       // No count pill in a parent's row: not open, not collapsed, and not after collapsing and expanding again.
       const pillCount = () => page.evaluate((id) => [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id).querySelectorAll(":scope > .tree-row .tree-summary").length, fan.id);
       r.expect(await pillCount() === 0, "desktop: an open parent shows no count pill");
