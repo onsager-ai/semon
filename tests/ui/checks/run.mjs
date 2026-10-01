@@ -32,6 +32,7 @@ import filtersCheck from "./filters.mjs";
 import childcardCheck from "./childcard.mjs";
 import breakdownCheck from "./breakdown.mjs";
 import tracebriefCheck from "./tracebrief.mjs";
+import codexThinkingCheck from "./codex-thinking.mjs";
 
 const checks = [
   ["home", homeCheck],
@@ -60,6 +61,7 @@ const checks = [
   ["childcard", childcardCheck],
   ["breakdown", breakdownCheck],
   ["tracebrief", tracebriefCheck],
+  ["codex-thinking", codexThinkingCheck],
 ];
 
 const browser = await launch();
