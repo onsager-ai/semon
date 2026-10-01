@@ -486,8 +486,30 @@ mod tests {
     #[test]
     fn dotted_gpt_version_does_not_borrow_another_models_price() {
         assert_eq!(normalize_model_id("gpt-6.1-sol"), "gpt-6.1-sol");
-        assert!(super::price_for("gpt-6.1-sol").is_none());
-        assert!(super::price_for("gpt-6-sol").is_some());
+        let price = super::price_for("gpt-6.1-sol").unwrap();
+        assert_eq!(price.input, Some(2.0));
+        assert_eq!(price.output, Some(10.0));
+        assert_eq!(price.cache_read, Some(0.1));
+        assert_eq!(price.cache_write_5m, Some(2.5));
+        assert_eq!(price.fast.unwrap().multiplier, 2.0);
+        assert_eq!(super::price_for("gpt-6-sol").unwrap().cache_read, Some(0.2));
+        assert!(super::price_for("gpt-6.2-sol").is_none());
+        assert_eq!(
+            price_data().models["gpt-6.1-sol"].source,
+            "https://developers.openai.com/api/docs/pricing"
+        );
+        let cost = calculate_cost(
+            &[usage(
+                "gpt-6.1-sol",
+                1_000_000,
+                1_000_000,
+                1_000_000,
+                1_000_000,
+                0,
+            )],
+            &[],
+        );
+        assert_eq!(cost.usd, Some(14.6));
     }
 
     #[test]
