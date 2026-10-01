@@ -22,6 +22,7 @@ const shown = (page, screen) => page.evaluate((screen) => screen === "sessions"
   ? [...document.querySelectorAll("#page .nrow")].map((x) => x.dataset.id).sort().join(",")
   : [...document.querySelectorAll('[data-breakdown="repo"]')].map((x) => x.dataset.key).sort().join(","), screen);
 const drawn = (page, screen, query) => screen === "analytics" ? page.waitForFunction((q) => { const m = document.querySelector(".analytics-metrics[data-analytics-ready]"); return !!m && m.dataset.query === q; }, query) : page.waitForTimeout(150);
+const backgroundScroll = (page) => page.evaluate(() => matchMedia("(max-width: 760px)").matches ? scrollY : document.querySelector("#main").scrollTop);
 const facetTexts = (page) => page.evaluate(() => [...document.querySelectorAll(".facet-filters .sh-select-trigger")].map((t) => t.textContent.trim()));
 const chipTexts = (page) => page.evaluate(() => [...document.querySelectorAll(".facet-filters .facet-chip")].filter((c) => c.getClientRects().length).map((c) => c.textContent.trim()));
 
@@ -68,15 +69,16 @@ export default async function filtersCheck(browser) {
       const y0 = await page.evaluate(() => {
         // Supply a scroll range even when desktop content fits in the viewport.
         const probe = document.createElement("div"); probe.id = "filter-scroll-probe";
-        probe.style.cssText = "position:absolute;pointer-events:none;width:1px;height:500px;top:" + Math.max(document.documentElement.scrollHeight, innerHeight) + "px";
-        document.body.append(probe); scrollTo(0, 40); return scrollY;
+        const phone = matchMedia("(max-width: 760px)").matches, scroller = phone ? document.body : document.querySelector("#main");
+        probe.style.cssText = "position:absolute;pointer-events:none;width:1px;height:500px;top:" + Math.max(scroller.scrollHeight, scroller.clientHeight) + "px";
+        scroller.append(probe); if (phone) scrollTo(0, 40); else scroller.scrollTop = 0; return phone ? scrollY : scroller.scrollTop;
       });
-      r.expect(y0 > 0, key + " the page isn't scrolled before the sheet opens: " + y0);
+      if (phone) r.expect(y0 > 0, key + " the page isn't scrolled before the sheet opens: " + y0);
       const wheelPoint = { x: (await page.evaluate(() => innerWidth)) - 8, y: 5 };
       await page.mouse.move(wheelPoint.x, wheelPoint.y); await page.mouse.wheel(0, 240); await page.waitForTimeout(200);
-      rec.wheelControl = await page.evaluate(() => scrollY);
+      rec.wheelControl = await backgroundScroll(page);
       r.expect(rec.wheelControl > y0, key + " closed-page wheel control didn't scroll: " + JSON.stringify({ before: y0, after: rec.wheelControl }));
-      await page.evaluate((y) => scrollTo(0, y), y0);
+      await page.evaluate((y) => { if (matchMedia("(max-width: 760px)").matches) scrollTo(0, y); else document.querySelector("#main").scrollTop = y; }, y0);
       await filterSheet(page);
       rec.sheet = await page.evaluate(({ sheetSel }) => {
         const d = document.querySelector(sheetSel), r = (n) => { const b = n.getBoundingClientRect(); return { left: b.left, top: b.top, right: b.right, bottom: b.bottom, width: b.width, height: b.height }; };
@@ -105,7 +107,7 @@ export default async function filtersCheck(browser) {
       }));
       r.expect(rec.held.every((move) => move.prevented), key + " background input wasn't held: " + JSON.stringify(rec.held));
       await page.mouse.move(wheelPoint.x, wheelPoint.y); await page.mouse.wheel(0, 240); await page.waitForTimeout(200);
-      rec.afterWheel = await page.evaluate(() => scrollY);
+      rec.afterWheel = await backgroundScroll(page);
       r.expect(rec.afterWheel === y0, key + " wheel moved the page behind the sheet: " + JSON.stringify({ before: y0, after: rec.afterWheel }));
       // Tab stays inside the sheet (both ways), and Escape closes it and gives the focus back to the button.
       const stray = [];
@@ -121,9 +123,9 @@ export default async function filtersCheck(browser) {
       }));
       r.expect(rec.released.every((move) => !move.prevented), key + " closing the sheet left an input hold: " + JSON.stringify(rec.released));
       await page.mouse.move(wheelPoint.x, wheelPoint.y); await page.mouse.wheel(0, 240); await page.waitForTimeout(200);
-      rec.wheelReleased = await page.evaluate(() => scrollY);
+      rec.wheelReleased = await backgroundScroll(page);
       r.expect(rec.wheelReleased > y0, key + " wheel remained blocked after Escape: " + JSON.stringify({ before: y0, after: rec.wheelReleased }));
-      await page.evaluate(() => { scrollTo(0, 0); document.getElementById("filter-scroll-probe").remove(); });
+      await page.evaluate(() => { scrollTo(0, 0); document.querySelector("#main").scrollTop = 0; document.getElementById("filter-scroll-probe").remove(); });
       if (phone) {
         // Back closes the sheet; the page stays.
         const path0 = await page.evaluate(() => location.pathname);
