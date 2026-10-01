@@ -509,7 +509,26 @@ mod tests {
             )],
             &[],
         );
-        assert_eq!(cost.usd, Some(14.6));
+        assert_eq!(cost.usd, Some(24.2));
+    }
+
+    #[test]
+    fn gpt_61_long_context_applies_only_above_the_published_threshold() {
+        let row = price_data().models["gpt-6.1-sol"].price;
+        let long = row.long_context.unwrap();
+        assert_eq!(long.threshold_tokens, 272_000);
+        assert_eq!(long.input, Some(4.0));
+        assert_eq!(long.output, Some(15.0));
+        assert_eq!(long.cache_read, Some(0.2));
+        assert_eq!(long.cache_write_5m, Some(5.0));
+        let mut message = usage("gpt-6.1-sol", 100_000, 10_000, 100_000, 72_000, 0);
+        let short = calculate_cost(&[message.clone()], &[]).usd.unwrap();
+        assert!((short - 0.49).abs() < 1e-12);
+        message.billing.prompt_size += 1;
+        let long = calculate_cost(&[message.clone()], &[]).usd.unwrap();
+        assert!((long - 0.93).abs() < 1e-12);
+        message.billing.speed = Some("fast".into());
+        assert!((calculate_cost(&[message], &[]).usd.unwrap() - 1.86).abs() < 1e-12);
     }
 
     #[test]
