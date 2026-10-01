@@ -1,34 +1,34 @@
-# The session viewer's browser checks (#40 M4, decision D2). Builds `semon` with a test clock, writes the synthetic sample
-# fixture (tests/ui/fixture.mjs) and its extras variant, serves them and an embedding-API fixture, and runs, in Chromium
-# through Playwright:
-#   - the fixture's gaps against the sample mockup's data (tests/ui/gaps.mjs, listed in tests/ui/gaps.json),
-#   - the mockup's check scripts, ported to the served viewer (tests/ui/checks/),
-#   - a pixel comparison of every screen with the mockup (tests/ui/pixels.mjs), at 390×844 light and dark and 1280×860.
-# and, on fixtures of its own that it writes to while the page is open, the live-update check (tests/ui/checks/live.mjs) and
-# the errors-mode check (tests/ui/checks/errnav.mjs) and the stable-order check (tests/ui/checks/order.mjs).
-# Then the sample pushed to `semon receive` by `semon push`, whose model must equal the machine's own and whose viewer must
-# render it like the local one (tests/ui/pushed-parity.mjs, and a subset of the gaps and pixel checks).
-# Node and Playwright are CI-only tooling in tests/ui/package.json; the Rust build doesn't depend on them. Nothing here
-# touches a real ~/.claude or ~/.codex: the server reads only the fixture.
+# Build once; independent suites run with isolated fixture servers and report directories.
+# The aggregate job keeps the existing required check name. See tests/ui/README.md.
 name: Viewer UI
 
 on:
   workflow_dispatch:
+    inputs:
+      exhaustive:
+        description: Audit touch targets in every fixture session
+        type: boolean
+        default: false
+      sample_report:
+        description: Include historical sample-mockup pixel reports
+        type: boolean
+        default: false
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: viewer-ui-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  browser:
-    name: viewer browser checks
+  build:
+    name: viewer test binaries
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
+    timeout-minutes: 15
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,6 +56,44 @@ jobs:
       - name: Build the embedding API fixture
         run: cargo build --locked -p semon-sessions --example ui-account-server --features test-clock,test-ui-account-server
 
+      - name: Strip debug symbols from transferred binaries
+        run: strip --strip-debug target/debug/semon target/debug/examples/ui-account-server
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: viewer-test-binaries
+          path: |
+            target/debug/semon
+            target/debug/examples/ui-account-server
+          if-no-files-found: error
+          retention-days: 1
+
+  checks:
+    name: viewer / ${{ matrix.suite }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [navigation, transcript, shell, interaction, accessibility, visual, live, order-phone, order-desktop-light, order-desktop-dark, performance, transport]
+    env:
+      SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
+      SEMON_BIN: ${{ github.workspace }}/target/debug/semon
+      SEMON_UI_COVERAGE: ${{ inputs.exhaustive && 'exhaustive' || 'representative' }}
+      SEMON_PIXEL_SAMPLE_REPORT: ${{ inputs.sample_report && '1' || '0' }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download test binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: viewer-test-binaries
+          path: target/debug
+      - name: Restore executable permissions
+        run: chmod +x target/debug/semon target/debug/examples/ui-account-server
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -70,7 +108,7 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Browser-check infrastructure regression tests
-        run: node --test tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/viewer-cache.test.mjs tests/ui/checks/model-delta.test.mjs
+        run: node --test tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/viewer-cache.test.mjs tests/ui/checks/model-delta.test.mjs
 
       - name: Write the sample fixtures
         run: |
@@ -116,44 +154,37 @@ jobs:
           curl -fsS -o /dev/null "$base/?t=$token"
 
       - name: Fixture gaps against the sample's data
+        if: matrix.suite == 'navigation'
         working-directory: tests/ui
         run: node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN"
 
-      - name: Mockup check scripts on the served viewer
-        if: ${{ !cancelled() }}
+      - name: Functional checks
+        if: contains(fromJSON('["navigation","transcript","shell","interaction","accessibility"]'), matrix.suite)
         working-directory: tests/ui
-        run: node checks/run.mjs
-
+        run: node checks/run.mjs --group "$SUITE"
+        env:
+          SUITE: ${{ matrix.suite }}
       - name: Pixel comparison with the mockup
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.suite == 'visual' }}
         working-directory: tests/ui
         run: node pixels.mjs
 
       - name: Live updates while the logs are written
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.suite == 'live' }}
         working-directory: tests/ui
         env:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
         run: node checks/live.mjs
 
-      # Lists of sessions keep their rows where they are while updates arrive; what they hold applies when the list is out of sight.
-      - name: Stable session order
-        if: ${{ !cancelled() }}
-        working-directory: tests/ui
-        env:
-          SEMON_BIN: ${{ github.workspace }}/target/debug/semon
-        run: node checks/order.mjs
-
-      # "N errors" stepping through failed steps spread over unloaded pages, with a failure written while it is open.
       - name: Errors mode
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.suite == 'performance' }}
         working-directory: tests/ui
         env:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
         run: node checks/errnav.mjs
 
       - name: Long-session performance
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.suite == 'performance' }}
         working-directory: tests/ui
         env:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
@@ -162,7 +193,7 @@ jobs:
       # Requests, bytes and long tasks per screen (perf step 0). Report only: it prints the lines over tests/ui/perf-budget.json
       # and fails only when it could not measure.
       - name: Request and main-thread budget
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.suite == 'performance' }}
         working-directory: tests/ui
         env:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
@@ -172,7 +203,7 @@ jobs:
       # their baselines against the overhaul mockup (the "two-machines" section of tests/ui/pixel-baseline.json), at 390×844
       # and 1280×860, light and dark.
       - name: Two machines in one viewer
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.suite == 'transport' }}
         env:
           SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/two-machines
           SEMON_PIXEL_SCREENS: machines,machine-
@@ -196,7 +227,7 @@ jobs:
       # receiver and `semon push --watch` keep running for the step below, as they would on a real pair of machines.
       # The model built from that copy must equal the machine's own, byte for byte (tests/ui/pushed-parity.mjs).
       - name: Pushed data, received and compared with the machine's own model
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.suite == 'transport' }}
         env:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
           SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/pushed
@@ -229,7 +260,7 @@ jobs:
       # 390×844 light and dark and 1280×860 light. The rest of the suite is about the viewer, not the data, and runs on the
       # local fixture above.
       - name: Pushed data in the viewer
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.suite == 'transport' }}
         env:
           SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/pushed
           SEMON_PIXEL_SCREENS: home,sessions,analytics,session-harbor,session-deps
@@ -259,6 +290,13 @@ jobs:
             "$SEMON_UI_OUT/pixels.json" || failed=1
           exit "$failed"
 
+      # Lists of sessions keep their rows where they are while updates arrive; what they hold applies when the list is out of sight.
+      - name: Stable session order
+        if: ${{ !cancelled() && startsWith(matrix.suite, 'order-') }}
+        working-directory: tests/ui
+        env:
+          SEMON_ORDER_SCHEMES: ${{ matrix.suite == 'order-phone' && 'phone-light,phone-dark' || matrix.suite == 'order-desktop-light' && 'desktop-light' || 'desktop-dark' }}
+        run: node checks/order.mjs
       - name: Server logs
         if: ${{ always() }}
         run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/account-menu.log "$RUNNER_TEMP"/two-machines.log "$RUNNER_TEMP"/receive.log "$RUNNER_TEMP"/push.log "$RUNNER_TEMP"/pushed-viewer.log || true
@@ -267,6 +305,18 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: viewer-ui
+          name: viewer-ui-${{ matrix.suite }}
           path: tests/ui/out
           if-no-files-found: warn
+
+  browser:
+    name: viewer browser checks
+    if: ${{ always() }}
+    needs: [build, checks]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every suite to pass
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+        run: test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
