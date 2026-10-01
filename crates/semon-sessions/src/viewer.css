@@ -330,7 +330,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .steps { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
 /* A lone call reads like a folded group's line: its output lines up with the verb, after the 16px icon and the 8px gap. */
 .steps.lone .step > .out { margin: 4px 0 8px 24px; }
-.tgroup > .steps { padding: 6px 0 2px 24px; }
+.tgroup > .steps { padding: 6px 0 2px 12px; }
 .step .sv { flex: none; color: var(--ink-2); }
 .step .sa { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 12.5px; }
 .step .sa.st { font: inherit; color: var(--ink-2); }
@@ -1234,13 +1234,12 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
   .analytics-metric .label > span.cost-info { overflow: visible; }
 }
 
-/* Touch controls stay within their paint containment and do not overlap adjacent content. */
+/* Keep the compact step pitch: the base negative margins let the 44px touch
+   targets share their edges without adding space between every call. Sidebar
+   rows fill the drawer; only a parent's metadata leaves room for its toggle. */
 @media (max-width: 760px), (any-pointer: coarse) {
-  .step > button, .tsum { width: 100%; margin: 0; padding-inline: 0; }
   .step .out .io > button { min-height: 44px; min-width: 44px; margin: 0; }
   .out > .viewall:last-child { border-radius: 0 0 var(--r2) var(--r2); }
-  .tree-row > .srow { width: calc(100% - 44px); }
-  .tree-row.has-toggle .srow-meta { padding-right: 0; }
   .hop .body > .more { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; margin: 0; padding: 0; }
 }
 @media (any-pointer: coarse) and (min-width: 761px) {

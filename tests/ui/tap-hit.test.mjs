@@ -31,6 +31,18 @@ test("a corner overlap is caught even when all four edge midpoints are clear", a
   assert.equal(result.misses.filter((miss) => ["top", "bottom", "left", "right"].includes(miss.side)).length, 0);
 });
 
+test("compact tool targets may share edges only within their group", async () => {
+  const steps = '<div class="step"><button style="position:absolute;left:20px;top:20px;width:120px">First</button></div><div class="step"><button style="position:absolute;left:20px;top:58px;width:120px">Second</button></div>';
+  assert.equal((await inspect('<div class="tgroup">' + steps + '</div>')).misses.length, 0);
+  assert.ok((await inspect(steps)).misses.length > 0);
+});
+
+test("a sidebar toggle may overlay its own full-width row", async () => {
+  const row = '<button class="srow" style="position:absolute;left:20px;top:20px;width:200px;height:54px">Session</button><button class="tree-toggle" style="position:absolute;left:176px;top:30px">Toggle</button>';
+  assert.equal((await inspect('<div class="tree-row">' + row + '</div>')).misses.length, 0);
+  assert.ok((await inspect('<div>' + row + '</div>')).misses.length > 0);
+});
+
 test("closed native details expose only their direct summary controls", async () => {
   const result = await inspect('<details><summary><button>Summary</button></summary><button>Closed</button><details open><summary>Nested</summary><button>Nested closed parent</button></details></details><details open><summary>Open</summary><button>Visible</button></details>');
   assert.deepEqual(result.items.map((item) => item.text), ["Summary", "Visible"]);
