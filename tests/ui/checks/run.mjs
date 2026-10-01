@@ -35,6 +35,7 @@ import tracebriefCheck from "./tracebrief.mjs";
 import codexThinkingCheck from "./codex-thinking.mjs";
 
 const checks = [
+  ["codex-thinking", codexThinkingCheck],
   ["home", homeCheck],
   ["bar", barCheck],
   ["turns", turnsCheck],
@@ -61,7 +62,6 @@ const checks = [
   ["childcard", childcardCheck],
   ["breakdown", breakdownCheck],
   ["tracebrief", tracebriefCheck],
-  ["codex-thinking", codexThinkingCheck],
 ];
 
 const browser = await launch();
