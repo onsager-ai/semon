@@ -1320,3 +1320,118 @@ fn current_epoch_frame_from_a_non_holder_is_rejected() {
         })
     ));
 }
+
+#[test]
+fn forgetting_a_session_removes_live_generations_epochs_and_orphans_without_resurrection() {
+    use semon_relay::ForgetSelector;
+    let temp = TempDir::new("forget-session");
+    let root = temp.path().join("receiver");
+    let receiver = Receiver::open(&root).unwrap();
+    receiver.acquire("synthetic-session", "machine-a").unwrap();
+    let first = frame(0, &ZERO_CHAIN, b"first secret\n");
+    receiver.accept(&first).unwrap();
+    receiver
+        .takeover("synthetic-session", "machine-b", 0, true)
+        .unwrap();
+    let mut second = frame(1, &frame_chain(&first), b"second secret\n");
+    second.key.epoch = 1;
+    second.machine = "machine-b".into();
+    receiver.accept(&second).unwrap();
+    let orphan = frame(1, &frame_chain(&first), b"orphan secret\n");
+    receiver.accept_orphan(&orphan).unwrap();
+    let mut rewritten = frame(0, &ZERO_CHAIN, b"rewritten secret\n");
+    rewritten.key.generation = 1;
+    rewritten.key.epoch = 1;
+    rewritten.machine = "machine-b".into();
+    receiver.accept(&rewritten).unwrap();
+    let selector = ForgetSelector {
+        session: Some("synthetic-session".into()),
+        ..Default::default()
+    };
+    let id = "12".repeat(32);
+    let report = receiver.forget(&id, &selector).unwrap();
+    assert_eq!(report.frames, 4);
+    assert!(report.bytes > 0);
+    assert_eq!(
+        receiver.forget(&id, &selector).unwrap(),
+        report,
+        "the acknowledgement is stable"
+    );
+    assert!(
+        receiver
+            .list_frames("synthetic-session")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(receiver.list_orphans().unwrap().is_empty());
+    drop(receiver);
+    let receiver = Receiver::open(&root).unwrap();
+    assert_eq!(receiver.accept(&second).unwrap(), ReceiveOutcome::Duplicate);
+    assert_eq!(
+        receiver.accept_orphan(&orphan).unwrap(),
+        ReceiveOutcome::Duplicate
+    );
+    assert!(
+        receiver
+            .list_frames("synthetic-session")
+            .unwrap()
+            .is_empty()
+    );
+    let mut collision = second.clone();
+    collision.content = semon_relay::FrameContent::Plaintext {
+        chain: frame_chain(&second),
+        line: b"different\n".to_vec(),
+    };
+    assert!(matches!(
+        receiver.accept(&collision),
+        Err(semon_relay::ReceiveError::Collision)
+    ));
+    let mut next = frame(2, &frame_chain(&second), b"new work\n");
+    next.key.epoch = 1;
+    next.machine = "machine-b".into();
+    receiver.accept(&next).unwrap();
+    assert_eq!(
+        receiver.list_frames("synthetic-session").unwrap(),
+        vec![next]
+    );
+    assert_eq!(
+        receiver.forget(&id, &selector).unwrap(),
+        report,
+        "retrying an acknowledged delete does not delete later work"
+    );
+}
+
+#[test]
+fn forgetting_by_day_keeps_later_frames_and_preserves_receiver_continuity() {
+    use semon_relay::ForgetSelector;
+    let temp = TempDir::new("forget-date");
+    let root = temp.path().join("receiver");
+    let receiver = Receiver::open(&root).unwrap();
+    receiver.acquire("synthetic-session", "machine-a").unwrap();
+    let first = frame(0, &ZERO_CHAIN, b"old\n");
+    let mut second = frame(1, &frame_chain(&first), b"new\n");
+    second.sender_wall_ns = 10;
+    receiver.accept(&first).unwrap();
+    receiver.accept(&second).unwrap();
+    let selector = ForgetSelector {
+        before_ns: Some(5),
+        ..Default::default()
+    };
+    assert_eq!(
+        receiver.forget(&"34".repeat(32), &selector).unwrap().frames,
+        1
+    );
+    drop(receiver);
+    let receiver = Receiver::open(&root).unwrap();
+    assert_eq!(receiver.accept(&first).unwrap(), ReceiveOutcome::Duplicate);
+    assert_eq!(
+        receiver.list_frames("synthetic-session").unwrap(),
+        vec![second.clone()]
+    );
+    let next = frame(2, &frame_chain(&second), b"later\n");
+    receiver.accept(&next).unwrap();
+    assert_eq!(
+        receiver.list_frames("synthetic-session").unwrap(),
+        vec![second, next]
+    );
+}

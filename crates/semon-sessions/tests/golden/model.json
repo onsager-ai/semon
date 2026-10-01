@@ -1,6 +1,6 @@
 {
   "api": 1,
-  "version": "2ec7ef6e2577037a",
+  "version": "3357fb91cf94193b",
   "now": 0,
   "machine": {
     "id": "testbox",
@@ -54,6 +54,7 @@
       ],
       "tokens_by_model": {},
       "parent": "harbor",
+      "parent_source": "marker",
       "repo": "harbor",
       "branch": "feat/flush",
       "start": 1790244840000,
@@ -63,7 +64,10 @@
           1790244840000,
           1790245080000
         ]
-      ]
+      ],
+      "signals": {
+        "model": 1
+      }
     },
     "harbor": {
       "name": "harbor",
@@ -447,6 +451,7 @@
       "start": "a368026b39844b198",
       "at": 1790244000000,
       "end": {
+        "at": 1790245260000,
         "st": "done",
         "why": "toyou",
         "h": "qf84cb3bbd95c749a"
@@ -467,6 +472,7 @@
       "start": "ra4d4f55525170a57",
       "at": 1790244600000,
       "end": {
+        "at": 1790244660000,
         "st": "done",
         "why": "replied"
       },
@@ -481,6 +487,7 @@
       "start": "scf9085bcbd567a10",
       "at": 1790244180000,
       "end": {
+        "at": 1790244480000,
         "st": "done",
         "why": "returned"
       },
@@ -495,6 +502,7 @@
       "start": "s249fde0718402de8",
       "at": 1790244780000,
       "end": {
+        "at": 1790245080000,
         "st": "done",
         "why": "returned"
       },
@@ -514,7 +522,7 @@
   },
   "tx": {
     "a1": "3.566.0",
-    "codex-run": "3.668.0",
+    "codex-run": "4.668.0",
     "harbor": "8.4746.0",
     "quill": "2.1033.0"
   }

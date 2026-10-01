@@ -278,5 +278,61 @@
   {
     "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"a\",\"text\":\"The ingest parser and storage work are ready. Review is clear; the index run needs a CI fix.\"}",
     "why": "The model serves the assistant reply in the transcript as well as its result card; the sample draws only the card. Results are new and read or unread per device (#26)."
+  },
+  {
+    "gap": "tx h-codex: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"model\",\"tag\":\"gpt-6-luna\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx h-codex: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"approval\",\"tag\":\"never\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx h-review-codex: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"model\",\"tag\":\"gpt-6-luna\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx h-review-codex: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"approval\",\"tag\":\"never\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx q-codex: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"model\",\"tag\":\"gpt-6-luna\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx q-codex: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"approval\",\"tag\":\"never\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx a-parse: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"model\",\"tag\":\"gpt-6-luna\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx a-parse: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"approval\",\"tag\":\"never\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx a-store: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"model\",\"tag\":\"gpt-6-luna\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx a-store: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"approval\",\"tag\":\"never\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx a-index: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"model\",\"tag\":\"gpt-6-luna\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx a-index: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"approval\",\"tag\":\"never\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx deps: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"model\",\"tag\":\"gpt-6-luna\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "tx deps: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"approval\",\"tag\":\"never\"}}",
+    "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
   }
 ]

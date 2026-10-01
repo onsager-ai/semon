@@ -51,7 +51,7 @@
     machine: "M3 5h18v11H3zM8 20h8M12 16v4", repo: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6", delegate: "M4 3h7v5H4zM7.5 8v9H13M13 14h7v6h-7z",
     out: "M7 17L17 7M9 7h8v8", in: "M17 7L7 17M15 17H7V9", move: "M4 8h13l-3-3M20 16H7l3 3", ask: "M5 18l-1 3 3-1 11-11-2-2zM14 6l4 4", you: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c1-4 4-6 8-6s7 2 8 6", q: "M9 9a3 3 0 1 1 4 2.8c-.7.3-1 .9-1 1.7V14M12 18h.01", check: "M5 12l4 4 10-10", qc: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4M12 17h.01", decide: "M12 21v-6M12 15L6 9M12 15l6-6M6 9V4M18 9V4M4 6l2-2 2 2M16 6l2-2 2 2", result: "M14 3H6v18h12V7zM14 3v4h4M9 12h6M9 16h6", done: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8 12.5l2.7 2.7L16 9.8", x: "M6 6l12 12M18 6L6 18", expand: "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7", copy: "M9 9h11v11H9zM5 15H4V4h11v1", ext: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
     down: "M12 4v15M5 12l7 7 7-7", up: "M6 15l6-6 6 6", dn: "M6 9l6 6 6-6", branch: "M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6",
-    wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z", wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", tokens: "M5 5h14M12 5v14M9 19h6", chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7", coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5", relay: "M4 7h13l-3-3M20 17H7l3 3M17 4l-3 3 3 3M7 14l3 3-3 3",
+    wrench: "M14.5 6.5a5 5 0 0 0-6.9 6.9l-4.8 4.8a2 2 0 0 0 2.8 2.8l4.8-4.8a5 5 0 0 0 6.9-6.9l-3 3-2.8-2.8z", wide: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", sidebar: "M4 5h16v14H4zM9 5v14", tokens: "M5 5h14M12 5v14M9 19h6", chart: "M4 19V5M4 19h17M8 15l3-4 3 2 5-7", coin: "M12 3v18M17 7.5C17 6.1 14.8 5 12 5S7 6.1 7 7.5 9.2 10 12 10s5 1.1 5 2.5-2.2 2.5-5 2.5-5-1.1-5-2.5", relay: "M4 7h13l-3-3M20 17H7l3 3",
   };
   const clock = (t) => { const d = new Date(t), n = new Date(NOW); const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString(undefined, { weekday: "short" }) + " " + hm; };
   const ago = (t) => { const d = Math.floor((NOW - t) / 60000); return d < 1 ? "now" : d < 60 ? d + "m" : d < 2880 ? Math.floor(d / 60) + "h" : Math.floor(d / 1440) + "d"; };
@@ -89,7 +89,7 @@
   // A session's machine by its short name, or "" where the view is of one machine.
   const machineLabel = (s, scope) => (s ? machineLabels(scope).get(s.machine) ?? "" : "");
   const branchOf = (s) => s.worktree ?? s.branch ?? "No branch";
-  const shortModel = (model) => String(model ?? "Unknown model").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
+  const shortModel = (model) => String(model ?? "Unknown model").replace(/^gpt-(\d+\.\d+)-(.+)$/i, "$2 $1").replace(/^gpt-\d+-/i, "").replace(/^claude-/i, "").replace(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)\.(\d+)$/i, "$1 $2.$3").replace(/^(opus|sonnet|haiku)-(\d+)$/i, "$1 $2");
   // A harness is named in plain muted text (.hname), never in a vendor colour; "short" gives "Claude" where the line is tight. The label itself
   // holds text only: its official mark (harnessIcon) is drawn beside it, outside the span, so the word still tells Claude and Codex apart.
   // The short name ("Claude") gets the long one ("Claude Code") as its tooltip; the long one repeats itself, so it has none.
@@ -130,7 +130,12 @@
     while (SEEN_RESULTS.size > SEEN_LIMIT) SEEN_RESULTS.delete(SEEN_RESULTS.values().next().value);
     if (changed) try { window.localStorage.setItem(SEEN_KEY, JSON.stringify([...SEEN_RESULTS])); } catch {}
   }
-  const inbox = () => H.filter((h) => h.kind === "toyou" && (h.status === "wait" || (isResult(h) && !SEEN_RESULTS.has(h.id)))).sort((a, b) => b.at - a.at);
+  const inbox = () => {
+    const entries = H.filter((h) => h.kind === "toyou" && (h.status === "wait" || (isResult(h) && !SEEN_RESULTS.has(h.id))));
+    const waiting = new Set(entries.filter((h) => h.status === "wait").map((h) => h.from));
+    for (const s of Object.values(SESS)) if (s.state === "wait" && !waiting.has(s.id)) entries.push({ id: "wait:" + s.id, kind: "toyou", from: s.id, to: "you", ask: "decision", status: "wait", at: s.waiting_since ?? s.last, brief: s.waiting_for ?? "Waiting for your input or permission" });
+    return entries.sort((a, b) => b.at - a.at);
+  };
   const working = () => Object.values(SESS).filter((s) => s.state === "work");
   const clean = (t) => t.replace(/[`*]/g, "");
 
@@ -203,20 +208,43 @@
   const rich = (tag, cls, text) => { const n = el(tag, cls); inline(n, text); return n; };
 
   // What a handoff says, from a viewpoint. Returns [icon, [parts...]].
-  function sentence(h, viewer) {
-    const W = (id) => { const s = el("span", "who", nameOf(id)); return s; };
+  function sentence(h, viewer, links = false) {
+    const W = (id, action) => {
+      const name = nameOf(id);
+      if (!links || !action || id === "you" || id === viewer || !SESS[id]) return el("span", "who", name);
+      const b = el("button", "who-link", name); b.type = "button"; b.setAttribute("aria-label", action.label(name));
+      b.addEventListener("click", (ev) => { ev.stopPropagation(); action.open(); });
+      return b;
+    };
     const kindOf = (id) => SESS[id]?.kind === "Subagent" ? "subagent" : SESS[id]?.kind ?? "";
-    if (h.kind === "ask") return [I.ask, [W("you"), el("span", "verb", " asked "), W(h.to)]];
-    if (h.kind === "spawn") return viewer === h.to ? [I.in, [el("span", "verb", "Brief from "), W(h.from)]] : [I.out, [W(h.from), el("span", "verb", " handed off to " + kindOf(h.to) + " "), W(h.to)]];
-    if (h.kind === "relay") return viewer === h.to ? [I.in, [el("span", "verb", "Relay from "), W(h.from)]] : [I.out, [W(h.from), el("span", "verb", " relayed to "), W(h.to)]];
+    if (h.kind === "ask") {
+      const recipient = { label: (name) => "Open " + name + " at the turn this started", open: () => goSession(h.to, STARTS.get(h.id)?.id) };
+      return [I.ask, [W("you"), el("span", "verb", " asked "), W(h.to, recipient)]];
+    }
+    if (h.kind === "spawn") {
+      const sender = { label: (name) => "Open " + name + " where it sent this", open: () => openSender(h) };
+      const recipient = { label: (name) => "Open " + name + " at the turn this started", open: () => goSession(h.to, STARTS.get(h.id)?.id) };
+      return viewer === h.to ? [I.in, [el("span", "verb", "Brief from "), W(h.from, sender)]] : [I.out, [W(h.from, sender), el("span", "verb", " handed off to " + kindOf(h.to) + " "), W(h.to, recipient)]];
+    }
+    if (h.kind === "relay") {
+      const sender = { label: (name) => "Open " + name + " where it sent this", open: () => openSender(h) };
+      const recipient = { label: (name) => "Open " + name + " at the turn this started", open: () => goSession(h.to, STARTS.get(h.id)?.id) };
+      return viewer === h.to ? [I.in, [el("span", "verb", "Relay from "), W(h.from, sender)]] : [I.out, [W(h.from, sender), el("span", "verb", " relayed to "), W(h.to, recipient)]];
+    }
     if (h.kind === "move") {
       const ends = [h.fromMachine, h.toMachine], short = machineShorts(ends.map((id) => [id, MACHINE[id] ?? id]));
-      const M = (id) => { const n = el("span", "verb mach", short.get(id)); n.dataset.tip = "Machine: " + (MACHINE[id] ?? id); return n; };
-      return [I.move, [el("span", "verb", "Semon moved "), W(h.to), el("span", "verb", " from "), M(h.fromMachine), el("span", "verb", " to "), M(h.toMachine)]];
+      const M = (id) => {
+        const label = MACHINE[id] ?? id, n = links ? el("button", "verb mach", short.get(id)) : el("span", "verb mach", short.get(id));
+        if (links) { n.type = "button"; n.setAttribute("aria-label", "Open machine " + label); n.addEventListener("click", (ev) => { ev.stopPropagation(); go({ v: "machine", id }); }); }
+        n.dataset.tip = "Machine: " + label; return n;
+      };
+      const session = { label: (name) => "Open " + name, open: () => goSession(h.to) };
+      return [I.move, [el("span", "verb", "Semon moved "), W(h.to, session), el("span", "verb", " from "), M(h.fromMachine), el("span", "verb", " to "), M(h.toMachine)]];
     }
     const what = { question: " asked you", result: " sent you a result", decision: " needs your decision" }[h.ask];
     const answered = h.status === "done" && (h.ask === "question" || h.ask === "decision");
-    return [answered ? I.done : h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from), el("span", "verb", what)]];
+    const sender = { label: (name) => "Open " + name + " where it sent this", open: () => openSender(h) };
+    return [answered ? I.done : h.ask === "question" ? I.qc : h.ask === "decision" ? I.decide : I.result, [W(h.from, sender), el("span", "verb", what)]];
   }
   const statWord = (h) => isResult(h) ? SEEN_RESULTS.has(h.id) ? "read" : "new" : ({ work: "working", wait: "waiting on you", err: "failed", done: h.kind === "toyou" ? "answered" : h.result ? "returned" : "delivered" })[h.status];
 
@@ -242,6 +270,7 @@
     // The model leaves an active or partially indexed turn without an end record. Keep the mockup's
     // transcript-derived fallback so outgoing work remains traceable while the run is in progress.
     if (!t.end) {
+      if (t.last && SESS[t.sid]?.state === "wait") return { st: "wait", text: "Waiting on permission or input" };
       if (t.last && SESS[t.sid]?.state === "work") return { st: "work", text: "Still working" };
       const ty = t.out.filter((h) => h.kind === "toyou").at(-1);
       if (ty) return { st: ty.status === "wait" ? "wait" : "done", text: (TOYOU[ty.ask] ?? "Sent you a message") + " · " + statWord(ty) + " · " + clock(ty.at) };
@@ -255,6 +284,8 @@
       return { st: "idle", text: "No reply in these logs" };
     }
     const { st, why } = t.end, mh = t.end.h ? HID.get(t.end.h) : null;
+    if (why === "input") return { st: "wait", text: "Waiting for your input" };
+    if (why === "permission" || why === "waiting" || why === "waiting_permission") return { st: "wait", text: "Waiting on permission" };
     if (why === "working") return { st: "work", text: "Still working" };
     if (why === "toyou" && mh) return { st: mh.status === "wait" ? "wait" : "done", text: (TOYOU[mh.ask] ?? "Sent you a message") + " · " + statWord(mh) + " · " + clock(mh.at) };
     if (why === "failed") return { st: "err", text: "Failed" + (t.start?.done ? " · " + clock(t.start.done) : "") };
@@ -329,7 +360,9 @@
     NOW = serverNow + (Date.now() - fetchedAt);
     for (const s of Object.values(SESS)) if (s.activity && s.activity[3] != null) s.activity[2] = Math.floor((NOW - s.activity[3]) / 1000);
   }
+  let wireModel = null;
   function adopt(m) {
+    wireModel = structuredClone(m);
     CHILDREN = null;
     serverNow = m.now; fetchedAt = Date.now(); TOK = m.tx ?? {};
     for (const k of Object.keys(MACHINE)) { delete MACHINE[k]; delete MACHINE_UP[k]; delete MACHINE_LAST[k]; }
@@ -369,44 +402,37 @@
   // A return line arrives as data; it reads as the mockup's "Returned to … · HH:MM".
   const txEntry = (e) => e.k === "end" && e.ret ? { k: "end", text: "Returned to " + nameOf(e.ret.to) + (e.ret.failed ? " · failed" : "") + (e.ret.at != null ? " · " + clock(e.ret.at) : ""), turn: e.turn } : e;
   // where: "before" and "after" extend the loaded range; otherwise the page replaces it.
-  function fetchTx(sid, q, where, signal) {
-    const tok = TOK[sid];
+  function fetchTx(sid, q, where, signal, onPage) {
+    const tok = TOK[sid], range = TXM[sid], boundary = where === "before" ? range?.from : range?.to;
     return api("/api/tx?sid=" + enc(sid) + (q ? "&" + q : ""), signal).then((p) => {
+      // An error jump or a reload may replace the range while a pager request is out. Its page no longer adjoins ours.
+      if (signal?.aborted || (where && (TXM[sid] !== range || (where === "before" ? TXM[sid]?.from : TXM[sid]?.to) !== boundary))) return;
       const es = p.entries.map((e) => txEntry({ ...e, sid })), m = TXM[sid];
       if (where === "before" && m) { TX[sid] = es.concat(TX[sid]); m.from = p.from; }
       else if (where === "after" && m) { TX[sid] = TX[sid].concat(es); m.to = p.to; }
-      else { TX[sid] = es; TXM[sid] = { from: p.from, to: p.to }; }
-      Object.assign(TXM[sid], { total: p.total, calls: p.calls, errors: p.errors }); if (where !== "before" && p.to >= p.total) TXM[sid].tok = tok; spread(sid);
+      else { clearPaging(sid); TX[sid] = es; TXM[sid] = { from: p.from, to: p.to }; STALE_BRIEFS.delete(sid); }
+      Object.assign(TXM[sid], { total: p.total, calls: p.calls, errors: p.errors, watchTok: tok }); if (where !== "before" && p.to >= p.total) { TXM[sid].tok = tok; TXM[sid].newer = 0; } spread(sid);
+      onPage?.(); // optional notification for a pager; the promise still resolves without a value
     });
   }
-  // A spawn's child work opens inline under its card: load the turn each brief started, when its session isn't loaded.
-  function kids(sid, signal) {
-    const jobs = [];
-    for (const e of TX[sid] ?? []) {
-      const h = e.k === "h" ? HID.get(e.id) : null, c = h && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id) : null;
-      if (c && !TX[c.sid]) jobs.push(fetchTx(c.sid, "turn=" + enc(c.id), undefined, signal));
-    }
-    return jobs.length ? Promise.all(jobs) : null;
-  }
-  // What a route needs before it can draw: a session's page (the one holding a deep-linked turn), and its child work.
+  // What a route needs before it can draw: a session's page (the one holding a deep-linked turn).
   // `signal` cancels what a navigation asked for when the reader goes elsewhere first.
   function load(r, signal) {
     if (r.v === "analytics") return fetchAnalytics().then(() => { scheduleAnalytics(); }); // the range's answer, from the server
     if (r.v !== "session" || !SESS[r.id]) return null;
     const t = r.turn ? TURN.get(r.turn) : null, deep = t && t.sid === r.id && !t.entries.length;
-    if (TX[r.id] && !deep) return lenient(kids(r.id, signal));
-    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal).then(() => lenient(kids(r.id, signal)));
+    if (TX[r.id] && !deep) return null;
+    return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", undefined, signal);
   }
-  // Child work that fails to load leaves its cards as they were: only the session's own transcript failing fails the route.
-  const lenient = (p) => (p ? p.catch(() => {}) : p);
   // The last few transcripts opened, kept when the reader leaves them, so opening one again draws it at once. (A transcript
   // still in TX, which only a model update prunes, draws from there just the same.) A transcript is kept only when it was
   // loaded to its end, and the cache is bounded by entries and by estimated memory: two bytes for each character of an entry's
   // text, since JavaScript strings are UTF-16. Opening one takes it out of the cache; leaving it puts it back at the newest end.
+  const STALE_BRIEFS = new Set();
   const TXCACHE = new Map(), TXCACHE_MAX = 5, TXCACHE_BYTES = 2 * 1024 * 1024;
   const weigh = (entries) => { let n = 0; for (const e of entries) for (const v of Object.values(e)) n += typeof v === "string" ? v.length : v && typeof v === "object" ? JSON.stringify(v).length : 4; return n * 2; };
   function cacheTx(sid, entries, meta) {
-    if (!entries || !meta || meta.to < meta.total || meta.tok == null) return; // without its mark there is no telling later whether it grew
+    if (!entries || !meta || meta.to < meta.total || meta.tok == null || STALE_BRIEFS.has(sid) || meta.origin !== !!originHandoff(sid)) return; // without its mark there is no telling later whether it grew
     TXCACHE.delete(sid);
     const bytes = weigh(entries); if (bytes > TXCACHE_BYTES) return;
     TXCACHE.set(sid, { entries, meta, bytes });
@@ -421,7 +447,7 @@
     TXCACHE.delete(r.id); TX[r.id] = c.entries; TXM[r.id] = c.meta;
     if (!r.turn) return true;
     spread(r.id); const t = TURN.get(r.turn);
-    if (t && t.sid === r.id && !t.entries.length) { delete TX[r.id]; delete TXM[r.id]; return false; }
+    if (t && t.sid === r.id && !t.entries.length) { dropTx(r.id); return false; }
     return true;
   }
   // A mark with fewer entries or bytes than the one loaded means the file was cut or rewritten: load it again.
@@ -431,18 +457,109 @@
   // for when the mark is the same. The page is drawn again, keeping the reader's place, once something arrived.
   function revalidate(r) {
     const sid = r.id, m = TXM[sid], moved = m && m.to >= m.total && m.tok != null && TOK[sid] != null && m.tok !== TOK[sid];
-    const job = moved ? (shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid)) : null, work = job ? job.then(() => kids(sid)) : kids(sid);
+    const job = moved ? (shrank(m.tok, TOK[sid]) ? reload(sid) : tail(sid)) : null, work = job;
     if (work) work.then(() => { if (route === r && rendered === r) refresh(null); }, () => {});
+  }
+  // Paging state survives redraws: a click and an observer share one request per session and direction, and a failed
+  // page stays manual until Retry succeeds. Observers belong only to the buttons currently drawn.
+  const PAGING = new Map(), pagerObservers = new Map();
+  let pagerFrame = null, pagerArmed = false, automaticLoads = 0, scrollRevision = 0, programmaticScrollPending = false, programmaticScrollTimer = null;
+  function clearPaging(sid) {
+    for (const state of Object.values(PAGING.get(sid) ?? {})) state.controller?.abort();
+    PAGING.delete(sid);
+    if (route.v === "session" && route.id === sid) resetPagerInput();
+  }
+  function dropTx(sid) { clearPaging(sid); delete TX[sid]; delete TXM[sid]; }
+  function resetPagerInput() { pagerArmed = false; automaticLoads = 0; scrollRevision++; disconnectPagerObservers(); }
+  function holdProgrammaticScroll() {
+    programmaticScrollPending = true;
+    clearTimeout(programmaticScrollTimer);
+    // Scroll events arrive after scrollTop writes. Smooth jumps keep extending this guard until scrolling is quiet.
+    programmaticScrollTimer = setTimeout(() => { programmaticScrollPending = false; programmaticScrollTimer = null; }, 120);
+  }
+  function scrollProgrammatically(fn, jump = true) {
+    if (jump) resetPagerInput();
+    holdProgrammaticScroll(); fn();
+  }
+  function readerScrollInput() {
+    if (route.v !== "session" || rendered !== route || $("#page").hasAttribute("aria-busy")) return;
+    clearTimeout(programmaticScrollTimer); programmaticScrollTimer = null; programmaticScrollPending = false;
+    stopOpeningEndPin(); pagerArmed = true; automaticLoads = 0; scrollRevision++; queuePagerObservers();
+  }
+  const automaticPagingAllowed = () => pagerArmed && automaticLoads < 3 && !openingEndUntil && !findOpen && !find && show.messages && show.tools && show.thinking;
+  function pagingState(sid, where) {
+    if (!PAGING.has(sid)) PAGING.set(sid, { before: { busy: false, failed: false }, after: { busy: false, failed: false } });
+    return PAGING.get(sid)[where];
+  }
+  function paintPager(b) {
+    const state = pagingState(b.dataset.pagerSid, b.dataset.pagerWhere), direction = b.dataset.pagerWhere === "before" ? "earlier" : "later";
+    b.disabled = state.busy;
+    const label = b.querySelector(".pager-label") ?? el("span", "pager-label");
+    if (!label.parentNode) b.replaceChildren(label);
+    b.querySelector(".spin")?.remove();
+    if (state.busy) { const spin = el("span", "spin"); spin.setAttribute("aria-hidden", "true"); b.prepend(spin); }
+    label.setAttribute("aria-live", "polite");
+    label.textContent = spaced(state.busy ? "Loading " + direction + "…" : state.failed ? "Couldn't load " + direction + " entries · Retry" : "Load " + direction + (b.dataset.pagerWhere === "after" && TXM[b.dataset.pagerSid]?.newer ? " · " + TXM[b.dataset.pagerSid].newer + " new" : ""));
+  }
+  function disconnectPagerObservers() {
+    if (pagerFrame !== null) cancelAnimationFrame(pagerFrame); pagerFrame = null;
+    for (const observer of pagerObservers.values()) observer.disconnect();
+    pagerObservers.clear();
+  }
+  function queuePagerObservers() {
+    if (pagerFrame !== null || SIDEBAR_ONLY) return;
+    // Wait until rendering, opening at the end and restoring the reader's place have finished.
+    pagerFrame = requestAnimationFrame(() => {
+      pagerFrame = null; disconnectPagerObservers();
+      if (route.v !== "session" || rendered !== route || !automaticPagingAllowed() || $("#page").hasAttribute("aria-busy") || typeof IntersectionObserver === "undefined") return;
+      for (const b of $("#page").querySelectorAll("[data-pager-where]")) {
+        const state = pagingState(b.dataset.pagerSid, b.dataset.pagerWhere);
+        if (state.busy || state.failed) continue;
+        const observer = new IntersectionObserver((entries) => {
+          if (pagerObservers.get(b) === observer && entries.some((entry) => entry.isIntersecting)) loadPager(b, false);
+        }, { root: phone.matches ? null : $("#main"), rootMargin: b.dataset.pagerWhere === "before" ? "800px 0px 0px 0px" : "0px 0px 800px 0px" });
+        pagerObservers.set(b, observer); observer.observe(b);
+      }
+    });
+  }
+  async function loadPager(b, manual) {
+    const sid = b.dataset.pagerSid, where = b.dataset.pagerWhere, state = pagingState(sid, where), r = route;
+    if (!b.isConnected || r.v !== "session" || r.id !== sid || rendered !== r || state.busy || (!manual && (state.failed || !automaticPagingAllowed()))) return;
+    if (manual) stopOpeningEndPin();
+    const m = TXM[sid]; if (!m || (where === "before" ? m.from <= 0 : m.to >= m.total)) return;
+    const boundary = where === "before" ? m.from : m.to;
+    if (!manual) automaticLoads++;
+    state.busy = true; state.controller = new AbortController(); paintPager(b);
+    try {
+      let applied = false;
+      await fetchTx(sid, where + "=" + boundary, where, state.controller.signal, () => { applied = true; });
+      if (!applied || PAGING.get(sid)?.[where] !== state || TXM[sid] !== m) return;
+      state.failed = false;
+      if (route !== r || rendered !== r || PAGING.get(sid)?.[where] !== state) return;
+      // Capture at the last moment: the reader can keep scrolling while the request is out.
+      const box = scroller(), top = phone.matches ? 0 : box.getBoundingClientRect().top, st = capture();
+      const entry = [...$("#page").querySelectorAll(".turns [data-e][data-entry-key]:not(.tgroup)")].find((n) => { const rect = n.getBoundingClientRect(); return rect.height && rect.top >= top; });
+      st.paging = { anchor: entry ? { key: entry.dataset.entryKey, off: entry.getBoundingClientRect().top - top } : null, height: box.scrollHeight, before: where === "before" };
+      const armed = pagerArmed, used = automaticLoads;
+      render(); restore(st);
+      // This paging redraw may continue the same reader gesture, within its three-page limit.
+      if (!manual) { pagerArmed = armed; automaticLoads = used; }
+      syncJump(); saveHistoryScroll();
+    } catch (error) {
+      if (error?.name !== "AbortError" && PAGING.get(sid)?.[where] === state) state.failed = true;
+    } finally {
+      state.busy = false; state.controller = null;
+      if (PAGING.get(sid)?.[where] === state) {
+        for (const button of $("#page").querySelectorAll("[data-pager-where]")) if (button.dataset.pagerSid === sid && button.dataset.pagerWhere === where) paintPager(button);
+        queuePagerObservers();
+      }
+    }
   }
   // "Load earlier" at the top of a transcript, and "Load later" at its end when a deep link loaded a middle page.
   function pager(sid, where, label) {
     const w = el("div", "list"), b = el("button", "more", label); b.type = "button"; if (where === "before") b.dataset.loadEarlier = ""; w.append(b); // data-load-earlier: a stable hook for the budget check
-    b.addEventListener("click", () => {
-      stopOpeningEndPin();
-      const m = TXM[sid], box = phone.matches ? document.documentElement : $("#main"), h0 = box.scrollHeight; b.disabled = true;
-      fetchTx(sid, where === "before" ? "before=" + m.from : "after=" + m.to, where).then(() => kids(sid)).then(() => {
-        render(); if (where === "before") { const d = box.scrollHeight - h0; if (phone.matches) window.scrollBy(0, d); else box.scrollTop += d; } }, () => { b.disabled = false; });
-    });
+    b.dataset.pagerSid = sid; b.dataset.pagerWhere = where; paintPager(b);
+    b.addEventListener("click", () => loadPager(b, true));
     return w;
   }
   // "View all" reads the whole call: each part the server cut ("more") is fetched in full from /api/entry, by the entry's
@@ -478,7 +595,7 @@
     return { v: "home" };
   }
   function boot() {
-    api("/api/model").then((m) => {
+    api("/api/model?delta=1").then((m) => {
       adopt(m); LIVE.version = m.version; remember(m); if (SIDEBAR_ONLY) { render(); schedule(2000); return; } route = routeOf(location);
       if (route.v === "sessions") query = (new URLSearchParams(location.search).get("q") ?? "").trim(); // direct Sessions links can prefill its search field
       if (route.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
@@ -491,7 +608,9 @@
         else quietTop();
         schedule(2000); setInterval(ticker, 1000);
       };
-      const p = load(route); if (p) p.then(done, done); else done();
+      const initialRoute = route, p = load(initialRoute);
+      if (p) p.then(() => { done();  }, done);
+      else { done();  }
     }, (err) => { $(SIDEBAR_ONLY ? "#lanes" : "#page").replaceChildren(el("p", SIDEBAR_ONLY ? "ghead" : "empty", "Couldn't load the sessions: " + err.message)); });
   }
 
@@ -523,7 +642,7 @@
   let groupBy = "recent"; let query = ""; let focusSessionsSearchOnRender = null; let analyticsRange = 7, analyticsMeasure = "hours";
   let showApprovalReviews = false;
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
-  let pendingSessionOpen = null, pendingFlashHandoff = null;
+  let pendingSessionOpen = null;
   let accountOpen = false;
   // The phone's account menu adds a history entry, so the back gesture closes it.
   let accountSheet = false;
@@ -533,12 +652,12 @@
   const SHOW_ALL = { messages: true, tools: true, thinking: true };
   let show = { ...SHOW_ALL }; let find = ""; let findOpen = false;
   const currentScroll = () => phone.matches ? window.scrollY : $("#main").scrollTop;
-  const restoreScroll = (top) => { if (phone.matches) window.scrollTo(0, top); else $("#main").scrollTop = top; };
-  const saveHistoryScroll = () => { try { if (history.state?.v) history.replaceState({ ...history.state, scrollTop: currentScroll() }, ""); } catch {} };
+  const restoreScroll = (top) => scrollProgrammatically(() => { if (phone.matches) window.scrollTo(0, top); else $("#main").scrollTop = top; });
+  const saveHistoryScroll = () => { if (viewerEl) return; try { if (history.state?.v) history.replaceState({ ...history.state, scrollTop: currentScroll() }, ""); } catch {} };
   let scrollSaveFrame = false;
   const queueScrollSave = () => { if (scrollSaveFrame) return; scrollSaveFrame = true; requestAnimationFrame(() => { scrollSaveFrame = false; saveHistoryScroll(); }); };
   if (!SIDEBAR_ONLY) { window.addEventListener("scroll", queueScrollSave, { passive: true }); $("#main").addEventListener("scroll", queueScrollSave, { passive: true }); }
-  const quietTop = () => { if (phone.matches) window.scrollTo(0, 0); else $("#main").scrollTop = 0; };
+  const quietTop = () => restoreScroll(0);
   function openSessionAtEnd() { if (location.hash) return; startOpeningEndPin(); }
   // Opening a session draws what the model already holds at once, before its transcript arrives: the sidebar row, the top bar,
   // and the old page held dimmed and inert (aria-busy). If the transcript is still on its way after 150 ms, a skeleton of turn-shaped
@@ -596,36 +715,43 @@
   function go(r, fromHistory) {
     if (r.v !== "sessions" || r !== focusSessionsSearchOnRender) focusSessionsSearchOnRender = null;
     if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
-    stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
+    if (route.v === "session") clearPaging(route.id);
+    resetPagerInput(); stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
     closeAccountMenu(true, true);
     dropErrors(true); // (first: it drops a range the error stepper moved, and that is not kept)
-    // The session left is kept for opening it again; weighing it waits until the frame the click drew has been painted.
-    if (route.v === "session" && (r.v !== "session" || r.id !== route.id) && TX[route.id] && TXM[route.id]) { const sid = route.id, entries = TX[sid], meta = { ...TXM[sid] }; requestAnimationFrame(() => setTimeout(() => cacheTx(sid, entries, meta), 0)); }
+    // Keep the session left after the cached destination has had a frame to draw; weighing it must not delay that draw.
+    if (route.v === "session" && (r.v !== "session" || r.id !== route.id) && TX[route.id] && TXM[route.id]) { const sid = route.id, entries = TX[sid], meta = { ...TXM[sid], origin: !!originHandoff(sid) }; requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => cacheTx(sid, entries, meta), 0))); }
     if (r.v !== "session" || r.id !== route.id) show = { ...SHOW_ALL };
+    if (r.v !== "sessions") ORD.delete("page");
     route = r; find = ""; findOpen = false; closeDrawer(true); clearNewEntries();
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     const done = () => {
       if (route !== r) return;
       endLoading(); render(); if (r.v === "session") focusTitle();
-      if (fromHistory && Number.isFinite(r.scrollTop)) restoreScroll(r.scrollTop);
+      if (fromHistory && Number.isFinite(r.scrollTop)) {
+        // A fresh offscreen turn has only its intrinsic estimate. Measure once on history navigation
+        // before setting the saved offset, so the browser cannot clamp it to the estimated height.
+        const turns = [...$("#page").querySelectorAll(".turn")];
+        for (const turn of turns) turn.style.contentVisibility = "visible";
+        const heights = turns.map((turn) => turn.getBoundingClientRect().height);
+        turns.forEach((turn, i) => { turn.style.containIntrinsicBlockSize = "auto " + Math.ceil(heights[i]) + "px"; turn.style.contentVisibility = ""; });
+        restoreScroll(r.scrollTop);
+      }
       else if (r.v === "session" && r.turn) { revealTurn(r.turn, !fromHistory); if (location.hash) requestAnimationFrame(() => requestAnimationFrame(revealEntryHash)); }
       else if (r.v === "session" && location.hash) revealEntryHash();
       else if (r.v === "session") openSessionAtEnd();
       else quietTop();
       syncJump();
-      if (pendingFlashHandoff && r.v === "session" && HID.get(pendingFlashHandoff)?.from === r.id) {
-        const id = pendingFlashHandoff; pendingFlashHandoff = null;
-        requestAnimationFrame(() => { const card = [...document.querySelectorAll(".hcard")].find((x) => x.dataset.h === id); if (!card) return; card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1500); });
-      }
     };
     // A transcript already in memory, still in TX or kept in the cache, needs no network: the top bar and the sidebar are drawn
     // from the model at once, the page itself on the next frame (so the first two are on screen before a long transcript is
     // built), and it is brought up to date afterwards. Otherwise the route waits for its data, with the top bar and the
     // sidebar already drawn.
     if (r.v === "session" && SESS[r.id]) {
+      if (STALE_BRIEFS.has(r.id)) { delete TX[r.id]; delete TXM[r.id]; TXCACHE.delete(r.id); }
       const kept = !TX[r.id];
       if (kept ? adoptCached(r) : !isDeep(r)) {
         TXCACHE.delete(r.id);
@@ -635,7 +761,7 @@
       }
     }
     const signal = r.v === "session" ? (navAbort = new AbortController()).signal : undefined, p = load(r, signal);
-    if (p) { if (r.v === "session") paintPending(r); p.then(done, (err) => failLoad(r, err)); } else done();
+    if (p) { if (r.v === "session") paintPending(r); p.then(() => { done();  }, (err) => failLoad(r, err)); } else done();
   }
   if (!SIDEBAR_ONLY) window.addEventListener("popstate", (e) => {
     if (skipPop) { skipPop = false; if (afterPop) { const leave = afterPop; afterPop = null; leave(); return; } if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } return; } // close a sheet before opening its session
@@ -648,20 +774,22 @@
   // A deep link to a turn: scroll it just below the top bar (measured, since its height varies) and mark it for a moment.
   // It is placed again two frames later, after "Show more" buttons above it have appeared.
   function revealTurn(id, flash) {
+    resetPagerInput();
     const b = [...document.querySelectorAll(".turn")].find((x) => x.dataset.turn === id); if (!b) { quietTop(); return; }
     const place = () => { if (!b.isConnected) return; const gap = $("#topbar").offsetHeight + 8;
-      if (phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + b.getBoundingClientRect().top - gap)); else { const m = $("#main"); m.scrollTop += b.getBoundingClientRect().top - m.getBoundingClientRect().top - gap; }
+      scrollProgrammatically(() => { if (phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + b.getBoundingClientRect().top - gap)); else { const m = $("#main"); m.scrollTop += b.getBoundingClientRect().top - m.getBoundingClientRect().top - gap; } });
       syncJump(); saveHistoryScroll(); };
     place(); requestAnimationFrame(() => requestAnimationFrame(place));
     if (flash) { b.classList.add("flash"); setTimeout(() => b.classList.remove("flash"), 1500); }
   }
   function revealEntryHash() {
+    resetPagerInput();
     if (!location.hash) return;
     let key = ""; try { key = decodeURIComponent(location.hash.slice(1)); } catch { key = location.hash.slice(1); }
     const target = document.getElementById(key) ?? [...document.querySelectorAll("[data-e]")].find((n) => n.dataset.e === key) ?? [...document.querySelectorAll(".turn[data-turn]")].find((n) => n.dataset.turn === key);
     if (!target) return;
     const place = () => { if (!target.isConnected) return; const gap = $("#topbar").offsetHeight + 8;
-      if (phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + target.getBoundingClientRect().top - gap)); else { const m = $("#main"); m.scrollTop += target.getBoundingClientRect().top - m.getBoundingClientRect().top - gap; }
+      scrollProgrammatically(() => { if (phone.matches) window.scrollTo(0, Math.max(0, window.scrollY + target.getBoundingClientRect().top - gap)); else { const m = $("#main"); m.scrollTop += target.getBoundingClientRect().top - m.getBoundingClientRect().top - gap; } });
       syncJump(); saveHistoryScroll(); };
     place(); requestAnimationFrame(() => requestAnimationFrame(place));
   }
@@ -780,21 +908,25 @@
     if (!ACCOUNT) return;
     const widget = accountWidget(true); widget.id = "account-drawer"; $("#sidebar").append(widget);
   }
-  // ---- Stable order: a list of sessions keeps its rows where they are while the model updates ------------------------------------
+  // ---- Stable order: a list of sessions keeps its rows where they are while the reader can see it ------------------------------------
   // Each list sorted by recency keeps its order as a snapshot of session ids. A live update refreshes every row in place and never
-  // reorders one, wherever the list is scrolled: a reorder is held and counted. A session new since the snapshot is inserted at the top
-  // (a pure insertion, like a message arriving) only while the list's top is in view and it is untouched (no pointer down, no mouse
-  // over one of its rows, no keyboard focus on one); otherwise it is held and counted too, and so is a list new since the snapshot.
-  // What is held shows as "N updated": a small chip in the list's own header row while its top is in view (it takes no room and covers
-  // no control), a floating pill once the top is scrolled out of view. Tapping either re-sorts the list (the pill also scrolls to its
-  // top). The list re-sorts, unasked, only when the reader changes what it is (the route, the search, the filters, the grouping) or
-  // opens the phone's drawer. A session that leaves the list or the filter goes in place. Nothing re-sorts on a timer.
-  const ORD = new Map(), ordPills = new Map(), ordChips = new Map(), ordTotal = { page: 0, side: 0 }, ordTouch = { down: false }, byLast = (a, b) => b.last - a.last;
+  // reorders one: a reorder is held. A session new since the snapshot is put at the top (a pure insertion, like a message arriving)
+  // only while the list's top is in view and it is untouched (no pointer down, no mouse over one of its rows, no keyboard focus on
+  // one); otherwise it is held too, and so is a list new since the snapshot. Nothing tells the reader what is held. Held order is
+  // applied when the list is out of sight, so that no row ever moves while it is looked at:
+  //   - the phone's drawer: when it opens (before it shows) and once it has closed;
+  //   - the page: when the route changes (the new page is drawn sorted) and when the tab comes back from the background;
+  //   - the sidebar on a wide screen, which is always in view: ORD_IDLE_MS after something was first held or the reader last touched it
+  //     (a pointer over it, focus in it), once the pointer and focus are off it. The Sessions page has no timer: it is what is read.
+  // The list also re-sorts when the reader changes what it is (the search, the filters, the grouping).
+  const ORD = new Map(), ordTouch = { down: false }, byLast = (a, b) => b.last - a.last;
   const pageSig = () => JSON.stringify([query, groupBy, sessionFilters]);
   document.addEventListener("pointerdown", () => { ordTouch.down = true; }, true);
   for (const t of ["pointerup", "pointercancel"]) document.addEventListener(t, () => { ordTouch.down = false; }, true);
   window.addEventListener("blur", () => { ordTouch.down = false; });
-  document.addEventListener("visibilitychange", () => { ordTouch.down = false; });
+  // A tab that comes back from the background applies what was held, once, before it paints, from the data it has. What the catch-up
+  // poll brings after that is held like any other update.
+  document.addEventListener("visibilitychange", () => { ordTouch.down = false; if (visible()) { orderApply("page"); orderApply("side"); } });
   // How many rows must move to put `rows` in `cmp` order: all of them but the longest run already in it.
   function ordMoves(rows, cmp) {
     const tails = [];
@@ -810,8 +942,7 @@
   // list, a mouse only over one of its rows.
   function ordState(name) {
     const side = name === "side", rows = side ? "#lanes .treeitem" : "#page .nrow", a = document.activeElement;
-    const host = side ? null : chipHost("page"); // the header row the chip sits in: the list's top is in view while that row's bottom is below the bar
-    const inView = side ? sideRegion().scrollTop <= 1 : !host || host.getBoundingClientRect().bottom >= $("#topbar").getBoundingClientRect().bottom - 1;
+    const inView = side ? sideRegion().scrollTop <= 1 : !$(rows) || $(rows).getBoundingClientRect().top >= $("#topbar").getBoundingClientRect().bottom - 1;
     const touched = ordTouch.down || (!!a?.matches?.(":focus-visible") && !!a.closest(side ? "#lanes" : rows)) || (matchMedia("(hover: hover)").matches && !!$(rows + ":hover"));
     return { inView, touched };
   }
@@ -844,71 +975,32 @@
     scope.lists.set(key, ids);
     return ids.map((id) => by.get(id));
   }
-  // The pill: in the sidebar a sticky zero-height slot above the rows, on a page a fixed button under the top bar, so that showing it
-  // moves no row. It shows the count the last draw of that screen found.
-  function makeOrderButton(name, cls) {
-    const b = el("button", cls); b.type = "button"; b.hidden = true; b.dataset.order = name;
-    b.addEventListener("click", (e) => orderResort(name, e.detail === 0, cls === "order-chip"));
-    (cls === "order-chip" ? ordChips : ordPills).set(name, b); return b;
-  }
   const sideRegion = () => $("#side-list") ?? $("#sidebar");
-  const ordLive = el("div", "sr-only"); ordLive.id = "order-status"; ordLive.setAttribute("role", "status"); ordLive.setAttribute("aria-live", "polite");
-  { const content = el("div", "side-content"), slot = el("div", "order-slot"); slot.append(makeOrderButton("side", "order-pill"));
-    // Bound the sticky slot to the full list content, so it stays pinned through the entire scroll range.
-    content.append(slot, $("#lanes")); sideRegion().prepend(content);
-    const pagePill = makeOrderButton("page", "order-pill"); if (SIDEBAR_ONLY) sideRegion().append(ordLive); else { $("#page").before(pagePill); document.body.append(ordLive); }
-    makeOrderButton("side", "order-chip"); makeOrderButton("page", "order-chip"); } // the page's pill sits just before the page, so the tab order reaches it first
-  function placeOrderPill() {
-    const b = ordPills.get("page"); if (!b || b.hidden) return;
-    const r = $("#page").getBoundingClientRect(); if (r.width) b.style.setProperty("--jump-x", r.left + r.width / 2 + "px");
-    b.style.setProperty("--order-top", Math.max(0, $("#topbar").getBoundingClientRect().bottom) + 8 + "px");
-  }
-  // The header row a screen's chip sits in: the sidebar's "Recent" label; Sessions' group-by row; the heading above a page's first list.
-  function chipHost(name) {
-    if (name === "side") return $(".side-h");
-    if (route.v === "sessions") return $("#page .groupby");
-    return $("#page .nrow")?.closest(".list")?.previousElementSibling ?? null;
-  }
-  function labelOrder(b, n, compact) {
-    b.replaceChildren(); if (!n) return;
-    const count = el("span", "new-count"), word = el("span", "word"); word.textContent = " updated"; count.append(String(n), word);
-    b.append(count, icon(I.up)); b.setAttribute("aria-label", n + " updated, show in recency order"); b.classList.toggle("compact", !!compact);
-  }
-  // What the last draw of that screen held or found stale shows as the chip while the list's top is in view, as the floating pill once
-  // it is scrolled out of view.
-  function syncOrderPill(name) {
-    const pill = ordPills.get(name), chip = ordChips.get(name), sc = ORD.get(name); if (!pill) return;
-    const view = ordState(name), n = !sc || (name === "page" && sc.tie !== route) || (name === "side" && railMode && !phone.matches) ? 0 : sc.n, was = ordTotal[name];
-    const pn = view.inView ? 0 : n, cn = view.inView ? n : 0;
-    if (pill.dataset.n !== String(pn)) { pill.dataset.n = String(pn); pill.hidden = !pn; labelOrder(pill, pn); }
-    const host = cn ? chipHost(name) : null;
-    if (!host || chip.parentElement !== host) chip.remove();
-    if (host) {
-      if (chip.parentElement !== host) host.append(chip);
-      if (chip.dataset.n !== String(cn)) { chip.dataset.n = String(cn); labelOrder(chip, cn); }
-      chip.hidden = false; chip.classList.remove("compact", "tiny");
-      // On a narrow row the chip would cover the last control: it shrinks to its count and arrow, then to its count.
-      const last = [...host.children].filter((x) => x !== chip && !x.hidden).at(-1), over = () => last && chip.getBoundingClientRect().left < last.getBoundingClientRect().right + 6;
-      if (over()) { chip.classList.add("compact"); if (over()) chip.classList.add("tiny"); }
-    } else { chip.hidden = true; chip.dataset.n = "0"; }
-    ordTotal[name] = n; // one status region serves both screens: it is cleared only when neither holds anything
-    if (n && !was) ordLive.textContent = n + (n === 1 ? " session updated" : " sessions updated"); else if (!ordTotal.page && !ordTotal.side) ordLive.textContent = "";
-    if (pn) placeOrderPill();
-  }
-  // Scrolling moves what is held between the chip and the pill.
-  function orderScroll() {
-    for (const name of ["page", "side"]) if (ORD.get(name)?.n || !ordPills.get(name).hidden || !ordChips.get(name).hidden) syncOrderPill(name); // nothing held or shown: nothing to move
-  }
-  if (!SIDEBAR_ONLY) { window.addEventListener("resize", placeOrderPill, { passive: true }); window.addEventListener("scroll", orderScroll, { passive: true }); $("#main").addEventListener("scroll", orderScroll, { passive: true }); }
-  sideRegion().addEventListener("scroll", orderScroll, { passive: true });
-  // Tapping the pill re-sorts the list it belongs to and scrolls it to its top; a keyboard user lands on its first row. The chip
-  // re-sorts where the list stands (its top is already in view).
-  function orderResort(name, keyboard, quiet) {
+  // How long the wide screen's sidebar is left alone before it applies what it holds. Read once, at load, with 10 s as the default; a
+  // browser check may set window.__semonOrderIdleMs to a finite number from 200 to 60000 ms before load; other values use the default.
+  const ordIdleMs = window.__semonOrderIdleMs;
+  const ORD_IDLE_MS = Number.isFinite(ordIdleMs) && ordIdleMs >= 200 && ordIdleMs <= 60000 ? ordIdleMs : 10000;
+  const ORD_DRAWER_MS = 320; // the drawer's slide (0.24 s) and a little
+  // Applies what a screen holds: the list is drawn sorted, from scratch.
+  function orderApply(name) {
+    const sc = ORD.get(name); if (!sc?.n || (name === "page" && (sc.tie !== route || rendered !== route || viewerEl || $("#page").hasAttribute("aria-busy")))) return;
     ORD.delete(name);
-    if (name === "side") { renderLanes(); if (!quiet) sideRegion().scrollTop = 0; if (keyboard) $("#lanes .srow")?.focus({ preventScroll: true }); }
-    else if (quiet) { const st = capture(); render(); restore(st); syncOrderPill("page"); syncOrderPill("side"); if (keyboard) $("#page .nrow")?.focus({ preventScroll: true }); }
-    else { render(); quietTop(); if (keyboard) $("#page .nrow")?.focus({ preventScroll: true }); }
+    if (name === "side") renderLanes(); else { const st = capture(); render(); restore(st); }
   }
+  // The wide screen's sidebar is always in view: what it holds is applied once it has been left alone for ORD_IDLE_MS. Left alone means
+  // no pointer over it or down, no keyboard focus or focused text field in it, and no menu or dialog open (the session menu hangs from
+  // the top bar, outside the sidebar, so it is named here); anything the reader does to it starts the wait again.
+  let ordIdle = null;
+  function ordIdleArm() {
+    clearTimeout(ordIdle); ordIdle = null;
+    if (phone.matches || !ORD.get("side")?.n) return;
+    ordIdle = setTimeout(() => {
+      ordIdle = null; const bar = $("#sidebar"), a = document.activeElement;
+      const menu = $(".session-menu, .account-popover, .runs-popover, .filters.pop:not([hidden])");
+      if (ordTouch.down || bar.matches(":hover") || (bar.contains(a) && (a.matches(":focus-visible") || a.matches("input, textarea, select, [contenteditable]"))) || menu || viewerEl) ordIdleArm(); else orderApply("side");
+    }, ORD_IDLE_MS);
+  }
+  for (const t of ["pointermove", "pointerdown", "pointerleave", "focusin", "focusout", "wheel", "keydown"]) $("#sidebar").addEventListener(t, () => { if (ordIdle) ordIdleArm(); }, { passive: true });
   function renderNav() {
     const nav = $("#nav"); nav.replaceChildren();
     // A session or a trace sits under Sessions, a machine under Machines.
@@ -1055,7 +1147,7 @@
     const fewer = el("button", "tree-fewer"); fewer.type = "button"; fewer.setAttribute("aria-label", "Show fewer sessions under " + s.name); fewer.append(el("span", null, "Show fewer"), icon(I.chev));
     fewer.addEventListener("click", (e) => {
       e.stopPropagation(); expandedAll = null; renderLanes();
-      const row = $('#lanes .srow[data-id="' + CSS.escape(s.id) + '"]'); row?.scrollIntoView({ block: "nearest" }); row?.focus({ preventScroll: true });
+      const row = $('#lanes .srow[data-id="' + CSS.escape(s.id) + '"]'); scrollProgrammatically(() => row?.scrollIntoView({ block: "nearest" })); row?.focus({ preventScroll: true });
     });
     line.append(fewer);
   }
@@ -1095,6 +1187,31 @@
     viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus({ focusVisible: false }); if (!SIDEBAR_ONLY) try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} // an embedding page's history is its own
   }
   // The sidebar keeps the 8 most recently active top-level sessions, with children nested beneath their parent.
+  // Sessions and the sidebar share the same two-line row. Metadata disappears as whole values,
+  // from the end, so the harness and model remain readable even in the narrow drawer.
+  function sessionRow(s, { density = "list", rail = false } = {}) {
+    const row = el("button", density === "compact" ? "srow" : "nrow"); row.type = "button"; row.dataset.id = s.id; row.dataset.sessionRow = density;
+    const main = el("span", "session-row-main srow-main"), nm = el("span", "nm", s.name), ag = el("span", "ag", ago(s.last)); nm.dataset.tip = s.name; nm.dataset.tipClipped = "";
+    main.append(dot(s.state, !rail), nm, ag);
+    const meta = el("span", "session-row-meta srow-meta for");
+    const mark = harnessIcon(s.harness, { size: 14, label: true }); if (mark) meta.append(mark);
+    const model = el("span", "row-model", shortModel(s.model ?? s.modelId)); model.dataset.tip = "Model: " + modelIdOf(s); meta.append(model);
+    if (density === "list" && parentOf(s.id)) { const delegation = icon(I.spawn ?? I.stack); delegation.classList.add("row-delegation"); delegation.dataset.tip = "Delegated session"; meta.append(delegation); }
+    const add = (cls, text, priority, tip) => { const value = el("span", cls, text); value.dataset.drop = priority; if (tip) value.dataset.tip = tip; meta.append(value); };
+    add("row-duration", dur(s.start, s.state === "work" || s.state === "wait" ? null : s.last), 1, "Duration");
+    if (Object.keys(MACHINE).length > 1) add("row-machine host", shortHost(s), 2, "Machine: " + hostOf(s));
+    if (s.repo) add("repo-short", s.repo, 3, "Repo: " + s.repo);
+    const counts = density === "list" ? childRuns(s.id) : ""; if (counts) add("row-counts", counts.replace(/Codex runs/g, "runs"), 4);
+    row.append(main, meta); row.addEventListener("click", () => goSession(s.id));
+    requestAnimationFrame(() => fitSessionRowMeta(meta)); return row;
+  }
+  function fitSessionRowMeta(meta) {
+    if (!meta.isConnected || !meta.clientWidth) return;
+    const compact = meta.closest('[data-session-row="compact"]'), values = [...meta.querySelectorAll("[data-drop]")];
+    for (const value of values) value.hidden = !!compact && meta.clientWidth < 280 && value.classList.contains("row-duration");
+    for (const value of values.sort((a, b) => Number(b.dataset.drop) - Number(a.dataset.drop))) { if (meta.scrollWidth <= meta.clientWidth + 1) break; value.hidden = true; }
+  }
+  window.addEventListener("resize", () => { for (const meta of document.querySelectorAll(".session-row-meta")) fitSessionRowMeta(meta); }, { passive: true });
   function buildLaneItem(s, depth, children, rail) {
     const kids = children.get(s.id) ?? [], allKids = descendantsOf(s.id, children), item = el("div", "treeitem");
     item.dataset.id = s.id; item.setAttribute("role", "treeitem"); item.setAttribute("aria-label", s.name); item.tabIndex = 0;
@@ -1108,18 +1225,17 @@
       toggle.addEventListener("click", (e) => { e.stopPropagation(); const value = item.getAttribute("aria-expanded") !== "true"; item.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-label", (value ? "Collapse " : "Expand ") + s.name); if (!value) forcedOpenIds().delete(s.id); saveTreePref(s.id, value); if (!value && (expandedAll === s.id || expandedPath.has(s.id))) { expandedAll = null; renderLanes(); $('#lanes .treeitem[data-id="' + CSS.escape(s.id) + '"] > .tree-row .tree-toggle')?.focus(); } });
       lineToggle = toggle; line.classList.add("has-toggle");
     }
-    const row = el("button", "srow"); row.type = "button"; row.dataset.id = s.id; if (rail) row.dataset.tip = s.name; // the collapsed rail shows only a dot; otherwise the name has a tip while it is cut off
+    const row = sessionRow(s, { density: "compact", rail }); if (rail) row.dataset.tip = s.name; // the collapsed rail shows only a dot; otherwise the name has a tip while it is cut off
     row.setAttribute("aria-label", s.name + ", " + (STATE[s.state] ?? s.state) + ", " + (HARNESS[s.harness] ?? s.harness) + ", " + shortHost(s));
     const parts = allKids.length ? childParts(allKids) : []; if (parts.length) row.setAttribute("aria-label", row.getAttribute("aria-label") + ", " + parts.join(", "));
     if (current === s.id) row.setAttribute("aria-current", "page");
     if (rail && ancestors.has(s.id)) { row.classList.add("on-path"); row.setAttribute("aria-current", "true"); }
-    const main = el("span", "srow-main"), ag = el("span", "ag", ago(s.last)), nm = el("span", "nm", s.name); nm.dataset.tip = s.name; nm.dataset.tipClipped = ""; main.append(dot(s.state, !rail), nm, ag); const mark = rail ? null : harnessIcon(s.harness, { size: 14, label: true }); if (mark) nm.after(mark); // the harness's mark stands alone after the name, its own control apart from the dot (the row's aria-label names the harness too); in the rail the row has the tip (the name), and a dot inside it would answer first
+    const main = row.querySelector(".session-row-main"), ag = main.querySelector(".ag");
     if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work", false); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
     // A parent's row (open or collapsed) shows a small dot beside its time only when a session under it needs you (amber) or failed (red); the label says which, so the dot is decorative.
     const flag = kids.length && !rail ? (allKids.some((x) => x.state === "wait") ? "wait" : allKids.some((x) => x.state === "err") ? "err" : null) : null;
-    if (flag) { const f = el("span", "kid-flag " + flag); f.setAttribute("aria-hidden", "true"); ag.before(f); }
-    const meta = el("span", "srow-meta"); meta.append(icon(I.machine), el("span", "host", shortHost(s)), el("span", "repo-short", s.repo ?? "no repo")); meta.querySelector(".host").dataset.tip = "Machine: " + hostOf(s); meta.querySelector(".repo-short").dataset.tip = spaced("Repo: " + (s.repo ?? "none") + " · " + (s.worktree ? "Worktree: " : "Branch: ") + branchOf(s));
-    row.append(main, meta); row.addEventListener("click", () => goSession(s.id)); line.append(row); if (lineToggle) line.append(lineToggle); item.append(line);
+    if (flag) { const f = el("span", "kid-flag " + flag); f.dataset.tip = allKids.filter((x) => x.state === "wait").length + " needs you · " + allKids.filter((x) => x.state === "err").length + " failed"; f.setAttribute("aria-hidden", "true"); ag.before(f); }
+    line.append(row); if (lineToggle) line.append(lineToggle); item.append(line);
     item.addEventListener("keydown", (e) => {
       if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { if (e.target !== item && e.target !== row && e.target !== lineToggle) return; const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); item.querySelector(":scope > .tree-row .tree-toggle")?.click(); } }
       else if ((e.key === "Enter" || e.key === " ") && e.target === item) { e.preventDefault(); goSession(s.id); }
@@ -1133,14 +1249,14 @@
     if (!a || !$("#lanes").contains(a)) return null;
     const kind = ["srow", "tree-all", "tree-fewer", "tree-toggle"].find((c) => a.classList.contains(c)) ?? (a === item ? "treeitem" : null);
     const id = kind === "tree-toggle" ? a.dataset.treeToggle : kind === "srow" || kind === "tree-all" ? a.dataset.id : item?.dataset.id;
-    return kind && id ? { kind, id } : null;
+    return kind && id ? { kind, id, visible: a.matches(":focus-visible") } : null;
   }
   function restoreLaneFocus(f) {
     if (!f || document.activeElement !== document.body) return;
     const q = (sel) => $("#lanes " + sel), id = CSS.escape(f.id);
     const target = f.kind === "srow" ? q('.srow[data-id="' + id + '"]') : f.kind === "tree-all" ? q('.tree-all[data-id="' + id + '"]') : f.kind === "tree-fewer" ? q('.treeitem[data-id="' + id + '"] > .tree-row .tree-fewer')
       : f.kind === "tree-toggle" ? q('.tree-toggle[data-tree-toggle="' + id + '"]') : q('.treeitem[data-id="' + id + '"]');
-    (target ?? q('.srow[data-id="' + id + '"]'))?.focus({ preventScroll: true });
+    (target ?? q('.srow[data-id="' + id + '"]'))?.focus({ preventScroll: true, focusVisible: f.visible });
   }
   function renderLanes() {
     const rail = railMode && !phone.matches, prevSide = ORD.get("side");
@@ -1166,13 +1282,14 @@
     expandedPath = expandedAll ? ancestorsOf(expandedAll) : new Set(); expandedUnder = expandedAll ? new Set(descendantsOf(expandedAll, children).map((x) => x.id)) : new Set();
     box.replaceChildren();
     for (const s of orderList(sideOrder, "lanes", lanes, byLast, { limit: 8, must: new Set([current, ...ancestors]) }).slice(0, 8)) box.append(buildLaneItem(s, 0, children, railMode && !phone.matches));
-    syncOrderPill("side");
-    if (!lanes.length) { const empty = el("p", "ghead", "No sessions"); empty.setAttribute("role", "none"); box.append(empty); }
+    if (!sideOrder.n) { clearTimeout(ordIdle); ordIdle = null; } else if (!ordIdle) ordIdleArm(); // (counted from when something was first held)
+    if (!lanes.length) { const empty = el("p", "ghead", "No sessions match"); empty.setAttribute("role", "none"); box.append(empty); }
+    const q = $("#q"); if (q && document.activeElement !== q) q.value = query;
     restoreLaneFocus(focus);
     // A stuck row covers the top of the sidebar: what is scrolled into view (the open session, after a navigation) stays clear of it.
     const stuck = box.querySelector(".tree-row.stuck"), navigated = revealedFor !== route; revealedFor = route;
     ($("#side-list") ?? $("#sidebar")).style.scrollPaddingTop = stuck ? stuck.offsetHeight + 8 + "px" : "";
-    if (stuck && navigated) box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" });
+    if (stuck && navigated) scrollProgrammatically(() => box.querySelector('.srow[aria-current="page"]')?.scrollIntoView({ block: "nearest" }));
   }
 
   // ---- Top bar ---------------------------------------------------------------------------------------
@@ -1185,25 +1302,25 @@
   const modelIdOf = (s) => s.model ?? Object.keys(s.tokens_by_model ?? {})[0];
   function renderTopbar(title, crumb, opts = {}) {
     closeAccountMenu(); // the bar is redrawn from scratch, the desktop menu with it: close it properly, not by detaching it
-    const bar = $("#topbar"), s = opts.session; clearBox(bar, route); bar.classList.remove("scrolled"); bar.classList.toggle("session-bar", !!s);
+    const bar = $("#topbar"), s = opts.session ?? opts.traceSession; clearBox(bar, route); bar.classList.remove("scrolled"); bar.classList.toggle("session-bar", !!s);
     // What the bar holds is added through `put`, so the range control on Analytics (a persistent control) stays where it is.
     const put = placer(bar), sink = { append: put };
     const account = (into) => { const a = accountWidget(false); if (a) (into ? into.append(a) : put(a)); };
     if (s && errOn(s.id)) { errorsBar(sink); account(); put.done(); return; }
     if (s && findOpen) { findBar(sink, s, account); put.done(); return; }
-    const m = btn("ibtn lead", null, "Open navigation"); m.id = "lead-btn"; m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(I.menu)); m.addEventListener("click", openDrawer); put(m);
+    const m = btn("ibtn lead", null, opts.traceSession ? "Back to " + s.name : "Open navigation"); m.id = "lead-btn"; m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(opts.traceSession ? I.chev : I.menu)); if (opts.traceSession) m.classList.add("trace-back"); m.addEventListener("click", opts.traceSession ? () => goSession(s.id, route.turn) : openDrawer); put(m);
     const t = el("div", "ttl"), l1 = el("div", "l1");
     // Ancestors are crumbs on a desktop; a phone's child session has none (its ⋯ menu lists the path, and holds the status the dot would show).
     if (opts.lineage?.length) { if (!phone.matches) opts.lineage.forEach((item) => { const c = btn("crumb", item.name, "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "crumb-sep", "›")); }); }
     else if (crumb) { const c = btn("crumb", crumb.label, "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "crumb-sep", "›")); }
-    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; if (s && !(phone.matches && opts.lineage?.length)) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
+    const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; if (s && !opts.traceSession && !(phone.matches && opts.lineage?.length)) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
     if (opts.line2) { const l2 = el("div", "meta-line"); opts.line2(l2); t.append(l2); if (s) requestAnimationFrame(() => { if (l2.isConnected) fitMeta(l2); }); }
     put(t);
     if (opts.analytics) { put(rangeControl(bar)); account(); put.done(); return; }
     if (!s) { account(); put.done(); return; }
     const fb = btn("ibtn", null, "Find and filter"); fb.id = "find-btn"; fb.append(icon(I.search)); fb.addEventListener("click", () => { findOpen = true; render(); $("#find")?.focus(); });
     const mb = btn("ibtn", null, "Session menu: details, cost and actions"); mb.id = "more-btn"; mb.setAttribute("aria-haspopup", "dialog"); mb.setAttribute("aria-expanded", "false"); mb.append(icon(I.more)); mb.addEventListener("click", () => openSessionMenu(SESS[s.id] ?? s, mb));
-    put(fb, mb); account(); put.done();
+    if (!opts.traceSession) put(fb); put(mb); account(); put.done();
   }
   // The Analytics range control, a persistent control of the bar: each redraw keeps it and only sets which button is pressed.
   function rangeControl(bar) {
@@ -1230,18 +1347,19 @@
   // further away replaces it with the page around the step. Each step is scrolled to the middle and marked, never opened;
   // its tool group opens so it shows. Closing puts back the pages, what was open and the scroll position from before. The
   // mode is its own controller, apart from find, so the two can become one mode later.
-  const ERR = { on: false, sid: null, slots: [], listed: false, count: 0, version: null, k: -1, slot: null, saved: null, range: null, tools: true, chain: Promise.resolve(), gen: 0 };
+  const ERR = { mode: "errors", on: false, sid: null, slots: [], listed: false, count: 0, version: null, k: -1, slot: null, saved: null, range: null, tools: true, chain: Promise.resolve(), gen: 0 };
   const ERR_NEAR = 400, ERR_AROUND = 40; // slots: a page (at most 200 entries) or two away is added; 40 entries of context above
   const errLive = el("div", "sr-only"); errLive.setAttribute("role", "status"); errLive.setAttribute("aria-live", "polite"); if (!SIDEBAR_ONLY) document.body.append(errLive);
-  const errText = () => ERR.k < 0 ? (ERR.count ? "Finding errors…" : "No errors") : "Error " + (ERR.k + 1) + " of " + ERR.count;
+  const signalCount = (s) => Object.values(s?.signals ?? {}).reduce((n, x) => n + x, 0);
+  const errText = () => ERR.k < 0 ? (ERR.count ? "Finding " + ERR.mode + "…" : "No " + ERR.mode) : (ERR.mode === "signals" ? "Signal " : "Error ") + (ERR.k + 1) + " of " + ERR.count;
   const errOn = (sid) => ERR.on && ERR.sid === sid;
   function errorsBar(bar) {
-    const close = el("button", "ibtn"); close.type = "button"; close.id = "err-close"; close.setAttribute("aria-label", "Close errors"); close.append(icon(I.x)); close.addEventListener("click", () => closeErrors());
+    const close = el("button", "ibtn"); close.type = "button"; close.id = "err-close"; close.setAttribute("aria-label", "Close " + ERR.mode); close.append(icon(I.x)); close.addEventListener("click", () => closeErrors());
     const pill = el("div", "find errnav"), mark = el("span", "errs-dot"); mark.setAttribute("aria-hidden", "true"); pill.append(mark, el("span", "errnav-count", errText()));
-    const prev = el("button", "ibtn errnav-btn"); prev.type = "button"; prev.id = "err-prev"; prev.setAttribute("aria-label", "Previous error"); prev.append(icon(I.up)); prev.addEventListener("click", () => stepErrors(-1));
-    const next = el("button", "ibtn errnav-btn"); next.type = "button"; next.id = "err-next"; next.setAttribute("aria-label", "Next error"); next.append(icon(I.dn)); next.addEventListener("click", () => stepErrors(1));
+    const prev = el("button", "ibtn errnav-btn"); prev.type = "button"; prev.id = "err-prev"; prev.setAttribute("aria-label", ERR.mode === "signals" ? "Previous signal" : "Previous error"); prev.append(icon(I.up)); prev.addEventListener("click", () => stepErrors(-1));
+    const next = el("button", "ibtn errnav-btn"); next.type = "button"; next.id = "err-next"; next.setAttribute("aria-label", ERR.mode === "signals" ? "Next signal" : "Next error"); next.append(icon(I.dn)); next.addEventListener("click", () => stepErrors(1));
     prev.disabled = next.disabled = ERR.listed && !ERR.slots.length;
-    const group = el("div", "errnav-bar"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Failed steps"); group.append(close, pill, prev, next);
+    const group = el("div", "errnav-bar"); group.setAttribute("role", "group"); group.setAttribute("aria-label", ERR.mode === "signals" ? "Session signals" : "Failed steps"); group.append(close, pill, prev, next);
     bar.append(group);
   }
   // The label and buttons in place, so focus stays where it is.
@@ -1257,22 +1375,22 @@
   };
   // A redraw keeps focus on the bar's control that had it.
   const keepFocus = (fn) => { const id = document.activeElement?.id; fn(); const n = id && document.getElementById(id); if (n && n !== document.activeElement) n.focus({ preventScroll: true }); };
-  function openErrors(sid) {
+  function openErrors(sid, mode = "errors") {
     if (ERR.on || route.v !== "session" || route.id !== sid || !TXM[sid]) return;
-    stopOpeningEndPin(); find = "";
-    Object.assign(ERR, { on: true, sid, slots: [], listed: false, count: countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: show.tools, gen: ERR.gen + 1 });
+    resetPagerInput(); stopOpeningEndPin(); find = "";
+    Object.assign(ERR, { mode, on: true, sid, slots: [], listed: false, count: mode === "signals" ? signalCount(SESS[sid]) : countOf(SESS[sid], "errors") ?? 0, version: null, k: -1, slot: null, saved: capture(), range: { tx: TX[sid], m: { ...TXM[sid] } }, tools: show.tools, gen: ERR.gen + 1 });
     if (!show.tools) { show.tools = true; render(); } else drawSessionBar();
     document.getElementById("err-next")?.focus({ preventScroll: true }); errLabel(true);
     const gen = ERR.gen;
-    fetchErrors(sid).then(() => { if (ERR.gen === gen && ERR.on && ERR.slots.length) { ERR.k = 0; showError(true); } else errLabel(true); }, () => { if (ERR.gen === gen && ERR.on) { errLive.textContent = "Couldn't list the errors"; const t = $("#topbar .errnav-count"); if (t) t.textContent = "Couldn't list the errors"; } });
+    fetchErrors(sid).then(() => { if (ERR.gen === gen && ERR.on && ERR.slots.length) { ERR.k = 0; showError(true); } else errLabel(true); }, () => { if (ERR.gen === gen && ERR.on) { errLive.textContent = "Couldn't list " + ERR.mode; const t = $("#topbar .errnav-count"); if (t) t.textContent = "Couldn't list " + ERR.mode; } });
   }
   // The list, or nothing new (304) when the model hasn't moved since it was fetched.
   function fetchErrors(sid) {
-    return fetch("/api/tx?sid=" + enc(sid) + "&errors=1" + (ERR.version ? "&since=" + enc(ERR.version) : ""), { credentials: "same-origin" })
+    return fetch("/api/tx?sid=" + enc(sid) + "&" + ERR.mode + "=1" + (ERR.version ? "&since=" + enc(ERR.version) : ""), { credentials: "same-origin" })
       .then((r) => r.status === 304 ? null : r.ok ? r.json() : Promise.reject(Object.assign(new Error(r.status + " " + r.statusText), { status: r.status })), (e) => Promise.reject(Object.assign(e, { status: 0 })))
       .then((x) => {
         if (!x || !errOn(sid)) return;
-        ERR.listed = true; ERR.slots = Array.isArray(x.slots) ? x.slots.filter(Number.isInteger) : []; ERR.count = Number.isInteger(x.errors) ? Math.max(x.errors, ERR.slots.length) : ERR.slots.length; ERR.version = typeof x.version === "string" ? x.version : null;
+        ERR.listed = true; ERR.slots = Array.isArray(x.slots) ? x.slots.filter(Number.isInteger) : []; ERR.count = Number.isInteger(x[ERR.mode]) ? Math.max(x[ERR.mode], ERR.slots.length) : ERR.slots.length; ERR.version = typeof x.version === "string" ? x.version : null;
         // The current step stays current wherever it now is in the list; one no longer failed gives way to the next after it.
         if (ERR.slot != null) {
           const at = ERR.slots.indexOf(ERR.slot), after = ERR.slots.findIndex((slot) => slot > ERR.slot);
@@ -1293,16 +1411,16 @@
     let tries = 0;
     const extend = () => hasSlot(sid, slot) || tries++ >= 3 ? null : fetchTx(sid, up ? "before=" + TXM[sid].from : "after=" + TXM[sid].to, up ? "before" : "after").then(extend);
     const around = () => hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + Math.max(0, slot - ERR_AROUND)).then(() => (hasSlot(sid, slot) ? null : fetchTx(sid, "after=" + slot)));
-    return Promise.resolve(near ? extend() : null).then(around).then(() => kids(sid)).then(() => true);
+    return Promise.resolve(near ? extend() : null).then(around).then(() => true);
   }
   // The session's own step for a slot: not one in a child run's work drawn inside it.
   function errNode(sid, slot) {
-    const e = (TX[sid] ?? []).find((x) => x.k === "tool" && x.slot === slot); if (!e?.key) return null;
-    return [...$("#page").querySelectorAll(".turns .step[data-e]")].find((n) => n.dataset.e === e.key && !n.closest(".cw-body")) ?? null;
+    const e = (TX[sid] ?? []).find((x) => x.k === (ERR.mode === "signals" ? "signal" : "tool") && x.slot === slot); if (!e?.key) return null;
+    return [...$("#page").querySelectorAll(".turns [data-e]")].find((n) => n.dataset.e === e.key) ?? null;
   }
   // Marks the current step (its group opened so it shows); with `ring`, rings it for a moment and centres it under the bar.
   function markError(ring) {
-    for (const n of $("#page").querySelectorAll(".step.err-current")) n.classList.remove("err-current", "err-ring");
+    for (const n of $("#page").querySelectorAll("[data-e].err-current")) n.classList.remove("err-current", "err-ring");
     if (!ERR.on || ERR.slot == null || route.v !== "session" || route.id !== ERR.sid) return null;
     const node = errNode(ERR.sid, ERR.slot); if (!node) return null;
     const g = node.closest(".tgroup"), sum = g && opener(g); if (sum?.getAttribute("aria-expanded") === "false") sum.click();
@@ -1313,10 +1431,11 @@
   function centre(node) {
     if (!node.isConnected) return;
     const sc = scroller(), r = (node.querySelector(":scope > button") ?? node).getBoundingClientRect(), bottom = phone.matches ? window.innerHeight : $("#main").getBoundingClientRect().bottom;
-    const d = (r.top + r.bottom) / 2 - (edge() + bottom) / 2; if (Math.abs(d) >= 1) sc.scrollTop += d;
+    const d = (r.top + r.bottom) / 2 - (edge() + bottom) / 2; scrollProgrammatically(() => { if (Math.abs(d) >= 1) sc.scrollTop += d; });
     syncBarLine(); syncJump(); saveHistoryScroll();
   }
   function showError(announce) {
+    resetPagerInput();
     const sid = ERR.sid, slot = ERR.slots[ERR.k], gen = ERR.gen; ERR.slot = slot; errLabel(announce);
     ERR.chain = ERR.chain.then(() => {
       if (!ERR.on || ERR.gen !== gen || ERR.slot !== slot) return null; // a later step or a close since
@@ -1336,7 +1455,7 @@
     if (!ERR.on) return;
     const sid = ERR.sid, range = ERR.range, m = TXM[sid];
     ERR.on = false; ERR.gen++; show.tools = ERR.tools; ERR.saved = ERR.range = null; errLive.textContent = "";
-    if (away && range && m && (m.from !== range.m.from || m.to < range.m.to)) { delete TX[sid]; delete TXM[sid]; }
+    if (away && range && m && (m.from !== range.m.from || m.to < range.m.to)) dropTx(sid);
   }
   function closeErrors() {
     if (!ERR.on) return;
@@ -1380,15 +1499,6 @@
       errLabel(ERR.count !== was); markError(false);
     });
   }
-  function childKindChip(s, meta = false) {
-    const c = el("span", meta ? "meta-item meta-kind" : "child-kind"); c.style.setProperty("--h", "var(--" + s.harness + ")");
-    // The top bar's badge (meta) keeps the delegation glyph for a Subagent. The card's badge names the harness by its mark and the kind by its word, so it has no glyph for one.
-    const mark = s.kind === "Subagent" ? (meta ? icon(I.delegate, "kind-delegate") : null) : s.kind === "Relayed" ? icon(I.relay) : null; // a run of another harness is named by its kind text
-    if (!meta) { const source = harnessIcon(s.harness, { size: 14 }); if (source) c.append(source); } // the top bar's badge (meta) is left to the session bar's own change
-    if (mark) c.append(mark);
-    const kindText = s.kind ?? (s.harness === "codex" ? "Codex run" : "Subagent"); if (meta) c.dataset.tip = "Kind: " + kindText;
-    c.append(el("span", meta ? "meta-value" : null, kindText)); return c;
-  }
   // Labels drop from the end, least important first, until the line fits. State always stays.
   function fitMeta(l2) {
     const labs = [...l2.querySelectorAll(".lab")]; labs.forEach((n) => { n.hidden = false; });
@@ -1409,7 +1519,7 @@
     const failed = countOf(s, "errors") ?? 0;
     const st = el("span", "lab state " + s.state); st.append(dot(s.state, false), el("span", null, STATE[s.state])); l2.append(st);
     l2.append(lab(kindText(s), s.kind ? s.kind + " · " + HARNESS[s.harness] : null, 2));
-    const model = lab(shortModel(s.model), "Model: " + modelIdOf(s) + (s.effort ? ". Reasoning effort: " + s.effort : ""), 3, "meta-model"); if (s.effort) model.append(el("span", "meta-effort", " · " + s.effort)); l2.append(model);
+    const model = lab(shortModel(s.model), "Model: " + modelIdOf(s) + (s.effort ? ". Reasoning effort: " + s.effort : ""), 3, "meta-model"); if (s.effort) { const eff = el("span", "meta-effort"); eff.append(el("span", "meta-sep", "·"), s.effort); model.append(eff); } l2.append(model);
     // Failed steps and runs are the two labels that lead somewhere, so they are the last two the fitter drops.
     if (failed) l2.append(lab(failed + " failed", failed + (failed === 1 ? " failed step" : " failed steps") + ": step through them", 0, "lab-errs", () => openErrors(s.id)));
     const runs = descendantsOf(s.id, sessionChildren());
@@ -1424,7 +1534,7 @@
     const sessions = here.length + (here.length === 1 ? " session" : " sessions");
     l2.append(lab(up ? w + " working · " + sessions : movedOff(m).length ? movedOff(m).length + " moved off" : [MACHINE_LAST[m] != null ? "Last seen " + clock(MACHINE_LAST[m]) : null, sessions].filter(Boolean).join(" · "), null, 1)); };
   // What Find counts: the matches on the page when there is a search or a filter, else nothing.
-  const matchCount = () => find || !show.messages || !show.tools || !show.thinking ? $("#page").querySelectorAll(".turns .msg, .turns .step, .turns .hcard").length : null;
+  const matchCount = () => find || !show.messages || !show.tools || !show.thinking ? $("#page").querySelectorAll(".turns .msg, .turns .bubble, .turns .step:not(.bgend), .turns .event, .turns .child-card").length : null;
   const matchText = (n) => n == null ? "" : n ? n + (n === 1 ? " match" : " matches") : "No matches";
   // Find and filter: one mode. Search takes over the bar and the filters sit under it as chips, one choice at a time.
   function findBar(bar, s, account) {
@@ -1437,11 +1547,11 @@
     row.append(back, fr, c); account(row); bar.append(row);
     const chips = el("div", "find-chips"); chips.setAttribute("role", "group"); chips.setAttribute("aria-label", "Show");
     const failed = countOf(s, "errors") ?? 0;
-    // One choice at a time: everything, only messages, or only steps. "Failed steps" is not a filter: it steps through them (errors mode).
+    // Message and step filters; errors and signals open a positional stepper.
     const MODES = { all: { ...SHOW_ALL }, messages: { messages: true, tools: false, thinking: false }, steps: { messages: false, tools: true, thinking: false } };
     const mode = show.messages && show.tools ? "all" : show.messages ? "messages" : "steps";
-    const chip = (key, label, count) => { const b = btn("chip"); b.dataset.filter = key; b.setAttribute("aria-pressed", String(mode === key)); b.append(el("span", null, label)); if (count != null) b.append(el("span", "n", String(count))); b.addEventListener("click", () => { if (key === "failures") { openErrors(s.id); return; } show = { ...MODES[key] }; render(); }); chips.append(b); };
-    chip("all", "All"); chip("messages", "Messages"); chip("steps", "Steps"); if (failed) chip("failures", "Failed steps", failed);
+    const chip = (key, label, count) => { const b = btn("chip"); b.dataset.filter = key; b.setAttribute("aria-pressed", String(mode === key)); b.append(el("span", null, label)); if (count != null) b.append(el("span", "n", String(count))); b.addEventListener("click", () => { if (key === "failures" || key === "signals") { openErrors(s.id, key === "signals" ? "signals" : "errors"); return; } show = { ...MODES[key] }; render(); }); chips.append(b); };
+    chip("all", "All"); chip("messages", "Messages"); chip("steps", "Steps"); if (failed) chip("failures", "Failed steps", failed); if (signalCount(s)) chip("signals", "Signals", signalCount(s));
     bar.append(chips);
   }
   // One observer for the current page title; the previous page's is disconnected so it can't flip the new bar.
@@ -1462,7 +1572,9 @@
     const body = el("div", "panel-b"); body.tabIndex = -1; d.append(head, body); document.body.append(d);
     d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
     d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("panel-open"); opts.onClose?.(); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } if (LIVE.pending) refresh(); });
-    const open = () => { viewerEl = d; document.documentElement.classList.add("panel-open"); d.showModal(); body.focus({ preventScroll: true }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} };
+    const hold = (e) => { if (!d.open || !d.isConnected) return; if (!body.contains(e.target) || body.scrollHeight <= body.clientHeight + 1) e.preventDefault(); };
+    d.addEventListener("close", () => { for (const type of ["wheel", "touchmove"]) document.removeEventListener(type, hold, { capture: true }); });
+    const open = () => { viewerEl = d; for (const type of ["wheel", "touchmove"]) document.addEventListener(type, hold, { capture: true, passive: false }); document.documentElement.classList.add("panel-open"); d.showModal(); body.focus({ preventScroll: true }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} };
     return { d, body, show: open };
   }
 
@@ -1474,10 +1586,14 @@
     const kids = descendantsOf(s.id, sessionChildren());
     const { d, body, show: open } = panel(s.name, { cls: "anchored session-menu", label: "Session menu for " + s.name, sub: [STATE[s.state], kindText(s), shortModel(s.model)].join(" · "), onClose: () => { anchor?.setAttribute("aria-expanded", "false"); anchor?.focus({ focusVisible: false }); } });
     const acts = el("div", "menu-list"); acts.setAttribute("role", "menu");
+    const traceTurn = route.v === "trace" ? TURN.get(route.turn) : (() => { const top = $("#topbar").getBoundingClientRect().bottom; const nodes = [...document.querySelectorAll("#page .turn[data-turn]")].filter((n) => !n.closest(".cw-body")); const visible = nodes.find((n) => n.getBoundingClientRect().bottom > top); return TURN.get(visible?.dataset.turn) ?? (TURNS[s.id] ?? []).at(-1); })();
+    if (traceTurn?.out.length) { const b = btn("menu-item menu-trace"); b.setAttribute("role", "menuitem"); b.append(icon(I.trace, "icon"), el("span", null, "Trace this turn")); b.addEventListener("click", () => { afterPop = () => goTrace(traceTurn.id); d.close(); }); acts.append(b); }
     const cmd = s.harness === "codex" ? "codex resume " + s.id : "claude --resume " + (s.sessionId ?? s.id);
     const copy = btn("menu-item"); copy.setAttribute("role", "menuitem"); copy.append(icon(I.copy, "icon"), el("span", null, "Copy resume command")); copy.addEventListener("click", () => { navigator.clipboard?.writeText(cmd).then(() => { copy.children[1].textContent = "Copied"; }, () => { copy.children[1].textContent = cmd; }); }); acts.append(copy);
     if (s.harness === "claude") { const a = btn("menu-item"); a.setAttribute("role", "menuitem"); a.append(icon(I.ext, "icon"), el("span", null, "Open in claude.ai")); acts.append(a); }
     if (!phone.matches) { const w = btn("menu-item"); w.setAttribute("role", "menuitemcheckbox"); w.setAttribute("aria-checked", String(wideMode)); w.append(icon(I.wide, "icon"), el("span", null, "Wide transcript"), el("span", "switch")); w.addEventListener("click", () => { setWideMode(!wideMode); w.setAttribute("aria-checked", String(wideMode)); }); acts.append(w); }
+    const signals = signalCount(s);
+    if (signals) { const b = btn("menu-item menu-signals"); b.setAttribute("role", "menuitem"); b.append(el("span", null, signals + " signals"), el("span", "menu-note", "Step through")); b.addEventListener("click", () => { d.close(); openErrors(s.id, "signals"); }); acts.append(b); }
     // On a phone the line of labels is not in the bar, so what it held that leads somewhere is reached here.
     if (phone.matches) {
       const failed = countOf(s, "errors") ?? 0;
@@ -1508,6 +1624,7 @@
     const calls = countOf(s, "calls"), errorCount = countOf(s, "errors") ?? 0;
     const rows = [["Status", STATE[s.state] + " · " + turnsLabel(s)], ...(s.kind ? [["Kind", s.kind]] : []), ["Harness", withHarnessIcon(el("span", null, HARNESS[s.harness] ?? s.harness), s.harness, { size: 16 })], ["Model", modelIdOf(s), true], ...(s.effort ? [["Effort", s.effort]] : []), ["Machine", machine + (hostOf(s) !== machine ? " · " + hostOf(s) : "") + (s.movedFrom ? " (moved from " + (MACHINE[s.movedFrom] ?? s.movedFrom) + ")" : "")], ["Directory", s.cwd ?? s.dir ?? s.directory, true], [s.worktree ? "Worktree" : "Branch", branchOf(s), true], ["Tool calls", calls == null ? "—" : String(calls)], ...(errorCount ? [["Errors", String(errorCount)]] : []), ["Started", clock(s.start)], ["Duration", dur(s.start, s.state === "work" ? null : s.last)], ["Process id", s.pid, true], ["Session id", s.sessionId ?? s.id, true]];
     for (const [k, v, mono] of rows) { if (v == null || v === "") continue; dl.append(el("dt", null, k), (() => { const d = el("dd", mono ? "mono" : null, v instanceof Node ? null : String(v)); if (v instanceof Node) d.append(v); return d; })()); }
+    for (const [kind, n] of Object.entries(s.signals ?? {})) dl.append(el("dt", null, "Signals · " + kind), el("dd", null, String(n)));
     det.append(dl); body.append(det, costSection(s, kids, d), el("p", "third-party", TRADEMARK_NOTICE));
     anchor?.setAttribute("aria-expanded", "true");
     open(); if (scrollTo) body.querySelector(scrollTo)?.scrollIntoView({ block: "nearest" }); return d;
@@ -1654,11 +1771,33 @@
   // ---- Trace: one turn and what it set off -------------------------------------------------------------------------
   // The root is the turn. Each spawn or relay it sent leads to the turn that handoff started in the receiving session,
   // and on down from there; a message to you is a leaf. One rail, as everywhere: depth shows as a smaller node.
+  // One observer measures expandable messages, and releases detached nodes after a redraw.
+  const CLAMP_MORE = new Map(); let clampCleanup = null;
+  const clampObserver = new ResizeObserver((entries) => {
+    for (const { target } of entries) {
+      const more = CLAMP_MORE.get(target);
+      if (!target.isConnected) { clampObserver.unobserve(target); CLAMP_MORE.delete(target); continue; }
+      if (!more || target.classList.contains("open") || !target.clientHeight) continue;
+      const clipped = target.scrollHeight > target.clientHeight + 1;
+      more.hidden = !clipped; target.classList.toggle("clipped", clipped);
+    }
+  });
+  function observeClamp(body, more) {
+    CLAMP_MORE.set(body, more); clampObserver.observe(body);
+    pruneClamps();
+  }
+  function pruneClamps() {
+    if (clampCleanup !== null) return;
+    clampCleanup = requestAnimationFrame(() => {
+      clampCleanup = null;
+      for (const node of CLAMP_MORE.keys()) if (!node.isConnected) { clampObserver.unobserve(node); CLAMP_MORE.delete(node); }
+    });
+  }
   function clampBrief(body, text) {
     const br = markdown(text, "brief"); body.append(br);
     const more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
     more.addEventListener("click", () => { const o = br.classList.toggle("open"); more.textContent = o ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(o)); });
-    new ResizeObserver(() => { if (br.classList.contains("open") || !br.clientHeight) return; const x = br.scrollHeight > br.clientHeight + 1; more.hidden = !x; br.classList.toggle("clipped", x); }).observe(br);
+    observeClamp(br, more);
     body.append(more);
   }
   function traceMeta(body, st, text, sid, turn, note, scope) {
@@ -1667,6 +1806,180 @@
     if (note) meta.append(el("span", "gone", note));
     if (s && !s.stub) { const o = el("button", "open", "Open in " + s.name + " ›"); o.type = "button"; o.addEventListener("click", () => goSession(sid, turn?.id)); meta.append(o); }
     body.append(meta);
+  }
+  const RUN_EXPANDED = new Map(); let runChartObserver = null;
+  const allRunNodes = (model) => { const rows = [], walk = (n) => { rows.push(n); n.children.forEach(walk); }; walk(model.rootNode); model.peers.forEach(walk); return rows; };
+  // Walk only the turns connected by recorded spawns and relays; the relay rows remain peers in the view.
+  function traceAgentTree(root) {
+    const rootNode = { sid: root.sid, turn: root, handoff: null, kind: "root", depth: 0, children: [] };
+    const peers = [], handoffs = [], spawns = [], seenTurns = new Set(), seenSessions = new Set([root.sid]);
+    const walk = (node) => {
+      const turn = node.turn;
+      if (!turn || seenTurns.has(turn.id)) return;
+      seenTurns.add(turn.id);
+      const sent = [...(turn.sent ?? [])].sort((a, b) => a.at - b.at);
+      handoffs.push(...sent);
+      const children = [];
+      for (const h of sent) {
+        if (h.kind === "spawn") {
+          spawns.push(h);
+          const childTurn = STARTS.get(h.id);
+          if (!SESS[h.to] || seenSessions.has(h.to)) continue;
+          seenSessions.add(h.to);
+          const child = { sid: h.to, turn: childTurn ?? null, handoff: h, kind: "spawn", depth: node.depth + 1, children: [] };
+          node.children.push(child); children.push(child);
+        } else if (h.kind === "relay" && SESS[h.to] && !seenSessions.has(h.to)) {
+          const peerTurn = STARTS.get(h.id);
+          seenSessions.add(h.to);
+          const peer = { sid: h.to, turn: peerTurn ?? null, handoff: h, kind: "relay", depth: 0, children: [] };
+          peers.push(peer); children.push(peer);
+        }
+      }
+      for (const child of children) walk(child);
+    };
+    walk(rootNode);
+    return { rootNode, peers, handoffs, spawns };
+  }
+  function renderAgents(root) {
+    const model = traceAgentTree(root), session = SESS[root.sid];
+    const start = root.at ?? root.start?.at ?? session.start;
+    const nextTurn = (TURNS[root.sid] ?? []).find((t) => t.at > start);
+    const upper = root.end?.at ?? nextTurn?.at ?? (session.state === "work" ? NOW : session.last) ?? start;
+    const end = Math.max(start, upper, ...model.handoffs.map((h) => h.done).filter(Number.isFinite), ...allRunNodes(model).filter((n) => n.kind !== "root").map((n) => SESS[n.sid]?.state === "work" ? NOW : n.handoff?.done ?? SESS[n.sid]?.last).filter(Number.isFinite));
+    const span = Math.max(1, end - start);
+    const waits = allRunNodes(model).flatMap((node) => (SESS[node.sid]?.wait_edges ?? []).filter((w) => (!w.turn || w.turn === node.turn?.id) && w.start >= start && w.start <= end).map((w) => ({ ...w, sid: node.sid })));
+    const critical = new Set(model.spawns.filter((h) => waits.some((w) => w.sid === h.from && w.targets?.includes(h.to))).map((h) => h.id));
+    const pct = (m) => Math.max(0, Math.min(100, ((m - start) / span) * 100));
+    const steps = [1, 2, 5, 10, 15, 30, 60, 120, 240].map((n) => n * 60000).map((step) => ({ step, count: Math.floor((span - 1) / step) })).filter((x) => x.count >= 3 && x.count <= 6)
+      .sort((a, b) => Math.abs(a.count - 5) - Math.abs(b.count - 5) || a.step - b.step);
+    const step = steps[0]?.step ?? [1, 2, 5, 10, 15, 30, 60, 120, 240].map((n) => n * 60000).sort((a, b) => Math.abs(Math.floor((span - 1) / a) - 5) - Math.abs(Math.floor((span - 1) / b) - 5))[0];
+    const ticks = []; for (let offset = step; offset < span; offset += step) ticks.push(offset);
+    const rowCount = (node) => 1 + node.children.reduce((n, child) => n + rowCount(child), 0);
+    const allNodes = (node, into = []) => { into.push(node); for (const child of node.children) allNodes(child, into); return into; };
+    const totalRows = rowCount(model.rootNode) + model.peers.reduce((n, peer) => n + rowCount(peer), 0), foldRows = totalRows > 12;
+    const spawned = model.spawns.filter((h) => Number.isFinite(h.at) && Number.isFinite(h.done) && h.done > h.at).map((h) => ({ start: h.at, end: h.done }));
+    const missingSpawnEnds = model.spawns.filter((h) => !Number.isFinite(h.done)).length;
+    const points = spawned.flatMap((x) => [{ at: x.start, change: 1 }, { at: x.end, change: -1 }]).sort((a, b) => a.at - b.at || a.change - b.change);
+    let active = 0, peak = 0; for (const p of points) { active += p.change; peak = Math.max(peak, active); }
+    const totalCost = costForSessions(allRunNodes(model).map((n) => SESS[n.sid]).filter(Boolean));
+    const panel = el("section", "agents-panel"); panel.setAttribute("aria-label", "Agents");
+    panel.append(el("h2", "agents-title", "Agents"));
+    const summary = el("div", "agents-summary"), participantCount = allRunNodes(model).length;
+    for (const item of [participantCount + (participantCount === 1 ? " agent" : " agents"), dur(start, end), costText(totalCost) + " session totals", ...(spawned.length ? ["Recorded spawn overlap: " + peak] : []), ...(missingSpawnEnds ? [missingSpawnEnds + " spawn end" + (missingSpawnEnds === 1 ? "" : "s") + " not recorded"] : [])]) summary.append(el("span", null, item));
+    panel.append(summary);
+    while (RUN_EXPANDED.size > 16) RUN_EXPANDED.delete(RUN_EXPANDED.keys().next().value);
+    const axis = el("div", "agents-axis");
+    const axisTrack = el("div", "agent-axis-track");
+    axisTrack.append(el("span", "agent-axis-time start", clock(start)), el("span", "agent-axis-time end", clock(end)));
+    for (const offset of ticks) {
+      const mark = el("span", "agent-axis-tick" + (offset / span > .86 ? " near-end" : "")); mark.style.left = pct(start + offset) + "%";
+      mark.append(el("span", null, "+" + Math.round(offset / 60000) + "m")); axisTrack.append(mark);
+    }
+    axis.append(axisTrack); panel.append(axis);
+    // The last tick can be right-aligned and run back into its neighbour. Keep the grid records, but show only labels that
+    // fit the measured track, including narrow phones and a chart resized after opening.
+    const layoutAxisLabels = () => {
+      const bounds = axisTrack.getBoundingClientRect(); let previousRight = bounds.left - 8;
+      for (const label of axisTrack.querySelectorAll(".agent-axis-tick > span")) {
+        label.hidden = false; const rect = label.getBoundingClientRect();
+        if (rect.left < previousRight + 8 || rect.right > bounds.right) label.hidden = true;
+        else previousRight = rect.right;
+      }
+    };
+    const legend = el("div", "agents-legend"); legend.append(el("span", "agents-legend-swatch"), el("span", null, waits.some((w) => w.targets?.length) ? "Recorded waits on agents" : waits.length ? "Recorded waits without known targets" : "Wait dependencies not recorded")); if (allRunNodes(model).some((node) => SESS[node.sid]?.wait_edges_truncated)) legend.append(el("span", null, "· Wait history incomplete")); panel.append(legend);
+    const chart = el("div", "agents-chart"); panel.append(chart);
+    const expandedMore = RUN_EXPANDED.get(root.id) ?? new Set(); RUN_EXPANDED.set(root.id, expandedMore);
+    const drawRows = () => {
+      chart.replaceChildren();
+      const rows = new Map(), edgeDefs = [];
+      const axisGridlines = (track) => { for (const offset of ticks) { const line = el("span", "agent-gridline"); line.style.left = pct(start + offset) + "%"; line.setAttribute("aria-hidden", "true"); track.append(line); } };
+      const addRow = (node, depth, parentSid = null) => {
+        const s = SESS[node.sid]; if (!s) return;
+        const handoff = node.handoff, from = node.kind === "root" ? start : handoff.at;
+        const to = node.kind === "root" ? end : s.state === "work" ? NOW : handoff.done ?? s.last ?? from;
+        const duration = dur(from, to), ownCost = costForSession(node.sid), rollup = costForSessions(allNodes(node).map((x) => SESS[x.sid]).filter(Boolean));
+        const isCritical = !!handoff && critical.has(handoff.id);
+        const row = el("button", "agent-row"); row.type = "button"; row.dataset.agentId = node.sid; row.dataset.depth = String(Math.min(3, depth)); row.dataset.critical = String(isCritical);
+        const kind = s.kind ?? HARNESS[s.harness], status = STATE[s.state] ?? s.state;
+        row.setAttribute("aria-label", [s.name, kind, status, duration, costText(rollup)].join(", "));
+        const label = el("span", "agent-label"), identity = el("span", "agent-identity"), indent = el("span", "agent-indent"); indent.style.width = Math.min(3, depth) * 12 + "px";
+        const harnessDot = el("span", "agent-harness-dot " + hcls(node.sid)); harnessDot.setAttribute("aria-hidden", "true");
+        identity.append(indent, harnessDot);
+        if (node.kind === "relay") { const relayIcon = icon(I.relay, "agent-relay-icon"); relayIcon.setAttribute("aria-hidden", "true"); identity.append(relayIcon); }
+        identity.append(el("span", "agent-name", s.name));
+        const meta = el("span", "agent-meta"); meta.append(el("span", "agent-model", [kindText(s), shortModel(s.model)].filter(Boolean).join(" · ")));
+        const statusMark = el("span", "agent-status stat " + s.state); statusMark.dataset.tip = status; statusMark.append(dot(s.state)); meta.append(statusMark);
+        const usage = allNodes(node).reduce((sum, n) => sum + usageTotal(SESS[n.sid] ?? {}), 0);
+        const tokens = el("span", "agent-tokens", tok(usage / 1000000) + " tokens"); tokens.dataset.tip = "Session totals, including this row's spawned agents"; meta.append(tokens);
+        label.append(identity, meta);
+        const durationCell = el("span", "agent-duration", duration), costCell = el("span", "agent-cost", rollup.usd == null ? "—" : shortMoney(rollup.usd));
+        costCell.dataset.tip = "Own cost: " + costText(ownCost);
+        const track = el("span", "agent-track"); track.setAttribute("aria-hidden", "true"); axisGridlines(track);
+        const intervals = (s.busy ?? []).map(([a, b]) => [Math.max(from, a), Math.min(to, b)]).filter(([a, b]) => b > a).sort((a, b) => a[0] - b[0]);
+        let cursor = from;
+        const segment = (a, b, type) => { if (b <= a) return; const bar = el("span", "agent-segment " + type); bar.style.left = pct(a) + "%"; bar.style.width = Math.max(.2, pct(b) - pct(a)) + "%"; track.append(bar); };
+        for (const [a, b] of intervals) { if (a > cursor) segment(cursor, a, "idle"); segment(a, b, "busy"); cursor = Math.max(cursor, b); }
+        if (to > cursor) segment(cursor, to, "idle");
+        for (const child of node.children) { const tick = el("span", "agent-spawn-tick"); tick.style.left = pct(child.handoff.at) + "%"; tick.setAttribute("aria-hidden", "true"); track.append(tick); }
+        for (const wait of waits.filter((w) => w.sid === node.sid)) {
+          const bar = el("span", "agent-wait"); bar.style.left = pct(wait.start) + "%"; bar.style.width = Math.max(.2, pct(wait.end ?? end) - pct(wait.start)) + "%";
+          bar.dataset.tip = wait.targets?.length ? "Waiting on " + wait.targets.map(nameOf).join(", ") : "Wait without a recorded target"; track.append(bar);
+        }
+        row.append(label, durationCell, costCell, track); row.addEventListener("click", () => goSession(node.sid, node.turn?.id));
+        const related = (on) => { for (const edge of chart.querySelectorAll(".agent-edge, .agent-edge-arrow")) if (edge.dataset.parent === node.sid || edge.dataset.child === node.sid) edge.classList.toggle("hot", on); };
+        row.addEventListener("pointerenter", () => related(true)); row.addEventListener("pointerleave", () => related(false));
+        row.addEventListener("focus", () => related(true)); row.addEventListener("blur", () => related(false));
+        chart.append(row); rows.set(node.sid, row);
+        if (parentSid) edgeDefs.push({ parentSid, childSid: node.sid, handoff, critical: critical.has(handoff.id) });
+        const fold = foldRows && node.children.length > 8 && !expandedMore.has(node.sid), visible = fold ? node.children.slice(0, 8) : node.children;
+        for (const child of visible) addRow(child, Math.min(3, depth + 1), node.sid);
+        if (fold) {
+          const hidden = node.children.slice(8), more = el("button", "agent-row agent-more"); more.type = "button"; more.dataset.depth = String(Math.min(3, depth + 1));
+          const moreLabel = el("span", "agent-label"), moreIdentity = el("span", "agent-identity"), moreIndent = el("span", "agent-indent"); moreIndent.style.width = Math.min(3, depth + 1) * 12 + "px";
+          moreIdentity.append(moreIndent, el("span", "agent-name", "+" + hidden.length + " more")); moreLabel.append(moreIdentity);
+          const hiddenIds = new Set(); for (const n of hidden) for (const x of allNodes(n)) hiddenIds.add(x.sid);
+          const hiddenCost = costForSessions([...hiddenIds].map((sid) => SESS[sid]).filter(Boolean));
+          const moreCost = el("span", "agent-cost", hiddenCost.usd == null ? "—" : shortMoney(hiddenCost.usd)); moreCost.dataset.tip = "Hidden agents' rollup cost: " + costText(hiddenCost);
+          more.setAttribute("aria-label", "Show " + hidden.length + " more agents under " + s.name);
+          more.append(moreLabel, el("span", "agent-duration"), moreCost, el("span", "agent-track"));
+          more.addEventListener("click", () => { expandedMore.add(node.sid); drawRows(); }); chart.append(more);
+        }
+      };
+      addRow(model.rootNode, 0);
+      if (model.peers.length) {
+        const heading = el("div", "agent-relayed-heading", "Relayed to"); chart.append(heading);
+        for (const peer of model.peers) addRow(peer, 0);
+      }
+      const edges = svgEl("svg", { class: "agent-edges", "aria-hidden": "true", preserveAspectRatio: "none" }); chart.append(edges);
+      const drawEdges = () => {
+        if (!chart.isConnected || !edges.isConnected) return;
+        layoutAxisLabels();
+        const rect = chart.getBoundingClientRect(), width = rect.width, height = rect.height;
+        edges.setAttribute("viewBox", "0 0 " + width + " " + height); edges.replaceChildren();
+        if (!window.matchMedia("(min-width: 761px)").matches || !width || !height) return;
+        for (const edge of edgeDefs) {
+          const parent = rows.get(edge.parentSid), child = rows.get(edge.childSid); if (!parent || !child) continue;
+          const parentTrack = parent.querySelector(".agent-track"), childTrack = child.querySelector(".agent-track");
+          const pr = parent.getBoundingClientRect(), cr = child.getBoundingClientRect(), ptr = parentTrack.getBoundingClientRect(), ctr = childTrack.getBoundingClientRect();
+          const yParent = pr.top - rect.top + pr.height / 2, yChild = cr.top - rect.top + cr.height / 2;
+          const xAt = ptr.left - rect.left + ptr.width * pct(edge.handoff.at) / 100;
+          const endAt = edge.handoff.done ?? (SESS[edge.childSid].state === "work" ? NOW : SESS[edge.childSid].last);
+          const xDone = ctr.left - rect.left + ctr.width * pct(endAt) / 100;
+          const klass = "agent-edge" + (edge.critical ? " critical" : "");
+          const related = { "data-parent": edge.parentSid, "data-child": edge.childSid };
+          edges.append(svgEl("path", { ...related, class: klass, d: "M " + xAt + " " + yParent + " V " + yChild }));
+          edges.append(svgEl("path", { ...related, class: klass, d: "M " + xAt + " " + (yParent - 4) + " V " + (yParent + 4) }));
+          if (!Number.isFinite(edge.handoff.done)) continue; // A return arrow needs a recorded return.
+          edges.append(svgEl("path", { ...related, class: klass, d: "M " + xDone + " " + yChild + " V " + (yParent + 4) }));
+          edges.append(svgEl("path", { ...related, class: "agent-edge-arrow" + (edge.critical ? " critical" : ""), d: "M " + (xDone - 3) + " " + (yParent + 4) + " L " + xDone + " " + yParent + " L " + (xDone + 3) + " " + (yParent + 4) }));
+        }
+      };
+      requestAnimationFrame(drawEdges);
+      document.fonts.ready.then(() => requestAnimationFrame(drawEdges));
+      if (typeof ResizeObserver !== "undefined") { runChartObserver?.disconnect(); runChartObserver = new ResizeObserver(drawEdges); runChartObserver.observe(chart); }
+    };
+    drawRows();
+    return panel;
   }
   function renderTrace(page, id) {
     const root = TURN.get(id);
@@ -1707,22 +2020,17 @@
       }
     };
     walk(root);
-    page.append(flow);
+    page.append(renderAgents(root), flow);
     // The bar's summary line.
     return [sess.size + (sess.size === 1 ? " session" : " sessions"), n + (n === 1 ? " handoff" : " handoffs"), [...machineLabels(scope).values()].join(", ")].filter(Boolean).join(" · ");
   }
 
   // ---- Session page --------------------------------------------------------------------------------------------------
-  // A child's brief is drawn once, in its intro block, so its transcript leaves out the handoff that started it. Every draw of
-  // that transcript takes these options: a live update redraws turns too, and one drawn without them shows the brief again.
-  // A page that ends in a footer leaves the last turn's "Still working" line to it; one without a footer (a stub, a session with
-  // no repo) keeps that line.
-  const transcriptOpts = (sid) => { const origin = originHandoff(sid); return origin ? { excludeH: origin.id } : { footer: !!SESS[sid] && showsFooter(SESS[sid], null) }; };
   function renderSession(page, sid) {
     markSeenResults(H.filter((h) => isResult(h) && h.from === sid));
     const s = SESS[sid], origin = originHandoff(sid), head = el("div", "ph sr"); const h1 = el("h1", null, s.name); head.append(h1); page.append(head); observeTitle(h1);
-    if (origin) { page.classList.add("child-page"); page.append(childBriefBlock(origin)); }
-    page.append(transcript(sid, transcriptOpts(sid)));
+    // The jump button sits in the transcript's own grid, so its row adds no page gap when it appears.
+    const t = transcript(sid); t.append(jumpWrap); page.append(t);
     if (showsFooter(s, origin)) page.append(sessionFooter(s, origin));
   }
   // Whether a session page ends in its status line: a child's when it is running or has returned, any other session's always.
@@ -1732,6 +2040,15 @@
   const thoughtText = (e) => String(e.text ?? "").trim();
   const isPendingThought = (e, entries, i, sid) => !!(e.pending || e.status === "thinking") ||
     Array.isArray(entries) && e.k === "think" && !thoughtText(e) && i === entries.length - 1 && SESS[sid]?.state === "work";
+  const signalLabel = (e) => {
+    const s = e.signal ?? {}, tag = s.tag ?? "", kind = s.kind;
+    if (kind === "compact") return "Context compacted" + (s.value != null ? " · " + compactCount(s.value) + " tokens before" : "");
+    if (kind === "interrupt") return "Interrupted by you";
+    if (kind === "denial") return (s.tool ?? "Tool call") + " denied";
+    if (kind === "hook") return "Hook " + (tag.includes("block") ? "blocked" : tag || "ran") + (s.tool ? " " + s.tool : "");
+    const name = {model:"Model", effort:"Effort", approval:"Approval policy", sandbox:"Sandbox", permission:"Permission mode"}[kind] ?? "Signal";
+    return name + (s.previous ? " " + s.previous + " → " : " → ") + tag;
+  };
   const isMaskedThought = (e, entries, i, sid) => e.k === "think" && !isPendingThought(e, entries, i, sid) && !thoughtText(e);
   function thoughtSeconds(e) {
     if (Number.isFinite(e?.secs) && e.secs >= 0) return e.secs;
@@ -1744,13 +2061,26 @@
   const thoughtLabel = (secs) => { const n = Number.isFinite(secs) ? Math.round(secs) : 0; return n < 1 ? "Thinking" : "Thinking · " + (n >= 60 ? Math.floor(n / 60) + "m " + (n % 60) + "s" : n + "s"); };
   // A masked thought (Claude redacts its thinking, Codex encrypts its reasoning) is kept in the list, so entry keys and turn
   // starts still line up with the index, and the page draws one quiet line for it.
+  // Join adjacent Codex snapshots with the same resolved owner; unknown explicit turns block merging until ownership resumes.
   function transcriptEntries(entries, sid) {
-    const out = [];
+    const out = [], codex = SESS[sid]?.harness === "codex";
+    const turns = codex ? TURNS[sid] ?? [] : [], owners = codex ? new Map(turns.flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : null;
+    const turnIds = codex ? new Set(turns.map((t) => t.id)) : null;
+    let chain = null, sawOwnedEntry = false, unresolvedOwner = false;
     for (let i = 0; i < entries.length; i++) {
-      const e = entries[i]; if (e.k !== "think") { out.push(e); continue; }
+      const e = entries[i], indexedOwner = codex ? owners.get(e.key) : null;
+      const turn = codex ? indexedOwner ?? (turnIds.has(e.turn) ? e.turn : null) : null;
+      if (codex && indexedOwner == null && e.turn != null && !turnIds.has(e.turn)) { unresolvedOwner = true; chain = null; }
+      else if (turn !== null) { sawOwnedEntry = true; unresolvedOwner = false; }
+      if (e.k !== "think") { out.push(e); chain = null; continue; }
       const pending = isPendingThought(e, entries, i, sid);
       const row = { ...e, ...(pending ? { pending: true } : {}), displaySecs: thoughtSeconds(e) };
-      out.push(row);
+      const text = thoughtText(row);
+      if (!codex || pending || !text || unresolvedOwner || (turn === null && sawOwnedEntry)) { out.push(row); chain = null; continue; }
+      if (chain && chain.turn === turn && (text === chain.text || text.startsWith(chain.text + "\n") || text.startsWith(chain.text + "\r\n"))) {
+        const merged = { ...chain.row, text, displaySecs: row.displaySecs };
+        out[chain.index] = merged; chain = { ...chain, row: merged, text };
+      } else { out.push(row); chain = { index: out.length - 1, row, text, turn }; }
     }
     return out;
   }
@@ -1768,29 +2098,54 @@
     Skill: ["stack", "Used skill", "used", "skill", "skills"] };
   const toolInfo = (name) => { if (TOOLS[name]) return TOOLS[name]; const m = /^mcp__(.+?)__/.exec(name); if (m) { const srv = m[1].replace(/^claude_ai_/, "").replace(/_/g, " "); return ["ext", "Used " + srv, "used " + srv, "time", "times"]; } return ["run", name, name, "step", "steps"]; };
   const verb = (name) => toolInfo(name).slice(0, 2);
+  const NOW_VERB = { Ran: "Running", Read: "Reading", Edited: "Editing", Patched: "Patching", Wrote: "Writing", "Searched for": "Searching for" };
+  const verbNow = (name) => NOW_VERB[verb(name)[1]] ?? verb(name)[1];
+  const isCmd = (name) => /^(Bash|shell|exec_command|local_shell)$/.test(name);
+  // A background step's outcome ("running 8m 18s", "exit 0 · 1m 0s", "failed · 2m 0s"). Its `.sd` puts "background · " before it,
+  // in a span a phone hides in favour of a marker before the verb, so the outcome is never what gets cut.
+  const backgroundText = (bg) => {
+    if (bg.state === "running") return "running " + bg.secs;
+    if (bg.state === "unknown") return "no end recorded";
+    const outcome = bg.state === "failed" ? "failed" : bg.state === "killed" ? "stopped" : bg.exit != null ? "exit " + bg.exit : "done";
+    return outcome + (bg.secs ? " · " + bg.secs : "");
+  };
+  const elapsedMs = (text) => { const m = /^(?:(\d+)m )?(\d+(?:\.\d+)?)s$/.exec(text ?? ""); return m ? (Number(m[1] ?? 0) * 60 + Number(m[2])) * 1000 : null; };
   function transcript(sid, opts = {}) {
-    const sec = el("section", opts.nested ? "nested" : null); sec.setAttribute("aria-label", opts.nested ? SESS[sid].name + " transcript" : "Transcript"); Object.assign(sec.style, { display: "grid", gap: "10px", gridTemplateColumns: "minmax(0, 1fr)" });
-    const entries = transcriptEntries(opts.entries ?? TX[sid] ?? [], sid);
-    const turnMode = !opts.nested;
-    // On a session page the transcript is a list of turns, each with its own entries; a nested one is a plain list.
-    const box = el("div", turnMode ? "turns" : "tx"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);
-    const keyed = (n, e) => { if (e.key) n.dataset.e = e.key; return n; };
+    const sec = el("section", "transcript"); sec.setAttribute("aria-label", "Transcript");
+    const entries = transcriptEntries(TX[sid] ?? [], sid);
+    const turnMode = true;
+    // The transcript is a list of turns, each with its own entries.
+    const box = el("div", "turns"); let tx = box; const hit = (s) => !find || s.toLowerCase().includes(find);
+    const filtering = !!find || !show.messages || !show.tools || !show.thinking;
+    // Slots identify the same entry even when an earlier page extends its turn and its turn-relative data-e key moves.
+    const entryKey = (e) => e.slot != null ? sid + "#slot:" + e.slot : e.key;
+    const keyed = (n, e) => { if (e.key) { n.dataset.e = e.key; n.dataset.entryKey = entryKey(e); } return n; };
     const range = turnMode ? TXM[sid] : null;
     if (range?.from > 0) box.append(pager(sid, "before", "Load earlier"));
-    else if (!find && turnMode) box.append(startedDivider(sid));
+    else if (!filtering) box.append(startedDivider(sid));
     // Adjacent tool calls collapse into one summary line ("Ran 2 commands, read 1 file · 1 failed"),
     // expandable to the individual steps. A lone call stays a single line; while finding, matches show directly.
+    const endedCalls = new Set(entries.filter((e) => e.k === "bgend").map((e) => e.call));
     let run = []; const maskedIn = new WeakSet();
     const flush = () => {
       if (!run.length) return;
-      const steps = el("div", "steps" + (run.length === 1 && !find ? " lone" : "")); run.forEach((r) => steps.append(r.node));
-      if (run.length === 1 || find) { tx.append(steps); run = []; return; }
-      const counts = new Map(); for (const r of run) { const [, , p, one, many] = toolInfo(r.k), c = counts.get(p) ?? { n: 0, one, many }; c.n++; counts.set(p, c); }
-      let text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", ");
-      text = text[0].toUpperCase() + text.slice(1);
-      const failed = run.filter((r) => r.err).length, live = run.find((r) => r.live);
-      const g = el("div", "tgroup"); if (run[0].key) g.dataset.e = "g:" + run[0].key; const b = el("button", "tsum"); b.type = "button"; b.setAttribute("aria-expanded", "false");
-      b.append(live ? el("span", "spin") : icon(I.stack), el("span", "tt", text));
+      const steps = el("div", "steps" + (run.length === 1 && !filtering ? " lone" : "")); run.forEach((r) => steps.append(r.node));
+      if (run.length === 1 || filtering) { tx.append(steps); run = []; return; }
+      const ends = run.filter((r) => r.end);
+      const counts = new Map(); for (const r of run.filter((r) => !r.end)) { const [, , p, one, many] = toolInfo(r.k), c = counts.get(p) ?? { n: 0, one, many }; c.n++; counts.set(p, c); }
+      // With finished background commands: "Finished 3 background commands (1 failed, 1 stopped), ran 4 commands". A phone hides
+      // the long words (.long) and lets it take two lines, "3 background (1 failed, 1 stopped), 4 commands", so the counts show.
+      const tt = el("span", "tt");
+      if (ends.length) {
+        const outcomes = [[ends.filter((r) => r.state === "failed").length, "failed"], [ends.filter((r) => r.state === "killed").length, "stopped"]].filter(([n]) => n).map(([n, word]) => n + " " + word);
+        tt.classList.add("bgsum"); tt.append(el("span", "long", "Finished "), ends.length + " background", el("span", "long", " command" + (ends.length === 1 ? "" : "s")));
+        if (outcomes.length) tt.append(el("span", "tt-counts", " (" + outcomes.join(", ") + ")"));
+        for (const [p, c] of counts) tt.append(", ", p === "ran" ? el("span", "long", "ran ") : p + " ", c.n + " " + (c.n === 1 ? c.one : c.many));
+      } else { const text = [...counts].map(([p, c]) => p + " " + c.n + " " + (c.n === 1 ? c.one : c.many)).join(", "); tt.textContent = text[0].toUpperCase() + text.slice(1); }
+      const failed = run.filter((r) => !r.end && r.err && (!r.bg || !endedCalls.has(r.tid))).length;
+      const live = run.some((r) => r.bg) ? run.filter((r) => r.live).sort((a, b) => (elapsedMs(b.secs) ?? 0) - (elapsedMs(a.secs) ?? 0))[0] : run.find((r) => r.live);
+      const g = el("div", "tgroup"); if (run[0].key) { g.dataset.e = "g:" + run[0].key; g.dataset.entryKey = "g:" + run[0].node.dataset.entryKey; } const b = el("button", "tsum"); b.type = "button"; b.setAttribute("aria-expanded", "false");
+      b.append(live ? el("span", "spin") : icon(I.stack), tt);
       if (failed) b.append(el("span", "tf", "· " + failed + " failed"));
       if (live) b.append(el("span", "tl tick", "· running " + live.secs));
       b.append(icon(I.chev, "chev"));
@@ -1803,77 +2158,73 @@
     const firsts = turnMode ? new Map((TURNS[sid] ?? []).filter((t) => t.entries[0]?.key).map((t) => [t.entries[0].key, t])) : new Map(); let cur = null;
     // A live update draws only the turns that changed (opts.only, by turn id).
     const owner = opts.only ? new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : null;
-    const closeTurn = () => { flush(); if (!cur) return; const { t, blk } = cur; cur = null; tx = box;
-      if ((find || !show.messages || !show.tools || !show.thinking) && !blk.querySelector(".msg, .step, .tgroup, .hcard, .thought, .think-pending")) { blk.remove(); return; }
-      if (opts.excludeH && t.last) return;
-      // The page's footer says the session is working, so the last turn doesn't say it too (its trace button stays).
-      const shown = turnEnd(t), end = opts.footer && t.last && shown?.st === "work" ? null : shown; if (!end && !t.out.length) return;
-      const d = el("div", "turn-end");
-      if (end) { const st = el("span", "stat " + end.st); st.append(end.st === "work" ? el("span", "spin") : dot(end.st, false), spaced(end.text)); d.append(st); }
-      if (t.out.length) d.append(traceBtn(t)); blk.append(d); };
+    const CONTENT = ".msg, .bubble, .step, .event, .child-card, .thought, .think-pending, .harness-note, .tgroup";
+    const closeTurn = () => { flush(); if (!cur) return; const { t, blk, masked } = cur; cur = null; tx = box;
+      // A turn whose only thinking was masked is left with nothing to draw (no header, no rows): it goes, unless its foot still says something.
+      const bare = masked && !blk.querySelector(".tx > *, .turn-h");
+      const end = turnEnd(t), returned = t.entries.some((e) => e.k === "end" && /^Returned to /.test(e.text ?? ""));
+      const foot = !filtering && ((end && end.st === "err" && !returned) || t.out.length);
+      if (bare && !foot) { blk.remove(); return; }
+      if (bare) blk.querySelector(":scope > .tx")?.remove(); // its foot stays alone, with no empty space above it
+      if (filtering && !blk.querySelector(CONTENT)) { blk.remove(); return; }
+      // A turn's foot only says what the rows above don't: that it stopped on a failure, and where its trace is.
+      if (foot) {
+        const d = el("div", "turn-end");
+        if (end?.st === "err" && !returned) d.append(stateLabel("err", end.text));
+        if (t.out.length) { const tb = btn("link", null, "Trace what this turn set off"); tb.append(icon(I.trace), el("span", null, "Trace")); tb.addEventListener("click", () => goTrace(t.id)); d.append(tb); }
+        blk.append(d);
+      } };
     const openTurn = (t) => { closeTurn(); const blk = el("section", "turn"); blk.dataset.turn = t.id;
       // Your own message needs no header: the bubble is yours and its time sits under it. A relay or brief says who sent it.
       const h = t.start;
       if (t.u || h?.kind === "ask") blk.setAttribute("aria-label", "Your message" + (h ? " at " + clock(h.at) : ""));
-      else if (h && h.id !== opts.excludeH) { const hd = el("h3", "turn-h " + hcls(h.from)); const l = el("span", "lbl"); const b = el("button", "from", nameOf(h.from)); b.type = "button"; b.setAttribute("aria-label", "Open " + nameOf(h.from) + " where it sent this"); b.addEventListener("click", () => openSender(h)); l.append(el("span", "verb", h.kind === "relay" ? "Relay from " : "Brief from "), b); hd.append(icon(I.in)); const sender = SESS[h.from] && harnessIcon(SESS[h.from].harness, { size: 16 }); if (sender) hd.append(sender); hd.append(l, el("span", "tm", clock(h.at))); blk.append(hd); }
+      else if (h) { const hd = el("div", "turn-h"); const [, parts] = sentence(h, sid, true); const sender = SESS[h.from] && harnessIcon(SESS[h.from].harness, { size: 16 }); if (sender) hd.append(sender); hd.append(...parts, el("span", "tm", clock(h.at))); blk.append(hd); }
       tx = el("div", "tx"); blk.append(tx); box.append(blk); cur = { t, blk }; };
     const toolStep = (e, v, ic, live) => {
-      const box = keyed(el("div", "step" + (live ? " live" : e.ok || e.ok === null ? "" : " err")), e);
+      // A background call's launch returns at once: its own lifecycle (e.bg) says whether it runs, failed or ended.
+      const bg = e.bg, bgRunning = bg?.state === "running";
+      const box = keyed(el("div", "step" + (bg ? (bg.state === "failed" ? " err" : "") + " background" + (bgRunning ? " background-running" : "") : live ? " live" : e.ok || e.ok === null ? "" : " err")), e);
+      if (e.tid) box.dataset.tid = e.tid;
       if (live) { box.dataset.live = sid; if (e.since != null) box.dataset.since = e.since; }
+      else if (bgRunning) { box.dataset.live = sid; if (bg.since != null) box.dataset.since = bg.since; }
       const b = el("button"); b.type = "button"; b.setAttribute("aria-expanded", "false");
-      const status = live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
+      const bgSecs = bgRunning && bg.since != null ? running(NOW - bg.since) : bg?.secs;
+      const waiting = live && SESS[sid]?.state === "wait", waitingText = SESS[sid]?.waiting_for?.includes("permission") ? "Waiting on permission" : "Waiting for your input";
+      const status = bg ? null : waiting ? waitingText : live ? e.secs : e.unfinished ? "no result" : e.exit != null ? "exit " + e.exit + " · " + e.secs : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
       const title = e.title ? String(e.title) : null;
       const command = e.in ?? e.arg;
       const firstNonemptyLine = typeof command === "string" ? command.split(/\r\n|\n|\r/).find((line) => line.trim()) : null;
       const label = title ? el("span", "sa st", title) : el("code", "sa", e.arg);
       if (title) {
-        b.setAttribute("aria-label", "Ran: " + title);
+        // Keep the title and changing status in the native accessible name.
+        b.append(el("span", "sr-only", waiting ? waitingText + ": " : live ? "Running: " : e.ok === false ? "Failed: " : v + ": "));
         if (firstNonemptyLine != null) label.setAttribute("data-tip", firstNonemptyLine.slice(0, 200));
       }
-      b.append(live ? el("span", "spin") : icon(I[ic]));
-      if (!title) b.append(el("span", "sv", live && v === "Ran" ? "Running" : v));
-      b.append(label, el("span", "sd" + (live ? " tick" : ""), status), icon(I.chev, "chev"));
-      const out = el("div", "out"); out.hidden = true;
-      // Expanded, a step previews what was asked (the full command or input) and what came back, each cut at about
-      // eleven lines. When either is cut, "View all" opens the whole call in a sheet.
-      const shell = /^(Bash|shell|exec_command|local_shell)$/.test(e.name), inLabel = shell ? "Command" : "Input";
-      const input = shell ? (e.in ?? e.arg) : e.in;
-      if (input != null) out.append(el("div", "io", inLabel), el("pre", "in clip", input));
-      if (e.cwd && e.cwd !== ".") out.append(el("div", "io", "Working directory · " + e.cwd));
-      if (live) out.append(el("div", "noout", "Running · no output yet"));
-      else {
-        if (e.out != null && e.out !== "") out.append(el("div", "io", "Output"));
-        if (e.changes) {
-          for (const change of e.changes) {
-            out.append(el("div", "io", "Change · " + change.path + (change.move ? " → " + change.move : "")));
-            if (change.diff?.length) out.append(diffEl(change.diff, "clip")); else out.append(el("div", "noout", "No diff recorded"));
-          }
-          if (!e.changes.length) out.append(el("div", "noout", "No changes recorded"));
-        } else if (e.diff) out.append(diffEl(e.diff, "clip")); else if (e.out) { out.append(outEl(e, "clip")); if (e.cut) out.append(el("div", "cutnote", cutNoteText(e.cut))); } else out.append(el("div", "noout", e.unfinished ? "No result recorded" : "No output"));
-      }
-      const actions = el("div", "step-actions");
-      if (!live && e.script != null) { const script = el("button", "viewscript", "View script"); script.type = "button"; script.addEventListener("click", () => openScript(e)); actions.append(script); }
-      const all = el("button", "viewall"); all.type = "button"; all.hidden = true; all.append(icon(I.expand), el("span", null, "View all"));
-      all.addEventListener("click", () => openViewer(e, v, ic, inLabel)); actions.append(all); actions.hidden = e.script == null; out.append(actions);
-      b.addEventListener("click", () => { out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden));
-        if (!out.hidden) {
-          let cut = !!e.more?.length;
-          out.querySelectorAll(".clip").forEach((c) => { const x = c.scrollHeight > c.clientHeight + 1; c.classList.toggle("clipped", x); cut ||= x; });
-          all.hidden = !cut; actions.hidden = e.script == null && !cut;
-          // Text cut when this copy was made, with nothing more to show: say so instead of ending on "…".
-          if (!cut && !e.cut && !out.querySelector(".cutnote") && [e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs"));
+      const sd = el("span", "sd" + (live || bgRunning ? " tick" : ""), status);
+      b.append(live || bgRunning ? el("span", "spin") : icon(I[ic]));
+      // A background step: "background · " then its outcome in `.sd`; a phone hides the word for the ring before the label.
+      if (bg) { const mark = el("span", "bgmark"); mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "background"); b.append(mark); sd.append(el("span", "bgw", "background · "), el("span", "bgo", backgroundText({ ...bg, secs: bgSecs }))); }
+      if (!title) b.append(el("span", "sv", waiting ? "Waiting" : live ? verbNow(e.name) : v));
+      b.append(label, sd, icon(I.chev, "chev"));
+      // Build call details only on demand; collapsed transcripts remain inexpensive.
+      let out = null;
+      b.addEventListener("click", () => {
+        if (!out) {
+          out = stepDetail(e, v, ic); out.hidden = true;
+          if (bg?.summary) out.append(el("div", "io", "Finished"), el("pre", "finished", bg.summary));
+          box.append(out);
         }
+        out.hidden = !out.hidden; b.setAttribute("aria-expanded", String(!out.hidden));
       });
-      box.append(b, out); return box;
+      box.append(b); return box;
     };
     for (const e of entries) {
       if (owner && !opts.only.has(owner.get(e.key))) continue;
-      if (turnMode && isGap(e)) { closeTurn(); if (!find) box.append(el("div", "divider", e.text)); continue; }
+      if (turnMode && isGap(e)) { closeTurn(); if (!filtering) box.append(el("div", "divider", e.text)); continue; }
       if (turnMode && firsts.has(e.key)) openTurn(firsts.get(e.key));
-      if (opts.excludeH && e.k === "h" && e.id === opts.excludeH) continue;
-      if (opts.excludeH && e.k === "end" && /^Returned to /.test(e.text ?? "")) continue;
-      // Entries that render nothing (hidden kinds) must not split a run of tool calls.
+      // Entries that render nothing (empty thinking, hidden kinds) must not split a run of tool calls.
       if (e.k === "think" && (!show.thinking || find)) continue;
+      if (e.k === "signal") { const label = signalLabel(e); if (hit(label)) tx.append(keyed(el("div", "signal-marker", label), e)); continue; }
       // Masked thinking is one quiet line per turn (per list, when nested), at the first masked thought's place. Later ones draw
       // nothing, and the line never splits a run of steps: drawn before flush(), it lands ahead of a run still being gathered.
       if (e.k === "think" && isMaskedThought(e)) {
@@ -1881,11 +2232,33 @@
         if (!maskedIn.has(scope)) { maskedIn.add(scope); const m = keyed(el("div", "thought masked"), e); m.append(el("div", "think-label", "Thinking hidden by the harness")); tx.append(m); }
         continue;
       }
+      if (e.k === "bgend") {
+        if (!show.tools || !hit(e.label ?? "")) continue;
+        const word = e.state === "failed" ? "failed" : e.state === "killed" ? "stopped" : "completed";
+        const row = keyed(el("div", "step bgend" + (e.state === "failed" ? " err" : "")), e);
+        const loaded = entries.some((entry) => entry.k === "tool" && entry.tid === e.call);
+        const line = el(loaded ? "button" : "div", "bg-line");
+        line.append(icon(I.run), el("span", "bg-label", "Background command " + word + " · " + (e.label ?? "")));
+        if (loaded) {
+          line.type = "button";
+          line.addEventListener("click", () => {
+            const target = line.closest('section[aria-label="Transcript"], section.nested')?.querySelector('.step[data-tid="' + CSS.escape(e.call) + '"]'); if (!target) return;
+            stopOpeningEndPin();
+            for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+              const toggle = opener(parent) ?? (parent.classList.contains("turn") ? parent.querySelector(':scope > button[aria-expanded]') : null);
+              if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
+            }
+            centre(target); target.classList.add("flash"); setTimeout(() => target.classList.remove("flash"), 1500);
+          });
+        }
+        row.append(line); run.push({ node: row, end: true, state: e.state, key: e.key }); continue;
+      }
       if (e.k === "tool") {
         if (!show.tools || !hit(e.name + " " + (e.title ?? "") + " " + e.arg + " " + (e.in ?? "") + " " + (e.out ?? ""))) continue;
         const [ic, v] = verb(e.name);
-        const box = toolStep(e, v, ic, !!e.live);
-        if (e.live) run.push({ node: box, v, k: e.name, live: true, secs: e.secs, key: e.key });
+        const box = toolStep(e, v, ic, !!e.live && !e.bg);
+        if (e.live && !e.bg) run.push({ node: box, v, k: e.name, live: true, secs: e.secs, key: e.key });
+        else if (e.bg) { const bgRunning = e.bg.state === "running"; run.push({ node: box, v, k: e.name, err: e.bg.state === "failed", bg: true, tid: e.tid, live: bgRunning, secs: bgRunning && e.bg.since != null ? running(NOW - e.bg.since) : e.bg.secs ?? e.secs, key: e.key }); }
         else run.push({ node: box, v, k: e.name, err: e.ok === false, key: e.key });
         continue;
       }
@@ -1902,28 +2275,24 @@
         }
       }
       else if (e.k === "harness") { if (!show.messages || find) continue; tx.append(keyed(el("div", "harness-note", "Harness text added before the prompt (" + e.label + ")"), e)); }
-      else if (e.k === "end") { if (find) continue; tx.append(keyed(el("div", "divider", e.text), e)); }
+      else if (e.k === "end") { if (filtering) continue; tx.append(keyed(el("div", "divider", e.text), e)); }
       else if (e.k === "h") {
         // A page before the model's window can name a handoff the model no longer holds: it draws nothing.
         const h = HID.get(e.id); if (!h || !hit(h.brief + " " + (h.result ?? ""))) continue;
         // Your own ask is simply your message.
         if (h.kind === "ask") { if (!show.messages) continue; const m = keyed(el("div", "msg user"), e); userBody(m, e, h.brief); tx.append(m); if (cur?.t.start === h) tx.append(el("div", "msg-tm", clock(h.at))); continue; }
-        if (h.kind === "toyou" && h.ask === "result") {
-          const marker = el("div", "result-marker " + (SEEN_RESULTS.has(h.id) ? "read" : "new"));
-          marker.append(icon(I.result), el("span", "word", statWord(h)), el("span", "tm", clock(h.at)));
-          tx.append(keyed(marker, e)); continue;
-        }
-        // A relay or brief that starts a turn is that turn's message.
-        if (cur && cur.t.start === h && e === cur.t.entries[0]) { if (!show.messages) continue; tx.append(keyed(handoffCard(h, sid, true), e)); continue; }
-        if (h.kind === "move") { if (find) continue; tx.append(keyed(handoffCard(h, sid), e)); continue; }
-        if (!show.tools && h.kind !== "toyou") continue;
-        if (opts.nested && h.kind === "spawn" && h.to === sid) continue; // the parent's card already shows this brief
-        tx.append(keyed(handoffCard(h, sid), e));
+        // A relay or brief that starts a turn is that turn's incoming message, under the header that names its sender.
+        if (cur && cur.t.start === h) { if (!show.messages) continue; const m = keyed(el("div", "bubble in"), e); m.dataset.h = h.id; m.append(markdown(h.brief)); tx.append(m); continue; }
+        // A session this one started is a card that opens it.
+        if (h.kind === "spawn" && h.from === sid && SESS[h.to]) { if (!show.tools) continue; tx.append(keyed(childCard(h, SESS[h.to]), e)); continue; }
+        if (find && h.kind === "move") continue;
+        if (!show.messages && h.kind !== "move") continue;
+        tx.append(keyed(eventRow(h, sid), e));
       }
     }
     closeTurn();
     if (range && range.to < range.total) box.append(pager(sid, "after", "Load later"));
-    if (!box.querySelector(".msg, .step, .hcard")) box.append(el("p", "empty", find ? "Nothing matches “" + find + "”." : "Nothing to show with these filters."));
+    if (!box.querySelector(CONTENT)) box.append(el("p", "empty", find ? "Nothing matches “" + find + "”." : "Nothing to show with these filters."));
     sec.append(box); return sec;
   }
   // Codex cuts some outputs before the model sees them and says where and how much. An output cut that way is drawn as its
@@ -1942,18 +2311,46 @@
   // The whole tool call. A phone gets a full-screen sheet and a wider screen a dialog; either way it is a history entry,
   // so the back gesture closes it without leaving the page.
   let viewerEl = null, skipPop = false;
-  function openViewer(e, verb, ic, inLabel) {
-    if (e.more?.length && e.slot != null && !e.full) { const open = (f) => openViewer({ ...e, ...f, full: true }, verb, ic, inLabel); fullOf(e).then(open, () => open({ fullFailed: true })); return; }
-    const d = el("dialog", "viewer"); d.setAttribute("aria-label", verb + " " + e.arg);
-    const head = el("div", "vh"); const t = el("div", "vt"); t.append(icon(I[ic]), el("span", null, verb + " " + e.arg));
-    const close = el("button", "vclose"); close.type = "button"; close.setAttribute("aria-label", "Close"); close.append(icon(I.x)); close.addEventListener("click", () => d.close());
-    const resultStatus = e.live ? "Running · " + e.secs : e.unfinished ? "no result" : e.ok ? e.secs : e.ok === null ? "exit unknown · " + e.secs : "failed · " + e.secs;
-    head.append(t, close, el("div", "vm" + (!e.live && !(e.ok || e.ok === null) ? " err" : ""), e.name + " · " + resultStatus));
-    const body = el("div", "vb");
-    const section = (label, text) => { const s = el("div", "vs"); s.append(el("span", null, label));
-      if (text) { const c = el("button", "vcopy"); c.type = "button"; c.append(icon(I.copy), el("span", null, "Copy"));
-        c.addEventListener("click", () => navigator.clipboard?.writeText(text).then(() => { c.lastChild.textContent = "Copied"; }, () => { c.lastChild.textContent = "Copy failed"; })); s.append(c); }
-      body.append(s); };
+  // What a step shows opened: what was asked first (the command, the file, the input), then what came back. A failed command
+  // shows the end of its output, where the failure is; anything else shows the start. "View all" opens the whole call.
+  const PREVIEW_LINES = 12;
+  const stateLabel = (st, text) => { const x = el("span", "state " + st); x.append(st === "work" && text !== STATE.work ? el("span", "spin") : dot(st), el("span", null, text ?? STATE[st] ?? st)); return x; };
+  function copyBtn(text) { const c = btn("link copy", null, "Copy"); c.append(icon(I.copy), el("span", null, "Copy")); c.addEventListener("click", () => navigator.clipboard?.writeText(text).then(() => { c.lastChild.textContent = "Copied"; }, () => { c.lastChild.textContent = "Copy failed"; })); return c; }
+  function stepDetail(e, v, ic) {
+    const out = el("div", "out"), ioHead = (label, text) => { const h = el("div", "io"); h.append(el("span", null, label)); if (text) h.append(copyBtn(text)); return h; };
+    const cmd = e.in ?? (isCmd(e.name) ? e.arg : null);
+    // A long command stops at the preview height and fades (the text stays whole in the page); "View all" opens the whole call (#178).
+    const cmdLines = typeof cmd === "string" ? cmd.split("\n") : [], inCut = cmdLines.length > PREVIEW_LINES, inLabel = cmd ? (isCmd(e.name) ? "Command" : "Input") : "Input";
+    const viewAll = (label) => { const all = btn("viewall"); all.append(icon(I.expand), el("span", null, label)); all.addEventListener("click", () => openStepViewer(e, v, ic, inLabel)); out.append(all); };
+    if (cmd) out.append(ioHead(isCmd(e.name) ? "Command" : "Input", cmd), el("pre", "in" + (inCut ? " clip clipped" : ""), cmd));
+    else if (!e.diff && !e.changes) out.append(ioHead(/^(Read|Grep|Glob)$/.test(e.name) ? (e.name === "Read" ? "File" : "Pattern") : "Input"), el("pre", "in", e.arg));
+    if (e.cwd && e.cwd !== ".") out.append(ioHead("Working directory · " + e.cwd));
+    const actions = () => {
+      if (e.script != null) { const sv = btn("viewall viewscript"); sv.append(icon(I.expand), el("span", null, "View script")); sv.addEventListener("click", () => openScript(e)); out.append(sv); }
+    };
+    if (e.changes) {
+      for (const change of e.changes) { out.append(ioHead("Change · " + change.path + (change.move ? " → " + change.move : ""))); if (change.diff?.length) out.append(diffEl(change.diff)); else out.append(el("div", "noout", "No diff recorded")); }
+      if (!e.changes.length) out.append(el("div", "noout", "No changes recorded"));
+      if (inCut) viewAll("View all"); actions(); return out;
+    }
+    if (e.diff) { out.append(ioHead("Change · " + e.arg), diffEl(e.diff)); if (inCut) viewAll("View all"); actions(); return out; }
+    if (!e.out) { out.append(ioHead("Output"), el("div", "noout", e.live ? (SESS[e.sid]?.state === "wait" ? "Waiting for your input or permission · no output yet" : "Running · no output yet") : e.unfinished ? "No result recorded: the machine stopped responding while this ran." : "No output")); if (inCut) viewAll("View all"); actions(); return out; }
+    const lines = e.out.split("\n"), cut = lines.length > PREVIEW_LINES, tail = e.ok === false, parts = !!e.cut?.parts?.length;
+    const shown = !cut || parts ? lines : tail ? lines.slice(-PREVIEW_LINES) : lines.slice(0, PREVIEW_LINES), more = !!e.more?.length;
+    out.append(ioHead(parts || !cut ? "Output" : (tail ? "Output · last " : "Output · first ") + PREVIEW_LINES + (more ? "" : " of " + lines.length) + " lines"));
+    if (parts) out.append(outEl(e)); else out.append(el("pre", null, shown.join("\n")));
+    if (e.cut) out.append(el("div", "cutnote", cutNoteText(e.cut)));
+    else if ([e.in, e.out].some((t) => /…(\(truncated\))?\s*$/.test(t ?? ""))) out.append(el("div", "cutnote", "Cut short in this copy of the logs"));
+    if ((cut && !parts) || more || inCut) viewAll(more || parts || inCut ? "View all" : "View all " + lines.length + " lines");
+    actions(); return out;
+  }
+  // The whole call, in a full sheet: what the preview cut, fetched from the server when it is longer than the preview.
+  function openStepViewer(e, v, ic, inLabel) {
+    if (e.more?.length && e.slot != null && !e.full) { const open = (f) => openStepViewer({ ...e, ...f, full: true }, v, ic, inLabel); fullOf(e).then(open, () => open({ fullFailed: true })); return; }
+    const status = e.live ? "Running · " + e.secs : e.unfinished ? "No result" : e.ok ? "Done · " + e.secs : e.ok === null ? "Exit unknown · " + e.secs : "Failed · " + e.secs;
+    const { body, show: open } = panel(v + " " + e.arg, { cls: "full", sub: e.name + " · " + status, label: v + " " + e.arg });
+    body.classList.add("viewer-b");
+    const section = (label, text) => { const x = el("div", "vs"); x.append(el("span", null, label)); if (text) x.append(copyBtn(text)); body.append(x); };
     const cutNote = (text) => { if (e.cut) { body.append(el("p", "vnote", cutNoteText(e.cut))); return; } if (!e.fullFailed && /…(\(truncated\))?\s*$/.test(text ?? "")) body.append(el("p", "vnote", "Cut short in this copy of the logs.")); };
     if (e.scriptText !== undefined) {
       section("Script", e.scriptText); body.append(el("pre", "script", e.scriptText));
@@ -1965,15 +2362,12 @@
         for (const change of e.changes) { section("Change · " + change.path + (change.move ? " → " + change.move : ""), null); body.append(diffEl(change.diff ?? [])); }
         if (!e.changes.length) body.append(el("p", "vnote", "No changes recorded."));
       } else if (e.diff) { section("Change", null); body.append(diffEl(e.diff)); }
-      else { section("Output", e.out); if (e.out) { body.append(outEl(e)); cutNote(e.out); } else body.append(el("p", "vnote", e.live ? "Running · no output yet" : e.unfinished ? "No result recorded." : "No output.")); }
+      else { section("Output", e.out); if (e.out) { body.append(outEl(e)); cutNote(e.out); } else body.append(el("p", "vnote", e.live ? (SESS[e.sid]?.state === "wait" ? "Waiting for your input or permission · no output yet" : "Running · no output yet") : e.unfinished ? "No result recorded." : "No output.")); }
     }
+    if (e.bg?.summary) { section("Finished", e.bg.summary); body.append(el("pre", null, e.bg.summary)); }
     if (e.fullFailed) body.append(el("p", "vnote", "Couldn't load the full text: this is the preview."));
     if (e.fullCut?.length) body.append(el("p", "vnote", "Cut at 8 MB: the rest isn't shown."));
-    d.append(head, body); document.body.append(d);
-    d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); }); // a tap on the backdrop (wide screens)
-    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("viewer-open"); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } } if (LIVE.pending) refresh(); });
-    viewerEl = d; document.documentElement.classList.add("viewer-open"); d.showModal(); close.focus();
-    try { history.pushState({ ...route, sheet: 1 }, ""); } catch {}
+    open();
   }
 
   // Images a prompt attached: thumbnails above its text, each opening the image whole in the viewer sheet. The page never holds
@@ -2024,23 +2418,45 @@
   }
 
   function openScript(e) {
-    const done = (fields) => openViewer({ ...e, ...fields, full: true }, "View script", "run", "Script");
+    const done = (fields) => openStepViewer({ ...e, ...fields, full: true }, "View script", "run", "Script");
     api("/api/entry?sid=" + enc(e.sid) + "&slot=" + e.slot + "&as=script")
       .then((result) => done({ scriptText: result.text, scriptTruncated: result.truncated }))
       .catch(() => done({ scriptFailed: true }));
   }
 
-  function openParentAtHandoff(h) { pendingFlashHandoff = h.id; const turn = HOLDS.get(h.id); goSession(h.from, turn?.id); }
-  function childBriefBlock(h) {
-    const parent = SESS[h.from], block = el("section", "child-intro"); block.setAttribute("aria-label", "Brief from " + parent.name);
-    const title = el("div", "intro-title"), open = el("button", null, parent.name); open.type = "button"; open.addEventListener("click", () => openParentAtHandoff(h));
-    title.append("Brief from ", open, el("span", "tm", clock(h.at)));
-    block.append(title);
-    const brief = markdown(h.brief, "brief"), more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
-    more.addEventListener("click", () => { const expanded = brief.classList.toggle("open"); more.textContent = expanded ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(expanded)); });
-    new ResizeObserver(() => { if (brief.classList.contains("open") || !brief.clientHeight) return; const clipped = brief.scrollHeight > brief.clientHeight + 1; more.hidden = !clipped; brief.classList.toggle("clipped", clipped); }).observe(brief);
-    const parentLink = el("button", "intro-open", "Open in " + parent.name); parentLink.type = "button"; parentLink.addEventListener("click", () => openParentAtHandoff(h)); const actions = el("div", "intro-actions"); actions.append(more, parentLink); block.append(brief, actions); return block;
+  // A brief or message clamped to three lines; "Show more" opens it in place, and only appears when it is cut.
+  function clampText(parent, text, cls) {
+    const t = rich("div", "ev-text" + (cls ? " " + cls : ""), preview(text)); parent.append(t);
+    const more = btn("link ev-more", "Show more"); more.hidden = true; more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", (ev) => { ev.stopPropagation(); const o = t.classList.toggle("open"); more.textContent = o ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(o)); });
+    observeClamp(t, more);
+    parent.append(more); return t;
   }
+  // A session this one started: a card that opens it. Its state, what it is, the brief, and what it is doing or returned.
+  function childCard(h, c) {
+    const b = el("div", "child-card"); b.dataset.h = h.id;
+    const calls = countOf(c, "calls");
+    const head = el("span", "cc-head"); const name = btn("cc-name who-link", c.name, "Open " + c.name); name.addEventListener("click", () => goSession(c.id, STARTS.get(h.id)?.id)); head.append(name, stateLabel(c.state), icon(I.chev, "chev"));
+    // The harness mark leads the kind line (#146); the kind stays a word, with no glyph.
+    b.append(head, withHarnessIcon(el("span", "cc-meta", [kindText(c), shortModel(c.model), dur(c.start, c.state === "work" ? null : c.last), (calls ?? "—") + (calls === 1 ? " step" : " steps"), costText(costForSession(c.id, true))].join(" · ")), c.harness, { size: 14 }));
+    b.append(rich("span", "cc-brief", preview(h.brief)));
+    if (h.result) { const r = el("span", "cc-result" + (h.status === "err" ? " err" : "")); r.append(el("span", "rl", h.status === "err" ? "Result: " : "Returned: ")); inline(r, h.result); b.append(r); }
+    else if (c.state === "work" && c.activity) { const n = el("span", "cc-now"); n.append(el("span", "spin"), el("span", null, verbNow(c.activity[0])), el("code", null, c.activity[1])); b.append(n); }
+    const holder = HOLDS.get(h.id);
+    if (holder) { const run = btn("link cc-run", "Run view", "Open run view for " + nameOf(h.from)); run.addEventListener("click", () => goTrace(holder.id)); b.append(run); }
+    return b;
+  }
+  // A relay, a message to you, or a machine move: who, when, the text, and what came back.
+  function eventRow(h, sid) {
+    const r = el("div", "event" + (h.kind === "toyou" && h.status === "wait" ? " waiting" : "") + (h.kind === "move" ? " move" : "")); r.dataset.h = h.id;
+    const [ic, parts] = sentence(h, sid, true); const head = el("div", "ev-head"); const ln = el("span", "ln"); ln.append(...parts); head.append(icon(ic), ln, el("span", "tm", clock(h.at))); r.append(head);
+    clampText(r, h.brief);
+    if (h.result) { const x = el("div", "ev-result"); x.append(el("span", "rl", h.kind === "relay" ? "Reply: " : "Returned: ")); inline(x, h.result); r.append(x); }
+    const an = answerEl(h, "ev-result"); if (an) r.append(an);
+    if (h.kind === "toyou" && h.status === "wait") r.append(stateLabel("wait", "Waiting on you"));
+    return r;
+  }
+  function openParentAtHandoff(h) { const turn = HOLDS.get(h.id); goSession(h.from, turn?.id); }
   // The tips on a session footer's items, as plain text (the tooltip sets it with textContent): calls by tool, times, cost by kind.
   const callsTip = (s) => { const parts = Object.entries(s.tool_calls ?? {}).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([name, n]) => name + " " + n), failed = countOf(s, "errors"); if (failed) parts.push(failed + " failed"); return parts.join(" · "); };
   const timeTip = (s, h, finished) => "Started " + clock(s.start) + " · last activity " + clock(s.last) + (finished ? " · finished " + clock(h?.done ?? s.last) : "");
@@ -2065,43 +2481,6 @@
     const state = el("span", "stat " + status); state.append(running ? el("span", "spin") : dot(status, false), line); block.append(state);
     if (h && finished) { const link = el("button", null, "Open in " + nameOf(h.from)); link.type = "button"; link.dataset.foot = "open"; link.addEventListener("click", () => openParentAtHandoff(h)); block.append(link); }
     return block;
-  }
-
-  function handoffCard(h, viewer, start) {
-    const other = h.kind === "move" ? null : viewer === h.from ? h.to : h.from;
-    const child = h.kind === "spawn" && viewer === h.from ? SESS[h.to] : null;
-    const answered = h.kind === "toyou" && h.status === "done" && (h.ask === "question" || h.ask === "decision");
-    const c = el("div", "hcard " + (child ? "child-card " + hcls(h.to) : h.kind === "toyou" ? "toyou" + (h.status === "wait" ? " waiting" : "") + (answered ? " answered" : "") : h.kind === "move" ? "move" : hcls(other)) + (start ? " start" : "")); c.dataset.h = h.id; c.tabIndex = 0; c.setAttribute("role", "link");
-    const [ic, parts] = sentence(h, viewer);
-    if (child) { const head = el("div", "child-head"); head.append(childKindChip(child), el("span", "ln", child.name)); c.append(head); }
-    else { c.append(icon(ic)); const ln = el("span", "ln"); ln.append(...parts); c.append(ln); }
-    const shownState = child?.state ?? h.status, sw = el("span", "stat " + shownState); sw.append(shownState === "work" ? el("span", "spin") : dot(shownState === "done" ? "done" : shownState, false), child ? STATE[shownState] : statWord(h)); c.append(sw);
-    if (child) { const meta = el("div", "child-meta"); meta.append(el("span", null, dur(child.start, child.state === "work" ? null : child.last)), el("span", null, callsText(countOf(child, "calls")))); c.append(meta); }
-    const br = markdown(h.brief, "brief"); c.append(br);
-    // Long messages open in place; the rest of the card still goes to the other session.
-    const more = el("button", "more", "Show more"); more.type = "button"; more.hidden = true; more.setAttribute("aria-expanded", "false");
-    more.addEventListener("click", (ev) => { ev.stopPropagation(); const open = c.classList.toggle("open"); more.textContent = open ? "Show less" : "Show more"; more.setAttribute("aria-expanded", String(open)); });
-    new ResizeObserver(() => { if (c.classList.contains("open") || !br.clientHeight) return; const x = br.scrollHeight > br.clientHeight + 1; more.hidden = !x; br.classList.toggle("clipped", x); }).observe(br);
-    c.append(more);
-    if (h.result) { const r = el("span", "result"); r.append(el("b", null, (h.status === "err" ? "Failed" : "Returned") + ": ")); inline(r, h.result); c.append(r); }
-    const an = answerEl(h, "result"); if (an) c.append(an);
-    if (child) {
-      const actions = el("div", "child-actions"), openChild = el("button", null, "Open"); openChild.type = "button"; openChild.addEventListener("click", (e) => { e.stopPropagation(); goSession(child.id); }); actions.append(openChild);
-      const entries = (STARTS.get(h.id)?.entries ?? TX[child.id] ?? []).filter((e) => !(e.k === "h" && e.id === h.id));
-      if (entries.length) {
-        const group = el("div", "child-work"); group.dataset.e = "cw:" + h.id; group.addEventListener("click", (e) => e.stopPropagation()); const toggle = el("button", "cw-toggle"); toggle.type = "button"; toggle.setAttribute("aria-expanded", "false"); toggle.setAttribute("aria-label", "Activity of " + child.name); const label = el("span", null, "Activity"); label.append(el("span", "cw-count", " · " + entries.length)); toggle.append(icon(I.chev, "chev"), label);
-        const inner = el("div", "cw-body"); inner.hidden = true; let showAll = false;
-        const paint = () => { inner.replaceChildren(transcript(child.id, { nested: true, entries: showAll ? entries : entries.slice(-5) })); if (!showAll && entries.length > 5) { const all = el("button", "show-all", "Show all " + entries.length); all.type = "button"; all.addEventListener("click", (e) => { e.stopPropagation(); showAll = true; paint(); }); inner.append(all); } };
-        toggle.addEventListener("click", (e) => { e.stopPropagation(); if (inner.hidden && !inner.childElementCount) paint(); inner.hidden = !inner.hidden; toggle.setAttribute("aria-expanded", String(!inner.hidden)); });
-        group.append(toggle, inner); actions.append(group);
-      }
-      c.append(actions);
-    }
-    // Received: the sender's turn that sent it. Sent on: the turn it started there. To you: this turn's trace. A move: the machine it left.
-    const open = () => { if (h.kind === "move") go({ v: "machine", id: h.fromMachine }); else if (h.kind === "toyou") { const t = HOLDS.get(h.id); if (t) goTrace(t.id); } else if (viewer === h.to) openSender(h); else if (SESS[other]) goSession(other, STARTS.get(h.id)?.id); };
-    c.addEventListener("click", (ev) => { if (!getSelection().isCollapsed) return; open(); });
-    c.addEventListener("keydown", (ev) => { if (ev.target === c && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); open(); } });
-    return c;
   }
 
   // ---- Render --------------------------------------------------------------------------------------------------------
@@ -2131,22 +2510,23 @@
     return put;
   }
   function render() {
+    runChartObserver?.disconnect(); pruneClamps();
     const focusSearch = focusSessionsSearchOnRender === route; focusSessionsSearchOnRender = null;
     if (SIDEBAR_ONLY) { CHILDREN = null; tick(); rendered = route; renderNav(); renderLanes(); return; } // the embedding page draws its own page and bar
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
-    closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
+    resetPagerInput(); holdProgrammaticScroll(); closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
     ordPageState = ordState("page"); tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; clearBox(page, r); page.classList.remove("child-page");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
     else if (r.v === "analytics") { renderAnalytics(page); renderTopbar("Analytics", null, { analytics: true }); }
     else if (r.v === "sessions") { renderSessions(page, focusSearch); renderTopbar("Sessions"); }
     else if (r.v === "machines") { renderMachines(page); renderTopbar("Machines"); }
     else if (r.v === "machine") { renderMachine(page, r.id); renderTopbar(MACHINE[r.id], { label: "Machines", go: () => go({ v: "machines" }) }, { line2: machineLine(r.id) }); }
-    else if (r.v === "trace") { const sum = renderTrace(page, r.turn) ?? ""; renderTopbar("Trace", { label: SESS[r.sid].name, go: () => goSession(r.sid, r.turn) }, sum ? { line2: (l2) => l2.append(lab(sum, null, 0)) } : {}); }
+    else if (r.v === "trace") { const sum = renderTrace(page, r.turn) ?? ""; if (sum) page.prepend(el("p", "trace-summary", sum)); renderTopbar("Trace", { label: SESS[r.sid].name, go: () => goSession(r.sid, r.turn) }, { traceSession: SESS[r.sid] }); }
     else if (r.v === "session") { const s = SESS[r.id], lineage = lineageOf(r.id).slice(0, -1); renderSession(page, r.id); renderTopbar(s.name, null, { session: s, lineage, line2: sessionLine(s) }); }
     if (r.v === "session" && errOn(r.id)) markError(false);
     document.documentElement.style.setProperty("--barh", $("#topbar").offsetHeight + "px");
     const lanesKept = lanesFor && lanesFor.r === r && lanesFor.version === LIVE.version; lanesFor = null;
-    syncLayoutPrefs(); syncBarLine(); renderNav(); if (!lanesKept) renderLanes(); renderDrawerAccount(); syncJump(); syncOrderPill("page"); ordPageState = null;
+    syncLayoutPrefs(); syncBarLine(); renderNav(); if (!lanesKept) renderLanes(); renderDrawerAccount(); syncJump(); ordPageState = null;
   }
 
   // ---- Analytics: the server computes each range (/api/analytics) -----------------------------------------------------------
@@ -2156,7 +2536,7 @@
   // while nothing changed), and every 10 s while the page shows, as time moves the range. Answers are kept per range and
   // filters, so switching back draws at once while the page asks again.
   const MIN = 60000, HOUR = 60 * MIN, AN_EVERY = 10000, AN_KEEP = 8;
-  const AN = { answers: new Map(), inflight: null, again: false, timer: null, error: null, failedAt: 0 };
+  const AN = { answers: new Map(), inflight: null, again: false, againAsked: false, timer: null, error: null, failedAt: 0 };
   function analyticsQuery() {
     const q = ["range=" + (analyticsRange === 1 ? "24h" : analyticsRange + "d")];
     // "No repo" is an empty repo; an unset filter isn't sent.
@@ -2166,8 +2546,8 @@
   }
   const analyticsData = () => AN.answers.get(analyticsQuery())?.data ?? null;
   // One request at a time: a change while one is out asks again when it is back. Resolves true when the answer changed.
-  function fetchAnalytics() {
-    if (AN.inflight) { AN.again = true; return AN.inflight; }
+  function fetchAnalytics(askedByUser = false) {
+    if (AN.inflight) { AN.again = true; AN.againAsked ||= askedByUser; return AN.inflight; }
     const key = analyticsQuery(), kept = AN.answers.get(key);
     const asked = fetch("/api/analytics?" + key, { credentials: "same-origin", headers: kept?.etag ? { "If-None-Match": kept.etag } : {} })
       .then((r) => {
@@ -2185,7 +2565,9 @@
     AN.inflight = asked.then((changed) => {
       AN.inflight = null;
       if (!AN.again) return changed;
-      AN.again = false; return fetchAnalytics().then((more) => changed || more);
+      const askedAgain = AN.againAsked; AN.again = AN.againAsked = false;
+      if (!askedAgain && backingOff()) return changed;
+      return fetchAnalytics(askedAgain).then((more) => changed || more);
     });
     return AN.inflight;
   }
@@ -2204,7 +2586,7 @@
     if (route.v !== "analytics") return Promise.resolve();
     if (asked !== true && backingOff()) { if (!AN.timer) scheduleAnalytics(); return Promise.resolve(); }
     clearTimeout(AN.timer); AN.timer = null;
-    return fetchAnalytics().then((changed) => {
+    return fetchAnalytics(asked === true).then((changed) => {
       if (changed && route.v === "analytics" && rendered === route) {
         if (viewerEl || accountOpen) LIVE.pending = true; // drawn when the sheet or the account menu closes
         else { const st = capture(); render(); restore(st); }
@@ -2217,7 +2599,7 @@
   const harnessOfSid = (A, sid) => SESS[sid]?.harness ?? A.sessions[sid]?.harness ?? "";
   // A session older than the model's window has no page to open: its row is text.
   // `rank` ({ measure, max }) makes it a ranked row: a link to the session (a plain click still goes through the router) with a bar scaled to the list's largest value, in its harness's colour.
-  function sessionRow(A, sid, cls, value, onOpen, rank) {
+  function analyticsSessionRow(A, sid, cls, value, onOpen, rank) {
     const open = !!SESS[sid], harness = harnessOfSid(A, sid), b = el(open ? (rank ? "a" : "button") : "div", cls);
     if (open && rank) { b.href = urlOf({ v: "session", id: sid }); b.addEventListener("click", (e) => { if (e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); onOpen(); }); }
     else if (open) { b.type = "button"; b.addEventListener("click", onOpen); }
@@ -2267,7 +2649,7 @@
           if (gone) values.push(current);
           f.select.setOptions([{ value: "", label: f.allLabel }, ...values.map((v) => ({ value: v, label: f.showValue(v) + (gone && v === current ? " (no sessions)" : "") }))]);
           f.select.setValue(current);
-          f.chip.hidden = current === ""; if (current !== "") { active++; f.text.textContent = f.label + ": " + f.showValue(current); f.chip.setAttribute("aria-label", "Clear " + f.label + " filter: " + f.showValue(current)); }
+          f.chip.hidden = current === ""; if (current !== "") { active++; f.text.textContent = f.label + ": " + f.showValue(current); f.chip.setAttribute("aria-label", "Remove " + f.label + ": " + f.showValue(current)); }
         }
         count.hidden = !active; count.textContent = active ? String(active) : ""; btn.setAttribute("aria-label", active ? "Filter, " + active + " active" : "Filter");
       };
@@ -2275,11 +2657,18 @@
       // doesn't scroll: not by overflow: hidden on the page (that resets a phone's page to the top, as the Select's sheet found), but by
       // refusing the wheel and touch moves that don't start in a list that can move (the Select's own sheet does the same for its list).
       let before = "";
-      const hold = (e) => { const t = e.target; if (t.closest?.(".sh-select-list") || (body.contains(t) && body.scrollHeight > body.clientHeight + 1)) return; e.preventDefault(); };
+      const hold = (e) => { if (!d.isConnected || !d.open) { for (const type of ["wheel", "touchmove"]) document.removeEventListener(type, hold, { capture: true }); if (viewerEl === d) viewerEl = null; return; } const t = e.target; if (t.closest?.(".sh-select-list") || (body.contains(t) && body.scrollHeight > body.clientHeight + 1)) return; e.preventDefault(); };
       btn.addEventListener("click", () => {
         if (viewerEl || d.open) return; ctx.sync(); before = JSON.stringify(sessionFilters);
         viewerEl = d; d.showModal(); for (const type of ["wheel", "touchmove"]) document.addEventListener(type, hold, { capture: true, passive: false });
         fields[0].select.focus(); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {}
+      });
+      d.addEventListener("keydown", (e) => {
+        if (e.key !== "Tab" || e.defaultPrevented) return;
+        const controls = [...d.querySelectorAll("button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex='-1'])")].filter((x) => x.getClientRects().length && !x.closest("[hidden]"));
+        const first = controls[0], last = controls.at(-1);
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
       });
       clear.addEventListener("click", () => { for (const key of Object.keys(sessionFilters)) sessionFilters[key] = ""; d.close(); });
       done.addEventListener("click", () => d.close());
@@ -2288,7 +2677,7 @@
         for (const type of ["wheel", "touchmove"]) document.removeEventListener(type, hold, { capture: true });
         if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } }
         btn.focus({ preventScroll: true });
-        if (JSON.stringify(sessionFilters) !== before) ctx.onChange(); else if (LIVE.pending) refresh();
+        if (JSON.stringify(sessionFilters) !== before) { LIVE.pending = false; ctx.onChange(); } else if (LIVE.pending) refresh();
       });
       return bar;
     });
@@ -2306,6 +2695,16 @@
   function timeText(ms) { const mins = Math.max(0, Math.round(ms / MIN)), days = Math.floor(mins / 1440), hours = Math.floor(mins % 1440 / 60), rem = mins % 60; return days ? days + "d " + hours + "h" : hours ? hours + "h " + rem + "m" : mins + "m"; }
   const countText = (n) => Math.round(n).toLocaleString(), hLabel = (n) => n ? +n.toFixed(2) + " h" : "0";
   const rangeAgo = (A) => A.days === 1 ? "24 h ago" : A.days + " d ago";
+  // The graph's thin bars have equivalent full-width targets on touch screens.
+  function chartSlices(A, bins, costMode = false) {
+    const details = el("details", "chart-slices"), summary = el("summary", null, "Explore time slices"), list = el("div", "chart-slice-list");
+    for (const bin of bins) {
+      if (costMode ? !bin.sessions.length : bin.claude + bin.codex <= 0) continue;
+      const b = btn("chart-slice"); b.append(el("span", null, clock(bin.a) + "–" + clock(bin.b)), el("span", null, costMode ? asMoney(bin.claude + bin.codex) : hLabel(bin.claude + bin.codex) + " agent-hours"));
+      b.addEventListener("click", () => openAnalyticsSlice(A, bin.a, bin.b, bin.sessions, bin.more, costMode)); list.append(b);
+    }
+    if (!list.childElementCount) return null; details.append(summary, list); return details;
+  }
   function renderAgentsChart(A) {
     const columns = A.agents.columns, count = columns.length, unit = A.agents.unit, panel = el("section", "analytics-panel");
     panel.append(el("h2", null, "Agents at work"), el("div", "panel-sub", "Agent-hours " + unit + " · stacked by harness"));
@@ -2323,7 +2722,7 @@
     });
     svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart);
-    const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(...[swatch, harnessIcon(h, { size: 14 }), label].filter(Boolean)); legend.append(item); } panel.append(legend); return panel;
+    const legend = el("div", "analytics-legend"); for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(...[swatch, harnessIcon(h, { size: 14 }), label].filter(Boolean)); legend.append(item); } panel.append(legend); const slices = chartSlices(A, bins); if (slices) panel.append(slices); return panel;
   }
   function renderCostChart(A) {
     const panel = el("section", "analytics-panel"), title = el("h2", null, "Cost over time"); title.append(costInfoTip());
@@ -2342,7 +2741,49 @@
     svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
     const chart = el("div", "analytics-chart"); chart.append(svg); panel.append(chart); const legend = el("div", "analytics-legend");
     for (const [h, label] of [["claude", "Claude"], ["codex", "Codex"]]) { const item = el("span"), swatch = el("i"); swatch.style.setProperty("--h", "var(--" + h + ")"); item.append(...[swatch, harnessIcon(h, { size: 14 }), label].filter(Boolean)); legend.append(item); } panel.append(legend);
+    const slices = chartSlices(A, bins, true); if (slices) panel.append(slices);
     if (A.cost.unpriced_models.length) panel.append(el("div", "no-price", "no price for " + A.cost.unpriced_models.join(", ") + "; unpriced usage is omitted from bars.")); return panel;
+  }
+  function openModelItems(group) {
+    const { d, body, show: open } = panel(shortModel(group.model) + " · " + group.band, { label: "Work items for " + group.model + ", " + group.band });
+    body.append(el("p", "panel-sub", group.n + " work items" + (group.small_sample ? " · small sample" : "")));
+    for (const item of group.items ?? []) {
+      const row = el("div", "model-item");
+      if (SESS[item.sid]) { const b = btn("model-item-session", SESS[item.sid].name); b.addEventListener("click", () => { pendingSessionOpen = item.sid; d.close(); }); row.append(b); }
+      else row.append(el("span", null, item.sid + " · outside the session window"));
+      row.append(el("span", "panel-sub", (item.models ?? []).map(shortModel).join(" → ") + " · " + (item.cost_usd == null ? "cost unknown" : asMoney(item.cost_usd))));
+      const trace = (TURNS[item.sid] ?? []).find((t) => t.out.length); if (trace) { const b = btn("model-item-trace", "Trace"); b.addEventListener("click", () => { afterPop = () => goTrace(trace.id); d.close(); }); row.append(b); }
+      if (liveUrl(item.pr_url)) row.append(link("Open pull request", item.pr_url)); body.append(row);
+    }
+    if (group.items_more) body.append(el("p", "panel-sub", group.items_more + " more items in the selected range")); open();
+  }
+  function renderModelsComparison(A) {
+    if (!A.models) return null;
+    const section = el("section", "analytics-panel models-panel"); section.append(el("h2", null, "Models"), el("p", "panel-sub", "Your launched work, compared within each difficulty band. Every measure shows its own sample count; unknown values are not estimated."));
+    const groups = A.models.groups ?? [], reasons = A.models.unknown_reasons ?? {};
+    if (!groups.length) { section.append(el("p", "empty", "No launched work with recorded per-message models in this range.")); return section; }
+    const measures = [["Acceptance", "first_pass_acceptance", "acceptance_n", "acceptance", (n) => (n * 100).toFixed(0) + "%"], ["Review rounds", "median_review_rounds", "review_rounds_n", "review_rounds", (n) => String(n)], ["Red CI heads", "median_red_ci_heads", "red_ci_n", "ci", (n) => String(n)], ["Model time", "median_model_ms", "model_time_n", "model_time", timeText], ["API cost", "median_cost_usd", "cost_n", "cost", asMoney], ["Allowance / M input", "allowance_per_million_input", "allowance_n", "allowance", (n) => n.toFixed(2) + "%"]];
+    for (const band of ["easy", "medium", "hard", "unknown"]) {
+      const rows = groups.filter((g) => g.band === band); if (!rows.length) continue;
+      const heading = el("h3", null, band === "unknown" ? "Unknown difficulty" : band[0].toUpperCase() + band.slice(1)); section.append(heading);
+      const wrap = el("div", "model-table-scroll"); wrap.tabIndex = 0; wrap.setAttribute("role", "region"); wrap.setAttribute("aria-label", band + " model comparison");
+      const table = el("table", "model-table"), head = el("thead"), hr = el("tr"); for (const title of ["Model", "Work items", ...measures.map((m) => m[0]), "Tokens · input / output / cache"]) { const th = el("th", null, title); th.scope = "col"; hr.append(th); } head.append(hr); table.append(head);
+      const body = el("tbody");
+      for (const group of rows) {
+        const tr = el("tr"), model = el("td"), b = btn("model-comparison-open", shortModel(group.model)); b.dataset.tip = group.model; b.addEventListener("click", () => openModelItems(group)); model.append(b); tr.append(model, el("td", null, group.n + (group.small_sample ? " · small sample" : "")));
+        for (const [, key, nKey, reason, format] of measures) { const cell = el("td"), value = group[key]; cell.append(el("span", null, value == null ? "Unknown" : format(value)), el("span", "model-n", "n=" + (group[nKey] ?? 0))); if (value == null && reasons[reason]) cell.dataset.tip = reasons[reason]; tr.append(cell); }
+        const tokens = group.tokens ?? {}, cell = el("td"); cell.append(el("span", null, group.tokens_n ? [tokens.input ?? 0, tokens.output ?? 0, (tokens.cache_read ?? 0) + (tokens.cache_write ?? 0)].map(countText).join(" / ") : "Unknown"), el("span", "model-n", "n=" + (group.tokens_n ?? 0))); tr.append(cell); body.append(tr);
+      }
+      table.append(body); wrap.append(table); section.append(wrap);
+      const points = rows.filter((g) => g.first_pass_acceptance != null && g.median_cost_usd != null);
+      if (points.length) {
+        const W = Math.max(280, chartWidth()), maxCost = Math.max(.01, ...points.map((g) => g.median_cost_usd)), svg = svgEl("svg", { viewBox: "0 0 " + W + " 190", role: "img", "aria-label": "API cost against first-pass acceptance for " + band + " work" });
+        svg.append(svgEl("line", { x1: 42, x2: W - 12, y1: 150, y2: 150, class: "gridline" }), svgEl("line", { x1: 42, x2: 42, y1: 12, y2: 150, class: "gridline" }));
+        for (const group of points) { const x = 42 + group.median_cost_usd / maxCost * (W - 58), y = 150 - group.first_pass_acceptance * 130, dot = svgEl("circle", { cx: x, cy: y, r: 5, class: "model-point" }); dot.dataset.tip = group.model + ": " + asMoney(group.median_cost_usd) + ", " + (group.first_pass_acceptance * 100).toFixed(0) + "% accepted; acceptance n=" + group.acceptance_n + ", cost n=" + group.cost_n; dot.setAttribute("aria-label", dot.dataset.tip); svg.append(dot, svgEl("text", { x: Math.max(42, Math.min(W - 90, x + 8)), y: Math.max(20, y - 8), class: "axis-label" }, shortModel(group.model))); }
+        svg.append(svgEl("text", { x: 42, y: 178, class: "axis-label" }, "Median API cost →"), svgEl("text", { x: 2, y: 16, class: "axis-label" }, "100%"), svgEl("text", { x: 8, y: 151, class: "axis-label" }, "0%")); const chart = el("div", "analytics-chart"); chart.append(svg); section.append(chart);
+      } else section.append(el("p", "panel-sub", "Cost / acceptance plot needs both recorded measures."));
+    }
+    return section;
   }
   function renderCodexAllowance(limits) {
     if (!limits || limits.recorded_at == null) return null;
@@ -2357,7 +2798,7 @@
     d.setAttribute("aria-label", heading + " " + when); title.append(el("span", null, heading + " · " + when)); close.type = "button"; close.setAttribute("aria-label", "Close sessions list"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(title, close);
     const body = el("div", "vb"), list = el("div", "analytics-list"); if (!items.length) body.append(el("p", "empty", costMode ? "No sessions had a recorded cost then." : "No sessions were busy then."));
     for (const item of items) {
-      const row = sessionRow(A, item.sid, "analytics-session analytics-slice", costMode ? asMoney(item.usd) : timeText(item.ms) + " busy", () => { pendingSessionOpen = item.sid; d.close(); });
+      const row = analyticsSessionRow(A, item.sid, "analytics-session analytics-slice", costMode ? asMoney(item.usd) : timeText(item.ms) + " busy", () => { pendingSessionOpen = item.sid; d.close(); });
       if (costMode && item.unpriced_models.length) row.append(el("span", "no-price", "no price for " + item.unpriced_models.join(", "))); list.append(row);
     }
     if (more) list.append(el("p", "empty", "and " + more + " more"));
@@ -2381,7 +2822,7 @@
   function analyticsList(A, title, items, value, measure) {
     const panel = el("section", "analytics-panel"); panel.append(el("h2", null, title)); const list = el("div", "analytics-list"); if (!items.length) list.append(el("p", "empty", "No sessions in this range."));
     const max = Math.max(1, ...items.map(measure));
-    for (const item of items) { const b = sessionRow(A, item.sid, "analytics-session", value(item), () => goSession(item.sid), { measure: measure(item), max }); const missing = item.unpriced_models ?? []; if (missing.length) b.append(el("span", "no-price", "no price for " + missing.join(", "))); list.append(b); } panel.append(list); return panel;
+    for (const item of items) { const b = analyticsSessionRow(A, item.sid, "analytics-session", value(item), () => goSession(item.sid), { measure: measure(item), max }); const missing = item.unpriced_models ?? []; if (missing.length) b.append(el("span", "no-price", "no price for " + missing.join(", "))); list.append(b); } panel.append(list); return panel;
   }
   function renderAnalytics(page) {
     const A = analyticsData();
@@ -2418,7 +2859,7 @@
     const oldGroups = bdBox.querySelector(":scope > .analytics-breakdowns"); if (oldGroups) oldGroups.replaceWith(breakdowns); else bdBox.append(breakdowns);
     const bottom = el("div", "analytics-split");
     bottom.append(analyticsList(A, "Top sessions · busy time", A.top.busy, (x) => timeText(x.ms), (x) => x.ms), analyticsList(A, "Top sessions · waited on", A.top.waited, (x) => timeText(x.ms), (x) => x.ms), analyticsList(A, "Most expensive sessions · API-equivalent cost", A.top.cost, (x) => x.usd == null ? "—" : asMoney(x.usd), (x) => x.usd ?? 0));
-    put(renderAgentsChart(A), renderCostChart(A), bdBox, bottom); const allowance = renderCodexAllowance(A.allowance); if (allowance) put(allowance);
+    put(renderAgentsChart(A), renderCostChart(A), bdBox, bottom); const models = renderModelsComparison(A); if (models) put(models); const allowance = renderCodexAllowance(A.allowance); if (allowance) put(allowance);
     // data-analytics-ready: the figures and charts are drawn (a stable hook for the budget check); data-query: for which range and filters.
     metrics.dataset.analyticsReady = ""; metrics.dataset.query = analyticsQuery();
     put.done();
@@ -2438,7 +2879,7 @@
     // The search field and the group-by buttons are persistent controls: the page's redraws keep them, and the field's focus, text and caret.
     const found = slot("find", page, (ctx) => {
       const fr = el("label", "find"), fi = el("input"); fi.id = "sq"; fi.type = "search"; fi.placeholder = "Search sessions"; fi.setAttribute("aria-label", "Search sessions"); fi.value = query; fr.append(icon(I.search), fi);
-      fi.addEventListener("input", () => { query = fi.value.trim(); ctx.draw(); }); return fr;
+      fi.addEventListener("input", () => { query = fi.value.trim(); const address = new URL(location.href); if (query) address.searchParams.set("q", query); else address.searchParams.delete("q"); history.replaceState(history.state, "", address); ctx.draw(); }); return fr;
     }), fr = found.el, fi = fr.querySelector("input");
     if (fi.value.trim() !== query) fi.value = query;
     const grouped = slot("groupby", page, (ctx) => {
@@ -2464,13 +2905,12 @@
         if (!items.length && total) continue; // a group new to a list that is held: its sessions are counted in the pill
         const box = el("div"); box.style.display = "grid"; if (title) { const head = secHead(title, total); if (groupBy === "harness") { const id = Object.keys(HARNESS).find((k) => HARNESS[k] === title); if (id) withHarnessIcon(head, id, { size: 14, lead: false }); } box.append(head); }
         const list = el("div", "list");
-        for (const s of items) { const r = el("button", "nrow"); r.type = "button"; r.dataset.id = s.id; r.append(dot(s.state), el("span", "nm", s.name), el("span", "ag", ago(s.last)), withHarnessIcon(el("span", "for", [s.kind ?? HARNESS[s.harness], MACHINE[s.machine], s.repo ? where(s) : "no repo"].join(" · ")), s.harness, { size: 14 })); const k = childRuns(s.id); if (k) r.append(el("span", "kids", k)); r.addEventListener("click", () => goSession(s.id)); list.append(r); }
+        for (const s of items) list.append(sessionRow(s));
         box.append(list); out.append(box);
       }
       if (!lanes.length) out.append(el("p", "empty", "No sessions match “" + query + "”."));
       for (const b of gb.querySelectorAll("button[data-g]")) b.setAttribute("aria-pressed", String(b.dataset.g === groupBy));
-      reviewToggle.setAttribute("aria-pressed", String(showApprovalReviews));
-      syncOrderPill("page"); renderLanes();
+      renderLanes();
     };
     found.ctx.draw = grouped.ctx.draw = draw;
     const nodes = [renderFacetFilters(page, () => render()), fr, gb]; if (showReviewControl) nodes.push(reviewControl.el); nodes.push(out);
@@ -2480,28 +2920,13 @@
 
   // ---- Drawer (phone) ---------------------------------------------------------------------------------------------------------
   const sidebar = $("#sidebar");
-  function openDrawer() { if (!phone.matches) return; if (ORD.get("side")?.n) { ORD.delete("side"); renderLanes(); } document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
-  function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); closeAccountMenu(); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); }
+  function openDrawer() { if (!phone.matches) return; orderApply("side"); document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
+  function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); closeAccountMenu(); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); setTimeout(() => { if (phone.matches && !document.body.classList.contains("drawer-open")) orderApply("side"); }, ORD_DRAWER_MS); }
   // On an embedding page shell.js opens and closes the drawer, and names its opening (semon:drawer-open); the viewer binds none of it, "/" included.
+  // On a phone there is no drawer-close event from the embedding page, so held order waits for the next open.
   if (!SIDEBAR_ONLY) { $("#drawer-close").addEventListener("click", () => closeDrawer()); $("#scrim").addEventListener("click", () => closeDrawer()); }
-  else window.addEventListener("semon:drawer-open", () => { if (ORD.get("side")?.n) { ORD.delete("side"); renderLanes(); } }); // opening the drawer re-sorts what the list held, as openDrawer does
-  if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && accountSheet) closeAccountMenu();
-    else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); }
-    const target = document.activeElement;
-    if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey && !viewerEl && !accountOpen &&
-        !document.querySelector("dialog[open], .menu, .runs-popover") &&
-        !/^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName ?? "") && !target?.isContentEditable) {
-      e.preventDefault();
-      const search = route.v === "sessions" ? $("#sq") : null;
-      if (search) {
-        focusSessionsSearchOnRender = null; search.focus({ preventScroll: true });
-      } else {
-        const sessions = { v: "sessions" }; focusSessionsSearchOnRender = sessions;
-        go(sessions);
-      }
-    }
-  });
+  else window.addEventListener("semon:drawer-open", () => orderApply("side")); // opening the drawer re-sorts what the list held, as openDrawer does
+    if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); } if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName ?? "") && !document.activeElement?.isContentEditable && !viewerEl) { e.preventDefault(); if (route.v === "session") { findOpen = true; render(); $("#find")?.focus(); } else if (route.v === "sessions") { $("#sq")?.focus(); } else { const r = { v: "sessions", q: query }; focusSessionsSearchOnRender = r; go(r); } } });
   let sx = null;
   if (!SIDEBAR_ONLY) sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
   if (!SIDEBAR_ONLY) sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });
@@ -2519,7 +2944,7 @@
   // again with its view state kept: the scroll position, anchored to the first visible block; what is open, by stable keys;
   // focus, find and filters; the drawer. A session page follows its transcript's tail
   // with /api/tx?after= and replaces only the turns that changed. An open View all sheet holds the redraw until it closes.
-  const LIVE = { late: null, lateTries: 0, retry: false, version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2000, ended: false, again: false, pending: false, fresh: 0, turns: new Map(), missing: new Set() };
+  const LIVE = { late: null, lateTries: 0, retry: false, version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2000, ended: false, again: false, pending: false, fresh: 0, turns: new Map() };
   // The turn index as last drawn, to tell which turns an update changed.
   const remember = (m) => { LIVE.turns = new Map(m.turns.map((x) => [x.id, turnKey(x)])); };
   // What an update can change in a turn record or a handoff, cheaply (not the text, which a record never rewrites).
@@ -2551,9 +2976,9 @@
     let ok = false;
     // While a late origin's transcript has yet to load again, the poll asks for the whole model (an empty since), so the update
     // that retries it runs even when nothing else moved.
-    fetch("/api/model?since=" + enc(LIVE.late ? "" : LIVE.version ?? ""), { credentials: "same-origin" })
+    fetch("/api/model?delta=1&since=" + enc(LIVE.late ? "" : LIVE.version ?? ""), { credentials: "same-origin" })
       .then((r) => r.status === 304 ? null : r.ok ? r.json() : Promise.reject(Object.assign(new Error(r.status + " " + r.statusText), { status: r.status })), (e) => Promise.reject(Object.assign(e, { status: 0 })))
-      .then((m) => (m ? update(m) : null))
+      .then((m) => { if (!m) return null; try { m = applyModelDelta(m); } catch { return api("/api/model?delta=1").then(update); } return update(m); })
       // A failed retry of that transcript backs off like a failed poll (4 s, 8 s, 16 s, capped at 30 s); anything else resets to 2 s.
       .then(() => { LIVE.delay = LIVE.retry ? Math.min(30000, LIVE.delay * 2) : 2000; ok = true; }, (err) => {
         if (err?.status === 403) return ended(403);
@@ -2575,46 +3000,79 @@
   }
   // A 403 or a dropped connection fails the update (and backs off); anything else skips that one transcript.
   const soft = (p) => p.catch((e) => { if (e?.status === 403 || e?.status === 0) throw e; });
-  // The transcripts on screen: a session page's own, and its child runs'. Any other loaded transcript is dropped from TX (the
-  // last few opened are kept in TXCACHE, and brought up to date when opened again).
-  const viewed = () => { const v = new Set(); if (route.v !== "session") return v; v.add(route.id); for (const h of H) if (h.kind === "spawn" && h.from === route.id && h.to) v.add(h.to); return v; };
+  // The transcript on screen: a session page's own. Any other loaded transcript is dropped from TX (the last few opened are kept in
+  // TXCACHE, and brought up to date when opened again). A child run's card is drawn from the model, so its transcript is not loaded.
+  const viewed = () => { const v = new Set(); if (route.v === "session") v.add(route.id); return v; };
+  // What a child card shows, so an update knows which cards changed: the run's name, state, kind, model, steps and current call.
+  const cardKeys = () => new Map(H.filter((h) => h.kind === "spawn" && SESS[h.to]).map((h) => { const c = SESS[h.to]; return [h.id, [c.name, c.state, c.kind, c.model, countOf(c, "calls"), c.activity?.join("|"), h.status, h.result].join("\u0001")]; }));
+  function applyModelDelta(m) {
+    if (m.delta !== 1) return m;
+    if (!wireModel || m.from !== wireModel.version) throw new Error("Model delta base expired");
+    const next = { ...wireModel, ...m.set };
+    for (const field of m.remove ?? []) delete next[field];
+    for (const [field, patch] of Object.entries(m.collections ?? {})) {
+      const array = field === "handoffs" || field === "turns";
+      const rows = array ? new Map((wireModel[field] ?? []).map((row) => [row.id, row])) : new Map(Object.entries(wireModel[field] ?? {}));
+      for (const id of patch.remove ?? []) rows.delete(id);
+      for (const [id, row] of Object.entries(patch.set ?? {})) rows.set(id, row);
+      next[field] = array ? (patch.order ?? [...rows.keys()]).map((id) => rows.get(id)) : Object.fromEntries(rows);
+      if (array && next[field].some((row) => !row)) throw new Error("Incomplete model delta");
+    }
+    next.version = m.version;
+    return next;
+  }
   function update(m) {
-    const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
+    m = applyModelDelta(m);
+    const oldH = new Map(H.map((h) => [h.id, handKey(h)])), oldT = LIVE.turns, oldCards = cardKeys(), names = new Map(Object.values(SESS).map((x) => [x.id, x.name]));
     const hadOrigins = new Set([...TXCACHE.keys()].filter((sid) => !!originHandoff(sid)));
     const hadOrigin = route.v === "session" && !!SESS[route.id] && !!originHandoff(route.id);
     adopt(m); remember(m);
+    for (const sid of STALE_BRIEFS) if (!SESS[sid]) STALE_BRIEFS.delete(sid);
     for (const sid of [...TXCACHE.keys()]) if (!hadOrigins.has(sid) && originHandoff(sid)) TXCACHE.delete(sid);
     // A page that had no origin and now has one (its parent's spawn arrived) loads its transcript again: the first prompt it drew as
     // a message is the brief, which the intro now shows. A failed request is retried on the next poll, which backs off, up to
     // LATE_TRIES requests in all; after that the page stays as drawn (the brief shows twice until a reload) and polls as usual.
     if (LIVE.late !== route.id) { if (LIVE.late) TXCACHE.delete(LIVE.late); LIVE.late = null; }
-    if (route.v === "session" && !hadOrigin && !!SESS[route.id] && !!originHandoff(route.id)) { LIVE.late = route.id; LIVE.lateTries = 0; }
+    if (route.v === "session" && !hadOrigin && !!SESS[route.id] && !!originHandoff(route.id)) { LIVE.late = route.id; LIVE.lateTries = 0; STALE_BRIEFS.add(route.id); TXCACHE.delete(route.id); }
     if (LIVE.late && !TX[LIVE.late]) LIVE.late = null; // nothing loaded to load again: the page loads it with its origin
     const changedH = new Set(H.filter((h) => oldH.get(h.id) !== handKey(h)).map((h) => h.id));
-    const view = viewed(), grown = new Set(), cuts = new Map();
+    const newCards = cardKeys(), changedCards = new Set([...newCards].filter(([id, k]) => oldCards.has(id) && oldCards.get(id) !== k).map(([id]) => id));
+    const view = viewed(), grown = new Set(), cuts = new Map(), patched = new Map();
     let full = Object.values(SESS).some((x) => names.has(x.id) && names.get(x.id) !== x.name); // a new name shows in every turn
-    for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else { delete TX[sid]; delete TXM[sid]; } }
+    for (const sid of Object.keys(TX)) { if (view.has(sid) && SESS[sid]) spread(sid); else dropTx(sid); }
     // Only transcripts whose mark in the model moved are asked for, one at a time.
     let chain = Promise.resolve();
     for (const sid of view) if (TX[sid] && LIVE.late === sid) chain = chain.then(() => soft(reloadLate(sid).then(() => { grown.add(sid); full = true; })));
     else if (TX[sid] && TXM[sid].tok != null && TOK[sid] != null && shrank(TXM[sid].tok, TOK[sid])) chain = chain.then(() => soft(reload(sid).then(() => { grown.add(sid); full = true; })));
-    else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.reload) full = true; })));
-    if (route.v === "session" && TX[route.id]) chain = chain.then(() => newKids(route.id, grown));
-    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
+    else if (TX[sid] && TXM[sid].to >= TXM[sid].total && TXM[sid].tok !== TOK[sid]) chain = chain.then(() => soft(tail(sid).then((r) => { grown.add(sid); if (r.cut != null) cuts.set(sid, r.cut); if (r.patched?.length) patched.set(sid, r.patched); if (r.reload) full = true; })));
+    for (const sid of view) if (TX[sid] && TXM[sid].to < TXM[sid].total && TXM[sid].watchTok !== TOK[sid]) chain = chain.then(() => soft(watchLater(sid).then((r) => { if (r?.reload) full = true; })));
+    return chain.then(() => { LIVE.version = m.version; refresh(full ? null : dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched)); if (route.v === "analytics") refreshAnalytics(); const e = errorsLive(); return e && soft(e); });
   }
-  // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), those
-  // whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw them all.
-  function dirtyTurns(cuts, grown, changedH, oldT) {
+  // The turns of the session page an update changed: those holding entries its tail brought (from the cut on), or a background
+  // call it updated, those whose record or handoffs changed, and those holding the spawn of a child run that grew. Null: draw
+  // them all.
+  function dirtyTurns(cuts, grown, changedH, oldT, changedCards, patched) {
     if (route.v !== "session" || !TX[route.id]) return null;
     const sid = route.id, dirty = new Set(), owner = new Map((TURNS[sid] ?? []).flatMap((t) => t.entries.map((e) => [e, t.id])));
     if (cuts.has(sid)) for (const e of TX[sid].slice(cuts.get(sid))) { if (isGap(e)) return null; if (owner.has(e)) dirty.add(owner.get(e)); }
+    for (const e of patched?.get(sid) ?? []) { if (!owner.has(e)) return null; dirty.add(owner.get(e)); }
     for (const t of TURNS[sid] ?? []) {
       if (oldT.get(t.id) !== LIVE.turns.get(t.id) || [t.start, ...t.sent].some((h) => h && changedH.has(h.id)) || t.entries.some((e) => e.k === "h" && changedH.has(e.id))) dirty.add(t.id);
     }
-    for (const h of H) if (h.kind === "spawn" && h.from === sid && grown.has(h.to) && HOLDS.get(h.id)) dirty.add(HOLDS.get(h.id).id);
+    for (const h of H) if (h.kind === "spawn" && h.from === sid && changedCards.has(h.id) && HOLDS.get(h.id)) dirty.add(HOLDS.get(h.id).id);
     return dirty;
   }
-  // The tail of a transcript loaded to its end: from its first call still running (anywhere), or the last turn's first call
+  // A deep link keeps its contiguous window. Learn that its unseen tail grew without replacing the reader's page.
+  function watchLater(sid) {
+    const m = TXM[sid], tok = TOK[sid];
+    return api("/api/tx?sid=" + enc(sid) + "&after=" + m.total).then((p) => {
+      if (TXM[sid] !== m) return;
+      if (p.total < m.total) return reload(sid);
+      m.newer = (m.newer ?? 0) + Math.max(0, p.total - m.total);
+      Object.assign(m, { total: p.total, calls: p.calls, errors: p.errors, watchTok: tok });
+    });
+  }
+  // The tail of a transcript loaded to its end: from its first foreground call still running, or the last turn's first call
   // with no result yet, since its result may have landed; else from the end. A file that shrank or was rewritten, or more
   // than five pages of new entries, loads the last page again instead.
   function tail(sid) {
@@ -2629,13 +3087,20 @@
     return page(cut < es.length ? es[cut].slot : m.to).then(() => {
       if (TX[sid] !== es) return { cut: null }; // "Load earlier" ran meanwhile: the next update catches up
       if (last.total < m.total || last.to < last.total || (cut < es.length && got[0]?.slot !== es[cut].slot)) return reload(sid);
+      // A background call loaded before the cut is not fetched again (it may be pages back): its finish row in the tail, or the
+      // page's list of calls still running (bg_running), says how it stands. Its turn is drawn again (patched).
+      const ends = new Map(got.filter((e) => e.k === "bgend" && e.bg).map((e) => [e.call, e.bg])), still = new Set(last.bg_running ?? []), patched = [];
+      for (const e of es.slice(0, cut)) if (e.bg) {
+        const next = ends.get(e.tid) ?? (still.has(e.tid) ? { ...e.bg, state: "running", secs: e.bg.secs ?? "—" } : e.bg.state === "running" ? { state: "unknown" } : e.bg);
+        if (JSON.stringify(next) !== JSON.stringify(e.bg)) { e.bg = next; patched.push(e); }
+      }
       TX[sid] = es.slice(0, cut).concat(got); Object.assign(m, { to: last.to, total: last.total, calls: last.calls, errors: last.errors, tok }); spread(sid);
-      return { cut };
+      return { cut, patched };
     });
   }
   // The page's own transcript loads its last page again; a child run's is dropped, and loads again as new child work.
   function reload(sid) {
-    if (sid !== route.id) { delete TX[sid]; delete TXM[sid]; return Promise.resolve({ cut: null, reload: true }); }
+    if (sid !== route.id) { dropTx(sid); return Promise.resolve({ cut: null, reload: true }); }
     return fetchTx(sid, "").then(() => ({ cut: null, reload: true }));
   }
   // The reload of a page whose origin arrived late (update): done once it loads; a failure is counted, makes the poll back off, and
@@ -2650,15 +3115,6 @@
       throw err;
     });
   }
-  // A new spawn's child work: its turn, loaded one request at a time. A turn the server doesn't have (404) isn't asked for again.
-  function newKids(sid, grown) {
-    let chain = Promise.resolve();
-    for (const e of TX[sid] ?? []) {
-      const h = e.k === "h" ? HID.get(e.id) : null, c = h && h.kind === "spawn" && h.from === sid ? STARTS.get(h.id) : null;
-      if (c && !TX[c.sid] && !LIVE.missing.has(c.id)) chain = chain.then(() => (TX[c.sid] ? null : soft(fetchTx(c.sid, "turn=" + enc(c.id)).then(() => { grown.add(c.sid); }, (err) => { if (err?.status === 404) LIVE.missing.add(c.id); throw err; }))));
-    }
-    return chain;
-  }
   // Draws the new model on the screen shown, unless a navigation is still loading (it draws when done), the sheet is open
   // (it draws when the sheet closes), or what the screen shows left the model (it stays as it was).
   function refresh(dirty) {
@@ -2668,7 +3124,7 @@
     LIVE.pending = false; const r = route;
     if (rendered !== r || (r.v === "session" && !SESS[r.id]) || (r.v === "trace" && !SESS[r.sid]) || (r.v === "machine" && !MACHINE[r.id])) return;
     const st = capture(); $("#page").style.paddingBottom = "";
-    if (r.v !== "session") { render(); restore(st); syncOrderPill("page"); syncOrderPill("side"); return; }
+    if (r.v !== "session") { render(); restore(st); return; }
     const n = patchSession(dirty); restore(st, st.bottom);
     if (!st.bottom && n) LIVE.fresh += n;
     syncJump();
@@ -2680,17 +3136,21 @@
   // The opened transcript can still grow as fonts and clamped cards settle; hold the tail briefly, then yield on reader input.
   let openingEndUntil = 0, openingEndTimer = null, openingEndObserver = null;
   function stopOpeningEndPin() {
+    const wasPinned = !!openingEndUntil;
     openingEndUntil = 0;
     clearTimeout(openingEndTimer); openingEndTimer = null;
     openingEndObserver?.disconnect(); openingEndObserver = null;
+    if (wasPinned) queuePagerObservers();
   }
   function pinOpeningEnd() {
     if (route.v !== "session" || performance.now() >= openingEndUntil) { stopOpeningEndPin(); return; }
-    const sc = scroller(); sc.scrollTop = sc.scrollHeight; LIVE.anchor = null; syncJump(); saveHistoryScroll();
+    const sc = scroller(); scrollProgrammatically(() => { sc.scrollTop = sc.scrollHeight; }); LIVE.anchor = null; syncJump(); saveHistoryScroll();
   }
   function startOpeningEndPin() {
+    resetPagerInput();
     stopOpeningEndPin(); if (route.v !== "session" || location.hash) return;
     openingEndUntil = performance.now() + 2000;
+    disconnectPagerObservers();
     const turns = $("#page section[aria-label='Transcript'] .turns");
     if (turns) { openingEndObserver = new ResizeObserver(pinOpeningEnd); openingEndObserver.observe(turns); }
     pinOpeningEnd(); openingEndTimer = setTimeout(stopOpeningEndPin, 2000);
@@ -2698,14 +3158,15 @@
   const ANCHORS = "[data-e], .turn, .hop, .ib, .nrow, .sec-h, .ph, .divider, .analytics-metric, .analytics-panel, .facet-filters, .groupby, .find, .empty";
   const HOSTS = "[data-e], [data-h], [data-id], [data-sid], [data-go], [data-turn], [data-g], [data-m]";
   const FOCUSABLE = "button, input, [tabindex], a[href]";
-  const identOf = (n) => { const d = n.dataset, keys = [d.e, d.turn, d.h, d.id, d.m, d.sid, d.go, d.g];
+  const stateKey = (n) => n.dataset.entryKey ?? n.dataset.e;
+  const identOf = (n) => { const d = n.dataset, keys = [stateKey(n), d.turn, d.h, d.id, d.m, d.sid, d.go, d.g];
     return [n.classList[0], ...keys, keys.some((x) => x != null) ? "" : n.firstChild?.nodeType === 3 ? n.firstChild.data : ""].map((x) => x ?? "").join("|"); };
   // Each anchor candidate on the page, in order, with its identity made unique by how many came before it.
   function anchors(fn) { const seen = new Map(); for (const n of $("#page").querySelectorAll(ANCHORS)) { const id = identOf(n), k = seen.get(id) ?? 0; seen.set(id, k + 1); if (fn(n, id + "#" + k)) return; } }
-  const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : n.classList.contains("child-work") ? n.querySelector(":scope > .cw-toggle") : null;
+  const opener = (n) => n.classList.contains("step") ? n.querySelector(":scope > button") : n.classList.contains("tgroup") ? n.querySelector(":scope > .tsum") : null;
   function capture() {
     const sc = scroller(), line = edge();
-    const st = { top: sc.scrollTop, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80, anchor: null, open: new Set(), groups: new Set(), focus: null, drawer: document.body.classList.contains("drawer-open") };
+    const st = { top: sc.scrollTop, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 80, anchor: null, open: new Set(), groups: new Set(), groupMembers: new Set(), focus: null, drawer: document.body.classList.contains("drawer-open") };
     // The first block, innermost, still visible under the bar, and how far its top is from the bar. While the reader hasn't
     // scrolled since the last redraw placed it, that placement's block and offset are kept as they were, so the fraction
     // of a pixel each placement rounds off can't add up over many updates.
@@ -2713,14 +3174,26 @@
     if (kept && kept.route === rendered && Math.abs(sc.scrollTop - kept.top) < 1) anchors((n, id) => (id === kept.id ? (still = n) : false));
     // ... and only while that block is still where it was placed (a filter, find or zoom since has moved it).
     if (still && Math.abs(still.getBoundingClientRect().top - line - kept.off) <= 1) st.anchor = { id: kept.id, off: kept.off };
-    else anchors((n, id) => { if (n.querySelector(ANCHORS)) return false; const b = n.getBoundingClientRect(); if (!b.height || b.bottom <= line) return false; st.anchor = { id, off: b.top - line }; return true; });
+    else {
+      const turnBounds = new Map();
+      anchors((n, id) => {
+        // Hidden turn contents need no measurements: only the enclosing turn's box can be near the reader.
+        const turn = n.closest(".turn");
+        if (turn) {
+          let bounds = turnBounds.get(turn); if (!bounds) { bounds = turn.getBoundingClientRect(); turnBounds.set(turn, bounds); }
+          if (bounds.bottom <= line || bounds.top >= (phone.matches ? innerHeight : sc.getBoundingClientRect().bottom)) return false;
+        }
+        if (n.querySelector(ANCHORS)) return false;
+        const b = n.getBoundingClientRect(); if (!b.height || b.bottom <= line) return false;
+        st.anchor = { id, off: b.top - line }; return true;
+      });
+    }
     for (const n of $("#page").querySelectorAll("[data-e]")) {
-      if (n.classList.contains("tgroup")) st.groups.add(n.dataset.e);
-      if (opener(n)?.getAttribute("aria-expanded") === "true" || (n.classList.contains("hcard") && n.classList.contains("open"))) st.open.add(n.dataset.e);
+      if (n.classList.contains("tgroup")) st.groups.add(stateKey(n));
+        if (opener(n)?.getAttribute("aria-expanded") === "true") for (const step of n.querySelectorAll(".step[data-e]")) st.groupMembers.add(stateKey(step));
+      if (opener(n)?.getAttribute("aria-expanded") === "true" || (n.classList.contains("event") && n.querySelector(":scope > .ev-text.open"))) st.open.add(stateKey(n));
     }
     for (const n of $("#page").querySelectorAll(".hop")) if (n.querySelector(".brief.open")) st.open.add("hop:" + identOf(n));
-    // Child work opened and then closed keeps what was open inside it, for when it opens again.
-    st.shut = new Set([...$("#page").querySelectorAll(".child-work[data-e]")].filter((n) => opener(n).getAttribute("aria-expanded") === "false" && n.querySelector(":scope > .cw-body").childElementCount).map((n) => n.dataset.e));
     const a = document.activeElement;
     if (a && a !== document.body && !a.closest("dialog")) {
       const host = a.id ? null : a.closest(HOSTS), sel = host && host !== a ? a.tagName.toLowerCase() + [...a.classList].map((c) => "." + CSS.escape(c)).join("") : null;
@@ -2733,25 +3206,20 @@
     return st;
   }
   function restore(st, pin) {
-    const all = (sel) => [...$("#page").querySelectorAll(sel)], r0 = rendered;
+    const all = (sel) => [...$("#page").querySelectorAll(sel)], r0 = rendered, revision = scrollRevision;
     // A new card or brief measures its "Show more" now, as its ResizeObserver would a frame later, so nothing moves after the
     // scroll position is set.
     const clamp = (br, more) => { if (!br || !more || !br.clientHeight) return; const x = br.scrollHeight > br.clientHeight + 1; more.hidden = !x; br.classList.toggle("clipped", x); };
-    for (const c of all(".hcard:not(.open)")) clamp(c.querySelector(":scope > .brief"), c.querySelector(":scope > .more"));
+    for (const c of all(".event")) clamp(c.querySelector(":scope > .ev-text"), c.querySelector(":scope > .ev-more"));
     for (const br of all(".hop .body > .brief:not(.open)")) clamp(br, br.parentElement.querySelector(":scope > .more"));
-    // Child work first (opening it draws its steps), then groups (a new one opens if it holds an open step), then steps and cards.
-    // Child work that was closed with something open inside is opened for the restore (so its steps measure as shown) and
-    // closed again below, in the same task: it is never drawn open.
-    const shut = all(".child-work[data-e]").filter((n) => st.shut.has(n.dataset.e) && opener(n).getAttribute("aria-expanded") === "false");
-    for (const n of all(".child-work[data-e]")) if ((st.open.has(n.dataset.e) || shut.includes(n)) && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
+    // Groups first (a new one opens if it holds an open step), then steps and events.
     for (const n of all(".tgroup[data-e]")) {
-      const want = st.groups.has(n.dataset.e) ? st.open.has(n.dataset.e) : [...n.querySelectorAll(".step[data-e]")].some((x) => st.open.has(x.dataset.e));
+      const want = st.groups.has(stateKey(n)) ? st.open.has(stateKey(n)) : [...n.querySelectorAll(".step[data-e]")].some((x) => st.open.has(stateKey(x)) || st.groupMembers.has(stateKey(x)));
       if (want && opener(n).getAttribute("aria-expanded") === "false") opener(n).click();
     }
-    for (const n of all(".step[data-e]")) if (st.open.has(n.dataset.e) && opener(n)?.getAttribute("aria-expanded") === "false") opener(n).click();
-    for (const n of shut) opener(n).click();
-    // A card or brief opened before its size was measured: its "Show less" is shown by hand.
-    for (const n of all(".hcard[data-e]")) if (st.open.has(n.dataset.e) && !n.classList.contains("open")) { const m = n.querySelector(":scope > .more"); m.hidden = false; m.click(); }
+    for (const n of all(".step[data-e]")) if (st.open.has(stateKey(n)) && opener(n)?.getAttribute("aria-expanded") === "false") opener(n).click();
+    // An event opened before its size was measured: its "Show less" is shown by hand.
+    for (const n of all(".event[data-e]")) if (st.open.has(stateKey(n)) && !n.querySelector(":scope > .ev-text.open")) { const m = n.querySelector(":scope > .ev-more"); m.hidden = false; m.click(); }
     for (const n of all(".hop")) if (st.open.has("hop:" + identOf(n)) && !n.querySelector(".brief.open")) { const m = n.querySelector(".body > .more"); m.hidden = false; m.click(); }
     if (st.drawer) { document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
     if (st.focus) {
@@ -2765,43 +3233,58 @@
       if (!n && !st.focus.host && st.focus.at >= 0 && $("#page").querySelectorAll(FOCUSABLE).length === st.focus.of) n = $("#page").querySelectorAll(FOCUSABLE)[st.focus.at];
       if (n && n !== document.activeElement) { n.focus({ preventScroll: true }); if (st.focus.range) try { n.setSelectionRange(...st.focus.range); } catch {} }
     }
+    const pagingTurns = st.paging ? all(".turn") : [];
+    if (st.paging) {
+      // Newly prepended offscreen turns must have measured heights before placing the visible
+      // entry; otherwise their lazy intrinsic estimates change after the anchor has been restored.
+      for (const turn of pagingTurns) turn.style.contentVisibility = "visible";
+      const heights = pagingTurns.map((turn) => turn.getBoundingClientRect().height);
+      pagingTurns.forEach((turn, i) => { turn.style.containIntrinsicBlockSize = "auto " + Math.ceil(heights[i]) + "px"; });
+    }
     const place = (first) => {
       const sc = scroller();
-      if (pin) sc.scrollTop = sc.scrollHeight;
-      else {
-        let found = null; if (st.anchor) anchors((n, id) => (id === st.anchor.id ? (found = n) : false));
-        if (found) {
-          // Rows that moved from below the anchor to above it (a re-sorted list) need more room below than the page may
-          // have: the page's bottom padding grows by what is missing, rather than the view sliding. The next redraw or
-          // navigation drops it.
-          const d = found.getBoundingClientRect().top - edge() - st.anchor.off, want = sc.scrollTop + d, room = sc.scrollHeight - sc.clientHeight;
-          if (want > room + 0.5) { const page = $("#page"); page.style.paddingBottom = parseFloat(getComputedStyle(page).paddingBottom) + Math.ceil(want - room) + "px"; }
-          if (d) sc.scrollTop = want;
-          LIVE.anchor = { ...st.anchor, route: r0, top: sc.scrollTop };
-        } else if (first) sc.scrollTop = st.top;
-      }
+      scrollProgrammatically(() => {
+        if (pin) sc.scrollTop = sc.scrollHeight;
+        else {
+          const paging = st.paging;
+          let found = null;
+          if (paging?.anchor) found = all(".turns [data-e][data-entry-key]:not(.tgroup)").find((n) => n.dataset.entryKey === paging.anchor.key);
+          else if (!paging && st.anchor) anchors((n, id) => (id === st.anchor.id ? (found = n) : false));
+          if (found) {
+            // Rows that moved from below the anchor to above it (a re-sorted list) need more room below than the page may
+            // have: the page's bottom padding grows by what is missing, rather than the view sliding. The next redraw or
+            // navigation drops it.
+            const line = paging ? (phone.matches ? 0 : sc.getBoundingClientRect().top) : edge();
+            const d = found.getBoundingClientRect().top - line - (paging ? paging.anchor.off : st.anchor.off), want = sc.scrollTop + d, room = sc.scrollHeight - sc.clientHeight;
+            if (want > room + 0.5) { const page = $("#page"); page.style.paddingBottom = parseFloat(getComputedStyle(page).paddingBottom) + Math.ceil(want - room) + "px"; }
+            if (d) sc.scrollTop = want;
+            LIVE.anchor = paging ? null : { ...st.anchor, route: r0, top: sc.scrollTop };
+          } else if (first) sc.scrollTop = st.top + (paging?.before ? sc.scrollHeight - paging.height : 0);
+        }
+      }, false);
       if (pin) LIVE.anchor = null;
       syncBarLine();
     };
     // And once more two frames later, in case something above changed size after all (as revealTurn does).
-    place(true); requestAnimationFrame(() => requestAnimationFrame(() => { if (rendered === r0 && !viewerEl) place(false); })); // not on a page opened since
+    place(true); const placedTop = scroller().scrollTop;
+    requestAnimationFrame(() => requestAnimationFrame(() => { for (const turn of pagingTurns) turn.style.contentVisibility = ""; if (rendered === r0 && !viewerEl && scrollRevision === revision && Math.abs(scroller().scrollTop - placedTop) < 1) place(false); })); // yield to a new scroll or jump
   }
 
   // A session page in place: its turns are drawn again and only those that changed (or are new) replace the ones shown, so
   // the rest keep their nodes and state. The bar's summary line, the title and the sidebar follow. Returns how many entries
   // are new.
   function patchSession(dirty) {
+    resetPagerInput(); holdProgrammaticScroll();
     tick(); const s = SESS[route.id], box = $("#page .turns");
-    const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .step, .hcard, .thought, .think-pending)[data-e]")].filter((n) => !n.closest(".cw-body")).map((n) => n.dataset.e));
+    const keys = () => new Set([...$("#page").querySelectorAll(".turns :is(.msg, .bubble, .step, .event, .child-card, .thought, .think-pending)[data-e]")].map((n) => n.dataset.e));
     const before = keys();
     // Only the changed turns are drawn again, unless the turns shown no longer match the index or nothing was shown.
     const whole = !dirty || box.querySelector(":scope > p.empty") || [...box.querySelectorAll(":scope > .turn")].some((b) => !TURN.has(b.dataset.turn));
-    if (whole) morph(box, transcript(route.id, transcriptOpts(route.id)).querySelector(".turns"));
-    else if (dirty.size) morphTurns(box, transcript(route.id, { ...transcriptOpts(route.id), only: dirty }).querySelector(".turns"), dirty);
-    // A page follows its origin and status: a child's intro that only now has an origin, and the footer redrawn when its text,
+    if (whole) morph(box, transcript(route.id).querySelector(".turns"));
+    else if (dirty.size) morphTurns(box, transcript(route.id, { only: dirty }).querySelector(".turns"), dirty);
+    // A page follows its status: the footer is redrawn when its text,
     // tips or state changed (in place, so a focused "Open in" button stays while nothing changes).
     const page = $("#page"), origin = originHandoff(s.id), foot = page.querySelector(":scope > .session-foot");
-    if (origin && !page.querySelector(":scope > .child-intro")) { page.classList.add("child-page"); page.querySelector(":scope > .ph")?.after(childBriefBlock(origin)); }
     if (!showsFooter(s, origin)) foot?.remove();
     else {
       const next = sessionFooter(s, origin);
@@ -2823,8 +3306,10 @@
     // Find's count and the Failed steps chip's count follow the page; a chip that appears or goes redraws the bar.
     const fc = $("#topbar .fcount"); if (fc) fc.textContent = matchText(matchCount());
     if (findOpen && !errOn(s.id)) { const chip = $('#topbar .chip[data-filter="failures"]'), failed = countOf(s, "errors") ?? 0; if (!!chip !== !!failed) keepFocus(drawSessionBar); else if (chip) { const nn = chip.querySelector(".n"); if (nn) nn.textContent = String(failed); } }
+    for (const pager of box.querySelectorAll("[data-pager-where]")) paintPager(pager);
     renderNav(); renderLanes(); ticker();
     let n = 0; for (const k of keys()) if (!before.has(k)) n++;
+    queuePagerObservers();
     return n;
   }
   // What a block shows, without what the reader toggled (open, hidden, measured clipping) or what opening fills in.
@@ -2834,7 +3319,7 @@
     const walk = (x) => { for (const c of x.childNodes) {
       if (c.nodeType === 3) { s += c.data; continue; }
       // A running time (the clock rewrites it every second) is left out: it isn't a change.
-      if (c.nodeType !== 1 || c.classList.contains("cw-body") || c.classList.contains("cutnote") || c.classList.contains("more") || c.classList.contains("tick")) continue;
+      if (c.nodeType !== 1 || c.classList.contains("cutnote") || c.classList.contains("more") || c.classList.contains("ev-more") || c.classList.contains("tick")) continue;
       s += "<" + c.tagName + " " + [...c.classList].filter((k) => !VIEW.has(k)).join(" ") + " " + (c.dataset?.e ?? "") + " " + (c.dataset?.h ?? "") + " " + (c.dataset?.sum ?? "") + " " + (c.getAttribute("d") ?? "") + ">"; walk(c); s += "</>"; } };
     walk(root); return s;
   }
@@ -2845,7 +3330,13 @@
     const keyOf = (n) => (n.classList.contains("turn") ? "t:" + n.dataset.turn : "x:" + n.className + ":" + n.textContent);
     const count = new Map(), tag = (n) => { const k = keyOf(n), i = count.get(k) ?? 0; count.set(k, i + 1); return k + "#" + i; };
     const old = new Map(); for (const n of box.children) old.set(tag(n), n); count.clear();
-    const next = [...fresh.children].map((n) => { const o = old.get(tag(n)); return o && sigOf(o) === sigOf(n) ? o : n; });
+    const next = [...fresh.children].map((n) => {
+      const o = old.get(tag(n)); if (!o || sigOf(o) === sigOf(n)) return o ?? n;
+      for (const f of o.querySelectorAll(".hcard.flash")) {
+        const replacement = [...n.querySelectorAll(".hcard")].find((x) => x.dataset.h === f.dataset.h); replacement?.classList.add("flash");
+      }
+      return n;
+    });
     const cur = [...box.children]; let i = 0; while (i < next.length && next[i] === cur[i]) i++;
     for (const n of cur.slice(i)) n.remove();
     box.append(...next.slice(i));
@@ -2865,47 +3356,61 @@
     });
   }
 
-  const jumpButton = el("button", "jump-bottom"); jumpButton.type = "button"; jumpButton.id = "jump-bottom"; jumpButton.setAttribute("aria-label", "Jump to bottom of transcript"); jumpButton.hidden = true; if (!SIDEBAR_ONLY) document.body.append(jumpButton);
-  // Centred over the transcript column (#page), not the viewport: the sidebar or rail takes the left, and #main has its own scrollbar.
-  const placeJump = () => { const r = $("#page").getBoundingClientRect(); if (r.width) jumpButton.style.setProperty("--jump-x", r.left + r.width / 2 + "px"); };
-  if (!SIDEBAR_ONLY) { const ro = new ResizeObserver(placeJump); ro.observe($("#page")); ro.observe($("#main")); }
+  // Jump to the latest: centred at the transcript column's foot, sticky, with the count of what arrived while the reader was away.
+  const jumpWrap = el("div", "jump-wrap"), jumpButton = el("button", "jump"); jumpButton.type = "button"; jumpButton.id = "jump-bottom"; jumpButton.setAttribute("aria-label", "Jump to bottom of transcript"); jumpWrap.hidden = true; jumpWrap.append(jumpButton);
   function scrollMetrics() {
     if (phone.matches) return { top: window.scrollY, height: document.documentElement.scrollHeight, viewport: window.innerHeight, gap: Math.max(0, document.documentElement.scrollHeight - window.innerHeight - window.scrollY) };
     const m = $("#main"); return { top: m.scrollTop, height: m.scrollHeight, viewport: m.clientHeight, gap: Math.max(0, m.scrollHeight - m.clientHeight - m.scrollTop) };
   }
-  function scrollToEnd(behavior = "smooth") { if (phone.matches) window.scrollTo({ top: document.documentElement.scrollHeight, behavior }); else { const m = $("#main"); m.scrollTo({ top: m.scrollHeight, behavior }); } }
+  function scrollToEnd(behavior = "smooth") { scrollProgrammatically(() => { if (phone.matches) window.scrollTo({ top: document.documentElement.scrollHeight, behavior }); else { const m = $("#main"); m.scrollTo({ top: m.scrollHeight, behavior }); } }); }
   // The button is rebuilt only when what it shows changes (hidden or not, and the new-entry count), not on every scroll.
   let jumpKey = "";
   function syncJump() {
-    if (route.v !== "session") { LIVE.fresh = 0; jumpButton.hidden = true; jumpKey = ""; return; }
-    const { gap } = scrollMetrics(); if (gap <= 80) LIVE.fresh = 0; else placeJump();
-    const key = (gap <= 80) + "|" + LIVE.fresh; if (key === jumpKey) return;
-    jumpKey = key; jumpButton.hidden = gap <= 80; jumpButton.replaceChildren();
-    if (LIVE.fresh) jumpButton.append(el("span", "new-count", LIVE.fresh + " new"));
+    if (route.v !== "session") { LIVE.fresh = 0; jumpWrap.hidden = true; jumpKey = ""; return; }
+    const { gap } = scrollMetrics(), newer = TXM[route.id]?.newer ?? 0; if (gap <= 80) LIVE.fresh = 0;
+    const fresh = LIVE.fresh + newer;
+    const key = (gap <= 80) + "|" + fresh; if (key === jumpKey && jumpWrap.isConnected) return;
+    jumpKey = key; jumpWrap.hidden = gap <= 80 && !newer; jumpButton.replaceChildren();
+    if (fresh) jumpButton.append(el("span", "new-count", fresh + " new"));
     jumpButton.append(icon(I.down));
-    jumpButton.setAttribute("aria-label", LIVE.fresh ? "Jump to bottom; " + LIVE.fresh + " new entries" : "Jump to bottom of transcript");
+    jumpButton.setAttribute("aria-label", fresh ? "Jump to bottom; " + fresh + " new entries" : "Jump to bottom of transcript");
   }
-  function clearNewEntries() { LIVE.fresh = 0; jumpButton.hidden = true; jumpKey = ""; }
-  jumpButton.addEventListener("click", () => scrollToEnd("smooth"));
+  function clearNewEntries() { LIVE.fresh = 0; jumpWrap.hidden = true; jumpKey = ""; }
+  jumpButton.addEventListener("click", () => {
+    const sid = route.id, r = route, m = TXM[sid];
+    if (m && m.to < m.total) {
+      jumpButton.disabled = true;
+      fetchTx(sid, "").then(() => { if (route === r) goSession(sid); }).catch(() => {}).finally(() => { jumpButton.disabled = false; });
+    } else scrollToEnd("smooth");
+  });
   if (!SIDEBAR_ONLY) { window.addEventListener("scroll", syncJump, { passive: true }); $("#main").addEventListener("scroll", syncJump, { passive: true }); }
   const cancelOpeningEndPin = () => { if (openingEndUntil) stopOpeningEndPin(); };
   if (!SIDEBAR_ONLY) { window.addEventListener("wheel", cancelOpeningEndPin, { passive: true }); window.addEventListener("touchmove", cancelOpeningEndPin, { passive: true }); window.addEventListener("pointerdown", cancelOpeningEndPin, { passive: true }); } // a press anywhere, a scrollbar drag included
+  const transcriptInput = (e) => !e.target.closest?.("#sidebar, dialog, input, textarea, select, [contenteditable='true']") && (phone.matches || $("#main").contains(e.target));
+  if (!SIDEBAR_ONLY) {
+    const input = (e) => { if (transcriptInput(e)) readerScrollInput(); };
+    window.addEventListener("wheel", input, { passive: true }); window.addEventListener("touchmove", input, { passive: true });
+    const scroll = () => { if (programmaticScrollPending) holdProgrammaticScroll(); else if (!openingEndUntil) readerScrollInput(); };
+    window.addEventListener("scroll", () => { if (phone.matches) scroll(); }, { passive: true });
+    $("#main").addEventListener("scroll", () => { if (!phone.matches) scroll(); }, { passive: true });
+  }
   if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => {
-    if (!e.defaultPrevented && !e.target.closest?.("input, textarea, select, [contenteditable='true']") && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) cancelOpeningEndPin();
+    if (!e.defaultPrevented && (transcriptInput(e) || e.target === document.body || e.target === document.documentElement) && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) readerScrollInput();
   });
 
-  // Every second: each running step's elapsed time and a running row's age.
+  // Every second: each running step uses its own start; a group shows its oldest running call.
   // A clock that stands still (the checks pin it) changes nothing.
   const running = (ms) => { const x = Math.max(0, Math.floor(ms / 1000)); return x < 60 ? x + "s" : Math.floor(x / 60) + "m " + (x % 60) + "s"; };
   function ticker() {
     if (!visible() || Date.now() === fetchedAt) return;
     tick();
     const groups = new Map();
-    for (const n of document.querySelectorAll(".step.live[data-live]")) {
+    for (const n of document.querySelectorAll(".step.live[data-live], .step.background-running[data-live]")) {
       const a = SESS[n.dataset.live]?.activity, since = n.dataset.since != null ? Number(n.dataset.since) : a?.[3];
       if (since == null || !Number.isFinite(since)) continue;
-      const text = running(NOW - since), sd = n.querySelector(".sd");
-      if (sd && sd.textContent !== text) sd.textContent = text;
+      const text = running(NOW - since), bg = n.classList.contains("background-running");
+      const sd = n.querySelector(bg ? ".sd > .bgo" : ".sd"), label = bg ? "running " + text : text;
+      if (sd && sd.textContent !== label) sd.textContent = label;
       const group = n.closest(".tgroup"), earliest = group && groups.get(group);
       if (group && (!earliest || since < earliest.since)) groups.set(group, { since, text });
     }

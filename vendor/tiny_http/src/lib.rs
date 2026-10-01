@@ -99,8 +99,8 @@ use std::io::Error as IoError;
 use std::io::ErrorKind as IoErrorKind;
 use std::io::Result as IoResult;
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -124,6 +124,22 @@ mod response;
 mod ssl;
 mod test;
 mod util;
+
+/// Optional connection policy added by semon. Limits cover TLS handshakes,
+/// request headers and bodies, and kept-alive connections.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConnectionLimits {
+    pub max_connections: Option<usize>,
+    pub read_timeout: Option<Duration>,
+    pub write_timeout: Option<Duration>,
+}
+
+struct ConnectionPermit(Arc<AtomicUsize>);
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Relaxed);
+    }
+}
 
 /// The main class of this library.
 ///
@@ -243,6 +259,23 @@ impl Server {
         listener: L,
         ssl_config: Option<SslConfig>,
     ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
+        Self::from_listener_with_limits(listener, ssl_config, ConnectionLimits::default())
+    }
+
+    /// Builds a server with bounded connections and socket I/O deadlines.
+    /// TLS handshakes run in connection workers so an idle TLS peer cannot
+    /// block the accept loop. A full server closes newly accepted connections.
+    pub fn from_listener_with_limits<L: Into<Listener>>(
+        listener: L,
+        ssl_config: Option<SslConfig>,
+        limits: ConnectionLimits,
+    ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
+        if limits.max_connections == Some(0)
+            || limits.read_timeout == Some(Duration::ZERO)
+            || limits.write_timeout == Some(Duration::ZERO)
+        {
+            return Err("connection limits must be positive".into());
+        }
         let listener = listener.into();
         // building the "close" variable
         let close_trigger = Arc::new(AtomicBool::new(false));
@@ -283,67 +316,80 @@ impl Server {
         // and ClientConnection objects are pushed in the messages queue
         let messages = MessagesQueue::with_capacity(8);
 
+        let ssl = ssl.map(Arc::new);
         let inside_close_trigger = close_trigger.clone();
         let inside_messages = messages.clone();
         thread::spawn(move || {
-            // a tasks pool is used to dispatch the connections into threads
             let tasks_pool = util::TaskPool::new();
-
+            let connections = Arc::new(AtomicUsize::new(0));
             log::debug!("Running accept thread");
             while !inside_close_trigger.load(Relaxed) {
-                let new_client = match server.accept() {
-                    Ok((sock, _)) => {
-                        use util::RefinedTcpStream;
-                        let (read_closable, write_closable) = match ssl {
-                            None => RefinedTcpStream::new(sock),
-                            #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
-                            Some(ref ssl) => {
-                                // trying to apply SSL over the connection
-                                // if an error occurs, we just close the socket and resume listening
-                                let sock = match ssl.accept(sock) {
-                                    Ok(s) => s,
-                                    Err(_) => continue,
-                                };
-
-                                RefinedTcpStream::new(sock)
-                            }
-                            #[cfg(not(any(feature = "ssl-openssl", feature = "ssl-rustls")))]
-                            Some(ref _ssl) => unreachable!(),
-                        };
-
-                        Ok(ClientConnection::new(write_closable, read_closable))
-                    }
-                    Err(e) => Err(e),
-                };
-
-                match new_client {
-                    Ok(client) => {
-                        let messages = inside_messages.clone();
-                        let mut client = Some(client);
-                        tasks_pool.spawn(Box::new(move || {
-                            if let Some(client) = client.take() {
-                                // Synchronization is needed for HTTPS requests to avoid a deadlock
-                                if client.secure() {
-                                    let (sender, receiver) = mpsc::channel();
-                                    for rq in client {
-                                        messages.push(rq.with_notify_sender(sender.clone()).into());
-                                        receiver.recv().unwrap();
-                                    }
-                                } else {
-                                    for rq in client {
-                                        messages.push(rq.into());
-                                    }
-                                }
-                            }
-                        }));
-                    }
-
-                    Err(e) => {
-                        log::error!("Error accepting new client: {}", e);
-                        inside_messages.push(e.into());
+                let sock = match server.accept() {
+                    Ok((sock, _)) => sock,
+                    Err(error) => {
+                        log::error!("Error accepting new client: {}", error);
+                        inside_messages.push(error.into());
                         break;
                     }
+                };
+                if connections
+                    .fetch_update(Relaxed, Relaxed, |count| {
+                        if limits
+                            .max_connections
+                            .map_or(false, |maximum| count >= maximum)
+                        {
+                            None
+                        } else {
+                            count.checked_add(1)
+                        }
+                    })
+                    .is_err()
+                {
+                    continue;
                 }
+                let permit = ConnectionPermit(connections.clone());
+                if sock
+                    .set_timeouts(limits.read_timeout, limits.write_timeout)
+                    .is_err()
+                {
+                    continue;
+                }
+                let ssl = ssl.clone();
+                let messages = inside_messages.clone();
+                let mut accepted = Some((sock, permit));
+                tasks_pool.spawn(Box::new(move || {
+                    let Some((sock, _permit)) = accepted.take() else {
+                        return;
+                    };
+                    use util::RefinedTcpStream;
+                    let (read_closable, write_closable) = match ssl {
+                        None => RefinedTcpStream::new(sock),
+                        #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+                        Some(ref ssl) => {
+                            let sock = match ssl.accept(sock) {
+                                Ok(sock) => sock,
+                                Err(_) => return,
+                            };
+                            RefinedTcpStream::new(sock)
+                        }
+                        #[cfg(not(any(feature = "ssl-openssl", feature = "ssl-rustls")))]
+                        Some(ref _ssl) => unreachable!(),
+                    };
+                    let client = ClientConnection::new(write_closable, read_closable);
+                    if client.secure() {
+                        let (sender, receiver) = mpsc::channel();
+                        for rq in client {
+                            messages.push(rq.with_notify_sender(sender.clone()).into());
+                            if receiver.recv().is_err() {
+                                break;
+                            }
+                        }
+                    } else {
+                        for rq in client {
+                            messages.push(rq.into());
+                        }
+                    }
+                }));
             }
             log::debug!("Terminating accept thread");
         });

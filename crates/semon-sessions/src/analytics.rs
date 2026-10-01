@@ -34,6 +34,9 @@ const VALUE_MAX: usize = 256;
 pub(crate) const SLICE_MAX: usize = 100;
 /// Each "top sessions" list's length.
 const TOP: usize = 5;
+/// Invariant: each activity retains at most this many open or answered wait spans.
+/// Overflow is explicitly reported; wait figures then describe retained spans.
+const MAX_WAIT_SPANS: usize = 4096;
 /// Answers kept, one per range and filters.
 const CACHE_MAX: usize = 16;
 /// A kept answer is computed again once the model changed, but never sooner
@@ -73,6 +76,8 @@ pub(crate) struct Activity {
     /// Each question of its that was answered or declined since
     /// [`KEEP_MS`] ago: when it was asked and when it was answered.
     pub(crate) answered: Vec<(i64, i64)>,
+    pub(crate) waits_truncated: bool,
+    pub(crate) comparison: Option<Arc<crate::comparison::Item>>,
 }
 
 impl Activity {
@@ -118,12 +123,18 @@ fn day_start(day: &str) -> Option<i64> {
 /// intervals, turns and cost days since then, and its waits on you.
 pub(crate) fn activity(
     sessions: &BTreeMap<String, Session>,
-    tx: &BTreeMap<String, Transcript>,
+    tx: &BTreeMap<String, std::sync::Arc<Transcript>>,
     turns: &[Turn],
     handoffs: &[Handoff],
     now: i64,
 ) -> BTreeMap<String, Activity> {
     let since = now.saturating_sub(KEEP_MS);
+    let comparison = crate::comparison::ModelComparisonConfig::load();
+    let launched: BTreeSet<&str> = handoffs
+        .iter()
+        .filter(|handoff| handoff.kind == "spawn")
+        .filter_map(|handoff| handoff.to.as_deref())
+        .collect();
     let mut rows: BTreeMap<String, Activity> = sessions
         .iter()
         .filter(|(_, session)| {
@@ -156,8 +167,19 @@ pub(crate) fn activity(
                     .collect(),
                 unpriced_models: session.cost.unpriced_models.clone(),
                 rate_limits: session.rate_limits.clone(),
-                waits: Vec::new(),
+                waits: session
+                    .waiting_since
+                    .filter(|_| session.state == "wait")
+                    .into_iter()
+                    .collect(),
                 answered: Vec::new(),
+                waits_truncated: false,
+                comparison: crate::comparison::Item::from_session(
+                    id,
+                    session,
+                    &comparison,
+                    launched.contains(id.as_str()),
+                ),
             };
             (id.clone(), row)
         })
@@ -193,14 +215,22 @@ pub(crate) fn activity(
         let Some(row) = rows.get_mut(&handoff.from) else {
             continue;
         };
-        if handoff.status == "wait" {
-            row.waits.push(handoff.at);
+        if handoff.status == "wait" && matches!(handoff.ask, Some("question" | "decision")) {
+            if row.waits.len() < MAX_WAIT_SPANS {
+                row.waits.push(handoff.at);
+            } else {
+                row.waits_truncated = true;
+            }
         } else if matches!(handoff.ask, Some("question" | "decision"))
             && let Some(done) = handoff.done
             && done > handoff.at
             && done >= since
         {
-            row.answered.push((handoff.at, done));
+            if row.answered.len() < MAX_WAIT_SPANS {
+                row.answered.push((handoff.at, done));
+            } else {
+                row.waits_truncated = true;
+            }
         }
     }
     // Collected and pushed without knowing their lengths: give back what
@@ -226,6 +256,7 @@ pub(crate) fn heap_bytes(rows: &BTreeMap<String, Activity>) -> usize {
             size_of::<String>()
                 + id.capacity()
                 + size_of::<Activity>()
+                + row.comparison.as_ref().map_or(0, |item| item.heap_bytes())
                 + row.name.capacity()
                 + row.repo.as_ref().map_or(0, String::capacity)
                 + row.model.capacity()
@@ -918,8 +949,25 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
     put("to", json!(to));
     put("current", current);
     put("previous", previous);
+    put(
+        "models",
+        crate::comparison::summarize(rows.iter().filter(|row| active(row)).filter_map(|row| {
+            row.activity()
+                .comparison
+                .as_deref()
+                .map(|item| (row.row.machine, item))
+        })),
+    );
     put("longest_current_wait", json!(longest_current));
     put("calls_unknown", json!(calls_unknown));
+    let waits_truncated: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.activity().waits_truncated)
+        .map(|row| row.row.id)
+        .collect();
+    if !waits_truncated.is_empty() {
+        put("waits_truncated", json!(waits_truncated));
+    }
     put("agents", json!({ "unit": unit, "columns": columns }));
     put("cost", json!(cost_days));
     put(
@@ -1043,6 +1091,8 @@ mod tests {
             rate_limits: None,
             waits: Vec::new(),
             answered: Vec::new(),
+            waits_truncated: false,
+            comparison: None,
         }
     }
 

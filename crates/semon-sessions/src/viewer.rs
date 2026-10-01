@@ -113,15 +113,23 @@ pub(crate) const SAFETY_EVERY: Duration = Duration::from_secs(30);
 /// the start of the next: changes within it are one rebuild.
 pub(crate) const REBUILD_SPACING: Duration = Duration::from_secs(1);
 /// A queued check this late means the refresh pool has fallen behind: a
-/// read of that machine refreshes it itself before it answers.
+/// read of that machine still answers from its last model, and nudges the
+/// pool to start a worker if it has room for one.
 pub(crate) const OVERDUE_AFTER: Duration = REBUILD_SPACING;
 /// A machine is no longer checked after this long without a read, and a
 /// refresh pool's thread stops after this long with nothing to run.
 pub(crate) const IDLE_AFTER: Duration = Duration::from_secs(30);
 /// While background rebuilds fail, reads answer from the last model built
-/// until they have failed this long; then each read refreshes itself, and
-/// answers the error (500) for as long as the build fails.
+/// until they have been seen failing this long; then each read answers the
+/// error (500) at once, without waiting for a build, for as long as the
+/// builds fail.
 pub(crate) const FAILING_AFTER: Duration = Duration::from_secs(3);
+/// A view whose queued check is this late (counted from when it was due or
+/// queued, whichever is later), or whose check has run this long since it
+/// took `work`, is stalled: its builds hang, or every worker its pool may
+/// start is held by builds that do. Each read then answers that (500) at once, so a
+/// frozen machine is never shown as a model that silently stopped moving.
+pub(crate) const STALLED_AFTER: Duration = Duration::from_secs(60);
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -156,10 +164,16 @@ pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 /// - `work` holds what a rebuild changes (the index, the event cache, the
 ///   texts, when each was saved). A rebuild holds it from its stat pass to
 ///   its swap, so one machine rebuilds once at a time. Outside
-///   [`Refresh::OnRead`] a read takes it only when it must refresh first
-///   (see [`MachineView::keep_fresh`]): there is no model yet, the view
-///   went idle, its queued check is [`OVERDUE_AFTER`] late, or background
-///   rebuilds have failed for [`FAILING_AFTER`].
+///   [`Refresh::OnRead`] an API read takes it only when there is nothing
+///   built to answer from yet: the first model read, or the first V1 tree
+///   read ([`MachineView::refresh_first`]), which may wait behind a model
+///   rebuild. A page URL the built model lacks is checked against a fresh
+///   model too ([`MachineView::page_exists`]). Once the model or tree is
+///   built, a read of it answers at once and never waits on `work`: whether
+///   the view went idle, its check is late, or its rebuilds fail, the read
+///   at most queues a check ([`MachineView::note_read`]). Once rebuilds have
+///   been seen failing for [`FAILING_AFTER`], or the view has stalled for
+///   [`STALLED_AFTER`], it answers that error instead, at once.
 /// - `files` holds the transcript paths and Codex harness offsets the V1
 ///   routes look up, held for a lookup or an insert, never for a file read.
 /// - `live` is the view's refresh state, held for a few field reads, and
@@ -203,6 +217,8 @@ struct Shown {
 /// Transcript files by session, and each Codex file's harness offsets.
 #[derive(Default)]
 struct Files {
+    /// Background viewers walk on an unknown id at most once per second.
+    lookup_at: Option<Instant>,
     paths: BTreeMap<(String, String), PathBuf>,
     known: BTreeSet<PathBuf>,
     harness: BTreeMap<PathBuf, ((u64, u64), BTreeSet<u64>)>,
@@ -238,16 +254,20 @@ struct LiveState {
     invalidated: bool,
     /// The last read that answered from a snapshot.
     read_at: Option<Instant>,
-    /// When the shown model, and the shown tree, were last checked
-    /// against the logs and found built ([`Kind`] indexes them).
-    checked_at: [Option<Instant>; 2],
     /// When the last rebuild of either started, as of the last check.
     built_at: Option<Instant>,
     /// Each kind's last refresh error, printed once; `None` after a
     /// refresh of it that worked. A failing tree never fails the model.
     error: [Option<String>; 2],
-    /// When each kind's refreshes started failing, while they fail.
+    /// When each kind's refreshes were first seen failing, while they fail.
     failing_since: [Option<Instant>; 2],
+    /// Each kind's recorded error predates an idle spell: no build has been
+    /// tried since, so it isn't answered until a check reports again.
+    unconfirmed: [bool; 2],
+    /// When the running check took `work` and started, while one runs.
+    running_since: Option<Instant>,
+    /// [`STALLED_AFTER`], but for tests.
+    stalled_after: Duration,
     /// [`IDLE_AFTER`], but for tests.
     idle_after: Duration,
     /// [`SAFETY_EVERY`], but for tests.
@@ -278,14 +298,16 @@ impl LiveState {
             .is_some_and(|read| read.elapsed() < self.idle_after)
     }
 
-    /// Notes how a refresh of `kind` that started at `started` went. Reads
-    /// go on answering from the last one built while it fails; its error
-    /// is printed once, not on every check.
-    fn record(&mut self, kind: Kind, started: Instant, result: &io::Result<()>) {
+    /// Notes how a refresh of `kind` went. Reads go on answering from the
+    /// last one built while it fails, until [`FAILING_AFTER`] after the
+    /// first failure seen (not after that build started: a long build that
+    /// fails once gets the whole grace); each check tries again, and its
+    /// error is printed once, not on every check.
+    fn record(&mut self, kind: Kind, result: &io::Result<()>) {
         let at = kind as usize;
+        self.unconfirmed[at] = false;
         match result {
             Ok(()) => {
-                self.checked_at[at] = Some(started);
                 self.error[at] = None;
                 self.failing_since[at] = None;
             }
@@ -295,7 +317,7 @@ impl LiveState {
                     eprintln!("semon sessions viewer: {message}");
                 }
                 self.error[at] = Some(message);
-                self.failing_since[at] = self.failing_since[at].or(Some(started));
+                self.failing_since[at] = self.failing_since[at].or(Some(Instant::now()));
             }
         }
     }
@@ -464,9 +486,9 @@ type Routed = (u16, &'static str, Vec<u8>, Option<String>);
 /// The viewer's page: every screen's URL serves it.
 const PAGE: &str = crate::shell::PAGE_HTML;
 
-/// The mockup's three families, vendored (D1): Instrument Sans, JetBrains
-/// Mono and Source Serif 4, each in its latin and latin-ext subsets.
-pub(crate) const FONTS: [(&str, &[u8]); 6] = [
+/// The mockup's two families, vendored (D1): Instrument Sans and JetBrains
+/// Mono, each in its latin and latin-ext subsets.
+pub(crate) const FONTS: [(&str, &[u8]); 4] = [
     (
         "instrument-sans-latin",
         include_bytes!("fonts/instrument-sans/latin.woff2"),
@@ -482,14 +504,6 @@ pub(crate) const FONTS: [(&str, &[u8]); 6] = [
     (
         "jetbrains-mono-latin-ext",
         include_bytes!("fonts/jetbrains-mono/latin-ext.woff2"),
-    ),
-    (
-        "source-serif-4-latin",
-        include_bytes!("fonts/source-serif-4/latin.woff2"),
-    ),
-    (
-        "source-serif-4-latin-ext",
-        include_bytes!("fonts/source-serif-4/latin-ext.woff2"),
     ),
 ];
 
@@ -642,6 +656,20 @@ fn random_token() -> io::Result<String> {
 pub fn serve(options: ServeOptions) -> io::Result<()> {
     let address = listen_addr(&options.listen)?;
     let server = Server::http(address).map_err(io::Error::other)?;
+    serve_server(options, server)
+}
+
+/// Serves on an already bound loopback listener. Binding to port zero lets
+/// callers obtain an assigned port without racing another listener.
+pub fn serve_listener(options: ServeOptions, listener: std::net::TcpListener) -> io::Result<()> {
+    if !listener.local_addr()?.ip().is_loopback() {
+        return Err(invalid_input("the viewer listener must be loopback"));
+    }
+    let server = Server::from_listener(listener, None).map_err(io::Error::other)?;
+    serve_server(options, server)
+}
+
+fn serve_server(options: ServeOptions, server: Server) -> io::Result<()> {
     let port = server
         .server_addr()
         .to_ip()
@@ -879,10 +907,12 @@ impl MachineView {
                     closed: false,
                     invalidated: false,
                     read_at: None,
-                    checked_at: [None; 2],
                     built_at: None,
                     error: [None, None],
                     failing_since: [None; 2],
+                    unconfirmed: [false; 2],
+                    running_since: None,
+                    stalled_after: STALLED_AFTER,
                     idle_after: IDLE_AFTER,
                     safety_every: SAFETY_EVERY,
                 }),
@@ -1063,16 +1093,17 @@ impl MachineView {
 
     /// The model a request answers from. Refreshed on read, it is
     /// [`MachineView::fresh_model`]. Otherwise it is the last one built, at
-    /// once, unless [`MachineView::keep_fresh`] says this read refreshes
-    /// first.
+    /// once, whatever a rebuild in progress or a late check is doing, or the
+    /// error of rebuilds failing for [`FAILING_AFTER`] or stalled for
+    /// [`STALLED_AFTER`], also at once ([`MachineView::note_read`]). Only a
+    /// view with no model yet waits, for its first build
+    /// ([`MachineView::refresh_first`]).
     fn served_model(&self) -> io::Result<Arc<ModelCache>> {
-        let refresh = self.refresh();
-        if refresh == Refresh::OnRead {
+        if self.refresh() == Refresh::OnRead {
             return self.fresh_model(model::now_ms());
         }
-        if let Some(model) = self.shown_model()
-            && self.keep_fresh(Kind::Model, refresh)
-        {
+        if let Some(model) = self.shown_model() {
+            self.note_read(Kind::Model)?;
             return Ok(model);
         }
         self.refresh_first(Kind::Model)?;
@@ -1082,13 +1113,11 @@ impl MachineView {
 
     /// The V1 tree a request answers from, as [`MachineView::served_model`].
     fn served_tree(&self) -> io::Result<Arc<TreeCache>> {
-        let refresh = self.refresh();
-        if refresh == Refresh::OnRead {
+        if self.refresh() == Refresh::OnRead {
             return self.fresh_tree();
         }
-        if let Some(tree) = self.shown_tree()
-            && self.keep_fresh(Kind::Tree, refresh)
-        {
+        if let Some(tree) = self.shown_tree() {
+            self.note_read(Kind::Tree)?;
             return Ok(tree);
         }
         self.refresh_first(Kind::Tree)?;
@@ -1114,55 +1143,78 @@ impl MachineView {
         }
     }
 
-    /// Notes a read of the model or the tree, and says whether the shown
-    /// one may answer it (true), or the read refreshes first (false):
-    /// - a closed view answers from what it has;
-    /// - once rebuilds have failed for [`FAILING_AFTER`], a read refreshes
-    ///   itself, and answers the error while the build still fails;
-    /// - a view a worker is checking answers, and so does one whose queued
-    ///   check is less than [`OVERDUE_AFTER`] late. Later than that, the
-    ///   pool has fallen behind, and the read refreshes the view itself;
-    /// - a view not queued (idle) answers in [`Refresh::Background`] only
-    ///   if it was checked in the last second, and in
-    ///   [`Refresh::OnInvalidate`] unless it was invalidated meanwhile.
-    ///   Either way, one that answers is queued for a check at once.
-    fn keep_fresh(&self, kind: Kind, refresh: Refresh) -> bool {
+    /// Notes a read of the shown model or tree (`kind`), makes sure a check
+    /// of the view is coming, and says whether the shown one answers it
+    /// (`Ok`) or the error of its failing rebuilds does. It takes only the
+    /// `live` lock (and under it the pool's, as [`MachineView::queue`]
+    /// does), never `work`, so it never waits for a check or a rebuild:
+    /// - a closed view is checked no more;
+    /// - a view a worker is checking is queued again by that worker;
+    /// - a queued check stays queued. One [`OVERDUE_AFTER`] late, the pool
+    ///   has fallen behind: it is nudged to start a worker if it has room
+    ///   for one, or past its size if every worker's check has run
+    ///   [`OVERFLOW_AFTER`](crate::refresh::OVERFLOW_AFTER)
+    ///   ([`RefreshPool::nudge`]); otherwise the check waits its turn and
+    ///   the read answers from the last model;
+    /// - a view not queued (idle, or invalidated while idle) is queued for
+    ///   a check at once, which rebuilds it if its logs changed.
+    ///
+    /// Rebuilds that fail leave the last one served, and each check tries
+    /// again ([`LiveState::record`]). They aren't hidden behind an ever
+    /// older snapshot, though: [`FAILING_AFTER`] after the first failure
+    /// seen, a read answers their error (500) at once, until a check's
+    /// build works. An error recorded before an idle spell isn't answered
+    /// until the check this read queues reports. Nor is a view that stalls
+    /// hidden: once its check is [`STALLED_AFTER`] late, or has run that
+    /// long, a read answers "rebuilds stalled" (500) at once. A closed view
+    /// answers from what it has.
+    fn note_read(&self, kind: Kind) -> io::Result<()> {
         let mut state = lock(&self.live.state);
         let now = Instant::now();
         state.read_at = Some(now);
         if state.closed {
-            return true;
+            return Ok(());
+        }
+        let (slot, stalled_after) = (state.slot, state.stalled_after);
+        let stalled = match slot {
+            Slot::Running => state
+                .running_since
+                .is_some_and(|since| now.saturating_duration_since(since) >= stalled_after),
+            Slot::Queued(key) => {
+                // Due no earlier than it was queued ([`MachineView::queue_by`]).
+                let late = now.saturating_duration_since(key.0);
+                if late >= OVERDUE_AFTER {
+                    state.pool.nudge();
+                }
+                late >= stalled_after
+            }
+            Slot::Idle => {
+                state.unconfirmed = [true; 2];
+                self.queue(&mut state, now, false);
+                false
+            }
+        };
+        if stalled {
+            return Err(io::Error::other("rebuilds stalled"));
         }
         let at = kind as usize;
-        // Rebuilds that keep failing aren't hidden behind an ever older
-        // one: FAILING_AFTER into the failures a read refreshes itself,
-        // and answers the error if the build still fails.
-        if state.error[at].is_some()
-            && state.failing_since[at]
-                .is_none_or(|since| now.saturating_duration_since(since) >= FAILING_AFTER)
-        {
-            return false;
-        }
-        let age = state.checked_at[at].map(|at| now.saturating_duration_since(at));
-        match state.slot {
-            Slot::Running => true,
-            Slot::Queued(key) => now < key.0 + OVERDUE_AFTER,
-            Slot::Idle => {
-                let fresh = match refresh {
-                    Refresh::OnInvalidate => !state.invalidated,
-                    _ => age.is_some_and(|age| age < REBUILD_SPACING),
-                };
-                if fresh {
-                    self.queue(&mut state, now, false);
-                }
-                fresh
+        match (&state.error[at], state.failing_since[at]) {
+            (Some(message), Some(since))
+                if !state.unconfirmed[at]
+                    && now.saturating_duration_since(since) >= FAILING_AFTER =>
+            {
+                Err(io::Error::other(message.clone()))
             }
+            _ => Ok(()),
         }
     }
 
-    /// A read's own refresh of the kind it wants, and of the other kind if
-    /// that is shown, after which the view's next background check is
-    /// queued. Only the wanted kind's error is the read's.
+    /// A read's own refresh of the kind it wants, when none is built yet
+    /// (the first read of a view, outside [`Refresh::OnRead`]), and of the
+    /// other kind if that is shown, after which the view's next background
+    /// check is queued. It waits for `work`: a warm or a check building
+    /// meanwhile finishes first. Only the wanted kind's error is the
+    /// read's.
     fn refresh_first(&self, kind: Kind) -> io::Result<()> {
         #[cfg(test)]
         self.hooks.refreshes_first.fetch_add(1, Ordering::SeqCst);
@@ -1180,10 +1232,10 @@ impl MachineView {
         let mut state = lock(&self.live.state);
         state.built_at = built_at;
         if let Some(result) = &others {
-            state.record(other, started, result);
+            state.record(other, result);
         }
         if wanted.is_ok() {
-            state.record(kind, started, &wanted);
+            state.record(kind, &wanted);
             state.read_at = Some(Instant::now());
             let failing = others.as_ref().is_some_and(Result::is_err);
             let due = self.next_due(&state, started, built_at, failing);
@@ -1227,6 +1279,10 @@ impl MachineView {
         if state.closed || self.refresh() == Refresh::OnRead {
             return;
         }
+        // Never due before it is queued: after a long build the next check
+        // is due in the past, and would read as late (to a read's nudge, and
+        // as a stall) the moment it is queued.
+        let at = at.max(Instant::now());
         let replacing = match state.slot {
             Slot::Running => return,
             Slot::Queued(key) if !exact && key.0 <= at => return,
@@ -1240,10 +1296,10 @@ impl MachineView {
     /// next check is queued as soon as [`REBUILD_SPACING`] after the last
     /// rebuild allows, however often this is called until then: the calls
     /// of one second are one rebuild. A view no one read in the last
-    /// [`IDLE_AFTER`] isn't rebuilt for it (its next read refreshes first),
-    /// but a check it still has queued is moved up, so that read never
-    /// answers from before the change for long. Refreshed on read, it
-    /// changes nothing.
+    /// [`IDLE_AFTER`] isn't rebuilt for it (its next read answers from the
+    /// last model and queues a check at once), but a check it still has
+    /// queued is moved up, so its reads never answer from before the change
+    /// for long. Refreshed on read, it changes nothing.
     pub(crate) fn invalidate(&self) {
         if self.refresh() == Refresh::OnRead {
             return;
@@ -1301,6 +1357,9 @@ impl MachineView {
     fn tick(&self) {
         let mut work = lock(&self.work);
         let started = Instant::now();
+        // A stall counts from here, with `work` taken: a warm or a page's
+        // fresh check holding it meanwhile isn't this view's build hanging.
+        lock(&self.live.state).running_since = Some(started);
         if let Some(built) = work.built_at
             && started < built + REBUILD_SPACING
         {
@@ -1322,7 +1381,7 @@ impl MachineView {
         let mut state = lock(&self.live.state);
         state.built_at = built_at;
         for (kind, result) in &results {
-            state.record(*kind, started, result);
+            state.record(*kind, result);
         }
         let failing = results.iter().any(|(_, result)| result.is_err());
         let due = self.next_due(&state, started, built_at, failing);
@@ -1333,6 +1392,7 @@ impl MachineView {
     /// while the view is read, and [`MachineView::close`] is told.
     fn checked(&self, state: &mut LiveState, due: Instant) {
         state.slot = Slot::Idle;
+        state.running_since = None;
         if state.active() {
             self.queue_by(state, due, true, true);
         }
@@ -1401,9 +1461,12 @@ impl MachineView {
         let answer = if path == "/api/model" {
             self.model(query, if_none_match)
         } else if path == "/api/tx"
-            && query
-                .split('&')
-                .any(|part| part == "errors" || part.starts_with("errors="))
+            && query.split('&').any(|part| {
+                part == "errors"
+                    || part.starts_with("errors=")
+                    || part == "signals"
+                    || part.starts_with("signals=")
+            })
         {
             self.tx_errors(query, if_none_match)
         } else {
@@ -1473,7 +1536,10 @@ impl MachineView {
     /// refused with it.
     fn tx_errors(&self, query: &str, if_none_match: Option<&str>) -> io::Result<Routed> {
         let json = "application/json; charset=utf-8";
-        if query_value(query, "errors") != Some("1") {
+        let signals = query_value(query, "signals").is_some();
+        if query_value(query, if signals { "signals" } else { "errors" }) != Some("1")
+            || (signals && query_value(query, "errors").is_some())
+        {
             return Err(invalid_input("errors"));
         }
         if ["before", "after", "turn"]
@@ -1498,7 +1564,17 @@ impl MachineView {
         {
             return Ok((304, json, Vec::new(), Some(etag)));
         }
-        Ok((200, json, tx::errors(built, &sid)?.into_bytes(), Some(etag)))
+        Ok((
+            200,
+            json,
+            if signals {
+                tx::signals(built, &sid)?
+            } else {
+                tx::errors(built, &sid)?
+            }
+            .into_bytes(),
+            Some(etag),
+        ))
     }
 
     /// `/api/attachment?sid=&o=&b=&v=`: one image a prompt of session `sid`
@@ -1541,7 +1617,7 @@ impl MachineView {
         let cache = self.served_model()?;
         let built = &cache.built;
         let transcript = built.tx.get(&sid).ok_or(io::ErrorKind::NotFound)?;
-        let mut paths: Vec<&Path> = Vec::new();
+        let mut files: Vec<&model::SlotFile> = Vec::new();
         for slot in &transcript.slots {
             let prompt = match &slot.kind {
                 model::SlotKind::U => true,
@@ -1551,16 +1627,14 @@ impl MachineView {
             if !prompt || slot.offset != offset {
                 continue;
             }
-            if let Some(file) = slot.file.and_then(|file| built.files.get(file))
-                && !paths.contains(&file.path.as_path())
+            if let Some(file) = slot.file.as_deref()
+                && !files.iter().any(|seen| seen.path == file.path)
             {
-                paths.push(&file.path);
+                files.push(file);
             }
         }
-        for path in paths {
-            if let Some((media, bytes)) = model::read_line(path, offset)
-                .and_then(|record| crate::attachments::image(&record, block, version))
-            {
+        for file in files {
+            if let Some((media, bytes)) = file.prompts.image(&file.path, offset, block, version) {
                 return Ok((200, media, bytes));
             }
         }
@@ -1653,6 +1727,18 @@ impl MachineView {
             && regular(&path)
         {
             return Ok(Some(path));
+        }
+        if self.refresh() == Refresh::Background {
+            let mut files = lock(&self.files);
+            if files
+                .lookup_at
+                .is_some_and(|when| when.elapsed() < REBUILD_SPACING)
+            {
+                return Ok(None);
+            }
+            // Reserve this pass before walking so concurrent unknown ids do
+            // not each walk every machine's homes. On-read mode stays fresh.
+            files.lookup_at = Some(Instant::now());
         }
         // Listed without the lock: another lookup isn't held up by a walk.
         let mut paths = Vec::new();
@@ -1828,7 +1914,7 @@ impl MachineView {
         let path = self
             .transcript_path(&harness, &id)?
             .ok_or(io::ErrorKind::NotFound)?;
-        let mut file = fs::File::open(path)?;
+        let mut file = crate::sealed::LogFile::open(&path)?;
         file.seek(SeekFrom::Start(offset))?;
         let mut reader = io::BufReader::new(file).take((MAX_LINE + 1) as u64);
         let mut bytes = Vec::new();
@@ -1881,9 +1967,9 @@ impl MachineView {
     /// invalidation it covers, as a background check does, so the next read
     /// after an idle spell answers at once. It is not a read: the view isn't
     /// marked read, so it starts no background checks. A closed view is left
-    /// as it is. It holds `work` while it builds, as any rebuild does: a
-    /// read that must refresh first waits for it, then finds it done; a
-    /// read that answers from the shown model never waits.
+    /// as it is. It holds `work` while it builds, as any rebuild does: the
+    /// first read of a view with no model yet waits for it, then finds it
+    /// done; a read once a model is shown never waits.
     pub(crate) fn warm(&self) -> io::Result<()> {
         if lock(&self.live.state).closed {
             return Ok(());
@@ -1891,7 +1977,6 @@ impl MachineView {
         let mut work = lock(&self.work);
         // Logs invalidated before this refresh starts, it sees.
         let invalidated = std::mem::take(&mut lock(&self.live.state).invalidated);
-        let started = Instant::now();
         let model = self.refresh_kind(&mut work, Kind::Model);
         let tree = self
             .is_shown(Kind::Tree)
@@ -1900,9 +1985,9 @@ impl MachineView {
         drop(work);
         let mut state = lock(&self.live.state);
         state.built_at = built_at;
-        state.record(Kind::Model, started, &model);
+        state.record(Kind::Model, &model);
         if let Some(result) = &tree {
-            state.record(Kind::Tree, started, result);
+            state.record(Kind::Tree, result);
         }
         if model.is_err() {
             state.invalidated |= invalidated;
@@ -2009,7 +2094,7 @@ pub(crate) fn percent_encode(value: &str) -> String {
 
 fn harness_offsets(path: &Path) -> io::Result<BTreeSet<u64>> {
     use io::BufRead;
-    let mut reader = io::BufReader::new(fs::File::open(path)?);
+    let mut reader = io::BufReader::new(crate::sealed::LogFile::open(path)?);
     let mut offsets = BTreeSet::new();
     let mut offset = 0;
     let mut line = Vec::new();
@@ -2344,7 +2429,7 @@ fn entries(
 const READ_CHUNK: u64 = 64 * 1024;
 
 struct ReverseReader {
-    file: fs::File,
+    file: crate::sealed::LogFile,
     length: u64,
     cursor: u64,
     buffer_start: u64,
@@ -2354,7 +2439,7 @@ struct ReverseReader {
 
 impl ReverseReader {
     fn open(path: &Path, cursor: u64) -> io::Result<Self> {
-        let file = fs::File::open(path)?;
+        let file = crate::sealed::LogFile::open(path)?;
         let length = file.metadata()?.len();
         if cursor > length {
             return Err(invalid_input("before beyond end"));
@@ -2562,7 +2647,7 @@ fn read_after(
     links: &BTreeMap<String, Vec<String>>,
     harness_messages: &BTreeSet<u64>,
 ) -> io::Result<(TranscriptPage, usize)> {
-    let mut file = fs::File::open(path)?;
+    let mut file = crate::sealed::LogFile::open(path)?;
     let length = file.metadata()?.len();
     if after > length {
         return Err(invalid_input("after beyond end"));
@@ -3346,8 +3431,6 @@ mod tests {
             ("/fonts/instrument-sans-latin-ext.woff2", "font/woff2"),
             ("/fonts/jetbrains-mono-latin.woff2", "font/woff2"),
             ("/fonts/jetbrains-mono-latin-ext.woff2", "font/woff2"),
-            ("/fonts/source-serif-4-latin.woff2", "font/woff2"),
-            ("/fonts/source-serif-4-latin-ext.woff2", "font/woff2"),
             ("/api/model", "application/json; charset=utf-8"),
             ("/api/tx?sid=lane", "application/json; charset=utf-8"),
             ("/api/tree", "application/json; charset=utf-8"),
@@ -3369,7 +3452,7 @@ mod tests {
             .skip(1)
             .map(|rest| rest.split('"').next().unwrap())
             .collect();
-        assert_eq!(urls.len(), 14);
+        assert_eq!(urls.len(), 10);
         for url in urls {
             let name = url
                 .strip_prefix("/fonts/")
@@ -3971,6 +4054,34 @@ mod tests {
     /// `/api/tx?errors=1` lists exactly the steps the errors badge counts,
     /// each at a slot whose page (`after=` it, or `before=` one past it)
     /// holds that failed step, in transcript order across pages.
+    #[test]
+    fn signals_have_a_versioned_positional_index_without_a_page_anchor() {
+        let fixture = Fixture::new();
+        fixture.codex("signals", &[
+            json!({"timestamp":"2026-09-24T06:00:00Z","type":"session_meta","payload":{"id":"signals","cwd":"/work/proj"}}),
+            json!({"timestamp":"2026-09-24T06:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Work"}}),
+            json!({"timestamp":"2026-09-24T06:00:02Z","type":"event_msg","payload":{"type":"context_compacted"}}),
+        ]);
+        let core = fixture.viewer();
+        let reply = core.respond("GET", "/api/tx", "sid=signals&signals=1", None);
+        assert_eq!(reply.status, 200);
+        let body = body_of(&reply);
+        assert_eq!(body["signals"], 1);
+        assert_eq!(body["slots"].as_array().unwrap().len(), 1);
+        let query = format!(
+            "sid=signals&signals=1&since={}",
+            body["version"].as_str().unwrap()
+        );
+        assert_eq!(core.respond("GET", "/api/tx", &query, None).status, 304);
+        for query in [
+            "sid=signals&signals=0",
+            "sid=signals&signals=1&before=2",
+            "sid=signals&signals=1&errors=1",
+        ] {
+            assert_eq!(core.respond("GET", "/api/tx", query, None).status, 400);
+        }
+    }
+
     #[test]
     fn failed_steps_are_listed_where_the_badge_counts_them() {
         let fixture = faults_fixture();
@@ -5607,6 +5718,54 @@ mod tests {
     }
 
     #[test]
+    fn background_unknown_transcripts_share_one_listing_interval() {
+        let fixture = Fixture::new();
+        let view = MachineView::new(fixture.options.clone());
+        view.set_refresh(Refresh::Background);
+        assert!(view.transcript_path("claude", "unknown").unwrap().is_none());
+        let path = fixture.root.join("claude/projects/project/later.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"{}\n").unwrap();
+        assert!(
+            view.transcript_path("claude", "later").unwrap().is_none(),
+            "another unknown id shares the listing instead of walking again"
+        );
+        lock(&view.files).lookup_at = Some(Instant::now() - REBUILD_SPACING);
+        assert_eq!(view.transcript_path("claude", "later").unwrap(), Some(path));
+        view.close();
+    }
+
+    #[test]
+    fn unchanged_heartbeats_do_not_rebuild_received_machine_models() {
+        let receiver = Fixture::new();
+        let dir = receiver.root.join("received");
+        for index in 0..6 {
+            let name = format!("machine-{index}");
+            receive(&dir, &name, Some(&name), &format!("lane-{index}"));
+        }
+        let core = ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
+        assert_eq!(core.respond("GET", "/api/model", "", None).status, 200);
+        let builds = crate::model::BUILDS.with(|builds| builds.get());
+        let started = Instant::now();
+        for _ in 0..3 {
+            for index in 0..6 {
+                let name = format!("machine-{index}");
+                received_facts(&dir, &name, facts_of(&name));
+            }
+            assert_eq!(core.respond("GET", "/api/model", "", None).status, 200);
+        }
+        eprintln!(
+            "18 received heartbeats and three six-machine polls: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            crate::model::BUILDS.with(|builds| builds.get()),
+            builds,
+            "identical heartbeat contents never trigger another build"
+        );
+    }
+
+    #[test]
     fn a_session_this_machine_has_is_left_out_of_a_received_one_not_refused() {
         // This machine pushed to itself, or its logs were copied.
         let local = machine("home", "same");
@@ -5910,9 +6069,54 @@ mod tests {
         }
     }
 
-    /// Background refresh (#29): a read while a rebuild runs answers at
-    /// once, from the model before it and with that model's `ETag`; the
-    /// rebuilt model answers once it is done.
+    /// What a read may take at most once a model is built, whatever a
+    /// rebuild or a check is doing: it answers from a snapshot in memory.
+    /// The property is structural (no read waits on `work`), so the bound
+    /// is loose, for a busy runner.
+    const AT_ONCE: Duration = Duration::from_secs(2);
+
+    /// How long a read may take before it is taken for one that waits on a
+    /// held build, which would never answer.
+    const HUNG_AFTER: Duration = Duration::from_secs(5);
+
+    /// Runs `read` on a thread of its own, and fails unless it answered
+    /// within [`AT_ONCE`]. A read that waits on a held build fails the test
+    /// after [`HUNG_AFTER`] rather than hanging it.
+    fn at_once<T: Send + 'static>(what: &str, read: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sent, answer) = mpsc::channel();
+        let asked = Instant::now();
+        thread::spawn(move || {
+            let _ = sent.send(read());
+        });
+        let answer = match answer.recv_timeout(HUNG_AFTER) {
+            Ok(answer) => answer,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{what}: no answer within {HUNG_AFTER:?}: the read waits on a build")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("{what}: the read panicked"),
+        };
+        let took = asked.elapsed();
+        assert!(took < AT_ONCE, "{what}: waited {took:?}");
+        answer
+    }
+
+    /// `view`'s answer to a GET of `path?query`, [`at_once`].
+    fn ask(what: &str, view: &Arc<MachineView>, path: &str, query: &str) -> ViewerReply {
+        let (view, path, query) = (view.clone(), path.to_owned(), query.to_owned());
+        at_once(what, move || view.respond("GET", &path, &query, None))
+    }
+
+    /// Whether `view`'s transcript of `lane` holds `text`, [`at_once`].
+    fn serves_at_once(what: &str, view: &Arc<MachineView>, text: &str) -> bool {
+        String::from_utf8_lossy(&ask(what, view, "/api/tx", "sid=lane").body).contains(text)
+    }
+
+    /// Background refresh (#29): while a rebuild runs, every read answers
+    /// at once from the model before it, with that model's `ETag`: the
+    /// model, each form of `/api/tx` (a page, `after=`, `turn=`, errors),
+    /// an attachment and the V1 tree. An id that snapshot lacks is the
+    /// usual 404. The rebuilt model answers once it is done, and a poll
+    /// never sees the version before it again.
     #[test]
     fn a_read_during_a_rebuild_answers_from_the_last_model_at_once() {
         let fixture = lane_fixture();
@@ -5921,32 +6125,63 @@ mod tests {
         let first = view.respond("GET", "/api/model", "", None);
         assert_eq!(first.status, 200);
         let v1 = version_of(&first);
+        let turn = body_of(&first)["turns"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
+        let reads = view.hooks.refreshes_first.load(Ordering::SeqCst);
         let (starts, release) = view.hooks.hold();
         say(&fixture, "lane", 1, "written while the rebuild waits");
         starts
             .recv_timeout(Duration::from_secs(10))
             .expect("the refresher rebuilds a changed log");
-        let asked = Instant::now();
-        let during = view.respond("GET", "/api/model", &format!("since={v1}"), None);
-        let took = asked.elapsed();
+        let during = ask("/api/model", &view, "/api/model", &format!("since={v1}"));
         assert_eq!(during.status, 304, "the model before the rebuild answers");
         assert_eq!(during.etag, Some(format!("\"{v1}\"")));
-        assert!(
-            took < Duration::from_millis(500),
-            "a read waited {took:?} for a rebuild"
+        for (query, status) in [
+            ("sid=lane".to_owned(), 200),
+            ("sid=lane&after=0".into(), 200),
+            (format!("sid=lane&turn={turn}"), 200),
+            (format!("sid=lane&errors=1&since={v1}"), 304),
+            ("sid=lane&turn=not-in-the-snapshot".into(), 404),
+            ("sid=nobody".into(), 404),
+        ] {
+            let page = ask(&query, &view, "/api/tx", &query);
+            assert_eq!(page.status, status, "{query}");
+            assert!(
+                !String::from_utf8_lossy(&page.body).contains("while the rebuild waits"),
+                "{query}"
+            );
+        }
+        let attachment = ask(
+            "/api/attachment",
+            &view,
+            "/api/attachment",
+            "sid=lane&o=0&b=0&v=0000000000000000",
         );
-        let page = view.respond("GET", "/api/tx", "sid=lane", None);
-        assert_eq!(page.status, 200);
-        assert!(!String::from_utf8_lossy(&page.body).contains("while the rebuild waits"));
+        assert_eq!(attachment.status, 404, "no image there, but an answer");
+        let tree = ask("/api/tree", &view, "/api/tree", "");
+        assert_eq!(tree.status, 200);
+        assert_eq!(
+            view.hooks.refreshes_first.load(Ordering::SeqCst),
+            reads,
+            "a read refreshed first"
+        );
         drop(release);
         let after = eventually("the rebuilt model", || {
             let reply = view.respond("GET", "/api/model", &format!("since={v1}"), None);
             (reply.status == 200).then_some(reply)
         });
-        assert_ne!(version_of(&after), v1);
-        assert_eq!(after.etag, Some(format!("\"{}\"", version_of(&after))));
+        let v2 = version_of(&after);
+        assert_ne!(v2, v1);
+        assert_eq!(after.etag, Some(format!("\"{v2}\"")));
         let page = view.respond("GET", "/api/tx", "sid=lane", None);
         assert!(String::from_utf8_lossy(&page.body).contains("while the rebuild waits"));
+        for _ in 0..5 {
+            let poll = view.respond("GET", "/api/model", &format!("since={v2}"), None);
+            assert_eq!(poll.status, 304, "a poll went back to an older version");
+        }
         view.close();
     }
 
@@ -6133,11 +6368,14 @@ mod tests {
         view.close();
     }
 
-    /// After IDLE_AFTER without a read the view is no longer checked; the
-    /// next read, its model last checked over a second ago, refreshes
-    /// before it answers and queues the view's checks again.
+    /// After IDLE_AFTER without a read the view is no longer checked. The
+    /// next read, its logs changed meanwhile, answers at once from the last
+    /// model and queues the view's checks again; the rebuild that check
+    /// runs, held here, never holds up a read, and once it is done the
+    /// change is served. (Before, that read rebuilt the view itself and
+    /// waited for the build.)
     #[test]
-    fn after_an_idle_spell_the_first_read_refreshes_first() {
+    fn after_an_idle_spell_the_first_read_answers_at_once_and_queues_a_check() {
         let fixture = lane_fixture();
         let view = fixture.viewer();
         view.set_refresh(Refresh::Background);
@@ -6147,12 +6385,44 @@ mod tests {
         assert!(running());
         eventually("the checks stop when idle", || (!running()).then_some(()));
         thread::sleep(REBUILD_SPACING + Duration::from_millis(100));
+        let reads = view.hooks.refreshes_first.load(Ordering::SeqCst);
+        let (starts, release) = view.hooks.hold();
         say(&fixture, "lane", 1, "written while idle");
-        assert!(
-            serves(&view, "written while idle"),
-            "the first read after an idle spell answered from the old model"
+        let first = ask(
+            "the first read after an idle spell",
+            &view,
+            "/api/model",
+            &format!("since={v1}"),
         );
+        assert_eq!(first.status, 304, "the model before the idle spell answers");
         assert!(running(), "the read queued the view's checks again");
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the queued check rebuilds the view");
+        for _ in 0..3 {
+            let during = ask(
+                "a read during the check's rebuild",
+                &view,
+                "/api/model",
+                &format!("since={v1}"),
+            );
+            assert_eq!(during.status, 304);
+            let page = serves_at_once(
+                "a page during the check's rebuild",
+                &view,
+                "written while idle",
+            );
+            assert!(!page, "served before the rebuild ended");
+        }
+        assert_eq!(
+            view.hooks.refreshes_first.load(Ordering::SeqCst),
+            reads,
+            "a read refreshed first"
+        );
+        drop(release);
+        eventually("the change, once rebuilt", || {
+            serves(&view, "written while idle").then_some(())
+        });
         assert_ne!(version_of(&view.respond("GET", "/api/model", "", None)), v1);
         view.close();
     }
@@ -6184,9 +6454,10 @@ mod tests {
         let during = view.respond("GET", "/api/model", &format!("since={v1}"), None);
         assert!(matches!(during.status, 200 | 304), "{}", during.status);
         // No read from here until the new worker has rebuilt it.
-        let builds = view.hooks.builds();
         eventually("a rebuild by the new worker", || {
-            (view.hooks.builds() > builds && shown() != before).then_some(())
+            // The replacement may finish before the preceding read returns.
+            // Wait for its published result, not an additional future build.
+            (shown() != before).then_some(())
         });
         assert!(serves(&view, "after the panic"));
         assert!(pool.threads() <= 1);
@@ -6422,49 +6693,93 @@ mod tests {
     }
 
     /// When the pool falls behind (its only worker held by another view's
-    /// build), a read answers from the last model at once until its view's
-    /// check is OVERDUE_AFTER late, then refreshes the view itself: the
-    /// line is still served within the staleness bound, and the pool never
-    /// starts a thread past its size for it.
+    /// build), a read answers from the last model at once however late its
+    /// view's check is, OVERDUE_AFTER and past it, and never builds: the
+    /// view's own builds are held too, so a read that built would hang
+    /// there. The pool never starts a thread past its size for it, and the
+    /// change is served once the worker is free. (Before, a read that found
+    /// its check OVERDUE_AFTER late rebuilt the view itself and waited.)
     #[test]
-    fn a_pool_that_falls_behind_leaves_reads_to_refresh_themselves() {
+    fn an_overdue_check_never_holds_up_a_read() {
         let (blocker, lane) = (lane_fixture(), lane_fixture());
         let pool = RefreshPool::new(1);
         let busy = pooled(&blocker, Refresh::Background, &pool);
         let view = pooled(&lane, Refresh::Background, &pool);
         warm(&busy);
-        warm(&view);
-        let inline = view.hooks.refreshes_first.load(Ordering::SeqCst);
-        let (starts, release) = busy.hooks.hold();
+        let v1 = warm(&view);
+        let reads = view.hooks.refreshes_first.load(Ordering::SeqCst);
+        let (busy_starts, busy_release) = busy.hooks.hold();
         say(&blocker, "lane", 1, "holds the only worker");
-        starts
+        busy_starts
             .recv_timeout(Duration::from_secs(10))
             .expect("the only worker rebuilds the blocker");
-        let written = Instant::now();
+        let (starts, release) = view.hooks.hold();
         say(&lane, "lane", 1, "while the pool is busy");
-        let asked = Instant::now();
-        assert!(
-            !serves(&view, "while the pool is busy"),
-            "served before its check came due"
-        );
-        assert!(
-            asked.elapsed() < Duration::from_millis(500),
-            "a read waited"
-        );
-        eventually("the line, refreshed by a read", || {
-            serves(&view, "while the pool is busy").then_some(())
-        });
-        let took = written.elapsed();
-        let bound = REBUILD_SPACING + CHECK_EVERY + Duration::from_millis(750);
-        assert!(took < bound, "served after {took:?}, over {bound:?}");
-        assert!(
-            view.hooks.refreshes_first.load(Ordering::SeqCst) > inline,
-            "not a read's own refresh"
+        let overdue = || match lock(&view.live.state).slot {
+            Slot::Queued(key) => Instant::now() >= key.0 + OVERDUE_AFTER,
+            Slot::Idle | Slot::Running => false,
+        };
+        let until = Instant::now() + OVERDUE_AFTER + CHECK_EVERY + Duration::from_millis(500);
+        let mut late = 0;
+        while Instant::now() < until {
+            late += usize::from(overdue());
+            let reply = ask(
+                "a read with its check late",
+                &view,
+                "/api/model",
+                &format!("since={v1}"),
+            );
+            assert_eq!(reply.status, 304, "the last model answers");
+            let page = serves_at_once(
+                "a page with its check late",
+                &view,
+                "while the pool is busy",
+            );
+            assert!(!page, "served before its check ran");
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(late > 0, "the view's check never came OVERDUE_AFTER late");
+        assert!(starts.try_recv().is_err(), "a read built the view");
+        assert_eq!(
+            view.hooks.refreshes_first.load(Ordering::SeqCst),
+            reads,
+            "a read refreshed first"
         );
         assert_eq!(pool.threads(), 1);
         assert_eq!(pool.peak_and_started().0, 1);
         drop(release);
+        drop(busy_release);
+        eventually("the line, once the worker is free", || {
+            serves(&view, "while the pool is busy").then_some(())
+        });
         busy.close();
+        view.close();
+    }
+
+    /// With no model built yet, the first read waits for the first build,
+    /// as before (here it is held for 300 ms and more); the reads after it
+    /// answer from that model and build nothing.
+    #[test]
+    fn with_no_model_yet_a_read_waits_for_the_first_build() {
+        let fixture = lane_fixture();
+        let view = fixture.viewer();
+        view.set_refresh(Refresh::Background);
+        let (starts, release) = view.hooks.hold();
+        let first = {
+            let view = view.clone();
+            thread::spawn(move || view.respond("GET", "/api/tx", "sid=lane", None).status)
+        };
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the read builds the first model");
+        thread::sleep(Duration::from_millis(300));
+        assert!(!first.is_finished(), "a read answered with no model built");
+        drop(release);
+        assert_eq!(first.join().expect("the read panicked"), 200);
+        assert_eq!(view.hooks.refreshes_first.load(Ordering::SeqCst), 1);
+        assert_eq!(view.respond("GET", "/api/model", "", None).status, 200);
+        assert_eq!(view.hooks.refreshes_first.load(Ordering::SeqCst), 1);
+        assert_eq!(view.hooks.builds(), 1);
         view.close();
     }
 
@@ -6573,8 +6888,9 @@ mod tests {
     /// Outside OnRead a page never waits for a build, nor takes a stat pass:
     /// before the first model it is the shell (its own /api/model builds
     /// the model), and once a model is built it answers from that one even
-    /// when an announced change would make the next API read refresh first.
-    /// Only the API routes refresh. A URL the built model lacks takes the
+    /// when a change was announced. Only the API routes refresh: once a
+    /// model is built, an API read answers from it at once too, and queues
+    /// the check that rebuilds it. A URL the built model lacks takes the
     /// exact route: a fresh check, then 404.
     #[test]
     fn a_page_never_waits_for_a_build_only_the_api_refreshes() {
@@ -6583,6 +6899,7 @@ mod tests {
         core.set_refresh_pool(RefreshPool::new(1));
         core.set_refresh(Refresh::OnInvalidate);
         let view = core.machine_views().remove(0);
+        let core = Arc::new(core);
         quick_idle(&view);
         let page = |path: &str| {
             let reply = core.respond("GET", path, "", None);
@@ -6613,7 +6930,7 @@ mod tests {
             .to_owned();
         assert_eq!(view.hooks.builds(), 1);
 
-        // Idle, then a change announced: the next API read refreshes first.
+        // Idle, then a change announced: pages take no notice of it.
         until_idle(&view);
         say(&fixture, "lane", 1, "announced while idle");
         assert!(core.invalidate(""));
@@ -6634,12 +6951,24 @@ mod tests {
         );
         assert!(lock(&view.live.state).invalidated, "a page took the change");
 
-        // The API read does refresh, before it answers.
-        assert!(tx_has(&core, "lane", "announced while idle"));
+        // The API read answers at once from the built model, and queues the
+        // check that rebuilds it; the change is served after that check.
+        let reply = {
+            let core = core.clone();
+            at_once("an API read after an announced change", move || {
+                core.respond("GET", "/api/tx", "sid=lane", None)
+            })
+        };
+        assert_eq!(reply.status, 200);
+        assert!(!String::from_utf8_lossy(&reply.body).contains("announced while idle"));
+        eventually("the announced change", || {
+            tx_has(&core, "lane", "announced while idle").then_some(())
+        });
         assert_eq!(view.hooks.builds(), before.0 + 1);
         assert_eq!(
             view.hooks.refreshes_first.load(Ordering::SeqCst),
-            before.2 + 1
+            before.2,
+            "an API read refreshed first"
         );
         // A URL the built model lacks: checked against a fresh one, 404.
         for path in ["/s/claude/nobody", "/machines/elsewhere", "/s/codex/lane"] {
@@ -6691,7 +7020,9 @@ mod tests {
         }
         let after: Vec<_> = views.iter().map(|view| refresh_counts(view)).collect();
         assert_eq!(after, before, "a page refreshed a machine");
-        assert!(tx_has(&core, "lane-b", "announced while idle"));
+        eventually("bravo's announced change", || {
+            tx_has(&core, "lane-b", "announced while idle").then_some(())
+        });
         assert_eq!(core.respond("GET", "/machines/gamma", "", None).status, 404);
         core.close();
     }
@@ -6860,22 +7191,80 @@ mod tests {
         a_new_session_opens_during_its_warm(core, "a", &alpha);
     }
 
+    /// Asks `view` for `path?query` until [`FAILING_AFTER`] has passed
+    /// `since` by ten reads: each answers at once, `before` while it was
+    /// answered inside FAILING_AFTER and 500 once it was asked past it. A
+    /// read is judged by when it was asked and answered, not by a loop's
+    /// bound, so a stalled runner can't flip it. Returns how many reads
+    /// came before.
+    fn two_phases(
+        view: &Arc<MachineView>,
+        since: Instant,
+        path: &str,
+        query: &str,
+        before: u16,
+        also: impl Fn(),
+    ) -> usize {
+        let (mut inside, mut past) = (0, 0);
+        while past < 10 {
+            assert!(
+                since.elapsed() < FAILING_AFTER + Duration::from_secs(20),
+                "{path}: no 500 past FAILING_AFTER"
+            );
+            let asked = since.elapsed();
+            let reply = ask(path, view, path, query);
+            let answered = since.elapsed();
+            if answered < FAILING_AFTER {
+                assert_eq!(reply.status, before, "{path} answered at {answered:?}");
+                inside += 1;
+            } else if asked >= FAILING_AFTER {
+                assert_eq!(reply.status, 500, "{path} asked at {asked:?}");
+                past += 1;
+            }
+            also();
+            thread::sleep(Duration::from_millis(50));
+        }
+        inside
+    }
+
     /// Background builds that keep failing aren't hidden forever behind
-    /// the last model: past FAILING_AFTER each read tries itself and
-    /// answers the error, and the model comes back once builds work.
+    /// the last model, and never make a read wait: for FAILING_AFTER from
+    /// the first failure seen each read answers from the last model at
+    /// once, and after that the error (500), at once too, while each check
+    /// tries the build again. The change is served once builds work.
     #[test]
-    fn background_builds_that_keep_failing_answer_the_error() {
+    fn background_builds_that_keep_failing_answer_the_error_at_once() {
         let fixture = lane_fixture();
         let (view, v1) = warm_background(&fixture);
+        let reads = view.hooks.refreshes_first.load(Ordering::SeqCst);
         view.hooks.failing.store(true, Ordering::SeqCst);
         say(&fixture, "lane", 1, "while builds fail");
-        let first = view.respond("GET", "/api/model", &format!("since={v1}"), None);
-        assert_eq!(first.status, 304, "at first the last model answers");
-        let failed = Instant::now();
-        eventually("the error", || {
-            (view.respond("GET", "/api/model", "", None).status == 500).then_some(())
+        let since = eventually("a failed rebuild", || {
+            lock(&view.live.state).failing_since[Kind::Model as usize]
         });
-        assert!(failed.elapsed() >= FAILING_AFTER - REBUILD_SPACING - CHECK_EVERY);
+        let builds = view.hooks.builds();
+        let inside = two_phases(
+            &view,
+            since,
+            "/api/model",
+            &format!("since={v1}"),
+            304,
+            || {
+                let page = ask("/api/tx", &view, "/api/tx", "sid=lane");
+                assert!(matches!(page.status, 200 | 500), "{}", page.status);
+            },
+        );
+        assert!(inside > 0, "no read inside FAILING_AFTER");
+        assert_eq!(ask("/api/tx", &view, "/api/tx", "sid=lane").status, 500);
+        assert!(
+            view.hooks.builds() > builds,
+            "the checks stopped trying the build"
+        );
+        assert_eq!(
+            view.hooks.refreshes_first.load(Ordering::SeqCst),
+            reads,
+            "a read refreshed first"
+        );
         view.hooks.failing.store(false, Ordering::SeqCst);
         eventually("the model again", || {
             (view
@@ -6885,6 +7274,308 @@ mod tests {
                 .then_some(())
         });
         assert!(serves(&view, "while builds fail"));
+        view.close();
+    }
+
+    /// FAILING_AFTER counts from the first failure seen, not from the
+    /// start of the build that failed: a build that takes longer than
+    /// FAILING_AFTER and fails once leaves the last model served, at once,
+    /// for the whole grace after it.
+    #[test]
+    fn a_long_build_that_fails_once_gets_the_whole_grace() {
+        let fixture = lane_fixture();
+        let (view, v1) = warm_background(&fixture);
+        view.hooks.failing.store(true, Ordering::SeqCst);
+        let (starts, release) = view.hooks.hold();
+        say(&fixture, "lane", 1, "while a long build fails");
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the check builds");
+        thread::sleep(FAILING_AFTER + Duration::from_millis(500));
+        // The failure is seen after this: FAILING_AFTER from here, reads
+        // answer the last model, whatever `failing_since` says.
+        let released = Instant::now();
+        drop(release);
+        eventually("the long build's failure", || {
+            lock(&view.live.state).failing_since[Kind::Model as usize]
+        });
+        let mut reads = 0;
+        while released.elapsed() + Duration::from_millis(500) < FAILING_AFTER {
+            let reply = ask("/api/model", &view, "/api/model", &format!("since={v1}"));
+            assert_eq!(
+                reply.status,
+                304,
+                "the error answered {:?} after the failure",
+                released.elapsed()
+            );
+            reads += 1;
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(reads > 0, "no read inside the grace");
+        view.hooks.failing.store(false, Ordering::SeqCst);
+        view.close();
+    }
+
+    /// An error recorded before an idle spell is stale: no build has been
+    /// tried since. The first read after the spell answers the last model
+    /// at once and queues a check, and so does every read while that
+    /// check's build runs (held here); once it reports the builds still
+    /// fail, reads answer the error again.
+    #[test]
+    fn after_an_idle_spell_a_stale_error_waits_for_the_next_check() {
+        let fixture = lane_fixture();
+        let (view, v1) = warm_background(&fixture);
+        view.hooks.failing.store(true, Ordering::SeqCst);
+        say(&fixture, "lane", 1, "while builds fail");
+        eventually("the error", || {
+            (view.respond("GET", "/api/model", "", None).status == 500).then_some(())
+        });
+        lock(&view.live.state).idle_after = Duration::from_millis(300);
+        until_idle(&view);
+        let (starts, release) = view.hooks.hold();
+        let first = ask(
+            "the first read after an idle spell",
+            &view,
+            "/api/model",
+            &format!("since={v1}"),
+        );
+        assert_eq!(first.status, 304, "a stale error answered");
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the queued check builds");
+        for _ in 0..3 {
+            let during = ask(
+                "a read during the check",
+                &view,
+                "/api/model",
+                &format!("since={v1}"),
+            );
+            assert_eq!(during.status, 304, "a stale error answered");
+        }
+        drop(release);
+        eventually("the error, once the check failed again", || {
+            (ask("/api/model", &view, "/api/model", "").status == 500).then_some(())
+        });
+        view.hooks.failing.store(false, Ordering::SeqCst);
+        view.close();
+    }
+
+    /// A view whose check has run STALLED_AFTER (a second here) is stalled:
+    /// its build hangs (held here). Before that, reads answer the last
+    /// model at once; after it, "rebuilds stalled" (500) at once. Once the
+    /// build ends the rebuilt model answers.
+    #[test]
+    fn a_hung_build_answers_stalled_at_once() {
+        let fixture = lane_fixture();
+        let (view, v1) = warm_background(&fixture);
+        let stalled = Duration::from_secs(1);
+        lock(&view.live.state).stalled_after = stalled;
+        let (starts, release) = view.hooks.hold();
+        say(&fixture, "lane", 1, "after the hang");
+        starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the check builds");
+        let since = lock(&view.live.state).running_since.expect("a check runs");
+        let (mut inside, mut past) = (0, 0);
+        while past < 5 {
+            assert!(since.elapsed() < stalled + Duration::from_secs(20));
+            let asked = since.elapsed();
+            let reply = ask(
+                "a read during a hung build",
+                &view,
+                "/api/model",
+                &format!("since={v1}"),
+            );
+            let answered = since.elapsed();
+            if answered < stalled {
+                assert_eq!(reply.status, 304, "answered at {answered:?}");
+                inside += 1;
+            } else if asked >= stalled {
+                assert_eq!(reply.status, 500, "asked at {asked:?}");
+                past += 1;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(inside > 0, "no read before the stall");
+        drop(release);
+        eventually("the rebuilt model", || {
+            (view
+                .respond("GET", "/api/model", &format!("since={v1}"), None)
+                .status
+                == 200)
+                .then_some(())
+        });
+        assert!(serves(&view, "after the hang"));
+        view.close();
+    }
+
+    /// A view whose check waits STALLED_AFTER (two seconds here) behind
+    /// another view's hung build, on a pool that may not grow, is stalled
+    /// too: its reads answer the last model at once, then "rebuilds
+    /// stalled" (500) at once, until the worker is free and rebuilds it.
+    #[test]
+    fn a_check_stuck_behind_a_hung_pool_answers_stalled_at_once() {
+        let (blocker, lane) = (lane_fixture(), lane_fixture());
+        let pool = RefreshPool::with_overflow_after(1, Duration::from_secs(3600));
+        let busy = pooled(&blocker, Refresh::Background, &pool);
+        let view = pooled(&lane, Refresh::Background, &pool);
+        warm(&busy);
+        let v1 = warm(&view);
+        lock(&view.live.state).stalled_after = Duration::from_secs(2);
+        let (busy_starts, busy_release) = busy.hooks.hold();
+        say(&blocker, "lane", 1, "hangs the only worker");
+        busy_starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the only worker rebuilds the blocker");
+        say(&lane, "lane", 1, "behind the hung pool");
+        let first = ask(
+            "a read behind the hung pool",
+            &view,
+            "/api/model",
+            &format!("since={v1}"),
+        );
+        assert_eq!(first.status, 304, "the last model answers first");
+        let mut stalled = 0;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while stalled < 5 {
+            assert!(Instant::now() < deadline, "no stall within 20 s");
+            let reply = ask(
+                "a read behind the hung pool",
+                &view,
+                "/api/model",
+                &format!("since={v1}"),
+            );
+            match reply.status {
+                304 => assert_eq!(stalled, 0, "the last model answered after the stall"),
+                500 => stalled += 1,
+                status => panic!("{status}"),
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(pool.peak_and_started().0, 1, "the pool grew");
+        drop(busy_release);
+        eventually("the line, once the worker is free", || {
+            serves(&view, "behind the hung pool").then_some(())
+        });
+        busy.close();
+        view.close();
+    }
+
+    /// Builds that hang hold every worker of a pool (its only one here),
+    /// but not the other machines' checks: once every worker's check has
+    /// run OVERFLOW_AFTER, a read that finds its check overdue starts a
+    /// thread past the pool's size (never more than twice it), which
+    /// rebuilds that view while the hang goes on. No read waits meanwhile.
+    /// Once the hang ends, the pool shrinks back to its size.
+    #[test]
+    fn a_hung_pool_grows_for_a_late_check_then_shrinks() {
+        let (blocker, lane) = (lane_fixture(), lane_fixture());
+        let pool = RefreshPool::with_overflow_after(1, Duration::from_millis(300));
+        let busy = pooled(&blocker, Refresh::Background, &pool);
+        let view = pooled(&lane, Refresh::Background, &pool);
+        warm(&busy);
+        warm(&view);
+        let (busy_starts, busy_release) = busy.hooks.hold();
+        say(&blocker, "lane", 1, "hangs the only worker");
+        busy_starts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the only worker rebuilds the blocker");
+        say(&lane, "lane", 1, "past the hung pool");
+        eventually("the line, rebuilt by an extra thread", || {
+            serves_at_once("a read behind the hung pool", &view, "past the hung pool").then_some(())
+        });
+        let (peak, _) = pool.peak_and_started();
+        assert_eq!(peak, 2, "the pool grew, to twice its size");
+        assert!(pool.threads() <= 2);
+        drop(busy_release);
+        eventually("the pool back to its size", || {
+            // Reads keep the views checked meanwhile.
+            serves_at_once("a read after the hang", &view, "past the hung pool");
+            (pool.threads() == 1).then_some(())
+        });
+        busy.close();
+        view.close();
+    }
+
+    /// A backlog is not a hang: four views whose builds take two seconds
+    /// each, all changing and read all the time, keep the pool's only
+    /// worker busy and their checks seconds late, past OVERFLOW_AFTER (three
+    /// seconds here). No build has run that long, so the pool never grows.
+    #[test]
+    fn a_backlog_never_grows_the_pool() {
+        let fixtures: Vec<_> = (0..4).map(|_| lane_fixture()).collect();
+        let pool = RefreshPool::with_overflow_after(1, Duration::from_secs(3));
+        let views: Vec<_> = fixtures
+            .iter()
+            .map(|fixture| {
+                let view = pooled(fixture, Refresh::Background, &pool);
+                assert_eq!(view.respond("GET", "/api/model", "", None).status, 200);
+                *lock(&view.hooks.building) =
+                    Some(Arc::new(|| thread::sleep(Duration::from_secs(2))));
+                view
+            })
+            .collect();
+        let until = Instant::now() + Duration::from_secs(10);
+        let mut line = 0;
+        let mut late = Duration::ZERO;
+        while Instant::now() < until {
+            line += 1;
+            for (fixture, view) in fixtures.iter().zip(&views) {
+                say(fixture, "lane", line, &format!("line {line}"));
+                if let Slot::Queued(key) = lock(&view.live.state).slot {
+                    late = late.max(Instant::now().saturating_duration_since(key.0));
+                }
+                let reply = ask("a read in a backlog", view, "/api/model", "");
+                assert_eq!(reply.status, 200);
+            }
+            assert!(pool.threads() <= 1, "{} threads", pool.threads());
+            thread::sleep(Duration::from_millis(300));
+        }
+        assert!(
+            late >= Duration::from_secs(3),
+            "no check fell OVERFLOW_AFTER behind: at most {late:?}"
+        );
+        assert_eq!(pool.peak_and_started().0, 1, "a backlog grew the pool");
+        for view in &views {
+            *lock(&view.hooks.building) = None;
+            view.close();
+        }
+    }
+
+    /// Lateness counts from when a check was queued: after a build longer
+    /// than STALLED_AFTER (a second here) the next check is due in the past,
+    /// and must not read as a stall, or overflow the pool, the moment it is
+    /// queued. Reads after the long build answer the rebuilt model.
+    #[test]
+    fn a_long_build_is_not_a_stall_once_it_ends() {
+        let fixture = lane_fixture();
+        let pool = RefreshPool::with_overflow_after(1, Duration::from_millis(300));
+        let view = pooled(&fixture, Refresh::Background, &pool);
+        let v1 = warm(&view);
+        lock(&view.live.state).stalled_after = Duration::from_secs(1);
+        *lock(&view.hooks.building) = Some(Arc::new(|| thread::sleep(Duration::from_secs(3))));
+        let builds = view.hooks.builds();
+        say(&fixture, "lane", 1, "after a long build");
+        // No read while it builds: a read then would rightly answer the stall.
+        eventually("the long build", || {
+            view.shown_model()
+                .filter(|model| model.built.version != v1)
+                .map(drop)
+        });
+        assert!(view.hooks.builds() > builds);
+        *lock(&view.hooks.building) = None;
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until {
+            let reply = ask(
+                "a read after a long build",
+                &view,
+                "/api/model",
+                &format!("since={v1}"),
+            );
+            assert_eq!(reply.status, 200, "the rebuilt model answers");
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(pool.peak_and_started().0, 1, "a long build grew the pool");
         view.close();
     }
 
@@ -6957,29 +7648,91 @@ mod tests {
     }
 
     /// The model and the V1 tree fail on their own: a tree that won't
-    /// build answers the error on `/api/tree`, and `/api/model` goes on
-    /// serving a model that builds, past FAILING_AFTER too.
+    /// build leaves the last tree served on `/api/tree` for FAILING_AFTER,
+    /// then answers the error, each at once, while `/api/model` goes on
+    /// serving a model that builds.
     #[test]
     fn a_failing_tree_leaves_the_model_served() {
         let fixture = lane_fixture();
         let (view, v1) = warm_background(&fixture);
         assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
+        let reads = view.hooks.refreshes_first.load(Ordering::SeqCst);
         view.hooks.tree_failing.store(true, Ordering::SeqCst);
         say(&fixture, "lane", 1, "while the tree fails");
-        eventually("the tree's error", || {
-            (view.respond("GET", "/api/tree", "", None).status == 500).then_some(())
+        let since = eventually("the tree's failed rebuild", || {
+            lock(&view.live.state).failing_since[Kind::Tree as usize]
         });
-        let until = Instant::now() + Duration::from_millis(1500);
-        while Instant::now() < until {
+        let inside = two_phases(&view, since, "/api/tree", "", 200, || {
             let reply = view.respond("GET", "/api/model", &format!("since={v1}"), None);
             assert_eq!(reply.status, 200, "the model with the new line");
-            thread::sleep(Duration::from_millis(50));
-        }
+        });
+        assert!(inside > 0, "no tree read inside FAILING_AFTER");
         assert!(serves(&view, "while the tree fails"));
+        assert_eq!(
+            view.hooks.refreshes_first.load(Ordering::SeqCst),
+            reads,
+            "a read refreshed first"
+        );
         view.hooks.tree_failing.store(false, Ordering::SeqCst);
         eventually("the tree again", || {
             (view.respond("GET", "/api/tree", "", None).status == 200).then_some(())
         });
         view.close();
+    }
+    #[test]
+    fn core_model_delta_handshake_works_for_one_and_multiple_machines() {
+        for multiple in [false, true] {
+            let fixture = Fixture::new();
+            let other = Fixture::new();
+            let record = |id: &str, text: &str| json!({"type":"user","timestamp":"2026-09-24T00:00:00Z","sessionId":id,"origin":{"kind":"human"},"message":{"role":"user","content":text}});
+            for i in 0..30 {
+                let id = format!("session-{i}");
+                fixture.claude(&id, &[record(&id, "Unchanged prompt")]);
+            }
+            let core = if multiple {
+                ViewerCore::with_machines(vec![
+                    ("first".into(), fixture.options.clone()),
+                    ("second".into(), other.options.clone()),
+                ])
+            } else {
+                ViewerCore::new(fixture.options.clone())
+            };
+            let first = core.respond("GET", "/api/model", "delta=1", None);
+            let before = body_of(&first);
+            let version = before["version"].as_str().unwrap();
+            assert_eq!(
+                core.respond(
+                    "GET",
+                    "/api/model",
+                    &format!("delta=1&since={version}"),
+                    None
+                )
+                .status,
+                304
+            );
+            fixture.claude("session-0", &[record("session-0", "Changed prompt")]);
+            let reply = core.respond(
+                "GET",
+                "/api/model",
+                &format!("delta=1&since={version}"),
+                None,
+            );
+            let delta = body_of(&reply);
+            assert_eq!(reply.status, 200);
+            assert_eq!(delta["delta"], 1);
+            assert_eq!(delta["from"], version);
+            assert!(
+                !delta["collections"]["tx"]["set"]
+                    .as_object()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(reply.body.len() < first.body.len() / 2);
+            let unknown =
+                body_of(&core.respond("GET", "/api/model", "delta=1&since=unknown", None));
+            assert!(unknown.get("sessions").is_some());
+            assert!(unknown.get("delta").is_none());
+            core.close();
+        }
     }
 }

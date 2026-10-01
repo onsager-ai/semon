@@ -5,10 +5,10 @@
 // 390 and 1280 px, light and dark, on the served trace with the most clamped briefs:
 //  - every clamped brief keeps its colour, size, family, weight and line height when opened (its first paragraph too), and is not the
 //    accent colour of the "Show more" button;
-//  - with one machine (given a long hostname), no hop line and no header subtitle contains the hostname, in full or in part;
-//  - with two (each given a long hostname), the hop lines and the subtitle name them by their short names, never the hostname, and
+//  - with one machine (given a long hostname), no hop line and no body summary contains the hostname, in full or in part;
+//  - with two (each given a long hostname), the hop lines and the summary name them by their short names, never the hostname, and
 //    the root hop's line names the machine the root ran on;
-//  - with two whose short names would cut alike ("build-runner-east-1" and "-2"), the chips and the subtitle tell them apart, and the
+//  - with two whose short names would cut alike ("build-runner-east-1" and "-2"), the chips and the summary tell them apart, and the
 //    subtitle names each machine once;
 //  - a chip and a move hop's machine names carry the full name as their tooltip, and a move hop says "from <short> to <short>", each
 //    name on one line (the sentence wraps between words, never inside a name);
@@ -87,7 +87,7 @@ const page_ = (page) => page.evaluate(() => ({
     return { text: n.textContent, oneLine: tops.length > 0 && Math.max(...tops) - Math.min(...tops) < lh * 0.7 };
   }),
   sentTips: [...document.querySelectorAll(".hop.k-move .sent .mach")].map((c) => c.dataset.tip ?? null),
-  bar: (document.querySelector("#topbar")?.textContent ?? "").replace(/\s+/g, " ").trim(),
+  bar: (document.querySelector("#page .trace-summary")?.textContent ?? "").replace(/\s+/g, " ").trim(),
   chipMark: [...document.querySelectorAll(".hop .meta .chip-h")].map((c) => { const b = getComputedStyle(c, "::before"); return b.content !== "none" && b.content !== "normal" ? b.content : null; }).filter(Boolean),
 }));
 
@@ -102,7 +102,7 @@ export default async function tracebrief(browser) {
   let pick = null;
   for (const sid of spawners) {
     await goto(probe, { v: "session", id: sid }, D);
-    const turns = await probe.evaluate(() => [...document.querySelectorAll(".turn-end .tracebtn")].map((b) => b.closest(".turn").dataset.turn));
+    const turns = await probe.evaluate(() => [...document.querySelectorAll(".turn-end .link")].map((b) => b.closest(".turn").dataset.turn));
     for (const turn of turns) {
       await goto(probe, { v: "trace", sid, turn }, D);
       const n = await probe.evaluate(() => ({ clamped: [...document.querySelectorAll(".hop .body > .more")].filter((x) => !x.hidden).length, hops: document.querySelectorAll(".hop.child").length, chips: document.querySelectorAll(".hop .meta .chip-h").length }));
@@ -147,12 +147,12 @@ export default async function tracebrief(browser) {
         // Machines: named by their short names where the trace spans two, and not at all where it spans one.
         const p = await page_(page), all = p.metaText.join(" | ") + " | " + p.sent.join(" | ") + " | " + p.bar, [s0, s1] = mode.shorts;
         r.expect(p.chips.length > 0, name + ": no hop line has a kind chip");
-        r.expect(/handoff/.test(p.bar), name + ": the header subtitle is missing: " + JSON.stringify(p.bar));
+        r.expect(/handoff/.test(p.bar), name + ": the body summary is missing: " + JSON.stringify(p.bar));
         for (const piece of [...mode.hosts, ...mode.pieces]) r.expect(!all.includes(piece), name + ": the hostname shows (" + piece + "): " + JSON.stringify({ bar: p.bar, chips: p.chips, sent: p.sent }));
         if (two) {
           const named = (c) => [s0, s1].find((x) => c.endsWith(" · " + x));
-          r.expect(p.bar.includes(s0) && p.bar.includes(s1), name + ": the subtitle names both machines by their short names: " + JSON.stringify(p.bar));
-          r.expect(p.bar.split(s0).length === 2 && p.bar.split(s1).length === 2, name + ": the subtitle names a machine more than once: " + JSON.stringify(p.bar));
+          r.expect(p.bar.includes(s0) && p.bar.includes(s1), name + ": the summary names both machines by their short names: " + JSON.stringify(p.bar));
+          r.expect(p.bar.split(s0).length === 2 && p.bar.split(s1).length === 2, name + ": the summary names a machine more than once: " + JSON.stringify(p.bar));
           r.expect(p.chips.every(named), name + ": every chip ends in a machine's short name: " + JSON.stringify(p.chips));
           r.expect(p.chips[0]?.endsWith(" · " + s0), name + ": the root hop's chip names its machine: " + JSON.stringify(p.chips[0]));
           r.expect(p.chips.some((c) => c.endsWith(" · " + s1)), name + ": a hop on the second machine names it: " + JSON.stringify(p.chips));

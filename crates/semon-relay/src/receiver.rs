@@ -251,6 +251,75 @@ impl Receiver {
         })
     }
 
+    /// Removes matching live and orphan frame bodies across all epochs and
+    /// generations. Body-free receipts prevent retransmission resurrecting them.
+    pub fn forget(
+        &self,
+        id: &str,
+        selector: &crate::ForgetSelector,
+    ) -> Result<crate::ForgetReport, ReceiveError> {
+        crate::deletion::validate_request_id(id)?;
+        selector.validate()?;
+        if selector.memory_root.is_some() {
+            return Err(ReceiveError::RequestField("memory_root"));
+        }
+        let mut state = self.state.lock().map_err(|_| ReceiveError::Poisoned)?;
+        let ack_path = self.root.join("deletions").join(format!("{id}.json"));
+        match fs::read(&ack_path) {
+            Ok(bytes) => {
+                let saved: Value = serde_json::from_slice(&bytes)?;
+                if saved["selector"] != selector.to_value() {
+                    return Err(ReceiveError::Collision);
+                }
+                return crate::ForgetReport::from_value(&saved["report"], id)
+                    .map_err(|error| ReceiveError::Inconsistent(error.to_string()));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        // Checkpoint every affected live generation before unlinking bodies.
+        // On restart the checkpoint can be verified against its tombstone.
+        for session_entry in sorted_entries(&self.root)? {
+            if !session_entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Ok(session) = decode_component(&session_entry.file_name()) else {
+                continue;
+            };
+            if selector
+                .session
+                .as_ref()
+                .is_some_and(|selected| selected != &session)
+            {
+                continue;
+            }
+            for stream_entry in sorted_entries(&session_entry.path())? {
+                if !stream_entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let stream = decode_component(&stream_entry.file_name())?;
+                for generation_entry in sorted_entries(&stream_entry.path())? {
+                    let Some(generation) =
+                        parse_number(&generation_entry.file_name(), "generation-")
+                    else {
+                        continue;
+                    };
+                    let receipt =
+                        reconcile_receipt(&generation_entry.path(), &session, &stream, generation)?;
+                    if receipt.acked.is_some() {
+                        save_receipt(&generation_entry.path().join("state.json"), receipt)?;
+                    }
+                }
+            }
+        }
+        forget_walk(&self.root, id, selector, false)?;
+        let report = forget_walk(&self.root, id, selector, true)?;
+        state.receipts.clear();
+        let ack = serde_json::json!({"selector":selector.to_value(),"report":report.to_value(id)});
+        write_atomic(&ack_path, &serde_json::to_vec(&ack)?)?;
+        Ok(report)
+    }
+
     /// Acquires a new session at epoch zero, renews the caller, or returns its holder.
     pub fn acquire(&self, session: &str, machine: &str) -> Result<LeaseRow, ReceiveError> {
         let mut state = self.state.lock().map_err(|_| ReceiveError::Poisoned)?;
@@ -419,6 +488,13 @@ impl Receiver {
         let frame_path = epoch_dir(&generation_dir, frame.key.epoch)
             .join("frames")
             .join(format!("{:020}.json", frame.key.seq));
+        if let Some(deleted) = read_deleted(&frame_path)? {
+            return if deleted_matches(&deleted, frame) {
+                Ok(ReceiveOutcome::Duplicate)
+            } else {
+                Err(ReceiveError::Collision)
+            };
+        }
         let existing = read_existing(&frame_path, frame)?;
         let receipt_key = (
             frame.key.session.clone(),
@@ -528,6 +604,13 @@ impl Receiver {
         )
         .join("frames")
         .join(format!("{:020}.json", frame.key.seq));
+        if let Some(deleted) = read_deleted(&path)? {
+            return if deleted_matches(&deleted, frame) {
+                Ok(ReceiveOutcome::Duplicate)
+            } else {
+                Err(ReceiveError::Collision)
+            };
+        }
         let existing = read_existing(&path, frame)?;
         if existing.is_none() {
             store_frame(&path, frame)?;
@@ -901,16 +984,26 @@ pub fn serve_configured(
         config.insecure_plaintext,
         !config.insecure_plaintext,
     )?);
-    let server = match &config.tls {
-        Some(tls) => Server::https(
-            listen,
-            SslConfig {
+    let tls = config
+        .tls
+        .as_ref()
+        .map(|tls| -> Result<_, ReceiveError> {
+            Ok(SslConfig {
                 certificate: read_tls_file(&tls.certificate)?,
                 private_key: read_tls_file(&tls.private_key)?,
-            },
-        ),
-        None => Server::http(listen),
-    }
+            })
+        })
+        .transpose()?;
+    let listener = std::net::TcpListener::bind(listen)?;
+    let server = Server::from_listener_with_limits(
+        listener,
+        tls,
+        tiny_http::ConnectionLimits {
+            max_connections: Some(128),
+            read_timeout: Some(std::time::Duration::from_secs(10)),
+            write_timeout: Some(std::time::Duration::from_secs(10)),
+        },
+    )
     .map_err(|error| ReceiveError::HttpServer(error.to_string()))?;
     let server = Arc::new(server);
     eprintln!("semon-relay receiver listening on {listen}");
@@ -1079,7 +1172,25 @@ fn request_headers(request: &tiny_http::Request) -> Result<SignedHeaders, Receiv
 }
 
 fn handle_request(receiver: &Receiver, route: &str, value: &Value) -> Result<Value, ReceiveError> {
+    if route.starts_with("/v1/snapshots/") {
+        if !receiver.allow_encrypted {
+            return Err(ReceiveError::EncryptedDisabled);
+        }
+        let _guard = receiver.state.lock().map_err(|_| ReceiveError::Poisoned)?;
+        return Ok(crate::snapshots::handle_snapshot(
+            &receiver.root,
+            route,
+            value,
+        )?);
+    }
     match route {
+        "/v1/delete" => {
+            let object = request_object(value)?;
+            let id = required_string(object, "id")?;
+            let _machine = required_string(object, "machine")?;
+            let selector = crate::ForgetSelector::from_value(&value["selector"])?;
+            Ok(receiver.forget(id, &selector)?.to_value(id))
+        }
         "/v1/frames" => {
             let frame = Frame::from_value(value)?;
             receiver.accept(&frame)?;
@@ -1121,7 +1232,28 @@ fn handle_request(receiver: &Receiver, route: &str, value: &Value) -> Result<Val
             let object = request_object(value)?;
             let _machine = required_string(object, "machine")?;
             let session = optional_string(object, "session")?;
-            Ok(receiver.lease_status(session)?.to_value())
+            let mut response = receiver.lease_status(session)?.to_value();
+            response["receiver_wall_ms"] = receiver.clock.now_ms().into();
+            let mut ids = match fs::read_dir(receiver.root.join("deletions")) {
+                Ok(entries) => entries
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|name| name.ends_with(".json"))
+                    })
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => return Err(error.into()),
+            };
+            ids.sort();
+            use sha2::{Digest, Sha256};
+            response["deletion_revision"] =
+                hex::encode(Sha256::digest(ids.join("\n").as_bytes())).into();
+            Ok(response)
         }
         "/v1/lease/tips" => {
             let object = request_object(value)?;
@@ -1420,6 +1552,116 @@ fn orphan_dir(root: &Path, session: &str, stream: &str, epoch: u64, generation: 
         .join(format!("generation-{generation}"))
 }
 
+fn read_deleted(path: &Path) -> Result<Option<Value>, ReceiveError> {
+    match fs::read(path.with_extension("deleted")) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn deleted_matches(deleted: &Value, frame: &Frame) -> bool {
+    let key = &frame.key;
+    let identity = deleted["session"].as_str() == Some(key.session.as_str())
+        && deleted["stream"].as_str() == Some(key.stream.as_str())
+        && deleted["generation"].as_u64() == Some(key.generation)
+        && deleted["epoch"].as_u64() == Some(key.epoch)
+        && deleted["seq"].as_u64() == Some(key.seq)
+        && deleted["machine"]
+            .as_str()
+            .is_some_and(|machine| machine.is_empty() || machine == frame.machine);
+    identity
+        && match &frame.content {
+            FrameContent::Plaintext { chain, line } => {
+                use sha2::{Digest, Sha256};
+                deleted["mode"] == "plaintext"
+                    && deleted["chain"].as_str() == Some(hex::encode(chain).as_str())
+                    && deleted["content_hash"].as_str()
+                        == Some(hex::encode(Sha256::digest(line)).as_str())
+            }
+            FrameContent::Encrypted(payload) => {
+                deleted["mode"] == "encrypted"
+                    && deleted["tag"].as_str() == Some(hex::encode(payload.tag).as_str())
+            }
+        }
+}
+
+fn forget_walk(
+    root: &Path,
+    id: &str,
+    selector: &crate::ForgetSelector,
+    count: bool,
+) -> Result<crate::ForgetReport, ReceiveError> {
+    let mut report = crate::ForgetReport::default();
+    let mut directories = vec![root.to_owned()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                // Snapshot ciphertext has its own selector and reference GC.
+                // Walk only live hex session trees and the orphan namespace.
+                if directory == root
+                    && entry.file_name() != "orphans"
+                    && hex::decode(entry.file_name().to_string_lossy().as_bytes()).is_err()
+                {
+                    continue;
+                }
+                directories.push(entry.path());
+                continue;
+            }
+            if !kind.is_file() || directory.file_name().is_none_or(|name| name != "frames") {
+                continue;
+            }
+            let path = entry.path();
+            if count {
+                if path
+                    .extension()
+                    .is_none_or(|extension| extension != "deleted")
+                {
+                    continue;
+                }
+                let value: Value = serde_json::from_slice(&fs::read(&path)?)?;
+                if value["delete_id"].as_str() == Some(id) {
+                    report.frames += 1;
+                    report.bytes += value["deleted_bytes"].as_u64().unwrap_or(0);
+                }
+                continue;
+            }
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let frame = Frame::from_stored_value(&serde_json::from_slice(&fs::read(&path)?)?)?;
+            if !selector.matches(&frame) {
+                continue;
+            }
+            let mut metadata = frame.to_value();
+            let object = metadata.as_object_mut().expect("a frame is an object");
+            if let FrameContent::Plaintext { line, .. } = &frame.content {
+                use sha2::{Digest, Sha256};
+                object.insert(
+                    "content_hash".into(),
+                    hex::encode(Sha256::digest(line)).into(),
+                );
+            }
+            for field in ["line", "ciphertext", "nonce"] {
+                object.remove(field);
+            }
+            object.insert("delete_id".into(), id.into());
+            object.insert("deleted_bytes".into(), entry.metadata()?.len().into());
+            // The tombstone is durable before removing the only body copy.
+            write_atomic(
+                &path.with_extension("deleted"),
+                &serde_json::to_vec(&metadata)?,
+            )?;
+            fs::remove_file(path)?;
+            #[cfg(unix)]
+            fs::File::open(&directory)?.sync_all()?;
+        }
+    }
+    Ok(report)
+}
+
 fn read_existing(path: &Path, frame: &Frame) -> Result<Option<Frame>, ReceiveError> {
     let Some(stored) = read_frame_path(path)? else {
         return Ok(None);
@@ -1480,27 +1722,46 @@ fn reconcile_receipt(
         let path = epoch_dir(generation_dir, receipt.epoch)
             .join("frames")
             .join(format!("{acked:020}.json"));
-        let stored = read_frame_path(&path)?.ok_or_else(|| {
-            ReceiveError::Inconsistent(format!(
-                "receipt references missing frame {}",
-                path.display()
-            ))
-        })?;
-        if stored.key.session != session
-            || stored.key.stream != stream
-            || stored.key.generation != generation
-            || stored.key.epoch != receipt.epoch
-            || stored.key.seq != acked
-            || stored.mode() != receipt.mode.unwrap_or(stored.mode())
-            || match &stored.content {
-                FrameContent::Plaintext { chain, .. } => *chain != receipt.chain,
-                FrameContent::Encrypted(payload) => Some(payload.tag) != receipt.tag,
+        if let Some(stored) = read_frame_path(&path)? {
+            if stored.key.session != session
+                || stored.key.stream != stream
+                || stored.key.generation != generation
+                || stored.key.epoch != receipt.epoch
+                || stored.key.seq != acked
+                || stored.mode() != receipt.mode.unwrap_or(stored.mode())
+                || match &stored.content {
+                    FrameContent::Plaintext { chain, .. } => *chain != receipt.chain,
+                    FrameContent::Encrypted(payload) => Some(payload.tag) != receipt.tag,
+                }
+            {
+                return Err(ReceiveError::Inconsistent(format!(
+                    "receipt does not match {}",
+                    path.display()
+                )));
             }
-        {
-            return Err(ReceiveError::Inconsistent(format!(
-                "receipt does not match {}",
-                path.display()
-            )));
+        } else {
+            let deleted = read_deleted(&path)?.ok_or_else(|| {
+                ReceiveError::Inconsistent(format!(
+                    "receipt references missing frame {}",
+                    path.display()
+                ))
+            })?;
+            let valid = deleted["session"].as_str() == Some(session)
+                && deleted["stream"].as_str() == Some(stream)
+                && deleted["generation"].as_u64() == Some(generation)
+                && deleted["epoch"].as_u64() == Some(receipt.epoch)
+                && deleted["seq"].as_u64() == Some(acked)
+                && deleted["mode"].as_str() == receipt.mode.map(|mode| mode.as_str())
+                && if receipt.mode == Some(FrameMode::Plaintext) {
+                    deleted["chain"].as_str() == Some(hex::encode(receipt.chain).as_str())
+                } else {
+                    deleted["tag"].as_str() == receipt.tag.map(hex::encode).as_deref()
+                };
+            if !valid {
+                return Err(ReceiveError::Inconsistent(
+                    "deleted receipt metadata does not match its checkpoint".into(),
+                ));
+            }
         }
     }
     let mut frames = Vec::new();
@@ -1762,6 +2023,12 @@ fn list_orphans(root: &Path) -> Result<Vec<OrphanSummary>, ReceiveError> {
                     }
                     let sequences = sorted_entries(&frames_dir)?
                         .into_iter()
+                        .filter(|entry| {
+                            entry
+                                .path()
+                                .extension()
+                                .is_some_and(|extension| extension == "json")
+                        })
                         .filter_map(|entry| {
                             entry
                                 .path()

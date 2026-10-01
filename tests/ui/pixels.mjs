@@ -24,7 +24,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PNG } from "pngjs";
-import pixelmatch from "pixelmatch";
+import { compare as comparePixels } from "./pixel-diff.mjs";
 import { ENV, launch, context, served, goto, data } from "./lib.mjs";
 import { sample, BASE } from "./fixture.mjs";
 import { overhaulPortReference, stableOverhaul } from "./overhaul-port.mjs";
@@ -275,7 +275,7 @@ async function referencePage(browser, size, dark, html) {
     if (harness && fs.existsSync(path.join(here, "../../assets/harnesses", harness[1]))) return r.fulfill({ contentType: "image/svg+xml", body: fs.readFileSync(path.join(here, "../../assets/harnesses", harness[1])) });
     if (url.href === "http://reference.test/mark.svg") return r.fulfill({ contentType: "image/svg+xml", body: MARK_SVG });
     if (url.host === "fonts.googleapis.com") return r.fulfill({ contentType: "text/css", body: FACES.replaceAll('url("/fonts/', 'url("http://reference.test/fonts/') });
-    const font = /^\/fonts\/(instrument-sans|jetbrains-mono|source-serif-4)-(latin-ext|latin)\.woff2$/.exec(url.pathname);
+    const font = /^\/fonts\/(instrument-sans|jetbrains-mono)-(latin-ext|latin)\.woff2$/.exec(url.pathname);
     if (url.host === "reference.test" && font) return r.fulfill({ contentType: "font/woff2", body: fs.readFileSync(path.join(FONTS, font[1], font[2] + ".woff2")) });
     return r.abort();
   });
@@ -283,8 +283,9 @@ async function referencePage(browser, size, dark, html) {
   return page;
 }
 
-const FACE_LOADS = ['400 14px "Instrument Sans"', '500 14px "Instrument Sans"', '600 14px "Instrument Sans"', '400 12px "JetBrains Mono"', '500 12px "JetBrains Mono"', '400 14px "Source Serif 4"', '600 14px "Source Serif 4"'];
+const FACE_LOADS = ['400 14px "Instrument Sans"', '500 14px "Instrument Sans"', '600 14px "Instrument Sans"', '400 12px "JetBrains Mono"', '500 12px "JetBrains Mono"'];
 async function ready(page) {
+  await mask(page);
   await page.evaluate((faces) => Promise.all(faces.map((f) => document.fonts.load(f))).then(() => document.fonts.ready), FACE_LOADS);
   await page.evaluate(() => {
     const state = history.state, sessionAtEnd = state?.v === "session" && !state.turn, main = document.querySelector("#main");
@@ -300,14 +301,7 @@ async function shot(page, size) {
   return PNG.sync.read(await page.screenshot({ fullPage: size === "phone", animations: "disabled", caret: "hide" }));
 }
 
-// Differing pixels over the larger of the two images; the area one image lacks counts as differing.
-function compare(a, b) {
-  const w = Math.max(a.width, b.width), h = Math.max(a.height, b.height);
-  const pad = (img) => { if (img.width === w && img.height === h) return img; const p = new PNG({ width: w, height: h }); p.data.fill(255); PNG.bitblt(img, p, 0, 0, img.width, img.height, 0, 0); return p; };
-  const A = pad(a), B = pad(b), diff = new PNG({ width: w, height: h });
-  const n = pixelmatch(A.data, B.data, diff.data, w, h, { threshold: THRESHOLD, includeAA: false });
-  return { pixels: n, ratio: n / (w * h), size: a.width === b.width && a.height === b.height ? null : [a.width + "×" + a.height, b.width + "×" + b.height], diff, A, B };
-}
+const compare = (a, b) => comparePixels(a, b, THRESHOLD);
 
 // Every screen, as routes on the served viewer and on each reference.
 function screens(D, S, ids) {
@@ -340,6 +334,11 @@ async function nav(page, route, D, mockup) {
   await page.waitForTimeout(80);
 }
 
+// Masked in every comparison: the jump-to-latest button, a transient control that floats at a scroll position (its place shifts a pixel or two
+// with how far each page was scrolled), not part of a screen's design.
+const MASK_CSS = ".jump-wrap { visibility: hidden !important; }";
+// (Applied as a constructed stylesheet: the viewer's style-src does not allow an injected <style>, which screenshot({ style }) uses.)
+const mask = (page) => page.evaluate((css) => { if (window.__pixelMask) return; window.__pixelMask = true; const sheet = new CSSStyleSheet(); sheet.replaceSync(css); document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet]; }, MASK_CSS);
 const save = (dir, name, img) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name + ".png"), PNG.sync.write(img)); };
 // The ratchet: a pending screen may not drift away from the overhaul. tests/ui/pixel-baseline.json holds, per screen and scheme, its
 // ratio of differing pixels and the size of both pictures (served, reference). A screen fails when its ratio rises by more than half
@@ -374,13 +373,33 @@ const REF_BASE = (process.env.SEMON_REF_BASE ?? "").replace(/\/$/, ""), REF_TOKE
 const REGIONS = MAP.regions ?? [];
 const regionsOf = (name) => REGIONS.filter((r) => r.screens.some((x) => (x.endsWith("-") ? name.startsWith(x) : name === x)));
 async function regionShot(page, region) {
+  await mask(page);
   // A region that does not depend on how far the page is scrolled (the bar, whose border shows once it is) is taken at the top, so a
-  // pending page that happens to be a few pixels taller on one side cannot change it.
-  if (region.top) { await page.evaluate(() => { window.scrollTo(0, 0); const main = document.querySelector("#main"); if (main) main.scrollTop = 0; }); await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))); await page.waitForTimeout(120); }
+  // pending page that happens to be a few pixels taller on one side cannot change it. Transcripts also start from a shared
+  // scroll position rather than inheriting the preceding full-page/menu capture.
+  if (region.top || region.name === "transcript") { await page.evaluate(() => { window.scrollTo(0, 0); const main = document.querySelector("#main"); if (main) main.scrollTop = 0; }); await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))); await page.waitForTimeout(120); }
   if (region.open) { await page.click(region.open); await page.waitForTimeout(200); }
   const target = page.locator(region.selector).first();
   await target.waitFor({ state: "visible", timeout: 3000 });
-  const png = PNG.sync.read(await target.screenshot({ animations: "disabled", caret: "hide" }));
+  // Locator screenshots enlarge a short viewport before scrolling. A sticky, independently scrolling main can then
+  // clamp that scroll differently on the two pages. Expand both first, preserving width and transcript geometry, then reset.
+  const viewport = page.viewportSize(), box = await target.boundingBox();
+  const expand = region.name === "transcript" && box && box.y + box.height > viewport.height;
+  let png;
+  try {
+    if (expand) {
+      await page.setViewportSize({ width: viewport.width, height: Math.ceil(box.y + box.height) });
+      await page.evaluate(() => { window.scrollTo(0, 0); document.querySelector("#main").scrollTop = 0; });
+      await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+      const full = await target.boundingBox();
+      if (Math.abs(full.width - box.width) > .5 || Math.abs(full.height - box.height) > .5) throw new Error("transcript geometry changed while stabilizing capture viewport");
+    }
+    // Avoid locator's own scrollIntoView after the shared state has been established (it can move mobile nested scrollers).
+    const clip = region.name === "transcript" ? await target.boundingBox() : null;
+    png = PNG.sync.read(clip
+      ? await page.screenshot({ clip, animations: "disabled", caret: "hide" })
+      : await target.screenshot({ animations: "disabled", caret: "hide" }));
+  } finally { if (expand) await page.setViewportSize(viewport); }
   if (region.open) { await page.keyboard.press("Escape"); await page.waitForTimeout(150); }
   return png;
 }

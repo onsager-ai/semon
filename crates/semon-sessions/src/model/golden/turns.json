@@ -1,6 +1,6 @@
 {
   "api": 1,
-  "version": "be059786194c82a7",
+  "version": "87cd35abb0ec82e4",
   "now": 1790294400000,
   "machine": {
     "id": "testbox",
@@ -322,6 +322,7 @@
       "start": "a54f7afbc37f9d7c0",
       "at": 1790269200000,
       "end": {
+        "at": 1790269260000,
         "st": "done",
         "why": "replied"
       },
@@ -335,6 +336,7 @@
       "start": "rff825f448513cd59",
       "at": 1790269320000,
       "end": {
+        "at": 1790269380000,
         "st": "err",
         "why": "failed_step"
       },
@@ -363,6 +365,7 @@
       "text": "a prompt that isn't yours",
       "at": 1790269560000,
       "end": {
+        "at": 1790269620000,
         "st": "done",
         "why": "replied"
       },

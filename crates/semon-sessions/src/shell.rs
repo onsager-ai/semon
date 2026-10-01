@@ -198,13 +198,11 @@ pub fn is_page_path(path: &str) -> bool {
 }
 
 /// Font file names used by [`VIEWER_CSS`], as served under `/fonts/`.
-pub const FONT_FILES: [&str; 6] = [
+pub const FONT_FILES: [&str; 4] = [
     "instrument-sans-latin.woff2",
     "instrument-sans-latin-ext.woff2",
     "jetbrains-mono-latin.woff2",
     "jetbrains-mono-latin-ext.woff2",
-    "source-serif-4-latin.woff2",
-    "source-serif-4-latin-ext.woff2",
 ];
 
 /// Returns the vendored bytes for a served font file name.

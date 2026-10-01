@@ -105,7 +105,10 @@ pub enum RegisterError {
     /// dropping every final request's payload.
     #[error("the held payloads are at their budget")]
     OverBudget,
-    /// A Claude request must carry a match key; its tool is
+    /// A Claude request has no key for matching later tool reports.
+    #[error("the Claude request has no match key; answer in the terminal")]
+    MissingMatchKey,
+    /// A Claude request's tool is
     /// `AskUserQuestion` exactly when it is a question.
     #[error("the request's kind doesn't match its tool")]
     KindMismatch,
@@ -124,6 +127,9 @@ pub enum AnswerError {
     /// The request is read-only (409), with the reason.
     #[error("the request can't be answered here: {0}")]
     ReadOnly(String),
+    /// The answer's hash is not 64 lowercase hex digits (400).
+    #[error("the payload hash must be 64 lowercase hex digits")]
+    MalformedHash,
     /// The answer's payload hash is not the request's (412), with the
     /// current payload.
     #[error("the request's payload has changed")]
@@ -145,7 +151,7 @@ impl AnswerError {
             Self::UnknownId => 404,
             Self::NotOpen(_) | Self::ReadOnly(_) => 409,
             Self::HashMismatch { .. } => 412,
-            Self::WrongShape => 400,
+            Self::WrongShape | Self::MalformedHash => 400,
         }
     }
 }
@@ -278,6 +284,7 @@ impl RequestStore {
                     expires_ms: new.expires_ms,
                     state: State::Open,
                     ended_ms: None,
+                    ended_wall_ms: None,
                     tool_run_matched: false,
                     superseded: false,
                     viewer_denied: false,
@@ -311,6 +318,7 @@ impl RequestStore {
         clock: &dyn Fn() -> u64,
     ) -> Result<State, AnswerError> {
         let answer = answer.capped();
+        let source = source.capped();
         let claimed = {
             let mut inner = self.lock();
             let now_ms = clock();
@@ -378,7 +386,13 @@ impl RequestStore {
         let current = inner.requests[index].state.clone();
         let state = match current {
             State::Open => {
-                set_state(&mut inner.requests[index], State::Resolved(reason), now_ms);
+                let wall_ms = (inner.wall)();
+                set_state(
+                    &mut inner.requests[index],
+                    State::Resolved(reason),
+                    now_ms,
+                    wall_ms,
+                );
                 inner.requests[index].state.clone()
             }
             State::Claimed { .. } => inner.end_claim(index, State::Resolved(reason), now_ms),
@@ -418,7 +432,8 @@ impl RequestStore {
             if claimed {
                 inner.end_claim(index, State::Gone, now_ms);
             } else {
-                set_state(&mut inner.requests[index], State::Gone, now_ms);
+                let wall_ms = (inner.wall)();
+                set_state(&mut inner.requests[index], State::Gone, now_ms, wall_ms);
             }
         }
         inner.prune(now_ms);
@@ -476,7 +491,7 @@ fn hash_payload(new: &NewRequest) -> Result<Hashed, RegisterError> {
         return Err(RegisterError::IdTooLong);
     }
     match &new.match_key {
-        None if new.harness == Harness::Claude => return Err(RegisterError::KindMismatch),
+        None if new.harness == Harness::Claude => return Err(RegisterError::MissingMatchKey),
         Some(key) if (key.tool_name == "AskUserQuestion") != (new.kind == Kind::Question) => {
             return Err(RegisterError::KindMismatch);
         }
@@ -558,8 +573,9 @@ fn answer_fits(request: &PendingRequest, answer: &Answer) -> bool {
 }
 
 /// Moves `request` to `state`, stamping the end time when it is final.
-fn set_state(request: &mut PendingRequest, state: State, now_ms: u64) {
+fn set_state(request: &mut PendingRequest, state: State, now_ms: u64, wall_ms: u64) {
     request.ended_ms = state.is_final().then_some(now_ms);
+    request.ended_wall_ms = state.is_final().then_some(wall_ms);
     request.state = state;
 }
 
@@ -755,10 +771,10 @@ impl Inner {
             }
             Some(request) => match &request.answerable {
                 Answerable::No(reason) => Some(AnswerError::ReadOnly(reason.clone())),
-                Answerable::Yes
-                    if !is_sha256_hex(payload_sha256)
-                        || request.payload_sha256.as_deref() != Some(payload_sha256) =>
-                {
+                Answerable::Yes if !is_sha256_hex(payload_sha256) => {
+                    Some(AnswerError::MalformedHash)
+                }
+                Answerable::Yes if request.payload_sha256.as_deref() != Some(payload_sha256) => {
                     Some(AnswerError::HashMismatch {
                         payload: Box::new(request.payload.clone()),
                     })
@@ -804,9 +820,10 @@ impl Inner {
     /// Ends a claim in `next` and journals the answer with its outcome. A
     /// delivered deny on a request whose tool already ran is marked.
     fn end_claim(&mut self, index: usize, next: State, now_ms: u64) -> State {
+        let wall_ms = (self.wall)();
         let request = &mut self.requests[index];
         let previous = std::mem::replace(&mut request.state, State::Open);
-        set_state(request, next, now_ms);
+        set_state(request, next, now_ms, wall_ms);
         let State::Claimed { answer, source, .. } = previous else {
             return request.state.clone();
         };
@@ -840,6 +857,7 @@ impl Inner {
                     &mut self.requests[index],
                     State::Left(LeftReason::TimedOut),
                     now_ms,
+                    (self.wall)(),
                 );
             } else if overdue {
                 self.end_claim(index, State::Left(LeftReason::DeliveryUnknown), now_ms);
@@ -888,6 +906,7 @@ impl Inner {
         }) else {
             return ToolRun::Unmatched;
         };
+        let wall_ms = (self.wall)();
         let request = &mut self.requests[index];
         request.tool_run_matched = true;
         let id = request.id;
@@ -898,6 +917,7 @@ impl Inner {
                 request,
                 State::Resolved(ResolvedReason::AllowedInTerminal),
                 now_ms,
+                wall_ms,
             );
             ToolRun::ResolvedOpen(id)
         } else if denied {

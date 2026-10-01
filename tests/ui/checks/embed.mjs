@@ -28,7 +28,7 @@
 // Screenshots of the open menu, at 1280 and 390 in light and dark, are written to out/embed/.
 import fs from "node:fs";
 import path from "node:path";
-import { ENV, context, settled, reporter } from "../lib.mjs";
+import { ENV, context, settled, reporter, closePage } from "../lib.mjs";
 
 const OUT = path.join(ENV.out, "embed");
 fs.mkdirSync(OUT, { recursive: true });
@@ -58,7 +58,7 @@ async function open(browser, { embed, state = { mode: "pass" }, serverAccount, s
       window.addEventListener(type, (e) => { if (type === "semon:ended" && window.__cancel) e.preventDefault(); window.__ev.push({ type, detail: e.detail, cancelable: e.cancelable, prevented: e.defaultPrevented, fetches: window.__fetches.length }); });
     }
     const orig = window.fetch;
-    window.fetch = function (...a) { if (/\/api\/model\?since=/.test(String(a[0]))) window.__fetches.push(performance.now()); return orig.apply(window, a); };
+    window.fetch = function (...a) { if ((() => { const url = new URL(String(a[0]), location.href); return url.pathname === "/api/model" && url.searchParams.has("since"); })()) window.__fetches.push(performance.now()); return orig.apply(window, a); };
   }, embed ?? null);
   const page = await ctx.newPage();
   page.errors = [];
@@ -127,7 +127,7 @@ export default async function embedCheck(browser) {
     r.expect(after.length > 1 && after[1] - after[0] < 3000, "the poll after a refresh should come 2 s later, not at the backed-off delay: " + R.afterRefresh);
     r.expect(await oncePerPoll(page), "semon:polled should fire exactly once per poll: " + JSON.stringify(await events(page, "semon:polled")));
     r.expect(page.errors.length === 0, "page errors: " + page.errors.join("; "));
-    await page.context().close();
+    await closePage(page);
   }
 
   // ---- The refresh floor: a listener that refreshes on every semon:polled, against a healthy server and a failing one ----
@@ -154,7 +154,7 @@ export default async function embedCheck(browser) {
     }
     r.expect(await oncePerPoll(page), "semon:polled once per poll (" + tag + ")");
     r.expect(page.errors.length === 0, "page errors (floor " + tag + "): " + page.errors.join("; "));
-    await page.context().close();
+    await closePage(page);
   }
 
   // ---- Refreshes while a poll is in flight: one follow-up ----
@@ -176,7 +176,7 @@ export default async function embedCheck(browser) {
     r.expect(total === 2, "refreshes during a poll should add exactly one follow-up poll: " + (total - 1));
     r.expect(await oncePerPoll(page), "semon:polled once per poll (in flight)");
     r.expect(page.errors.length === 0, "page errors (in flight): " + page.errors.join("; "));
-    await page.context().close();
+    await closePage(page);
   }
 
   // ---- A refresh before the first model has loaded ----
@@ -193,7 +193,7 @@ export default async function embedCheck(browser) {
     R.beforeLoad = { held, polls };
     r.expect(held === 0 && polls === 0, "a refresh before the first model load should poll nothing, then or once it loads (the first poll is 2 s after it): " + JSON.stringify(R.beforeLoad));
     r.expect(page.errors.length === 0, "page errors (before load): " + page.errors.join("; "));
-    await page.context().close();
+    await closePage(page);
   }
 
   // ---- semon:ended ----
@@ -213,7 +213,7 @@ export default async function embedCheck(browser) {
     const polled = await events(page, "semon:polled");
     r.expect(polled.length === polls && polled.at(-1)?.detail?.ok === false && await oncePerPoll(page), "semon:polled once per poll, the last with ok:false after the 403 (" + tag + "): " + JSON.stringify(polled));
     r.expect(page.errors.length === 0, "page errors (" + tag + "): " + page.errors.join("; "));
-    await page.context().close();
+    await closePage(page);
   }
 
   // ---- The account menu from the embedding page ----
@@ -259,7 +259,7 @@ export default async function embedCheck(browser) {
     R["desktopWideModeReload " + tag] = saved;
     r.expect(saved.checked === String(expected) && saved.wide === expected, "the desktop Display switch should show the saved state after reload: " + JSON.stringify(saved));
     r.expect(page.errors.length === 0, "page errors (desktop wide mode): " + page.errors.join("; "));
-    await page.context().close();
+    await closePage(page);
   }
   for (const [size, dark] of [["desktop", false], ["desktop", true], ["phone", false], ["phone", true]]) {
     const tag = (size === "desktop" ? "1280" : "390") + (dark ? "-dark" : "");
@@ -289,7 +289,7 @@ export default async function embedCheck(browser) {
     r.expect(menu && menu.hrefs.join() === "/embed/profile" && menu.actions.join() === "/embed/switch/1,/embed/sign-out" && menu.workspaces.join() === "Engine room", "the embedding page's menu links (" + tag + "): " + JSON.stringify(menu));
     await page.screenshot({ path: path.join(OUT, "embed-menu-" + tag + ".png") });
     r.expect(page.errors.length === 0, "page errors (embed menu " + tag + "): " + page.errors.join("; "));
-    await page.context().close();
+    await closePage(page);
   }
   // On a phone the menu floats above its row and never moves the drawer; outside, Esc and back close it.
   for (const dark of [false, true]) {
@@ -368,7 +368,7 @@ export default async function embedCheck(browser) {
     const returned = await state();
     r.expect(returned.path === path0 && !returned.sheet && !returned.open, "Back from a page a menu item opened lands on this page, menu closed (" + tag + "): " + JSON.stringify(returned));
     r.expect(page.errors.length === 0, "page errors (phone menu " + tag + "): " + page.errors.join("; "));
-    await page.context().close();
+    await closePage(page);
   }
   // A top bar redrawn with the desktop menu open ("N errors" stops its click there and redraws the bar) closes the menu
   // properly: the next click on the avatar opens it at once.
@@ -384,7 +384,7 @@ export default async function embedCheck(browser) {
     R.menuAfterBarRedraw = { gone, reopened };
     r.expect(gone && reopened, "a top bar redrawn with the menu open closes it, and the avatar opens it again with one click: " + JSON.stringify(R.menuAfterBarRedraw));
     r.expect(page.errors.length === 0, "page errors (menu and N errors): " + page.errors.join("; "));
-    await page.context().close();
+    await closePage(page);
   }
   // The menu is a copy: changing the embedding page's object after it was read changes nothing on screen.
   {
@@ -393,7 +393,7 @@ export default async function embedCheck(browser) {
     const menu = await openMenu(page);
     R.embedCopy = menu;
     r.expect(menu?.name === "Embed <b>Ada</b> Lovelace" && menu.hrefs.join() === "/embed/profile" && menu.workspaces.join() === "Engine room", "the account menu should be a copy of the embedding page's object: " + JSON.stringify(menu));
-    await page.context().close();
+    await closePage(page);
   }
   // A getter that throws: no menu, and the page still draws and polls.
   {
@@ -402,7 +402,7 @@ export default async function embedCheck(browser) {
     const widgets = await page.locator(".account-widget").count();
     R.embedThrows = { widgets, errors: page.errors };
     r.expect(widgets === 0 && page.errors.length === 0, "a throwing semonEmbed.account getter should leave no menu and no page error: " + JSON.stringify(R.embedThrows));
-    await page.context().close();
+    await closePage(page);
   }
   for (const [what, over] of [
     ["a javascript: link", { links: [{ label: "Bad", href: "javascript:alert(1)", method: "get", danger: false }] }],
@@ -415,7 +415,7 @@ export default async function embedCheck(browser) {
     const widgets = await page.locator(".account-widget").count(), bad = await page.locator('a[href^="javascript:"], a[href^="//"], form[action^="//"], img[src^="javascript:"]').count();
     R["invalid " + what] = { widgets, bad };
     r.expect(widgets === 0 && bad === 0, "the embedding page's account with " + what + " should be dropped like a server's, and nothing built from it: " + JSON.stringify({ widgets, bad }));
-    await page.context().close();
+    await closePage(page);
   }
   {
     const server = account({ name: "Server Grace", login: "grace", initials: "SG", workspaces: [{ name: "Bridge", role: "admin", current: true, switch_href: "/server/switch" }], links: [{ label: "Server profile", href: "/server/profile", method: "get", danger: false }] });
@@ -424,14 +424,14 @@ export default async function embedCheck(browser) {
     R.serverWins = menu;
     r.expect(menu?.name === "Server Grace" && menu.hrefs.join() === "/server/profile", "a server-provided account should win over the embedding page's: " + JSON.stringify(menu));
     r.expect(page.errors.length === 0, "page errors (server wins): " + page.errors.join("; "));
-    await page.context().close();
+    await closePage(page);
     // A server account the rules reject leaves the embedding page's.
     const invalid = { ...server, links: [{ label: "Bad", href: "//evil.example/x", method: "get", danger: false }] };
     const fallback = await open(browser, { embed: { account: account() }, serverAccount: invalid });
     const menu2 = await openMenu(fallback);
     R.serverInvalid = menu2;
     r.expect(menu2?.name === "Embed <b>Ada</b> Lovelace", "an invalid server account should leave the embedding page's: " + JSON.stringify(menu2));
-    await fallback.context().close();
+    await closePage(fallback);
   }
 
   return r.done();

@@ -32,13 +32,13 @@ export default async function full(browser) {
 
   const openAll = () => page.evaluate(() => {
     const r = { steps: 0, withInput: 0, cutNoInput: 0, more: 0, moreFull: 0, moreStillClipped: 0, navigatedByMore: 0 };
-    for (let k = 0; k < 3; k++) document.querySelectorAll('.cw-toggle[aria-expanded="false"], .tsum[aria-expanded="false"]').forEach((x) => x.click());
+    for (let k = 0; k < 3; k++) document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click());
     document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => { x.click(); r.steps++;
       const box = x.parentElement, arg = x.querySelector('.sa')?.textContent ?? '';
       if (box.querySelector('.out .io')) r.withInput++; else if (arg.endsWith('…')) r.cutNoInput++; });
     const before = location.href;
-    document.querySelectorAll('.hcard .more').forEach((m) => { if (m.hidden) return; r.more++; m.click();
-      const br = m.parentElement.querySelector('.brief'); if (br.scrollHeight <= br.clientHeight + 1) r.moreFull++; else r.moreStillClipped++; });
+    document.querySelectorAll('.event .ev-more').forEach((m) => { if (m.hidden) return; r.more++; m.click();
+      const br = m.parentElement.querySelector('.ev-text'); if (br.scrollHeight <= br.clientHeight + 1) r.moreFull++; else r.moreStillClipped++; });
     if (location.href !== before) r.navigatedByMore++;
     return r;
   });
@@ -56,10 +56,10 @@ export default async function full(browser) {
   for (const id of lanes) {
     await openLane(id);
     add(await openAll()); await page.waitForTimeout(60); T.screens++; if (await over()) T.overflowScreens++;
-    const tt = await page.evaluate(() => [...document.querySelectorAll(".turn-end .tracebtn")].map((b) => b.closest(".turn").dataset.turn));
+    const tt = await page.evaluate(() => [...document.querySelectorAll(".turn-end .link")].map((b) => b.closest(".turn").dataset.turn));
     for (const t of tt) {
       await openLane(id);
-      await page.click('.turn[data-turn="' + t + '"] > .turn-end .tracebtn');
+      await page.click('.turn[data-turn="' + t + '"] > .turn-end .link');
       await afterTitle(page, "Trace"); await page.waitForTimeout(150); T.traces++;
       const rr = await page.evaluate(() => { let n = 0, c = 0; document.querySelectorAll(".hop .more:not([hidden])").forEach((m) => { n++; m.click(); const br = m.parentElement.querySelector(".brief"); if (br.scrollHeight > br.clientHeight + 1) c++; }); return [n, c]; });
       T.hopMore += rr[0]; T.hopMoreStillClipped += rr[1]; await page.waitForTimeout(60); T.screens++; if (await over()) T.overflowScreens++;
@@ -71,36 +71,30 @@ export default async function full(browser) {
   await page.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); });
   const st = page.locator('.step > button:has(.sa:text-matches("…$"))').first();
   if (await st.count()) { await st.click(); await st.scrollIntoViewIfNeeded(); await page.evaluate(() => window.scrollBy(0, -120)); await page.waitForTimeout(400); await page.screenshot({ path: path.join(ENV.out, "full-step.png") }); }
-  const mo = page.locator(".hcard .more:visible").first();
+  const mo = page.locator(".event .ev-more:visible").first();
   if (await mo.count()) { await mo.click(); await mo.scrollIntoViewIfNeeded(); await page.evaluate(() => window.scrollBy(0, -300)); await page.waitForTimeout(400); await page.screenshot({ path: path.join(ENV.out, "full-relay.png") }); }
 
-  // A spawn card's brief opens to its full height and pushes what follows it down. Its text is replaced with a long one and its
-  // "Show more" is shown by hand (the clamp's ResizeObserver does not fire when only the text behind a fixed box changes).
+  // A spawn card's brief is clamped to two lines whatever its length (the card opens the session; there is no "Show more"), and the
+  // card keeps its own box: what follows it starts below it.
   {
     let probe = null;
     for (const id of lanes) {
       await openLane(id);
       probe = await page.evaluate(() => {
-        const c = document.querySelector(".hcard.child-card"); if (!c) return null;
-        const br = c.querySelector(".brief"), more = c.querySelector(".more"), actions = c.querySelector(".child-actions");
-        br.replaceChildren(...Array.from({ length: 14 }, (_, i) => { const p = document.createElement("p"); p.textContent = "Paragraph " + i + " of a long brief. " + "It wraps over several lines on a phone. ".repeat(3); return p; }));
-        more.hidden = false; br.classList.add("clipped");
-        const clamped = { client: br.clientHeight, scroll: br.scrollHeight };
-        more.click();
-        const b = br.getBoundingClientRect(), m = more.getBoundingClientRect(), a = actions?.getBoundingClientRect();
-        const open = { open: c.classList.contains("open"), client: br.clientHeight, scroll: br.scrollHeight, maxHeight: getComputedStyle(br).maxHeight, moreBelow: m.top >= b.bottom - 1, actionsBelow: !a || a.top >= b.bottom - 1, label: more.textContent };
-        more.click();
-        return { clamped, open, closed: { open: c.classList.contains("open"), client: br.clientHeight, scroll: br.scrollHeight, label: more.textContent } };
+        const c = document.querySelector(".child-card"); if (!c) return null;
+        const br = c.querySelector(".cc-brief");
+        br.replaceChildren(document.createTextNode(Array.from({ length: 14 }, (_, i) => "Paragraph " + i + " of a long brief. " + "It wraps over several lines on a phone. ".repeat(3)).join(" ")));
+        const b = br.getBoundingClientRect(), card = c.getBoundingClientRect(), next = c.nextElementSibling?.getBoundingClientRect();
+        const line = parseFloat(getComputedStyle(br).lineHeight);
+        return { clamp: getComputedStyle(br).webkitLineClamp, client: br.clientHeight, scroll: br.scrollHeight, line, cardInside: b.bottom <= card.bottom + 1, nextBelow: !next || next.top >= card.bottom - 1, sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth };
       });
       if (probe) break;
     }
     r.results.spawnBrief = probe;
     r.expect(!!probe, "the fixture needs a spawn card on some session");
     if (probe) {
-      r.expect(probe.clamped.scroll > probe.clamped.client + 1, "the spawn brief is clamped before Show more: " + JSON.stringify(probe.clamped));
-      r.expect(probe.open.open && probe.open.label === "Show less" && probe.open.maxHeight === "none" && probe.open.client >= probe.open.scroll - 1, "an open spawn brief grows to its text: " + JSON.stringify(probe.open));
-      r.expect(probe.open.moreBelow && probe.open.actionsBelow, "Show less and Open sit below an open spawn brief: " + JSON.stringify(probe.open));
-      r.expect(!probe.closed.open && probe.closed.label === "Show more" && probe.closed.scroll > probe.closed.client + 1, "Show less clamps the spawn brief again: " + JSON.stringify(probe.closed));
+      r.expect(probe.clamp === "2" && probe.scroll > probe.client + 1 && probe.client <= probe.line * 2 + 2, "the spawn brief is clamped to two lines: " + JSON.stringify(probe));
+      r.expect(probe.cardInside && probe.nextBelow && probe.sideways <= 0, "a long brief stays inside its card, with what follows below it: " + JSON.stringify(probe));
     }
   }
 

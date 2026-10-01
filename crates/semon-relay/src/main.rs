@@ -1,12 +1,12 @@
 use std::{
     collections::BTreeSet,
-    env,
+    env, fs,
     io::{self, Write},
     net::SocketAddr,
     path::PathBuf,
     process::ExitCode,
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use semon_relay::{
@@ -38,6 +38,8 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         Some("keys") => run_keys(arguments),
         Some("verify") => run_verify(arguments),
         Some("restore") => run_restore(arguments),
+        Some("forget") => run_forget(arguments),
+        Some("snapshot") => run_snapshot(arguments),
         Some("-h" | "--help") => Err(usage()),
         Some(command) => Err(format!("unknown command: {command}\n{}", usage())),
         None => Err(usage()),
@@ -53,6 +55,7 @@ enum SendMode {
 fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
     let mut mode = None;
     let mut projects_arg = None;
+    let mut codex_sessions = None;
     let mut all = false;
     let mut sessions = BTreeSet::new();
     let mut state = default_state()?;
@@ -68,6 +71,9 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
             "--follow" => set_mode(&mut mode, SendMode::Follow)?,
             "--projects" => {
                 projects_arg = Some(PathBuf::from(value(&mut arguments, "--projects")?));
+            }
+            "--codex-sessions" => {
+                codex_sessions = Some(PathBuf::from(value(&mut arguments, "--codex-sessions")?))
             }
             "--all" => all = true,
             "--session" => {
@@ -96,7 +102,11 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
     let mode = mode.ok_or_else(|| format!("send requires --once or --follow\n{}", usage()))?;
     // No implicit default root: shipping every real session by accident
     // (the incident this guard exists for) requires an explicit choice.
-    let projects = match (projects_arg, all) {
+    let codex_only = projects_arg.is_none() && codex_sessions.is_some() && !all;
+    let projects = match (
+        projects_arg.or_else(|| codex_sessions.clone().filter(|_| !all)),
+        all,
+    ) {
         (Some(_), true) => {
             return Err(format!(
                 "send accepts either --projects PATH or --all, not both\n{}",
@@ -107,7 +117,7 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         (None, true) => default_projects()?,
         (None, false) => {
             return Err(format!(
-                "send requires exactly one of --projects PATH or --all\n{}",
+                "send requires --projects PATH, --codex-sessions PATH, or --all\n{}",
                 usage()
             ));
         }
@@ -139,6 +149,16 @@ fn run_send(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         (transport, machine, sender)
     };
     let _ = machine;
+    if !codex_only {
+        if let Some(root) = codex_sessions {
+            sender.add_root(root);
+        } else if all {
+            let root = default_codex_sessions()?;
+            if root.exists() {
+                sender.add_root(root);
+            }
+        }
+    }
     if !sessions.is_empty() {
         sender.set_session_filter(sessions);
     }
@@ -598,19 +618,35 @@ fn run_restore(mut arguments: impl Iterator<Item = String>) -> Result<(), String
     let mut session = None;
     let mut cwd = None;
     let mut projects = None;
+    let mut harness = "claude".to_owned();
+    let mut codex_sessions = None;
     let mut state = None;
     let mut force = false;
     let mut allow_gaps = false;
     let mut json = false;
     let mut insecure_plaintext = false;
     let mut machine = None;
+    let mut memory_root = None;
+    let mut memory_target = None;
+    let mut memory_manifest = None;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--config" => config = value(&mut arguments, "--config")?.into(),
             "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
             "--tls-ca" => tls_ca = Some(PathBuf::from(value(&mut arguments, "--tls-ca")?)),
             "--session" => session = Some(value(&mut arguments, "--session")?),
+            "--memory-root-id" => memory_root = Some(value(&mut arguments, "--memory-root-id")?),
+            "--memory-target" => {
+                memory_target = Some(PathBuf::from(value(&mut arguments, "--memory-target")?))
+            }
+            "--memory-manifest" => {
+                memory_manifest = Some(value(&mut arguments, "--memory-manifest")?)
+            }
             "--cwd" => cwd = Some(PathBuf::from(value(&mut arguments, "--cwd")?)),
+            "--harness" => harness = value(&mut arguments, "--harness")?,
+            "--codex-sessions" => {
+                codex_sessions = Some(PathBuf::from(value(&mut arguments, "--codex-sessions")?))
+            }
             "--projects" => projects = Some(PathBuf::from(value(&mut arguments, "--projects")?)),
             "--state" => state = Some(PathBuf::from(value(&mut arguments, "--state")?)),
             "--force" => force = true,
@@ -624,7 +660,19 @@ fn run_restore(mut arguments: impl Iterator<Item = String>) -> Result<(), String
     }
     let session = session.ok_or_else(|| "restore requires --session".to_owned())?;
     let cwd = cwd.ok_or_else(|| "restore requires --cwd".to_owned())?;
-    let projects = projects.map_or_else(default_projects, Ok)?;
+    let projects = match harness.as_str() {
+        "claude" if codex_sessions.is_none() => projects.map_or_else(default_projects, Ok)?,
+        "codex" if projects.is_none() => codex_sessions.map_or_else(default_codex_sessions, Ok)?,
+        _ => return Err("restore accepts --harness claude with --projects, or --harness codex with --codex-sessions".into()),
+    };
+    validate_memory_selection(
+        memory_root.as_deref(),
+        memory_target.as_deref(),
+        memory_manifest.as_deref(),
+    )?;
+    if memory_root.is_some() && insecure_plaintext {
+        return Err("memory recovery requires an enrolled encrypted machine".into());
+    }
     let state = state.map_or_else(default_state, Ok)?;
     let (transport, machine, identity) = transport_context(
         endpoint,
@@ -633,7 +681,17 @@ fn run_restore(mut arguments: impl Iterator<Item = String>) -> Result<(), String
         insecure_plaintext,
         machine,
     )?;
-    let report = if let Some(identity) = identity {
+    let tips = transport
+        .lease_tips(&session, &machine)
+        .map_err(|error| error.to_string())?;
+    if tips
+        .tips
+        .iter()
+        .any(|tip| tip.stream.starts_with("codex/") != (harness == "codex"))
+    {
+        return Err("receiver streams do not match requested --harness".into());
+    }
+    let report = if let Some(ref identity) = identity {
         restore_session_encrypted(
             &projects,
             &state,
@@ -651,16 +709,93 @@ fn run_restore(mut arguments: impl Iterator<Item = String>) -> Result<(), String
         )
     }
     .map_err(|error| error.to_string())?;
-    if json {
-        println!("{}", report.to_json());
+    let memory = if let (Some(root), Some(target)) = (&memory_root, &memory_target) {
+        identity
+            .as_ref()
+            .ok_or_else(|| "memory recovery requires encrypted identity".to_owned())
+            .and_then(|identity| {
+                semon_relay::restore_snapshot_for_session(
+                    root,
+                    memory_manifest.as_deref(),
+                    target,
+                    &machine,
+                    &identity.age,
+                    &transport,
+                    Some(&session),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .map(|report| serde_json::json!({"status":"restored","root":root,"report":report}))
     } else {
-        println!("{}", report.to_text());
+        Ok(serde_json::json!({"status":"not_selected"}))
+    };
+    let memory_error = memory.as_ref().err().cloned();
+    let memory = memory.unwrap_or_else(|error| serde_json::json!({"status":"failed","root":memory_root,"target":memory_target,"error":error}));
+    let mut output = report.to_json();
+    output["recovery_status"] = serde_json::json!({"memory":memory,"sidecars":"only explicitly selected memory roots are restored; all other sidecars are omitted"});
+    if memory_error.is_some() {
+        output["incomplete"] = true.into();
+        output["next_step"] = serde_json::Value::Null;
     }
-    if report.incomplete {
+    if json {
+        println!("{output}");
+    } else {
+        let mut text = report.to_text();
+        if memory_error.is_some()
+            && let Some(command) = report.next_step()
+        {
+            text = text
+                .lines()
+                .filter(|line| *line != command)
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        println!(
+            "{text}\nmemory recovery: {}\nsidecars: only explicitly selected roots; all other sidecars omitted",
+            output["recovery_status"]["memory"]
+        );
+    }
+    if let Some(error) = memory_error {
+        Err(format!(
+            "session files were restored, but memory recovery failed: {error}; review partial recovery before resuming"
+        ))
+    } else if report.incomplete {
         Err("restore is incomplete because one or more streams contain a gap".into())
     } else {
         Ok(())
     }
+}
+
+fn validate_memory_selection(
+    root: Option<&str>,
+    target: Option<&std::path::Path>,
+    manifest: Option<&str>,
+) -> Result<(), String> {
+    if root.is_some() != target.is_some() || (manifest.is_some() && root.is_none()) {
+        return Err("memory recovery requires both --memory-root-id and --memory-target; --memory-manifest is optional".into());
+    }
+    for id in root.into_iter().chain(manifest) {
+        if id.len() != 64
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("memory identifiers must be lowercase SHA-256".into());
+        }
+    }
+    if let Some(target) = target {
+        match fs::symlink_metadata(target) {
+            Ok(_) => {
+                return Err(
+                    "memory recovery requires a new target; existing paths are never overwritten"
+                        .into(),
+                );
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
 }
 
 fn transport_context(
@@ -695,7 +830,76 @@ fn transport_context(
     }
 }
 
+fn run_forget(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut selector = semon_relay::ForgetSelector::default();
+    let mut state = default_state()?;
+    let mut endpoint = DEFAULT_ENDPOINT.to_owned();
+    let mut config = default_config()?;
+    let mut machine = None;
+    let mut tls_ca = None;
+    let mut insecure_plaintext = false;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--session" => selector.session = Some(value(&mut arguments, "--session")?),
+            "--before" => selector.before_ns = Some(semon_relay::forget_before_day(&value(&mut arguments, "--before")?)?),
+            "--memory" => {
+                let root = PathBuf::from(value(&mut arguments, "--memory")?);
+                if root.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+                    return Err("--memory root must not contain ..".into());
+                }
+                let root = if root.is_absolute() { root } else { env::current_dir().map_err(|error| error.to_string())?.join(root) };
+                let label = root.to_str().ok_or("--memory root is not UTF-8")?;
+                use sha2::{Digest, Sha256};
+                selector.memory_root = Some(hex::encode(Sha256::digest(label.as_bytes())));
+            }
+            "--memory-id" => selector.memory_root = Some(value(&mut arguments, "--memory-id")?),
+            "--trace" => return Err("--trace selects semantic content; it cannot select replicated carrier frames and does not delete server copies".into()),
+            "--state" => state = value(&mut arguments, "--state")?.into(),
+            "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
+            "--config" => config = value(&mut arguments, "--config")?.into(),
+            "--machine" => machine = Some(value(&mut arguments, "--machine")?),
+            "--tls-ca" => tls_ca = Some(PathBuf::from(value(&mut arguments, "--tls-ca")?)),
+            "--insecure-plaintext" => insecure_plaintext = true,
+            "-h" | "--help" => return Err(usage()),
+            _ => return Err(format!("unknown forget argument: {argument}\n{}", usage())),
+        }
+    }
+    selector.validate().map_err(|error| error.to_string())?;
+    let (transport, machine, _) = transport_context(
+        endpoint,
+        &config,
+        tls_ca.as_deref(),
+        insecure_plaintext,
+        machine,
+    )?;
+    let id = semon_relay::queue_forget(&state, &transport.deletion_scope(), &selector)
+        .map_err(|error| error.to_string())?;
+    let result = semon_relay::flush_forgets(&state, &machine, &transport)
+        .map_err(|error| error.to_string())?;
+    println!(
+        "forget id={id} acknowledged={} pending_on_server={}",
+        result.acknowledged, result.pending
+    );
+    if result.pending > 0 {
+        println!("pending on server; the sender retries until acknowledged");
+        for failure in result.failures {
+            eprintln!("semon-relay: {failure}");
+        }
+    }
+    println!("Carrier files and copies another machine already restored are not deleted.");
+    Ok(())
+}
+
 fn print_report(report: &PassReport) -> io::Result<()> {
+    if report.deletions.acknowledged > 0 || report.deletions.pending > 0 {
+        println!(
+            "relay deletions acknowledged={} pending_on_server={}",
+            report.deletions.acknowledged, report.deletions.pending
+        );
+        for failure in &report.deletions.failures {
+            eprintln!("relay deletion pending: {failure}");
+        }
+    }
     for stream in &report.streams {
         println!(
             "relay stream session={} stream={} generation={} epoch={} fenced={} acked_lines={} \
@@ -758,6 +962,14 @@ fn value(arguments: &mut impl Iterator<Item = String>, option: &str) -> Result<S
         .ok_or_else(|| format!("{option} requires a value"))
 }
 
+fn default_codex_sessions() -> Result<PathBuf, String> {
+    env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+        .map(|home| home.join("sessions"))
+        .ok_or_else(|| "CODEX_HOME or HOME is required".into())
+}
+
 fn default_projects() -> Result<PathBuf, String> {
     Ok(home()?.join(".claude/projects"))
 }
@@ -794,7 +1006,7 @@ fn machine_identity(override_value: Option<String>) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "Usage: semon-relay send (--once | --follow) (--projects PATH | --all) [--session S ...] \
+    "Usage: semon-relay send (--once | --follow) (--projects PATH | --codex-sessions PATH | --all) [--session S ...] \
      [--state PATH] [--endpoint URL] [--config PATH] [--tls-ca CERT] [--interval-ms N] \
      [--insecure-plaintext --machine ID]\n\
      Usage: semon-relay receive [--listen 127.0.0.1:8734] --dir PATH \
@@ -809,10 +1021,244 @@ fn usage() -> String {
      Usage: semon-relay keys rewrap [--session S] [--force] [--endpoint URL] [--tls-ca CERT]\n\
      Usage: semon-relay keys decrypt-envelope --session S --identity PATH [--endpoint URL] [--tls-ca CERT]\n\
      Usage: semon-relay verify --session S [--endpoint URL] [--config PATH] [--tls-ca CERT]\n\
-     Usage: semon-relay restore --session S --cwd PATH [--projects PATH] [--state PATH] [--force] [--allow-gaps] [--json] \
+     Usage: semon-relay forget (--session S | --before YYYY-MM-DD | --memory ROOT | --memory-id ID) [--state PATH] [--endpoint URL] [--config PATH] [--tls-ca CERT]\n\
+     Usage: semon-relay restore [--harness claude|codex] [--codex-sessions PATH] --session S --cwd PATH [--projects PATH] [--state PATH] [--force] [--allow-gaps] [--json] [--memory-root-id SHA256 --memory-target NEW_DIR [--memory-manifest SHA256]] \
      [--endpoint URL] [--config PATH] [--tls-ca CERT] [--insecure-plaintext --machine ID]\n\
+     Usage: semon-relay snapshot capture|follow --root PATH [--root-id SHA256] [--parent SHA256] [--session SESSION] [--epoch N] [--endpoint URL] [--config PATH] [--tls-ca CERT]\n\
+     Usage: semon-relay snapshot list --root-id SHA256 [--endpoint URL] [--config PATH] [--tls-ca CERT]\n\
+     Usage: semon-relay snapshot restore --root-id SHA256 --target NEW_DIR [--manifest SHA256] [--endpoint URL] [--config PATH] [--tls-ca CERT]\n\
      Encrypted signed requests are the default; plaintext requires an explicit loopback-only flag."
         .into()
+}
+
+fn run_snapshot(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    use semon_relay::{
+        SnapshotCache, inspect_snapshot_manifest, list_snapshot_history, load_snapshot_packet,
+        persist_snapshot_packet, publish_snapshot, restore_snapshot, snapshot_root_id,
+    };
+    use serde_json::json;
+    let action = arguments
+        .next()
+        .ok_or_else(|| "snapshot requires capture, follow, list or restore".to_owned())?;
+    if !matches!(action.as_str(), "capture" | "follow" | "list" | "restore") {
+        return Err("unknown snapshot action".into());
+    }
+    let mut config = default_config()?;
+    let mut endpoint = DEFAULT_ENDPOINT.to_owned();
+    let mut tls_ca = None;
+    let mut root = None;
+    let mut root_id = None;
+    let mut parent = None;
+    let mut selected = None;
+    let mut target = None;
+    let mut epoch = None;
+    let mut session = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--config" => config = value(&mut arguments, "--config")?.into(),
+            "--endpoint" => endpoint = value(&mut arguments, "--endpoint")?,
+            "--tls-ca" => tls_ca = Some(PathBuf::from(value(&mut arguments, "--tls-ca")?)),
+            "--root" => root = Some(PathBuf::from(value(&mut arguments, "--root")?)),
+            "--root-id" => root_id = Some(value(&mut arguments, "--root-id")?),
+            "--parent" => parent = Some(value(&mut arguments, "--parent")?),
+            "--manifest" => selected = Some(value(&mut arguments, "--manifest")?),
+            "--target" => target = Some(PathBuf::from(value(&mut arguments, "--target")?)),
+            "--session" => session = Some(value(&mut arguments, "--session")?),
+            "--epoch" => {
+                epoch = Some(
+                    value(&mut arguments, "--epoch")?
+                        .parse::<u64>()
+                        .map_err(|_| "invalid epoch")?,
+                )
+            }
+            _ => return Err(format!("unknown snapshot argument: {argument}")),
+        }
+    }
+    let root = match root {
+        Some(path) if path.is_absolute() => Some(path),
+        Some(path) => Some(
+            std::env::current_dir()
+                .map_err(|e| e.to_string())?
+                .join(path),
+        ),
+        None => None,
+    };
+    let root_id = root_id
+        .or_else(|| {
+            root.as_ref()
+                .map(|p| snapshot_root_id(&p.to_string_lossy()))
+        })
+        .ok_or_else(|| "snapshot requires --root or --root-id".to_owned())?;
+    let scope = snapshot_root_id(&endpoint);
+    let (transport, machine, identity) =
+        transport_context(endpoint, &config, tls_ca.as_deref(), false, None)?;
+    let identity =
+        identity.ok_or_else(|| "snapshots require an enrolled encrypted machine".to_owned())?;
+    if action == "list" {
+        let list =
+            list_snapshot_history(&root_id, &machine, &transport).map_err(|e| e.to_string())?;
+        // List public history only; ciphertext need not fill the terminal.
+        let manifests=list["manifests"].as_array().ok_or_else(||"invalid history".to_owned())?.iter().map(|m|json!({"id":m["id"],"machine":m["machine"],"parent":m["parent"],"taken_at_wall":m["taken_at_wall"]})).collect::<Vec<_>>();
+        println!(
+            "{}",
+            json!({"root":root_id,"heads":list["heads"],"manifests":manifests})
+        );
+        return Ok(());
+    }
+    if action == "restore" {
+        let target = target
+            .ok_or_else(|| "snapshot restore requires --target (a new directory)".to_owned())?;
+        let report = restore_snapshot(
+            &root_id,
+            selected.as_deref(),
+            &target,
+            &machine,
+            &identity.age,
+            &transport,
+        )
+        .map_err(|e| e.to_string())?;
+        println!("{report}");
+        return Ok(());
+    }
+    let root = root.ok_or_else(|| "snapshot capture/follow requires --root".to_owned())?;
+    let recipients = load_recipients(&config.join(RECIPIENTS_FILE)).map_err(|e| e.to_string())?;
+    let outbox = config.join("snapshot-outbox").join(scope);
+    fs::create_dir_all(&outbox).map_err(|e| e.to_string())?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&outbox, fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    let pending = outbox.join(format!("{root_id}.json"));
+
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap_or_else(|_| hex::encode(semon_relay::generate_data_key()));
+    let mut cache = SnapshotCache::default();
+    loop {
+        let pass = (|| -> Result<(), String> {
+            if pending.exists() {
+                let packet = load_snapshot_packet(&pending).map_err(|e| e.to_string())?;
+                if packet.manifest["root"] != root_id || packet.manifest["machine"] != machine {
+                    return Err("pending snapshot scope mismatch".into());
+                }
+                publish_snapshot(&packet, &transport).map_err(|e| e.to_string())?;
+                fs::remove_file(&pending).map_err(|e| e.to_string())?;
+            }
+            let list =
+                list_snapshot_history(&root_id, &machine, &transport).map_err(|e| e.to_string())?;
+            let manifests = list["manifests"]
+                .as_array()
+                .ok_or_else(|| "invalid snapshot history".to_owned())?;
+            let previous = if let Some(ref id) = parent {
+                manifests.iter().find(|m| m["id"] == *id)
+            } else {
+                manifests.iter().rev().find(|m| m["machine"] == machine)
+            };
+            if parent.is_some() && previous.is_none() {
+                return Err("explicit parent is missing from this root".into());
+            }
+            let wall = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_millis() as u64;
+            let associated_epoch = if let Some(ref session) = session {
+                let status = transport
+                    .lease_status(Some(session), &machine)
+                    .map_err(|error| error.to_string())?;
+                Some(snapshot_associated_epoch(
+                    &status,
+                    session,
+                    &machine,
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|error| error.to_string())?
+                        .as_millis() as u64,
+                    epoch,
+                )?)
+            } else {
+                epoch
+            };
+            let packet = cache
+                .capture(
+                    &root,
+                    &root_id,
+                    &machine,
+                    previous.and_then(|m| m["id"].as_str()),
+                    wall,
+                    snapshot_monotonic_ms()?,
+                    boot.trim(),
+                    associated_epoch,
+                    session.as_deref(),
+                    &recipients,
+                )
+                .map_err(|e| e.to_string())?;
+            if let Some(previous) = previous {
+                let previous_id = previous["id"].clone();
+                let previous=transport.snapshot_request("/v1/snapshots/get",&json!({"root":root_id,"machine":machine,"kind":"manifest","id":previous["id"]})).map_err(|e|e.to_string())?;
+                if previous["id"] != previous_id || previous["root"] != root_id {
+                    return Err("previous snapshot substitution".into());
+                }
+                let old = inspect_snapshot_manifest(&previous, &identity.age)
+                    .map_err(|e| e.to_string())?;
+                let new = inspect_snapshot_manifest(&packet.manifest, &identity.age)
+                    .map_err(|e| e.to_string())?;
+                if old["entries"] == new["entries"]
+                    && old["session"] == new["session"]
+                    && old["epoch"] == new["epoch"]
+                {
+                    return Ok(());
+                }
+            }
+            persist_snapshot_packet(&pending, &packet).map_err(|e| e.to_string())?;
+            publish_snapshot(&packet, &transport).map_err(|e| e.to_string())?;
+            fs::remove_file(&pending).map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                json!({"root":root_id,"manifest":packet.manifest["id"],"blobs":packet.blobs.len()})
+            );
+            parent = None;
+            Ok(())
+        })();
+        if action == "capture" {
+            return pass;
+        }
+        if let Err(error) = pass {
+            eprintln!("snapshot pending: {error}");
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+}
+
+fn snapshot_associated_epoch(
+    status: &semon_relay::LeaseStatus,
+    session: &str,
+    machine: &str,
+    now: u64,
+    expected: Option<u64>,
+) -> Result<u64, String> {
+    let row = status
+        .rows
+        .iter()
+        .find(|row| row.session == session)
+        .ok_or_else(|| "associated session has no lease".to_owned())?;
+    if row.holder_machine != machine || row.lease_expires_at_ms <= now {
+        return Err("associated session lease is not currently held by this machine".into());
+    }
+    if expected.is_some_and(|epoch| epoch != row.epoch) {
+        return Err("--epoch disagrees with observed session lease".into());
+    }
+    Ok(row.epoch)
+}
+
+fn snapshot_monotonic_ms() -> Result<u64, String> {
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) } != 0 {
+        return Err(io::Error::last_os_error().to_string());
+    }
+    Ok((value.tv_sec as u64).saturating_mul(1000) + (value.tv_nsec as u64) / 1_000_000)
 }
 
 #[cfg(test)]
@@ -839,5 +1285,52 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn memory_selection_requires_explicit_new_target_and_valid_ids() {
+        let root = "a".repeat(64);
+        assert!(validate_memory_selection(Some(&root), None, None).is_err());
+        assert!(validate_memory_selection(None, None, Some(&root)).is_err());
+        assert!(
+            validate_memory_selection(Some("wrong"), Some(std::path::Path::new("/missing")), None)
+                .is_err()
+        );
+        let existing = std::env::temp_dir();
+        assert!(validate_memory_selection(Some(&root), Some(&existing), None).is_err());
+        let new = existing.join(format!(
+            "semon-new-memory-{}",
+            hex::encode(semon_relay::generate_data_key())
+        ));
+        assert!(validate_memory_selection(Some(&root), Some(&new), Some(&root)).is_ok());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("missing", &new).unwrap();
+            assert!(validate_memory_selection(Some(&root), Some(&new), None).is_err());
+            fs::remove_file(new).unwrap();
+        }
+    }
+    #[test]
+    fn snapshot_association_requires_current_holder_and_observed_epoch() {
+        let status = semon_relay::LeaseStatus {
+            rows: vec![semon_relay::LeaseRow {
+                session: "session".into(),
+                epoch: 7,
+                holder_machine: "machine".into(),
+                lease_expires_at_ms: 100,
+            }],
+            takeovers: vec![],
+        };
+        assert_eq!(
+            snapshot_associated_epoch(&status, "session", "machine", 99, None).unwrap(),
+            7
+        );
+        assert_eq!(
+            snapshot_associated_epoch(&status, "session", "machine", 99, Some(7)).unwrap(),
+            7
+        );
+        assert!(snapshot_associated_epoch(&status, "session", "other", 99, None).is_err());
+        assert!(snapshot_associated_epoch(&status, "session", "machine", 100, None).is_err());
+        assert!(snapshot_associated_epoch(&status, "session", "machine", 99, Some(6)).is_err());
+        assert!(snapshot_associated_epoch(&status, "missing", "machine", 99, None).is_err());
     }
 }

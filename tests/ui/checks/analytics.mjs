@@ -147,6 +147,9 @@ export default async function analyticsCheck(browser) {
   const asked0 = asks; await fp.waitForTimeout(6000);
   failing.spacing = { asks: asks - asked0, modelUpdates: updates };
   await fp.unroute(modelUrl);
+  await fp.route(modelUrl, async (route) => { const url = new URL(route.request().url()); url.searchParams.delete("since"); const response = await route.fetch({ url: url.toString() }); await route.fulfill({ response }); });
+  await fp.waitForResponse((response) => new URL(response.url()).pathname === "/api/model" && response.status() === 200);
+  await fp.unroute(modelUrl);
   failing.steps.during = await shown();
   // 409, on 30 d (kept): the reader's click asks at once.
   mode = "conflict"; await fp.click('#topbar .analytics-range button:has-text("30 d")');
