@@ -5,7 +5,7 @@
 //   "sample"    the previous mockup (reference/semon-sample.html): enforced
 //   "overhaul"  the overhaul mockup (reference/overhaul.html): enforced. A screen's port PR flips it here.
 //   "pending"   a screen whose port PR hasn't landed but whose look has already moved on (the overhaul's tokens are global, so
-//               the previous mockup no longer describes it): compared with the overhaul mockup and reported, not enforced
+//               the previous mockup no longer describes it): compared with the overhaul mockup; mismatch growth and size changes fail
 //   null        a screen the viewer doesn't draw yet (loading, empty, error, not found): not compared
 //
 // Two comparisons per screen, both against the screen's mapped mockup rendered in the same browser:
@@ -16,7 +16,7 @@
 //           the served page must match it within the anti-aliasing tolerance. Enforced.
 //   sample  The previous sample mockup exactly as committed, with its own data. The differences are the fixture's gaps (gaps.json:
 //           one machine, no moves, …) and what the overhaul fixture added (a screen of a session the sample lacks isn't compared),
-//           so this one is reported with its diff images, not enforced.
+//           so this optional comparison is reported with its diff images, not enforced.
 //
 // Fonts: both sides use the vendored woff2 files (the reference's Google Fonts request is answered with them).
 // Clock: both pages stand at the fixture's now, in UTC.
@@ -53,6 +53,8 @@ function referenceOf(name) {
   const keys = Object.keys(MAP.screens).filter((k) => name === k || name.startsWith(k + "-")).sort((a, b) => b.length - a.length);
   return keys.length ? MAP.screens[keys[0]] : undefined;
 }
+// The old sample comparison is historical reporting, not a regression gate. Opt in explicitly.
+const SAMPLE_REPORT = process.env.SEMON_PIXEL_SAMPLE_REPORT === "1";
 const MOCKUP = fs.readFileSync(path.join(here, MAP.references.sample), "utf8");
 const OVERHAUL = fs.readFileSync(path.join(here, MAP.references.overhaul), "utf8");
 function stableMockup(html) {
@@ -429,7 +431,7 @@ function saveMismatch(row, name, scheme, p) {
     const ports = new Map();
     const portFor = async (ref) => { if (!ports.has(ref)) ports.set(ref, await referencePage(browser, size, dark, portReference(D, ref))); return ports.get(ref); };
     const other = REF_BASE ? await served(browser, { size, dark, base: REF_BASE, token: REF_TOKEN }) : null;
-    const orig = other ? null : await referencePage(browser, size, dark, MOCKUP);
+    const orig = other || !SAMPLE_REPORT ? null : await referencePage(browser, size, dark, MOCKUP);
     for (const s of list.filter((x) => other || referenceOf(x.name) !== null)) {
       const mapped = other ? "served" : referenceOf(s.name), enforced = mapped !== "pending", ref = other ? "served" : enforced ? mapped : "overhaul";
       const port = other ?? await portFor(ref);
@@ -459,7 +461,7 @@ function saveMismatch(row, name, scheme, p) {
         } catch (e) { rrow.error = String(e.message ?? e).split("\n")[0]; }
         regions.push(rrow);
       }
-      if (s.sample && !other) {
+      if (s.sample && orig) {
         await nav(orig, s.sample, D, true); const c = await shot(orig, size);
         const q = compare(a, c);
         row.sample = { pixels: q.pixels, ratio: q.ratio, size: q.size };
@@ -503,7 +505,7 @@ function saveMismatch(row, name, scheme, p) {
   fs.writeFileSync(path.join(ENV.out, "pixels.md"), md + regionMd + "\n" + note);
   console.log(md + regionMd);
   console.log("regions: " + regions.length + ", failing: " + regions.filter((r) => !r.port.pass).length);
-  console.log("screens: " + results.length + ", port mismatches: " + failed.length + ", page errors: " + errors.length + (pending.length ? ", pending (reported, not enforced): " + pending.length : ""));
+  console.log("screens: " + results.length + ", port mismatches: " + failed.length + ", page errors: " + errors.length + (pending.length ? ", pending (ratchet enforced): " + pending.length : ""));
   if (skipped.length) console.log("unmapped, not compared: " + skipped.join(", "));
   for (const e of errors) console.log("  page error: " + e);
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Pixel comparison\n\n" + md + regionMd + "\n" + note);

@@ -1,6 +1,6 @@
 // Tap targets on the phone (#54 point 1): every interactive element on the main phone screens is at least 44×44 CSS px
 // at 390 wide, and the check fails listing each one that isn't. It walks Home, Sessions, Machines, Analytics (and its
-// slice sheet), every session (collapsed, scrolled up to show the jump button, and with everything expanded), every
+// slice sheet), representative sessions (collapsed, scrolled up to show the jump button, and expanded), their
 // trace, and the overlays a phone reaches from them: the navigation drawer with its tree open, the details menu, the
 // filters popover, Find, the session-details sheet with its cost breakdown, the runs sheet, the session path in a child's
 // details menu and the View script sheet. It runs on the sample fixture and on the extras fixture (code mode, markdown, the payload lane).
@@ -23,6 +23,7 @@
 //     stands alone in its element is measured like any control. The allowed controls are counted per signature in taps.json
 //     (results.allowed), so a new allowed signature shows.
 //   - chart columns only when their panel also offers the equivalent time-slice button list.
+import { tapSessions } from "../suite-plan.mjs";
 import { ENV, served, goto, data, reporter, closePage } from "../lib.mjs";
 
 const MIN = 44;
@@ -246,9 +247,9 @@ export default async function tapsCheck(browser) {
       await page.waitForTimeout(150); await tally(page, at("drawer tree open")); await closeOverlays(page);
     });
 
-    // Every session, and its overlays.
+    // Representative content shapes and their overlays; exhaustive mode visits every session.
     let detailsDone = 0;
-    for (const sid of Object.keys(D.SESS)) {
+    for (const sid of tapSessions(D.SESS, name, process.env.SEMON_UI_COVERAGE === "exhaustive")) {
       const short = D.SESS[sid].name.slice(0, 24);
       await goto(page, { v: "session", id: sid }, D); await page.waitForTimeout(80);
       await tally(page, at("session " + short));
@@ -308,6 +309,7 @@ export default async function tapsCheck(browser) {
 
   const shortList = [...seen.entries()].sort((a, b) => a[1].minH - b[1].minH);
   r.results = {
+    coverage: process.env.SEMON_UI_COVERAGE === "exhaustive" ? "exhaustive" : "representative",
     screens, measured, skippedProbes, tokenDetails, sliceLists,
     under44: shortList.map(([sig, g]) => ({ sig, minW: g.minW, minH: g.minH, n: g.n, text: g.text, screens: [...g.screens].slice(0, 6) })),
     signatures: bySignature, allowed: allowedBy, problems,
@@ -329,6 +331,9 @@ export default async function tapsCheck(browser) {
   r.expect(sliceLists > 0, "no equivalent chart time-slice button list was opened and measured");
   for (const must of ["nav-item", "srow", "ibtn", "jump", "analytics-range", "analytics-measure", "viewscript", "menu-path-item"]) {
     r.expect(Object.keys(bySignature).some((sig) => sig.includes("." + must)), "no ." + must + " was measured: its screen was not reached");
+  }
+  for (const shape of ["button.agent-row.agent-more", "div.list > button.more", "div.event.waiting > button.link.ev-more"]) {
+    r.expect(Object.keys(bySignature).some(sig => sig.includes(shape)), "representative coverage missed control shape: " + shape);
   }
   return r.done();
 }
