@@ -895,6 +895,95 @@ fn codex_runs_link_by_marker_or_parent_thread_and_otherwise_stay_unlinked() {
 }
 
 #[test]
+fn guardian_reviews_get_a_stable_kind_and_name_without_losing_codex_data() {
+    let home = Home::new();
+    let records = |minute: i64, prompt: &str, answer: &str| {
+        vec![
+            codex_user(ts(5, minute), prompt),
+            codex_reply(ts(5, minute + 1), answer),
+            codex_line(
+                ts(5, minute + 2),
+                "turn_context",
+                json!({"model":"gpt-6-luna"}),
+            ),
+            codex_line(
+                ts(5, minute + 3),
+                "event_msg",
+                json!({"type":"token_count","info":{"total_token_usage":{
+                    "input_tokens":1_000,"cached_input_tokens":200,"output_tokens":50,
+                    "reasoning_output_tokens":10,"total_tokens":1_060
+                }}}),
+            ),
+        ]
+    };
+    home.codex(
+        "codex-parent",
+        json!({}),
+        &records(0, "coordinate", "parent transcript"),
+    );
+    home.codex(
+        "codex-worker",
+        json!({"parent_thread_id":"codex-parent","thread_source":"subagent","agent_nickname":"worker","agent_path":"root/worker"}),
+        &records(10, "implement", "worker transcript"),
+    );
+    home.codex(
+        "guardian-canonical",
+        json!({"parent_thread_id":"codex-parent","thread_source":"guardian_review","agent_nickname":"reviewer","agent_path":"root/reviewer"}),
+        &records(20, "review one", "canonical review transcript"),
+    );
+    home.codex(
+        "guardian-nested-source",
+        json!({"parent_thread_id":"codex-parent","source":{"subagent":{"other":"guardian"}}}),
+        &records(30, "review two", "nested-source review transcript"),
+    );
+    home.codex(
+        "approval-review-name-only",
+        json!({"parent_thread_id":"codex-parent","thread_source":"subagent","agent_nickname":"Approval review helper","agent_path":"root/helper"}),
+        &records(40, "implement helper", "ordinary helper transcript"),
+    );
+
+    let built = home.build();
+    assert_eq!(built.sessions["codex-parent"].kind, Some("Codex run"));
+    for id in [
+        "codex-worker",
+        "guardian-canonical",
+        "guardian-nested-source",
+        "approval-review-name-only",
+    ] {
+        assert_eq!(built.sessions[id].parent.as_deref(), Some("codex-parent"));
+        assert!(built.tx.contains_key(id), "{id} keeps its transcript");
+        assert!(
+            built.sessions[id]
+                .tokens_by_model
+                .contains_key("gpt-6-luna")
+        );
+    }
+    assert_eq!(built.sessions["codex-worker"].kind, Some("Codex run"));
+    assert_eq!(built.sessions["codex-worker"].name, "worker");
+    for id in ["guardian-canonical", "guardian-nested-source"] {
+        assert_eq!(built.sessions[id].kind, Some("Approval review"));
+        assert_eq!(built.sessions[id].name, "Approval review");
+    }
+    assert_eq!(
+        built.sessions["approval-review-name-only"].kind,
+        Some("Codex run")
+    );
+    assert_eq!(
+        built.sessions["approval-review-name-only"].name,
+        "Approval review helper"
+    );
+    assert_eq!(
+        built.sessions["guardian-canonical"].tokens_by_model["gpt-6-luna"],
+        crate::events::ModelTokens {
+            input: 800,
+            output: 50,
+            cache_write: 0,
+            cache_read: 200,
+        }
+    );
+}
+
+#[test]
 fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
     let home = Home::new();
     let command = r#"S=/tmp/x/scratchpad; P=$S/codex-foo-prompt.md; { printf 'Semon-Parent: claude:%s\nSemon-Handoff: %s\n' "$CLAUDE_CODE_SESSION_ID" "$P"; cat "$P"; } | codex exec --json -C /home/u/wt/semon-wt-foo"#;
