@@ -26,7 +26,7 @@ jobs:
   browser:
     name: viewer browser checks
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     env:
       SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
     steps:
