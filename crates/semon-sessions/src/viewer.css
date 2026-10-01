@@ -1239,7 +1239,7 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
   .step > button, .tsum { width: 100%; margin: 0; padding-inline: 0; }
   .step .out .io > button { min-height: 44px; min-width: 44px; margin: 0; }
   .out > .viewall:last-child { border-radius: 0 0 var(--r2) var(--r2); }
-  .tree-row.has-toggle > .srow { width: calc(100% - 60px); }
+  .tree-row > .srow { width: calc(100% - 44px); }
   .tree-row.has-toggle .srow-meta { padding-right: 0; }
   .hop .body > .more { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; margin: 0; padding: 0; }
 }

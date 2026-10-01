@@ -6,6 +6,7 @@
 //   SEMON_UI_OUT where reports, screenshots and diffs go (default: ./out)
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 export const ENV = {
@@ -21,7 +22,12 @@ export const ENV = {
 };
 fs.mkdirSync(ENV.out, { recursive: true });
 
-export const launch = () => chromium.launch({ args: ["--disable-gpu", "--font-render-hinting=none"] });
+export const launch = () => chromium.launch({
+  args: ["--disable-gpu", "--font-render-hinting=none"],
+  ...(process.platform === "linux" ? {
+    env: { ...process.env, FONTCONFIG_FILE: fileURLToPath(new URL("./fontconfig.conf", import.meta.url)) },
+  } : {}),
+});
 
 // The three screens every check and comparison covers.
 export const VIEWPORTS = {

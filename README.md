@@ -731,6 +731,17 @@ cargo test --locked
 sh -n scripts/install-user-timer.sh
 ```
 
+Browser checks use the locked tooling in `tests/ui/` (`npm ci` and
+`npx playwright install --with-deps chromium`); `.github/workflows/ui.yml`
+contains the fixture and server setup. Capture pixel baselines in Ubuntu 24.04
+with that locked browser and its default fontconfig RGB subpixel rendering.
+The same vendored fonts and Chromium version produce different glyph pixels on
+Debian 13, whose fontconfig defaults to no subpixel rendering. The Linux browser
+launcher uses the checked-in `tests/ui/fontconfig.conf` to assign `rgba` to `rgb`,
+matching Ubuntu CI without changing the host configuration or system fonts.
+Review changed screenshots before updating affected baseline entries, and keep
+the pixel thresholds unchanged.
+
 ## Harness icons
 
 Semon shows each harness's official icon to identify where a session came from. The unmodified files are in
