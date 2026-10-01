@@ -27,6 +27,12 @@ export default async function viewerBacklog(browser) {
       }));
       assert(rows.length > 0 && rows.every((x) => x.main && x.model && x.fits && x.items.every((v) => !v.cut)), size + ": metadata must drop complete values");
       assert(await page.locator('#lanes [data-session-row="compact"] .session-row-main').count() > 0);
+      const fields = await page.locator('.session-row-meta > .row-duration, .session-row-meta > .row-machine, .session-row-meta > .repo-short').evaluateAll((fields) => fields.map((field) => ({
+        icon: field.querySelectorAll(':scope > svg[aria-hidden="true"]').length,
+        text: field.querySelector(':scope > .field-value')?.textContent,
+        atomic: field.classList.contains('row-field') && field.hasAttribute('data-drop'),
+      })));
+      assert(fields.length > 0 && fields.every((field) => field.icon === 1 && field.text && field.atomic), size + ': metadata fields keep their decorative icon and text together');
       if (size === "phone") {
         await goto(page, { v: "analytics" }, D);
         await page.waitForSelector("#page [data-analytics-ready]");
