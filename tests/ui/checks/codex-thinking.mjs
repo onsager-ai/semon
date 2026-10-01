@@ -36,12 +36,19 @@ export default async function codexThinkingCheck(browser) {
   const entries = [];
   add(entries, "think", null, { text: "# Prelude" });
   add(entries, "think", null, { text: "# Prelude\n# Before turns" });
+  add(entries, "think", "codex-thinking-removed-turn-a", { text: "# Plan" });
+  add(entries, "think", null, { text: "# Plan\n# Stage A" });
+  add(entries, "think", "codex-thinking-removed-turn-b", { text: "# Plan\n# Stage A\n# Stage B" });
+  add(entries, "think", null, { text: "# Plan\n# Stage A\n# Stage B\n# Stage C" });
   add(entries, "think", codexTurn, { text: "# Plan", secs: "1s" });
   add(entries, "think", null, { text: "# Plan\n# Stage A", secs: "2s" });
   add(entries, "think", null, { text: "# Plan\n# Stage A\n# Stage B", secs: "3s" });
   add(entries, "think", null, { text: "# Plan\n# Stage A\n# Stage B", secs: "4s" });
+  add(entries, "think", null, { text: "# Plan\n# Stage A\n# Stage B\n# Stage C", secs: "5s" });
+  add(entries, "think", null, { text: "# Plan\n# Stage A\n# Stage B\n# Stage C", secs: "6s" });
+  add(entries, "think", null, { text: "# Plan\n# Stage A\n# Stage B\n# Stage C", secs: "7s" });
 
-  add(entries, "think", boundaryTurn, { text: "# Plan\n# Stage A\n# Stage B\n# Next turn", secs: "1s" });
+  add(entries, "think", boundaryTurn, { text: "# Plan\n# Stage A\n# Stage B\n# Stage C\n# Next turn", secs: "1s" });
   tool(entries, null, "Fixture command A", "echo alpha");
   tool(entries, null, "Fixture command B", "echo beta");
   add(entries, "think", null, { text: "# After tool", secs: "1s" });
@@ -74,6 +81,7 @@ export default async function codexThinkingCheck(browser) {
   add(entries, "think", null, { text: "# Live plan", secs: "2s" });
   add(entries, "think", null, { text: "# Live plan\n# Stage A", secs: "4s" });
   const liveTail = [{ k: "think", text: "# Live plan\n# Stage A\n# Stage B", secs: "8s", slot: entries.length }];
+  const liveTailSourceRaw = JSON.stringify(liveTail), tailResponseRaw = JSON.stringify([{ ...liveTail[0], turn: liveTurn }]);
 
   const claudeTurn = "claude-thinking-unchanged";
   const claudeEntries = [
@@ -81,7 +89,7 @@ export default async function codexThinkingCheck(browser) {
     { k: "think", text: "# Claude plan\n# Continues", secs: "2s", slot: 1 },
   ];
   const claudeTurns = [turnFrom(claudeBase, claudeTurn)];
-  const codexRaw = JSON.stringify(entries), tailRaw = JSON.stringify(liveTail);
+  const codexRaw = JSON.stringify(entries), tailRaw = tailResponseRaw;
   let epoch = 0, claudeEnabled = false;
   const modelFor = () => {
     const model = structuredClone(D.model);
@@ -114,12 +122,15 @@ export default async function codexThinkingCheck(browser) {
     let selected = all, from = 0, total = all.length;
     const turnId = url.searchParams.get("turn");
     if (turnId) {
-      let owner = null;
-      selected = all.filter((e) => { if (e.turn) owner = e.turn; return owner === turnId; });
-      total = selected.length;
+      from = all.findIndex((e) => e.turn === turnId);
+      if (from < 0) return route.fulfill({ status: 404, contentType: "text/plain", body: "turn not found" });
+      selected = all.slice(from);
     } else if (url.searchParams.has("after")) {
       from = Number(url.searchParams.get("after")) || 0;
       selected = all.slice(from);
+      let owner = null;
+      for (const entry of all.slice(0, from + 1)) if (entry.turn) owner = entry.turn;
+      if (selected.length && selected[0].turn == null && owner) selected = [{ ...selected[0], turn: owner }, ...selected.slice(1)];
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       entries: selected, from, to: from + selected.length, total,
@@ -167,11 +178,18 @@ export default async function codexThinkingCheck(browser) {
     };
   }, { firstTurn: codexTurn, secondTurn: boundaryTurn });
   const prelude = R.initial.unowned.filter((x) => x.headings[0] === "Prelude");
+  const unresolvedBeforeOwner = R.initial.unowned.filter((x) => x.headings[0] === "Plan");
   r.expect(prelude.length === 1 && JSON.stringify(prelude[0].headings) === JSON.stringify(["Prelude", "Before turns"]) && prelude[0].key === CODEX_SID + "#0",
     "an unowned contiguous transcript prelude did not keep one stable display row: " + JSON.stringify(prelude));
-  r.expect(R.initial.first.length === 1 && JSON.stringify(R.initial.first[0].headings) === JSON.stringify(["Plan", "Stage A", "Stage B"]) && R.initial.first[0].label === "Thinking · 4s", "growing and equal Codex snapshots did not keep the latest complete text and duration in one row: " + JSON.stringify(R.initial.first));
+  r.expect(JSON.stringify(unresolvedBeforeOwner) === JSON.stringify([
+    { key: CODEX_SID + "#2", headings: ["Plan"] },
+    { key: CODEX_SID + "#3", headings: ["Plan", "Stage A"] },
+    { key: CODEX_SID + "#4", headings: ["Plan", "Stage A", "Stage B"] },
+    { key: CODEX_SID + "#5", headings: ["Plan", "Stage A", "Stage B", "Stage C"] },
+  ]), "missing explicit turn owners merged with each other or following ownerless rows: " + JSON.stringify(unresolvedBeforeOwner));
+  r.expect(R.initial.first.length === 1 && JSON.stringify(R.initial.first[0].headings) === JSON.stringify(["Plan", "Stage A", "Stage B", "Stage C"]) && R.initial.first[0].label === "Thinking · 7s", "growing and equal Codex snapshots did not keep the latest complete text and duration in one row: " + JSON.stringify(R.initial.first));
   r.expect(R.initial.first[0]?.key === codexTurn + "#0" && R.initial.t2 === boundaryTurn, "the coalesced first row lost its stable key or turn-opening anchor");
-  r.expect(JSON.stringify(R.initial.secondFirst?.headings) === JSON.stringify(["Plan", "Stage A", "Stage B", "Next turn"]) && R.initial.secondFirst?.key === boundaryTurn + "#0", "adjacent same-prefix thoughts from different turns were merged");
+  r.expect(JSON.stringify(R.initial.secondFirst?.headings) === JSON.stringify(["Plan", "Stage A", "Stage B", "Stage C", "Next turn"]) && R.initial.secondFirst?.key === boundaryTurn + "#0", "adjacent same-prefix thoughts from different turns were merged");
   r.expect(R.initial.group?.count === 2 && R.initial.group.summary === "Ran 2 commands" && R.initial.group.expanded === false && R.initial.group.stepsVisible === false,
     "intervening tool calls did not remain an intact collapsed group: " + JSON.stringify(R.initial.group));
   r.expect(JSON.stringify(R.initial.group?.titles) === JSON.stringify(["Fixture command A", "Fixture command B"]), "the grouped tool labels changed");
@@ -219,6 +237,7 @@ export default async function codexThinkingCheck(browser) {
   r.expect(JSON.stringify(R.liveAfter.headings) === JSON.stringify(["Live plan", "Stage A", "Stage B"]) && R.liveAfter.headings.every((h, i, a) => a.indexOf(h) === i) && R.liveAfter.label === "Thinking · 8s", "an appended live summary repeated a heading or lost its latest duration: " + JSON.stringify(R.liveAfter));
   r.expect(R.liveAfter.key === R.liveBefore.key && R.liveAfter.turn === liveTurn && R.liveAfter.toolOpen && R.liveAfter.keptOtherTurn, "the live turn patch lost the oldest key, tool state, or an untouched turn: " + JSON.stringify(R.liveAfter));
   r.expect(R.rawAfterLive.every((x) => x.before === x.after) && R.rawAfterLive.some((x) => x.before === tailRaw), "display preparation mutated a raw API snapshot or changed the appended entry: " + JSON.stringify(R.rawAfterLive));
+  r.expect(JSON.stringify(liveTail) === liveTailSourceRaw, "the after-page fixture mutated its raw source entry while adding its page-start owner");
 
   await page.reload(); await settled(page);
   await goto(page, { v: "session", id: CODEX_SID }, D);
@@ -239,13 +258,33 @@ export default async function codexThinkingCheck(browser) {
     work?.querySelector(".cw-toggle")?.click();
   }, origin.id);
   await page.waitForFunction((id) => [...document.querySelectorAll(".child-work")].some((x) => x.dataset.e === "cw:" + id && x.querySelector(".cw-body .thought:not(.masked)")), origin.id);
-  R.nested = await page.evaluate((id) => {
+  R.nestedDefault = await page.evaluate((id) => {
+    const work = [...document.querySelectorAll(".child-work")].find((x) => x.dataset.e === "cw:" + id), rows = [...(work?.querySelectorAll(".cw-body .thought:not(.masked)") ?? [])];
+    const first = rows.find((x) => x.querySelector(".think-text [role=heading]")?.textContent.trim() === "Plan");
+    return { count: rows.length, key: first?.dataset.e ?? null, rawCount: work?.querySelector(".cw-count")?.textContent.trim() ?? "",
+      headings: [...(first?.querySelectorAll(".think-text [role=heading]") ?? [])].map((h) => h.textContent.trim()) };
+  }, origin.id);
+  r.expect(R.nestedDefault.rawCount === "· 7" && R.nestedDefault.count === 1 && JSON.stringify(R.nestedDefault.headings) === JSON.stringify(["Plan", "Stage A", "Stage B", "Stage C"]) && R.nestedDefault.key === codexTurn + "#2",
+    "the default nested last-five window lost the newest summary or claimed the global first key: " + JSON.stringify(R.nestedDefault));
+  R.showAll = await page.evaluate((id) => {
+    const work = [...document.querySelectorAll(".child-work")].find((x) => x.dataset.e === "cw:" + id), button = work?.querySelector(".cw-body > .show-all");
+    if (!button) return null;
+    const label = button.textContent.trim(); button.click(); return label;
+  }, origin.id);
+  r.expect(R.showAll === "Show all 7", "the nested transcript did not expose its scoped full-chain control: " + R.showAll);
+  await page.waitForFunction(({ handoff, turn }) => {
+    const work = [...document.querySelectorAll(".child-work")].find((x) => x.dataset.e === "cw:" + handoff);
+    const row = [...(work?.querySelectorAll(".cw-body .thought:not(.masked)") ?? [])].find((x) => x.querySelector(".think-text [role=heading]")?.textContent.trim() === "Plan");
+    return row?.dataset.e === turn + "#0" && row.querySelector(".think-text").textContent.includes("Stage C");
+  }, { handoff: origin.id, turn: codexTurn });
+  R.nestedAll = await page.evaluate((id) => {
     const work = [...document.querySelectorAll(".child-work")].find((x) => x.dataset.e === "cw:" + id), rows = [...(work?.querySelectorAll(".cw-body .thought:not(.masked)") ?? [])];
     const first = rows.find((x) => x.querySelector(".think-text [role=heading]")?.textContent.trim() === "Plan");
     return { count: rows.length, key: first?.dataset.e ?? null,
       headings: [...(first?.querySelectorAll(".think-text [role=heading]") ?? [])].map((h) => h.textContent.trim()) };
   }, origin.id);
-  r.expect(R.nested.count > 0 && JSON.stringify(R.nested.headings) === JSON.stringify(["Plan", "Stage A", "Stage B"]) && R.nested.key === codexTurn + "#0", "nested Codex rendering did not use the same coalesced display row: " + JSON.stringify(R.nested));
+  r.expect(R.nestedAll.count === 1 && JSON.stringify(R.nestedAll.headings) === JSON.stringify(["Plan", "Stage A", "Stage B", "Stage C"]) && R.nestedAll.key === codexTurn + "#0",
+    "show-all did not restore the complete coalesced chain and its true first key: " + JSON.stringify(R.nestedAll));
 
   claudeEnabled = true;
   await page.reload(); await settled(page);
