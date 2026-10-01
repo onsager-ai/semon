@@ -80,7 +80,8 @@ const toggleBox = (page, id) => page.evaluate((id) => {
   const item = [...document.querySelectorAll("#lanes > .treeitem")].find((x) => x.dataset.id === id), t = item?.querySelector(":scope > .tree-row .tree-toggle"), row = item?.querySelector(":scope > .tree-row .srow");
   if (!t || !row) return null;
   const a = t.getBoundingClientRect(), b = row.getBoundingClientRect(), line = item.querySelector(":scope > .tree-row").getBoundingClientRect();
-  return { w: Math.round(a.width * 10) / 10, h: Math.round(a.height * 10) / 10, right: a.right <= line.right + 0.5 && a.right >= line.right - 12, separate: a.left >= b.right - 0.5, lower: (a.top + a.bottom) / 2 >= (line.top + line.bottom) / 2 - 1 && a.bottom <= line.bottom + 0.5, color: getComputedStyle(t).color, bg: getComputedStyle(t).backgroundColor };
+  const hit = document.elementFromPoint((a.left + a.right) / 2, (a.top + a.bottom) / 2);
+  return { w: Math.round(a.width * 10) / 10, h: Math.round(a.height * 10) / 10, right: a.right <= line.right + 0.5 && a.right >= line.right - 12, fullWidth: Math.abs(b.left - line.left) < 0.5 && Math.abs(b.right - line.right) < 0.5, toggleTappable: hit === t || t.contains(hit), lower: (a.top + a.bottom) / 2 >= (line.top + line.bottom) / 2 - 1 && a.bottom <= line.bottom + 0.5, color: getComputedStyle(t).color, bg: getComputedStyle(t).backgroundColor };
 }, id);
 
 // Every top-level parent with children, collapsed in turn (and put back as it was): whether a count pill shows in its row, open
@@ -586,7 +587,7 @@ export default async function sidebarCheck(browser) {
     R.phoneToggle = box;
     r.expect(box && box.w >= 44 && box.h >= 44, "phone: the toggle is at least 44x44: " + JSON.stringify(box));
     r.expect(box?.right && box.lower, "phone: the toggle sits at the right end of the row's meta line: " + JSON.stringify(box));
-    r.expect(box?.separate, "phone: the navigation and toggle targets do not overlap: " + JSON.stringify(box));
+    r.expect(box?.fullWidth && box.toggleTappable, "phone: the session fills its row and the overlaid toggle takes a tap: " + JSON.stringify(box));
     r.expect(box?.color === "rgb(93, 101, 97)", "phone: the chevron is --muted (5.3:1 on the light sidebar): " + box?.color);
     r.expect(box?.bg === "rgba(0, 0, 0, 0)", "phone: the toggle has no background until hover or focus: " + box?.bg);
     const g = await gutters(page);
