@@ -85,6 +85,19 @@ export default async function filtersCheck(browser) {
       else r.expect(sh.dialog.left >= 0 && sh.dialog.right <= sh.vw && sh.dialog.top >= 0 && sh.dialog.bottom <= sh.vh && sh.dialog.width <= 440, key + " the sheet isn't a dialog inside the viewport: " + JSON.stringify(sh.dialog));
       rec.overflowOpen = await overflow(page); r.expect(rec.overflowOpen === 0, key + " sideways overflow, open: " + rec.overflowOpen);
       await shot("open");
+      // Exercise the input hold itself, rather than only checking the position
+      // after opening. Cancelable moves outside the sheet must be refused.
+      rec.held = await page.evaluate(() => ["wheel", "touchmove"].map((type) => {
+        const event = type === "wheel" ? new WheelEvent(type, { bubbles: true, cancelable: true, deltaY: 240 })
+          : new TouchEvent(type, { bubbles: true, cancelable: true });
+        document.body.dispatchEvent(event);
+        return { type, prevented: event.defaultPrevented };
+      }));
+      r.expect(rec.held.every((move) => move.prevented), key + " background input wasn't held: " + JSON.stringify(rec.held));
+      await page.mouse.move(5, 5); await page.mouse.wheel(0, 240);
+      await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+      rec.afterWheel = await page.evaluate(() => scrollY);
+      r.expect(rec.afterWheel === y0, key + " wheel moved the page behind the sheet: " + JSON.stringify({ before: y0, after: rec.afterWheel }));
       // Tab stays inside the sheet (both ways), and Escape closes it and gives the focus back to the button.
       const stray = [];
       for (let i = 0; i < 12; i++) { await page.keyboard.press(i % 4 === 3 ? "Shift+Tab" : "Tab"); if (!(await page.evaluate((sel) => { const d = document.querySelector(sel); return document.activeElement !== document.body && d.contains(document.activeElement); }, FILTER_SHEET))) stray.push(i); }
@@ -92,6 +105,12 @@ export default async function filtersCheck(browser) {
       await page.keyboard.press("Escape"); await page.waitForFunction((sel) => document.querySelector(sel).open === false, FILTER_SHEET);
       rec.afterEscape = await page.evaluate((btn) => ({ focus: document.activeElement === document.querySelector(btn), y: scrollY }), FILTER_BUTTON);
       r.expect(rec.afterEscape.focus && rec.afterEscape.y === y0, key + " Escape didn't return focus to the Filter button, or moved the page: " + JSON.stringify(rec.afterEscape));
+      rec.released = await page.evaluate(() => ["wheel", "touchmove"].map((type) => {
+        const event = new Event(type, { bubbles: true, cancelable: true });
+        document.body.dispatchEvent(event);
+        return { type, prevented: event.defaultPrevented };
+      }));
+      r.expect(rec.released.every((move) => !move.prevented), key + " closing the sheet left an input hold: " + JSON.stringify(rec.released));
       if (phone) {
         // Back closes the sheet; the page stays.
         const path0 = await page.evaluate(() => location.pathname);
