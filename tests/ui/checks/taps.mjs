@@ -122,6 +122,15 @@ export function measure({ selector, min }) {
       // Another control (one with no control inside it) takes the tap: rows that stack share their edge. So does the label around this one. A card that holds controls does not: tapping it is not tapping this.
       const ctl = hit.closest(selector);
       if (ctl?.contains(it.e) && ctl.matches("label")) continue;
+      // Compact disclosures share target edges with their own neighbouring
+      // controls, including rounded corners. Keep this local to a tool group
+      // or a sidebar row; prose and unrelated controls must still fail.
+      const toolRow = it.e.matches('.step > button, .tsum') && ctl?.matches('.step > button, .tsum');
+      const toolGroup = it.e.closest('.tgroup, .steps.lone');
+      if (toolRow && toolGroup && ctl.closest('.tgroup, .steps.lone') === toolGroup) continue;
+      const sidebarRow = it.e.matches('.srow, .tree-toggle') && ctl?.matches('.srow, .tree-toggle');
+      const treeRow = it.e.closest('.tree-row');
+      if (sidebarRow && treeRow && treeRow === ctl.closest('.tree-row')) continue;
       if (ctl && !ctl.querySelector(selector) && !side.includes("-") && ctl.parentElement === it.e.parentElement) continue;
       if (chrome(hit, it.e)) { skipped.chrome++; continue; }
       misses.push({ sig: it.sig, text: it.text, side, by: sigOf(hit), byText: (hit.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40) });
