@@ -1744,13 +1744,24 @@
   const thoughtLabel = (secs) => { const n = Number.isFinite(secs) ? Math.round(secs) : 0; return n < 1 ? "Thinking" : "Thinking · " + (n >= 60 ? Math.floor(n / 60) + "m " + (n % 60) + "s" : n + "s"); };
   // A masked thought (Claude redacts its thinking, Codex encrypts its reasoning) is kept in the list, so entry keys and turn
   // starts still line up with the index, and the page draws one quiet line for it.
+  // Join adjacent Codex snapshots with the same resolved owner; unresolved ownership is safe only in the leading prelude.
   function transcriptEntries(entries, sid) {
-    const out = [];
+    const out = [], codex = SESS[sid]?.harness === "codex";
+    const turns = codex ? TURNS[sid] ?? [] : [], owners = codex ? new Map(turns.flatMap((t) => t.entries.map((e) => [e.key, t.id]))) : null;
+    const turnIds = codex ? new Set(turns.map((t) => t.id)) : null;
+    let chain = null, sawOwnedEntry = false;
     for (let i = 0; i < entries.length; i++) {
-      const e = entries[i]; if (e.k !== "think") { out.push(e); continue; }
+      const e = entries[i], turn = codex ? owners.get(e.key) ?? (turnIds.has(e.turn) ? e.turn : null) : null;
+      if (turn !== null) sawOwnedEntry = true;
+      if (e.k !== "think") { out.push(e); chain = null; continue; }
       const pending = isPendingThought(e, entries, i, sid);
       const row = { ...e, ...(pending ? { pending: true } : {}), displaySecs: thoughtSeconds(e) };
-      out.push(row);
+      const text = thoughtText(row);
+      if (!codex || pending || !text || (turn === null && sawOwnedEntry)) { out.push(row); chain = null; continue; }
+      if (chain && chain.turn === turn && (text === chain.text || text.startsWith(chain.text + "\n") || text.startsWith(chain.text + "\r\n"))) {
+        const merged = { ...chain.row, text, displaySecs: row.displaySecs };
+        out[chain.index] = merged; chain = { ...chain, row: merged, text };
+      } else { out.push(row); chain = { index: out.length - 1, row, text, turn }; }
     }
     return out;
   }
