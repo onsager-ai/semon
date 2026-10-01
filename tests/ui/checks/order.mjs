@@ -34,6 +34,7 @@
 //
 //   SEMON_BIN   the semon binary built with the test-clock feature (default: target/debug/semon)
 //   SEMON_UI_OUT where the report and screenshots go (default: ./out)
+import { selectSchemes } from "../suite-plan.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -455,7 +456,7 @@ async function scheme(browser, name, opts, r) {
 
 export default async function orderCheck(browser) {
   const r = reporter("order"), out = {};
-  for (const [name, opts] of SCHEMES) {
+  for (const [name, opts] of selectSchemes(SCHEMES, process.env.SEMON_ORDER_SCHEMES)) {
     try { out[name] = await scheme(browser, name, opts, r); }
     catch (e) { r.expect(false, name + ": threw " + (e?.stack ?? e)); }
   }
