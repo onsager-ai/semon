@@ -418,7 +418,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .mark { width: 16px; height: 16px; background: var(--ink); -webkit-mask: url(/mark.svg) center / contain no-repeat; mask: url(/mark.svg) center / contain no-repeat; flex: none; }
 .brandrow .close { display: none; margin-left: auto; }
 .find input::placeholder { color: var(--muted); }
-.nav-item { width: calc(100% - 16px); margin: 1px 8px; display: flex; align-items: center; gap: 10px; border: 0; background: none; padding: 8px 10px; border-radius: 9px; text-align: left; font-weight: 500; color: var(--ink-2); }
+.nav-item { text-decoration: none; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; width: calc(100% - 16px); margin: 1px 8px; display: flex; align-items: center; gap: 10px; border: 0; background: none; padding: 8px 10px; border-radius: 9px; text-align: left; font-weight: 500; color: var(--ink-2); }
 @media (hover: hover) { .nav-item:hover { background: color-mix(in srgb, var(--sunken) 70%, transparent); } }
 .nav-item[aria-current="page"] { background: var(--sunken); color: var(--ink); }
 .nav-item .cnt { margin-left: auto; font-family: var(--mono); font-size: var(--fs-cap); color: var(--muted); font-weight: 400; }

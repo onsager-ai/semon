@@ -85,3 +85,80 @@ test('independent shell consumer unmounts roots and releases dismissal listeners
     assert.equal(result.remaining, 0);
   } finally { await browser.close(); }
 });
+
+for (const width of [390, 1280]) for (const colorScheme of ['light', 'dark']) {
+  test(`independent application shell ownership/lifecycle ${width} ${colorScheme}`, async () => {
+    const bundle = await build({ absWorkingDir: new URL('../', import.meta.url).pathname, entryPoints: ['src/lib-contract.tsx'], bundle: true, write: false, format: 'iife', globalName: 'AccountExample', platform: 'browser', tsconfig: 'tsconfig.json', define: { 'process.env.NODE_ENV': '"production"' } });
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage({ viewport: { width, height: 860 }, colorScheme });
+      await page.route('http://shell.test/**', route => route.fulfill({
+        contentType: route.request().url().endsWith('.js') ? 'text/javascript' : 'text/html',
+        headers: { 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'" },
+        body: route.request().url().endsWith('.js') ? bundle.outputFiles[0].text : '<!doctype html><div class="app" id="shell"></div><script src="/consumer.js"></script>',
+      }));
+      await page.goto('http://shell.test/');
+      const result = await page.evaluate(() => {
+        const assert = (condition, message) => { if (!condition) throw new Error(message); };
+        const listeners = new Map(); let registrations = 0, removals = 0, navigations = 0, opened = 0, closed = 0;
+        const add = EventTarget.prototype.addEventListener, remove = EventTarget.prototype.removeEventListener;
+        const tracked = (target, type) => (target === window && type === 'pageshow') || (target === document && type === 'click') || (target instanceof MediaQueryList && type === 'change') || (target instanceof HTMLElement && ['sidebar', 'scrim'].includes(target.id));
+        EventTarget.prototype.addEventListener = function(type, callback, options) {
+          if (tracked(this, type)) { listeners.set(callback, { target: this, type }); registrations++; }
+          return add.call(this, type, callback, options);
+        };
+        EventTarget.prototype.removeEventListener = function(type, callback, options) {
+          if (tracked(this, type)) { const entry = listeners.get(callback); assert(entry?.target === this && entry?.type === type, 'unmatched listener removal'); listeners.delete(callback); removals++; }
+          return remove.call(this, type, callback, options);
+        };
+        try {
+          const container = document.querySelector('#shell');
+          const host = { account: { place() {}, opened() {}, closed() {}, navigate() { return false; }, submit() { return false; } }, navigate() { navigations++; return true; }, drawerOpened() { opened++; }, drawerClosed() { closed++; }, railChanged() {} };
+          const destination = { key: 'sessions', label: '<img src=x onerror=alert(1)>', href: '/sessions', icon: 'M4 5h16', current: true };
+          for (let i = 0; i < 20; i++) {
+            const instance = AccountExample.mountShellExample(container, host), chrome = instance.chrome;
+            const slots = chrome.slots; const input = document.createElement('input'); slots.content.append(input);
+            const recent = document.createElement('button'); slots.recent.append(recent);
+            const nav = container.querySelector('.nav-item'), lead = container.querySelector('#lead-btn'), trigger = container.querySelector('.account-widget-desktop .account-trigger');
+            assert(listeners.size === 7, 'missing lifecycle registrations: ' + listeners.size);
+            nav.focus(); chrome.update([destination], true);
+            assert(container.querySelector('.nav-item') === nav && document.activeElement === nav, 'keyed navigation lost focus');
+            assert(!nav.querySelector('img') && nav.textContent === destination.label, 'unsafe navigation label');
+            for (const modifiers of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+              const event = new MouseEvent('click', { bubbles: true, cancelable: true, ...modifiers }); nav.dispatchEvent(event); assert(!event.defaultPrevented, 'modified navigation consumed');
+            }
+            const click = new MouseEvent('click', { bubbles: true, cancelable: true }); nav.dispatchEvent(click); assert(click.defaultPrevented, 'primary click not consumed');
+            const before = nav.getAttribute('href');
+            try { chrome.update([{ ...destination, href: '//evil.test/' }], false); throw new Error('unsafe destination accepted'); } catch (error) { assert(error.message === 'Invalid shell destination', error.message); }
+            assert(nav.getAttribute('href') === before, 'invalid update mutated navigation');
+            lead.click();
+            const phone = matchMedia('(max-width: 760px)').matches;
+            assert(chrome.drawerOpen === phone, 'responsive drawer');
+            chrome.closeDrawer(); assert(!chrome.drawerOpen, 'drawer close');
+            trigger.click(); assert(chrome.account.open, 'account did not open');
+            const action = instance.action; action.focus();
+            chrome.topbar({ titleSlot: instance.title, actions: [action] });
+            assert(document.activeElement === action && !chrome.account.open, 'action slot focus or account teardown');
+            chrome.topbar({ mode: [action] });
+            assert(action.parentElement.id === 'topbar', 'mode slot was wrapped');
+            assert(input.parentElement === slots.content && recent.parentElement === slots.recent, 'host slots changed');
+            chrome.unmount(); assert(listeners.size === 0, 'unmount leaked lifecycle listeners');
+            assert(action.childNodes.length === 1 && !action.isConnected && input.isConnected && recent.isConnected, 'unmount cleared host-owned descendants');
+            const n = navigations; lead.click(); trigger.click(); nav.click();
+            assert(navigations === n && !chrome.account.open && !chrome.drawerOpen, 'stale chrome remained live');
+            chrome.mount(container); chrome.update([destination], false); chrome.unmount();
+            instance.destroy(); instance.destroy();
+            assert(listeners.size === 0, 'destroy leaked lifecycle listeners');
+            input.remove(); recent.remove();
+          }
+          return { registrations, removals, remaining: listeners.size, navigations, opened, closed };
+        } finally { EventTarget.prototype.addEventListener = add; EventTarget.prototype.removeEventListener = remove; }
+      });
+      assert.equal(result.registrations, result.removals);
+      assert.equal(result.remaining, 0);
+      assert.equal(result.navigations, 20);
+      assert.equal(result.opened, width === 390 ? 20 : 0);
+      assert.equal(result.closed, result.opened);
+    } finally { await browser.close(); }
+  });
+}

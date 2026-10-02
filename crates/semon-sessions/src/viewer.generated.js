@@ -495,14 +495,26 @@ SOFTWARE.
     const pageshow = (event) => {
       if (event.persisted && active) close({ keepEntry: true });
     };
-    document.addEventListener("click", outside);
-    window.addEventListener("pageshow", pageshow);
+    let listening = false;
+    function startListening() {
+      if (listening) return;
+      listening = true;
+      document.addEventListener("click", outside);
+      window.addEventListener("pageshow", pageshow);
+    }
+    function stopListening() {
+      if (!listening) return;
+      listening = false;
+      document.removeEventListener("click", outside);
+      window.removeEventListener("pageshow", pageshow);
+    }
     function unmount(root) {
       const widget = widgets.get(root);
       if (!widget) return;
       if (active === widget) close();
       R(null, root);
       widgets.delete(root);
+      if (!widgets.size) stopListening();
     }
     return {
       get open() {
@@ -514,6 +526,7 @@ SOFTWARE.
         root.className = "account-widget " + (props.compact ? "account-widget-phone" : "account-widget-desktop");
         const widget = { root, props };
         widgets.set(root, widget);
+        startListening();
         commit(widget);
         return root;
       },
@@ -530,8 +543,271 @@ SOFTWARE.
         if (destroyed) return;
         destroyed = true;
         for (const root of widgets.keys()) unmount(root);
-        document.removeEventListener("click", outside);
-        window.removeEventListener("pageshow", pageshow);
+        stopListening();
+      }
+    };
+  }
+
+  // src/lib/shell.tsx
+  var NS = "http://www.w3.org/2000/svg";
+  function element(tag, className, id) {
+    const node = document.createElement(tag);
+    node.className = className;
+    if (id) node.id = id;
+    return node;
+  }
+  function svg(path, stroke = "1.8") {
+    const node = document.createElementNS(NS, "svg");
+    for (const [key, value] of Object.entries({ viewBox: "0 0 24 24", "aria-hidden": "true", fill: "none", stroke: "currentColor", "stroke-width": stroke, "stroke-linecap": "round", "stroke-linejoin": "round" })) node.setAttribute(key, value);
+    const p2 = document.createElementNS(NS, "path");
+    p2.setAttribute("d", path);
+    node.append(p2);
+    return node;
+  }
+  function Icon({ path }) {
+    return /* @__PURE__ */ u2("svg", { class: "icon", viewBox: "0 0 24 24", "aria-hidden": "true", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", children: /* @__PURE__ */ u2("path", { d: path }) });
+  }
+  function renderShellNavigation(nav, destinations, navigate) {
+    const keys = /* @__PURE__ */ new Set();
+    for (const destination of destinations) {
+      if (!destination.key || keys.has(destination.key) || !safePath(destination.href)) throw new Error("Invalid shell destination");
+      keys.add(destination.key);
+    }
+    R(/* @__PURE__ */ u2(S, { children: destinations.map((destination) => /* @__PURE__ */ u2(
+      "a",
+      {
+        class: "nav-item",
+        "data-go": destination.key,
+        href: destination.href,
+        "aria-current": destination.current ? "page" : void 0,
+        onClick: (event) => {
+          if (!event.currentTarget.isConnected || !nav.contains(event.currentTarget) || event.defaultPrevented || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+          if (navigate(destination)) event.preventDefault();
+        },
+        children: [
+          /* @__PURE__ */ u2(Icon, { path: destination.icon }),
+          /* @__PURE__ */ u2("span", { children: destination.label }),
+          !!destination.count && /* @__PURE__ */ u2("span", { class: "cnt" + (destination.hot ? " hot" : ""), children: destination.count })
+        ]
+      },
+      destination.key
+    )) }), nav);
+  }
+  function createShellChrome(host) {
+    const account = createAccountChrome(host.account);
+    const phone = window.matchMedia("(max-width: 760px)");
+    let app = null, sidebar, head, nav, bar, scrim;
+    let recent, content;
+    let desktopAccount = null, phoneAccount = null;
+    let lead = null, destroyed = false, sx = null;
+    let destinations = [], rail = false;
+    const listeners = [];
+    function listen(target, type, handler, options) {
+      target.addEventListener(type, handler, options);
+      listeners.push(() => target.removeEventListener(type, handler, options));
+    }
+    function ready() {
+      if (destroyed || !app) throw new Error("Shell is not mounted");
+    }
+    function closeDrawer(quiet = false) {
+      if (!app || !document.body.classList.contains("drawer-open")) return;
+      document.body.classList.remove("drawer-open");
+      account.close();
+      lead?.setAttribute("aria-expanded", "false");
+      if (!quiet) lead?.focus();
+      host.drawerClosed();
+    }
+    function openDrawer() {
+      if (!app?.isConnected || !phone.matches || destroyed) return;
+      host.drawerOpened();
+      document.body.classList.add("drawer-open");
+      lead?.setAttribute("aria-expanded", "true");
+    }
+    function paintHead() {
+      const label = rail ? "Expand sidebar" : "Collapse sidebar";
+      R(/* @__PURE__ */ u2(S, { children: [
+        /* @__PURE__ */ u2("div", { class: "brandrow", children: [
+          /* @__PURE__ */ u2("span", { class: "mark", "aria-hidden": "true" }),
+          /* @__PURE__ */ u2("span", { class: "brandname", children: "Semon" }),
+          /* @__PURE__ */ u2("button", { class: "ibtn close", id: "drawer-close", type: "button", "aria-label": "Close menu", onClick: () => closeDrawer(), children: /* @__PURE__ */ u2("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.9", "stroke-linecap": "round", "aria-hidden": "true", children: /* @__PURE__ */ u2("path", { d: "M6 6l12 12M18 6L6 18" }) }) })
+        ] }),
+        /* @__PURE__ */ u2("button", { class: "ibtn rail-toggle", id: "rail-toggle", type: "button", "aria-label": label, "aria-expanded": !rail, "data-tip": label, onClick: () => {
+          if (app?.isConnected && !destroyed) host.railChanged();
+        }, children: /* @__PURE__ */ u2("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ u2("path", { d: "M4 5h16v14H4zM9 5v14" }) }) })
+      ] }), head);
+    }
+    function dropDesktop() {
+      if (desktopAccount) {
+        account.unmount(desktopAccount);
+        desktopAccount.remove();
+        desktopAccount = null;
+      }
+    }
+    function drawerAccount(props) {
+      ready();
+      if (phoneAccount) {
+        account.unmount(phoneAccount);
+        phoneAccount.remove();
+        phoneAccount = null;
+      }
+      if (props) {
+        phoneAccount = account.mount(props);
+        phoneAccount.id = "account-drawer";
+        sidebar.append(phoneAccount);
+      }
+    }
+    function unmount() {
+      if (!app) return;
+      closeDrawer(true);
+      dropDesktop();
+      drawerAccount(null);
+      for (const remove of listeners.splice(0)) remove();
+      phone.removeEventListener("change", resized);
+      R(null, nav);
+      R(null, head);
+      for (const node of [...bar.childNodes]) node.remove();
+      lead = null;
+      app = null;
+      sx = null;
+    }
+    const resized = () => {
+      closeDrawer(true);
+      app?.classList.toggle("rail", rail && !phone.matches);
+    };
+    return {
+      account,
+      get slots() {
+        ready();
+        return { recent, content };
+      },
+      get drawerOpen() {
+        return !!app && document.body.classList.contains("drawer-open");
+      },
+      mount(container) {
+        if (destroyed) throw new Error("Shell is destroyed");
+        if (app) throw new Error("Shell is already mounted");
+        if (!container.querySelector("#sidebar")) {
+          const side = element("aside", "sidebar", "sidebar");
+          side.setAttribute("aria-label", "Navigation");
+          const heading = element("div", "sidebar-head");
+          const navigation = element("div", "", "nav");
+          const caption = element("div", "side-h");
+          caption.textContent = "Recent";
+          const list = element("div", "side-list", "side-list");
+          const lanes = element("div", "", "lanes");
+          lanes.setAttribute("role", "tree");
+          lanes.setAttribute("aria-label", "Recent sessions");
+          list.append(lanes);
+          side.append(heading, navigation, caption, list);
+          const main = element("div", "main", "main");
+          main.append(element("header", "topbar", "topbar"), element("div", "page", "page"));
+          container.append(side, element("div", "scrim", "scrim"), main);
+        }
+        const required = (selector) => {
+          const node = container.querySelector(selector);
+          if (!node) throw new Error("Missing shell slot " + selector);
+          return node;
+        };
+        sidebar = required("#sidebar");
+        head = required(".sidebar-head");
+        nav = required("#nav");
+        bar = required("#topbar");
+        scrim = required("#scrim");
+        recent = required("#side-list");
+        content = required("#page");
+        app = container;
+        paintHead();
+        listen(scrim, "click", () => closeDrawer());
+        listen(sidebar, "touchstart", (event) => {
+          sx = event.touches[0]?.clientX ?? null;
+        }, { passive: true });
+        listen(sidebar, "touchmove", (event) => {
+          if (sx !== null && event.touches[0] && event.touches[0].clientX - sx < -50) {
+            sx = null;
+            closeDrawer();
+          }
+        }, { passive: true });
+        listen(sidebar, "touchend", () => {
+          sx = null;
+        }, { passive: true });
+        phone.addEventListener("change", resized);
+      },
+      update(next, collapsed) {
+        ready();
+        const keys = /* @__PURE__ */ new Set();
+        destinations = next.map((destination) => {
+          if (!destination.key || keys.has(destination.key) || !safePath(destination.href)) throw new Error("Invalid shell destination");
+          keys.add(destination.key);
+          return { ...destination };
+        });
+        rail = collapsed;
+        app.classList.toggle("rail", rail && !phone.matches);
+        paintHead();
+        renderShellNavigation(nav, destinations, host.navigate);
+      },
+      topbar(props) {
+        ready();
+        account.close();
+        dropDesktop();
+        lead = null;
+        const nodes = [];
+        if (!props.mode && props.lead) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "ibtn lead" + (props.lead.back ? " trace-back" : "");
+          button.id = "lead-btn";
+          button.setAttribute("aria-label", props.lead.label);
+          button.setAttribute("aria-controls", "sidebar");
+          button.setAttribute("aria-expanded", String(document.body.classList.contains("drawer-open")));
+          button.append(svg(props.lead.icon));
+          const back = props.lead.back;
+          button.addEventListener("click", () => {
+            if (button !== lead || !button.isConnected || !app || destroyed) return;
+            if (back) back();
+            else openDrawer();
+          });
+          lead = button;
+          nodes.push(button);
+        }
+        if (props.mode) nodes.push(...props.mode);
+        else {
+          if (props.titleSlot) nodes.push(props.titleSlot);
+          if (props.actions) nodes.push(...props.actions);
+        }
+        if (props.account) {
+          desktopAccount = account.mount(props.account);
+          if (props.accountTarget) props.accountTarget.append(desktopAccount);
+          else nodes.push(desktopAccount);
+        }
+        bar.classList.remove("scrolled");
+        bar.classList.toggle("session-bar", !!props.session);
+        const kept = new Set(nodes);
+        for (const node of [...bar.children]) if (!kept.has(node)) node.remove();
+        let cursor = bar.firstChild;
+        for (const node of nodes) {
+          if (node === cursor) cursor = cursor.nextSibling;
+          else bar.insertBefore(node, cursor);
+        }
+        while (cursor) {
+          const next = cursor.nextSibling;
+          cursor.remove();
+          cursor = next;
+        }
+      },
+      drawerAccount,
+      openDrawer,
+      closeDrawer,
+      restoreDrawer() {
+        ready();
+        document.body.classList.add("drawer-open");
+        lead?.setAttribute("aria-expanded", "true");
+      },
+      unmount,
+      destroy() {
+        if (destroyed) return;
+        unmount();
+        account.destroy();
+        destroyed = true;
       }
     };
   }
@@ -1510,7 +1786,7 @@ SOFTWARE.
       } catch {
       }
     }
-    const railToggle = $2("#rail-toggle") ?? el("button");
+    const railToggle = SIDEBAR_ONLY ? $2("#rail-toggle") ?? el("button") : el("button");
     railToggle.append(icon(I2.sidebar));
     railToggle.setAttribute("aria-expanded", String(!railMode));
     railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar");
@@ -1820,7 +2096,7 @@ SOFTWARE.
       place();
       requestAnimationFrame(() => requestAnimationFrame(place));
     }
-    const accountChrome = createAccountChrome({
+    const accountHost = {
       place(widget, trigger) {
         const at = trigger.getBoundingClientRect();
         widget.style.setProperty("--account-left", at.left + "px");
@@ -1856,7 +2132,28 @@ SOFTWARE.
         leaveAccountSheet(() => form.submit());
         return true;
       }
+    };
+    const shellChrome = SIDEBAR_ONLY ? null : createShellChrome({
+      account: accountHost,
+      navigate(destination) {
+        go({ v: destination.key });
+        return true;
+      },
+      drawerOpened() {
+        orderApply("side");
+      },
+      drawerClosed() {
+        setTimeout(() => {
+          if (phone.matches && !document.body.classList.contains("drawer-open")) orderApply("side");
+        }, ORD_DRAWER_MS);
+      },
+      railChanged() {
+        setRailMode(!railMode);
+        renderNav();
+      }
     });
+    if (shellChrome) shellChrome.mount(app);
+    const accountChrome = shellChrome?.account ?? createAccountChrome(accountHost);
     function closeAccountMenu(keepEntry, navigating) {
       accountChrome.close({ keepEntry, navigating });
     }
@@ -1872,6 +2169,10 @@ SOFTWARE.
       return ACCOUNT ? accountChrome.mount({ account: ACCOUNT, compact, wide: wideMode, onWideChange: () => setWideMode(!wideMode) }) : null;
     }
     function renderDrawerAccount() {
+      if (shellChrome) {
+        shellChrome.drawerAccount(ACCOUNT ? { account: ACCOUNT, compact: true, wide: wideMode, onWideChange: () => setWideMode(!wideMode) } : null);
+        return;
+      }
       const old = $2("#account-drawer");
       if (old) {
         accountChrome.unmount(old);
@@ -1987,23 +2288,20 @@ SOFTWARE.
       if (ordIdle) ordIdleArm();
     }, { passive: true });
     function renderNav() {
-      const nav = $2("#nav");
-      nav.replaceChildren();
+      const nav = $2("#nav"), destinations = [];
       const under = { home: ["home"], analytics: ["analytics"], sessions: ["sessions", "session", "trace"], machines: ["machines", "machine"] };
       const item = (v2, label, ic, count, hot) => {
-        const b2 = el("button", "nav-item");
-        b2.type = "button";
-        b2.dataset.go = v2;
-        if (under[v2].includes(route.v)) b2.setAttribute("aria-current", "page");
-        b2.append(icon(ic, "icon"), el("span", null, label));
-        if (count) b2.append(el("span", "cnt" + (hot ? " hot" : ""), String(count)));
-        b2.addEventListener("click", () => go({ v: v2 }));
-        nav.append(b2);
+        destinations.push({ key: v2, label, icon: ic, href: v2 === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf({ v: v2 }), current: under[v2].includes(route.v), count, hot });
       };
       item("home", "Home", I2.home, inbox().length, true);
       item("sessions", "Sessions", I2.sessions);
       item("analytics", "Analytics", I2.chart);
       item("machines", "Machines", I2.machine, Object.keys(MACHINE).filter((m2) => !MACHINE_UP[m2]).length, true);
+      if (shellChrome) shellChrome.update(destinations, railMode);
+      else renderShellNavigation(nav, destinations, (destination) => {
+        go({ v: destination.key });
+        return true;
+      });
     }
     const sessMatch = (s2, q2) => !q2 || [s2.name, s2.repo, s2.branch, MACHINE[s2.machine], s2.movedFrom ? MACHINE[s2.movedFrom] : "", HARNESS[s2.harness], s2.role ? "role no repo" : "", ...(TURNS[s2.id] ?? []).map((t2) => t2.start?.brief ?? t2.u?.text ?? "")].join(" ").toLowerCase().includes(q2.toLowerCase());
     let CHILDREN = null;
@@ -2455,36 +2753,26 @@ SOFTWARE.
     const kindText = (s2) => s2.kind ?? HARNESS[s2.harness];
     const modelIdOf = (s2) => s2.model ?? Object.keys(s2.tokens_by_model ?? {})[0];
     function renderTopbar(title, crumb, opts = {}) {
-      closeAccountMenu();
-      document.querySelectorAll("#topbar .account-widget").forEach((root) => accountChrome.unmount(root));
       const bar = $2("#topbar"), s2 = opts.session ?? opts.traceSession;
-      clearBox(bar, route);
-      bar.classList.remove("scrolled");
-      bar.classList.toggle("session-bar", !!s2);
-      const put = placer(bar), sink = { append: put };
-      const account = (into) => {
-        const a2 = accountWidget(false);
-        if (a2) into ? into.append(a2) : put(a2);
-      };
+      for (const [key, slot2] of SLOTS) if (slot2.route !== route) SLOTS.delete(key);
+      const nodes = [], sink = { append: (...xs) => nodes.push(...xs) };
+      const account = ACCOUNT ? { account: ACCOUNT, compact: false, wide: wideMode, onWideChange: () => setWideMode(!wideMode) } : null;
       if (s2 && errOn(s2.id)) {
         errorsBar(sink);
-        account();
-        put.done();
+        shellChrome.topbar({ mode: nodes, session: true, account });
         return;
       }
       if (s2 && findOpen) {
-        findBar(sink, s2, account);
-        put.done();
+        let accountTarget;
+        findBar(sink, s2, (row) => {
+          accountTarget = row;
+        });
+        shellChrome.topbar({ mode: nodes, session: true, account, accountTarget });
         return;
       }
-      const m2 = btn("ibtn lead", null, opts.traceSession ? "Back to " + s2.name : "Open navigation");
-      m2.id = "lead-btn";
-      m2.setAttribute("aria-controls", "sidebar");
-      m2.setAttribute("aria-expanded", "false");
-      m2.append(icon(opts.traceSession ? I2.chev : I2.menu));
-      if (opts.traceSession) m2.classList.add("trace-back");
-      m2.addEventListener("click", opts.traceSession ? () => goSession(s2.id, route.turn) : openDrawer);
-      put(m2);
+      const lead = { label: opts.traceSession ? "Back to " + s2.name : "Open navigation", icon: opts.traceSession ? I2.chev : I2.menu, back: opts.traceSession ? () => goSession(s2.id, route.turn) : void 0 };
+      const actions = [];
+      const commit = () => shellChrome.topbar({ titleSlot: t2, actions, session: !!s2, lead, account });
       const t2 = el("div", "ttl"), l1 = el("div", "l1");
       if (opts.lineage?.length) {
         if (!phone.matches) opts.lineage.forEach((item) => {
@@ -2511,16 +2799,13 @@ SOFTWARE.
           if (l2.isConnected) fitMeta(l2);
         });
       }
-      put(t2);
       if (opts.analytics) {
-        put(rangeControl(bar));
-        account();
-        put.done();
+        actions.push(rangeControl(bar));
+        commit();
         return;
       }
       if (!s2) {
-        account();
-        put.done();
+        commit();
         return;
       }
       const fb = btn("ibtn", null, "Find and filter");
@@ -2537,10 +2822,9 @@ SOFTWARE.
       mb.setAttribute("aria-expanded", "false");
       mb.append(icon(I2.more));
       mb.addEventListener("click", () => openSessionMenu(SESS[s2.id] ?? s2, mb));
-      if (!opts.traceSession) put(fb);
-      put(mb);
-      account();
-      put.done();
+      if (!opts.traceSession) actions.push(fb);
+      actions.push(mb);
+      commit();
     }
     function rangeControl(bar) {
       const group = slot("range", bar, () => {
@@ -5074,13 +5358,13 @@ SOFTWARE.
       panel2.append(el("h2", null, "Agents at work"), el("div", "panel-sub", "Agent-hours " + unit + " \xB7 stacked by harness"));
       const bins = columns.map((c2) => ({ a: c2.from, b: c2.to, claude: c2.claude_ms / HOUR, codex: c2.codex_ms / HOUR, sessions: c2.sessions, more: c2.more }));
       const W = chartWidth(), height = 190, left = 40, right = W - 4, top = 12, bottom = 151, most = Math.max(0, ...bins.map((x2) => x2.claude + x2.codex)), stepY = niceStep(most || 1), max = Math.max(stepY, Math.ceil(most / stepY) * stepY);
-      const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + height, role: "group", "aria-label": "Agent-hours " + unit + " over the selected range, stacked by harness" }), yOf = (n2) => bottom - (bottom - top) * n2 / max;
-      for (let n2 = 0; n2 <= max + 1e-9; n2 += stepY) svg.append(svgEl("line", { x1: left, x2: right, y1: yOf(n2), y2: yOf(n2), class: "gridline" }), svgEl("text", { x: 0, y: yOf(n2) + 4, class: "axis-label" }, hLabel(n2)));
+      const svg2 = svgEl("svg", { viewBox: "0 0 " + W + " " + height, role: "group", "aria-label": "Agent-hours " + unit + " over the selected range, stacked by harness" }), yOf = (n2) => bottom - (bottom - top) * n2 / max;
+      for (let n2 = 0; n2 <= max + 1e-9; n2 += stepY) svg2.append(svgEl("line", { x1: left, x2: right, y1: yOf(n2), y2: yOf(n2), class: "gridline" }), svgEl("text", { x: 0, y: yOf(n2) + 4, class: "axis-label" }, hLabel(n2)));
       const step = (right - left) / Math.max(1, count), w2 = Math.max(2, step * 0.64);
       bins.forEach((bin, i2) => {
         const x2 = left + i2 * step + (step - w2) / 2, ch = (bottom - top) * bin.claude / max, xh = (bottom - top) * bin.codex / max, total = bin.claude + bin.codex;
-        if (ch) svg.append(svgEl("rect", { x: x2, y: bottom - ch, width: w2, height: ch, class: "cost-claude" }));
-        if (xh) svg.append(svgEl("rect", { x: x2, y: bottom - ch - xh, width: w2, height: xh, class: "cost-codex" }));
+        if (ch) svg2.append(svgEl("rect", { x: x2, y: bottom - ch, width: w2, height: ch, class: "cost-claude" }));
+        if (xh) svg2.append(svgEl("rect", { x: x2, y: bottom - ch - xh, width: w2, height: xh, class: "cost-codex" }));
         const label = clock(bin.a) + "\u2013" + clock(bin.b) + ": " + hLabel(total), hit = svgEl("rect", { x: left + i2 * step, y: top, width: step, height: bottom - top, class: "chart-hit" });
         hit.dataset.tip = label;
         if (total > 0) {
@@ -5098,11 +5382,11 @@ SOFTWARE.
             open();
           }
         });
-        svg.append(hit);
+        svg2.append(hit);
       });
-      svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A2)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
+      svg2.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A2)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
       const chart = el("div", "analytics-chart");
-      chart.append(svg);
+      chart.append(svg2);
       panel2.append(chart);
       const legend = el("div", "analytics-legend");
       for (const [h2, label] of [["claude", "Claude"], ["codex", "Codex"]]) {
@@ -5126,16 +5410,16 @@ SOFTWARE.
       const days = A2.cost.days, count = days.length, unit = "per day";
       panel2.append(title, el("div", "panel-sub", "API-equivalent cost per UTC day \xB7 today so far \xB7 stacked by harness"));
       const bins = days.map((d2) => ({ a: d2.from, b: d2.to, claude: d2.claude_usd, codex: d2.codex_usd, sessions: d2.sessions, more: d2.more }));
-      const W = chartWidth(), svg = svgEl("svg", { viewBox: "0 0 " + W + " 190", role: "img", "aria-label": "API-equivalent cost " + unit + ", stacked by harness" });
+      const W = chartWidth(), svg2 = svgEl("svg", { viewBox: "0 0 " + W + " 190", role: "img", "aria-label": "API-equivalent cost " + unit + ", stacked by harness" });
       const left = 46, right = W - 4, top = 12, bottom = 151, max = Math.max(0.01, ...bins.map((b2) => b2.claude + b2.codex)), step = (right - left) / Math.max(1, count);
       for (let n2 = 0; n2 <= 2; n2++) {
         const y2 = bottom - (bottom - top) * n2 / 2;
-        svg.append(svgEl("line", { x1: left, x2: right, y1: y2, y2, class: "gridline" }), svgEl("text", { x: 0, y: y2 + 4, class: "axis-label" }, "$" + (max * n2 / 2).toFixed(2)));
+        svg2.append(svgEl("line", { x1: left, x2: right, y1: y2, y2, class: "gridline" }), svgEl("text", { x: 0, y: y2 + 4, class: "axis-label" }, "$" + (max * n2 / 2).toFixed(2)));
       }
       bins.forEach((bin, i2) => {
         const w2 = Math.max(2, step * 0.64), x2 = left + i2 * step + (step - w2) / 2, ch = bin.claude / max * (bottom - top), xh = bin.codex / max * (bottom - top);
-        if (ch) svg.append(svgEl("rect", { x: x2, y: bottom - ch, width: w2, height: ch, class: "cost-claude" }));
-        if (xh) svg.append(svgEl("rect", { x: x2, y: bottom - ch - xh, width: w2, height: xh, class: "cost-codex" }));
+        if (ch) svg2.append(svgEl("rect", { x: x2, y: bottom - ch, width: w2, height: ch, class: "cost-claude" }));
+        if (xh) svg2.append(svgEl("rect", { x: x2, y: bottom - ch - xh, width: w2, height: xh, class: "cost-codex" }));
         const hit = svgEl("rect", { x: left + i2 * step, y: top, width: step, height: bottom - top, class: "chart-hit" });
         if (bin.sessions.length) {
           hit.setAttribute("role", "button");
@@ -5152,11 +5436,11 @@ SOFTWARE.
             open();
           }
         });
-        svg.append(hit);
+        svg2.append(hit);
       });
-      svg.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A2)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
+      svg2.append(svgEl("text", { x: left, y: 178, class: "axis-label" }, rangeAgo(A2)), svgEl("text", { x: right, y: 178, "text-anchor": "end", class: "axis-label" }, "Now"));
       const chart = el("div", "analytics-chart");
-      chart.append(svg);
+      chart.append(svg2);
       panel2.append(chart);
       const legend = el("div", "analytics-legend");
       for (const [h2, label] of [["claude", "Claude"], ["codex", "Codex"]]) {
@@ -5250,17 +5534,17 @@ SOFTWARE.
         section.append(wrap);
         const points = rows.filter((g2) => g2.first_pass_acceptance != null && g2.median_cost_usd != null);
         if (points.length) {
-          const W = Math.max(280, chartWidth()), maxCost = Math.max(0.01, ...points.map((g2) => g2.median_cost_usd)), svg = svgEl("svg", { viewBox: "0 0 " + W + " 190", role: "img", "aria-label": "API cost against first-pass acceptance for " + band + " work" });
-          svg.append(svgEl("line", { x1: 42, x2: W - 12, y1: 150, y2: 150, class: "gridline" }), svgEl("line", { x1: 42, x2: 42, y1: 12, y2: 150, class: "gridline" }));
+          const W = Math.max(280, chartWidth()), maxCost = Math.max(0.01, ...points.map((g2) => g2.median_cost_usd)), svg2 = svgEl("svg", { viewBox: "0 0 " + W + " 190", role: "img", "aria-label": "API cost against first-pass acceptance for " + band + " work" });
+          svg2.append(svgEl("line", { x1: 42, x2: W - 12, y1: 150, y2: 150, class: "gridline" }), svgEl("line", { x1: 42, x2: 42, y1: 12, y2: 150, class: "gridline" }));
           for (const group of points) {
             const x2 = 42 + group.median_cost_usd / maxCost * (W - 58), y2 = 150 - group.first_pass_acceptance * 130, dot2 = svgEl("circle", { cx: x2, cy: y2, r: 5, class: "model-point" });
             dot2.dataset.tip = group.model + ": " + asMoney(group.median_cost_usd) + ", " + (group.first_pass_acceptance * 100).toFixed(0) + "% accepted; acceptance n=" + group.acceptance_n + ", cost n=" + group.cost_n;
             dot2.setAttribute("aria-label", dot2.dataset.tip);
-            svg.append(dot2, svgEl("text", { x: Math.max(42, Math.min(W - 90, x2 + 8)), y: Math.max(20, y2 - 8), class: "axis-label" }, shortModel(group.model)));
+            svg2.append(dot2, svgEl("text", { x: Math.max(42, Math.min(W - 90, x2 + 8)), y: Math.max(20, y2 - 8), class: "axis-label" }, shortModel(group.model)));
           }
-          svg.append(svgEl("text", { x: 42, y: 178, class: "axis-label" }, "Median API cost \u2192"), svgEl("text", { x: 2, y: 16, class: "axis-label" }, "100%"), svgEl("text", { x: 8, y: 151, class: "axis-label" }, "0%"));
+          svg2.append(svgEl("text", { x: 42, y: 178, class: "axis-label" }, "Median API cost \u2192"), svgEl("text", { x: 2, y: 16, class: "axis-label" }, "100%"), svgEl("text", { x: 8, y: 151, class: "axis-label" }, "0%"));
           const chart = el("div", "analytics-chart");
-          chart.append(svg);
+          chart.append(svg2);
           section.append(chart);
         } else section.append(el("p", "panel-sub", "Cost / acceptance plot needs both recorded measures."));
       }
@@ -5603,26 +5887,12 @@ SOFTWARE.
     }
     const sidebar = $2("#sidebar");
     function openDrawer() {
-      if (!phone.matches) return;
-      orderApply("side");
-      document.body.classList.add("drawer-open");
-      $2("#lead-btn")?.setAttribute("aria-expanded", "true");
+      shellChrome?.openDrawer();
     }
     function closeDrawer(quiet) {
-      if (!document.body.classList.contains("drawer-open")) return;
-      document.body.classList.remove("drawer-open");
-      closeAccountMenu();
-      const b2 = $2("#lead-btn");
-      b2?.setAttribute("aria-expanded", "false");
-      if (!quiet) b2?.focus();
-      setTimeout(() => {
-        if (phone.matches && !document.body.classList.contains("drawer-open")) orderApply("side");
-      }, ORD_DRAWER_MS);
+      shellChrome?.closeDrawer(quiet);
     }
-    if (!SIDEBAR_ONLY) {
-      $2("#drawer-close").addEventListener("click", () => closeDrawer());
-      $2("#scrim").addEventListener("click", () => closeDrawer());
-    } else window.addEventListener("semon:drawer-open", () => orderApply("side"));
+    if (SIDEBAR_ONLY) window.addEventListener("semon:drawer-open", () => orderApply("side"));
     if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e2) => {
       if (e2.key === "Escape" && accountSheet) accountChrome.escape();
       else if (e2.key === "Escape" && !viewerEl) {
@@ -5646,16 +5916,6 @@ SOFTWARE.
         }
       }
     });
-    let sx = null;
-    if (!SIDEBAR_ONLY) sidebar.addEventListener("touchstart", (e2) => {
-      sx = e2.touches[0].clientX;
-    }, { passive: true });
-    if (!SIDEBAR_ONLY) sidebar.addEventListener("touchmove", (e2) => {
-      if (sx !== null && e2.touches[0].clientX - sx < -50) {
-        sx = null;
-        closeDrawer();
-      }
-    }, { passive: true });
     phone.addEventListener("change", () => {
       closeDrawer(true);
       syncLayoutPrefs();
@@ -6067,10 +6327,7 @@ SOFTWARE.
         m2.hidden = false;
         m2.click();
       }
-      if (st.drawer) {
-        document.body.classList.add("drawer-open");
-        $2("#lead-btn")?.setAttribute("aria-expanded", "true");
-      }
+      if (st.drawer) shellChrome?.restoreDrawer();
       if (st.focus) {
         let n2 = st.focus.id ? document.getElementById(st.focus.id) : null;
         if (!n2 && st.focus.host) {
