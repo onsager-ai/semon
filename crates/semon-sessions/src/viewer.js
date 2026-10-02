@@ -704,7 +704,7 @@ queueMicrotask(() => {
   }
   // A deep link to a turn the loaded transcript doesn't hold yet.
   const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
-  function go(r, fromHistory, prepared = false) {
+  function go(r, fromHistory, prepared = false, nextContent = null) {
     externalPending?.abort(); externalPending = null;
     if (NATIVE_PAGE) { if (!fromHistory) location.assign(r.v === "machines" ? NAV_MACHINES : urlOf(r)); return; }
     if (r.v === "machines" && viewerHost && !prepared) {
@@ -713,15 +713,12 @@ queueMicrotask(() => {
       viewerHost.loadMachines(controller.signal).then(content => {
         if (controller.signal.aborted || externalPending !== controller) { content.destroy(); return; }
         externalPending = null;
-        externalContent?.destroy(); externalContent = content;
-        go(r, fromHistory, true);
+        go(r, fromHistory, true, content);
       }, error => {
         if (!controller.signal.aborted && externalPending === controller) { externalPending = null; location.assign(viewerHost.machinesPath); }
       });
       return;
     }
-    if (r.v !== "machines" && externalContent) { externalContent.destroy(); externalContent = null; }
-
     if (r.v !== "sessions" || r !== focusSessionsSearchOnRender) focusSessionsSearchOnRender = null;
     if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
     if (route.v === "session") clearPaging(route.id);
@@ -729,6 +726,9 @@ queueMicrotask(() => {
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
     if (r.v === "machines" && NAV_MACHINES && !viewerHost) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
+    // Capture outgoing history before removing host content: removal can clamp its scroll offset.
+    if (nextContent) { externalContent?.destroy(); externalContent = nextContent; }
+    else if (r.v !== "machines" && externalContent) { externalContent.destroy(); externalContent = null; }
     closeAccountMenu(true, true);
     dropErrors(true); // (first: it drops a range the error stepper moved, and that is not kept)
     // Keep the session left after the cached destination has had a frame to draw; weighing it must not delay that draw.
