@@ -6,6 +6,34 @@ Marvin selected **Preact + TypeScript/TSX + esbuild** in [#224](https://github.c
 
 The top-level `ui/` stays in Semon. Use native Preact; `preact/compat` needs a demonstrated dependency requirement. CSS, URLs, CSP, embedding prelude, `window.semonEmbed` and `semon:refresh` / `semon:polled` / `semon:ended` stay unchanged. Rust embeds checked-in production assets and requires no Node or build script.
 
+### Stage 3 item 1 — shared shell frame/navigation
+
+The viewer now consumes `createShellChrome(ShellHost)` through the library bridge.
+The implemented exports and consumer contract are documented in [ui/README.md](../../ui/README.md).
+Chrome owns the frame, brand/rail controls, keyed native navigation, lead button,
+drawer/scrim gestures and account root replacement/cleanup. Native links carry
+validated same-origin destinations; host navigation handles ordinary primary
+clicks only. No router, poller or endpoint is introduced. Sidebar-only consumers
+retain their Rust/server shell owner and share `renderShellNavigation`.
+
+Host-owned title metadata/actions and Find/error modes enter as direct DOM slots;
+the shell commits or detaches these nodes without rendering/removing their
+children. Recent and page containers are disjoint from all Preact roots. Host
+screen state, held ordering, authorization, history/focus/scroll and live model
+transactions remain outside the library. Explicit renders preserve synchronous
+commit semantics and keyed navigation; persistent action nodes remain attached.
+Unmount releases roots/listeners while preserving host slot descendants; destroy
+also disposes the reusable account controller. Account dismissal listeners are
+registered only while roots exist. The pinned-runtime sink boundary and all
+application bans remain unchanged; Rust also explicitly proves shell.tsx is scanned.
+
+The independent consumer verifies repeated mount/update/unmount/destroy, native
+modifier clicks, hostile labels/paths, stable focus and real listener removal on
+phone/desktop in light/dark. This bounded source step is not Hub consolidation.
+Next: shared Recent/sidebar snapshot rendering and consumer build contract, then
+Hub adoption with equal pins and end-to-end persistent Sessions–Machines navigation.
+Sheets/screens follow; transcript/paging/live orchestration remains last.
+
 ### Stage 2 — account trigger and lifecycle
 
 The next source stage adds `createAccountChrome(AccountChromeHost)` and the

@@ -6,7 +6,7 @@
 //   - "bare", the page docs/shell.md gives as the whole of such a page, with its comment replaced by the same sidebar markup: no
 //     #main, #page or #topbar.
 // On both, at 390 and 1280:
-//   - the viewer's script draws the navigation (its buttons, with Home's badge and no Sessions count, as the viewer's page has) and the
+//   - the viewer's script draws the navigation (its native links, with Home's badge and no Sessions count, as the viewer's page has) and the
 //     Recent list from /api/model: the same rows, in the same order, with the same text and dots (state, and a parent's attention
 //     dot), as the viewer's own page, and only Machines is current;
 //   - nothing outside the sidebar's own parts (header, nav, Recent list) changes: the document, serialized without those
@@ -74,7 +74,7 @@ const openDrawer = async (page) => { await page.click("#lead-btn"); await page.w
 const lanes = (page) => page.evaluate(() => [...document.querySelectorAll("#lanes .srow")].map((r) => ({ id: r.dataset.id, label: r.getAttribute("aria-label"), text: r.textContent,
   dots: [...r.querySelectorAll(".dot, .kid-flag")].map((d) => d.className) })));
 const nav = (page) => page.evaluate(() => [...document.querySelectorAll("#nav .nav-item")].map((b) => ({
-  tag: b.tagName, label: b.querySelector(":scope > span:not(.cnt)")?.textContent ?? null, cnt: b.querySelector(".cnt")?.textContent ?? null,
+  tag: b.tagName, href: b.getAttribute("href"), label: b.querySelector(":scope > span:not(.cnt)")?.textContent ?? null, cnt: b.querySelector(".cnt")?.textContent ?? null,
   hot: !!b.querySelector(".cnt.hot"), current: b.getAttribute("aria-current"),
 })));
 // Where the sidebar's parts sit in it, and their type. The list's own height is left out: the embedding page's account row under it
@@ -171,7 +171,8 @@ export default async function embedSidebarCheck(browser) {
     K.badges = { home: home?.cnt ?? null, sessions: sessions?.cnt ?? null, flags: ours.filter((x) => x.dots.some((d) => d.startsWith("kid-flag"))).length };
     r.expect(!!home?.cnt && home.cnt === theirNav.find((x) => x.label === "Home")?.cnt && !!sessions && sessions.cnt === null, P + ": the nav's badges are not the viewer's (Home's badge, no Sessions count): " + JSON.stringify(K.badges));
     r.expect(ours.some((x) => x.dots.length), P + ": the Recent rows have no dots: " + JSON.stringify(ours.slice(0, 2)));
-    r.expect(ourNav.every((x) => x.tag === "BUTTON"), P + ": the viewer's script did not draw its navigation: " + JSON.stringify(ourNav));
+    r.expect(JSON.stringify(ourNav.map((x) => x.href)) === JSON.stringify(["/", "/sessions", "/analytics", "/machines"]), P + ": native navigation destinations differ: " + JSON.stringify(ourNav));
+    r.expect(ourNav.every((x) => x.tag === "A"), P + ": the shared renderer did not draw native navigation links: " + JSON.stringify(ourNav));
     r.expect(JSON.stringify(ourNav.map((x) => x.current)) === JSON.stringify([null, null, null, "page"]), P + ": only Machines should be current: " + JSON.stringify(ourNav));
 
     // Nothing outside the sidebar's own parts changed (at 1280 with a wide page and a collapsed rail saved), and there is no rail

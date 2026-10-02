@@ -1,4 +1,4 @@
-import { parseAccount, createAccountChrome } from "../../../ui/src/account-adapter";
+import { parseAccount, createAccountChrome, createShellChrome, renderShellNavigation } from "../../../ui/src/account-adapter";
 (() => {
   // ====================================================================================
   // Model: sessions are places; handoffs are how work moves between them (ask: you → session,
@@ -614,7 +614,7 @@ import { parseAccount, createAccountChrome } from "../../../ui/src/account-adapt
     try { localStorage.setItem("semon.tree", JSON.stringify(treePrefs)); } catch {}
   }
   // An embedding page's sidebar has no rail and no toggle for it (shell::session_sidebar): the toggle is then a detached button.
-  const railToggle = $("#rail-toggle") ?? el("button"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
+  const railToggle = SIDEBAR_ONLY ? ($("#rail-toggle") ?? el("button")) : el("button"); railToggle.append(icon(I.sidebar)); railToggle.setAttribute("aria-expanded", String(!railMode)); railToggle.setAttribute("data-tip", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.setAttribute("aria-label", railMode ? "Expand sidebar" : "Collapse sidebar"); railToggle.addEventListener("click", () => setRailMode(!railMode)); syncLayoutPrefs();
   let groupBy = "recent"; let query = ""; let focusSessionsSearchOnRender = null; let analyticsRange = 7, analyticsMeasure = "hours";
   let showApprovalReviews = false;
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
@@ -772,7 +772,7 @@ import { parseAccount, createAccountChrome } from "../../../ui/src/account-adapt
   // ---- Sidebar ----------------------------------------------------------------------------------
   // One typed owner for trigger/menu DOM, open state, focus and dismissal listeners. The viewer owns
   // history, pending model transactions and CSSOM placement; none of those globals enter the library.
-  const accountChrome = createAccountChrome({
+  const accountHost = {
     place(widget, trigger) {
       const at = trigger.getBoundingClientRect();
       widget.style.setProperty("--account-left", at.left + "px");
@@ -794,7 +794,16 @@ import { parseAccount, createAccountChrome } from "../../../ui/src/account-adapt
       if (!accountSheet) return false;
       leaveAccountSheet(() => form.submit()); return true;
     },
+  };
+  const shellChrome = SIDEBAR_ONLY ? null : createShellChrome({
+    account: accountHost,
+    navigate(destination) { go({ v: destination.key }); return true; },
+    drawerOpened() { orderApply("side"); },
+    drawerClosed() { setTimeout(() => { if (phone.matches && !document.body.classList.contains("drawer-open")) orderApply("side"); }, ORD_DRAWER_MS); },
+    railChanged() { setRailMode(!railMode); renderNav(); },
   });
+  if (shellChrome) shellChrome.mount(app);
+  const accountChrome = shellChrome?.account ?? createAccountChrome(accountHost);
   function closeAccountMenu(keepEntry, navigating) { accountChrome.close({ keepEntry, navigating }); }
   // Step over the phone sheet before leaving so Back lands on the page, not a removed menu.
   function leaveAccountSheet(go) {
@@ -805,6 +814,7 @@ import { parseAccount, createAccountChrome } from "../../../ui/src/account-adapt
     return ACCOUNT ? accountChrome.mount({ account: ACCOUNT, compact, wide: wideMode, onWideChange: () => setWideMode(!wideMode) }) : null;
   }
   function renderDrawerAccount() {
+    if (shellChrome) { shellChrome.drawerAccount(ACCOUNT ? { account: ACCOUNT, compact: true, wide: wideMode, onWideChange: () => setWideMode(!wideMode) } : null); return; }
     const old = $("#account-drawer");
     if (old) { accountChrome.unmount(old); old.remove(); }
     if (!ACCOUNT) return;
@@ -904,14 +914,16 @@ import { parseAccount, createAccountChrome } from "../../../ui/src/account-adapt
   }
   for (const t of ["pointermove", "pointerdown", "pointerleave", "focusin", "focusout", "wheel", "keydown"]) $("#sidebar").addEventListener(t, () => { if (ordIdle) ordIdleArm(); }, { passive: true });
   function renderNav() {
-    const nav = $("#nav"); nav.replaceChildren();
+    const nav = $("#nav"), destinations = [];
     // A session or a trace sits under Sessions, a machine under Machines.
     const under = { home: ["home"], analytics: ["analytics"], sessions: ["sessions", "session", "trace"], machines: ["machines", "machine"] };
-    const item = (v, label, ic, count, hot) => { const b = el("button", "nav-item"); b.type = "button"; b.dataset.go = v; if (under[v].includes(route.v)) b.setAttribute("aria-current", "page"); b.append(icon(ic, "icon"), el("span", null, label)); if (count) b.append(el("span", "cnt" + (hot ? " hot" : ""), String(count))); b.addEventListener("click", () => go({ v })); nav.append(b); };
+    const item = (v, label, ic, count, hot) => { destinations.push({ key: v, label, icon: ic, href: v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf({ v }), current: under[v].includes(route.v), count, hot }); };
     item("home", "Home", I.home, inbox().length, true);
     item("sessions", "Sessions", I.sessions);
     item("analytics", "Analytics", I.chart);
     item("machines", "Machines", I.machine, Object.keys(MACHINE).filter((m) => !MACHINE_UP[m]).length, true);
+    if (shellChrome) shellChrome.update(destinations, railMode);
+    else renderShellNavigation(nav, destinations, (destination) => { go({ v: destination.key }); return true; });
   }
   // Sessions match by name, repo, branch, machine, harness and the messages that started their turns.
   const sessMatch = (s, q) => !q || [s.name, s.repo, s.branch, MACHINE[s.machine], s.movedFrom ? MACHINE[s.movedFrom] : "", HARNESS[s.harness], s.role ? "role no repo" : "", ...(TURNS[s.id] ?? []).map((t) => t.start?.brief ?? t.u?.text ?? "")].join(" ").toLowerCase().includes(q.toLowerCase());
@@ -1203,27 +1215,27 @@ import { parseAccount, createAccountChrome } from "../../../ui/src/account-adapt
   // The model the session is on (what the line's label abbreviates), so the label, its tip and the Details row name the same one; a session that used more than one is priced per model in the cost section.
   const modelIdOf = (s) => s.model ?? Object.keys(s.tokens_by_model ?? {})[0];
   function renderTopbar(title, crumb, opts = {}) {
-    closeAccountMenu(); // the bar is redrawn from scratch, the desktop menu with it: close it properly, not by detaching it
-    document.querySelectorAll("#topbar .account-widget").forEach((root) => accountChrome.unmount(root));
-    const bar = $("#topbar"), s = opts.session ?? opts.traceSession; clearBox(bar, route); bar.classList.remove("scrolled"); bar.classList.toggle("session-bar", !!s);
-    // What the bar holds is added through `put`, so the range control on Analytics (a persistent control) stays where it is.
-    const put = placer(bar), sink = { append: put };
-    const account = (into) => { const a = accountWidget(false); if (a) (into ? into.append(a) : put(a)); };
-    if (s && errOn(s.id)) { errorsBar(sink); account(); put.done(); return; }
-    if (s && findOpen) { findBar(sink, s, account); put.done(); return; }
-    const m = btn("ibtn lead", null, opts.traceSession ? "Back to " + s.name : "Open navigation"); m.id = "lead-btn"; m.setAttribute("aria-controls", "sidebar"); m.setAttribute("aria-expanded", "false"); m.append(icon(opts.traceSession ? I.chev : I.menu)); if (opts.traceSession) m.classList.add("trace-back"); m.addEventListener("click", opts.traceSession ? () => goSession(s.id, route.turn) : openDrawer); put(m);
+    const bar = $("#topbar"), s = opts.session ?? opts.traceSession;
+    // Host screen nodes are disjoint slots; chrome commits them without reconciling descendants.
+    for (const [key, slot] of SLOTS) if (slot.route !== route) SLOTS.delete(key);
+    const nodes = [], sink = { append: (...xs) => nodes.push(...xs) };
+    const account = ACCOUNT ? { account: ACCOUNT, compact: false, wide: wideMode, onWideChange: () => setWideMode(!wideMode) } : null;
+    if (s && errOn(s.id)) { errorsBar(sink); shellChrome.topbar({ mode: nodes, session: true, account }); return; }
+    if (s && findOpen) { let accountTarget; findBar(sink, s, row => { accountTarget = row; }); shellChrome.topbar({ mode: nodes, session: true, account, accountTarget }); return; }
+    const lead = { label: opts.traceSession ? "Back to " + s.name : "Open navigation", icon: opts.traceSession ? I.chev : I.menu, back: opts.traceSession ? () => goSession(s.id, route.turn) : undefined };
+    const actions = [];
+    const commit = () => shellChrome.topbar({ titleSlot: t, actions, session: !!s, lead, account });
     const t = el("div", "ttl"), l1 = el("div", "l1");
     // Ancestors are crumbs on a desktop; a phone's child session has none (its ⋯ menu lists the path, and holds the status the dot would show).
     if (opts.lineage?.length) { if (!phone.matches) opts.lineage.forEach((item) => { const c = btn("crumb", item.name, "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "crumb-sep", "›")); }); }
     else if (crumb) { const c = btn("crumb", crumb.label, "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "crumb-sep", "›")); }
     const tt = el("span", "t", title); tt.dataset.tip = title; tt.dataset.tipClipped = ""; if (s && !opts.traceSession && !(phone.matches && opts.lineage?.length)) l1.append(stateLead(s)); l1.append(tt); t.append(l1);
     if (opts.line2) { const l2 = el("div", "meta-line"); opts.line2(l2); t.append(l2); if (s) requestAnimationFrame(() => { if (l2.isConnected) fitMeta(l2); }); }
-    put(t);
-    if (opts.analytics) { put(rangeControl(bar)); account(); put.done(); return; }
-    if (!s) { account(); put.done(); return; }
+    if (opts.analytics) { actions.push(rangeControl(bar)); commit(); return; }
+    if (!s) { commit(); return; }
     const fb = btn("ibtn", null, "Find and filter"); fb.id = "find-btn"; fb.append(icon(I.search)); fb.addEventListener("click", () => { findOpen = true; render(); $("#find")?.focus(); });
     const mb = btn("ibtn", null, "Session menu: details, cost and actions"); mb.id = "more-btn"; mb.setAttribute("aria-haspopup", "dialog"); mb.setAttribute("aria-expanded", "false"); mb.append(icon(I.more)); mb.addEventListener("click", () => openSessionMenu(SESS[s.id] ?? s, mb));
-    if (!opts.traceSession) put(fb); put(mb); account(); put.done();
+    if (!opts.traceSession) actions.push(fb); actions.push(mb); commit();
   }
   // The Analytics range control, a persistent control of the bar: each redraw keeps it and only sets which button is pressed.
   function rangeControl(bar) {
@@ -2821,16 +2833,11 @@ import { parseAccount, createAccountChrome } from "../../../ui/src/account-adapt
 
   // ---- Drawer (phone) ---------------------------------------------------------------------------------------------------------
   const sidebar = $("#sidebar");
-  function openDrawer() { if (!phone.matches) return; orderApply("side"); document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
-  function closeDrawer(quiet) { if (!document.body.classList.contains("drawer-open")) return; document.body.classList.remove("drawer-open"); closeAccountMenu(); const b = $("#lead-btn"); b?.setAttribute("aria-expanded", "false"); if (!quiet) b?.focus(); setTimeout(() => { if (phone.matches && !document.body.classList.contains("drawer-open")) orderApply("side"); }, ORD_DRAWER_MS); }
-  // On an embedding page shell.js opens and closes the drawer, and names its opening (semon:drawer-open); the viewer binds none of it, "/" included.
-  // On a phone there is no drawer-close event from the embedding page, so held order waits for the next open.
-  if (!SIDEBAR_ONLY) { $("#drawer-close").addEventListener("click", () => closeDrawer()); $("#scrim").addEventListener("click", () => closeDrawer()); }
-  else window.addEventListener("semon:drawer-open", () => orderApply("side")); // opening the drawer re-sorts what the list held, as openDrawer does
+  function openDrawer() { shellChrome?.openDrawer(); }
+  function closeDrawer(quiet) { shellChrome?.closeDrawer(quiet); }
+  // Sidebar-only consumers retain their existing server shell.js owner.
+  if (SIDEBAR_ONLY) window.addEventListener("semon:drawer-open", () => orderApply("side"));
     if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) accountChrome.escape(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); } if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName ?? "") && !document.activeElement?.isContentEditable && !viewerEl) { e.preventDefault(); if (route.v === "session") { findOpen = true; render(); $("#find")?.focus(); } else if (route.v === "sessions") { $("#sq")?.focus(); } else { const r = { v: "sessions", q: query }; focusSessionsSearchOnRender = r; go(r); } } });
-  let sx = null;
-  if (!SIDEBAR_ONLY) sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
-  if (!SIDEBAR_ONLY) sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });
   phone.addEventListener("change", () => {
     closeDrawer(true); syncLayoutPrefs(); expandedAll = null; renderLanes();
     if (!phone.matches && viewerEl?.classList.contains("kids-sheet")) viewerEl.close(); // a sheet is a phone's: a wide screen opens the list in the tree
@@ -3122,7 +3129,7 @@ import { parseAccount, createAccountChrome } from "../../../ui/src/account-adapt
     // An event opened before its size was measured: its "Show less" is shown by hand.
     for (const n of all(".event[data-e]")) if (st.open.has(stateKey(n)) && !n.querySelector(":scope > .ev-text.open")) { const m = n.querySelector(":scope > .ev-more"); m.hidden = false; m.click(); }
     for (const n of all(".hop")) if (st.open.has("hop:" + identOf(n)) && !n.querySelector(".brief.open")) { const m = n.querySelector(".body > .more"); m.hidden = false; m.click(); }
-    if (st.drawer) { document.body.classList.add("drawer-open"); $("#lead-btn")?.setAttribute("aria-expanded", "true"); }
+    if (st.drawer) shellChrome?.restoreDrawer();
     if (st.focus) {
       let n = st.focus.id ? document.getElementById(st.focus.id) : null;
       if (!n && st.focus.host) { const host = [...document.querySelectorAll(HOSTS)].find((x) => identOf(x) === st.focus.host); n = host && st.focus.sel ? host.querySelectorAll(st.focus.sel)[st.focus.i] : host; }
