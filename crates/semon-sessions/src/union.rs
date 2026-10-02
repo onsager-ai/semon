@@ -1349,50 +1349,56 @@ impl ViewerCore {
         }
     }
 
-    /// The machine that answers for session `sid`, every model brought up
-    /// to date first.
-    pub(crate) fn owner(&self, sid: &str) -> io::Result<Owner> {
+    /// The machine that answers for session `sid`, under the caller's
+    /// refresh policy.
+    pub(crate) fn owner(&self, sid: &str, read: Reading) -> io::Result<Owner> {
         self.follow();
-        self.owner_in(&self.views(), sid, Reading::At(crate::model::now_ms()))
+        self.owner_in(&self.views(), sid, read)
     }
 
-    /// Machine `index`'s model, rebuilt first if its logs changed.
-    pub(crate) fn built_at(&self, index: usize) -> io::Result<Arc<Built>> {
+    /// Machine `index`'s model, under the caller's refresh policy.
+    pub(crate) fn built_at(&self, index: usize, read: Reading) -> io::Result<Arc<Built>> {
         self.follow();
         self.views()
             .get(index)
             .ok_or(io::ErrorKind::NotFound)?
             .1
-            .built(Reading::At(crate::model::now_ms()))
+            .built(read)
     }
 
     /// The model `/api/model` serves (without an admin link) at `now`, or
     /// the ids two machines both claim.
-    pub(crate) fn model_at(&self, now: i64) -> io::Result<Result<String, Vec<String>>> {
+    pub(crate) fn model_at(
+        &self,
+        now: i64,
+        read: Reading,
+    ) -> io::Result<Result<String, Vec<String>>> {
         self.follow();
         let views = self.views();
         match views.len() {
-            0 => Err(io::ErrorKind::NotFound.into()),
-            1 => Ok(Ok(views[0].1.built(Reading::At(now))?.json(now))),
+            0 => Ok(Ok(
+                serde_json::json!({"sessions":{}, "turns":[], "handoffs":[]}).to_string(),
+            )),
+            1 => Ok(Ok(views[0].1.built(read)?.json(now))),
             _ => {
-                let (models, plan) = self.refresh_at(&views, Reading::At(now))?;
+                let (models, plan) = self.refresh_at(&views, read)?;
                 Ok(union_json(&parts(&views, &models), &plan, now))
             }
         }
     }
 
-    /// Every machine's model, brought up to date, with how the core serves
+    /// Every machine's model, under the caller's refresh policy, with how the core serves
     /// its session ids.
-    pub(crate) fn served(&self, now: i64) -> io::Result<Vec<Served>> {
+    pub(crate) fn served(&self, read: Reading) -> io::Result<Vec<Served>> {
         self.follow();
         let views = self.views();
         let (models, machine_ids) = if views.len() > 1 {
-            let (models, plan) = self.refresh_at(&views, Reading::At(now))?;
+            let (models, plan) = self.refresh_at(&views, read)?;
             (models, plan.machine_ids)
         } else {
             let models = views
                 .iter()
-                .map(|(_, view)| view.built(Reading::At(now)))
+                .map(|(_, view)| view.built(read))
                 .collect::<io::Result<Vec<_>>>()?;
             (models, Vec::new())
         };
