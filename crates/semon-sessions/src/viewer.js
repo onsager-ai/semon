@@ -593,7 +593,7 @@ queueMicrotask(() => {
       const initialRoute = route, p = load(initialRoute);
       if (p) p.then(() => { done();  }, done);
       else { done();  }
-    }, (err) => { if (viewerHost) { console.warn("semon: model unavailable", err.status); return; } $(SIDEBAR_ONLY ? "#lanes" : "#page").replaceChildren(el("p", SIDEBAR_ONLY ? "ghead" : "empty", "Couldn't load the sessions: " + err.message)); });
+    }, (err) => { if (viewerHost?.modelFailed?.(err?.status ?? 0)) return; if (viewerHost) { console.warn("semon: model unavailable", err.status); return; } $(SIDEBAR_ONLY ? "#lanes" : "#page").replaceChildren(el("p", SIDEBAR_ONLY ? "ghead" : "empty", "Couldn't load the sessions: " + err.message)); });
   }
 
   // ---- State & navigation ---------------------------------------------------------------

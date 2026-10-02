@@ -1911,6 +1911,7 @@ SOFTWARE.
           done();
         }
       }, (err) => {
+        if (viewerHost?.modelFailed?.(err?.status ?? 0)) return;
         if (viewerHost) {
           console.warn("semon: model unavailable", err.status);
           return;
