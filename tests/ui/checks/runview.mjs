@@ -1,5 +1,5 @@
 // Run view: exact spawn/return records, peer relays, bounded fan-out, recorded waits and transcript navigation.
-import { served, data, goto, reporter, ENV } from "../lib.mjs";
+import { served, data, goto, settled, reporter, ENV } from "../lib.mjs";
 import path from "node:path";
 export default async function runView(browser) {
   const D = await data(), r = reporter("runview"), results = {};
@@ -24,7 +24,7 @@ export default async function runView(browser) {
       if (!ids.includes(sid)) return route.continue();
       return route.fulfill({ json: { sid, from: 0, to: 1, total: 1, calls: 0, errors: 0, entries: [{ k: "a", text: "Reviewed", turn: "run-view-t-0", slot: 0 }] } });
     });
-    await page.reload();
+    await page.reload(); await settled(page);
     await goto(page, { v: "trace", sid: root.sid, turn: root.id }, D);
     await page.waitForSelector(".agents-panel .agent-row");
     r.expect(await page.locator(".agent-more").count() === 1, tag + ": large fan-out has one explicit expand control");
@@ -54,7 +54,7 @@ export default async function runView(browser) {
     for (const [i, delta] of [[0, 0], [1, -1000]]) { const h = invalid.handoffs.find(h => h.id === "run-view-h-" + i); h.done = h.at + delta; }
     invalid.version += "-invalid-bounds";
     await page.route(/\/api\/model(\?|$)/, route => route.fulfill({ json:invalid }));
-    await page.reload(); await goto(page, { v:"trace", sid:root.sid, turn:root.id }, D);
+    await page.reload(); await settled(page); await goto(page, { v:"trace", sid:root.sid, turn:root.id }, D);
     r.expect((await page.locator(".agents-summary").textContent()).includes("Recorded spawn overlap: 10"), tag + ": zero/reversed spawn intervals cannot inflate or invert recorded overlap");
     results[tag] = dimensions; await page.context().close();
   }
