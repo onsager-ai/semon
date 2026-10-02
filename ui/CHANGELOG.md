@@ -48,3 +48,10 @@ an additive source-library pilot; the viewer/shell asset URLs, Rust public API,
 embedding prelude/events and existing account data acceptance rules are unchanged.
 The complete trigger/history lifecycle is not yet a shared component. Future
 public-contract breaks must be documented here with the consumer's required edit.
+
+Stage 3 Hub integration adds a narrow `configureViewerHost` content port for
+Machines and native administrative chrome. It retains the viewer's router and
+poller; screens/transcript orchestration remain legacy. Host content loads are
+abortable, commit only while current, and carry explicit teardown. Failed or
+unsupported navigation stays native. `COMPONENT_JS` supplies legacy component
+prefixes without duplicate drawer/account handlers.

@@ -406,7 +406,7 @@ SOFTWARE.
   }
 
   // src/lib/account-chrome.tsx
-  function createAccountChrome(host) {
+  function createAccountChrome(host2) {
     const widgets = /* @__PURE__ */ new Map();
     let active = null;
     let destroyed = false;
@@ -454,10 +454,10 @@ SOFTWARE.
             onClick: (event) => {
               const target = event.target;
               const link = target instanceof Element ? target.closest("a[href]") : null;
-              if (compact && link && host.navigate(link.href)) event.preventDefault();
+              if (compact && link && host2.navigate(link.href)) event.preventDefault();
             },
             onSubmit: (event) => {
-              if (compact && event.target instanceof HTMLFormElement && host.submit(event.target)) event.preventDefault();
+              if (compact && event.target instanceof HTMLFormElement && host2.submit(event.target)) event.preventDefault();
             },
             children: /* @__PURE__ */ u2(AccountMenu, { account, compact, wide, onWideChange })
           },
@@ -474,7 +474,7 @@ SOFTWARE.
       active = null;
       if (widget) commit(widget);
       if (refocus && widget?.root.isConnected) triggerOf(widget).focus(returnFocus);
-      host.closed(options);
+      host2.closed(options);
     }
     function toggle(widget) {
       if (destroyed || !widgets.has(widget.root) || !widget.root.isConnected) return;
@@ -483,10 +483,10 @@ SOFTWARE.
         return;
       }
       const trigger = triggerOf(widget);
-      if (widget.props.compact) host.place(widget.root, trigger);
+      if (widget.props.compact) host2.place(widget.root, trigger);
       active = widget;
       commit(widget);
-      host.opened(widget.props.compact);
+      host2.opened(widget.props.compact);
       widget.root.querySelector(".account-menu-row")?.focus(initialFocus);
     }
     const outside = (event) => {
@@ -593,8 +593,8 @@ SOFTWARE.
       destination.key
     )) }), nav);
   }
-  function createShellChrome(host) {
-    const account = createAccountChrome(host.account);
+  function createShellChrome(host2) {
+    const account = createAccountChrome(host2.account);
     const phone = window.matchMedia("(max-width: 760px)");
     let app = null, sidebar, head, nav, bar, scrim;
     let recent, content;
@@ -615,11 +615,11 @@ SOFTWARE.
       account.close();
       lead?.setAttribute("aria-expanded", "false");
       if (!quiet) lead?.focus();
-      host.drawerClosed();
+      host2.drawerClosed();
     }
     function openDrawer() {
       if (!app?.isConnected || !phone.matches || destroyed) return;
-      host.drawerOpened();
+      host2.drawerOpened();
       document.body.classList.add("drawer-open");
       lead?.setAttribute("aria-expanded", "true");
     }
@@ -634,7 +634,7 @@ SOFTWARE.
           }, children: /* @__PURE__ */ u2("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.9", "stroke-linecap": "round", "aria-hidden": "true", children: /* @__PURE__ */ u2("path", { d: "M6 6l12 12M18 6L6 18" }) }) })
         ] }),
         /* @__PURE__ */ u2("button", { class: "ibtn rail-toggle", id: "rail-toggle", type: "button", "aria-label": label, "aria-expanded": !rail, "data-tip": label, onClick: (event) => {
-          if (app?.isConnected && !destroyed && event.currentTarget.isConnected && head.contains(event.currentTarget)) host.railChanged();
+          if (app?.isConnected && !destroyed && event.currentTarget.isConnected && head.contains(event.currentTarget)) host2.railChanged();
         }, children: /* @__PURE__ */ u2("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ u2("path", { d: "M4 5h16v14H4zM9 5v14" }) }) })
       ] }), head);
     }
@@ -745,7 +745,7 @@ SOFTWARE.
         rail = collapsed;
         app.classList.toggle("rail", rail && !phone.matches);
         paintHead();
-        renderShellNavigation(nav, destinations, (destination) => host.navigate(destination));
+        renderShellNavigation(nav, destinations, (destination) => host2.navigate(destination));
       },
       topbar(props) {
         ready();
@@ -819,7 +819,7 @@ SOFTWARE.
   function Icon2({ path }) {
     return /* @__PURE__ */ u2("svg", { class: "icon", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ u2("path", { d: path }) });
   }
-  function createRecentRenderer(root, host) {
+  function createRecentRenderer(root, host2) {
     let destroyed = false, frame = 0;
     const active = (node) => !destroyed && node.isConnected && root.contains(node);
     function fit() {
@@ -854,11 +854,11 @@ SOFTWARE.
               const open = event.key === "ArrowRight";
               if (open !== item.open) {
                 event.preventDefault();
-                host.toggle(item.id, open);
+                host2.toggle(item.id, open);
               }
             } else if ((event.key === "Enter" || event.key === " ") && target === event.currentTarget) {
               event.preventDefault();
-              host.open(item.id);
+              host2.open(item.id);
             }
           },
           children: [
@@ -874,7 +874,7 @@ SOFTWARE.
                   "aria-label": item.label,
                   "aria-current": item.current,
                   onClick: (event) => {
-                    if (active(event.currentTarget)) host.open(item.id);
+                    if (active(event.currentTarget)) host2.open(item.id);
                   },
                   children: [
                     /* @__PURE__ */ u2("span", { class: "session-row-main srow-main", children: [
@@ -908,7 +908,7 @@ SOFTWARE.
                   "aria-expanded": item.open,
                   onClick: (event) => {
                     event.stopPropagation();
-                    if (active(event.currentTarget)) host.toggle(item.id, !item.open);
+                    if (active(event.currentTarget)) host2.toggle(item.id, !item.open);
                   },
                   children: /* @__PURE__ */ u2(Icon2, { path: CHEVRON })
                 }
@@ -921,7 +921,7 @@ SOFTWARE.
                   "aria-label": "Show fewer sessions under " + item.name,
                   onClick: (event) => {
                     event.stopPropagation();
-                    if (active(event.currentTarget)) host.fewer(item.id);
+                    if (active(event.currentTarget)) host2.fewer(item.id);
                   },
                   children: [
                     /* @__PURE__ */ u2("span", { children: "Show fewer" }),
@@ -943,7 +943,7 @@ SOFTWARE.
                   "aria-label": "All " + item.all + " sessions under " + item.name,
                   onClick: (event) => {
                     event.stopPropagation();
-                    if (active(event.currentTarget)) host.all(item.id, event.currentTarget);
+                    if (active(event.currentTarget)) host2.all(item.id, event.currentTarget);
                   },
                   children: [
                     /* @__PURE__ */ u2("span", { children: "All " + item.all }),
@@ -991,15 +991,24 @@ SOFTWARE.
   // src/lib/index.ts
   installPropGuard();
 
+  // src/viewer-host.ts
+  var host = null;
+  function getViewerHost() {
+    return host;
+  }
+
   // ../crates/semon-sessions/src/viewer.js
-  (() => {
+  queueMicrotask(() => {
     let NOW = Date.now();
     const MACHINE = {};
     const MACHINE_UP = {};
     const MACHINE_LAST = {};
     let ADMIN = null;
     let ACCOUNT = null;
-    let NAV_MACHINES = null;
+    const viewerHost = getViewerHost();
+    const NATIVE_PAGE = viewerHost?.nativePage;
+    let externalContent = viewerHost?.initialMachines ?? null, externalPending = null;
+    let NAV_MACHINES = viewerHost?.machinesPath ?? null;
     const SIDEBAR_ONLY = document.querySelector(".app")?.dataset.viewer === "sidebar";
     const HARNESSES = { claude: { name: "Claude Code", short: "Claude", icon: { light: "/harness/claude-code.svg", dark: "/harness/claude-code.svg" } }, codex: { name: "Codex", short: "Codex", icon: { light: "/harness/codex-black.svg", dark: "/harness/codex.svg" } }, opencode: { name: "OpenCode", short: "OpenCode", icon: { light: "/harness/opencode-light.svg", dark: "/harness/opencode-dark.svg" } } };
     const HARNESS = Object.fromEntries(Object.entries(HARNESSES).map(([id, h2]) => [id, h2.name]));
@@ -1547,8 +1556,9 @@ SOFTWARE.
         if (x2.last != null) MACHINE_LAST[x2.id] = x2.last;
       }
       ADMIN = m2.admin && safePath2(m2.admin.href) ? m2.admin : null;
-      ACCOUNT = accountOf(m2.account) ?? embeddedAccount();
-      NAV_MACHINES = m2.nav && safePath2(m2.nav.machines) ? m2.nav.machines : null;
+      ACCOUNT = accountOf(m2.account) ?? accountOf(viewerHost?.account) ?? embeddedAccount();
+      viewerHost?.modelAccount?.(ACCOUNT);
+      NAV_MACHINES = viewerHost?.machinesPath ?? (m2.nav && safePath2(m2.nav.machines) ? m2.nav.machines : null);
       for (const k2 of Object.keys(SESS)) delete SESS[k2];
       for (const [id, s2] of Object.entries(m2.sessions)) {
         s2.id = id;
@@ -1831,9 +1841,10 @@ SOFTWARE.
     }
     function urlOf(r2) {
       const hs = (id) => SESS[id]?.harness ?? "claude";
-      return r2.v === "home" ? "/" : r2.v === "analytics" ? "/analytics" : r2.v === "sessions" ? "/sessions" : r2.v === "machines" ? "/machines" : r2.v === "machine" ? "/machines/" + enc(r2.id) : r2.v === "session" ? "/s/" + hs(r2.id) + "/" + enc(r2.id) + (r2.turn ? "?turn=" + enc(r2.turn) : "") : "/trace/" + hs(r2.sid) + "/" + enc(r2.sid) + "/" + enc(r2.turn);
+      return r2.v === "home" ? "/" : r2.v === "analytics" ? "/analytics" : r2.v === "sessions" ? "/sessions" : r2.v === "machines" ? viewerHost?.machinesPath ?? "/machines" : r2.v === "machine" ? "/machines/" + enc(r2.id) : r2.v === "session" ? "/s/" + hs(r2.id) + "/" + enc(r2.id) + (r2.turn ? "?turn=" + enc(r2.turn) : "") : "/trace/" + hs(r2.sid) + "/" + enc(r2.sid) + "/" + enc(r2.turn);
     }
     function routeOf(loc) {
+      if (viewerHost && loc.pathname === viewerHost.machinesPath) return { v: "machines" };
       const p2 = loc.pathname.split("/").filter(Boolean).map((x2) => {
         try {
           return decodeURIComponent(x2);
@@ -1863,14 +1874,15 @@ SOFTWARE.
         adopt(m2);
         LIVE.version = m2.version;
         remember(m2);
-        if (SIDEBAR_ONLY) {
+        if (SIDEBAR_ONLY || NATIVE_PAGE) {
+          if (NATIVE_PAGE) route = { v: NATIVE_PAGE.nav };
           render();
           schedule(2e3);
           return;
         }
         route = routeOf(location);
         if (route.v === "sessions") query = (new URLSearchParams(location.search).get("q") ?? "").trim();
-        if (route.v === "machines" && NAV_MACHINES) {
+        if (route.v === "machines" && NAV_MACHINES && !viewerHost) {
           location.assign(NAV_MACHINES);
           return;
         }
@@ -1899,6 +1911,11 @@ SOFTWARE.
           done();
         }
       }, (err) => {
+        if (viewerHost?.modelFailed?.(err?.status ?? 0)) return;
+        if (viewerHost) {
+          console.warn("semon: model unavailable", err.status);
+          return;
+        }
         $2(SIDEBAR_ONLY ? "#lanes" : "#page").replaceChildren(el("p", SIDEBAR_ONLY ? "ghead" : "empty", "Couldn't load the sessions: " + err.message));
       });
     }
@@ -1991,10 +2008,21 @@ SOFTWARE.
       if (phone.matches) window.scrollTo(0, top);
       else $2("#main").scrollTop = top;
     });
+    let hostFocus = null;
+    if (viewerHost) document.addEventListener("focusin", (event) => {
+      const node = event.target;
+      if (!(node instanceof HTMLElement) || !$2("#page").contains(node)) return;
+      hostFocus = node.id ? { id: node.id } : node.dataset.id ? { row: node.dataset.id } : node.getAttribute("aria-label") ? { label: node.getAttribute("aria-label") } : null;
+    });
+    function restoreHostFocus(saved) {
+      if (!viewerHost || !saved) return;
+      const selector = saved.id ? "#" + CSS.escape(saved.id) : saved.row ? '[data-id="' + CSS.escape(saved.row) + '"]' : saved.label ? '[aria-label="' + CSS.escape(saved.label) + '"]' : null;
+      if (selector) $2("#page")?.querySelector(selector)?.focus({ preventScroll: true });
+    }
     const saveHistoryScroll = () => {
       if (viewerEl) return;
       try {
-        if (history.state?.v) history.replaceState({ ...history.state, scrollTop: currentScroll() }, "");
+        if (history.state?.v) history.replaceState({ ...history.state, scrollTop: currentScroll(), ...viewerHost ? { hostFocus } : {} }, "");
       } catch {
       }
     };
@@ -2088,7 +2116,33 @@ SOFTWARE.
       const t2 = r2.turn ? TURN.get(r2.turn) : null;
       return !!t2 && t2.sid === r2.id && !t2.entries.length;
     };
-    function go(r2, fromHistory) {
+    function go(r2, fromHistory, prepared = false, nextContent = null) {
+      externalPending?.abort();
+      externalPending = null;
+      if (NATIVE_PAGE) {
+        if (!fromHistory) location.assign(r2.v === "machines" ? NAV_MACHINES : urlOf(r2));
+        return;
+      }
+      if (r2.v === "machines" && viewerHost && !prepared) {
+        const controller = new AbortController();
+        externalPending = controller;
+        closeDrawer(true);
+        closeAccountMenu(true, true);
+        viewerHost.loadMachines(controller.signal).then((content) => {
+          if (controller.signal.aborted || externalPending !== controller) {
+            content.destroy();
+            return;
+          }
+          externalPending = null;
+          go(r2, fromHistory, true, content);
+        }, (error) => {
+          if (!controller.signal.aborted && externalPending === controller) {
+            externalPending = null;
+            location.assign(viewerHost.machinesPath);
+          }
+        });
+        return;
+      }
       if (r2.v !== "sessions" || r2 !== focusSessionsSearchOnRender) focusSessionsSearchOnRender = null;
       if (SIDEBAR_ONLY) {
         if (!fromHistory) {
@@ -2109,11 +2163,18 @@ SOFTWARE.
         } catch {
         }
       }
-      if (r2.v === "machines" && NAV_MACHINES) {
+      if (r2.v === "machines" && NAV_MACHINES && !viewerHost) {
         location.assign(NAV_MACHINES);
         return;
       }
       if (!fromHistory) saveHistoryScroll();
+      if (nextContent) {
+        externalContent?.destroy();
+        externalContent = nextContent;
+      } else if (r2.v !== "machines" && externalContent) {
+        externalContent.destroy();
+        externalContent = null;
+      }
       closeAccountMenu(true, true);
       dropErrors(true);
       if (route.v === "session" && (r2.v !== "session" || r2.id !== route.id) && TX[route.id] && TXM[route.id]) {
@@ -2139,7 +2200,7 @@ SOFTWARE.
         if (route !== r2) return;
         endLoading();
         render();
-        if (r2.v === "session") focusTitle();
+        if (r2.v === "session" || viewerHost && r2.v === "machines") focusTitle();
         if (fromHistory && Number.isFinite(r2.scrollTop)) {
           const turns = [...$2("#page").querySelectorAll(".turn")];
           for (const turn of turns) turn.style.contentVisibility = "visible";
@@ -2149,6 +2210,7 @@ SOFTWARE.
             turn.style.contentVisibility = "";
           });
           restoreScroll(r2.scrollTop);
+          restoreHostFocus(r2.hostFocus);
         } else if (r2.v === "session" && r2.turn) {
           revealTurn(r2.turn, !fromHistory);
           if (location.hash) requestAnimationFrame(() => requestAnimationFrame(revealEntryHash));
@@ -5120,6 +5182,24 @@ SOFTWARE.
         renderLanes();
         return;
       }
+      if (NATIVE_PAGE || route.v === "machines" && viewerHost) {
+        tick();
+        rendered = route;
+        if (externalContent && !externalContent.element.isConnected) {
+          clearBox($2("#page"), route);
+          $2("#page").append(externalContent.element);
+        }
+        document.title = (NATIVE_PAGE?.title ?? "Machines") + " \xB7 Semon";
+        renderTopbar(NATIVE_PAGE?.title ?? "Machines");
+        syncLayoutPrefs();
+        syncBarLine();
+        renderNav();
+        renderLanes();
+        renderDrawerAccount();
+        syncJump();
+        return;
+      }
+      if (viewerHost) document.title = ({ home: "Home", sessions: "Sessions", analytics: "Analytics" }[route.v] ?? "Semon") + " \xB7 Semon";
       resetPagerInput();
       holdProgrammaticScroll();
       closeAccountMenu();
@@ -6098,6 +6178,12 @@ SOFTWARE.
         LIVE.delay = LIVE.retry ? Math.min(3e4, LIVE.delay * 2) : 2e3;
         ok = true;
       }, (err) => {
+        if (viewerHost?.modelFailed?.(err?.status ?? 0)) {
+          LIVE.ended = true;
+          clearTimeout(LIVE.timer);
+          LIVE.timer = null;
+          return;
+        }
         if (err?.status === 403) return ended(403);
         LIVE.delay = Math.min(3e4, LIVE.delay * 2);
         if (err?.status == null) setTimeout(() => {
@@ -6398,12 +6484,12 @@ SOFTWARE.
       for (const n2 of $2("#page").querySelectorAll(".hop")) if (n2.querySelector(".brief.open")) st.open.add("hop:" + identOf(n2));
       const a2 = document.activeElement;
       if (a2 && a2 !== document.body && !a2.closest("dialog")) {
-        const host = a2.id ? null : a2.closest(HOSTS), sel = host && host !== a2 ? a2.tagName.toLowerCase() + [...a2.classList].map((c2) => "." + CSS.escape(c2)).join("") : null;
+        const host2 = a2.id ? null : a2.closest(HOSTS), sel = host2 && host2 !== a2 ? a2.tagName.toLowerCase() + [...a2.classList].map((c2) => "." + CSS.escape(c2)).join("") : null;
         st.focus = {
           id: a2.id || null,
-          host: host ? identOf(host) : null,
+          host: host2 ? identOf(host2) : null,
           sel,
-          i: sel ? [...host.querySelectorAll(sel)].indexOf(a2) : 0,
+          i: sel ? [...host2.querySelectorAll(sel)].indexOf(a2) : 0,
           range: null,
           label: a2.getAttribute("aria-label"),
           at: [...$2("#page").querySelectorAll(FOCUSABLE)].indexOf(a2),
@@ -6446,8 +6532,8 @@ SOFTWARE.
       if (st.focus) {
         let n2 = st.focus.id ? document.getElementById(st.focus.id) : null;
         if (!n2 && st.focus.host) {
-          const host = [...document.querySelectorAll(HOSTS)].find((x2) => identOf(x2) === st.focus.host);
-          n2 = host && st.focus.sel ? host.querySelectorAll(st.focus.sel)[st.focus.i] : host;
+          const host2 = [...document.querySelectorAll(HOSTS)].find((x2) => identOf(x2) === st.focus.host);
+          n2 = host2 && st.focus.sel ? host2.querySelectorAll(st.focus.sel)[st.focus.i] : host2;
         }
         if (!n2 && st.focus.label) n2 = [...document.querySelectorAll("#page [aria-label], #topbar [aria-label]")].find((x2) => x2.getAttribute("aria-label") === st.focus.label);
         if (!n2 && st.focus.foot) {
@@ -6750,6 +6836,12 @@ SOFTWARE.
       const nav = app.dataset.viewerNav;
       route = { v: ["home", "sessions", "machines"].includes(nav) ? nav : "" };
     }
+    if (viewerHost) {
+      ACCOUNT = accountOf(viewerHost.account);
+      if (NATIVE_PAGE) route = { v: NATIVE_PAGE.nav };
+      else if (externalContent) route = { v: "machines" };
+      if (NATIVE_PAGE || externalContent) render();
+    }
     boot();
-  })();
+  });
 })();
