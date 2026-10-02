@@ -2116,7 +2116,7 @@ SOFTWARE.
       const t2 = r2.turn ? TURN.get(r2.turn) : null;
       return !!t2 && t2.sid === r2.id && !t2.entries.length;
     };
-    function go(r2, fromHistory, prepared = false) {
+    function go(r2, fromHistory, prepared = false, nextContent = null) {
       externalPending?.abort();
       externalPending = null;
       if (NATIVE_PAGE) {
@@ -2134,9 +2134,7 @@ SOFTWARE.
             return;
           }
           externalPending = null;
-          externalContent?.destroy();
-          externalContent = content;
-          go(r2, fromHistory, true);
+          go(r2, fromHistory, true, content);
         }, (error) => {
           if (!controller.signal.aborted && externalPending === controller) {
             externalPending = null;
@@ -2144,10 +2142,6 @@ SOFTWARE.
           }
         });
         return;
-      }
-      if (r2.v !== "machines" && externalContent) {
-        externalContent.destroy();
-        externalContent = null;
       }
       if (r2.v !== "sessions" || r2 !== focusSessionsSearchOnRender) focusSessionsSearchOnRender = null;
       if (SIDEBAR_ONLY) {
@@ -2174,6 +2168,13 @@ SOFTWARE.
         return;
       }
       if (!fromHistory) saveHistoryScroll();
+      if (nextContent) {
+        externalContent?.destroy();
+        externalContent = nextContent;
+      } else if (r2.v !== "machines" && externalContent) {
+        externalContent.destroy();
+        externalContent = null;
+      }
       closeAccountMenu(true, true);
       dropErrors(true);
       if (route.v === "session" && (r2.v !== "session" || r2.id !== route.id) && TX[route.id] && TXM[route.id]) {
