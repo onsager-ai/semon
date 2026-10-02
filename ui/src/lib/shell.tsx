@@ -103,11 +103,11 @@ export function createShellChrome(host: ShellHost): ShellChrome {
     const label = rail ? 'Expand sidebar' : 'Collapse sidebar';
     render(<>
       <div class="brandrow"><span class="mark" aria-hidden="true" /><span class="brandname">Semon</span>
-        <button class="ibtn close" id="drawer-close" type="button" aria-label="Close menu" onClick={() => closeDrawer()}>
+        <button class="ibtn close" id="drawer-close" type="button" aria-label="Close menu" onClick={event => { if (event.currentTarget.isConnected && head.contains(event.currentTarget)) closeDrawer(); }}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
         </button>
       </div>
-      <button class="ibtn rail-toggle" id="rail-toggle" type="button" aria-label={label} aria-expanded={!rail} data-tip={label} onClick={() => { if (app?.isConnected && !destroyed) host.railChanged(); }}>
+      <button class="ibtn rail-toggle" id="rail-toggle" type="button" aria-label={label} aria-expanded={!rail} data-tip={label} onClick={event => { if (app?.isConnected && !destroyed && event.currentTarget.isConnected && head.contains(event.currentTarget)) host.railChanged(); }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v14H4zM9 5v14" /></svg>
       </button>
     </>, head);

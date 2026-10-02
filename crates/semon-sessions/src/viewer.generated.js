@@ -629,10 +629,12 @@ SOFTWARE.
         /* @__PURE__ */ u2("div", { class: "brandrow", children: [
           /* @__PURE__ */ u2("span", { class: "mark", "aria-hidden": "true" }),
           /* @__PURE__ */ u2("span", { class: "brandname", children: "Semon" }),
-          /* @__PURE__ */ u2("button", { class: "ibtn close", id: "drawer-close", type: "button", "aria-label": "Close menu", onClick: () => closeDrawer(), children: /* @__PURE__ */ u2("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.9", "stroke-linecap": "round", "aria-hidden": "true", children: /* @__PURE__ */ u2("path", { d: "M6 6l12 12M18 6L6 18" }) }) })
+          /* @__PURE__ */ u2("button", { class: "ibtn close", id: "drawer-close", type: "button", "aria-label": "Close menu", onClick: (event) => {
+            if (event.currentTarget.isConnected && head.contains(event.currentTarget)) closeDrawer();
+          }, children: /* @__PURE__ */ u2("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.9", "stroke-linecap": "round", "aria-hidden": "true", children: /* @__PURE__ */ u2("path", { d: "M6 6l12 12M18 6L6 18" }) }) })
         ] }),
-        /* @__PURE__ */ u2("button", { class: "ibtn rail-toggle", id: "rail-toggle", type: "button", "aria-label": label, "aria-expanded": !rail, "data-tip": label, onClick: () => {
-          if (app?.isConnected && !destroyed) host.railChanged();
+        /* @__PURE__ */ u2("button", { class: "ibtn rail-toggle", id: "rail-toggle", type: "button", "aria-label": label, "aria-expanded": !rail, "data-tip": label, onClick: (event) => {
+          if (app?.isConnected && !destroyed && event.currentTarget.isConnected && head.contains(event.currentTarget)) host.railChanged();
         }, children: /* @__PURE__ */ u2("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ u2("path", { d: "M4 5h16v14H4zM9 5v14" }) }) })
       ] }), head);
     }
