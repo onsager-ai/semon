@@ -1,5 +1,25 @@
 # Shared UI changes
 
+## 2026-10-02 — shared shell frame/navigation
+
+Added `createShellChrome`, `ShellChrome`, `ShellHost`, `ShellDestination`,
+`ShellSlots`, `ShellBar` and `renderShellNavigation`. The viewer consumes the
+shared frame, keyed native links, topbar slot commit, brand/rail controls,
+drawer gestures and account root lifecycle. Host title/actions/Find/error nodes,
+Recent tree and content remain disjoint from Preact roots. URL/history, polling,
+authorization and live/scroll transactions remain host responsibilities.
+
+Topbar nodes use `titleSlot`, `actions` or replacement `mode`; direct children
+preserve existing geometry. Unmount detaches these slots intact and releases
+chrome listeners; Recent/page content is preserved for host teardown. Destroy
+is idempotent. Account dismissal listeners are released when the final account
+root unmounts. Sidebar-only embeddings use the same navigation renderer while
+retaining their server shell owner. Navigation now has real safe hrefs and
+preserves modifier clicks; anchor decoration matches the former buttons.
+
+This is stage 3 item 1. Shared Recent/consumer tooling and Hub adoption/persistent
+Sessions–Machines transitions remain pending; Hub pins/deployment are unchanged.
+
 ## 2026-10-02 — shared account lifecycle
 
 Added `createAccountChrome`, `AccountChrome`, `AccountChromeHost` and
