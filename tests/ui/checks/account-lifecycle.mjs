@@ -33,6 +33,14 @@ export default async function accountLifecycle(browser) {
       }
       if (size === 'phone') {
         await trigger.click();
+        await page.setViewportSize({ width: 1280, height: 860 });
+        await page.waitForFunction(() => !history.state?.sheet && !document.querySelector('.account-popover'));
+        await page.locator('#topbar .account-trigger').click();
+        report.expect(await page.locator('.account-popover').count() === 1, label + ': resizing closes the phone sheet before opening desktop chrome');
+        await page.keyboard.press('Escape');
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.locator('#lead-btn').click();
+        await trigger.click();
         await page.goBack();
         report.expect(await page.locator('.account-popover').count() === 0 && !await page.evaluate(() => !!history.state?.sheet), label + ': Back consumes only the account sheet');
         await trigger.click();

@@ -38,8 +38,18 @@ now explicitly includes both account content and lifecycle modules.
 Stage 2 served asset: 356,617 raw / 94,969 raw gzip / 204,317 minified /
 72,012 minified gzip bytes. The same pinned production flags on stage 1 give
 355,555 / 94,693 / 204,039 / 71,791: delta +1,062 raw / +278 minified /
-+221 minified gzip bytes. No request or polling endpoint is added. Review/CI
-acceptance belongs to this stage's PR; baseline references and thresholds stay fixed.
++221 minified gzip bytes. No request or polling endpoint is added. Fresh baseline/head budget runs each
+measure all 14 rows with zero warnings/failures; report-only overages are 34/36.
+Static requests remain 8, Sessions 9, Analytics 10; live remains 3.5 requests and
+one transcript request per update. Observed Home/Sessions transfer bytes are
+616,962 → 618,025. Timing varies and existing byte/request ceilings remain
+exceeded; no threshold or baseline is widened. All five functional groups pass;
+the first run-view synthetic-model undefined.name race reproduces on unchanged
+stage 1 and an identical-code stage-2 group rerun passes. Both visual runs pass
+113 screens and 159 enforced regions, with eight account-region crops identical.
+The named 4× CPU long-session check has zero failures/errors and zero scroll
+frames over 20ms (cold opens 870/885ms, phone/desktop). These are fixture
+observations, not production SLA claims. Exact-head CI belongs to this stage's PR.
 
 **Next priority:** shared application shell/topbar/sidebar/drawer and navigation
 source, then Hub consumer adoption in bounded PRs, before sheets and individual
