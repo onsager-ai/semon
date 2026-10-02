@@ -2919,6 +2919,7 @@ queueMicrotask(() => {
       .then((m) => { if (!m) return null; try { m = applyModelDelta(m); } catch { return api("/api/model?delta=1").then(update); } return update(m); })
       // A failed retry of that transcript backs off like a failed poll (4 s, 8 s, 16 s, capped at 30 s); anything else resets to 2 s.
       .then(() => { LIVE.delay = LIVE.retry ? Math.min(30000, LIVE.delay * 2) : 2000; ok = true; }, (err) => {
+        if (viewerHost?.modelFailed?.(err?.status ?? 0)) { LIVE.ended = true; clearTimeout(LIVE.timer); LIVE.timer = null; return; }
         if (err?.status === 403) return ended(403);
         LIVE.delay = Math.min(30000, LIVE.delay * 2);
         if (err?.status == null) setTimeout(() => { throw err; }); // not the network: a fault on the page, reported as one

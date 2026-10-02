@@ -6176,6 +6176,12 @@ SOFTWARE.
         LIVE.delay = LIVE.retry ? Math.min(3e4, LIVE.delay * 2) : 2e3;
         ok = true;
       }, (err) => {
+        if (viewerHost?.modelFailed?.(err?.status ?? 0)) {
+          LIVE.ended = true;
+          clearTimeout(LIVE.timer);
+          LIVE.timer = null;
+          return;
+        }
         if (err?.status === 403) return ended(403);
         LIVE.delay = Math.min(3e4, LIVE.delay * 2);
         if (err?.status == null) setTimeout(() => {
