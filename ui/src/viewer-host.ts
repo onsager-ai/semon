@@ -7,6 +7,8 @@ export interface ViewerHost {
   nativePage?: { title: string; nav: string };
   account?: unknown;
   modelAccount?(account: Account | null): void;
+  /** Return true when the host has taken native recovery for a model failure. */
+  modelFailed?(status: number): boolean;
   initialMachines?: ViewerContent;
   loadMachines(signal: AbortSignal): Promise<ViewerContent>;
 }
