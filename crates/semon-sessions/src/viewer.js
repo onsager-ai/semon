@@ -1,4 +1,4 @@
-import { parseAccount, createAccountChrome, createShellChrome, renderShellNavigation } from "../../../ui/src/account-adapter";
+import { parseAccount, createAccountChrome, createShellChrome, renderShellNavigation, createRecentRenderer } from "../../../ui/src/account-adapter";
 (() => {
   // ====================================================================================
   // Model: sessions are places; handoffs are how work moves between them (ask: you → session,
@@ -1024,7 +1024,7 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
   let expandedAll = null, revealedFor = null, expandedPath = new Set(), expandedUnder = new Set(), sideOrder = null;
   const ancestorsOf = (id) => { const out = new Set(); for (let p = id && SESS[id] ? parentOf(id) : null; p && SESS[p] && p !== id && !out.has(p); p = parentOf(p)) out.add(p); return out; };
   // Fills a parent's group and says whether it holds the parent's whole list, which sticks the parent's row (stickRow).
-  function treeGroupFill(group, parent, kids, children, depth, rail, open) {
+  function treeGroupSnapshot(parent, kids, children, depth, rail, open) {
     const { current, ancestors } = routedPath(), rank = new Map(kids.map((c) => [c.id, kidRank(c, children)]));
     const byRank = (a, b) => rank.get(a.id) - rank.get(b.id) || b.last - a.last, sorted = [...kids].sort(byRank), keep = new Set();
     for (const c of sorted) if (rank.get(c.id) < 2 && keep.size < TREE_ACTIVE) keep.add(c.id);
@@ -1033,38 +1033,39 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
     const listed = sorted.filter((c) => keep.has(c.id)), hidden = kids.length - listed.length;
     if (!hidden && expandedAll === parent.id) expandedAll = null; // nothing is left to open: "Show fewer" would have nothing to fold
     const full = hidden > 0 && !rail && (expandedAll === parent.id || expandedUnder.has(parent.id));
-    group.replaceChildren();
     // The rows keep the order they had (see "Stable order"); a child new to the list is held, unless it is the open session or leads to it.
     // A collapsed parent's children are nobody's to see: drawn sorted, not counted. A list new to a screen that has a snapshot is held
     // whole, with no "All N" row either, so that nothing appears in the tree.
     const key = (full ? "a:" : "k:") + parent.id, unseen = !!sideOrder?.keep && open && !full && !sideOrder.reseed && sideOrder.seen.has(parent.id) && !sideOrder.prev.has(key);
     const shown = sideOrder ? orderList(sideOrder, key, full ? sorted : listed, byRank, { must: new Set([current, ...ancestors, ...expandedPath]), quiet: !open, seed: full || sideOrder.reseed || !sideOrder.seen.has(parent.id) }) : full ? sorted : listed;
-    for (const child of shown) group.append(buildLaneItem(child, depth + 1, children, rail));
-    if (kids.length === shown.length || full || unseen) return full && expandedAll === parent.id;
-    const total = descendantsOf(parent.id, children).length, button = el("button", "tree-all");
-    button.type = "button"; button.dataset.id = parent.id; button.setAttribute("role", "treeitem"); if (phone.matches) button.setAttribute("aria-haspopup", "dialog");
-    button.setAttribute("aria-label", "All " + total + " sessions under " + parent.name);
-    button.append(el("span", null, "All " + total), icon(I.chev));
-    button.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (phone.matches) { openKidsSheet(parent, button); return; }
-      expandedAll = parent.id; renderLanes();
-      $('#lanes .treeitem[data-id="' + CSS.escape(parent.id) + '"] > .tree-row .tree-fewer')?.focus();
-    });
-    group.append(button);
-    return false;
+    const items = shown.map(child => buildLaneSnapshot(child, depth + 1, children, rail));
+    return { items, all: kids.length === shown.length || full || unseen ? undefined : descendantsOf(parent.id, children).length, full: full && expandedAll === parent.id };
   }
-  // While a parent's whole list is open its row sticks to the top of the sidebar and carries the control that folds the list again,
-  // so folding never needs a scroll: the row is scrolled back into view and keeps focus.
-  function stickRow(line, s) {
-    line.classList.add("stuck");
-    const fewer = el("button", "tree-fewer"); fewer.type = "button"; fewer.setAttribute("aria-label", "Show fewer sessions under " + s.name); fewer.append(el("span", null, "Show fewer"), icon(I.chev));
-    fewer.addEventListener("click", (e) => {
-      e.stopPropagation(); expandedAll = null; renderLanes();
-      const row = $('#lanes .srow[data-id="' + CSS.escape(s.id) + '"]'); scrollProgrammatically(() => row?.scrollIntoView({ block: "nearest" })); row?.focus({ preventScroll: true });
-    });
-    line.append(fewer);
-  }
+  let recentSnapshot = { items: [], empty: false };
+  const recentRenderer = createRecentRenderer($("#lanes"), {
+    open: id => goSession(id),
+    toggle(id, value) {
+      if (!value) forcedOpenIds().delete(id);
+      saveTreePref(id, value);
+      if (!value && (expandedAll === id || expandedPath.has(id))) {
+        expandedAll = null; renderLanes();
+        $('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] > .tree-row .tree-toggle')?.focus();
+      } else {
+        const change = items => items.map(item => ({ ...item, open: item.id === id ? value : item.open, children: item.children ? change(item.children) : undefined }));
+        recentSnapshot = { ...recentSnapshot, items: change(recentSnapshot.items) }; recentRenderer.update(recentSnapshot);
+      }
+    },
+    all(id, trigger) {
+      if (!SESS[id]) return;
+      if (phone.matches) { openKidsSheet(SESS[id], trigger); return; }
+      expandedAll = id; renderLanes();
+      $('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] > .tree-row .tree-fewer')?.focus();
+    },
+    fewer(id) {
+      expandedAll = null; renderLanes();
+      const row = $('#lanes .srow[data-id="' + CSS.escape(id) + '"]'); scrollProgrammatically(() => row?.scrollIntoView({ block: "nearest" })); row?.focus({ preventScroll: true });
+    },
+  });
   // A phone's "All N": every session below the parent in one sheet, waiting first, then running, then finished, newest first in each.
   function openKidsSheet(parent, trigger) {
     const all = descendantsOf(parent.id, navigationTree().children), bucket = (s) => s.state === "wait" ? 0 : s.state === "work" ? 1 : 2;
@@ -1125,37 +1126,26 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
     for (const value of values) value.hidden = !!compact && meta.clientWidth < 280 && value.classList.contains("row-duration");
     for (const value of values.sort((a, b) => Number(b.dataset.drop) - Number(a.dataset.drop))) { if (meta.scrollWidth <= meta.clientWidth + 1) break; value.hidden = true; }
   }
-  window.addEventListener("resize", () => { for (const meta of document.querySelectorAll(".session-row-meta")) fitSessionRowMeta(meta); }, { passive: true });
-  function buildLaneItem(s, depth, children, rail) {
-    const kids = children.get(s.id) ?? [], allKids = descendantsOf(s.id, children), item = el("div", "treeitem");
-    item.dataset.id = s.id; item.setAttribute("role", "treeitem"); item.setAttribute("aria-label", s.name); item.tabIndex = 0;
+  window.addEventListener("resize", () => { for (const meta of document.querySelectorAll('.session-row-meta:not(#lanes .session-row-meta)')) fitSessionRowMeta(meta); }, { passive: true });
+  function buildLaneSnapshot(s, depth, children, rail) {
+    const kids = children.get(s.id) ?? [], allKids = descendantsOf(s.id, children);
     const { current, ancestors } = routedPath(), saved = treePrefs[s.id];
     const open = forcedOpenIds().has(s.id) || expandedPath.has(s.id) || (typeof saved?.open === "boolean" ? saved.open : defaultTreeOpen(s.id, children) || expandedUnder.has(s.id));
-    if (kids.length && !rail) item.setAttribute("aria-expanded", String(open));
-    const line = el("div", "tree-row");
-    let lineToggle = null;
-    if (kids.length && !rail) {
-      const toggle = el("button", "tree-toggle"); toggle.type = "button"; toggle.dataset.treeToggle = s.id; toggle.setAttribute("aria-label", (open ? "Collapse " : "Expand ") + s.name); toggle.setAttribute("aria-expanded", String(open)); toggle.append(icon(I.chev));
-      toggle.addEventListener("click", (e) => { e.stopPropagation(); const value = item.getAttribute("aria-expanded") !== "true"; item.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-expanded", String(value)); toggle.setAttribute("aria-label", (value ? "Collapse " : "Expand ") + s.name); if (!value) forcedOpenIds().delete(s.id); saveTreePref(s.id, value); if (!value && (expandedAll === s.id || expandedPath.has(s.id))) { expandedAll = null; renderLanes(); $('#lanes .treeitem[data-id="' + CSS.escape(s.id) + '"] > .tree-row .tree-toggle')?.focus(); } });
-      lineToggle = toggle; line.classList.add("has-toggle");
-    }
-    const row = sessionRow(s, { density: "compact", rail }); if (rail) row.dataset.tip = s.name; // the collapsed rail shows only a dot; otherwise the name has a tip while it is cut off
-    row.setAttribute("aria-label", s.name + ", " + (STATE[s.state] ?? s.state) + ", " + (HARNESS[s.harness] ?? s.harness) + ", " + shortHost(s));
-    const parts = allKids.length ? childParts(allKids) : []; if (parts.length) row.setAttribute("aria-label", row.getAttribute("aria-label") + ", " + parts.join(", "));
-    if (current === s.id) row.setAttribute("aria-current", "page");
-    if (rail && ancestors.has(s.id)) { row.classList.add("on-path"); row.setAttribute("aria-current", "true"); }
-    const main = row.querySelector(".session-row-main"), ag = main.querySelector(".ag");
-    if (rail && allKids.some((x) => x.state === "work" || x.state === "wait")) { const childDot = dot(urgentDescendant(s.id, children) ?? "work", false); childDot.classList.add("child-dot"); childDot.setAttribute("aria-hidden", "true"); main.append(childDot); }
-    // A parent's row (open or collapsed) shows a small dot beside its time only when a session under it needs you (amber) or failed (red); the label says which, so the dot is decorative.
-    const flag = kids.length && !rail ? (allKids.some((x) => x.state === "wait") ? "wait" : allKids.some((x) => x.state === "err") ? "err" : null) : null;
-    if (flag) { const f = el("span", "kid-flag " + flag); f.dataset.tip = allKids.filter((x) => x.state === "wait").length + " needs you · " + allKids.filter((x) => x.state === "err").length + " failed"; f.setAttribute("aria-hidden", "true"); ag.before(f); }
-    line.append(row); if (lineToggle) line.append(lineToggle); item.append(line);
-    item.addEventListener("keydown", (e) => {
-      if (kids.length && !rail && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { if (e.target !== item && e.target !== row && e.target !== lineToggle) return; const next = e.key === "ArrowRight"; if ((item.getAttribute("aria-expanded") === "true") !== next) { e.preventDefault(); item.querySelector(":scope > .tree-row .tree-toggle")?.click(); } }
-      else if ((e.key === "Enter" || e.key === " ") && e.target === item) { e.preventDefault(); goSession(s.id); }
-    });
-    if (kids.length && !rail) { const group = el("div", "tree-group"); group.dataset.depth = String(Math.min(depth + 1, 4)); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Sessions spawned by " + s.name); const full = treeGroupFill(group, s, kids, children, depth, rail, open); item.append(group); if (full && open) stickRow(line, s); }
-    return item;
+    const group = kids.length && !rail ? treeGroupSnapshot(s, kids, children, depth, rail, open) : null;
+    const parts = allKids.length ? childParts(allKids) : [], harness = Object.hasOwn(HARNESSES, s.harness) ? HARNESSES[s.harness] : null;
+    const flag = kids.length && !rail ? (allKids.some(x => x.state === "wait") ? "wait" : allKids.some(x => x.state === "err") ? "err" : null) : null;
+    const fields = [{ className: "row-duration", text: dur(s.start, s.state === "work" || s.state === "wait" ? null : s.last), priority: 1, tip: "Duration", icon: I.duration }];
+    if (Object.keys(MACHINE).length > 1) fields.push({ className: "row-machine host", text: shortHost(s), priority: 2, tip: "Machine: " + hostOf(s), icon: I.machine });
+    if (s.repo) fields.push({ className: "repo-short", text: s.repo, priority: 3, tip: "Repo: " + s.repo, icon: I.repo });
+    return {
+      id: s.id, name: s.name, label: [s.name, STATE[s.state] ?? s.state, HARNESS[s.harness] ?? s.harness, shortHost(s), ...parts].join(", "),
+      state: s.state, stateLabel: STATE[s.state] ?? s.state, age: ago(s.last), model: shortModel(s.model ?? s.modelId), modelTip: "Model: " + modelIdOf(s),
+      harness: harness ? { id: s.harness, name: harness.name, light: harness.icon.light, dark: harness.icon.dark, darkTheme: darkTheme() } : undefined,
+      fields, current: current === s.id ? "page" : rail && ancestors.has(s.id) ? "true" : undefined, rail,
+      childState: rail && allKids.some(x => x.state === "work" || x.state === "wait") ? urgentDescendant(s.id, children) ?? "work" : undefined,
+      flag: flag ? { state: flag, tip: allKids.filter(x => x.state === "wait").length + " needs you · " + allKids.filter(x => x.state === "err").length + " failed" } : undefined,
+      open, depth, children: group?.items, all: group?.all, stuck: !!group?.full && open,
+    };
   }
   // The focused control in the tree, so a redraw (a live update, a fold) can put focus back on it or, failing that, on its parent's row.
   function laneFocus() {
@@ -1194,10 +1184,9 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
     // just brought back are drawn sorted, not held as new.
     sideOrder.exp = JSON.stringify([expandedAll, railMode && !phone.matches]); sideOrder.reseed = sideOrder.keep && sideOrder.prevExp !== sideOrder.exp;
     expandedPath = expandedAll ? ancestorsOf(expandedAll) : new Set(); expandedUnder = expandedAll ? new Set(descendantsOf(expandedAll, children).map((x) => x.id)) : new Set();
-    box.replaceChildren();
-    for (const s of orderList(sideOrder, "lanes", lanes, byLast, { limit: 8, must: new Set([current, ...ancestors]) }).slice(0, 8)) box.append(buildLaneItem(s, 0, children, railMode && !phone.matches));
+    recentSnapshot = { items: orderList(sideOrder, "lanes", lanes, byLast, { limit: 8, must: new Set([current, ...ancestors]) }).slice(0, 8).map(s => buildLaneSnapshot(s, 0, children, rail)), empty: !lanes.length };
+    recentRenderer.update(recentSnapshot);
     if (!sideOrder.n) { clearTimeout(ordIdle); ordIdle = null; } else if (!ordIdle) ordIdleArm(); // (counted from when something was first held)
-    if (!lanes.length) { const empty = el("p", "ghead", "No sessions match"); empty.setAttribute("role", "none"); box.append(empty); }
     const q = $("#q"); if (q && document.activeElement !== q) q.value = query;
     restoreLaneFocus(focus);
     // A stuck row covers the top of the sidebar: what is scrolled into view (the open session, after a navigation) stays clear of it.

@@ -167,3 +167,27 @@ for (const width of [390, 1280]) for (const colorScheme of ['light', 'dark']) {
     } finally { await browser.close(); }
   });
 }
+
+test('Recent commits preserve keyed focus and destroy rejects detached controls', async () => {
+  const bundle = await build({ absWorkingDir: new URL('../', import.meta.url).pathname, entryPoints: ['src/lib-contract.tsx'], bundle: true, write: false, format: 'iife', globalName: 'AccountExample', platform: 'browser', tsconfig: 'tsconfig.json' });
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<div id="recent"></div>'); await page.addScriptTag({ content: bundle.outputFiles[0].text });
+    const result = await page.evaluate(() => {
+      const root = document.querySelector('#recent'), events = [];
+      const item = { id: 'parent', name: '<img onerror=alert(1)>', label: 'Parent', state: 'work', stateLabel: 'Working', age: 'now', model: 'Model', modelTip: 'Model', fields: [], rail: false, open: true, children: [], depth: 0, all: 9, stuck: false };
+      const host = { open: id => events.push(id), toggle: (id, open) => events.push(open), all: id => events.push(id), fewer: id => events.push(id) };
+      const snapshot = { items: [item], empty: false };
+      const renderer = AccountExample.mountRecentExample(root, host, snapshot), row = root.querySelector('.srow'); row.focus();
+      renderer.update({ ...snapshot, items: [{ ...item, age: '1m' }] });
+      if (root.querySelector('.srow') !== row || document.activeElement !== row) throw new Error('keyed commit lost focus');
+      if (root.querySelector('img') || root.querySelector('.nm').textContent !== item.name) throw new Error('Recent did not escape text');
+      row.click(); root.querySelector('.tree-toggle').click(); root.querySelector('.tree-all').click();
+      renderer.destroy(); renderer.destroy(); row.click(); window.dispatchEvent(new Event('resize'));
+      let rejected = false; try { renderer.update(snapshot); } catch { rejected = true; }
+      return { events, empty: !root.childNodes.length, rejected };
+    });
+    assert.deepEqual(result, { events: ['parent', false, 'parent'], empty: true, rejected: true });
+  } finally { await browser.close(); }
+});

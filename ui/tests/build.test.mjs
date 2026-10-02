@@ -19,3 +19,22 @@ test('production builds are deterministic and stale assets fail', async () => {
   assert.ok(inputs.some(p => p.endsWith('preact/dist/preact.module.js')));
   assert.ok(inputs.every(p => !/preact\/(debug|devtools|compat)\//.test(p)));
 });
+
+test('consumer build uses pinned types/security/runtime and rejects stale output', async () => {
+  const { buildConsumer } = await import('../build.mjs');
+  const dir = await mkdtemp(join(tmpdir(), 'semon-consumer-'));
+  try {
+    const entry = join(dir, 'consumer.ts'), output = join(dir, 'consumer.js');
+    const library = new URL('../src/lib/index.ts', import.meta.url).pathname;
+    await writeFile(entry, `import { createRecentRenderer } from ${JSON.stringify(library)}; console.log(createRecentRenderer);`);
+    const result = await buildConsumer(entry, output);
+    assert.equal(Object.keys(result.metafile.inputs).filter(p => /preact\/dist\/preact\.module\.js$/.test(p)).length, 1);
+    await buildConsumer(entry, output, true);
+    await writeFile(output, '// stale');
+    await assert.rejects(buildConsumer(entry, output, true), /Stale consumer/);
+    await writeFile(entry, 'const value: number = "wrong";');
+    await assert.rejects(buildConsumer(entry, output), /not assignable/);
+    await writeFile(entry, 'document.body.innerHTML = "unsafe";');
+    await assert.rejects(buildConsumer(entry, output), /forbidden application boundary/);
+  } finally { await rm(dir, { recursive: true }); }
+});
