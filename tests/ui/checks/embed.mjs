@@ -217,6 +217,24 @@ export default async function embedCheck(browser) {
   }
 
   // ---- The account menu from the embedding page ----
+  // Hostile values traverse the served production bundle's copied model and Preact props.
+  for (const size of ["phone", "desktop"]) {
+    const hostile = '<img src=x onerror="window.__accountXss=1">';
+    const page = await open(browser, { size, embed: { account: account({
+      name: hostile, login: '</span><script>window.__accountXss=2</script>', initials: '<b>',
+      workspaces: [{ name: hostile, role: '<svg onload="window.__accountXss=3">', current: true, switch_href: '/embed/switch/1' }],
+      links: [{ label: hostile, href: '/embed/profile', method: 'get', danger: false }],
+    }) } });
+    if (size === 'phone') await page.locator('#lead-btn').click();
+    await page.locator(size === 'phone' ? '#account-drawer .account-trigger' : '#topbar .account-trigger').click();
+    const state = await page.evaluate(() => {
+      const menu = document.querySelector('.account-popover');
+      return { name: menu.querySelector('.account-name').textContent, markup: menu.querySelectorAll('script, img, svg, b, [style], [onerror], [onload]').length, executed: window.__accountXss ?? 0 };
+    });
+    r.expect(state.name === hostile && state.markup === 0 && state.executed === 0, 'hostile account values stay text in served ' + size + ' menu: ' + JSON.stringify(state));
+    await closePage(page);
+  }
+
   const menuOf = (page, scope = "#topbar") => page.evaluate((sc) => {
     const menu = document.querySelector(sc + " .account-popover");
     return menu ? { name: menu.querySelector(".account-name")?.textContent, login: menu.querySelector(".account-login-value")?.textContent, bold: menu.querySelectorAll("b").length, hrefs: [...menu.querySelectorAll("a[href]")].map((a) => a.getAttribute("href")), actions: [...menu.querySelectorAll("form")].map((f) => f.getAttribute("action")), workspaces: [...menu.querySelectorAll(".account-workspace-name")].map((n) => n.textContent) } : null;
@@ -238,16 +256,20 @@ export default async function embedCheck(browser) {
     await openMenu(page);
     const control = page.locator('#topbar .account-popover [role="menuitemcheckbox"][data-pref="wide"]');
     const before = await control.getAttribute("aria-checked");
+    await control.evaluate((row) => { window.__accountDisplayNode = row; window.__accountWorkspaceNode = row.closest('.account-popover').querySelector('.account-workspace-form'); });
     await control.click();
     const changed = await page.evaluate(() => ({
       checked: document.querySelector('#topbar .account-popover [role="menuitemcheckbox"][data-pref="wide"]')?.getAttribute("aria-checked"),
       wide: document.querySelector("#page").classList.contains("wide-mode"),
       saved: localStorage.getItem("semon.wide"),
       open: !!document.querySelector("#topbar .account-popover"),
+      kept: window.__accountDisplayNode === document.querySelector('#topbar .account-popover [data-pref="wide"]'),
+      focused: document.activeElement === window.__accountDisplayNode,
+      workspaceKept: window.__accountWorkspaceNode === document.querySelector('#topbar .account-popover .account-workspace-form'),
     }));
     const expected = !start;
     R["desktopWideMode " + tag] = { before, changed };
-    r.expect(before === String(start) && changed.checked === String(expected) && changed.wide === expected && changed.saved === (expected ? "1" : "0") && changed.open,
+    r.expect(before === String(start) && changed.checked === String(expected) && changed.wide === expected && changed.saved === (expected ? "1" : "0") && changed.open && changed.kept && changed.focused && changed.workspaceKept,
       "the desktop Display switch should toggle wide mode, save it, and leave the menu open: " + JSON.stringify(R["desktopWideMode " + tag]));
     await page.waitForTimeout(300); // the knob's slide is 160 ms; the shot shows the settled state
     await page.screenshot({ path: path.join(OUT, "embed-menu-wide-on-" + tag + ".png") });

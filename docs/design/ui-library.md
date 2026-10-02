@@ -1,5 +1,30 @@
 # The UI library: semon's `ui/` as components an embedding app imports
 
+## Current library decision — 2026-10-02
+
+[#224](https://github.com/onsager-ai/semon/issues/224) selects native **Preact + TypeScript/TSX + esbuild**, superseding the custom `h()` factory in the historical plan below. See [tsx.md](tsx.md#current-decision--2026-10-02) for the current baseline, build, scheduling, security and measured bundle costs. Source stays in Semon's top-level `ui/`; Hub consumes a pinned submodule rather than maintaining a second framework implementation.
+
+The current first stage exports `AccountMenu`, `AccountMenuProps`, `Account`, `parseAccount` and `safePath` from `ui/src/lib/index.ts`. `AccountMenu` renders account **popover contents**; it does not yet own a trigger, container, drawer, polling, history or focus restoration. Validate unknown API/prelude data with `parseAccount` before giving it to the component. Its native VNodes use the shared HTML/style/path guard. `AccountMenuProps` contains `{ account, compact, wide, onWideChange }`: the viewer supplies Display state explicitly; the component owns no viewer global state. Account links and workspace paths retain the existing validation and same-origin POST contract.
+
+`ui/src/account-adapter.tsx` owns the viewer's Preact roots. Legacy code owns containers and commits mount/update/unmount synchronously through that adapter; Preact alone owns their descendants. No shared `lib/` module imports viewer state. `ui/src/lib-contract.tsx` type-checks every current export as a consumer. `ui/tsconfig.lib.json` provides strict native Preact JSX settings; install exact versions from `ui/package-lock.json`. The runtime's license is retained in `ui/PREACT-LICENSE`.
+
+### Hub integration against the actual consumer
+
+Hub main `149e382` pins Semon `acf79df` in `semon.rev` and the `semon` gitlink. Its viewer is served through `ViewerCore` (which embeds `shell::VIEWER_JS`); it supplies account JSON through `account::with_account`. Hub's own signed-in pages currently render separate account chrome in `crates/semon-hub/src/pages.rs` and load unchanged `shell::JS`. There is no Hub Preact build today. Its browser checks cover page/viewer account and drawer geometry plus one viewer load, while Semon owns the broader viewer suite.
+
+After the source pilot is reviewed and green, a separate Hub bump must keep both pins equal and rerun Rust, PostgreSQL, browser and image/smoke workflows. That bump adopts the generated viewer automatically and needs no Node in its production image. To replace the shell page's own account menu, first finish trigger/lifecycle extraction in Semon, then import the public library entry, extend `ui/tsconfig.lib.json`, use the pinned tooling and check in the Hub entry's generated asset with freshness CI. Preserve Hub's same-origin POST/CSRF checks, account avatar proxy, no-JS fallbacks, prelude/events and authenticated model handling. The consumer must share Semon's Preact instance within each bundle. No Hub pins, runtime deployment, pricing/filter/MCP work or shell page behavior change in the source pilot.
+
+### Remaining API and migration plan
+
+`TopBar`, `Sidebar`, `RecentSessions`, `pollRecentSessions`, `Sheet`, `enhanceSheet`, `sidebarOf`, `/api/sidebar`, extra `MenuSection`s, static-frame comparison fixtures and a Breaking changelog gate remain planned work. The original export table below is a target API, not an implemented contract. CSS stays in existing crate files for this pilot; splitting it or changing shell geometry would enlarge the refactor unnecessarily.
+
+Proceed through account trigger/lifecycle ownership, sheets, top bar/sidebar, individual screens, then transcript/paging/live orchestration. Every stage preserves current URLs, embedding contract, CSP, focus, scroll, ordering, expanded state and unchanged visual gates. Server/component parity should use actual Preact in a browser or an established DOM implementation; the earlier tiny fake DOM sufficient for `h()` is not a Preact verification strategy. Measure equivalent production builds and consumer request budgets at each adoption.
+
+## Historical library plan — 2026-09-30
+
+The approved original plan is preserved below as a comparison and decision record. Its helper/installer references, obsolete overhaul dependencies, estimates and unimplemented API descriptions are superseded by the current stages above. The current pilot intentionally extracts content first, keeping existing history/focus behavior in its legacy controller until the next bounded stage.
+
+
 Status: decided 2026-09-30; see [Decided](#decided). Code follows the [migration order](#migration-order). Marvin asked for the plan in the Semon session, 2026-09-30T02:04:21Z: "Library plan + cheap fixes now (Recommended)", and approved it there at 2026-09-30T02:27:47Z. This amends [tsx.md](tsx.md): the same `ui/` directory, the same pinned esbuild, the same `h()` factory, no runtime library.
 
 ## Why

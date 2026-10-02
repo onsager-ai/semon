@@ -3508,6 +3508,39 @@ mod tests {
         assert!(crate::shell::font("instrument-sans-latin").is_none());
     }
 
+    fn application_script(js: &str) -> String {
+        // Only the pinned Preact core may contain its generic HTML/style implementation.
+        // Application sources are AST-checked in ui/security-check.mjs; the VNode guard
+        // rejects these props at runtime. Keep all other bundle checks and CSP intact.
+        let (before, runtime_and_after) = js
+            .split_once("  // node_modules/preact/dist/preact.module.js\n")
+            .expect("pinned Preact core boundary");
+        let (runtime, after) = runtime_and_after
+            .split_once("\n  // ")
+            .expect("end of pinned Preact core module");
+        assert_eq!(runtime.matches("innerHTML").count(), 3);
+        assert_eq!(runtime.matches("cssText").count(), 2);
+        format!("{before}\n  // {after}")
+    }
+
+    #[test]
+    fn runtime_sink_exemption_stops_before_application_modules() {
+        let js = crate::shell::VIEWER_JS;
+        let app = application_script(js);
+        for module in ["src/lib/account.ts", "src/lib/security.ts"] {
+            assert!(
+                app.contains(&format!("  // {module}\n")),
+                "{module} must be scanned"
+            );
+        }
+        let injected = js.replacen(
+            "  // src/lib/account.ts\n",
+            "  // src/lib/account.ts\n  probe.innerHTML = hostile;\n",
+            1,
+        );
+        assert!(application_script(&injected).contains("innerHTML"));
+    }
+
     #[test]
     fn the_page_has_no_inline_script_style_or_html_injection() {
         let lower = PAGE.to_ascii_lowercase();
@@ -3521,6 +3554,7 @@ mod tests {
             .any(|word| word.starts_with("on") && word.contains('='));
         assert!(!handler, "no inline event handlers");
         let js = crate::shell::VIEWER_JS;
+        let application = application_script(js);
         for banned in [
             "innerHTML",
             "outerHTML",
@@ -3531,7 +3565,13 @@ mod tests {
             "setAttribute(\"style\"",
             "cssText",
         ] {
-            assert!(!js.contains(banned), "viewer.js uses {banned}");
+            assert!(
+                !application.contains(banned),
+                "application viewer.js uses {banned}"
+            );
+            if banned != "innerHTML" && banned != "cssText" {
+                assert!(!js.contains(banned), "viewer.js uses {banned}");
+            }
         }
         assert!(js.contains("textContent"));
         // No native tooltips: a tip is `data-tip` (tooltip.js). The browser check scans the screens it renders; this covers
@@ -4589,7 +4629,7 @@ mod tests {
         let (capped, truncated) = truncate(&"x".repeat(EXPAND_BYTES + 1), EXPAND_BYTES);
         assert!(truncated);
         assert_eq!(capped.len(), EXPAND_BYTES);
-        assert!(!crate::shell::VIEWER_JS.contains("innerHTML"));
+        assert!(!application_script(crate::shell::VIEWER_JS).contains("innerHTML"));
         assert!(crate::shell::VIEWER_JS.contains("textContent"));
     }
 
