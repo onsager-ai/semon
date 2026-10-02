@@ -8,3 +8,5 @@ export { createAccountChrome } from './account-chrome';
 export type { AccountChrome, AccountChromeHost, AccountCloseOptions } from './account-chrome';
 export { createShellChrome, renderShellNavigation } from './shell';
 export type { ShellChrome, ShellHost, ShellDestination, ShellSlots, ShellBar } from './shell';
+export { createRecentRenderer } from './recent';
+export type { RecentRenderer, RecentHost, RecentSnapshot, RecentItem } from './recent';
