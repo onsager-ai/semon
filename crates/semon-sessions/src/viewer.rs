@@ -3584,6 +3584,8 @@ mod tests {
         // No native tooltips: a tip is `data-tip` (tooltip.js). The browser check scans the screens it renders; this covers
         // the ones it does not open (menus, the errors stepper, listboxes).
         for (name, script) in [("viewer.js", js), ("shell.js", crate::shell::JS)] {
+            // The document title names a history destination; element titles create forbidden native tooltips.
+            let script = script.replace("document.title =", "documentTitle =");
             for banned in [
                 ".title =",
                 ".title=",
