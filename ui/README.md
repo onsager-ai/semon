@@ -84,3 +84,8 @@ a supported consumer build entry, and Hub adoption follow before sheets/screens.
 and [consumer plan](../docs/design/ui-library.md) for remaining stages, runtime sink
 review and actual Hub pin/embedding contracts. Legacy sources remain in the
 crate during the bounded migration to avoid interfering with parallel work.
+
+External consumers: `node ui/build.mjs --entry /absolute/consumer.ts --output /absolute/consumer.generated.js`
+(typecheck, source security and one pinned Preact runtime). Repeat with `--check`
+for checked-in asset freshness. Recent's typed snapshot renderer is exported
+from `src/lib`; ordering, model refresh, focus/scroll and sheet policy remain host-owned.

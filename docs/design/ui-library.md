@@ -260,3 +260,18 @@ Marvin's answers in the Semon session, 2026-09-30T02:27:47Z: "Approve all three 
 5. **No search in the sidebar.** Marvin, in the Semon session, 2026-09-30: "search not needed in sidebar, remove". The viewer's sidebar and `session_sidebar` lose the search field in their own PR, so `Sidebar` takes no search and (e)'s acceptance has none. The Sessions page keeps its own search.
 
 Also part of the plan, with no alternative proposed: Rust helpers plus comparison checks for the four frames ([Rendering](#rendering), option 1), and a checked-in bundle in the app, not a bundle made during its production build.
+
+The implemented Recent boundary is `createRecentRenderer(root, host)`, with
+`RecentSnapshot` and recursive `RecentItem` presentation data. The host supplies
+ordered rows, selected/ancestor status, open groups, metadata and View all state;
+callbacks report open, toggle, all and fewer actions. The renderer owns its keyed
+DOM descendants and metadata fitting. `update` commits synchronously; `destroy`
+unmounts the root, cancels measurements and removes its resize listener. Hosts
+retain polling, held-order logic, focus restoration, scroll and sheet decisions.
+It does not fetch data or introduce another sidebar endpoint.
+
+External typed consumers build with Semon's pinned installation:
+`node semon/ui/build.mjs --entry ui/shell.ts --output ui/shell.generated.js`.
+Add `--check` in CI to reject stale assets. The command typechecks the consumer,
+checks source boundaries, resolves one pinned Preact runtime and emits a
+standalone browser bundle. The library imports no viewer, router or poller.
