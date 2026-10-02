@@ -113,7 +113,7 @@ for (const width of [390, 1280]) for (const colorScheme of ['light', 'dark']) {
         };
         try {
           const container = document.querySelector('#shell');
-          const host = { account: { place() {}, opened() {}, closed() {}, navigate() { return false; }, submit() { return false; } }, navigate() { navigations++; return true; }, drawerOpened() { opened++; }, drawerClosed() { closed++; }, railChanged() { railChanges++; } };
+          const host = { account: { place() {}, opened() {}, closed() {}, navigate() { return false; }, submit() { return false; } }, navigate() { assert(this === host, "shell lost host callback context"); navigations++; return true; }, drawerOpened() { opened++; }, drawerClosed() { closed++; }, railChanged() { railChanges++; } };
           const destination = { key: 'sessions', label: '<img src=x onerror=alert(1)>', href: '/sessions', icon: 'M4 5h16', current: true };
           for (let i = 0; i < 20; i++) {
             const instance = AccountExample.mountShellExample(container, host), chrome = instance.chrome;

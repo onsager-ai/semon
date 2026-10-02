@@ -745,7 +745,7 @@ SOFTWARE.
         rail = collapsed;
         app.classList.toggle("rail", rail && !phone.matches);
         paintHead();
-        renderShellNavigation(nav, destinations, host.navigate);
+        renderShellNavigation(nav, destinations, (destination) => host.navigate(destination));
       },
       topbar(props) {
         ready();
