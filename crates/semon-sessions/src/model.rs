@@ -307,8 +307,8 @@ pub(crate) struct Built {
     pub(crate) tx: BTreeMap<String, Arc<Transcript>>,
     /// Each session's facts for the agent read surface, by session key.
     pub(crate) facts: BTreeMap<String, SessionFacts>,
-    /// Where the scan window started (epoch ms): files last modified before
-    /// it weren't read. `None` when every file was.
+    /// Where the model window started (epoch ms), whether applied at scan
+    /// time or by trimming output. `None` only for an unbounded model.
     pub(crate) window_start: Option<i64>,
     /// What `/api/analytics` reads of each session active in the last
     /// [`crate::analytics::KEEP_MS`], taken before the model is trimmed to
@@ -5768,7 +5768,11 @@ pub(crate) fn build(
         machine_id,
         tx,
         facts: session_facts,
-        window_start,
+        window_start: window_start.or_else(|| {
+            (!options.all).then(|| {
+                now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
+            })
+        }),
         activity,
         #[cfg(test)]
         handoffs,
