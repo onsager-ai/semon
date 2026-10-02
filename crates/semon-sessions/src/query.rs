@@ -15,6 +15,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fmt, io,
+    sync::Arc,
     time::Duration,
 };
 
@@ -25,6 +26,7 @@ use crate::{
     model::{SessionFacts, SlotKind, now_ms, one_line},
     tx,
     union::{Owner, ViewerCore},
+    viewer::Reading,
 };
 
 /// A session's state: a closed set.
@@ -509,7 +511,8 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
 /// `semon query` and `semon mcp` answer. It keeps the viewer's model and
 /// caches between calls, rebuilding only what changed.
 pub struct Query {
-    core: ViewerCore,
+    core: Arc<ViewerCore>,
+    cached: bool,
     /// The current call's window start (epoch ms), as the model was built.
     start: Option<i64>,
 }
@@ -544,18 +547,38 @@ impl Query {
             })
             .collect();
         Self {
-            core: ViewerCore::with_machines(machines),
+            core: Arc::new(ViewerCore::with_machines(machines)),
+            cached: false,
             start: None,
+        }
+    }
+
+    /// Reads an embedding server's existing core, following its refresh and
+    /// window policy. Calls share its cached models; no second builder or
+    /// cache is created. Each request should own its own Query.
+    pub fn from_core(core: Arc<ViewerCore>) -> Self {
+        Self {
+            core,
+            cached: true,
+            start: None,
+        }
+    }
+
+    fn reading(&self, now: i64) -> Reading {
+        if self.cached {
+            Reading::Served
+        } else {
+            Reading::At(now)
         }
     }
 
     /// Where the window starts, as the current models were built with it
     /// (epoch ms): the latest machine's start; `None` when every machine
-    /// read every file.
+    /// has an unbounded model.
     fn window_start(&mut self, now: i64) -> Result<Option<i64>, QueryError> {
         Ok(self
             .core
-            .served(now)
+            .served(self.reading(now))
             .map_err(|error| QueryError::io(&error))?
             .iter()
             .filter_map(|part| part.built.window_start)
@@ -572,10 +595,15 @@ impl Query {
                 window_start: Some(start),
                 ..QueryError::new(
                     "outside_window",
-                    format!(
-                        "since reaches before the window, which starts at {start} (epoch ms); \
-                         widen it with --since or --all"
-                    ),
+                    if self.cached {
+                        format!(
+                            "since reaches before the cached model window, which starts at {start} (epoch ms)"
+                        )
+                    } else {
+                        format!(
+                            "since reaches before the window, which starts at {start} (epoch ms); widen it with --since or --all"
+                        )
+                    },
                 )
             });
         }
@@ -619,7 +647,7 @@ impl Query {
     fn view(&mut self, now: i64) -> Result<View, QueryError> {
         let model = match self
             .core
-            .model_at(now)
+            .model_at(now, self.reading(now))
             .map_err(|error| QueryError::io(&error))?
         {
             Ok(model) => model,
@@ -635,7 +663,7 @@ impl Query {
         let mut facts = BTreeMap::new();
         for part in self
             .core
-            .served(now)
+            .served(self.reading(now))
             .map_err(|error| QueryError::io(&error))?
         {
             for (id, own) in &part.built.facts {
@@ -770,7 +798,7 @@ impl Query {
         let limit = integer(args, "limit").map_or(tx::PAGE_ENTRIES, |limit| limit as usize);
         let own = match self
             .core
-            .owner(&id)
+            .owner(&id, self.reading(now))
             .map_err(|error| QueryError::io(&error))?
         {
             Owner::At(index, own) => (index, own),
@@ -784,7 +812,7 @@ impl Query {
         };
         let built = self
             .core
-            .built_at(own.0)
+            .built_at(own.0, self.reading(now))
             .map_err(|error| QueryError::io(&error))?;
         if !built.tx.contains_key(&own.1) {
             return Err(QueryError::unknown_session(&id));
@@ -838,7 +866,7 @@ impl Query {
         // from its newest entry back. Stubs have no activity of their own.
         let parts = self
             .core
-            .served(now)
+            .served(self.reading(now))
             .map_err(|error| QueryError::io(&error))?;
         let mut order: Vec<(Option<i64>, String, usize, &str)> = Vec::new();
         for (index, part) in parts.iter().enumerate() {

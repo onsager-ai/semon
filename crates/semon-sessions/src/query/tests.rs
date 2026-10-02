@@ -1344,3 +1344,63 @@ fn run_ids_travel_in_the_facts_and_a_mirror_reads_no_proc() {
     let offline = facts.offline(NOW);
     assert!(offline.runs.is_empty());
 }
+
+#[test]
+fn an_empty_union_answers_without_creating_a_home() {
+    let mut query = Query::with_machines(Vec::new());
+    let listed = query.call_at("list_sessions", &json!({}), NOW).unwrap();
+    assert_eq!(listed["sessions"], json!([]));
+    assert_eq!(listed["window_start"], Value::Null);
+    assert_eq!(
+        query
+            .call_at("find", &json!({"text":"hello"}), NOW)
+            .unwrap()["matches"],
+        json!([])
+    );
+    assert_eq!(
+        query
+            .call_at("get_session", &json!({"id":"missing"}), NOW)
+            .unwrap_err()
+            .code,
+        "unknown_session"
+    );
+}
+
+#[test]
+fn shared_queries_read_the_viewer_cache_and_expose_its_output_window() {
+    use crate::Refresh;
+    let home = Home::new("shared");
+    let mut options = home.options.clone();
+    options.all = false;
+    options.since = Duration::from_secs(86400);
+    let mut viewer = ViewerCore::new(options);
+    viewer.set_refresh(Refresh::OnInvalidate);
+    let core = Arc::new(viewer);
+    let mut first = Query::from_core(core.clone());
+    let answer = first.call_at("list_sessions", &json!({}), NOW).unwrap();
+    let start = answer["window_start"]
+        .as_i64()
+        .expect("output-trimmed models have a window too");
+    let second = Query::from_core(core.clone())
+        .call_at("list_sessions", &json!({}), NOW)
+        .unwrap();
+    assert_eq!(answer, second);
+    assert_eq!(
+        first
+            .call_at(
+                "list_sessions",
+                &json!({"since":"1970-01-01T00:00:00Z"}),
+                NOW
+            )
+            .unwrap_err()
+            .window_start,
+        Some(start)
+    );
+    // Closing keeps the last snapshot served: the Query does not instantiate
+    // or synchronously rebuild another core behind the embedding server.
+    core.close();
+    assert_eq!(
+        first.call_at("list_sessions", &json!({}), NOW).unwrap(),
+        answer
+    );
+}
