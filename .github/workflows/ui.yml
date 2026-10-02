@@ -25,8 +25,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  foundation:
+    name: UI types and generated assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install pinned UI tooling
+        run: npm --prefix ui ci --no-audit --no-fund
+      - name: Type-check, security boundaries, deterministic build and freshness
+        run: |
+          npm --prefix ui run typecheck
+          npm --prefix ui test
+          npm --prefix ui run check:bundle
+          npm --prefix ui run sizes
+
   build:
     name: viewer test binaries
+    needs: foundation
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -312,11 +335,12 @@ jobs:
   browser:
     name: viewer browser checks
     if: ${{ always() }}
-    needs: [build, checks]
+    needs: [foundation, build, checks]
     runs-on: ubuntu-latest
     steps:
       - name: Require every suite to pass
         env:
+          FOUNDATION_RESULT: ${{ needs.foundation.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           CHECKS_RESULT: ${{ needs.checks.result }}
-        run: test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
+        run: test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success

@@ -1,3 +1,4 @@
+import { parseAccount, mountAccountPopover, updateAccountWide, destroyAccountPopover } from "../../../ui/src/account-adapter";
 (() => {
   // ====================================================================================
   // Model: sessions are places; handoffs are how work moves between them (ask: you → session,
@@ -318,32 +319,7 @@
   let TOK = {}; // per session: its transcript's growth mark in the model; a loaded transcript is tailed only when it moved
   const enc = encodeURIComponent;
   const safePath = (href) => typeof href === "string" && href.startsWith("/") && !href.startsWith("//") && !href.includes("\\") && !/[\u0000-\u001f\u007f-\u009f]/.test(href) && href.length <= 512;
-  const textField = (value, min, max) => typeof value === "string" && [...value].length >= min && [...value].length <= max && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
-  // A validated copy of an account menu, or null. Each field is read once, inside `try` (an embedding page's object may have
-  // getters that throw or answer differently the second time), into plain data, and the copy is what gets checked and kept.
-  function accountOf(source) {
-    let value;
-    try {
-      if (!source || typeof source !== "object") return null;
-      const list = (xs, max, pick) => {
-        if (!Array.isArray(xs)) return null;
-        const n = xs.length; if (!(n <= max)) return null;
-        const out = []; for (let i = 0; i < n; i++) { const x = xs[i]; out.push(x && typeof x === "object" ? pick(x) : null); }
-        return out;
-      };
-      value = {
-        name: source.name, login: source.login, initials: source.initials, avatar_href: source.avatar_href ?? null,
-        workspaces: list(source.workspaces, 50, (w) => ({ name: w.name, role: w.role, current: w.current, switch_href: w.switch_href })),
-        links: list(source.links, 12, (a) => ({ label: a.label, href: a.href, method: a.method, danger: a.danger })),
-      };
-    } catch { return null; }
-    if (!textField(value.name, 1, 80) || !value.name.trim() || !textField(value.login, 0, 80) || !textField(value.initials, 1, 3) || !value.initials.trim()) return null;
-    if (value.avatar_href !== null && !safePath(value.avatar_href)) return null;
-    if (!value.workspaces || !value.links) return null;
-    if (value.workspaces.some((w) => !w || !textField(w.name, 1, 80) || !w.name.trim() || !textField(w.role, 0, 80) || typeof w.current !== "boolean" || !safePath(w.switch_href))) return null;
-    if (value.links.some((a) => !a || !textField(a.label, 1, 80) || !a.label.trim() || !safePath(a.href) || (a.method !== "get" && a.method !== "post") || typeof a.danger !== "boolean")) return null;
-    return value;
-  }
+  const accountOf = parseAccount;
   // The embedding page's menu, `window.semonEmbed.account`, validated like a server's. A rejected one is reported once on
   // the console, since the embedding page gets no other sign of it.
   let embedWarned = false;
@@ -623,7 +599,7 @@
   try { const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = pruneTreePrefs(saved); } catch {}
   const app = $(".app");
   const syncLayoutPrefs = () => { if (SIDEBAR_ONLY) return; app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches && route.v === "session"); };
-  function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); $(".account-popover [data-pref=\"wide\"]")?.setAttribute("aria-checked", String(on)); }
+  function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); updateAccountWide(on); }
   function setRailMode(on) { railMode = on; ORD.delete("side"); try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
   // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
   // it is dropped on load, along with any entry that has no `open`, and the next save writes the pruned list.
@@ -804,46 +780,7 @@
     return avatar;
   }
   function accountPopover(compact) {
-    const menu = el("div", "menu account-popover"); menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", "Account");
-    const identity = el("div", "account-identity"); identity.append(accountAvatar(ACCOUNT));
-    const details = el("span", "account-identity-text"); details.append(el("span", "account-name", ACCOUNT.name), el("span", "account-login-value", ACCOUNT.login)); identity.append(details); menu.append(identity);
-    const workspaces = el("section", "account-section"); workspaces.append(el("div", "account-heading", "Workspaces"));
-    for (const workspace of ACCOUNT.workspaces) {
-      if (!safePath(workspace.switch_href)) continue;
-      const form = el("form", "account-menu-form account-workspace-form"); form.setAttribute("method", "post"); form.setAttribute("action", workspace.switch_href);
-      const row = el("button", "account-menu-row"); row.type = "submit"; row.setAttribute("role", "menuitem");
-      if (workspace.current) row.setAttribute("aria-current", "page");
-      const name = el("span", "account-row-main"); name.append(el("span", "account-workspace-name", workspace.name), el("span", "account-role", workspace.role)); row.append(name);
-      if (workspace.current) row.append(el("span", "account-check", "✓"));
-      form.append(row); workspaces.append(form);
-    }
-    menu.append(workspaces);
-    if (!compact) {
-      const display = el("section", "account-section account-display"); display.append(el("div", "account-heading", "Display"));
-      const row = el("button", "account-menu-row account-switch-row"); row.type = "button"; row.setAttribute("role", "menuitemcheckbox"); row.setAttribute("aria-checked", String(wideMode)); row.dataset.pref = "wide";
-      row.append(el("span", "account-row-main", "Wide reading mode"));
-      const toggle = el("span", "switch"); toggle.setAttribute("aria-hidden", "true"); toggle.append(el("span", "switch-knob")); row.append(toggle);
-      row.addEventListener("click", (event) => { event.stopPropagation(); setWideMode(!wideMode); });
-      display.append(row); menu.append(display);
-    }
-    if (ACCOUNT.links.length) {
-      // A destructive link (Sign out) gets a section of its own, set apart from the rest.
-      const links = el("section", "account-section account-links"), apart = el("section", "account-section account-links account-danger");
-      for (const link of ACCOUNT.links) {
-        if (!safePath(link.href)) continue;
-        const into = link.danger ? apart : links;
-        const row = el(link.method === "post" ? "button" : "a", "account-menu-row" + (link.danger ? " danger" : ""), link.label);
-        row.setAttribute("role", "menuitem");
-        if (link.method === "post") {
-          const form = el("form", "account-menu-form account-link-form"); form.setAttribute("method", "post"); form.setAttribute("action", link.href);
-          row.type = "submit"; form.append(row); into.append(form);
-        } else {
-          row.setAttribute("href", link.href); into.append(row);
-        }
-      }
-      for (const section of [links, apart]) if (section.childElementCount) menu.append(section);
-    }
-    return menu;
+    return mountAccountPopover({ account: ACCOUNT, compact, wide: wideMode, onWideChange: () => setWideMode(!wideMode) });
   }
   // Every close takes the phone menu's history entry with it, so no Back press is spent on a menu that is gone. Only a
   // navigation (`go`) and the back gesture itself (`keepEntry`) leave it: stepping back then would undo the navigation, or the
@@ -852,7 +789,7 @@
   function closeAccountMenu(keepEntry, navigating) {
     const menu = $(".account-popover"), trigger = $('.account-trigger[aria-expanded="true"]'), active = document.activeElement;
     const refocus = !!menu && (menu.contains(active) || !active || active === document.body);
-    document.querySelectorAll(".account-popover, .account-backdrop").forEach((node) => node.remove());
+    document.querySelectorAll(".account-popover, .account-backdrop").forEach((node) => { destroyAccountPopover(node); node.remove(); });
     document.querySelectorAll(".account-trigger").forEach((button) => button.setAttribute("aria-expanded", "false"));
     accountOpen = false;
     if (accountSheet) { accountSheet = false; if (!keepEntry && history.state?.sheet) { skipPop = true; history.back(); } }
