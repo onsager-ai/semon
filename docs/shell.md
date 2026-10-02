@@ -2,6 +2,16 @@
 
 The shell gives server-rendered pages the viewer's visual language and reusable form components.
 
+## Typed application shell
+
+The source library now exposes `createShellChrome` for an application frame with
+host content slots; see [ui/README.md](../ui/README.md) for the implemented API.
+The full viewer consumes it. Sidebar-only pages keep the server shell/drawer owner
+below and share its keyed native navigation renderer. Existing Rust shell exports,
+asset URLs, CSP, embedding prelude and lifecycle events remain supported. Hub's
+own chrome has not adopted this controller yet; Recent/consumer build and Hub
+navigation integration remain separate source/consumer stages.
+
 ## Assets
 
 Serve the viewer's base stylesheet at `/viewer.css`, the component stylesheet at `/shell.css`, and the script at `/shell.js`. Serve the four font files listed by `semon_sessions::shell::FONT_FILES` at `/fonts/<name>`. The page must load `/viewer.css` before `/shell.css`; load `/shell.js` as a same-origin deferred script. Serve those four paths from the page's own origin because the viewer's content security policy allows same-origin assets only.

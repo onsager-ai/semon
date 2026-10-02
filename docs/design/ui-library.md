@@ -29,6 +29,34 @@ checks root/listener cleanup. `ui/tsconfig.lib.json` provides strict native Prea
 JSX settings; install the exact versions from `ui/package-lock.json`. One native
 Preact instance serves each bundle; the runtime license stays in `ui/PREACT-LICENSE`.
 
+### Stage 3 item 1 — shared shell frame/navigation
+
+The viewer now consumes `createShellChrome(ShellHost)` through the library bridge.
+The implemented exports and consumer contract are documented in [ui/README.md](../../ui/README.md).
+Chrome owns the frame, brand/rail controls, keyed native navigation, lead button,
+drawer/scrim gestures and account root replacement/cleanup. Native links carry
+validated same-origin destinations; host navigation handles ordinary primary
+clicks only. No router, poller or endpoint is introduced. Sidebar-only consumers
+retain their Rust/server shell owner and share `renderShellNavigation`.
+
+Host-owned title metadata/actions and Find/error modes enter as direct DOM slots;
+the shell commits or detaches these nodes without rendering/removing their
+children. Recent and page containers are disjoint from all Preact roots. Host
+screen state, held ordering, authorization, history/focus/scroll and live model
+transactions remain outside the library. Explicit renders preserve synchronous
+commit semantics and keyed navigation; persistent action nodes remain attached.
+Unmount releases roots/listeners while preserving host slot descendants; destroy
+also disposes the reusable account controller. Account dismissal listeners are
+registered only while roots exist. The pinned-runtime sink boundary and all
+application bans remain unchanged; Rust also explicitly proves shell.tsx is scanned.
+
+The independent consumer verifies repeated mount/update/unmount/destroy, native
+modifier clicks, hostile labels/paths, stable focus and real listener removal on
+phone/desktop in light/dark. This bounded source step is not Hub consolidation.
+Next: shared Recent/sidebar snapshot rendering and consumer build contract, then
+Hub adoption with equal pins and end-to-end persistent Sessions–Machines navigation.
+Sheets/screens follow; transcript/paging/live orchestration remains last.
+
 ### Hub integration against the actual consumer
 
 Hub main `149e382` pins Semon `acf79df` in `semon.rev` and the `semon` gitlink. Its viewer is served through `ViewerCore` (which embeds `shell::VIEWER_JS`); it supplies account JSON through `account::with_account`. Hub's own signed-in pages currently render separate account chrome in `crates/semon-hub/src/pages.rs` and load unchanged `shell::JS`. There is no Hub Preact build today. Its browser checks cover page/viewer account and drawer geometry plus one viewer load, while Semon owns the broader viewer suite.

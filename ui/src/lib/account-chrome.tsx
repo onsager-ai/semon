@@ -89,14 +89,22 @@ export function createAccountChrome(host: AccountChromeHost): AccountChrome {
   const pageshow = (event: PageTransitionEvent) => {
     if (event.persisted && active) close({ keepEntry: true });
   };
-  document.addEventListener('click', outside);
-  window.addEventListener('pageshow', pageshow);
+  let listening = false;
+  function startListening() {
+    if (listening) return;
+    listening = true; document.addEventListener('click', outside); window.addEventListener('pageshow', pageshow);
+  }
+  function stopListening() {
+    if (!listening) return;
+    listening = false; document.removeEventListener('click', outside); window.removeEventListener('pageshow', pageshow);
+  }
   function unmount(root: HTMLElement) {
     const widget = widgets.get(root);
     if (!widget) return;
     if (active === widget) close();
     render(null, root);
     widgets.delete(root);
+    if (!widgets.size) stopListening();
   }
   return {
     get open() { return active !== null; },
@@ -106,6 +114,7 @@ export function createAccountChrome(host: AccountChromeHost): AccountChrome {
       root.className = 'account-widget ' + (props.compact ? 'account-widget-phone' : 'account-widget-desktop');
       const widget = { root, props };
       widgets.set(root, widget);
+      startListening();
       commit(widget);
       return root;
     },
@@ -122,8 +131,7 @@ export function createAccountChrome(host: AccountChromeHost): AccountChrome {
       if (destroyed) return;
       destroyed = true;
       for (const root of widgets.keys()) unmount(root);
-      document.removeEventListener('click', outside);
-      window.removeEventListener('pageshow', pageshow);
+      stopListening();
     },
   };
 }
