@@ -467,6 +467,7 @@ SOFTWARE.
     }
     function close(options = {}) {
       const widget = active;
+      if (!widget) return;
       const menu = widget?.root.querySelector(".account-popover");
       const focused = document.activeElement;
       const refocus = !!menu && (!focused || focused === document.body || menu.contains(focused));
@@ -481,7 +482,6 @@ SOFTWARE.
         close();
         return;
       }
-      close();
       const trigger = triggerOf(widget);
       if (widget.props.compact) host.place(widget.root, trigger);
       active = widget;

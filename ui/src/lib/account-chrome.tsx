@@ -63,6 +63,7 @@ export function createAccountChrome(host: AccountChromeHost): AccountChrome {
   }
   function close(options: AccountCloseOptions = {}) {
     const widget = active;
+    if (!widget) return;
     const menu = widget?.root.querySelector('.account-popover');
     const focused = document.activeElement;
     const refocus = !!menu && (!focused || focused === document.body || menu.contains(focused));
@@ -75,7 +76,6 @@ export function createAccountChrome(host: AccountChromeHost): AccountChrome {
     // Detached or unmounted triggers cannot reopen stale account roots.
     if (destroyed || !widgets.has(widget.root) || !widget.root.isConnected) return;
     if (active) { close(); return; }
-    close();
     const trigger = triggerOf(widget);
     if (widget.props.compact) host.place(widget.root, trigger);
     active = widget;

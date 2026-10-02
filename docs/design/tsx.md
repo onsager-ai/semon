@@ -35,14 +35,14 @@ open root and dismissal listener cleanup. Runtime sink exemption still ends at
 the next module comment with exact pinned sink counts; the Rust scan regression
 now explicitly includes both account content and lifecycle modules.
 
-Stage 2 served asset: 356,617 raw / 94,969 raw gzip / 204,317 minified /
-72,012 minified gzip bytes. The same pinned production flags on stage 1 give
-355,555 / 94,693 / 204,039 / 71,791: delta +1,062 raw / +278 minified /
-+221 minified gzip bytes. No request or polling endpoint is added. Fresh baseline/head budget runs each
-measure all 14 rows with zero warnings/failures; report-only overages are 34/36.
+Stage 2 served asset: 356,629 raw / 94,971 raw gzip / 204,333 minified /
+72,017 minified gzip bytes. The same pinned production flags on stage 1 give
+355,555 / 94,693 / 204,039 / 71,791: delta +1,074 raw / +294 minified /
++226 minified gzip bytes. No request or polling endpoint is added. Fresh baseline/head budget runs each
+measure all 14 rows with zero warnings/failures; report-only overages are 34/44.
 Static requests remain 8, Sessions 9, Analytics 10; live remains 3.5 requests and
 one transcript request per update. Observed Home/Sessions transfer bytes are
-616,962 → 618,025. Timing varies and existing byte/request ceilings remain
+616,962 → 618,037. Timing varies and existing byte/request ceilings remain
 exceeded; no threshold or baseline is widened. All five functional groups pass;
 the first run-view synthetic-model undefined.name race reproduces on unchanged
 stage 1 and an identical-code stage-2 group rerun passes. Both visual runs pass
