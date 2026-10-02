@@ -256,16 +256,20 @@ export default async function embedCheck(browser) {
     await openMenu(page);
     const control = page.locator('#topbar .account-popover [role="menuitemcheckbox"][data-pref="wide"]');
     const before = await control.getAttribute("aria-checked");
+    await control.evaluate((row) => { window.__accountDisplayNode = row; window.__accountWorkspaceNode = row.closest('.account-popover').querySelector('.account-workspace-form'); });
     await control.click();
     const changed = await page.evaluate(() => ({
       checked: document.querySelector('#topbar .account-popover [role="menuitemcheckbox"][data-pref="wide"]')?.getAttribute("aria-checked"),
       wide: document.querySelector("#page").classList.contains("wide-mode"),
       saved: localStorage.getItem("semon.wide"),
       open: !!document.querySelector("#topbar .account-popover"),
+      kept: window.__accountDisplayNode === document.querySelector('#topbar .account-popover [data-pref="wide"]'),
+      focused: document.activeElement === window.__accountDisplayNode,
+      workspaceKept: window.__accountWorkspaceNode === document.querySelector('#topbar .account-popover .account-workspace-form'),
     }));
     const expected = !start;
     R["desktopWideMode " + tag] = { before, changed };
-    r.expect(before === String(start) && changed.checked === String(expected) && changed.wide === expected && changed.saved === (expected ? "1" : "0") && changed.open,
+    r.expect(before === String(start) && changed.checked === String(expected) && changed.wide === expected && changed.saved === (expected ? "1" : "0") && changed.open && changed.kept && changed.focused && changed.workspaceKept,
       "the desktop Display switch should toggle wide mode, save it, and leave the menu open: " + JSON.stringify(R["desktopWideMode " + tag]));
     await page.waitForTimeout(300); // the knob's slide is 160 ms; the shot shows the settled state
     await page.screenshot({ path: path.join(OUT, "embed-menu-wide-on-" + tag + ".png") });

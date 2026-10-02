@@ -44,6 +44,14 @@ With the same esbuild flags and unchanged tooltip/Select prefixes, gzip level 9:
 
 The equivalent-build pilot increment is 24,145 raw / 13,844 minified / 5,985 minified gzip bytes. The shipped asset remains readable and unminified; its raw bytes are 603 above the old served script. The equivalent-build cost includes the preserved Preact MIT license; esbuild also removes comments/reformats legacy code. This is a pilot measurement, not the eventual migration cost. Reproduce with `npm --prefix ui run sizes -- --baseline /absolute/baseline/crates/semon-sessions/src/viewer.js`. Request/render budgets remain in `tests/ui/perf-budget.json` and existing long-session checks; the menu adds no fetch or poller. Record actual budget results with the PR, without widening limits.
 
+### Pilot validation evidence
+
+Local workspace `cargo test --locked`, all-target strict Clippy, formatting, pinned clean npm install, type-check, six foundation tests and bundle freshness pass. Baseline and pilot interaction groups pass; pilot shell/sidebar embedding and all 113 visual screens pass without changing references. Served hostile account-content tests pass on phone/desktop. The Display switch test additionally checks that synchronous updates retain the focused switch and workspace nodes.
+
+The local head request-budget report retains existing overages. Baseline main's [performance job](https://github.com/onsager-ai/semon/actions/runs/36953532084/job/110671630213) already reports Sessions 9 requests against 8, Analytics 10 against 8, and transfer/decoded-byte overages for Home/Sessions/session-open/Analytics. Pilot counts are identical: 8 static requests, one initial model, one transcript request on session open; live updates average 3.5 requests and one transcript request. Static/page transfer increases by exactly the 603 additional served script bytes (Home/Sessions 616,359 → 616,962 bytes). No new endpoint or poller. Local timing overages also remain report-only; timing comparisons across the cloud machine and GitHub runner do not establish a regression or improvement. No budget is widened.
+
+The named long-session check completes with no failures at 4× CPU throttling: phone/desktop cold open 567/534 ms, switches 166.5–199.6 ms, click tasks 24.5/37.9 ms, zero scroll frames above 20 ms and 16.8 ms longest frames. Poll-to-paint is about 2.1 s, including the unchanged polling interval. These are fixture measurements, not production SLA claims. Final PR CI evidence belongs in #224 and the PR; migration remains partial.
+
 ### Next bounded stages
 
 1. Review foundation/account-content pilot with unchanged served browser, security and pixel gates.
