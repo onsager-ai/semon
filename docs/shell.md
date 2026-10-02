@@ -333,3 +333,21 @@ served paths, prelude, `window.semonEmbed` and events above are unchanged. The
 shell page script remains the existing shared imperative bundle. Cargo builds
 require no Node. See [the current migration decision](design/tsx.md) for tooling,
 security boundaries and later consumer adoption.
+
+### Persistent document host
+
+`ui/src/viewer-host.ts` exports `configureViewerHost(ViewerHost)` and
+`ViewerContent`. Configure synchronously from the consumer entry before the
+queued viewer bootstrap. This narrow port keeps the existing viewer router and
+single model poller: hosts supply a safe Machines path, validated account data,
+an optional native page title/current destination, and an abortable Machines
+content loader. Content has one element and an explicit `destroy()` lifecycle.
+The host must validate transport and authorization before returning detached
+content; the viewer commits it only if the navigation is still current. Native
+page links remain native. Failed Machines navigation falls back to its server
+route; leaving it destroys host controls/dialogs. Back/Forward restore scroll
+and saved host focus. Live model redraws preserve the host content element.
+
+`COMPONENT_JS` exposes the Tooltip/Select prefixes for a single consumer bundle
+that includes the viewer. Do not load that bundle alongside `VIEWER_JS` or the
+legacy signed-in `shell.js`; those would create duplicate document owners.
