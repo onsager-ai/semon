@@ -100,7 +100,7 @@ for (const width of [390, 1280]) for (const colorScheme of ['light', 'dark']) {
       await page.goto('http://shell.test/');
       const result = await page.evaluate(() => {
         const assert = (condition, message) => { if (!condition) throw new Error(message); };
-        const listeners = new Map(); let registrations = 0, removals = 0, navigations = 0, opened = 0, closed = 0;
+        const listeners = new Map(); let registrations = 0, removals = 0, navigations = 0, opened = 0, closed = 0, railChanges = 0;
         const add = EventTarget.prototype.addEventListener, remove = EventTarget.prototype.removeEventListener;
         const tracked = (target, type) => (target === window && type === 'pageshow') || (target === document && type === 'click') || (target instanceof MediaQueryList && type === 'change') || (target instanceof HTMLElement && ['sidebar', 'scrim'].includes(target.id));
         EventTarget.prototype.addEventListener = function(type, callback, options) {
@@ -113,12 +113,13 @@ for (const width of [390, 1280]) for (const colorScheme of ['light', 'dark']) {
         };
         try {
           const container = document.querySelector('#shell');
-          const host = { account: { place() {}, opened() {}, closed() {}, navigate() { return false; }, submit() { return false; } }, navigate() { navigations++; return true; }, drawerOpened() { opened++; }, drawerClosed() { closed++; }, railChanged() {} };
+          const host = { account: { place() {}, opened() {}, closed() {}, navigate() { return false; }, submit() { return false; } }, navigate() { navigations++; return true; }, drawerOpened() { opened++; }, drawerClosed() { closed++; }, railChanged() { railChanges++; } };
           const destination = { key: 'sessions', label: '<img src=x onerror=alert(1)>', href: '/sessions', icon: 'M4 5h16', current: true };
           for (let i = 0; i < 20; i++) {
             const instance = AccountExample.mountShellExample(container, host), chrome = instance.chrome;
             const slots = chrome.slots; const input = document.createElement('input'); slots.content.append(input);
             const recent = document.createElement('button'); slots.recent.append(recent);
+            const oldClose = container.querySelector('#drawer-close'), oldRail = container.querySelector('#rail-toggle');
             const nav = container.querySelector('.nav-item'), lead = container.querySelector('#lead-btn'), trigger = container.querySelector('.account-widget-desktop .account-trigger');
             assert(listeners.size === 7, 'missing lifecycle registrations: ' + listeners.size);
             nav.focus(); chrome.update([destination], true);
@@ -146,7 +147,11 @@ for (const width of [390, 1280]) for (const colorScheme of ['light', 'dark']) {
             assert(action.childNodes.length === 1 && !action.isConnected && input.isConnected && recent.isConnected, 'unmount cleared host-owned descendants');
             const n = navigations; lead.click(); trigger.click(); nav.click();
             assert(navigations === n && !chrome.account.open && !chrome.drawerOpen, 'stale chrome remained live');
-            chrome.mount(container); chrome.update([destination], false); chrome.unmount();
+            chrome.mount(container); chrome.update([destination], false);
+            chrome.topbar({ titleSlot: instance.title, lead: { label: 'Open navigation', icon: 'M4 7h16' } });
+            chrome.openDrawer(); oldClose.click(); oldRail.click(); lead.click();
+            assert(chrome.drawerOpen === phone && railChanges === 0, 'stale frame controls changed a remounted shell');
+            chrome.unmount();
             instance.destroy(); instance.destroy();
             assert(listeners.size === 0, 'destroy leaked lifecycle listeners');
             input.remove(); recent.remove();
@@ -157,7 +162,7 @@ for (const width of [390, 1280]) for (const colorScheme of ['light', 'dark']) {
       assert.equal(result.registrations, result.removals);
       assert.equal(result.remaining, 0);
       assert.equal(result.navigations, 20);
-      assert.equal(result.opened, width === 390 ? 20 : 0);
+      assert.equal(result.opened, width === 390 ? 40 : 0);
       assert.equal(result.closed, result.opened);
     } finally { await browser.close(); }
   });
