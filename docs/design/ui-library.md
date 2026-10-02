@@ -4,21 +4,63 @@
 
 [#224](https://github.com/onsager-ai/semon/issues/224) selects native **Preact + TypeScript/TSX + esbuild**, superseding the custom `h()` factory in the historical plan below. See [tsx.md](tsx.md#current-decision--2026-10-02) for the current baseline, build, scheduling, security and measured bundle costs. Source stays in Semon's top-level `ui/`; Hub consumes a pinned submodule rather than maintaining a second framework implementation.
 
-The current first stage exports `AccountMenu`, `AccountMenuProps`, `Account`, `parseAccount` and `safePath` from `ui/src/lib/index.ts`. `AccountMenu` renders account **popover contents**; it does not yet own a trigger, container, drawer, polling, history or focus restoration. Validate unknown API/prelude data with `parseAccount` before giving it to the component. Its native VNodes use the shared HTML/style/path guard. `AccountMenuProps` contains `{ account, compact, wide, onWideChange }`: the viewer supplies Display state explicitly; the component owns no viewer global state. Account links and workspace paths retain the existing validation and same-origin POST contract.
+The source library exports `AccountMenu`, `AccountMenuProps`, `Account`,
+`parseAccount`, `safePath`, `createAccountChrome`, `AccountChrome`,
+`AccountChromeHost` and `AccountCloseOptions` from `ui/src/lib/index.ts`.
+`AccountMenu` remains the popover-content component. `createAccountChrome` owns
+phone/desktop triggers, avatar, menu/backdrop, open state, focus and dismissal
+listener cleanup. Validate unknown API/prelude data with `parseAccount` first.
+Account links/workspaces retain the existing same-origin POST/path contract.
 
-`ui/src/account-adapter.tsx` owns the viewer's Preact roots. Legacy code owns containers and commits mount/update/unmount synchronously through that adapter; Preact alone owns their descendants. No shared `lib/` module imports viewer state. `ui/src/lib-contract.tsx` type-checks every current export as a consumer. `ui/tsconfig.lib.json` provides strict native Preact JSX settings; install exact versions from `ui/package-lock.json`. The runtime's license is retained in `ui/PREACT-LICENSE`.
+The host supplies `place(widget, trigger)`, `opened(compact)`,
+`closed({keepEntry?, navigating?})`, `navigate(href)` and `submit(form)`; the last
+two return whether they consumed phone navigation. Display state is explicitly
+supplied through AccountMenuProps; no viewer globals enter the library. One
+controller owns both device roots, with synchronous `mount`, `updateWide`,
+`close`, `escape`, `unmount`, `destroy` and readonly `open`. Forward Escape from
+host overlay arbitration; unmount before removing a root, destroy on shell
+teardown. The viewer retains history/polling transactions and legacy measured
+CSSOM placement behind those callbacks; Preact owns root descendants completely.
+
+`ui/src/account-adapter.tsx` is the viewer's library entry bridge. No shared lib
+module imports viewer state. `ui/src/lib-contract.tsx` type-checks the exports and
+an independent consumer's mount/destroy implementation; its real-browser test
+checks root/listener cleanup. `ui/tsconfig.lib.json` provides strict native Preact
+JSX settings; install the exact versions from `ui/package-lock.json`. One native
+Preact instance serves each bundle; the runtime license stays in `ui/PREACT-LICENSE`.
 
 ### Hub integration against the actual consumer
 
 Hub main `149e382` pins Semon `acf79df` in `semon.rev` and the `semon` gitlink. Its viewer is served through `ViewerCore` (which embeds `shell::VIEWER_JS`); it supplies account JSON through `account::with_account`. Hub's own signed-in pages currently render separate account chrome in `crates/semon-hub/src/pages.rs` and load unchanged `shell::JS`. There is no Hub Preact build today. Its browser checks cover page/viewer account and drawer geometry plus one viewer load, while Semon owns the broader viewer suite.
 
-After the source pilot is reviewed and green, a separate Hub bump must keep both pins equal and rerun Rust, PostgreSQL, browser and image/smoke workflows. That bump adopts the generated viewer automatically and needs no Node in its production image. To replace the shell page's own account menu, first finish trigger/lifecycle extraction in Semon, then import the public library entry, extend `ui/tsconfig.lib.json`, use the pinned tooling and check in the Hub entry's generated asset with freshness CI. Preserve Hub's same-origin POST/CSRF checks, account avatar proxy, no-JS fallbacks, prelude/events and authenticated model handling. The consumer must share Semon's Preact instance within each bundle. No Hub pins, runtime deployment, pricing/filter/MCP work or shell page behavior change in the source pilot.
+After the account source stage is reviewed and green, a separate Hub bump must keep both pins equal and rerun Rust, PostgreSQL, browser and image/smoke workflows. That bump adopts the generated viewer automatically and needs no Node in its production image. To replace the shell page's own account menu, import the public library entry, extend `ui/tsconfig.lib.json`, use the pinned tooling and check in the Hub entry's generated asset with freshness CI. Preserve Hub's same-origin POST/CSRF checks, account avatar proxy, no-JS fallbacks, prelude/events and authenticated model handling. The consumer must share Semon's Preact instance within each bundle. No Hub pins, runtime deployment, pricing/filter/MCP work or shell page behavior change in the source pilot.
 
 ### Remaining API and migration plan
 
 `TopBar`, `Sidebar`, `RecentSessions`, `pollRecentSessions`, `Sheet`, `enhanceSheet`, `sidebarOf`, `/api/sidebar`, extra `MenuSection`s, static-frame comparison fixtures and a Breaking changelog gate remain planned work. The original export table below is a target API, not an implemented contract. CSS stays in existing crate files for this pilot; splitting it or changing shell geometry would enlarge the refactor unnecessarily.
 
-Proceed through account trigger/lifecycle ownership, sheets, top bar/sidebar, individual screens, then transcript/paging/live orchestration. Every stage preserves current URLs, embedding contract, CSP, focus, scroll, ordering, expanded state and unchanged visual gates. Server/component parity should use actual Preact in a browser or an established DOM implementation; the earlier tiny fake DOM sufficient for `h()` is not a Preact verification strategy. Measure equivalent production builds and consumer request budgets at each adoption.
+Proceed from account trigger/lifecycle ownership to shared shell/navigation and Hub adoption, then sheets/screens, and transcript/paging/live orchestration last. Every stage preserves current URLs, embedding contract, CSP, focus, scroll, ordering, expanded state and unchanged visual gates. Server/component parity should use actual Preact in a browser or an established DOM implementation; the earlier tiny fake DOM sufficient for `h()` is not a Preact verification strategy. Measure equivalent production builds and consumer request budgets at each adoption.
+
+### Unified shell follow-up contract (proposed, not yet exported)
+
+The next bounded source PR should establish one typed shell host with authenticated
+account/workspace inputs, safe navigation destinations and active route, Recent
+session data from the existing host poller, and a content slot for viewer or Hub
+administrative content. Shared components own topbar/sidebar/drawer chrome; the
+host owns content rendering, authorization, URL/history and saved focus/scroll.
+The content slot must be outside chrome-owned roots, with explicit unmount and
+commit transactions when its host changes. Semon source remains shared by both
+applications rather than introducing a Hub framework copy.
+
+Hub supplies Machines/account/workspace destinations. Evaluate persistent shell
+navigation across viewer/Hub routes while preserving native links and server
+fallbacks for reload, absent JS and authorization errors. Test Sessions → Machines
+→ Sessions on phone/desktop and light/dark, correct active navigation, Recent,
+account/drawer spacing, Back/Forward, workspace changes and no duplicate poller.
+Account-only adoption is not the consolidated-experience milestone. Necessary
+visual unification requires explicit reviewed comparison evidence; refactor
+references are not silently refreshed. This is the next contract to implement,
+not an assertion that the shell or persistent routing already exists.
 
 ## Historical library plan — 2026-09-30
 

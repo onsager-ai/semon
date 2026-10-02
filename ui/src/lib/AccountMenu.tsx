@@ -7,7 +7,7 @@ export interface AccountMenuProps {
   wide: boolean;
   onWideChange: () => void;
 }
-class Avatar extends Component<{ account: Account }, { failed: boolean }> {
+export class AccountAvatar extends Component<{ account: Account }, { failed: boolean }> {
   state = { failed: false };
   render() {
     const { account } = this.props;
@@ -32,7 +32,7 @@ function AccountLink({ link }: { link: Account['links'][number] }) {
 /** Owns only the contents of .account-popover; no fetch, routing or page state. */
 export function AccountMenu({ account, compact, wide, onWideChange }: AccountMenuProps) {
   return <>
-    <div class="account-identity"><Avatar account={account} /><span class="account-identity-text"><span class="account-name">{account.name}</span><span class="account-login-value">{account.login}</span></span></div>
+    <div class="account-identity"><AccountAvatar account={account} /><span class="account-identity-text"><span class="account-name">{account.name}</span><span class="account-login-value">{account.login}</span></span></div>
     <section class="account-section"><div class="account-heading">Workspaces</div>
       {account.workspaces.map((workspace, i) => <Workspace key={`${workspace.switch_href}:${i}`} workspace={workspace} />)}
     </section>

@@ -1,4 +1,4 @@
-import { parseAccount, mountAccountPopover, updateAccountWide, destroyAccountPopover } from "../../../ui/src/account-adapter";
+import { parseAccount, createAccountChrome } from "../../../ui/src/account-adapter";
 (() => {
   // ====================================================================================
   // Model: sessions are places; handoffs are how work moves between them (ask: you → session,
@@ -599,7 +599,7 @@ import { parseAccount, mountAccountPopover, updateAccountWide, destroyAccountPop
   try { const saved = JSON.parse(localStorage.getItem("semon.tree") ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) treePrefs = pruneTreePrefs(saved); } catch {}
   const app = $(".app");
   const syncLayoutPrefs = () => { if (SIDEBAR_ONLY) return; app.classList.toggle("rail", railMode && !phone.matches); $("#page").classList.toggle("wide-mode", wideMode && !phone.matches && route.v === "session"); };
-  function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); updateAccountWide(on); }
+  function setWideMode(on) { wideMode = on; try { localStorage.setItem("semon.wide", on ? "1" : "0"); } catch {} syncLayoutPrefs(); $(".wide-toggle")?.setAttribute("aria-pressed", String(on)); accountChrome.updateWide(on); }
   function setRailMode(on) { railMode = on; ORD.delete("side"); try { localStorage.setItem("semon.rail", on ? "1" : "0"); } catch {} syncLayoutPrefs(); expandedAll = null; renderLanes(); const b = $("#rail-toggle"); b?.setAttribute("aria-expanded", String(!on)); b?.setAttribute("aria-label", on ? "Expand sidebar" : "Collapse sidebar"); b?.setAttribute("data-tip", on ? "Expand sidebar" : "Collapse sidebar"); }
   // A parent's saved choice is whether it is `open`. Saves from before the sidebar's "All N" row also held `more`, which nothing reads now:
   // it is dropped on load, along with any entry that has no `open`, and the next save writes the pruned list.
@@ -619,7 +619,6 @@ import { parseAccount, mountAccountPopover, updateAccountWide, destroyAccountPop
   let showApprovalReviews = false;
   const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
   let pendingSessionOpen = null;
-  let accountOpen = false;
   // The phone's account menu adds a history entry, so the back gesture closes it.
   let accountSheet = false;
   // What to do once the account menu's history entry has been stepped back over (leaving the page from one of its items).
@@ -771,77 +770,43 @@ import { parseAccount, mountAccountPopover, updateAccountWide, destroyAccountPop
   }
 
   // ---- Sidebar ----------------------------------------------------------------------------------
-  function accountAvatar(account) {
-    const avatar = el("span", "account-avatar", account.initials);
-    if (safePath(account.avatar_href)) {
-      const image = el("img"); image.alt = ""; image.setAttribute("src", account.avatar_href);
-      image.addEventListener("error", () => image.remove()); avatar.append(image);
-    }
-    return avatar;
-  }
-  function accountPopover(compact) {
-    return mountAccountPopover({ account: ACCOUNT, compact, wide: wideMode, onWideChange: () => setWideMode(!wideMode) });
-  }
-  // Every close takes the phone menu's history entry with it, so no Back press is spent on a menu that is gone. Only a
-  // navigation (`go`) and the back gesture itself (`keepEntry`) leave it: stepping back then would undo the navigation, or the
-  // entry is already gone. Focus that was in the menu (or fell to the page when it closed) returns to the menu's button, and an
-  // update that waited for the menu to close is drawn, unless a navigation (`navigating`) is about to draw the page anyway.
-  function closeAccountMenu(keepEntry, navigating) {
-    const menu = $(".account-popover"), trigger = $('.account-trigger[aria-expanded="true"]'), active = document.activeElement;
-    const refocus = !!menu && (menu.contains(active) || !active || active === document.body);
-    document.querySelectorAll(".account-popover, .account-backdrop").forEach((node) => { destroyAccountPopover(node); node.remove(); });
-    document.querySelectorAll(".account-trigger").forEach((button) => button.setAttribute("aria-expanded", "false"));
-    accountOpen = false;
-    if (accountSheet) { accountSheet = false; if (!keepEntry && history.state?.sheet) { skipPop = true; history.back(); } }
-    if (refocus && trigger?.isConnected) trigger.focus({ focusVisible: false, preventScroll: true });
-    if (LIVE.pending && !navigating) setTimeout(() => { if (LIVE.pending && !viewerEl && !accountOpen) refresh(); }, 0);
-  }
-  // Leaving the page from a phone menu item steps back over the menu's entry first, so Back from the next page lands on this
-  // one, not on a menu that is no longer there.
-  function leaveAccountSheet(go) {
-    accountSheet = false;
-    if (history.state?.sheet) { skipPop = true; afterPop = go; history.back(); } else go();
-  }
-  // A page brought back from the back-forward cache comes back as it was left, menu and all: close it (its entry is gone).
-  window.addEventListener("pageshow", (e) => { if (e.persisted && accountOpen) { accountSheet = false; closeAccountMenu(true); } });
-  function toggleAccountMenu(widget, trigger, compact) {
-    if (accountOpen) { closeAccountMenu(); return; }
-    closeAccountMenu();
-    const menu = accountPopover(compact);
-    if (compact) {
-      // On a phone it floats just above its row, as wide as the row, over a clear backdrop that takes the tap outside it, so it
-      // never pushes the drawer and never runs past the screen (the stylesheet caps its height and it scrolls inside).
+  // One typed owner for trigger/menu DOM, open state, focus and dismissal listeners. The viewer owns
+  // history, pending model transactions and CSSOM placement; none of those globals enter the library.
+  const accountChrome = createAccountChrome({
+    place(widget, trigger) {
       const at = trigger.getBoundingClientRect();
       widget.style.setProperty("--account-left", at.left + "px");
       widget.style.setProperty("--account-width", at.width + "px");
       widget.style.setProperty("--account-bottom", Math.max(0, innerHeight - at.top + 6) + "px");
-      const backdrop = el("div", "account-backdrop"); backdrop.addEventListener("click", (e) => { e.stopPropagation(); closeAccountMenu(); });
-      widget.insertBefore(backdrop, trigger); trigger.after(menu);
-      menu.addEventListener("click", (e) => { const a = e.target.closest?.("a[href]"); if (!a || !accountSheet) return; e.preventDefault(); leaveAccountSheet(() => location.assign(a.href)); });
-      menu.addEventListener("submit", (e) => { if (!accountSheet) return; e.preventDefault(); const form = e.target; leaveAccountSheet(() => form.submit()); });
-      try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); accountSheet = true; } catch {}
-    } else widget.append(menu);
-    accountOpen = true; trigger.setAttribute("aria-expanded", "true");
-    menu.querySelector(".account-menu-row")?.focus({ focusVisible: false });
+    },
+    opened(compact) {
+      if (compact) try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); accountSheet = true; } catch {}
+    },
+    closed({ keepEntry, navigating }) {
+      if (accountSheet) { accountSheet = false; if (!keepEntry && history.state?.sheet) { skipPop = true; history.back(); } }
+      if (LIVE.pending && !navigating) setTimeout(() => { if (LIVE.pending && !viewerEl && !accountChrome.open) refresh(); }, 0);
+    },
+    navigate(href) {
+      if (!accountSheet) return false;
+      leaveAccountSheet(() => location.assign(href)); return true;
+    },
+    submit(form) {
+      if (!accountSheet) return false;
+      leaveAccountSheet(() => form.submit()); return true;
+    },
+  });
+  function closeAccountMenu(keepEntry, navigating) { accountChrome.close({ keepEntry, navigating }); }
+  // Step over the phone sheet before leaving so Back lands on the page, not a removed menu.
+  function leaveAccountSheet(go) {
+    accountSheet = false;
+    if (history.state?.sheet) { skipPop = true; afterPop = go; history.back(); } else go();
   }
   function accountWidget(compact) {
-    if (!ACCOUNT) return null;
-    const widget = el("div", "account-widget " + (compact ? "account-widget-phone" : "account-widget-desktop"));
-    const trigger = el("button", "account-trigger"); trigger.type = "button";
-    trigger.setAttribute("aria-haspopup", "menu"); trigger.setAttribute("aria-expanded", "false");
-    const current = ACCOUNT.workspaces.find((workspace) => workspace.current);
-    if (compact) {
-      trigger.setAttribute("aria-label", ACCOUNT.name + ", " + (current?.name ?? ACCOUNT.login));
-      const summary = el("span", "account-summary"); summary.append(el("span", "account-summary-name", ACCOUNT.name), el("span", "account-summary-workspace", current?.name ?? ACCOUNT.login));
-      trigger.append(accountAvatar(ACCOUNT), summary);
-    } else {
-      trigger.classList.add("account-avatar-button"); trigger.setAttribute("aria-label", ACCOUNT.name + " account menu"); trigger.append(accountAvatar(ACCOUNT));
-    }
-    trigger.addEventListener("click", (event) => { event.stopPropagation(); toggleAccountMenu(widget, trigger, compact); });
-    widget.append(trigger); return widget;
+    return ACCOUNT ? accountChrome.mount({ account: ACCOUNT, compact, wide: wideMode, onWideChange: () => setWideMode(!wideMode) }) : null;
   }
   function renderDrawerAccount() {
-    $("#account-drawer")?.remove();
+    const old = $("#account-drawer");
+    if (old) { accountChrome.unmount(old); old.remove(); }
     if (!ACCOUNT) return;
     const widget = accountWidget(true); widget.id = "account-drawer"; $("#sidebar").append(widget);
   }
@@ -1239,6 +1204,7 @@ import { parseAccount, mountAccountPopover, updateAccountWide, destroyAccountPop
   const modelIdOf = (s) => s.model ?? Object.keys(s.tokens_by_model ?? {})[0];
   function renderTopbar(title, crumb, opts = {}) {
     closeAccountMenu(); // the bar is redrawn from scratch, the desktop menu with it: close it properly, not by detaching it
+    document.querySelectorAll("#topbar .account-widget").forEach((root) => accountChrome.unmount(root));
     const bar = $("#topbar"), s = opts.session ?? opts.traceSession; clearBox(bar, route); bar.classList.remove("scrolled"); bar.classList.toggle("session-bar", !!s);
     // What the bar holds is added through `put`, so the range control on Analytics (a persistent control) stays where it is.
     const put = placer(bar), sink = { append: put };
@@ -1601,8 +1567,6 @@ import { parseAccount, mountAccountPopover, updateAccountWide, destroyAccountPop
     t.addEventListener("click", () => { tb.hidden = !tb.hidden; t.setAttribute("aria-expanded", String(!tb.hidden)); });
     sec.append(t, tb); return sec;
   }
-  if (!SIDEBAR_ONLY) document.addEventListener("click", (e) => {
-    const account = $(".account-popover"); if (account && !account.parentElement.contains(e.target)) closeAccountMenu(); });
 
   // ---- Home: what needs you, then what is running ------------------------------------------------------
   const secHead = (title, n) => { const s = el("div", "sec-h", title); s.append(el("span", "n", String(n))); return s; };
@@ -2525,7 +2489,7 @@ import { parseAccount, mountAccountPopover, updateAccountWide, destroyAccountPop
     clearTimeout(AN.timer); AN.timer = null;
     return fetchAnalytics(asked === true).then((changed) => {
       if (changed && route.v === "analytics" && rendered === route) {
-        if (viewerEl || accountOpen) LIVE.pending = true; // drawn when the sheet or the account menu closes
+        if (viewerEl || accountChrome.open) LIVE.pending = true; // drawn when the sheet or the account menu closes
         else { const st = capture(); render(); restore(st); }
       }
       scheduleAnalytics();
@@ -2863,7 +2827,7 @@ import { parseAccount, mountAccountPopover, updateAccountWide, destroyAccountPop
   // On a phone there is no drawer-close event from the embedding page, so held order waits for the next open.
   if (!SIDEBAR_ONLY) { $("#drawer-close").addEventListener("click", () => closeDrawer()); $("#scrim").addEventListener("click", () => closeDrawer()); }
   else window.addEventListener("semon:drawer-open", () => orderApply("side")); // opening the drawer re-sorts what the list held, as openDrawer does
-    if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) closeAccountMenu(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); } if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName ?? "") && !document.activeElement?.isContentEditable && !viewerEl) { e.preventDefault(); if (route.v === "session") { findOpen = true; render(); $("#find")?.focus(); } else if (route.v === "sessions") { $("#sq")?.focus(); } else { const r = { v: "sessions", q: query }; focusSessionsSearchOnRender = r; go(r); } } });
+    if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e) => { if (e.key === "Escape" && accountSheet) accountChrome.escape(); else if (e.key === "Escape" && !viewerEl) { closeDrawer(); closeAccountMenu(); $(".session-menu")?.remove(); $("#more-btn")?.setAttribute("aria-expanded", "false"); } if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName ?? "") && !document.activeElement?.isContentEditable && !viewerEl) { e.preventDefault(); if (route.v === "session") { findOpen = true; render(); $("#find")?.focus(); } else if (route.v === "sessions") { $("#sq")?.focus(); } else { const r = { v: "sessions", q: query }; focusSessionsSearchOnRender = r; go(r); } } });
   let sx = null;
   if (!SIDEBAR_ONLY) sidebar.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
   if (!SIDEBAR_ONLY) sidebar.addEventListener("touchmove", (e) => { if (sx !== null && e.touches[0].clientX - sx < -50) { sx = null; closeDrawer(); } }, { passive: true });
@@ -3055,8 +3019,8 @@ import { parseAccount, mountAccountPopover, updateAccountWide, destroyAccountPop
   // Draws the new model on the screen shown, unless a navigation is still loading (it draws when done), the sheet is open
   // (it draws when the sheet closes), or what the screen shows left the model (it stays as it was).
   function refresh(dirty) {
-    if (accountOpen && !$(".account-popover")?.isConnected) closeAccountMenu(); // a menu some redraw took away is closed
-    if (viewerEl || accountOpen) { LIVE.pending = true; return; } // drawn whole when the sheet or the account menu closes
+    if (accountChrome.open && !$(".account-popover")?.isConnected) closeAccountMenu(); // a menu some redraw took away is closed
+    if (viewerEl || accountChrome.open) { LIVE.pending = true; return; } // drawn whole when the sheet or the account menu closes
     if (SIDEBAR_ONLY) { LIVE.pending = false; render(); return; } // the page is the embedding page's: only the sidebar is redrawn
     LIVE.pending = false; const r = route;
     if (rendered !== r || (r.v === "session" && !SESS[r.id]) || (r.v === "trace" && !SESS[r.sid]) || (r.v === "machine" && !MACHINE[r.id])) return;
