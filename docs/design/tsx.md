@@ -6,7 +6,64 @@ Marvin selected **Preact + TypeScript/TSX + esbuild** in [#224](https://github.c
 
 The top-level `ui/` stays in Semon. Use native Preact; `preact/compat` needs a demonstrated dependency requirement. CSS, URLs, CSP, embedding prelude, `window.semonEmbed` and `semon:refresh` / `semon:polled` / `semon:ended` stay unchanged. Rust embeds checked-in production assets and requires no Node or build script.
 
-### Refreshed baseline
+### Stage 2 — account trigger and lifecycle
+
+The next source stage adds `createAccountChrome(AccountChromeHost)` and the
+`AccountChrome` / `AccountCloseOptions` types. The controller owns widget
+contents (trigger/avatar, menu/backdrop), one-menu open state, synchronous
+commit/focus, outside click and persisted-pageshow dismissal. Hosts insert/remove
+root containers and must unmount before replacement; destroying a shell removes
+all roots and listeners. Escape is forwarded from host overlay arbitration so
+account dismissal does not also dismiss the phone drawer. Detached triggers
+cannot reopen removed widgets. Wide updates retain keyed controls and focus.
+
+The viewer host retains route/history (`accountSheet`, `skipPop`, `afterPop`),
+Display state, pending live-model release and measured phone CSS custom-property
+placement. Placement remains the existing legacy CSSOM operation through the typed
+`place(widget, trigger)` callback; the typed inline-style ban is unchanged.
+`opened`, `closed`, `navigate` and `submit` are the only history/live callbacks;
+the library imports no viewer state and adds no fetch or poller. Public API and
+independent consumer example are in `ui/README.md` and `ui/src/lib-contract.tsx`.
+
+At source baseline `9d37fc2`, fresh foundation gates and the served account,
+shell and embedding checks pass. New lifecycle coverage reproduces a removed
+trigger reopening detached state in all four phone/desktop × light/dark cases.
+Stage 2 rejects that stale trigger and covers Back/Escape/backdrop/outside close,
+focus/node stability, bfcache notification, held model release and menu navigation.
+An independent browser consumer verifies repeated mount/destroy, unmounting an
+open root and dismissal listener cleanup. Runtime sink exemption still ends at
+the next module comment with exact pinned sink counts; the Rust scan regression
+now explicitly includes both account content and lifecycle modules.
+
+Stage 2 served asset: 356,629 raw / 94,971 raw gzip / 204,333 minified /
+72,017 minified gzip bytes. The same pinned production flags on stage 1 give
+355,555 / 94,693 / 204,039 / 71,791: delta +1,074 raw / +294 minified /
++226 minified gzip bytes. No request or polling endpoint is added. Fresh baseline/head budget runs each
+measure all 14 rows with zero warnings/failures; report-only overages are 34/44.
+Static requests remain 8, Sessions 9, Analytics 10; live remains 3.5 requests and
+one transcript request per update. Observed Home/Sessions transfer bytes are
+616,962 → 618,037. Timing varies and existing byte/request ceilings remain
+exceeded; no threshold or baseline is widened. All five functional groups pass;
+the first run-view synthetic-model undefined.name race reproduces on unchanged
+stage 1 and an identical-code stage-2 group rerun passes. Both visual runs pass
+113 screens and 159 enforced regions, with eight account-region crops identical.
+The named 4× CPU long-session check has zero failures/errors and zero scroll
+frames over 20ms (cold opens 870/885ms, phone/desktop). These are fixture
+observations, not production SLA claims. Exact-head CI belongs to this stage's PR.
+
+**Next priority:** shared application shell/topbar/sidebar/drawer and navigation
+source, then Hub consumer adoption in bounded PRs, before sheets and individual
+screens. One Hub experience is the product goal; account reuse alone does not
+achieve it. Preserve native authenticated/server/no-JS fallbacks, URL/history,
+focus/scroll and single polling ownership across Sessions → Machines → Sessions.
+Hub adoption must remove superseded duplicate chrome ownership and test both
+themes and devices, workspace changes and authorization failures. Transcript,
+paging and live transactions remain last. No Hub pin, merge or deployment is
+part of this account source stage.
+
+### Stage 1 baseline and pilot record
+
+#### Refreshed baseline
 
 Work starts from main `acf79df2718c8c23de5269fd2ecfea0750bf26c2`, including #222 and #223. All three exact-main Rust/release/viewer workflows pass. The handover at `b578953` had inherited visual/transport mismatches; #223 resolved them before this migration. Local pre-change semon-sessions tests pass (415 unit, 4 core, 17 server, 2 other integration; four ignored across unit/docs). Local pre-change visual checks compare 113 screens with zero mismatches/errors. Record any newly observed failures separately; thresholds, image references and budgets do not change.
 
@@ -56,7 +113,7 @@ The named long-session check completes with no failures at 4× CPU throttling: p
 
 1. Review foundation/account-content pilot with unchanged served browser, security and pixel gates.
 2. Move account triggers and lifecycle/history into shared chrome; adopt on Hub's signed-in shell pages in a separate pin/consumer PR, preserving focus and server first-paint geometry.
-3. Shared sheets, top bar, sidebar/Recent and typed API/state boundaries. `/api/sidebar` and server/component markup parity remain proposed work, not existing APIs.
+3. Shared shell/top bar/sidebar/Recent/navigation and Hub adoption before sheets and typed API/state boundaries. `/api/sidebar` and server/component markup parity remain proposed work, not existing APIs.
 4. Individual Home/Sessions/Machines/Trace/Analytics screens with explicit root ownership.
 5. Transcript, paging and live-update orchestration last. Tooltip/Select shared entry points move only once both viewer and shell consumers remain covered.
 

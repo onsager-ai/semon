@@ -133,6 +133,12 @@ jobs:
       - name: Browser-check infrastructure regression tests
         run: node --test tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/viewer-cache.test.mjs tests/ui/checks/model-delta.test.mjs
 
+      - name: Independent shared-account consumer lifecycle
+        if: matrix.suite == 'interaction'
+        run: |
+          npm --prefix ui ci --no-audit --no-fund
+          node --test ui/tests/browser-lifecycle.mjs
+
       - name: Write the sample fixtures
         run: |
           echo "SEMON_NOW=$(node tests/ui/fixture.mjs "$RUNNER_TEMP/sample")" >> "$GITHUB_ENV"

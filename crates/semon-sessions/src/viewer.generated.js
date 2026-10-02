@@ -352,7 +352,7 @@ SOFTWARE.
   }
 
   // src/lib/AccountMenu.tsx
-  var Avatar = class extends C {
+  var AccountAvatar = class extends C {
     state = { failed: false };
     render() {
       const { account } = this.props;
@@ -378,7 +378,7 @@ SOFTWARE.
   function AccountMenu({ account, compact, wide, onWideChange }) {
     return /* @__PURE__ */ u2(S, { children: [
       /* @__PURE__ */ u2("div", { class: "account-identity", children: [
-        /* @__PURE__ */ u2(Avatar, { account }),
+        /* @__PURE__ */ u2(AccountAvatar, { account }),
         /* @__PURE__ */ u2("span", { class: "account-identity-text", children: [
           /* @__PURE__ */ u2("span", { class: "account-name", children: account.name }),
           /* @__PURE__ */ u2("span", { class: "account-login-value", children: account.login })
@@ -405,32 +405,139 @@ SOFTWARE.
     ] });
   }
 
+  // src/lib/account-chrome.tsx
+  function createAccountChrome(host) {
+    const widgets = /* @__PURE__ */ new Map();
+    let active = null;
+    let destroyed = false;
+    const initialFocus = { focusVisible: false };
+    const returnFocus = { focusVisible: false, preventScroll: true };
+    const triggerOf = (widget) => widget.root.querySelector(".account-trigger");
+    function commit(widget) {
+      const { root, props } = widget;
+      const { account, compact, wide, onWideChange } = props;
+      const current = account.workspaces.find((workspace) => workspace.current);
+      const expanded = active === widget;
+      R(/* @__PURE__ */ u2(S, { children: [
+        expanded && compact && /* @__PURE__ */ u2("div", { class: "account-backdrop", onClick: (event) => {
+          event.stopPropagation();
+          close();
+        } }, "backdrop"),
+        /* @__PURE__ */ u2(
+          "button",
+          {
+            class: "account-trigger" + (compact ? "" : " account-avatar-button"),
+            type: "button",
+            "aria-haspopup": "menu",
+            "aria-expanded": expanded,
+            "aria-label": compact ? account.name + ", " + (current?.name ?? account.login) : account.name + " account menu",
+            onClick: (event) => {
+              event.stopPropagation();
+              toggle(widget);
+            },
+            children: [
+              /* @__PURE__ */ u2(AccountAvatar, { account }),
+              compact && /* @__PURE__ */ u2("span", { class: "account-summary", children: [
+                /* @__PURE__ */ u2("span", { class: "account-summary-name", children: account.name }),
+                /* @__PURE__ */ u2("span", { class: "account-summary-workspace", children: current?.name ?? account.login })
+              ] })
+            ]
+          },
+          "trigger"
+        ),
+        expanded && /* @__PURE__ */ u2(
+          "div",
+          {
+            class: "menu account-popover",
+            role: "menu",
+            "aria-label": "Account",
+            onClick: (event) => {
+              const target = event.target;
+              const link = target instanceof Element ? target.closest("a[href]") : null;
+              if (compact && link && host.navigate(link.href)) event.preventDefault();
+            },
+            onSubmit: (event) => {
+              if (compact && event.target instanceof HTMLFormElement && host.submit(event.target)) event.preventDefault();
+            },
+            children: /* @__PURE__ */ u2(AccountMenu, { account, compact, wide, onWideChange })
+          },
+          "menu"
+        )
+      ] }), root);
+    }
+    function close(options = {}) {
+      const widget = active;
+      if (!widget) return;
+      const menu = widget?.root.querySelector(".account-popover");
+      const focused = document.activeElement;
+      const refocus = !!menu && (!focused || focused === document.body || menu.contains(focused));
+      active = null;
+      if (widget) commit(widget);
+      if (refocus && widget?.root.isConnected) triggerOf(widget).focus(returnFocus);
+      host.closed(options);
+    }
+    function toggle(widget) {
+      if (destroyed || !widgets.has(widget.root) || !widget.root.isConnected) return;
+      if (active) {
+        close();
+        return;
+      }
+      const trigger = triggerOf(widget);
+      if (widget.props.compact) host.place(widget.root, trigger);
+      active = widget;
+      commit(widget);
+      host.opened(widget.props.compact);
+      widget.root.querySelector(".account-menu-row")?.focus(initialFocus);
+    }
+    const outside = (event) => {
+      if (active && event.target instanceof Node && !active.root.contains(event.target)) close();
+    };
+    const pageshow = (event) => {
+      if (event.persisted && active) close({ keepEntry: true });
+    };
+    document.addEventListener("click", outside);
+    window.addEventListener("pageshow", pageshow);
+    function unmount(root) {
+      const widget = widgets.get(root);
+      if (!widget) return;
+      if (active === widget) close();
+      R(null, root);
+      widgets.delete(root);
+    }
+    return {
+      get open() {
+        return active !== null;
+      },
+      mount(props) {
+        if (destroyed) throw new Error("Account chrome is destroyed");
+        const root = document.createElement("div");
+        root.className = "account-widget " + (props.compact ? "account-widget-phone" : "account-widget-desktop");
+        const widget = { root, props };
+        widgets.set(root, widget);
+        commit(widget);
+        return root;
+      },
+      close,
+      escape: () => close(),
+      updateWide(wide) {
+        for (const widget of widgets.values()) {
+          widget.props = { ...widget.props, wide };
+          commit(widget);
+        }
+      },
+      unmount,
+      destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        for (const root of widgets.keys()) unmount(root);
+        document.removeEventListener("click", outside);
+        window.removeEventListener("pageshow", pageshow);
+      }
+    };
+  }
+
   // src/lib/index.ts
   installPropGuard();
-
-  // src/account-adapter.tsx
-  var roots = /* @__PURE__ */ new Map();
-  function mountAccountPopover(props) {
-    const root = document.createElement("div");
-    root.className = "menu account-popover";
-    root.setAttribute("role", "menu");
-    root.setAttribute("aria-label", "Account");
-    roots.set(root, props);
-    R(/* @__PURE__ */ u2(AccountMenu, { account: props.account, compact: props.compact, wide: props.wide, onWideChange: props.onWideChange }), root);
-    return root;
-  }
-  function updateAccountWide(wide) {
-    for (const [root, props] of roots) {
-      const next = { ...props, wide };
-      roots.set(root, next);
-      R(/* @__PURE__ */ u2(AccountMenu, { account: next.account, compact: next.compact, wide: next.wide, onWideChange: next.onWideChange }), root);
-    }
-  }
-  function destroyAccountPopover(root) {
-    if (!roots.has(root)) return;
-    R(null, root);
-    roots.delete(root);
-  }
 
   // ../crates/semon-sessions/src/viewer.js
   (() => {
@@ -1373,7 +1480,7 @@ SOFTWARE.
       }
       syncLayoutPrefs();
       $2(".wide-toggle")?.setAttribute("aria-pressed", String(on));
-      updateAccountWide(on);
+      accountChrome.updateWide(on);
     }
     function setRailMode(on) {
       railMode = on;
@@ -1417,7 +1524,6 @@ SOFTWARE.
     let showApprovalReviews = false;
     const sessionFilters = { repo: "", machine: "", harness: "", model: "" };
     let pendingSessionOpen = null;
-    let accountOpen = false;
     let accountSheet = false;
     let afterPop = null;
     if (!SIDEBAR_ONLY) try {
@@ -1714,40 +1820,45 @@ SOFTWARE.
       place();
       requestAnimationFrame(() => requestAnimationFrame(place));
     }
-    function accountAvatar(account) {
-      const avatar = el("span", "account-avatar", account.initials);
-      if (safePath2(account.avatar_href)) {
-        const image = el("img");
-        image.alt = "";
-        image.setAttribute("src", account.avatar_href);
-        image.addEventListener("error", () => image.remove());
-        avatar.append(image);
-      }
-      return avatar;
-    }
-    function accountPopover(compact) {
-      return mountAccountPopover({ account: ACCOUNT, compact, wide: wideMode, onWideChange: () => setWideMode(!wideMode) });
-    }
-    function closeAccountMenu(keepEntry, navigating) {
-      const menu = $2(".account-popover"), trigger = $2('.account-trigger[aria-expanded="true"]'), active = document.activeElement;
-      const refocus = !!menu && (menu.contains(active) || !active || active === document.body);
-      document.querySelectorAll(".account-popover, .account-backdrop").forEach((node) => {
-        destroyAccountPopover(node);
-        node.remove();
-      });
-      document.querySelectorAll(".account-trigger").forEach((button) => button.setAttribute("aria-expanded", "false"));
-      accountOpen = false;
-      if (accountSheet) {
-        accountSheet = false;
-        if (!keepEntry && history.state?.sheet) {
-          skipPop = true;
-          history.back();
+    const accountChrome = createAccountChrome({
+      place(widget, trigger) {
+        const at = trigger.getBoundingClientRect();
+        widget.style.setProperty("--account-left", at.left + "px");
+        widget.style.setProperty("--account-width", at.width + "px");
+        widget.style.setProperty("--account-bottom", Math.max(0, innerHeight - at.top + 6) + "px");
+      },
+      opened(compact) {
+        if (compact) try {
+          history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, "");
+          accountSheet = true;
+        } catch {
         }
+      },
+      closed({ keepEntry, navigating }) {
+        if (accountSheet) {
+          accountSheet = false;
+          if (!keepEntry && history.state?.sheet) {
+            skipPop = true;
+            history.back();
+          }
+        }
+        if (LIVE.pending && !navigating) setTimeout(() => {
+          if (LIVE.pending && !viewerEl && !accountChrome.open) refresh();
+        }, 0);
+      },
+      navigate(href) {
+        if (!accountSheet) return false;
+        leaveAccountSheet(() => location.assign(href));
+        return true;
+      },
+      submit(form) {
+        if (!accountSheet) return false;
+        leaveAccountSheet(() => form.submit());
+        return true;
       }
-      if (refocus && trigger?.isConnected) trigger.focus({ focusVisible: false, preventScroll: true });
-      if (LIVE.pending && !navigating) setTimeout(() => {
-        if (LIVE.pending && !viewerEl && !accountOpen) refresh();
-      }, 0);
+    });
+    function closeAccountMenu(keepEntry, navigating) {
+      accountChrome.close({ keepEntry, navigating });
     }
     function leaveAccountSheet(go2) {
       accountSheet = false;
@@ -1757,80 +1868,15 @@ SOFTWARE.
         history.back();
       } else go2();
     }
-    window.addEventListener("pageshow", (e2) => {
-      if (e2.persisted && accountOpen) {
-        accountSheet = false;
-        closeAccountMenu(true);
-      }
-    });
-    function toggleAccountMenu(widget, trigger, compact) {
-      if (accountOpen) {
-        closeAccountMenu();
-        return;
-      }
-      closeAccountMenu();
-      const menu = accountPopover(compact);
-      if (compact) {
-        const at = trigger.getBoundingClientRect();
-        widget.style.setProperty("--account-left", at.left + "px");
-        widget.style.setProperty("--account-width", at.width + "px");
-        widget.style.setProperty("--account-bottom", Math.max(0, innerHeight - at.top + 6) + "px");
-        const backdrop = el("div", "account-backdrop");
-        backdrop.addEventListener("click", (e2) => {
-          e2.stopPropagation();
-          closeAccountMenu();
-        });
-        widget.insertBefore(backdrop, trigger);
-        trigger.after(menu);
-        menu.addEventListener("click", (e2) => {
-          const a2 = e2.target.closest?.("a[href]");
-          if (!a2 || !accountSheet) return;
-          e2.preventDefault();
-          leaveAccountSheet(() => location.assign(a2.href));
-        });
-        menu.addEventListener("submit", (e2) => {
-          if (!accountSheet) return;
-          e2.preventDefault();
-          const form = e2.target;
-          leaveAccountSheet(() => form.submit());
-        });
-        try {
-          history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, "");
-          accountSheet = true;
-        } catch {
-        }
-      } else widget.append(menu);
-      accountOpen = true;
-      trigger.setAttribute("aria-expanded", "true");
-      menu.querySelector(".account-menu-row")?.focus({ focusVisible: false });
-    }
     function accountWidget(compact) {
-      if (!ACCOUNT) return null;
-      const widget = el("div", "account-widget " + (compact ? "account-widget-phone" : "account-widget-desktop"));
-      const trigger = el("button", "account-trigger");
-      trigger.type = "button";
-      trigger.setAttribute("aria-haspopup", "menu");
-      trigger.setAttribute("aria-expanded", "false");
-      const current = ACCOUNT.workspaces.find((workspace) => workspace.current);
-      if (compact) {
-        trigger.setAttribute("aria-label", ACCOUNT.name + ", " + (current?.name ?? ACCOUNT.login));
-        const summary = el("span", "account-summary");
-        summary.append(el("span", "account-summary-name", ACCOUNT.name), el("span", "account-summary-workspace", current?.name ?? ACCOUNT.login));
-        trigger.append(accountAvatar(ACCOUNT), summary);
-      } else {
-        trigger.classList.add("account-avatar-button");
-        trigger.setAttribute("aria-label", ACCOUNT.name + " account menu");
-        trigger.append(accountAvatar(ACCOUNT));
-      }
-      trigger.addEventListener("click", (event) => {
-        event.stopPropagation();
-        toggleAccountMenu(widget, trigger, compact);
-      });
-      widget.append(trigger);
-      return widget;
+      return ACCOUNT ? accountChrome.mount({ account: ACCOUNT, compact, wide: wideMode, onWideChange: () => setWideMode(!wideMode) }) : null;
     }
     function renderDrawerAccount() {
-      $2("#account-drawer")?.remove();
+      const old = $2("#account-drawer");
+      if (old) {
+        accountChrome.unmount(old);
+        old.remove();
+      }
       if (!ACCOUNT) return;
       const widget = accountWidget(true);
       widget.id = "account-drawer";
@@ -1977,7 +2023,7 @@ SOFTWARE.
     const isApprovalReview = (s2) => s2.kind === "Approval review";
     const visibleInNavigation = (s2, path = routedPath()) => showApprovalReviews || !isApprovalReview(s2) || s2.id === path.current || path.ancestors.has(s2.id);
     const navigationTree = (path = routedPath()) => {
-      const canonical = sessionChildren(), roots2 = [], children = /* @__PURE__ */ new Map(), visited = /* @__PURE__ */ new Set();
+      const canonical = sessionChildren(), roots = [], children = /* @__PURE__ */ new Map(), visited = /* @__PURE__ */ new Set();
       const visit = (session, parent) => {
         if (visited.has(session.id)) return;
         visited.add(session.id);
@@ -1986,15 +2032,15 @@ SOFTWARE.
           if (parent) {
             if (!children.has(parent)) children.set(parent, []);
             children.get(parent).push(session);
-          } else roots2.push(session);
+          } else roots.push(session);
           nearest = session.id;
         }
         for (const child of canonical.get(session.id) ?? []) visit(child, nearest);
       };
       for (const root of Object.values(SESS).filter((s2) => s2.lane && !parentOf(s2.id))) visit(root, null);
-      roots2.sort(byLast);
+      roots.sort(byLast);
       for (const kids of children.values()) kids.sort(byLast);
-      return { roots: roots2, children };
+      return { roots, children };
     };
     const childSessions = (sid) => [...sessionChildren().get(sid) ?? []].sort((a2, b2) => (originHandoff(a2.id)?.at ?? a2.last) - (originHandoff(b2.id)?.at ?? b2.last));
     const descendantsOf = (sid, children, out = [], seen = /* @__PURE__ */ new Set([sid])) => {
@@ -2410,6 +2456,7 @@ SOFTWARE.
     const modelIdOf = (s2) => s2.model ?? Object.keys(s2.tokens_by_model ?? {})[0];
     function renderTopbar(title, crumb, opts = {}) {
       closeAccountMenu();
+      document.querySelectorAll("#topbar .account-widget").forEach((root) => accountChrome.unmount(root));
       const bar = $2("#topbar"), s2 = opts.session ?? opts.traceSession;
       clearBox(bar, route);
       bar.classList.remove("scrolled");
@@ -3230,10 +3277,6 @@ SOFTWARE.
       sec.append(t2, tb);
       return sec;
     }
-    if (!SIDEBAR_ONLY) document.addEventListener("click", (e2) => {
-      const account = $2(".account-popover");
-      if (account && !account.parentElement.contains(e2.target)) closeAccountMenu();
-    });
     const secHead = (title, n2) => {
       const s2 = el("div", "sec-h", title);
       s2.append(el("span", "n", String(n2)));
@@ -4799,7 +4842,7 @@ SOFTWARE.
       AN.timer = null;
       return fetchAnalytics(asked === true).then((changed) => {
         if (changed && route.v === "analytics" && rendered === route) {
-          if (viewerEl || accountOpen) LIVE.pending = true;
+          if (viewerEl || accountChrome.open) LIVE.pending = true;
           else {
             const st = capture();
             render();
@@ -5581,7 +5624,7 @@ SOFTWARE.
       $2("#scrim").addEventListener("click", () => closeDrawer());
     } else window.addEventListener("semon:drawer-open", () => orderApply("side"));
     if (!SIDEBAR_ONLY) document.addEventListener("keydown", (e2) => {
-      if (e2.key === "Escape" && accountSheet) closeAccountMenu();
+      if (e2.key === "Escape" && accountSheet) accountChrome.escape();
       else if (e2.key === "Escape" && !viewerEl) {
         closeDrawer();
         closeAccountMenu();
@@ -5865,8 +5908,8 @@ SOFTWARE.
       });
     }
     function refresh(dirty) {
-      if (accountOpen && !$2(".account-popover")?.isConnected) closeAccountMenu();
-      if (viewerEl || accountOpen) {
+      if (accountChrome.open && !$2(".account-popover")?.isConnected) closeAccountMenu();
+      if (viewerEl || accountChrome.open) {
         LIVE.pending = true;
         return;
       }
