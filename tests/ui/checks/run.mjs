@@ -45,10 +45,12 @@ import backlogCheck from "./viewer-backlog.mjs";
 import modelsCheck from "./models.mjs";
 import stepNamesCheck from "./stepnames.mjs";
 import sidebarFocusCheck from "./sidebarfocus.mjs";
+import accountLifecycle from "./account-lifecycle.mjs";
 
 import signalsCheck from "./signals.mjs";
 
 const checks = [
+  ["account-lifecycle", accountLifecycle],
   ["runview", runView],
   ["signals", signalsCheck],
   ["viewer-backlog", backlogCheck],

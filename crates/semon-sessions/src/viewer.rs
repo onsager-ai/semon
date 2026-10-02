@@ -3527,7 +3527,12 @@ mod tests {
     fn runtime_sink_exemption_stops_before_application_modules() {
         let js = crate::shell::VIEWER_JS;
         let app = application_script(js);
-        for module in ["src/lib/account.ts", "src/lib/security.ts"] {
+        for module in [
+            "src/lib/account.ts",
+            "src/lib/security.ts",
+            "src/lib/AccountMenu.tsx",
+            "src/lib/account-chrome.tsx",
+        ] {
             assert!(
                 app.contains(&format!("  // {module}\n")),
                 "{module} must be scanned"
