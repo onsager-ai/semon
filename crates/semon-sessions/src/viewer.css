@@ -1240,6 +1240,11 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
    targets share their edges without adding space between every call. Sidebar
    rows fill the drawer; only a parent's metadata leaves room for its toggle. */
 @media (max-width: 760px), (any-pointer: coarse) {
+  /* content-visibility gives turns paint containment: horizontal overhang
+     loses its hit target at the turn edge. Keep the shared vertical pitch. */
+  .step > button, .tsum { width: 100%; margin-inline: 0; padding-inline: 0; }
+  /* The following steps panel must not take the summary's shared lower edge. */
+  .tsum { z-index: 1; }
   .step .out .io > button { min-height: 44px; min-width: 44px; margin: 0; }
   .out > .viewall:last-child { border-radius: 0 0 var(--r2) var(--r2); }
   .hop .body > .more { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; margin: 0; padding: 0; }
