@@ -9,6 +9,13 @@ pub const VIEWER_CSS: &str = concat!(include_str!("viewer.css"), "\n", include_s
 
 /// The viewer's page script. Embedders serving the viewer without a `ViewerCore` can serve it at `/viewer.js`. It starts
 /// with the tooltip (`tooltip.js`, also the start of [`JS`]), then the Select component (`select.js`), then the production Preact pilot and legacy viewer (built by `ui/build.mjs`).
+pub const COMPONENT_JS: &str = concat!(
+    include_str!("tooltip.js"),
+    "\n",
+    include_str!("select.js"),
+    "\n"
+);
+
 pub const VIEWER_JS: &str = concat!(
     include_str!("tooltip.js"),
     "\n",

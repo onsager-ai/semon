@@ -1,5 +1,6 @@
 import { parseAccount, createAccountChrome, createShellChrome, renderShellNavigation, createRecentRenderer } from "../../../ui/src/account-adapter";
-(() => {
+import { getViewerHost } from "../../../ui/src/viewer-host";
+queueMicrotask(() => {
   // ====================================================================================
   // Model: sessions are places; handoffs are how work moves between them (ask: you → session,
   // spawn: session → subagent / Codex run, relay: session → session, move: takeover on another
@@ -16,7 +17,10 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
   const MACHINE_LAST = {};
   let ADMIN = null;
   let ACCOUNT = null;
-  let NAV_MACHINES = null;
+  const viewerHost = getViewerHost();
+  const NATIVE_PAGE = viewerHost?.nativePage;
+  let externalContent = viewerHost?.initialMachines ?? null, externalPending = null;
+  let NAV_MACHINES = viewerHost?.machinesPath ?? null;
   // An embedding page that shows the viewer's sidebar beside its own content marks its .app data-viewer="sidebar" (docs/shell.md):
   // only the sidebar is drawn there, and every destination opens the viewer's own page.
   const SIDEBAR_ONLY = document.querySelector(".app")?.dataset.viewer === "sidebar";
@@ -346,8 +350,9 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
     for (const x of m.machines ?? [m.machine]) { MACHINE[x.id] = x.name; MACHINE_UP[x.id] = x.up; if (x.last != null) MACHINE_LAST[x.id] = x.last; }
     ADMIN = m.admin && safePath(m.admin.href) ? m.admin : null;
     // A server-provided menu wins; otherwise an embedding page may set `window.semonEmbed.account`, held to the same rules.
-    ACCOUNT = accountOf(m.account) ?? embeddedAccount();
-    NAV_MACHINES = m.nav && safePath(m.nav.machines) ? m.nav.machines : null;
+    ACCOUNT = accountOf(m.account) ?? accountOf(viewerHost?.account) ?? embeddedAccount();
+    viewerHost?.modelAccount?.(ACCOUNT);
+    NAV_MACHINES = viewerHost?.machinesPath ?? (m.nav && safePath(m.nav.machines) ? m.nav.machines : null);
     for (const k of Object.keys(SESS)) delete SESS[k];
     for (const [id, s] of Object.entries(m.sessions)) { s.id = id; SESS[id] = s; }
     H.length = 0; H.push(...m.handoffs);
@@ -551,12 +556,13 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
   // Real URLs: every screen has one, and the server serves this page for each.
   function urlOf(r) {
     const hs = (id) => SESS[id]?.harness ?? "claude";
-    return r.v === "home" ? "/" : r.v === "analytics" ? "/analytics" : r.v === "sessions" ? "/sessions" : r.v === "machines" ? "/machines"
+    return r.v === "home" ? "/" : r.v === "analytics" ? "/analytics" : r.v === "sessions" ? "/sessions" : r.v === "machines" ? viewerHost?.machinesPath ?? "/machines"
       : r.v === "machine" ? "/machines/" + enc(r.id)
       : r.v === "session" ? "/s/" + hs(r.id) + "/" + enc(r.id) + (r.turn ? "?turn=" + enc(r.turn) : "")
       : "/trace/" + hs(r.sid) + "/" + enc(r.sid) + "/" + enc(r.turn);
   }
   function routeOf(loc) {
+    if (viewerHost && loc.pathname === viewerHost.machinesPath) return { v: "machines" };
     const p = loc.pathname.split("/").filter(Boolean).map((x) => { try { return decodeURIComponent(x); } catch { return x; } }), turn = new URLSearchParams(loc.search).get("turn");
     if (p[0] === "timeline" || p[0] === "analytics") return { v: "analytics" };
     if (p[0] === "sessions") return { v: "sessions" };
@@ -572,9 +578,9 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
   }
   function boot() {
     api("/api/model?delta=1").then((m) => {
-      adopt(m); LIVE.version = m.version; remember(m); if (SIDEBAR_ONLY) { render(); schedule(2000); return; } route = routeOf(location);
+      adopt(m); LIVE.version = m.version; remember(m); if (SIDEBAR_ONLY || NATIVE_PAGE) { if (NATIVE_PAGE) route = { v: NATIVE_PAGE.nav }; render(); schedule(2000); return; } route = routeOf(location);
       if (route.v === "sessions") query = (new URLSearchParams(location.search).get("q") ?? "").trim(); // direct Sessions links can prefill its search field
-      if (route.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
+      if (route.v === "machines" && NAV_MACHINES && !viewerHost) { location.assign(NAV_MACHINES); return; }
       try { history.replaceState({ ...route, scrollTop: 0 }, "", urlOf(route) + (route.v === "session" ? location.hash : route.v === "sessions" && query ? "?q=" + enc(query) : "")); } catch {}
       const done = () => {
         render();
@@ -587,7 +593,7 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
       const initialRoute = route, p = load(initialRoute);
       if (p) p.then(() => { done();  }, done);
       else { done();  }
-    }, (err) => { $(SIDEBAR_ONLY ? "#lanes" : "#page").replaceChildren(el("p", SIDEBAR_ONLY ? "ghead" : "empty", "Couldn't load the sessions: " + err.message)); });
+    }, (err) => { if (viewerHost) { console.warn("semon: model unavailable", err.status); return; } $(SIDEBAR_ONLY ? "#lanes" : "#page").replaceChildren(el("p", SIDEBAR_ONLY ? "ghead" : "empty", "Couldn't load the sessions: " + err.message)); });
   }
 
   // ---- State & navigation ---------------------------------------------------------------
@@ -628,7 +634,18 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
   let show = { ...SHOW_ALL }; let find = ""; let findOpen = false;
   const currentScroll = () => phone.matches ? window.scrollY : $("#main").scrollTop;
   const restoreScroll = (top) => scrollProgrammatically(() => { if (phone.matches) window.scrollTo(0, top); else $("#main").scrollTop = top; });
-  const saveHistoryScroll = () => { if (viewerEl) return; try { if (history.state?.v) history.replaceState({ ...history.state, scrollTop: currentScroll() }, ""); } catch {} };
+  let hostFocus = null;
+  if (viewerHost) document.addEventListener("focusin", event => {
+    const node = event.target;
+    if (!(node instanceof HTMLElement) || !$("#page").contains(node)) return;
+    hostFocus = node.id ? { id: node.id } : node.dataset.id ? { row: node.dataset.id } : node.getAttribute("aria-label") ? { label: node.getAttribute("aria-label") } : null;
+  });
+  function restoreHostFocus(saved) {
+    if (!viewerHost || !saved) return;
+    const selector = saved.id ? "#" + CSS.escape(saved.id) : saved.row ? '[data-id="' + CSS.escape(saved.row) + '"]' : saved.label ? '[aria-label="' + CSS.escape(saved.label) + '"]' : null;
+    if (selector) $("#page")?.querySelector(selector)?.focus({ preventScroll: true });
+  }
+  const saveHistoryScroll = () => { if (viewerEl) return; try { if (history.state?.v) history.replaceState({ ...history.state, scrollTop: currentScroll(), ...(viewerHost ? { hostFocus } : {}) }, ""); } catch {} };
   let scrollSaveFrame = false;
   const queueScrollSave = () => { if (scrollSaveFrame) return; scrollSaveFrame = true; requestAnimationFrame(() => { scrollSaveFrame = false; saveHistoryScroll(); }); };
   if (!SIDEBAR_ONLY) { window.addEventListener("scroll", queueScrollSave, { passive: true }); $("#main").addEventListener("scroll", queueScrollSave, { passive: true }); }
@@ -687,13 +704,30 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
   }
   // A deep link to a turn the loaded transcript doesn't hold yet.
   const isDeep = (r) => { const t = r.turn ? TURN.get(r.turn) : null; return !!t && t.sid === r.id && !t.entries.length; };
-  function go(r, fromHistory) {
+  function go(r, fromHistory, prepared = false) {
+    externalPending?.abort(); externalPending = null;
+    if (NATIVE_PAGE) { if (!fromHistory) location.assign(r.v === "machines" ? NAV_MACHINES : urlOf(r)); return; }
+    if (r.v === "machines" && viewerHost && !prepared) {
+      const controller = new AbortController(); externalPending = controller;
+      closeDrawer(true); closeAccountMenu(true, true);
+      viewerHost.loadMachines(controller.signal).then(content => {
+        if (controller.signal.aborted || externalPending !== controller) { content.destroy(); return; }
+        externalPending = null;
+        externalContent?.destroy(); externalContent = content;
+        go(r, fromHistory, true);
+      }, error => {
+        if (!controller.signal.aborted && externalPending === controller) { externalPending = null; location.assign(viewerHost.machinesPath); }
+      });
+      return;
+    }
+    if (r.v !== "machines" && externalContent) { externalContent.destroy(); externalContent = null; }
+
     if (r.v !== "sessions" || r !== focusSessionsSearchOnRender) focusSessionsSearchOnRender = null;
     if (SIDEBAR_ONLY) { if (!fromHistory) { closeDrawer(true); location.assign(r.v === "machines" && NAV_MACHINES ? NAV_MACHINES : urlOf(r)); } return; } // an embedding page's sidebar leads to the viewer's pages
     if (route.v === "session") clearPaging(route.id);
     resetPagerInput(); stopOpeningEndPin(); navAbort?.abort(); navAbort = null;
     if (r.v === "timeline") { r = { ...r, v: "analytics" }; try { history.replaceState({ ...r, scrollTop: r.scrollTop ?? currentScroll() }, "", urlOf(r)); } catch {} }
-    if (r.v === "machines" && NAV_MACHINES) { location.assign(NAV_MACHINES); return; }
+    if (r.v === "machines" && NAV_MACHINES && !viewerHost) { location.assign(NAV_MACHINES); return; }
     if (!fromHistory) saveHistoryScroll();
     closeAccountMenu(true, true);
     dropErrors(true); // (first: it drops a range the error stepper moved, and that is not kept)
@@ -705,7 +739,7 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
     if (!fromHistory) { const state = { ...r }; delete state.scrollTop; try { history.pushState(state, "", urlOf(r)); } catch {} }
     const done = () => {
       if (route !== r) return;
-      endLoading(); render(); if (r.v === "session") focusTitle();
+      endLoading(); render(); if (r.v === "session" || (viewerHost && r.v === "machines")) focusTitle();
       if (fromHistory && Number.isFinite(r.scrollTop)) {
         // A fresh offscreen turn has only its intrinsic estimate. Measure once on history navigation
         // before setting the saved offset, so the browser cannot clamp it to the estimated height.
@@ -713,7 +747,7 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
         for (const turn of turns) turn.style.contentVisibility = "visible";
         const heights = turns.map((turn) => turn.getBoundingClientRect().height);
         turns.forEach((turn, i) => { turn.style.containIntrinsicBlockSize = "auto " + Math.ceil(heights[i]) + "px"; turn.style.contentVisibility = ""; });
-        restoreScroll(r.scrollTop);
+        restoreScroll(r.scrollTop); restoreHostFocus(r.hostFocus);
       }
       else if (r.v === "session" && r.turn) { revealTurn(r.turn, !fromHistory); if (location.hash) requestAnimationFrame(() => requestAnimationFrame(revealEntryHash)); }
       else if (r.v === "session" && location.hash) revealEntryHash();
@@ -2415,7 +2449,14 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
     runChartObserver?.disconnect(); pruneClamps();
     const focusSearch = focusSessionsSearchOnRender === route; focusSessionsSearchOnRender = null;
     if (SIDEBAR_ONLY) { CHILDREN = null; tick(); rendered = route; renderNav(); renderLanes(); return; } // the embedding page draws its own page and bar
+    if (NATIVE_PAGE || (route.v === "machines" && viewerHost)) {
+      tick(); rendered = route;
+      if (externalContent && !externalContent.element.isConnected) { clearBox($("#page"), route); $("#page").append(externalContent.element); }
+      document.title = (NATIVE_PAGE?.title ?? "Machines") + " · Semon";
+      renderTopbar(NATIVE_PAGE?.title ?? "Machines"); syncLayoutPrefs(); syncBarLine(); renderNav(); renderLanes(); renderDrawerAccount(); syncJump(); return;
+    }
     // The page first, then the bar: the bar's summary (a trace's counts, a search's matches) comes from the page.
+    if (viewerHost) document.title = ({ home: "Home", sessions: "Sessions", analytics: "Analytics" }[route.v] ?? "Semon") + " · Semon";
     resetPagerInput(); holdProgrammaticScroll(); closeAccountMenu(); stopOpeningEndPin(); CHILDREN = null; // a redraw inside the open-at-end window ends the pin
     ordPageState = ordState("page"); tick(); const page = $("#page"), r = route; rendered = r; page.style.paddingBottom = ""; clearBox(page, r); page.classList.remove("child-page");
     if (r.v === "home") { renderHome(page); renderTopbar("Home"); }
@@ -3320,5 +3361,11 @@ import { parseAccount, createAccountChrome, createShellChrome, renderShellNaviga
 
   // An embedding page's sidebar: the row its data-viewer-nav names (home, sessions or machines) is current.
   if (SIDEBAR_ONLY) { const nav = app.dataset.viewerNav; route = { v: ["home", "sessions", "machines"].includes(nav) ? nav : "" }; }
+  if (viewerHost) {
+    ACCOUNT = accountOf(viewerHost.account);
+    if (NATIVE_PAGE) route = { v: NATIVE_PAGE.nav };
+    else if (externalContent) route = { v: "machines" };
+    if (NATIVE_PAGE || externalContent) render();
+  }
   boot();
-})();
+});
