@@ -3516,11 +3516,29 @@ mod tests {
             .split_once("  // node_modules/preact/dist/preact.module.js\n")
             .expect("pinned Preact core boundary");
         let (runtime, after) = runtime_and_after
-            .split_once("  // node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js\n")
-            .expect("pinned Preact JSX boundary");
+            .split_once("\n  // ")
+            .expect("end of pinned Preact core module");
         assert_eq!(runtime.matches("innerHTML").count(), 3);
         assert_eq!(runtime.matches("cssText").count(), 2);
-        format!("{before}{after}")
+        format!("{before}\n  // {after}")
+    }
+
+    #[test]
+    fn runtime_sink_exemption_stops_before_application_modules() {
+        let js = crate::shell::VIEWER_JS;
+        let app = application_script(js);
+        for module in ["src/lib/account.ts", "src/lib/security.ts"] {
+            assert!(
+                app.contains(&format!("  // {module}\n")),
+                "{module} must be scanned"
+            );
+        }
+        let injected = js.replacen(
+            "  // src/lib/account.ts\n",
+            "  // src/lib/account.ts\n  probe.innerHTML = hostile;\n",
+            1,
+        );
+        assert!(application_script(&injected).contains("innerHTML"));
     }
 
     #[test]
