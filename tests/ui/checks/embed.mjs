@@ -217,6 +217,24 @@ export default async function embedCheck(browser) {
   }
 
   // ---- The account menu from the embedding page ----
+  // Hostile values traverse the served production bundle's copied model and Preact props.
+  for (const size of ["phone", "desktop"]) {
+    const hostile = '<img src=x onerror="window.__accountXss=1">';
+    const page = await open(browser, { size, embed: { account: account({
+      name: hostile, login: '</span><script>window.__accountXss=2</script>', initials: '<b>',
+      workspaces: [{ name: hostile, role: '<svg onload="window.__accountXss=3">', current: true, switch_href: '/embed/switch/1' }],
+      links: [{ label: hostile, href: '/embed/profile', method: 'get', danger: false }],
+    }) } });
+    if (size === 'phone') await page.locator('#lead-btn').click();
+    await page.locator(size === 'phone' ? '#account-drawer .account-trigger' : '#topbar .account-trigger').click();
+    const state = await page.evaluate(() => {
+      const menu = document.querySelector('.account-popover');
+      return { name: menu.querySelector('.account-name').textContent, markup: menu.querySelectorAll('script, img, svg, b, [style], [onerror], [onload]').length, executed: window.__accountXss ?? 0 };
+    });
+    r.expect(state.name === hostile && state.markup === 0 && state.executed === 0, 'hostile account values stay text in served ' + size + ' menu: ' + JSON.stringify(state));
+    await closePage(page);
+  }
+
   const menuOf = (page, scope = "#topbar") => page.evaluate((sc) => {
     const menu = document.querySelector(sc + " .account-popover");
     return menu ? { name: menu.querySelector(".account-name")?.textContent, login: menu.querySelector(".account-login-value")?.textContent, bold: menu.querySelectorAll("b").length, hrefs: [...menu.querySelectorAll("a[href]")].map((a) => a.getAttribute("href")), actions: [...menu.querySelectorAll("form")].map((f) => f.getAttribute("action")), workspaces: [...menu.querySelectorAll(".account-workspace-name")].map((n) => n.textContent) } : null;

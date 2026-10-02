@@ -312,3 +312,14 @@ sh-select-close
 Classes prefixed `sh-` are renamed from a shorter name because `viewer.css` already defines a class of that name for its own, unrelated chrome (for example, the transcript's `.steps`/`.step` draw a numbered rail with a different meaning). A Rust test in `shell.rs` fails the build if a class `shell.css` defines, other than the shared chrome list above, is also defined by `viewer.css`.
 
 Everything else in `viewer.css` is private to the viewer and may change.
+
+## Preact source pilot
+
+The viewer now embeds a checked-in production esbuild tail,
+`viewer.generated.js`, after the existing tooltip and Select prefixes. Its
+account popover contents come from `ui/src/lib/index.ts`; the legacy viewer
+retains trigger/history/focus behavior through one synchronous adapter. The
+served paths, prelude, `window.semonEmbed` and events above are unchanged. The
+shell page script remains the existing shared imperative bundle. Cargo builds
+require no Node. See [the current migration decision](design/tsx.md) for tooling,
+security boundaries and later consumer adoption.

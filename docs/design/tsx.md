@@ -1,5 +1,64 @@
 # The viewer in TSX components: bundler and runtime compared
 
+## Current decision — 2026-10-02
+
+Marvin selected **Preact + TypeScript/TSX + esbuild** in [#224](https://github.com/onsager-ai/semon/issues/224): “Okay. Go for preact then. Record that decision and start a new codex cloud session to implement”. This supersedes the custom `h()`/no-runtime decision below. The benchmark remains a historical comparison, including its sample runtime costs; those are not production-viewer measurements.
+
+The top-level `ui/` stays in Semon. Use native Preact; `preact/compat` needs a demonstrated dependency requirement. CSS, URLs, CSP, embedding prelude, `window.semonEmbed` and `semon:refresh` / `semon:polled` / `semon:ended` stay unchanged. Rust embeds checked-in production assets and requires no Node or build script.
+
+### Refreshed baseline
+
+Work starts from main `acf79df2718c8c23de5269fd2ecfea0750bf26c2`, including #222 and #223. All three exact-main Rust/release/viewer workflows pass. The handover at `b578953` had inherited visual/transport mismatches; #223 resolved them before this migration. Local pre-change semon-sessions tests pass (415 unit, 4 core, 17 server, 2 other integration; four ignored across unit/docs). Local pre-change visual checks compare 113 screens with zero mismatches/errors. Record any newly observed failures separately; thresholds, image references and budgets do not change.
+
+The overhaul is integrated through #216; #81/#106/#126/#129 and later overhaul source PRs are integrated, so their old sequencing gates below no longer apply. Open #218 filter input, #219 pricing and #225 query-core work are separate and untouched. Hub main `149e38291a1578872e214dcc55f40fc68c27ab25` pins this Semon revision in both its gitlink and `semon.rev`, with all four exact-main workflows green. See [Hub #67](https://github.com/onsager-ai/semon-hub/issues/67).
+
+### Foundation and first pilot
+
+- `ui/package.json` and npm's integrity-bearing `package-lock.json` pin Preact 10.29.8, esbuild 0.28.2 and TypeScript 6.0.3. `npm --prefix ui ci --no-audit --no-fund` is the install path. npm locking fits the repository's existing `tests/ui` tooling; no runtime source vendoring or separate binary downloader is needed. TypeScript 6 supplies the compiler AST API used for security checks; the benchmark's 7.0.2 package does not supply that API. Install tooling only for development/CI.
+- `ui/src/viewer.ts` imports the existing legacy JS from the crate. Keeping that file in place avoids a monolithic rename under parallel PRs and preserves registry/nav source tests. New typed code belongs in `ui/src/`. `ui/build.mjs` bundles the production runtime to `crates/semon-sessions/src/viewer.generated.js`; `shell::VIEWER_JS` keeps tooltip/Select prefixes and embeds that tail. `shell::JS` remains unchanged.
+- `npm --prefix ui run typecheck`, `test`, `check:bundle` and `sizes` gate the existing Viewer UI aggregate. Build/freshness runs before Rust browser-fixture compilation. Tests use the checked-in served asset, never a silently regenerated replacement. Two independent builds must match; a stale asset fails. `npm --prefix ui run build` updates the asset deliberately.
+- The first real Preact component is the account popover's identity, workspaces, Display switch and links, exported from `ui/src/lib/index.ts`. `parseAccount(unknown)` owns the copied/validated account model; `AccountMenuProps` owns rendering inputs. No model/session/transcript globals move into a component. The avatar owns only its failed-image state.
+- `account-adapter.tsx` is the only bridge to the legacy viewer: mount, synchronous wide-mode update and unmount. Legacy owns the `.account-popover` container, insertion/removal, event routing, history, focus return, drawer placement and polling hold/release; Preact owns all descendants. Legacy never patches those descendants. Containers are unmounted before removal. Widget/trigger migration is a later stage.
+
+### Scheduling and transactions
+
+Preact's explicit `render(vnode, root)` commits synchronously. The adapter calls it before legacy code inserts/focuses the menu, and when a Display switch changes. Stable keyed workspace/link rows keep their nodes and focus during that update. Do not override `options.debounceRendering` globally or assume `setState`/hooks commit synchronously: Preact queues component state updates. The pilot's sole queued update removes a failed avatar image, outside scroll/focus transactions; no global listeners or timers belong to it. Unmount cancels ownership and Preact cleans up component state.
+
+Future transcript/live ports must preserve the existing capture → synchronous DOM commit → clamp measurement → restore transaction, including the later frame restores. Define an explicit synchronous update adapter for those roots, or prove a scheduling strategy before using queued state for transaction-critical writes. Keep anchors, held order, expanded tools, paging and long-session state keyed independently of rendered DOM.
+
+### Security adaptation
+
+Preact 10.29.8's production core contains exactly three `innerHTML` and two `cssText` references for its generic HTML/style support. Rust isolates only the core's esbuild module section, asserts those exact counts, and bans the existing sinks throughout the rest of the served bundle. Other whole-bundle restrictions, native-title checks, page checks and CSP remain required. Any runtime upgrade must review that boundary anew.
+
+The application AST check scans all new TS/TSX and legacy viewer/tooltip/Select/shell sources: no HTML sinks, eval/dynamic Function, JSX prop spreads, native title or inline style props; new typed code also cannot directly use DOM styles. Existing imperative CSSOM layout measurements remain outside Preact ownership. A runtime `options.vnode` guard installed by the public library entry rejects HTML/style/title props on native elements, unsafe href/src/action paths and string event handlers. It validates props after any prior VNode hook. Incoming account data is copied once, checked at `unknown`, rendered as text, and never spread into DOM props. Security tests exercise hostile props and getters; served browser tests exercise hostile identity/workspace/link content on phone and desktop.
+
+### Measured production cost
+
+With the same esbuild flags and unchanged tooltip/Select prefixes, gzip level 9:
+
+| Script | Raw bytes | Raw gzip | Minified bytes | Minified gzip |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline original served | 354,952 | 107,590 | 190,199 | 65,809 |
+| Baseline rebuilt with identical esbuild | 331,410 | 86,892 | 190,195 | 65,806 |
+| Preact account pilot served | 355,555 | 94,693 | 204,039 | 71,791 |
+
+The equivalent-build pilot increment is 24,145 raw / 13,844 minified / 5,985 minified gzip bytes. The shipped asset remains readable and unminified; its raw bytes are 603 above the old served script. The equivalent-build cost includes the preserved Preact MIT license; esbuild also removes comments/reformats legacy code. This is a pilot measurement, not the eventual migration cost. Reproduce with `npm --prefix ui run sizes -- --baseline /absolute/baseline/crates/semon-sessions/src/viewer.js`. Request/render budgets remain in `tests/ui/perf-budget.json` and existing long-session checks; the menu adds no fetch or poller. Record actual budget results with the PR, without widening limits.
+
+### Next bounded stages
+
+1. Review foundation/account-content pilot with unchanged served browser, security and pixel gates.
+2. Move account triggers and lifecycle/history into shared chrome; adopt on Hub's signed-in shell pages in a separate pin/consumer PR, preserving focus and server first-paint geometry.
+3. Shared sheets, top bar, sidebar/Recent and typed API/state boundaries. `/api/sidebar` and server/component markup parity remain proposed work, not existing APIs.
+4. Individual Home/Sessions/Machines/Trace/Analytics screens with explicit root ownership.
+5. Transcript, paging and live-update orchestration last. Tooltip/Select shared entry points move only once both viewer and shell consumers remain covered.
+
+This PR begins the migration; legacy rendering remains. Merge and deployment require separate authorization.
+
+## Historical comparison and superseded implementation plan
+
+The original September 29–30 record follows unchanged. References to the helper, standalone installer, local-machine restrictions, unmerged overhaul PRs and future file moves describe that earlier proposal, not the active cloud-session build instructions above. No AGENTS.md or CLAUDE.md exists in either refreshed checkout; the authorized cloud task includes local build/test work.
+
+
 Status: decided 2026-09-29 and 2026-09-30. The comparison below is kept as the record of why. The numbers come from `docs/design/tsx-bench/` and its workflow, `.github/workflows/tsx-bench.yml`.
 
 ## Decision
