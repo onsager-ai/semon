@@ -3533,6 +3533,7 @@ mod tests {
             "src/lib/AccountMenu.tsx",
             "src/lib/account-chrome.tsx",
             "src/lib/shell.tsx",
+            "src/lib/recent.tsx",
         ] {
             assert!(
                 app.contains(&format!("  // {module}\n")),

@@ -814,6 +814,180 @@ SOFTWARE.
     };
   }
 
+  // src/lib/recent.tsx
+  var CHEVRON = "M9 6l6 6-6 6";
+  function Icon2({ path }) {
+    return /* @__PURE__ */ u2("svg", { class: "icon", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ u2("path", { d: path }) });
+  }
+  function createRecentRenderer(root, host) {
+    let destroyed = false, frame = 0;
+    const active = (node) => !destroyed && node.isConnected && root.contains(node);
+    function fit() {
+      if (destroyed) return;
+      for (const meta of root.querySelectorAll(".session-row-meta")) {
+        if (!meta.isConnected || !meta.clientWidth) continue;
+        const values = [...meta.querySelectorAll("[data-drop]")];
+        for (const value of values) value.hidden = meta.clientWidth < 280 && value.classList.contains("row-duration");
+        for (const value of values.sort((a2, b2) => Number(b2.dataset.drop) - Number(a2.dataset.drop))) {
+          if (meta.scrollWidth <= meta.clientWidth + 1) break;
+          value.hidden = true;
+        }
+      }
+    }
+    function Item({ item }) {
+      const kids = item.children, expandable = !!kids && !item.rail;
+      const harness = item.harness;
+      return /* @__PURE__ */ u2(
+        "div",
+        {
+          class: "treeitem",
+          role: "treeitem",
+          "data-id": item.id,
+          "aria-label": item.name,
+          tabIndex: 0,
+          "aria-expanded": expandable ? item.open : void 0,
+          onKeyDown: (event) => {
+            if (!active(event.currentTarget)) return;
+            const target = event.target;
+            if (target !== event.currentTarget && target !== event.currentTarget.querySelector(":scope > .tree-row .srow") && target !== event.currentTarget.querySelector(":scope > .tree-row .tree-toggle")) return;
+            if (expandable && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+              const open = event.key === "ArrowRight";
+              if (open !== item.open) {
+                event.preventDefault();
+                host.toggle(item.id, open);
+              }
+            } else if ((event.key === "Enter" || event.key === " ") && target === event.currentTarget) {
+              event.preventDefault();
+              host.open(item.id);
+            }
+          },
+          children: [
+            /* @__PURE__ */ u2("div", { class: "tree-row" + (expandable ? " has-toggle" : "") + (item.stuck ? " stuck" : ""), children: [
+              /* @__PURE__ */ u2(
+                "button",
+                {
+                  class: "srow" + (item.current === "true" ? " on-path" : ""),
+                  type: "button",
+                  "data-id": item.id,
+                  "data-session-row": "compact",
+                  "data-tip": item.rail ? item.name : void 0,
+                  "aria-label": item.label,
+                  "aria-current": item.current,
+                  onClick: (event) => {
+                    if (active(event.currentTarget)) host.open(item.id);
+                  },
+                  children: [
+                    /* @__PURE__ */ u2("span", { class: "session-row-main srow-main", children: [
+                      /* @__PURE__ */ u2("span", { class: "dot " + item.state, role: "img", "aria-label": item.stateLabel, "data-tip": item.rail ? void 0 : item.stateLabel }),
+                      /* @__PURE__ */ u2("span", { class: "nm", "data-tip": item.name, "data-tip-clipped": "", children: item.name }),
+                      item.flag && /* @__PURE__ */ u2("span", { class: "kid-flag " + item.flag.state, "data-tip": item.flag.tip, "aria-hidden": "true" }),
+                      /* @__PURE__ */ u2("span", { class: "ag", children: item.age }),
+                      item.childState && /* @__PURE__ */ u2("span", { class: "dot " + item.childState + " child-dot", role: "img", "aria-label": item.childState, "aria-hidden": "true" })
+                    ] }),
+                    /* @__PURE__ */ u2("span", { class: "session-row-meta srow-meta for", children: [
+                      harness && /* @__PURE__ */ u2("span", { class: "hicon hi-sidebar", "data-harness": harness.id, role: "img", "aria-label": harness.name, "data-tip": harness.name, children: harness.light === harness.dark ? /* @__PURE__ */ u2("img", { src: harness.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ u2(S, { children: [
+                        /* @__PURE__ */ u2("img", { class: "hi-light", src: harness.light, alt: "", draggable: false, decoding: "async", loading: harness.darkTheme ? "lazy" : void 0 }),
+                        /* @__PURE__ */ u2("img", { class: "hi-dark", src: harness.dark, alt: "", draggable: false, decoding: "async", loading: harness.darkTheme ? void 0 : "lazy" })
+                      ] }) }),
+                      /* @__PURE__ */ u2("span", { class: "row-model", "data-tip": item.modelTip, children: item.model }),
+                      item.fields.map((field) => /* @__PURE__ */ u2("span", { class: field.className + " row-field", "data-drop": field.priority, "data-tip": field.tip, children: [
+                        /* @__PURE__ */ u2(Icon2, { path: field.icon }),
+                        /* @__PURE__ */ u2("span", { class: "field-value", children: field.text })
+                      ] }, field.priority))
+                    ] })
+                  ]
+                }
+              ),
+              expandable && /* @__PURE__ */ u2(
+                "button",
+                {
+                  class: "tree-toggle",
+                  type: "button",
+                  "data-tree-toggle": item.id,
+                  "aria-label": (item.open ? "Collapse " : "Expand ") + item.name,
+                  "aria-expanded": item.open,
+                  onClick: (event) => {
+                    event.stopPropagation();
+                    if (active(event.currentTarget)) host.toggle(item.id, !item.open);
+                  },
+                  children: /* @__PURE__ */ u2(Icon2, { path: CHEVRON })
+                }
+              ),
+              item.stuck && /* @__PURE__ */ u2(
+                "button",
+                {
+                  class: "tree-fewer",
+                  type: "button",
+                  "aria-label": "Show fewer sessions under " + item.name,
+                  onClick: (event) => {
+                    event.stopPropagation();
+                    if (active(event.currentTarget)) host.fewer(item.id);
+                  },
+                  children: [
+                    /* @__PURE__ */ u2("span", { children: "Show fewer" }),
+                    /* @__PURE__ */ u2(Icon2, { path: CHEVRON })
+                  ]
+                }
+              )
+            ] }),
+            expandable && /* @__PURE__ */ u2("div", { class: "tree-group", "data-depth": Math.min(item.depth + 1, 4), role: "group", "aria-label": "Sessions spawned by " + item.name, children: [
+              kids.map((child) => /* @__PURE__ */ u2(Item, { item: child }, child.id)),
+              item.all !== void 0 && /* @__PURE__ */ u2(
+                "button",
+                {
+                  class: "tree-all",
+                  type: "button",
+                  "data-id": item.id,
+                  role: "treeitem",
+                  "aria-haspopup": window.matchMedia("(max-width: 760px)").matches ? "dialog" : void 0,
+                  "aria-label": "All " + item.all + " sessions under " + item.name,
+                  onClick: (event) => {
+                    event.stopPropagation();
+                    if (active(event.currentTarget)) host.all(item.id, event.currentTarget);
+                  },
+                  children: [
+                    /* @__PURE__ */ u2("span", { children: "All " + item.all }),
+                    /* @__PURE__ */ u2(Icon2, { path: CHEVRON })
+                  ]
+                }
+              )
+            ] })
+          ]
+        }
+      );
+    }
+    window.addEventListener("resize", fit, { passive: true });
+    return {
+      update(snapshot) {
+        if (destroyed) throw new Error("Recent renderer is destroyed");
+        const ids = /* @__PURE__ */ new Set();
+        function validate(items) {
+          for (const item of items) {
+            if (!item.id || ids.has(item.id)) throw new Error("Invalid Recent identity");
+            ids.add(item.id);
+            if (item.harness && (!safePath(item.harness.light) || !safePath(item.harness.dark))) throw new Error("Invalid Recent harness path");
+            if (item.children) validate(item.children);
+          }
+        }
+        validate(snapshot.items);
+        R(/* @__PURE__ */ u2(S, { children: [
+          snapshot.items.map((item) => /* @__PURE__ */ u2(Item, { item }, item.id)),
+          snapshot.empty && /* @__PURE__ */ u2("p", { class: "ghead", role: "none", children: "No sessions match" })
+        ] }), root);
+        cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(fit);
+      },
+      fit,
+      destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        cancelAnimationFrame(frame);
+        window.removeEventListener("resize", fit);
+        R(null, root);
+      }
+    };
+  }
+
   // src/lib/index.ts
   installPropGuard();
 
@@ -2424,7 +2598,7 @@ SOFTWARE.
       for (let p2 = id && SESS[id] ? parentOf(id) : null; p2 && SESS[p2] && p2 !== id && !out.has(p2); p2 = parentOf(p2)) out.add(p2);
       return out;
     };
-    function treeGroupFill(group, parent, kids, children, depth, rail, open) {
+    function treeGroupSnapshot(parent, kids, children, depth, rail, open) {
       const { current, ancestors } = routedPath(), rank = new Map(kids.map((c2) => [c2.id, kidRank(c2, children)]));
       const byRank = (a2, b2) => rank.get(a2.id) - rank.get(b2.id) || b2.last - a2.last, sorted = [...kids].sort(byRank), keep = /* @__PURE__ */ new Set();
       for (const c2 of sorted) if (rank.get(c2.id) < 2 && keep.size < TREE_ACTIVE) keep.add(c2.id);
@@ -2433,47 +2607,45 @@ SOFTWARE.
       const listed = sorted.filter((c2) => keep.has(c2.id)), hidden = kids.length - listed.length;
       if (!hidden && expandedAll === parent.id) expandedAll = null;
       const full = hidden > 0 && !rail && (expandedAll === parent.id || expandedUnder.has(parent.id));
-      group.replaceChildren();
       const key = (full ? "a:" : "k:") + parent.id, unseen = !!sideOrder?.keep && open && !full && !sideOrder.reseed && sideOrder.seen.has(parent.id) && !sideOrder.prev.has(key);
       const shown = sideOrder ? orderList(sideOrder, key, full ? sorted : listed, byRank, { must: /* @__PURE__ */ new Set([current, ...ancestors, ...expandedPath]), quiet: !open, seed: full || sideOrder.reseed || !sideOrder.seen.has(parent.id) }) : full ? sorted : listed;
-      for (const child of shown) group.append(buildLaneItem(child, depth + 1, children, rail));
-      if (kids.length === shown.length || full || unseen) return full && expandedAll === parent.id;
-      const total = descendantsOf(parent.id, children).length, button = el("button", "tree-all");
-      button.type = "button";
-      button.dataset.id = parent.id;
-      button.setAttribute("role", "treeitem");
-      if (phone.matches) button.setAttribute("aria-haspopup", "dialog");
-      button.setAttribute("aria-label", "All " + total + " sessions under " + parent.name);
-      button.append(el("span", null, "All " + total), icon(I2.chev));
-      button.addEventListener("click", (e2) => {
-        e2.stopPropagation();
+      const items = shown.map((child) => buildLaneSnapshot(child, depth + 1, children, rail));
+      return { items, all: kids.length === shown.length || full || unseen ? void 0 : descendantsOf(parent.id, children).length, full: full && expandedAll === parent.id };
+    }
+    let recentSnapshot = { items: [], empty: false };
+    const recentRenderer = createRecentRenderer($2("#lanes"), {
+      open: (id) => goSession(id),
+      toggle(id, value) {
+        if (!value) forcedOpenIds().delete(id);
+        saveTreePref(id, value);
+        if (!value && (expandedAll === id || expandedPath.has(id))) {
+          expandedAll = null;
+          renderLanes();
+          $2('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] > .tree-row .tree-toggle')?.focus();
+        } else {
+          const change = (items) => items.map((item) => ({ ...item, open: item.id === id ? value : item.open, children: item.children ? change(item.children) : void 0 }));
+          recentSnapshot = { ...recentSnapshot, items: change(recentSnapshot.items) };
+          recentRenderer.update(recentSnapshot);
+        }
+      },
+      all(id, trigger) {
+        if (!SESS[id]) return;
         if (phone.matches) {
-          openKidsSheet(parent, button);
+          openKidsSheet(SESS[id], trigger);
           return;
         }
-        expandedAll = parent.id;
+        expandedAll = id;
         renderLanes();
-        $2('#lanes .treeitem[data-id="' + CSS.escape(parent.id) + '"] > .tree-row .tree-fewer')?.focus();
-      });
-      group.append(button);
-      return false;
-    }
-    function stickRow(line, s2) {
-      line.classList.add("stuck");
-      const fewer = el("button", "tree-fewer");
-      fewer.type = "button";
-      fewer.setAttribute("aria-label", "Show fewer sessions under " + s2.name);
-      fewer.append(el("span", null, "Show fewer"), icon(I2.chev));
-      fewer.addEventListener("click", (e2) => {
-        e2.stopPropagation();
+        $2('#lanes .treeitem[data-id="' + CSS.escape(id) + '"] > .tree-row .tree-fewer')?.focus();
+      },
+      fewer(id) {
         expandedAll = null;
         renderLanes();
-        const row = $2('#lanes .srow[data-id="' + CSS.escape(s2.id) + '"]');
+        const row = $2('#lanes .srow[data-id="' + CSS.escape(id) + '"]');
         scrollProgrammatically(() => row?.scrollIntoView({ block: "nearest" }));
         row?.focus({ preventScroll: true });
-      });
-      line.append(fewer);
-    }
+      }
+    });
     function openKidsSheet(parent, trigger) {
       const all = descendantsOf(parent.id, navigationTree().children), bucket = (s2) => s2.state === "wait" ? 0 : s2.state === "work" ? 1 : 2;
       const d2 = el("dialog", "viewer kids-sheet"), head = el("div", "vh"), title = el("div", "vt"), close = el("button", "vclose");
@@ -2603,93 +2775,39 @@ SOFTWARE.
       }
     }
     window.addEventListener("resize", () => {
-      for (const meta of document.querySelectorAll(".session-row-meta")) fitSessionRowMeta(meta);
+      for (const meta of document.querySelectorAll(".session-row-meta:not(#lanes .session-row-meta)")) fitSessionRowMeta(meta);
     }, { passive: true });
-    function buildLaneItem(s2, depth, children, rail) {
-      const kids = children.get(s2.id) ?? [], allKids = descendantsOf(s2.id, children), item = el("div", "treeitem");
-      item.dataset.id = s2.id;
-      item.setAttribute("role", "treeitem");
-      item.setAttribute("aria-label", s2.name);
-      item.tabIndex = 0;
+    function buildLaneSnapshot(s2, depth, children, rail) {
+      const kids = children.get(s2.id) ?? [], allKids = descendantsOf(s2.id, children);
       const { current, ancestors } = routedPath(), saved = treePrefs[s2.id];
       const open = forcedOpenIds().has(s2.id) || expandedPath.has(s2.id) || (typeof saved?.open === "boolean" ? saved.open : defaultTreeOpen(s2.id, children) || expandedUnder.has(s2.id));
-      if (kids.length && !rail) item.setAttribute("aria-expanded", String(open));
-      const line = el("div", "tree-row");
-      let lineToggle = null;
-      if (kids.length && !rail) {
-        const toggle = el("button", "tree-toggle");
-        toggle.type = "button";
-        toggle.dataset.treeToggle = s2.id;
-        toggle.setAttribute("aria-label", (open ? "Collapse " : "Expand ") + s2.name);
-        toggle.setAttribute("aria-expanded", String(open));
-        toggle.append(icon(I2.chev));
-        toggle.addEventListener("click", (e2) => {
-          e2.stopPropagation();
-          const value = item.getAttribute("aria-expanded") !== "true";
-          item.setAttribute("aria-expanded", String(value));
-          toggle.setAttribute("aria-expanded", String(value));
-          toggle.setAttribute("aria-label", (value ? "Collapse " : "Expand ") + s2.name);
-          if (!value) forcedOpenIds().delete(s2.id);
-          saveTreePref(s2.id, value);
-          if (!value && (expandedAll === s2.id || expandedPath.has(s2.id))) {
-            expandedAll = null;
-            renderLanes();
-            $2('#lanes .treeitem[data-id="' + CSS.escape(s2.id) + '"] > .tree-row .tree-toggle')?.focus();
-          }
-        });
-        lineToggle = toggle;
-        line.classList.add("has-toggle");
-      }
-      const row = sessionRow(s2, { density: "compact", rail });
-      if (rail) row.dataset.tip = s2.name;
-      row.setAttribute("aria-label", s2.name + ", " + (STATE[s2.state] ?? s2.state) + ", " + (HARNESS[s2.harness] ?? s2.harness) + ", " + shortHost(s2));
-      const parts = allKids.length ? childParts(allKids) : [];
-      if (parts.length) row.setAttribute("aria-label", row.getAttribute("aria-label") + ", " + parts.join(", "));
-      if (current === s2.id) row.setAttribute("aria-current", "page");
-      if (rail && ancestors.has(s2.id)) {
-        row.classList.add("on-path");
-        row.setAttribute("aria-current", "true");
-      }
-      const main = row.querySelector(".session-row-main"), ag = main.querySelector(".ag");
-      if (rail && allKids.some((x2) => x2.state === "work" || x2.state === "wait")) {
-        const childDot = dot(urgentDescendant(s2.id, children) ?? "work", false);
-        childDot.classList.add("child-dot");
-        childDot.setAttribute("aria-hidden", "true");
-        main.append(childDot);
-      }
+      const group = kids.length && !rail ? treeGroupSnapshot(s2, kids, children, depth, rail, open) : null;
+      const parts = allKids.length ? childParts(allKids) : [], harness = Object.hasOwn(HARNESSES, s2.harness) ? HARNESSES[s2.harness] : null;
       const flag = kids.length && !rail ? allKids.some((x2) => x2.state === "wait") ? "wait" : allKids.some((x2) => x2.state === "err") ? "err" : null : null;
-      if (flag) {
-        const f3 = el("span", "kid-flag " + flag);
-        f3.dataset.tip = allKids.filter((x2) => x2.state === "wait").length + " needs you \xB7 " + allKids.filter((x2) => x2.state === "err").length + " failed";
-        f3.setAttribute("aria-hidden", "true");
-        ag.before(f3);
-      }
-      line.append(row);
-      if (lineToggle) line.append(lineToggle);
-      item.append(line);
-      item.addEventListener("keydown", (e2) => {
-        if (kids.length && !rail && (e2.key === "ArrowLeft" || e2.key === "ArrowRight")) {
-          if (e2.target !== item && e2.target !== row && e2.target !== lineToggle) return;
-          const next = e2.key === "ArrowRight";
-          if (item.getAttribute("aria-expanded") === "true" !== next) {
-            e2.preventDefault();
-            item.querySelector(":scope > .tree-row .tree-toggle")?.click();
-          }
-        } else if ((e2.key === "Enter" || e2.key === " ") && e2.target === item) {
-          e2.preventDefault();
-          goSession(s2.id);
-        }
-      });
-      if (kids.length && !rail) {
-        const group = el("div", "tree-group");
-        group.dataset.depth = String(Math.min(depth + 1, 4));
-        group.setAttribute("role", "group");
-        group.setAttribute("aria-label", "Sessions spawned by " + s2.name);
-        const full = treeGroupFill(group, s2, kids, children, depth, rail, open);
-        item.append(group);
-        if (full && open) stickRow(line, s2);
-      }
-      return item;
+      const fields = [{ className: "row-duration", text: dur(s2.start, s2.state === "work" || s2.state === "wait" ? null : s2.last), priority: 1, tip: "Duration", icon: I2.duration }];
+      if (Object.keys(MACHINE).length > 1) fields.push({ className: "row-machine host", text: shortHost(s2), priority: 2, tip: "Machine: " + hostOf(s2), icon: I2.machine });
+      if (s2.repo) fields.push({ className: "repo-short", text: s2.repo, priority: 3, tip: "Repo: " + s2.repo, icon: I2.repo });
+      return {
+        id: s2.id,
+        name: s2.name,
+        label: [s2.name, STATE[s2.state] ?? s2.state, HARNESS[s2.harness] ?? s2.harness, shortHost(s2), ...parts].join(", "),
+        state: s2.state,
+        stateLabel: STATE[s2.state] ?? s2.state,
+        age: ago(s2.last),
+        model: shortModel(s2.model ?? s2.modelId),
+        modelTip: "Model: " + modelIdOf(s2),
+        harness: harness ? { id: s2.harness, name: harness.name, light: harness.icon.light, dark: harness.icon.dark, darkTheme: darkTheme() } : void 0,
+        fields,
+        current: current === s2.id ? "page" : rail && ancestors.has(s2.id) ? "true" : void 0,
+        rail,
+        childState: rail && allKids.some((x2) => x2.state === "work" || x2.state === "wait") ? urgentDescendant(s2.id, children) ?? "work" : void 0,
+        flag: flag ? { state: flag, tip: allKids.filter((x2) => x2.state === "wait").length + " needs you \xB7 " + allKids.filter((x2) => x2.state === "err").length + " failed" } : void 0,
+        open,
+        depth,
+        children: group?.items,
+        all: group?.all,
+        stuck: !!group?.full && open
+      };
     }
     function laneFocus() {
       const a2 = document.activeElement, item = a2?.closest?.(".treeitem");
@@ -2727,17 +2845,12 @@ SOFTWARE.
       sideOrder.reseed = sideOrder.keep && sideOrder.prevExp !== sideOrder.exp;
       expandedPath = expandedAll ? ancestorsOf(expandedAll) : /* @__PURE__ */ new Set();
       expandedUnder = expandedAll ? new Set(descendantsOf(expandedAll, children).map((x2) => x2.id)) : /* @__PURE__ */ new Set();
-      box.replaceChildren();
-      for (const s2 of orderList(sideOrder, "lanes", lanes, byLast, { limit: 8, must: /* @__PURE__ */ new Set([current, ...ancestors]) }).slice(0, 8)) box.append(buildLaneItem(s2, 0, children, railMode && !phone.matches));
+      recentSnapshot = { items: orderList(sideOrder, "lanes", lanes, byLast, { limit: 8, must: /* @__PURE__ */ new Set([current, ...ancestors]) }).slice(0, 8).map((s2) => buildLaneSnapshot(s2, 0, children, rail)), empty: !lanes.length };
+      recentRenderer.update(recentSnapshot);
       if (!sideOrder.n) {
         clearTimeout(ordIdle);
         ordIdle = null;
       } else if (!ordIdle) ordIdleArm();
-      if (!lanes.length) {
-        const empty = el("p", "ghead", "No sessions match");
-        empty.setAttribute("role", "none");
-        box.append(empty);
-      }
       const q2 = $2("#q");
       if (q2 && document.activeElement !== q2) q2.value = query;
       restoreLaneFocus(focus);

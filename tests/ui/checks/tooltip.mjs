@@ -373,11 +373,12 @@ export default async function tooltipCheck(browser) {
           new MutationObserver(() => { if (tip.hidden) window.__hides++; }).observe(tip, { attributes: true, attributeFilter: ["hidden"] });
         }, selector);
         const seen = polls;
-        await page.waitForFunction(() => window.__was && !window.__was.isConnected, null, { timeout: 12000 }).catch(() => {});
+        if (selector.startsWith("#lanes")) await page.waitForResponse(response => new URL(response.url()).pathname === "/api/model" && new URL(response.url()).searchParams.has("since"), { timeout: 12000 });
+        else await page.waitForFunction(() => window.__was && !window.__was.isConnected, null, { timeout: 12000 }).catch(() => {});
         await page.waitForTimeout(400);
         const after = await state(page), info = await page.evaluate(() => ({ replaced: !window.__was.isConnected, hides: window.__hides }));
         results[tag][name] = { polls: polls - seen, before: before.text, after: after.text, ...info };
-        r.expect(info.replaced, tag + ": " + name + " was not rebuilt by the live update, so the check proved nothing");
+        r.expect(polls > seen && (selector.startsWith("#lanes") ? !info.replaced : info.replaced), tag + ": " + name + " did not commit with the expected root identity");
         r.expect(after.open && after.text === before.text && info.hides === 0, tag + ": " + name + ": the tooltip did not stay open on the rebuilt element " + JSON.stringify({ before: before.text, after: after.text, hides: info.hides }));
         await away(page); await page.waitForTimeout(200);
       }

@@ -29,3 +29,8 @@ export function mountShellExample(container: HTMLElement, host: ShellHost) {
   chrome.drawerAccount({ ...props, compact: true });
   return { chrome, title, action, destroy() { chrome.destroy(); } };
 }
+
+import { createRecentRenderer, type RecentHost, type RecentSnapshot } from './lib';
+export function mountRecentExample(container: HTMLElement, host: RecentHost, snapshot: RecentSnapshot) {
+  const recent = createRecentRenderer(container, host); recent.update(snapshot); return recent;
+}

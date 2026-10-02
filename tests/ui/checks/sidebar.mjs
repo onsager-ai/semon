@@ -975,7 +975,7 @@ export default async function sidebarCheck(browser) {
 
       if (!dark) {
         // A live update while Swarm's whole list is open: it stays open with its rows where they were and focus on "Show fewer" (the new
-        // child, Worker 13, is held, and so is Worker 10's finish); the redraw is proved by the rows being new elements. The held order
+        // child, Worker 13, is held, and so is Worker 10's finish); the redraw is proved by Worker 10’s updated state, with keyed rows retained. The held order
         // applies when the tab comes back from the background (a visibilitychange): the list is then in order with all 13 rows.
         await page.evaluate(() => { document.querySelector("#side-list").scrollTop = 0; });
         await page.click('#lanes .tree-all[data-id="' + swarm.id + '"]');
@@ -983,9 +983,11 @@ export default async function sidebarCheck(browser) {
         await page.evaluate(() => { document.querySelector("#side-list").scrollTop = 40; });
         await page.waitForTimeout(150);
         const held = await groupOf(page, swarm.id);
-        await page.evaluate(() => { document.querySelectorAll("#lanes .treeitem").forEach((x) => { x.__drawn = true; }); }); // (a redraw makes new elements)
+        const w10 = swarmKids.find(c => c.name === "Worker 10");
+        await page.evaluate(id => { window.__heldRecentRow = document.querySelector('.srow[data-id="' + CSS.escape(id) + '"]'); }, w10.id);
         state.edit = finishSwarm;
-        await page.waitForFunction(() => !document.querySelector("#lanes .treeitem")?.__drawn, null, { timeout: 15000 });
+        await page.waitForFunction(id => document.querySelector('.srow[data-id="' + CSS.escape(id) + '"] .dot.done'), w10.id, { timeout: 15000 });
+        r.expect(await page.evaluate(() => window.__heldRecentRow?.isConnected), "live: the keyed Recent row survives the update");
         await page.waitForTimeout(100);
         const after = await groupOf(page, swarm.id);
         R.liveAfter = after;

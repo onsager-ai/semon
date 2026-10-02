@@ -1,5 +1,13 @@
 # Shared UI changes
 
+## 2026-10-02 — shared Recent and consumer builds
+
+Added `createRecentRenderer`, `RecentSnapshot`, `RecentItem`, `RecentHost` and
+`RecentRenderer`. Keyed tree descendants, metadata fitting and cleanup are shared;
+model polling, held ordering, expansion policy, focus, scroll and sheets stay in
+the host. External typed entry/output builds typecheck and enforce security,
+asset freshness and one pinned Preact runtime.
+
 ## 2026-10-02 — shared shell frame/navigation
 
 Added `createShellChrome`, `ShellChrome`, `ShellHost`, `ShellDestination`,
