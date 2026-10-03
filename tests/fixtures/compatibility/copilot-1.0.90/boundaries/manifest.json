@@ -38,7 +38,7 @@
     {
       "path": "compaction.events.jsonl",
       "original_source_sha256": "ac8d6ff658999906df0461882ce461226f359cbcc353c2e9ccebd8d1cc113d44",
-      "fixture_sha256": "c7355e28cab8ed75165118c35e0fc6467955a38b524b56e848a814e5669b3a00",
+      "fixture_sha256": "5ecfd7247a00f171d1657035fcddbc53280da955683cc6ad5e182383de954dd6",
       "mode": "compaction",
       "native_checkpoint_sha256": "b92311bcb6be41cf6a1dba63880eaf1c8149ab18a20a02df436037e0316b0d1a"
     }
@@ -46,7 +46,8 @@
   "transformations": [
     "Removed native system.message payload",
     "Removed prompt-rich model.message/model.messages_snapshot payloads, preserving event types/IDs and observed field names",
-    "Replaced disposable roots and session UUIDs consistently; other native IDs retained"
+    "Replaced disposable roots and session UUIDs consistently; other native IDs retained",
+    "Removed nested model.model_call_success.data.requestMessages, preserving event IDs and usage metadata"
   ],
   "observed": [
     "Interactive reply persisted after ephemeral folder trust acceptance",

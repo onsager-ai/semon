@@ -138,6 +138,16 @@ else:
                             self.assertEqual(row['data']['copilotVersion'], version)
                         if row['type'] == 'system.message':
                             self.assertEqual(row['data'], {'content': '[fixture: native system prompt removed]'})
+                        def check_nested_prompts(value):
+                            if isinstance(value, dict):
+                                for key, nested in value.items():
+                                    if key == 'requestMessages':
+                                        self.assertEqual(nested, '[fixture: native prompt-rich request messages removed]')
+                                    check_nested_prompts(nested)
+                            elif isinstance(value, list):
+                                for nested in value:
+                                    check_nested_prompts(nested)
+                        check_nested_prompts(row)
                         if row['type'] in ('model.message', 'model.messages_snapshot'):
                             self.assertEqual(row['data']['fixture_removed'], 'native prompt-rich model payload')
                 cancellation = list(map(json.loads, fixtures['cancel.events.jsonl'].splitlines()))

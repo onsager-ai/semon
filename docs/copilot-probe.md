@@ -145,7 +145,8 @@ Manual `/compact` appends start/completion, model events and a usage checkpoint;
 the consumed event prefix remains byte-identical. A checkpoint Markdown file is
 written under the private native home, and the probe verifies its path, existence
 and hash. Checkpoint bytes and prompt-rich model payloads remain private. Fixture
-transformations remove those payloads while preserving structural event IDs.
+transformations remove those payloads, including nested `requestMessages` in
+model-call success records, while preserving structural event IDs and usage.
 
 Compaction records its own mock 11 input, 3 output and 2 cache-read tokens. The
 shutdown metrics still report only the initial request with 11 input tokens,
