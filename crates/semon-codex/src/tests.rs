@@ -37,6 +37,154 @@ fn compatibility_native_codex_paginated_cold_restart_and_retained_raw_parity() {
     compatibility_capture_parity(source, "native-codex-compat", 3);
 }
 
+#[test]
+fn retained_custody_rebuilds_restored_source_without_guessing_raw_order() {
+    let root = TestDir::new();
+    let path = root.path().join("native-codex-compat.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let history = root.path().join("history.jsonl");
+    let database = root.path().join("custody.sqlite");
+    let original = include_bytes!(
+        "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/initial-rollout.jsonl"
+    );
+    let replacement = String::from_utf8(original.to_vec())
+        .unwrap()
+        .replace("SYNTHETIC_ACK", "SYNTHETIC_CHANGED_ACK")
+        .into_bytes();
+    for source in [
+        original.as_slice(),
+        replacement.as_slice(),
+        original.as_slice(),
+    ] {
+        fs::write(&path, source).unwrap();
+        let mut store = TraceStore::open(&database).unwrap();
+        let mut state = load_state(&cursor).unwrap();
+        process_file(&path, &mut state, &mut store, &options(&cursor, &history)).unwrap();
+    }
+    let store = TraceStore::open(&database).unwrap();
+    let key = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let retained = store
+        .fetch_current_capture_source_raw(CARRIER, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained, original);
+    assert!(
+        store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(
+                "native-codex-compat"
+            ))
+            .unwrap()
+            .len()
+            > original.split_inclusive(|byte| *byte == b'\n').count()
+    );
+    fs::write(&path, retained).unwrap();
+    let mut rebuilt = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut rebuilt,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    assert_eq!(
+        store.log(&LogFilter::default()).unwrap(),
+        rebuilt.log(&LogFilter::default()).unwrap()
+    );
+    // A lost cursor must re-establish the recorded source revision.
+    fs::remove_file(&cursor).unwrap();
+    fs::write(&path, &replacement).unwrap();
+    let mut warm = TraceStore::open(&database).unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut warm,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut cold,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    assert_eq!(
+        warm.log(&LogFilter::default()).unwrap(),
+        cold.log(&LogFilter::default()).unwrap()
+    );
+    assert_eq!(
+        warm.fetch_current_capture_source_raw(CARRIER, &key)
+            .unwrap()
+            .unwrap(),
+        replacement
+    );
+}
+
+#[test]
+fn lost_legacy_cursor_reconciles_fewer_records_using_recorded_custody() {
+    let root = TestDir::new();
+    let path = root.path().join("rollout-legacy.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let history = root.path().join("history.jsonl");
+    let database = root.path().join("legacy.sqlite");
+    let original = include_bytes!("../../../tests/fixtures/compatibility/v1/codex-legacy.jsonl");
+    fs::write(&path, original).unwrap();
+    {
+        let mut store = TraceStore::open(&database).unwrap();
+        process_file(
+            &path,
+            &mut CursorState::default(),
+            &mut store,
+            &options(&cursor, &history),
+        )
+        .unwrap();
+    }
+    fs::remove_file(&cursor).unwrap();
+    let shorter: Vec<u8> = original
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(2)
+        .flatten()
+        .copied()
+        .collect();
+    fs::write(&path, &shorter).unwrap();
+    let mut warm = TraceStore::open(&database).unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut warm,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut cold,
+        &options(&cursor, &history),
+    )
+    .unwrap();
+    assert_eq!(
+        warm.log(&LogFilter::default()).unwrap(),
+        cold.log(&LogFilter::default()).unwrap()
+    );
+    let key = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    assert_eq!(
+        warm.fetch_current_capture_source_raw(CARRIER, &key)
+            .unwrap()
+            .unwrap(),
+        shorter
+    );
+    assert_eq!(
+        warm.fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session("compat"))
+            .unwrap()
+            .iter()
+            .map(|row| row.bytes().len())
+            .sum::<usize>(),
+        original.len()
+    );
+}
+
 fn compatibility_capture_parity(source: &[u8], session: &str, expected_occurrences: usize) {
     let root = TestDir::new();
     let path = root.path().join("rollout-compat.jsonl");

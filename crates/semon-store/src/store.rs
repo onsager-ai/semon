@@ -1,6 +1,7 @@
 use std::{path::Path, str::FromStr};
 
 use rusqlite::{Connection, OptionalExtension, ToSql, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
@@ -145,7 +146,7 @@ CREATE INDEX IF NOT EXISTS raw_carrier_records_by_carrier_session_sequence
 /// to this constant (instead of anything derived from a caller or the
 /// database) is what keeps that `format!` call safe.
 ///
-/// Five schema shapes exist now (1: `canonical_traces` + `raw_carrier_records`
+/// Schema evolution starts with (1: `canonical_traces` + `raw_carrier_records`
 /// only; 2: adds `occurrences`; 3: adds nullable `session`/`sequence` link
 /// columns and an index to `raw_carrier_records`; 4: makes `trace_id`
 /// nullable and adds the raw row's own `timestamp`; 5: moves trace links into
@@ -164,10 +165,55 @@ CREATE INDEX IF NOT EXISTS raw_carrier_records_by_carrier_session_sequence
 /// remove `trace_id`'s `NOT NULL` constraint in place. Version 5 rebuilds it
 /// again to remove that column; each rebuild advances its marker in its own
 /// transaction. A fresh database (`user_version` 0) is created directly in
-/// the v5 shape.
+/// the current shape.
 /// Version 6 adds local source ownership for replaceable occurrence projections.
 /// Canonical traces, raw records and their forensic links are unchanged.
-const SCHEMA_VERSION: u32 = 6;
+/// Version 7 adds private source-revision custody and hashes recorded ownership
+/// keys; legacy custody is adopted only from an observed, verified source prefix.
+const SCHEMA_VERSION: u32 = 7;
+
+// Authoritative local capture custody belongs to the private forensic region.
+// It records observed source revisions, never inferred native session lineage.
+const CAPTURE_EVIDENCE_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS capture_evidence_generations (
+    generation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    carrier TEXT NOT NULL CHECK(length(trim(carrier)) > 0),
+    source_key_sha256 TEXT NOT NULL,
+    consumed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(consumed_bytes >= 0),
+    prefix_sha256 TEXT,
+    confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0, 1))
+) STRICT;
+CREATE INDEX IF NOT EXISTS capture_evidence_source
+    ON capture_evidence_generations(carrier, source_key_sha256, generation_id);
+CREATE TABLE IF NOT EXISTS capture_evidence_records (
+    generation_id INTEGER NOT NULL REFERENCES capture_evidence_generations(generation_id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL CHECK(sequence >= 0),
+    raw_record_id INTEGER NOT NULL REFERENCES raw_carrier_records(raw_record_id) ON DELETE CASCADE,
+    PRIMARY KEY(generation_id, sequence)
+) STRICT;
+"#;
+
+fn capture_source_digest(source_key: &str) -> String {
+    format!("{:x}", Sha256::digest(source_key.as_bytes()))
+}
+
+fn capture_generation(
+    connection: &Connection,
+    carrier: &str,
+    source_digest: &str,
+) -> Result<i64, StoreError> {
+    let existing = connection.query_row(
+        "SELECT generation_id FROM capture_evidence_generations WHERE carrier = ?1 AND source_key_sha256 = ?2 ORDER BY generation_id DESC LIMIT 1",
+        params![carrier, source_digest], |row| row.get(0),
+    ).optional()?;
+    match existing {
+        Some(generation) => Ok(generation),
+        None => {
+            connection.execute("INSERT INTO capture_evidence_generations (carrier, source_key_sha256) VALUES (?1, ?2)",params![carrier, source_digest])?;
+            Ok(connection.last_insert_rowid())
+        }
+    }
+}
 
 const CAPTURE_SOURCE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS capture_source_occurrences (
@@ -183,6 +229,10 @@ CREATE INDEX IF NOT EXISTS capture_sources_by_occurrence
 /// Errors returned by the trace store.
 #[derive(Debug, Error)]
 pub enum StoreError {
+    /// Current source custody was interrupted or its retained bytes are unavailable.
+    #[error("current source capture evidence is incomplete or unavailable")]
+    IncompleteCaptureEvidence,
+
     /// SQLite rejected an operation.
     #[error("SQLite store error: {0}")]
     Sqlite(#[from] rusqlite::Error),
@@ -358,6 +408,22 @@ impl TraceStore {
         connection.execute_batch(RAW_RECORD_TRACES_SCHEMA)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(CAPTURE_SOURCE_SCHEMA)?;
+        transaction.execute_batch(CAPTURE_EVIDENCE_SCHEMA)?;
+        if user_version < 7 {
+            // Ownership is derived. Keep its key reconstructable from private
+            // custody without retaining the original pathname in this index.
+            let sources: Vec<(String, String)> = {
+                let mut statement = transaction.prepare(
+                    "SELECT DISTINCT carrier, source_key FROM capture_source_occurrences",
+                )?;
+                statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<_, _>>()?
+            };
+            for (carrier, source_key) in sources {
+                transaction.execute("UPDATE capture_source_occurrences SET source_key = ?3 WHERE carrier = ?1 AND source_key = ?2", params![carrier, source_key, capture_source_digest(&source_key)])?;
+            }
+        }
         if user_version < SCHEMA_VERSION {
             transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         }
@@ -378,9 +444,21 @@ impl TraceStore {
         source_key: &str,
         operation: impl FnOnce(&mut Self) -> Result<T, E>,
     ) -> Result<T, E> {
+        self.with_capture_source_digest(carrier, &capture_source_digest(source_key), operation)
+    }
+
+    /// Re-establish ownership using an authoritative custody source digest.
+    /// This opaque local key is not native lineage or transferable trace identity.
+    /// It permits rebuilding the derived ownership index without a pathname.
+    pub fn with_capture_source_digest<T, E>(
+        &mut self,
+        carrier: &str,
+        source_digest: &str,
+        operation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
         let previous = self
             .capture_source
-            .replace((carrier.into(), source_key.into()));
+            .replace((carrier.into(), source_digest.into()));
         let result = operation(self);
         self.capture_source = previous;
         result
@@ -395,6 +473,7 @@ impl TraceStore {
         carrier: &str,
         source_key: &str,
     ) -> Result<(), StoreError> {
+        let source_digest = capture_source_digest(source_key);
         let transaction = self.connection.savepoint()?;
         transaction.execute(
             "DELETE FROM occurrences WHERE occurrence_id IN \
@@ -402,14 +481,149 @@ impl TraceStore {
              AND NOT EXISTS (SELECT 1 FROM capture_source_occurrences owners \
              WHERE owners.occurrence_id = occurrences.occurrence_id \
              AND (owners.carrier != ?1 OR owners.source_key != ?2))",
-            params![carrier, source_key],
+            params![carrier, source_digest],
         )?;
         transaction.execute(
             "DELETE FROM capture_source_occurrences WHERE carrier = ?1 AND source_key = ?2",
-            params![carrier, source_key],
+            params![carrier, source_digest],
+        )?;
+        transaction.execute(
+            "INSERT INTO capture_evidence_generations (carrier, source_key_sha256) VALUES (?1, ?2)",
+            params![carrier, source_digest],
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Whether explicit source custody has been recorded, including an empty revision.
+    pub fn has_capture_source_custody(
+        &self,
+        carrier: &str,
+        source_key: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM capture_evidence_generations WHERE carrier = ?1 AND source_key_sha256 = ?2)", params![carrier, capture_source_digest(source_key)], |row| row.get(0))?)
+    }
+
+    /// Adopt a verified legacy cursor prefix using only exact already-retained rows.
+    /// The adapter has just observed these bytes at this source. This never inserts
+    /// missing raw bytes or guesses older revisions, so explicit forensic deletion
+    /// is respected. Missing rows leave forensic replay unavailable.
+    pub fn adopt_retained_capture_prefix(
+        &mut self,
+        carrier: &str,
+        source_key: &str,
+        lines: &[RawBackfillLine],
+        consumed_bytes: u64,
+        prefix_sha256: &str,
+    ) -> Result<(), StoreError> {
+        let mut digest = Sha256::new();
+        let mut total = 0u64;
+        for line in lines {
+            digest.update(&line.bytes);
+            total += line.bytes.len() as u64;
+        }
+        if total != consumed_bytes || format!("{:x}", digest.finalize()) != prefix_sha256 {
+            return Err(StoreError::IncompleteCaptureEvidence);
+        }
+        let consumed_bytes =
+            i64::try_from(consumed_bytes).map_err(|_| StoreError::IncompleteCaptureEvidence)?;
+        let transaction = self.connection.savepoint()?;
+        let generation =
+            capture_generation(&transaction, carrier, &capture_source_digest(source_key))?;
+        for line in lines {
+            let raw: Option<i64> = transaction.query_row("SELECT raw_record_id FROM raw_carrier_records WHERE carrier = ?1 AND session = ?2 AND sequence = ?3 AND raw_bytes = ?4", params![carrier, line.session, line.sequence, line.bytes], |row| row.get(0)).optional()?;
+            if let Some(raw) = raw {
+                transaction.execute("INSERT OR IGNORE INTO capture_evidence_records (generation_id, sequence, raw_record_id) VALUES (?1, ?2, ?3)", params![generation, line.sequence, raw])?;
+            }
+        }
+        transaction.execute("UPDATE capture_evidence_generations SET consumed_bytes = ?2, prefix_sha256 = ?3, confirmed = 1 WHERE generation_id = ?1", params![generation, consumed_bytes, prefix_sha256])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Whether the cursor agrees with a confirmed local capture checkpoint.
+    /// A missing checkpoint never retroactively guesses custody from raw rows.
+    /// Deliberate raw deletion does not cause already consumed bytes to be recaptured.
+    pub fn capture_source_cursor_matches(
+        &self,
+        carrier: &str,
+        source_key: &str,
+        consumed_bytes: u64,
+        prefix_sha256: &str,
+    ) -> Result<bool, StoreError> {
+        let checkpoint: Option<(i64, Option<String>, bool)> = self.connection.query_row(
+            "SELECT consumed_bytes, prefix_sha256, confirmed FROM capture_evidence_generations WHERE carrier = ?1 AND source_key_sha256 = ?2 ORDER BY generation_id DESC LIMIT 1",
+            params![carrier, capture_source_digest(source_key)],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        match checkpoint {
+            Some((bytes, digest, confirmed)) => Ok(confirmed
+                && u64::try_from(bytes).ok() == Some(consumed_bytes)
+                && digest.as_deref() == Some(prefix_sha256)),
+            None if consumed_bytes == 0 => {
+                let owned: bool = self.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM capture_source_occurrences WHERE carrier = ?1 AND source_key = ?2)", params![carrier, capture_source_digest(source_key)], |row| row.get(0),
+                )?;
+                Ok(!owned)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Confirm the exact complete source prefix consumed by this capture.
+    /// This is collector provenance; its digest is not a native relationship ID.
+    pub fn checkpoint_capture_source(
+        &mut self,
+        carrier: &str,
+        source_key: &str,
+        consumed_bytes: u64,
+        prefix_sha256: &str,
+    ) -> Result<(), StoreError> {
+        let consumed_bytes =
+            i64::try_from(consumed_bytes).map_err(|_| StoreError::IncompleteCaptureEvidence)?;
+        let transaction = self.connection.savepoint()?;
+        let generation =
+            capture_generation(&transaction, carrier, &capture_source_digest(source_key))?;
+        transaction.execute(
+            "UPDATE capture_evidence_generations SET consumed_bytes = ?2, prefix_sha256 = ?3, confirmed = 1 WHERE generation_id = ?1 AND (confirmed = 0 OR consumed_bytes != ?2 OR prefix_sha256 IS NOT ?3)",
+            params![generation, consumed_bytes, prefix_sha256],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Explicit forensic access to the current source's retained complete prefix.
+    /// Selects recorded custody, not insertion order or similarity. Missing legacy
+    /// custody is unknown; interrupted checkpoints or forgotten bytes fail closed.
+    /// Older generations and their raw rows remain retained independently.
+    pub fn fetch_current_capture_source_raw(
+        &self,
+        carrier: &str,
+        source_key: &str,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let checkpoint: Option<(i64, i64, Option<String>, bool)> = self.connection.query_row(
+            "SELECT generation_id, consumed_bytes, prefix_sha256, confirmed FROM capture_evidence_generations WHERE carrier = ?1 AND source_key_sha256 = ?2 ORDER BY generation_id DESC LIMIT 1",
+            params![carrier, capture_source_digest(source_key)], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        ).optional()?;
+        let Some((generation, expected_bytes, digest, confirmed)) = checkpoint else {
+            return Ok(None);
+        };
+        if !confirmed {
+            return Err(StoreError::IncompleteCaptureEvidence);
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT r.raw_bytes FROM capture_evidence_records evidence JOIN raw_carrier_records r ON r.raw_record_id = evidence.raw_record_id WHERE evidence.generation_id = ?1 ORDER BY evidence.sequence",
+        )?;
+        let mut bytes = Vec::new();
+        for record in statement.query_map([generation], |row| row.get::<_, Vec<u8>>(0))? {
+            bytes.extend(record?);
+        }
+        if i64::try_from(bytes.len()).ok() != Some(expected_bytes)
+            || digest.as_deref() != Some(format!("{:x}", Sha256::digest(&bytes)).as_str())
+        {
+            return Err(StoreError::IncompleteCaptureEvidence);
+        }
+        Ok(Some(bytes))
     }
 
     /// Captures one projected block while preserving the existing one-block API.
@@ -450,6 +664,19 @@ impl TraceStore {
         let transaction = self.connection.savepoint()?;
         let (raw_record_id, _) =
             resolve_raw_record(&transaction, raw_record, session, line_sequence, timestamp)?;
+        if let Some((carrier, source_key)) = &self.capture_source
+            && carrier == raw_record.carrier
+        {
+            let generation = capture_generation(&transaction, carrier, source_key)?;
+            transaction.execute(
+                "INSERT INTO capture_evidence_records (generation_id, sequence, raw_record_id) VALUES (?1, ?2, ?3) ON CONFLICT(generation_id, sequence) DO UPDATE SET raw_record_id = excluded.raw_record_id",
+                params![generation, line_sequence, raw_record_id],
+            )?;
+            transaction.execute(
+                "UPDATE capture_evidence_generations SET confirmed = 0 WHERE generation_id = ?1",
+                [generation],
+            )?;
+        }
         let mut results = Vec::with_capacity(blocks.len());
 
         for (semantic_core, occurrence) in blocks {
@@ -580,7 +807,15 @@ impl TraceStore {
                         )
                         .optional()
                         .map_err(StoreError::from)?;
-                    if duplicate.is_some() {
+                    if let Some(keep_id) = duplicate {
+                        self.connection.execute(
+                            "UPDATE capture_evidence_records SET raw_record_id = ?1 WHERE raw_record_id = ?2",
+                            params![keep_id, id],
+                        ).map_err(StoreError::from)?;
+                        self.connection.execute(
+                            "INSERT OR IGNORE INTO raw_record_traces (raw_record_id, trace_id) SELECT ?1, trace_id FROM raw_record_traces WHERE raw_record_id = ?2",
+                            params![keep_id, id],
+                        ).map_err(StoreError::from)?;
                         self.connection
                             .execute(
                                 "DELETE FROM raw_carrier_records WHERE raw_record_id = ?1",
@@ -1608,6 +1843,406 @@ mod tests {
             )
             .unwrap();
         assert_eq!(counts(&store), (2, 2));
+    }
+
+    fn custody_raw(store: &mut TraceStore, source: &str, sequence: i64, bytes: &[u8]) -> i64 {
+        store
+            .with_capture_source("codex", source, |store| {
+                store.capture_raw_only("codex", bytes, "custody-session", sequence, 0)
+            })
+            .unwrap()
+    }
+
+    fn confirm_custody(store: &mut TraceStore, source: &str, bytes: &[u8]) {
+        store
+            .checkpoint_capture_source(
+                "codex",
+                source,
+                bytes.len() as u64,
+                &format!("{:x}", Sha256::digest(bytes)),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn capture_custody_selects_restored_bytes_instead_of_latest_raw_insertion() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        let source = "/fixture/restored";
+        let original = custody_raw(&mut store, source, 0, b"A\n");
+        confirm_custody(&mut store, source, b"A\n");
+        store.reset_capture_source("codex", source).unwrap();
+        let replacement = custody_raw(&mut store, source, 0, b"B\n");
+        confirm_custody(&mut store, source, b"B\n");
+        store.reset_capture_source("codex", source).unwrap();
+        let restored = custody_raw(&mut store, source, 0, b"A\n");
+        confirm_custody(&mut store, source, b"A\n");
+        assert_eq!(original, restored);
+        assert!(replacement > restored);
+        assert_eq!(
+            store
+                .fetch_current_capture_source_raw("codex", source)
+                .unwrap(),
+            Some(b"A\n".to_vec())
+        );
+        assert_eq!(
+            store
+                .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(
+                    "custody-session"
+                ))
+                .unwrap()
+                .len(),
+            2
+        );
+        let generations: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM capture_evidence_generations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generations, 3);
+    }
+
+    #[test]
+    fn capture_custody_preserves_unknown_frames_and_independent_sources() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        custody_raw(&mut store, "/fixture/one", 0, b"unknown\n");
+        custody_raw(&mut store, "/fixture/one", 1024, b"malformed\n");
+        custody_raw(&mut store, "/fixture/one", 2048, b"\n");
+        confirm_custody(&mut store, "/fixture/one", b"unknown\nmalformed\n\n");
+        custody_raw(&mut store, "/fixture/two", 0, b"unknown\n");
+        confirm_custody(&mut store, "/fixture/two", b"unknown\n");
+        store.reset_capture_source("codex", "/fixture/one").unwrap();
+        confirm_custody(&mut store, "/fixture/one", b"");
+        assert_eq!(
+            store
+                .fetch_current_capture_source_raw("codex", "/fixture/one")
+                .unwrap(),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            store
+                .fetch_current_capture_source_raw("codex", "/fixture/two")
+                .unwrap(),
+            Some(b"unknown\n".to_vec())
+        );
+        assert_eq!(
+            store
+                .fetch_current_capture_source_raw("claude", "/fixture/two")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(
+                    "custody-session"
+                ))
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn capture_custody_missing_or_interrupted_evidence_never_guesses() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        store
+            .capture_raw_only("codex", b"legacy\n", "custody-session", 0, 0)
+            .unwrap();
+        assert_eq!(
+            store
+                .fetch_current_capture_source_raw("codex", "/fixture/legacy")
+                .unwrap(),
+            None
+        );
+        custody_raw(&mut store, "/fixture/recorded", 0, b"recorded\n");
+        assert!(matches!(
+            store.fetch_current_capture_source_raw("codex", "/fixture/recorded"),
+            Err(StoreError::IncompleteCaptureEvidence)
+        ));
+        confirm_custody(&mut store, "/fixture/recorded", b"recorded\n");
+        let digest = format!("{:x}", Sha256::digest(b"recorded\n"));
+        assert!(
+            store
+                .capture_source_cursor_matches("codex", "/fixture/recorded", 9, &digest)
+                .unwrap()
+        );
+        store
+            .forget_forensic(ForgetSelector::Session("custody-session"))
+            .unwrap();
+        assert!(matches!(
+            store.fetch_current_capture_source_raw("codex", "/fixture/recorded"),
+            Err(StoreError::IncompleteCaptureEvidence)
+        ));
+        assert!(
+            store
+                .capture_source_cursor_matches("codex", "/fixture/recorded", 9, &digest)
+                .unwrap(),
+            "forensic forget must not force an idle recapture"
+        );
+    }
+
+    #[test]
+    fn legacy_custody_adoption_does_not_recreate_forgotten_bytes() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        store
+            .capture_raw_only("codex", b"legacy\n", "legacy-session", 0, 0)
+            .unwrap();
+        store
+            .forget_forensic(ForgetSelector::Session("legacy-session"))
+            .unwrap();
+        let lines = [RawBackfillLine {
+            bytes: b"legacy\n".to_vec(),
+            session: "legacy-session".into(),
+            sequence: 0,
+            timestamp: 0,
+        }];
+        let digest = format!("{:x}", Sha256::digest(b"legacy\n"));
+        store
+            .adopt_retained_capture_prefix("codex", "/fixture/legacy", &lines, 7, &digest)
+            .unwrap();
+        assert_eq!(counts(&store), (0, 0));
+        assert!(
+            store
+                .capture_source_cursor_matches("codex", "/fixture/legacy", 7, &digest)
+                .unwrap()
+        );
+        assert!(matches!(
+            store.fetch_current_capture_source_raw("codex", "/fixture/legacy"),
+            Err(StoreError::IncompleteCaptureEvidence)
+        ));
+    }
+
+    #[test]
+    fn session_repair_preserves_custody_when_identical_raw_rows_merge() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        store
+            .capture_raw_only("codex", b"A\n", "old", 0, 0)
+            .unwrap();
+        let kept = store
+            .capture_raw_only("codex", b"A\n", "new", 0, 0)
+            .unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"A\n"));
+        store
+            .adopt_retained_capture_prefix(
+                "codex",
+                "/fixture/repair",
+                &[RawBackfillLine {
+                    bytes: b"A\n".to_vec(),
+                    session: "old".into(),
+                    sequence: 0,
+                    timestamp: 0,
+                }],
+                2,
+                &digest,
+            )
+            .unwrap();
+        store
+            .repair_session_keys::<StoreError, _>(
+                "codex",
+                "old",
+                &[RawSessionRekeyLine {
+                    old_session: "old".into(),
+                    new_session: "new".into(),
+                    sequence: 0,
+                    bytes: b"A\n".to_vec(),
+                }],
+                false,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .fetch_current_capture_source_raw("codex", "/fixture/repair")
+                .unwrap(),
+            Some(b"A\n".to_vec())
+        );
+        let bound: i64 = store
+            .connection
+            .query_row(
+                "SELECT raw_record_id FROM capture_evidence_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound, kept);
+        assert_eq!(counts(&store), (0, 1));
+    }
+
+    #[test]
+    fn legacy_custody_adoption_selects_exact_retained_bytes_only() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        let original = store
+            .capture_raw_only("codex", b"A\n", "legacy-session", 0, 0)
+            .unwrap();
+        store
+            .capture_raw_only("codex", b"B\n", "legacy-session", 0, 0)
+            .unwrap();
+        let lines = [RawBackfillLine {
+            bytes: b"A\n".to_vec(),
+            session: "legacy-session".into(),
+            sequence: 0,
+            timestamp: 0,
+        }];
+        let digest = format!("{:x}", Sha256::digest(b"A\n"));
+        store
+            .adopt_retained_capture_prefix("codex", "/fixture/legacy", &lines, 2, &digest)
+            .unwrap();
+        assert_eq!(
+            store
+                .fetch_current_capture_source_raw("codex", "/fixture/legacy")
+                .unwrap(),
+            Some(b"A\n".to_vec())
+        );
+        let retained: i64 = store
+            .connection
+            .query_row(
+                "SELECT raw_record_id FROM capture_evidence_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, original);
+        assert_eq!(counts(&store), (0, 2));
+    }
+
+    #[test]
+    fn version_six_ownership_migration_hashes_recorded_keys_without_guessing_custody() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        let source = "/fixture/version-six";
+        let core = semantic(r#"{"goal":"known ownership"}"#);
+        store
+            .with_capture_source("codex", source, |store| {
+                store.capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"opaque\n"),
+                    occurrence("legacy-session", 0),
+                )
+            })
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE capture_source_occurrences SET source_key = ?1",
+                [source],
+            )
+            .unwrap();
+        store.connection.execute_batch("DROP TABLE capture_evidence_records; DROP TABLE capture_evidence_generations; PRAGMA user_version = 6;").unwrap();
+        let mut upgraded = TraceStore::from_connection(store.connection).unwrap();
+        let key: String = upgraded
+            .connection
+            .query_row(
+                "SELECT source_key FROM capture_source_occurrences",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(key, capture_source_digest(source));
+        assert_eq!(occurrence_count(&upgraded), 1);
+        assert_eq!(counts(&upgraded), (1, 1));
+        assert!(
+            !upgraded
+                .has_capture_source_custody("codex", source)
+                .unwrap()
+        );
+        assert_eq!(
+            upgraded
+                .fetch_current_capture_source_raw("codex", source)
+                .unwrap(),
+            None
+        );
+        upgraded.reset_capture_source("codex", source).unwrap();
+        assert_eq!(occurrence_count(&upgraded), 0);
+        assert_eq!(counts(&upgraded), (1, 1));
+    }
+
+    #[test]
+    fn custody_and_ownership_are_reconstructable_without_pathname_indexes() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        let source = "/fixture/private-source";
+        let core = semantic(r#"{"goal":"rebuild ownership"}"#);
+        store
+            .with_capture_source("codex", source, |store| {
+                store.capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"A\n"),
+                    occurrence("custody-session", 0),
+                )
+            })
+            .unwrap();
+        confirm_custody(&mut store, source, b"A\n");
+        let digest: String = store
+            .connection
+            .query_row(
+                "SELECT source_key_sha256 FROM capture_evidence_generations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DELETE FROM capture_source_occurrences; DROP INDEX capture_evidence_source;",
+            )
+            .unwrap();
+        store
+            .with_capture_source_digest("codex", &digest, |store| {
+                store.capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"A\n"),
+                    occurrence("custody-session", 0),
+                )
+            })
+            .unwrap();
+        confirm_custody(&mut store, source, b"A\n");
+        assert_eq!(
+            store
+                .fetch_current_capture_source_raw("codex", source)
+                .unwrap(),
+            Some(b"A\n".to_vec())
+        );
+        let rebuilt_key: String = store
+            .connection
+            .query_row(
+                "SELECT source_key FROM capture_source_occurrences",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rebuilt_key, digest);
+        assert_eq!(counts(&store), (1, 1));
+        store.reset_capture_source("codex", source).unwrap();
+        assert_eq!(occurrence_count(&store), 0);
+        assert_eq!(counts(&store), (1, 1));
+    }
+
+    #[test]
+    fn capture_custody_insert_failure_rolls_back_all_line_regions() {
+        let mut store = TraceStore::open_in_memory().unwrap();
+        store.connection.execute_batch("CREATE TRIGGER fail_custody BEFORE INSERT ON capture_evidence_records BEGIN SELECT RAISE(ABORT, 'synthetic custody failure'); END;").unwrap();
+        let core = semantic(r#"{"goal":"custody rollback"}"#);
+        let error = store
+            .with_capture_source("codex", "/fixture/rollback", |store| {
+                store.capture(
+                    &core,
+                    NewRawCarrierRecord::new("codex", b"private raw"),
+                    occurrence("custody-session", 0),
+                )
+            })
+            .unwrap_err();
+        assert!(matches!(error, StoreError::Sqlite(_)));
+        assert_eq!(counts(&store), (0, 0));
+        assert_eq!(occurrence_count(&store), 0);
+        let generations: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM capture_evidence_generations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generations, 0);
     }
 
     #[test]

@@ -169,3 +169,18 @@ newly attributable child consumption. Canonical message occurrences preserve
 the physical session namespace. Fixture tests compare cold, restarted and
 retained-raw replay for each complete snapshot; retained generation selection
 following source replacement remains a separate unresolved gate.
+
+## Retained source revision selection
+
+Complete raw history can contain several byte variants at the same source line.
+Schema v7 therefore retains private collector custody for each observed capture
+revision. Current-source forensic replay selects those recorded ordered bindings
+and validates their complete-prefix checksum. A→B→A tests for both native Claude
+and native paginated Codex compare full current occurrence rows against replay,
+while retaining both raw variants and all canonical/raw links. A lost legacy
+Codex cursor also retires only the explicitly owned projection before replay.
+
+Custody is local source provenance, not a native generation, logical parent or
+transferable trace identity. Explicit raw forgetting leaves replay unavailable;
+idle capture and legacy adoption do not recreate those bytes. Unowned historical
+rows are preserved because their source cannot be established retrospectively.

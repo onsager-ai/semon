@@ -303,6 +303,49 @@ pub fn process_file(
     })
 }
 
+fn retained_prefix_lines(
+    path: &Path,
+    offset: u64,
+    history_path: &Path,
+    state: &CursorState,
+    repo_override: &str,
+    has_item_stream: bool,
+) -> Result<Vec<RawBackfillLine>, AdapterError> {
+    let history_source = same_path(path, history_path)?;
+    let mut context = NormalizeContext {
+        has_item_stream,
+        ..NormalizeContext::default()
+    };
+    let mut reader = BufReader::new(File::open(path)?.take(offset));
+    let mut lines = Vec::new();
+    let mut consumed = 0u64;
+    while consumed < offset {
+        let mut bytes = Vec::new();
+        let count = reader.read_until(b'\n', &mut bytes)?;
+        if count == 0 || !bytes.ends_with(b"\n") {
+            return Err(AdapterError::State(
+                "legacy cursor is not on a complete frame".into(),
+            ));
+        }
+        consumed += count as u64;
+        let derived = derive_line(
+            &bytes,
+            lines.len() as u64,
+            &mut context,
+            history_source,
+            state.session_repos(),
+            repo_override,
+        );
+        lines.push(RawBackfillLine {
+            bytes,
+            session: derived.session,
+            sequence: derived.sequence,
+            timestamp: derived.timestamp,
+        });
+    }
+    Ok(lines)
+}
+
 fn process_file_until(
     path: &Path,
     state: &mut CursorState,
@@ -329,7 +372,25 @@ fn process_file_until(
     let prefix_matches = saved.offset == 0
         || saved.prefix_sha256.as_deref()
             == Some(format!("{:x}", prefix.clone().finalize()).as_str());
-    if saved.offset > size || !prefix_matches {
+    let prefix_digest = format!("{:x}", prefix.clone().finalize());
+    if saved.offset > 0
+        && saved.offset <= size
+        && prefix_matches
+        && !store.has_capture_source_custody(CARRIER, &key)?
+    {
+        let lines = retained_prefix_lines(
+            path,
+            saved.offset,
+            options.history_path,
+            state,
+            options.repo_override,
+            saved.context().has_item_stream,
+        )?;
+        store.adopt_retained_capture_prefix(CARRIER, &key, &lines, saved.offset, &prefix_digest)?;
+    }
+    let custody_matches =
+        store.capture_source_cursor_matches(CARRIER, &key, saved.offset, &prefix_digest)?;
+    if saved.offset > size || !prefix_matches || !custody_matches {
         store.reset_capture_source(CARRIER, &key)?;
         saved = state::FileCursor::default();
         prefix = Sha256::new();
@@ -512,6 +573,12 @@ fn process_file_until(
         if !context.session_id().is_empty() && !context.repo().is_empty() {
             state.remember_repo(context.session_id(), context.repo(), context.repo_source());
         }
+        store.checkpoint_capture_source(
+            CARRIER,
+            &key,
+            saved.offset,
+            &format!("{:x}", prefix.clone().finalize()),
+        )?;
         state.put_file(key.clone(), saved.clone());
         if persist_state {
             save_state(options.state_path, state)?;
@@ -519,6 +586,12 @@ fn process_file_until(
         consumed += batch_count;
     }
 
+    store.checkpoint_capture_source(
+        CARRIER,
+        &key,
+        saved.offset,
+        &format!("{:x}", prefix.clone().finalize()),
+    )?;
     state.put_file(key, saved);
     Ok(consumed)
 }
