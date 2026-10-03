@@ -11,7 +11,7 @@ export function createLiveController(host: LiveHost) {
   async function poll() {
     state.timer = null; if (disposed || state.busy || state.ended || !visible()) return; state.busy = true; state.started = performance.now(); state.retry = false; let ok = false;
     try { await host.poll(); state.delay = state.retry ? Math.min(30000,state.delay * 2) : 2000; ok = true; }
-    catch (error) { const status = typeof error === 'object' && error !== null && 'status' in error ? error.status : undefined; if (host.failed(error)) { state.ended = true; cancel(); } else if (status === 403) host.ended(403); else { state.delay = Math.min(30000,state.delay * 2); if (status === undefined) window.setTimeout(() => { throw error; }); } }
+    catch (error) { if (disposed) return; const status = typeof error === 'object' && error !== null && 'status' in error ? error.status : undefined; if (host.failed(error)) { state.ended = true; cancel(); } else if (status === 403) host.ended(403); else { state.delay = Math.min(30000,state.delay * 2); if (status === undefined) window.setTimeout(() => { throw error; }); } }
     finally { state.busy = false; if (!disposed) { schedule(state.again ? floorWait() : state.delay); state.again = false; window.dispatchEvent(new CustomEvent('semon:polled',{ detail: { ok } })); } }
   }
   function visibility() { if (!visible()) cancel(); else if (state.version && !state.busy && !state.timer) schedule(state.delay > 2000 ? state.delay : 0); }

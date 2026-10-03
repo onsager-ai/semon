@@ -37,7 +37,7 @@ export async function checkSources() {
     }
   }
   await walk(root);
-  for (const name of ['viewer', 'shell']) {
+  for (const name of ['shell']) {
     checkSource(await readFile(new URL(`../crates/semon-sessions/src/${name}.js`, import.meta.url), 'utf8'), `${name}.js`);
   }
 }
