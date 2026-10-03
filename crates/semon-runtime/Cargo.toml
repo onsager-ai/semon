@@ -1,0 +1,14 @@
+[package]
+name = "semon-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Durable logical-session and disposable-compute lifecycle contracts"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
