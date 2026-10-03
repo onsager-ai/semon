@@ -5,121 +5,342 @@
 // label has one (the ranked lists in Analytics) the mark comes first and is the label's own harness. Sidebar rows carry no label
 // (the row's aria-label names the harness; their mark stands alone and carries the name), and a top bar's kind
 // chip is neutral too. Screenshots of the sidebar, a session's top bar and Analytics are written to out/names/ for the visual pass.
-import fs from "node:fs";
-import path from "node:path";
-import { ENV, served, data, reporter, goto, overflow } from "../lib.mjs";
+import fs from 'node:fs';
+import path from 'node:path';
+import { ENV, served, data, reporter, goto, overflow } from '../lib.mjs';
 
 // A Codex session started directly is a "Codex run" in the model, so its top bar says so; every other place says "Codex".
-const ALLOWED = new Set(["Claude Code", "Claude", "Codex", "Codex run", "Subagent"]);
-const OUT = path.join(ENV.out, "names");
+const ALLOWED = new Set(['Claude Code', 'Claude', 'Codex', 'Codex run', 'Subagent']);
+const OUT = path.join(ENV.out, 'names');
 fs.mkdirSync(OUT, { recursive: true });
 
 // Reads every visible label in `root`: its text, whether it holds a graphic, its lines, and its contrast ratio.
-const measure = (page, root, label = ".hname") => page.evaluate(([rootSelector, labelSelector]) => {
-  const canvas = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-  const token = (name) => { const probe = document.createElement("span"); probe.style.color = "var(--" + name + ")"; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; };
-  const muted = token("muted");
-  const rgba = (css) => { canvas.clearRect(0, 0, 1, 1); canvas.fillStyle = "#000"; canvas.fillStyle = css; canvas.fillRect(0, 0, 1, 1); const [r, g, b, a] = canvas.getImageData(0, 0, 1, 1).data; return [r, g, b, a / 255]; };
-  const over = (top, under) => { const a = top[3] + under[3] * (1 - top[3]); return a ? [0, 1, 2].map((i) => (top[i] * top[3] + under[i] * under[3] * (1 - top[3])) / a).concat(a) : [0, 0, 0, 0]; };
-  const backdrop = (node) => { const layers = []; for (let e = node; e; e = e.parentElement) layers.push(rgba(getComputedStyle(e).backgroundColor)); let c = rgba(getComputedStyle(document.documentElement).getPropertyValue("--ground") || "#fff"); if (c[3] < 1) c = [255, 255, 255, 1]; for (const layer of layers.reverse()) c = over(layer, c); return c; };
-  const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
-  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
-  return [...document.querySelectorAll(rootSelector + " " + labelSelector)].filter((n) => n.getClientRects().length).map((n) => {
-    const cs = getComputedStyle(n), box = n.getBoundingClientRect(), lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.2;
-    const fg = rgba(cs.color), bg = backdrop(n.parentElement);
-    return { text: n.textContent, harness: [...n.classList].find((c) => c.startsWith("h-")), graphics: n.querySelectorAll("svg,img").length + n.children.length, tag: n.tagName, mark: n.parentElement?.classList.contains("hlabel") ? n.previousElementSibling?.dataset?.harness ?? null : undefined, lines: Math.round(box.height / lh), fontSize: parseFloat(cs.fontSize), weight: cs.fontWeight, ratio: Math.round(ratio(fg, bg) * 100) / 100, color: cs.color, muted };
-  });
-}, [root, label]);
+const measure = (page, root, label = '.hname') =>
+  page.evaluate(
+    ([rootSelector, labelSelector]) => {
+      const canvas = document
+        .createElement('canvas')
+        .getContext('2d', { willReadFrequently: true });
+      const token = (name) => {
+        const probe = document.createElement('span');
+        probe.style.color = 'var(--' + name + ')';
+        document.body.append(probe);
+        const c = getComputedStyle(probe).color;
+        probe.remove();
+        return c;
+      };
+      const muted = token('muted');
+      const rgba = (css) => {
+        canvas.clearRect(0, 0, 1, 1);
+        canvas.fillStyle = '#000';
+        canvas.fillStyle = css;
+        canvas.fillRect(0, 0, 1, 1);
+        const [r, g, b, a] = canvas.getImageData(0, 0, 1, 1).data;
+        return [r, g, b, a / 255];
+      };
+      const over = (top, under) => {
+        const a = top[3] + under[3] * (1 - top[3]);
+        return a
+          ? [0, 1, 2]
+              .map((i) => (top[i] * top[3] + under[i] * under[3] * (1 - top[3])) / a)
+              .concat(a)
+          : [0, 0, 0, 0];
+      };
+      const backdrop = (node) => {
+        const layers = [];
+        for (let e = node; e; e = e.parentElement)
+          layers.push(rgba(getComputedStyle(e).backgroundColor));
+        let c = rgba(
+          getComputedStyle(document.documentElement).getPropertyValue('--ground') || '#fff',
+        );
+        if (c[3] < 1) c = [255, 255, 255, 1];
+        for (const layer of layers.reverse()) c = over(layer, c);
+        return c;
+      };
+      const lum = ([r, g, b]) => {
+        const f = (v) => {
+          v /= 255;
+          return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+        };
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+      };
+      const ratio = (a, b) => {
+        const x = lum(a),
+          y = lum(b);
+        return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+      };
+      return [...document.querySelectorAll(rootSelector + ' ' + labelSelector)]
+        .filter((n) => n.getClientRects().length)
+        .map((n) => {
+          const cs = getComputedStyle(n),
+            box = n.getBoundingClientRect(),
+            lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.2;
+          const fg = rgba(cs.color),
+            bg = backdrop(n.parentElement);
+          return {
+            text: n.textContent,
+            harness: [...n.classList].find((c) => c.startsWith('h-')),
+            graphics: n.querySelectorAll('svg,img').length + n.children.length,
+            tag: n.tagName,
+            mark: n.parentElement?.classList.contains('hlabel')
+              ? (n.previousElementSibling?.dataset?.harness ?? null)
+              : undefined,
+            lines: Math.round(box.height / lh),
+            fontSize: parseFloat(cs.fontSize),
+            weight: cs.fontWeight,
+            ratio: Math.round(ratio(fg, bg) * 100) / 100,
+            color: cs.color,
+            muted,
+          };
+        });
+    },
+    [root, label],
+  );
 
 export default async function namesCheck(browser) {
-  const D = await data(), r = reporter("names"), results = {};
-  const claude = Object.values(D.SESS).find((s) => s.harness === "claude" && s.lane), codex = Object.values(D.SESS).find((s) => s.harness === "codex" && s.lane);
-  r.expect(!!claude && !!codex, "the fixture must hold a Claude and a Codex session");
-  const seen = { "Claude Code": 0, Claude: 0, Codex: 0 };
+  const D = await data(),
+    r = reporter('names'),
+    results = {};
+  const claude = Object.values(D.SESS).find((s) => s.harness === 'claude' && s.lane),
+    codex = Object.values(D.SESS).find((s) => s.harness === 'codex' && s.lane);
+  r.expect(!!claude && !!codex, 'the fixture must hold a Claude and a Codex session');
+  const seen = { 'Claude Code': 0, Claude: 0, Codex: 0 };
 
-  for (const [size, dark] of [["phone", false], ["phone", true], ["desktop", false], ["desktop", true]]) {
-    const tag = size + (dark ? "-dark" : "-light"), rec = (results[tag] = {}), page = await served(browser, { size, dark });
+  for (const [size, dark] of [
+    ['phone', false],
+    ['phone', true],
+    ['desktop', false],
+    ['desktop', true],
+  ]) {
+    const tag = size + (dark ? '-dark' : '-light'),
+      rec = (results[tag] = {}),
+      page = await served(browser, { size, dark });
     const audit = (where, labels) => {
-      rec[where] = labels.map((l) => l.text + " " + l.ratio + (l.lines > 1 ? " WRAPS" : ""));
-      r.expect(labels.length > 0, tag + " " + where + ": no harness label is shown");
+      rec[where] = labels.map((l) => l.text + ' ' + l.ratio + (l.lines > 1 ? ' WRAPS' : ''));
+      r.expect(labels.length > 0, tag + ' ' + where + ': no harness label is shown');
       for (const l of labels) {
-        r.expect(ALLOWED.has(l.text), tag + " " + where + ": label reads " + JSON.stringify(l.text));
-        r.expect(l.graphics === 0 && l.tag === "SPAN", tag + " " + where + ": a label holds an svg, img or child element");
-        r.expect(l.lines <= 1, tag + " " + where + ": " + l.text + " wraps onto " + l.lines + " lines");
-        r.expect(l.fontSize >= 11 && l.fontSize <= 12 && Number(l.weight) <= 500, tag + " " + where + ": " + l.text + " is " + l.fontSize + "px weight " + l.weight);
-        r.expect(l.ratio >= 4.5, tag + " " + where + ": " + l.text + " has contrast " + l.ratio + ", under 4.5");
-        r.expect(l.color === l.muted, tag + " " + where + ": " + l.text + " is painted " + l.color + ", not the neutral --muted " + l.muted);
+        r.expect(
+          ALLOWED.has(l.text),
+          tag + ' ' + where + ': label reads ' + JSON.stringify(l.text),
+        );
+        r.expect(
+          l.graphics === 0 && l.tag === 'SPAN',
+          tag + ' ' + where + ': a label holds an svg, img or child element',
+        );
+        r.expect(
+          l.lines <= 1,
+          tag + ' ' + where + ': ' + l.text + ' wraps onto ' + l.lines + ' lines',
+        );
+        r.expect(
+          l.fontSize >= 11 && l.fontSize <= 12 && Number(l.weight) <= 500,
+          tag + ' ' + where + ': ' + l.text + ' is ' + l.fontSize + 'px weight ' + l.weight,
+        );
+        r.expect(
+          l.ratio >= 4.5,
+          tag + ' ' + where + ': ' + l.text + ' has contrast ' + l.ratio + ', under 4.5',
+        );
+        r.expect(
+          l.color === l.muted,
+          tag +
+            ' ' +
+            where +
+            ': ' +
+            l.text +
+            ' is painted ' +
+            l.color +
+            ', not the neutral --muted ' +
+            l.muted,
+        );
         if (seen[l.text] !== undefined) seen[l.text]++;
-        if (l.harness) r.expect((l.harness === "h-codex") === (l.text === "Codex"), tag + " " + where + ": " + l.text + " carries " + l.harness);
-        if (l.mark !== undefined) r.expect(l.mark === (l.text === "Codex" ? "codex" : "claude"), tag + " " + where + ": " + l.text + " has the mark of " + l.mark);
+        if (l.harness)
+          r.expect(
+            (l.harness === 'h-codex') === (l.text === 'Codex'),
+            tag + ' ' + where + ': ' + l.text + ' carries ' + l.harness,
+          );
+        if (l.mark !== undefined)
+          r.expect(
+            l.mark === (l.text === 'Codex' ? 'codex' : 'claude'),
+            tag + ' ' + where + ': ' + l.text + ' has the mark of ' + l.mark,
+          );
       }
     };
-    const shot = (name) => page.screenshot({ path: path.join(OUT, "names-" + tag + "-" + name + ".png") });
+    const shot = (name) =>
+      page.screenshot({ path: path.join(OUT, 'names-' + tag + '-' + name + '.png') });
     const kinded = Object.values(D.SESS).find((s) => s.kind);
     for (const s of [claude, codex, ...(kinded ? [kinded] : [])]) {
-      await goto(page, { v: "session", id: s.id }, D);
+      await goto(page, { v: 'session', id: s.id }, D);
       await page.waitForTimeout(200);
       // A session bar names its harness in the kind label of its meta line: plain text, no glyph.
-      const top = await measure(page, "#topbar", '.meta-line .lab[data-drop="2"]');
+      const top = await measure(page, '#topbar', '.meta-line .lab[data-drop="2"]');
       // A session's top bar always shows its harness. If the line fitter dropped the label, nothing was audited, so fail.
       // A child's own top bar keeps its kind chip first, so its model label may be dropped there.
       // (A phone's bar is one row and does not draw the line: there the harness is a row of the ⋯ menu's Details, audited here instead.)
-      const lineShown = await page.evaluate(() => { const l = document.querySelector("#topbar .meta-line"); return !!l && getComputedStyle(l).display !== "none"; });
-      r.expect(lineShown === (size === "desktop"), tag + ": the line of labels is " + (lineShown ? "drawn" : "not drawn") + " on a " + size);
+      const lineShown = await page.evaluate(() => {
+        const l = document.querySelector('#topbar .meta-line');
+        return !!l && getComputedStyle(l).display !== 'none';
+      });
+      r.expect(
+        lineShown === (size === 'desktop'),
+        tag + ': the line of labels is ' + (lineShown ? 'drawn' : 'not drawn') + ' on a ' + size,
+      );
       if (!lineShown) {
-        await page.click("#more-btn"); await page.waitForSelector("dialog.session-menu[open]");
-        const row = await page.evaluate(() => { const dt = [...document.querySelectorAll("dialog.session-menu dl.kv dt")].find((x) => x.textContent === "Harness"); return dt ? dt.nextElementSibling?.textContent ?? null : null; });
-        rec["menu-harness-" + s.harness] = row;
-        r.expect(ALLOWED.has(row) && (row === "Codex") === (s.harness === "codex"), tag + ": the menu's Harness row for " + s.name + " reads " + JSON.stringify(row));
-        await page.keyboard.press("Escape"); await page.waitForTimeout(150);
+        await page.click('#more-btn');
+        await page.waitForSelector('dialog.session-menu[open]');
+        const row = await page.evaluate(() => {
+          const dt = [...document.querySelectorAll('dialog.session-menu dl.kv dt')].find(
+            (x) => x.textContent === 'Harness',
+          );
+          return dt ? (dt.nextElementSibling?.textContent ?? null) : null;
+        });
+        rec['menu-harness-' + s.harness] = row;
+        r.expect(
+          ALLOWED.has(row) && (row === 'Codex') === (s.harness === 'codex'),
+          tag + ": the menu's Harness row for " + s.name + ' reads ' + JSON.stringify(row),
+        );
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(150);
       }
-      if (lineShown && (s !== kinded || s === claude || s === codex)) r.expect(top.length > 0, tag + ": the top bar of " + s.name + " (" + s.harness + ") shows no harness label, so none was audited");
-      if (top.length) audit("topbar-" + s.harness, top);
+      if (lineShown && (s !== kinded || s === claude || s === codex))
+        r.expect(
+          top.length > 0,
+          tag +
+            ': the top bar of ' +
+            s.name +
+            ' (' +
+            s.harness +
+            ') shows no harness label, so none was audited',
+        );
+      if (top.length) audit('topbar-' + s.harness, top);
       if (s === kinded) {
         // A child's kind ("Subagent", "Codex run") is a plain label of the meta line: no fill, the neutral ink.
-        const chip = await page.evaluate(() => { const c = document.querySelector('#topbar .meta-line .lab[data-drop="2"]'); if (!c) return null; const probe = document.createElement("span"); probe.style.color = "var(--muted)"; document.body.append(probe); const muted = getComputedStyle(probe).color; probe.remove(); const cs = getComputedStyle(c); return { text: c.textContent, bg: cs.backgroundColor, color: cs.color, muted }; });
-        rec["kind-label"] = chip ?? "dropped by the line fitter";
-        if (size === "desktop") r.expect(!!chip, tag + ": the kind label is missing from a child's top bar at 1280 px");
-        if (chip) r.expect(chip.bg === "rgba(0, 0, 0, 0)" && chip.color === chip.muted, tag + ": the kind label is tinted: " + JSON.stringify(chip));
+        const chip = await page.evaluate(() => {
+          const c = document.querySelector('#topbar .meta-line .lab[data-drop="2"]');
+          if (!c) return null;
+          const probe = document.createElement('span');
+          probe.style.color = 'var(--muted)';
+          document.body.append(probe);
+          const muted = getComputedStyle(probe).color;
+          probe.remove();
+          const cs = getComputedStyle(c);
+          return { text: c.textContent, bg: cs.backgroundColor, color: cs.color, muted };
+        });
+        rec['kind-label'] = chip ?? 'dropped by the line fitter';
+        if (size === 'desktop')
+          r.expect(!!chip, tag + ": the kind label is missing from a child's top bar at 1280 px");
+        if (chip)
+          r.expect(
+            chip.bg === 'rgba(0, 0, 0, 0)' && chip.color === chip.muted,
+            tag + ': the kind label is tinted: ' + JSON.stringify(chip),
+          );
       }
-      if (s === claude) await shot("session");
+      if (s === claude) await shot('session');
     }
-    if (size === "phone") {
+    if (size === 'phone') {
       // A child's ⋯ menu lists its ancestors in Session path; the current session is the title, not a path row.
-      const child = Object.values(D.SESS).find((x) => x.parent ?? D.H.some((h) => h.kind === "spawn" && h.to === x.id));
-      r.expect(!!child, "the fixture must hold a child session for Session path");
+      const child = Object.values(D.SESS).find(
+        (x) => x.parent ?? D.H.some((h) => h.kind === 'spawn' && h.to === x.id),
+      );
+      r.expect(!!child, 'the fixture must hold a child session for Session path');
       if (child) {
-        await goto(page, { v: "session", id: child.id }, D); await page.waitForTimeout(200);
-        await page.click("#more-btn"); await page.waitForSelector(".session-menu .menu-path-item");
-        const menu = await measure(page, ".session-menu .menu-path-group");
-        r.expect(menu.length > 0, tag + ": Session path shows no ancestor harness label");
-        audit("session-path", menu);
-        await shot("session-path");
-        await page.keyboard.press("Escape"); await page.waitForFunction(() => !document.querySelector("dialog.session-menu[open]") && !history.state?.sheet); // the menu is a modal dialog here, with a history entry of its own: close it, and let its back step land, before the next page is opened by history
+        await goto(page, { v: 'session', id: child.id }, D);
+        await page.waitForTimeout(200);
+        await page.click('#more-btn');
+        await page.waitForSelector('.session-menu .menu-path-item');
+        const menu = await measure(page, '.session-menu .menu-path-group');
+        r.expect(menu.length > 0, tag + ': Session path shows no ancestor harness label');
+        audit('session-path', menu);
+        await shot('session-path');
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(
+          () => !document.querySelector('dialog.session-menu[open]') && !history.state?.sheet,
+        ); // the menu is a modal dialog here, with a history entry of its own: close it, and let its back step land, before the next page is opened by history
       }
     }
-    await goto(page, { v: "analytics" }, D);
+    await goto(page, { v: 'analytics' }, D);
     await page.waitForTimeout(200);
-    audit("analytics", await measure(page, ".page"));
-    rec.sideways = size === "phone" ? await overflow(page) : 0;
-    r.expect(rec.sideways === 0, tag + ": Analytics scrolls sideways (" + rec.sideways + ")");
-    await shot("analytics");
-    await page.locator(".analytics-session").first().scrollIntoViewIfNeeded(); await page.waitForTimeout(150);
-    await shot("analytics-list");
+    audit('analytics', await measure(page, '.page'));
+    rec.sideways = size === 'phone' ? await overflow(page) : 0;
+    r.expect(rec.sideways === 0, tag + ': Analytics scrolls sideways (' + rec.sideways + ')');
+    await shot('analytics');
+    await page.locator('.analytics-session').first().scrollIntoViewIfNeeded();
+    await page.waitForTimeout(150);
+    await shot('analytics-list');
     // The sidebar last: on a phone it is the drawer over Home, on desktop it sits beside the open session (its row selected).
-    if (size === "phone") { await goto(page, { v: "home" }, D); await page.click("#lead-btn"); await page.waitForTimeout(320); } else { await goto(page, { v: "session", id: claude.id }, D); await page.waitForTimeout(200); }
+    if (size === 'phone') {
+      await goto(page, { v: 'home' }, D);
+      await page.click('#lead-btn');
+      await page.waitForTimeout(320);
+    } else {
+      await goto(page, { v: 'session', id: claude.id }, D);
+      await page.waitForTimeout(200);
+    }
     // Sidebar rows carry no harness label: the row's aria-label names it for screen readers.
-    r.expect((await measure(page, "#lanes")).length === 0 && await page.evaluate(() => document.querySelectorAll("#lanes .hname").length === 0), tag + ": a sidebar row still shows a harness label");
-    r.expect(await page.evaluate(() => { const rows = [...document.querySelectorAll("#lanes .srow")]; return rows.length > 0 && rows.every((row) => /, (Claude|Codex)/.test(row.getAttribute("aria-label") ?? "")); }), tag + ": a sidebar row's aria-label does not name its harness");
+    r.expect(
+      (await measure(page, '#lanes')).length === 0 &&
+        (await page.evaluate(() => document.querySelectorAll('#lanes .hname').length === 0)),
+      tag + ': a sidebar row still shows a harness label',
+    );
+    r.expect(
+      await page.evaluate(() => {
+        const rows = [...document.querySelectorAll('#lanes .srow')];
+        return (
+          rows.length > 0 &&
+          rows.every((row) => /, (Claude|Codex)/.test(row.getAttribute('aria-label') ?? ''))
+        );
+      }),
+      tag + ": a sidebar row's aria-label does not name its harness",
+    );
     // The mark stands alone in a sidebar row and names its harness itself, the same one the row's aria-label names.
-    r.expect(await page.evaluate(() => { const rows = [...document.querySelectorAll("#lanes .srow")]; return rows.length > 0 && rows.every((row) => { const mark = row.querySelector(".hicon"), name = { claude: "Claude", codex: "Codex" }[mark?.dataset.harness]; return !!mark && mark.getAttribute("role") === "img" && !!name && mark.getAttribute("aria-label").startsWith(name) && (row.getAttribute("aria-label") ?? "").includes(mark.getAttribute("aria-label")); }); }), tag + ": a sidebar row's mark is missing, or does not name the harness its aria-label names");
-    r.expect(await page.evaluate(() => document.querySelectorAll(".hmark").length === 0 && !/[✳⌘]/.test(document.querySelector("#lanes").textContent + document.querySelector("#topbar").textContent)), tag + ": an old text glyph is still drawn");
-    r.expect(await page.evaluate(() => [...document.querySelectorAll("#lanes .srow-meta")].every((m) => { const tops = [...m.children].filter((c) => c.getClientRects().length).map((c) => Math.round(c.getBoundingClientRect().top / 3)); return !tops.length || Math.max(...tops) - Math.min(...tops) <= 1; })), tag + ": a sidebar meta line has more than one line");
-    await shot("sidebar");
-    r.expect(page.errors.length === 0, tag + ": page errors " + page.errors.join("; "));
+    r.expect(
+      await page.evaluate(() => {
+        const rows = [...document.querySelectorAll('#lanes .srow')];
+        return (
+          rows.length > 0 &&
+          rows.every((row) => {
+            const mark = row.querySelector('.hicon'),
+              name = { claude: 'Claude', codex: 'Codex' }[mark?.dataset.harness];
+            return (
+              !!mark &&
+              mark.getAttribute('role') === 'img' &&
+              !!name &&
+              mark.getAttribute('aria-label').startsWith(name) &&
+              (row.getAttribute('aria-label') ?? '').includes(mark.getAttribute('aria-label'))
+            );
+          })
+        );
+      }),
+      tag + ": a sidebar row's mark is missing, or does not name the harness its aria-label names",
+    );
+    r.expect(
+      await page.evaluate(
+        () =>
+          document.querySelectorAll('.hmark').length === 0 &&
+          !/[✳⌘]/.test(
+            document.querySelector('#lanes').textContent +
+              document.querySelector('#topbar').textContent,
+          ),
+      ),
+      tag + ': an old text glyph is still drawn',
+    );
+    r.expect(
+      await page.evaluate(() =>
+        [...document.querySelectorAll('#lanes .srow-meta')].every((m) => {
+          const tops = [...m.children]
+            .filter((c) => c.getClientRects().length)
+            .map((c) => Math.round(c.getBoundingClientRect().top / 3));
+          return !tops.length || Math.max(...tops) - Math.min(...tops) <= 1;
+        }),
+      ),
+      tag + ': a sidebar meta line has more than one line',
+    );
+    await shot('sidebar');
+    r.expect(page.errors.length === 0, tag + ': page errors ' + page.errors.join('; '));
     await page.context().close();
   }
-  r.expect(seen.Codex > 0 && seen.Claude + seen["Claude Code"] > 0, "both a Claude and a Codex label must appear");
+  r.expect(
+    seen.Codex > 0 && seen.Claude + seen['Claude Code'] > 0,
+    'both a Claude and a Codex label must appear',
+  );
   r.results = { seen, ...results };
   return r.done();
 }

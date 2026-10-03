@@ -1,0 +1,8 @@
+**/node_modules/**
+**/target/**
+**/*.generated.js
+vendor/**
+docs/**
+.agents/**
+.claude/**
+tests/ui/out/**
