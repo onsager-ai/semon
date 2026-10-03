@@ -171,6 +171,30 @@ retained-raw replay for each complete snapshot. Current-source revision
 selection after replacement is described below; unowned legacy custody remains
 unknown.
 
+### Native Claude tools and model switch
+
+`claude-2.1.288/tools` exercises Read, Edit, successful Bash and Bash exit 1
+against disposable files with localhost synthetic model replies. Tool request
+IDs join exact persisted result IDs. Three streamed assistant blocks share one
+API message ID but retain distinct record UUIDs. They must all remain visible;
+an API message ID alone is not a block identity.
+
+The batch executes serially in this native run. Overlapping/reversed same-name
+call decoding remains covered by the separately labeled source-shaped fixture.
+The initial run uses `permission-mode default` with an explicit fixture tool
+allowlist; resume and fork use native default `auto` and perform no new tools.
+The allowlist does not establish a persisted approval ID.
+Resume appends under the same physical session and switches Sonnet to Haiku;
+fork copies these records into a distinct physical session without an explicit
+logical parent edge. The cold/restart/raw oracle compares six, eight and ten
+semantic occurrences respectively. Tool results remain in the forensic region
+under the existing Claude projection contract. Usage is mock evidence, and
+shared streamed API message IDs must not be summed as independent requests.
+
+Reproduce with `tests/spikes/claude-tools.py` using the pinned binary and a new
+private output directory. The manifest pins script content, binary and original
+source hashes, transformations, and unsupported scenarios.
+
 ## Source-backed Codex archive discovery
 
 Codex `0.159.0-alpha.3` source at commit
@@ -184,8 +208,13 @@ Semon discovers plain JSONL in both `CODEX_HOME/sessions` and
 `CODEX_HOME/archived_sessions` for session lists, model building, transcript
 lookup and refresh. These archived files are part of the existing explicit
 viewing-input allowlist. Input copies with recorded machine facts preserve
-model and transcript parity. Received archive roots behind symbolic links are
-refused, and native source bytes remain read-only.
+model and transcript parity. Optional recorded facts carry a content-free
+current Codex source inventory, so active/archive transitions select the
+current paths while retaining older mirrored bytes. End-to-end push tests cover
+both directions with deliberate redaction. An absent inventory in older facts
+remains unknown; an explicit empty inventory selects no current sources.
+Received archive roots behind symbolic links are refused, and native source
+bytes remain read-only.
 
 Compressed native rollouts are outside this supported subset. To capture a
 plain archived tree explicitly, select it with `semon-codex --sessions PATH`;

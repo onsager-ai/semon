@@ -1118,6 +1118,9 @@ pub(crate) fn collect_with_index(
         file_list(&root, &mut codex_files, "jsonl")?;
     }
     for path in codex_files {
+        if !machine.codex_rollout_is_current(options, &path) {
+            continue;
+        }
         if !options.all && options.session.is_none() && !modified_recently(&path, cutoff) {
             continue;
         }

@@ -3060,6 +3060,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         home: Some("/home/fake-user".into()),
         proc_starts: BTreeMap::from([(40, 777)]),
         codex_locks: BTreeMap::new(),
+        codex_rollouts: None,
         repos: BTreeMap::new(),
         offline_since: None,
         runs: BTreeMap::new(),
@@ -3196,6 +3197,40 @@ fn reported_cost_checks_keep_overwritten_runs_and_drop_account_values() {
     assert!(!facts_json.contains("fixture-model@example.invalid"));
     assert!(!facts_json.contains("fixture-model-account"));
     assert!(!facts_json.contains("/private/fixture/project"));
+}
+
+#[test]
+fn recorded_codex_selection_distinguishes_absent_and_empty_without_pruning() {
+    let home = Home::new();
+    home.codex(
+        "retained",
+        json!({}),
+        &[codex_user(ts(18, 0), "retained fixture")],
+    );
+    let source = home
+        .root
+        .join("codex/sessions/2026/09/24/rollout-retained.jsonl");
+    let bytes = fs::read(&source).unwrap();
+    let path = home.root.join("facts.json");
+    let mut facts = crate::local_facts(&home.options).unwrap();
+    facts.codex_rollouts = None;
+    crate::write_facts(&path, &facts).unwrap();
+    let mut options = home.options.clone();
+    options.facts = Some(path.clone());
+    assert!(
+        home.build_at(&options, NOW)
+            .sessions
+            .contains_key("retained")
+    );
+    facts.codex_rollouts = Some(BTreeSet::new());
+    crate::write_facts(&path, &facts).unwrap();
+    assert!(
+        !home
+            .build_at(&options, NOW)
+            .sessions
+            .contains_key("retained")
+    );
+    assert_eq!(fs::read(source).unwrap(), bytes);
 }
 
 #[cfg(unix)]

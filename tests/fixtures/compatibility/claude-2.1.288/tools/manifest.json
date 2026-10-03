@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "harness": "Claude Code",
+  "harness_version": "2.1.288",
+  "build": null,
+  "binary_sha256": "0298068b686e7fdbaf9402a7a587bb7f49c0b0e084de09f69145a0719207640c",
+  "os": "Linux x86_64",
+  "execution_mode": "headless --print; initial permission-mode default with allowedTools Read Edit Bash; resume/fork use native default auto without tools; localhost mock Anthropic SSE",
+  "storage_schema": "native JSONL record UUID/parentUuid; tool_use.id/tool_result.tool_use_id; API message IDs shared by streamed blocks",
+  "home_override": "/workspace/scratch/235-claude-tools-public-repro/config (disposable CLAUDE_CONFIG_DIR)",
+  "evidence_origin": "native CLI persistence with deterministic mock model",
+  "source_reference": {
+    "probe_path": "tests/spikes/claude-tools.py",
+    "probe_sha256": "04089439cca5ec454dc64c80f9542fb3b61ad6311696ca36e90325f64b992d38",
+    "probe_git_blob": "49b9e5a7320784b34afaed847e534f8dd552741a"
+  },
+  "fixtures": [
+    {
+      "path": "initial-transcript.jsonl",
+      "original_source_sha256": "28bc9287afd0a14fc2285c42a4bcd9c99805e441e72f2e899d912ef2f2eaa067",
+      "fixture_sha256": "7297dda93a4acc55841c9161969aee91ce868f973356b35002678347913b7032",
+      "permission_mode": "default",
+      "allowed_tools": [
+        "Read",
+        "Edit",
+        "Bash"
+      ]
+    },
+    {
+      "path": "resumed-transcript.jsonl",
+      "original_source_sha256": "0ff5f47d6997f71d3c98f6f16bdd34f90b472b887b3c401a8f7916a12bffb455",
+      "fixture_sha256": "58161f234ef98ba1566ca8c694e5381db8a4e6f667b999709df74379b97d05b2",
+      "permission_mode": "auto",
+      "allowed_tools": null
+    },
+    {
+      "path": "forked-transcript.jsonl",
+      "original_source_sha256": "39a2229ab8594d481c97c6898633d37bc73a945dbdaaa6bdf70a0a5aefa91853",
+      "fixture_sha256": "3d438b49e9bf681efddd7529b7a5e9115518cf2dc3277739ea5f7f6ccb2ae463",
+      "permission_mode": "auto",
+      "allowed_tools": null
+    }
+  ],
+  "transformations": [
+    "Removed attachment, atis-latch, and last-prompt payloads",
+    "Replaced disposable root and physical parent/child session IDs consistently",
+    "Preserved record UUIDs, parent UUIDs, API message IDs and exact tool IDs"
+  ],
+  "observed": [
+    "Read and Edit execute on a disposable seed file",
+    "Two same-name Bash calls have distinct exact IDs; one succeeds and one exits 1",
+    "Three streamed assistant tool blocks share one API message ID and retain distinct native record UUIDs",
+    "Resume preserves consumed bytes and changes the persisted model from Sonnet to Haiku",
+    "Fork copies parent tool and message records under a distinct physical session"
+  ],
+  "limitations": [
+    "Tool batch executed serially; native concurrent execution is not established",
+    "Explicit fixture allowlist is not a persisted approval decision ID",
+    "Mock model usage and private cost-state are not billing",
+    "Copied record identities do not establish a logical fork parent",
+    "Only pinned Linux headless mode; cancellation and compaction are not probed here"
+  ]
+}
