@@ -6,7 +6,10 @@ import { GROUPS, TAP_SESSIONS, selectChecks, selectSchemes, tapSessions } from '
 // Read the actual registry without importing browser modules or starting servers.
 const source = fs.readFileSync(new URL('./checks/run.mjs', import.meta.url), 'utf8');
 const registry = source.split('const checks = [')[1].split('\n];')[0];
-const checks = [...registry.matchAll(/\["([^"]+)",/g)].map(([, name]) => [name, () => true]);
+const checks = [...registry.matchAll(/\[\s*(['"])(.*?)\1\s*,/g)].map(([, , name]) => [
+  name,
+  () => true,
+]);
 
 test('the CI groups partition the actual functional registry without losing checks', () => {
   assert.ok(checks.length > 30);

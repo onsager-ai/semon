@@ -17,6 +17,7 @@ function moduleSource(name) {
 const context = vm.createContext({});
 vm.runInContext(moduleSource('src/lib/routes.ts'), context);
 vm.runInContext(moduleSource('src/lib/live.ts'), context);
+vm.runInContext(moduleSource('src/state/viewUpdates.ts'), context);
 vm.runInContext(moduleSource('src/state/transcript.ts'), context);
 vm.runInContext(
   `
