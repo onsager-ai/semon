@@ -1,25 +1,253 @@
-import {test} from 'node:test';import assert from 'node:assert/strict';import {build} from 'esbuild';
-const {outputFiles}=await build({stdin:{contents:"export * from './src/state/model';export * from './src/state/transcript';export * from './src/state/transcript-wire';",resolveDir:new URL('..',import.meta.url).pathname},bundle:true,write:false,format:'esm',platform:'node'});
-const {ViewerModelStore,TranscriptStore,parseTranscriptPage}=await import('data:text/javascript;base64,'+Buffer.from(outputFiles[0].contents).toString('base64'));
-const model=()=>({now:1,version:'v1',machine:{id:'m',name:'Machine',up:true},sessions:{s:{name:'Session',harness:'codex',state:'idle',machine:'m',start:1,last:1}},handoffs:[],turns:[{id:'t',sid:'s',sent:[]}]});
-const page=(from,to,total)=>({from,to,total,entries:[{k:'a',text:'Answer',turn:'t',slot:from}]});
-const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
-function fixture(){const graph=new ViewerModelStore();graph.adopt(model());const asked=[];const store=new TranscriptStore({request(path,signal){const d=deferred();asked.push({...d,path,signal});return d.promise;},turns:sid=>graph.turns[sid]??[],turn:id=>graph.turn.get(id),entry:e=>e,cleared(){}});return {graph,store,asked};}
-test('invalid domain values leave both raw delta baseline and normalized tables untouched',()=>{const store=new ViewerModelStore();store.adopt(model());const table=store.sessions,before=store.sessions.s;const bad=model();bad.version='bad';bad.sessions.s.cost={usd:Infinity};assert.throws(()=>store.adopt(bad),/Invalid/);assert.equal(store.sessions,table);assert.equal(store.sessions.s,before);assert.equal(store.apply({delta:1,from:'v1',version:'v2'}).version,'v2');});
-test('an old paging response cannot enter a replaced range',async()=>{const {store,asked}=fixture();const first=store.fetch('s');asked[0].resolve(page(5,10,10));await first;const old=store.fetch('s','before=5','before');const replacement=store.fetch('s');asked[2].resolve(page(20,25,25));await replacement;asked[1].resolve(page(0,5,10));await old;assert.equal(store.meta.s.from,20);assert.deepEqual(store.entries.s.map(e=>e.slot),[20]);store.destroy();});
-test('superseded replacements cannot discard a newer transcript window',async()=>{
- const {store,asked}=fixture();let commits=0;
- const old=store.fetch('s','after=0',undefined,undefined,()=>commits++),latest=store.fetch('s','after=20',undefined,undefined,()=>commits++);
- assert.equal(asked[0].signal.aborted,true);asked[1].resolve(page(20,25,25));await latest;
- asked[0].resolve(page(0,5,25));await old;assert.equal(store.meta.s.from,20);assert.deepEqual(store.entries.s.map(e=>e.slot),[20]);assert.equal(commits,1);
- const pending=store.fetch('s','after=10');store.drop('s');assert.equal(asked[2].signal.aborted,true);asked[2].resolve(page(10,15,25));await pending;assert.equal(store.entries.s,undefined);store.destroy();
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+const { outputFiles } = await build({
+  stdin: {
+    contents:
+      "export * from './src/state/viewUpdates';export * from './src/app/transport';export * from './src/state/model';export * from './src/state/transcript';export * from './src/state/transcript-wire';",
+    resolveDir: new URL('..', import.meta.url).pathname,
+  },
+  bundle: true,
+  write: false,
+  format: 'esm',
+  platform: 'node',
 });
-test('model updates during loading distribute entries into the latest normalized turns',async()=>{const {graph,store,asked}=fixture();const load=store.fetch('s');const next=model();next.version='v2';graph.adopt(next);asked[0].resolve(page(0,1,1));await load;assert.equal(graph.turn.get('t').entries[0],store.entries.s[0]);assert.equal(store.entries.s[0].key,'t#0');store.destroy();});
-test('abort and destroy isolate pending pages and stale controls',async()=>{const {store,asked}=fixture();const abort=new AbortController(),load=store.fetch('s','',undefined,abort.signal);abort.abort();assert.equal(asked[0].signal.aborted,true);asked[0].resolve(page(0,1,1));await load;assert.equal(store.entries.s,undefined);const pending=store.fetch('s');store.destroy();assert.equal(asked[1].signal.aborted,true);asked[1].resolve(page(0,1,1));await pending;assert.equal(store.entries.s,undefined);await store.fetch('s');assert.equal(asked.length,2);});
-test('page validation rejects invalid ranges and hostile entry structures',()=>{for(const bad of [{...page(0,1,1),to:2}, {...page(0,1,1),entries:[{k:'a',text:{markup:'<img>'}}]}, {...page(0,1,1),entries:[{k:'tool',name:'run',arg:'cmd',diff:[['+',{}]]}]}])assert.throws(()=>parseTranscriptPage(bad),/Invalid/);});
+const { ViewUpdates, createTransport, ViewerModelStore, TranscriptStore, parseTranscriptPage } =
+  await import(
+    'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
+  );
+const model = () => ({
+  now: 1,
+  version: 'v1',
+  machine: { id: 'm', name: 'Machine', up: true },
+  sessions: {
+    s: { name: 'Session', harness: 'codex', state: 'idle', machine: 'm', start: 1, last: 1 },
+  },
+  handoffs: [],
+  turns: [{ id: 't', sid: 's', sent: [] }],
+});
+const page = (from, to, total) => ({
+  from,
+  to,
+  total,
+  entries: [{ k: 'a', text: 'Answer', turn: 't', slot: from }],
+});
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  return { promise, resolve };
+};
+function fixture() {
+  const graph = new ViewerModelStore();
+  graph.adopt(model());
+  const asked = [];
+  const store = new TranscriptStore({
+    request(path, signal) {
+      const d = deferred();
+      asked.push({ ...d, path, signal });
+      return d.promise;
+    },
+    turns: (sid) => graph.turns[sid] ?? [],
+    turn: (id) => graph.turn.get(id),
+    entry: (e) => e,
+    cleared() {},
+  });
+  return { graph, store, asked };
+}
+test('invalid domain values leave both raw delta baseline and normalized tables untouched', () => {
+  const store = new ViewerModelStore();
+  store.adopt(model());
+  const table = store.sessions,
+    before = store.sessions.s;
+  const bad = model();
+  bad.version = 'bad';
+  bad.sessions.s.cost = { usd: Infinity };
+  assert.throws(() => store.adopt(bad), /Invalid/);
+  assert.equal(store.sessions, table);
+  assert.equal(store.sessions.s, before);
+  assert.equal(store.apply({ delta: 1, from: 'v1', version: 'v2' }).version, 'v2');
+});
+test('an old paging response cannot enter a replaced range', async () => {
+  const { store, asked } = fixture();
+  const first = store.fetch('s');
+  asked[0].resolve(page(5, 10, 10));
+  await first;
+  const old = store.fetch('s', 'before=5', 'before');
+  const replacement = store.fetch('s');
+  asked[2].resolve(page(20, 25, 25));
+  await replacement;
+  asked[1].resolve(page(0, 5, 10));
+  await old;
+  assert.equal(store.meta.s.from, 20);
+  assert.deepEqual(
+    store.entries.s.map((e) => e.slot),
+    [20],
+  );
+  store.destroy();
+});
+test('superseded replacements cannot discard a newer transcript window', async () => {
+  const { store, asked } = fixture();
+  let commits = 0;
+  const old = store.fetch('s', 'after=0', undefined, undefined, () => commits++),
+    latest = store.fetch('s', 'after=20', undefined, undefined, () => commits++);
+  assert.equal(asked[0].signal.aborted, true);
+  asked[1].resolve(page(20, 25, 25));
+  await latest;
+  asked[0].resolve(page(0, 5, 25));
+  await old;
+  assert.equal(store.meta.s.from, 20);
+  assert.deepEqual(
+    store.entries.s.map((e) => e.slot),
+    [20],
+  );
+  assert.equal(commits, 1);
+  const pending = store.fetch('s', 'after=10');
+  store.drop('s');
+  assert.equal(asked[2].signal.aborted, true);
+  asked[2].resolve(page(10, 15, 25));
+  await pending;
+  assert.equal(store.entries.s, undefined);
+  store.destroy();
+});
+test('model updates during loading distribute entries into the latest normalized turns', async () => {
+  const { graph, store, asked } = fixture();
+  const load = store.fetch('s');
+  const next = model();
+  next.version = 'v2';
+  graph.adopt(next);
+  asked[0].resolve(page(0, 1, 1));
+  await load;
+  assert.equal(graph.turn.get('t').entries[0], store.entries.s[0]);
+  assert.equal(store.entries.s[0].key, 't#0');
+  store.destroy();
+});
+test('abort and destroy isolate pending pages and stale controls', async () => {
+  const { store, asked } = fixture();
+  const abort = new AbortController(),
+    load = store.fetch('s', '', undefined, abort.signal);
+  abort.abort();
+  assert.equal(asked[0].signal.aborted, true);
+  asked[0].resolve(page(0, 1, 1));
+  await load;
+  assert.equal(store.entries.s, undefined);
+  const pending = store.fetch('s');
+  store.destroy();
+  assert.equal(asked[1].signal.aborted, true);
+  asked[1].resolve(page(0, 1, 1));
+  await pending;
+  assert.equal(store.entries.s, undefined);
+  await store.fetch('s');
+  assert.equal(asked.length, 2);
+});
+test('page validation rejects invalid ranges and hostile entry structures', () => {
+  for (const bad of [
+    { ...page(0, 1, 1), to: 2 },
+    { ...page(0, 1, 1), entries: [{ k: 'a', text: { markup: '<img>' } }] },
+    { ...page(0, 1, 1), entries: [{ k: 'tool', name: 'run', arg: 'cmd', diff: [['+', {}]] }] },
+  ])
+    assert.throws(() => parseTranscriptPage(bad), /Invalid/);
+});
 
-test('handoff entries retain validated image references, including masked prompts',()=>{const reference={o:12,b:1,v:'0123456789abcdef',w:180,h:390,type:'image/png',size:99};const p=parseTranscriptPage({...page(0,1,1),entries:[{k:'h',id:'ask',img:[reference]}]});assert.deepEqual(p.entries[0].img[0],{...reference,na:undefined});});
+test('handoff entries retain validated image references, including masked prompts', () => {
+  const reference = {
+    o: 12,
+    b: 1,
+    v: '0123456789abcdef',
+    w: 180,
+    h: 390,
+    type: 'image/png',
+    size: 99,
+  };
+  const p = parseTranscriptPage({
+    ...page(0, 1, 1),
+    entries: [{ k: 'h', id: 'ask', img: [reference] }],
+  });
+  assert.deepEqual(p.entries[0].img[0], { ...reference, na: undefined });
+});
 
-test('unavailable attachment records omit a version while available images require it',()=>{const masked={o:5738,b:0,na:true};const p=parseTranscriptPage({...page(0,1,1),entries:[{k:'h',id:'ask',img:[masked]}]});assert.equal(p.entries[0].img[0].na,true);assert.equal(p.entries[0].img[0].v,undefined);assert.throws(()=>parseTranscriptPage({...page(0,1,1),entries:[{k:'h',id:'ask',img:[{o:1,b:0}]}]}),/Invalid/);});
+test('unavailable attachment records omit a version while available images require it', () => {
+  const masked = { o: 5738, b: 0, na: true };
+  const p = parseTranscriptPage({
+    ...page(0, 1, 1),
+    entries: [{ k: 'h', id: 'ask', img: [masked] }],
+  });
+  assert.equal(p.entries[0].img[0].na, true);
+  assert.equal(p.entries[0].img[0].v, undefined);
+  assert.throws(
+    () =>
+      parseTranscriptPage({
+        ...page(0, 1, 1),
+        entries: [{ k: 'h', id: 'ask', img: [{ o: 1, b: 0 }] }],
+      }),
+    /Invalid/,
+  );
+});
 
-test('numeric tool elapsed values normalize to display text at the wire boundary',()=>{const p=parseTranscriptPage({...page(0,1,1),entries:[{k:'tool',name:'Read',arg:'file',secs:1}]});assert.equal(p.entries[0].secs,'1');});
+test('numeric tool elapsed values normalize to display text at the wire boundary', () => {
+  const p = parseTranscriptPage({
+    ...page(0, 1, 1),
+    entries: [{ k: 'tool', name: 'Read', arg: 'file', secs: 1 }],
+  });
+  assert.equal(p.entries[0].secs, '1');
+});
+
+test('accepted updates publish coherent revisions once; invalid auxiliary input cannot change a delta baseline', () => {
+  const updates = new ViewUpdates(),
+    graph = new ViewerModelStore(updates);
+  const host = {
+    disposed: false,
+    modelStore: graph,
+    transcripts: { entries: {}, marks: {}, spread() {} },
+    viewerHost: null,
+  };
+  const transport = createTransport(host),
+    seen = [];
+  const unsubscribe = updates.subscribe((change) =>
+    seen.push([change, graph.sessions.s.name, host.transcripts.marks.s, host.admin]),
+  );
+  transport.adopt({ ...model(), tx: { s: 'mark' }, admin: { href: '/admin', label: 'Admin' } });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0][1], 'Session');
+  assert.equal(seen[0][2], 'mark');
+  assert.equal(seen[0][3].label, 'Admin');
+  const before = graph.sessions.s;
+  assert.throws(() => transport.adopt({ ...model(), version: 'bad', tx: { s: 42 } }), /Invalid/);
+  assert.equal(graph.sessions.s, before);
+  assert.equal(seen.length, 1);
+  assert.equal(graph.apply({ delta: 1, from: 'v1', version: 'v2' }).version, 'v2');
+  unsubscribe();
+  transport.adopt(model());
+  assert.equal(seen.length, 1);
+  updates.destroy();
+  transport.adopt(model());
+  assert.equal(updates.revision, 2);
+  host.disposed = true;
+  assert.throws(() => transport.adopt(model()), /destroyed/);
+});
+
+test('transcript subscribers select sessions and never see stale, malformed or post-destroy pages', async () => {
+  const { store, asked } = fixture(),
+    seen = [];
+  store.updates.subscribe((change) => seen.push([change, store.view('s')]), 's');
+  const first = store.fetch('s'),
+    second = store.fetch('s');
+  asked[0].resolve(page(0, 1, 1));
+  await first;
+  assert.equal(seen.length, 0);
+  asked[1].resolve(page(5, 10, 10));
+  await second;
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0][1].entries, store.entries.s);
+  assert.equal(seen[0][1].range.from, 5);
+  const bad = store.fetch('s');
+  asked[2].resolve({ ...page(0, 1, 1), entries: [{ k: 'invalid' }] });
+  await assert.rejects(bad);
+  assert.equal(seen.length, 1);
+  const late = store.fetch('s');
+  store.destroy();
+  asked[3].resolve(page(0, 1, 1));
+  await late;
+  assert.equal(seen.length, 1);
+  store.updates.transcript('s');
+  assert.equal(seen.length, 1);
+});
