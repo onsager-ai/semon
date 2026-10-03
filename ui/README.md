@@ -19,7 +19,7 @@ Viewer UI required aggregate gates type-check/security/freshness before compilin
 its Rust fixture binaries and tests the served checked-in bytes.
 
 `src/lib/index.ts` is the shared component/type entry; lib modules import no
-viewer state. `src/account-adapter.tsx` is the legacy/Preact library bridge.
+viewer state. `src/application.ts` exposes the typed application mount/destroy boundary.
 Shared chrome owns widget descendants, trigger/avatar, menu/backdrop, open state,
 dismissal listeners and focus. The host owns insertion/removal, history and live
 holds. Unmount before removing a container. New typed application code cannot use
@@ -84,9 +84,9 @@ entries now render through typed native Preact components. Keyed turns preserve
 unchanged nodes; dirty-turn updates synchronously commit before host scroll
 restoration. Components own expansion state, clamps, controls and cleanup.
 Typed controllers own validated model/delta snapshots, routing, cache admission,
-held ordering, polling/backoff and paging. `viewer.js` remains the browser host
-adapter for domain calculations, history, scroll capture/restore and embedding
-callbacks; it contains no legacy screen renderer or DOM factory.
+held ordering, polling/backoff and paging. `src/app/` composes the application lifecycle, destination transactions, Recent
+navigation, session chrome, transcript projections, analytics and live updates.
+The handwritten viewer and internal compatibility bridge are deleted.
 
 The shared prefix initializes once when shell and viewer assets coexist. Consumer
 bundles already include it: **do not prepend `shell::COMPONENT_JS`** to output from
@@ -121,3 +121,11 @@ handoff and turn data before host adoption. `calculations.ts`, `trace.ts` and
 charts and labels. The host keeps raw delta snapshots separate from these
 resolved relationships. Ownership and commit ordering are documented in
 [viewer-ownership.md](../docs/design/viewer-ownership.md).
+
+`mountViewerApplication(host?)` returns an idempotent `destroy()` owner. Replacing
+a document mount first destroys its predecessor. Hosts may pass the documented
+`ViewerHost` port directly; existing `configureViewerHost` callers remain supported.
+Teardown invalidates callbacks, aborts requests, stops polling and paging, releases
+roots/dialogs, and cancels document listeners, timers and animation frames.
+`ui/tests/application-lifecycle.mjs` exercises fixture-backed standalone, sidebar
+and native document replacement with deliberately late model responses.

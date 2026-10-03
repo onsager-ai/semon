@@ -41,7 +41,7 @@ export { renderPlaceholder, createStatusNote } from './placeholder';
 export { requestJson, ModelStore } from './model';
 export { createLiveController, createPagingStore } from './live';
 
-export { setGeometry, revealMeasuredTurn } from './geometry';
+export { setGeometry, releaseGeometry, revealMeasuredTurn } from './geometry';
 export { createLiveRegion } from './placeholder';
 
 export { routeUrl, parseRoute, TranscriptCache } from './routes';
