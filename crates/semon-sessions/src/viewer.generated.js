@@ -2104,8 +2104,8 @@ SOFTWARE.
                     ] }),
                     /* @__PURE__ */ jsxs("span", { class: "session-row-meta srow-meta for", children: [
                       harness && /* @__PURE__ */ jsx("span", { class: "hicon hi-sidebar", "data-harness": harness.id, role: "img", "aria-label": harness.name, "data-tip": harness.name, children: harness.light === harness.dark ? /* @__PURE__ */ jsx("img", { src: harness.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-                        /* @__PURE__ */ jsx("img", { class: "hi-light", src: harness.light, alt: "", draggable: false, decoding: "async", loading: harness.darkTheme ? "lazy" : void 0 }),
-                        /* @__PURE__ */ jsx("img", { class: "hi-dark", src: harness.dark, alt: "", draggable: false, decoding: "async", loading: harness.darkTheme ? void 0 : "lazy" })
+                        /* @__PURE__ */ jsx("img", { class: "hi-light", loading: harness.darkTheme ? "lazy" : void 0, src: harness.light, alt: "", draggable: false, decoding: "async" }),
+                        /* @__PURE__ */ jsx("img", { class: "hi-dark", loading: harness.darkTheme ? void 0 : "lazy", src: harness.dark, alt: "", draggable: false, decoding: "async" })
                       ] }) }),
                       /* @__PURE__ */ jsx("span", { class: "row-model", "data-tip": item.modelTip, children: item.model }),
                       item.fields.map((field) => /* @__PURE__ */ jsxs("span", { class: field.className + " row-field", "data-drop": field.priority, "data-tip": field.tip, children: [
@@ -2469,8 +2469,8 @@ SOFTWARE.
   }
   function Harness({ mark, size = 14, lead = true }) {
     return /* @__PURE__ */ jsx("span", { class: "hicon " + (size === 16 ? "hi-screen-16" : "hi-screen") + (lead ? " hi-lead" : ""), "data-harness": mark.id, "aria-hidden": "true", children: mark.light === mark.dark ? /* @__PURE__ */ jsx("img", { src: mark.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("img", { class: "hi-light", src: mark.light, alt: "", draggable: false, decoding: "async", loading: mark.darkTheme ? "lazy" : void 0 }),
-      /* @__PURE__ */ jsx("img", { class: "hi-dark", src: mark.dark, alt: "", draggable: false, decoding: "async", loading: mark.darkTheme ? void 0 : "lazy" })
+      /* @__PURE__ */ jsx("img", { class: "hi-light", loading: mark.darkTheme ? "lazy" : void 0, src: mark.light, alt: "", draggable: false, decoding: "async" }),
+      /* @__PURE__ */ jsx("img", { class: "hi-dark", loading: mark.darkTheme ? void 0 : "lazy", src: mark.dark, alt: "", draggable: false, decoding: "async" })
     ] }) });
   }
   function Section({ heading, count }) {
@@ -2617,8 +2617,8 @@ SOFTWARE.
       ] }),
       /* @__PURE__ */ jsxs("span", { class: "session-row-meta srow-meta for", children: [
         row.harness && /* @__PURE__ */ jsx("span", { class: "hicon hi-screen", "data-harness": row.harness.id, role: "img", "aria-label": row.harness.name, "data-tip": row.harness.name, children: row.harness.light === row.harness.dark ? /* @__PURE__ */ jsx("img", { src: row.harness.light, alt: "", draggable: false, decoding: "async" }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-          /* @__PURE__ */ jsx("img", { class: "hi-light", src: row.harness.light, alt: "", draggable: false, decoding: "async", loading: row.harness.darkTheme ? "lazy" : void 0 }),
-          /* @__PURE__ */ jsx("img", { class: "hi-dark", src: row.harness.dark, alt: "", draggable: false, decoding: "async", loading: row.harness.darkTheme ? void 0 : "lazy" })
+          /* @__PURE__ */ jsx("img", { class: "hi-light", loading: row.harness.darkTheme ? "lazy" : void 0, src: row.harness.light, alt: "", draggable: false, decoding: "async" }),
+          /* @__PURE__ */ jsx("img", { class: "hi-dark", loading: row.harness.darkTheme ? void 0 : "lazy", src: row.harness.dark, alt: "", draggable: false, decoding: "async" })
         ] }) }),
         /* @__PURE__ */ jsx("span", { class: "row-model", "data-tip": row.modelTip, children: screenText(row.model) }),
         row.delegation && /* @__PURE__ */ jsx("svg", { class: "icon row-delegation", "data-tip": "Delegated session", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: row.delegation }) }),
@@ -3660,7 +3660,7 @@ SOFTWARE.
             entry.running ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(Glyph, { path: entry.stack, className: "" }),
             /* @__PURE__ */ jsx("span", { class: "tt" + (entry.background ? " bgsum" : ""), children: entry.summary.map((part, i) => part.className ? /* @__PURE__ */ jsx("span", { class: part.className, children: screenText(part.text) }, i) : part.text) }),
             entry.failed > 0 && /* @__PURE__ */ jsx("span", { class: "tf", children: screenText("\xB7 " + entry.failed + " failed") }),
-            entry.running && /* @__PURE__ */ jsx("span", { class: "tl tick", children: "\xB7 running " + entry.running }),
+            entry.running && /* @__PURE__ */ jsx("span", { class: "tl tick", children: entry.clockTick ? "\xB7 running " + entry.running : screenText("\xB7 running " + entry.running) }),
             /* @__PURE__ */ jsx(Glyph, { path: entry.chevron, className: "chev" })
           ] }),
           steps
@@ -3906,7 +3906,7 @@ SOFTWARE.
       if (entry.kind === "group") {
         const entries = entry.entries.map((item) => update(item)), since = entries.filter((item) => item.kind === "tool" && item.step.running && !!item.step.sid).map((item) => item.step.since ?? starts[item.step.sid]).filter((value) => value !== void 0 && Number.isFinite(value));
         const running = since.length ? elapsed(Math.min(...since)) : entry.running;
-        return running === entry.running && entries.every((item, i) => item === entry.entries[i]) ? entry : { ...entry, entries, running };
+        return running === entry.running && entries.every((item, i) => item === entry.entries[i]) ? entry : { ...entry, entries, running, clockTick: true };
       }
       return entry;
     }
