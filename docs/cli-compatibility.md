@@ -235,3 +235,23 @@ Custody is local source provenance, not a native generation, logical parent or
 transferable trace identity. Explicit raw forgetting leaves replay unavailable;
 idle capture and legacy adoption do not recreate those bytes. Unowned historical
 rows are preserved because their source cannot be established retrospectively.
+
+## Codex native fork boundaries and child usage
+
+The pinned `0.159.0-alpha.3` probe executes a parent against a synthetic localhost
+provider, forks through native app-server `thread/fork` with `excludeTurns=true`,
+and completes a child-owned turn. Its three hash-addressed snapshots preserve
+native logical `forked_from_id` and exclusive ordinal separately from physical
+`history_base`. The fresh fork references the parent prefix without copying its
+messages into the child JSONL. Pinned source comments allow logical and physical
+bases to diverge after revert; this probe does not execute that scenario.
+
+The fork itself makes no model request and has no child usage observation.
+After its own turn, `token_usage_record.usage` reports fresh mock usage of 5 input
+and 3 output tokens, while `thread_token_usage` and the cumulative `token_count`
+report 10/6 including inherited parent context. These are distinct observations,
+not billing evidence. Live mock-provider checks that inherited context was sent
+are recorded separately from persisted facts. Capture tests compare cold,
+restart and retained-raw replay for the parent, empty child and completed child.
+Viewer interpretation of these fork fields and fresh versus inherited usage is
+a remaining compatibility requirement; this corpus does not claim that support.

@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "harness": "Codex",
+  "harness_version": "0.159.0-alpha.3",
+  "build": null,
+  "binary_sha256": "981ade7b03926534c654fd718ced3a9f378b7b2841271e29156f939462d176e9",
+  "os": "Linux x86_64",
+  "execution_mode": "initial codex exec with synthetic localhost Responses SSE; stdio app-server thread/fork excludeTurns=true and child turn/start; no tools",
+  "storage_schema": "native paginated JSONL session_meta logical fork boundary and physical history_base",
+  "home_override": "/workspace/scratch/235-codex-fork-reviewed/home (disposable CODEX_HOME)",
+  "evidence_origin": "native CLI persistence with deterministic mock model",
+  "source_reference": {
+    "probe_path": "tests/spikes/codex-fork.py",
+    "probe_sha256": "feb2ccf162f6ca3d9c942f1eb1a310c075f782d81c5264ac150a9fca7afd9121",
+    "probe_git_blob": "4eeac4cf355838978c9972818266cec8930faf70",
+    "native_protocol": {
+      "commit": "3b01b36fa5eb96ba82a776bd3c2fc57f8969181f",
+      "path": "codex-rs/protocol/src/protocol.rs",
+      "sha256": "e9c35559a97d5505341ccb2ecc319a2ada18a60295cc07258fe89d9e33612fb4",
+      "git_blob": "da9ba1ad095735af49a533fc5b421ffdf43ee4d7"
+    }
+  },
+  "fixtures": [
+    {
+      "path": "initial-rollout.jsonl",
+      "original_source_sha256": "7fddaec774b1e3b828afb6abdec685c9d1666669ea4576cd9aadc10d1cc3f8d7",
+      "fixture_sha256": "9202aa57fa1151b86bed502188312368b73ae74b48c392c2bed74a1c290d9495"
+    },
+    {
+      "path": "forked-rollout.jsonl",
+      "original_source_sha256": "fd2ef7ea10ce37e46310f4915801b1306972e49c5a05e1c56df4361aa2b5447b",
+      "fixture_sha256": "171177d103aec27ffc10893fe86ab9822aff63576e68de71e445b98b2f95c8a0"
+    },
+    {
+      "path": "child-turn-rollout.jsonl",
+      "original_source_sha256": "9b032adbbe8f23abcfa30a369d04028c06084c8b2e06f3fbf2083851279a64d4",
+      "fixture_sha256": "621e0b30cc07dc6ea31f1f9f0116003a821b68368185396f27ea95a2277b18ce"
+    }
+  ],
+  "transformations": [
+    "Removed native base instruction text, harness message text and world-state instruction payloads",
+    "Replaced disposable root and parent/child native thread/session identities consistently; other native record/turn/API IDs retained",
+    "Adjusted child history_base.end_byte_offset to the transformed parent complete-prefix byte length; native ordinal boundaries retained"
+  ],
+  "native_physical_prefix": {
+    "end_byte_offset": 34899,
+    "end_ordinal_exclusive": 13
+  },
+  "observed": [
+    "Distinct child thread/session ID; logical forked_from_id and exclusive ordinal 13",
+    "Physical history_base references parent prefix at ordinal 13; inherited messages are not copied into child JSONL",
+    "Before its own turn the child has only session_meta and thread_settings_applied and no usage observation",
+    "Child own turn appends to the fork snapshot; parent bytes unchanged; fork adds no model request",
+    "Child token_usage_record.usage reports fresh 5 input/3 output; thread_token_usage and token_count total report cumulative 10 input/6 output"
+  ],
+  "limitations": [
+    "Pinned Linux alpha release; no stable support claim",
+    "Mock usage is not billing; missing child usage before its own turn is unknown",
+    "Live provider input observations are separate from persisted source facts",
+    "This fresh fork shares logical and physical parent; pinned source permits divergence after revert",
+    "No compaction, cancellation, subagent-history boundary or native revert in this probe"
+  ],
+  "live_provider_observations": [
+    {
+      "path": "/v1/responses",
+      "model": "mock-model",
+      "prior_prompt_present": true,
+      "prior_reply_present": false
+    },
+    {
+      "path": "/v1/responses",
+      "model": "mock-model",
+      "prior_prompt_present": true,
+      "prior_reply_present": true
+    }
+  ]
+}
