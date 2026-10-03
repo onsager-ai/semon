@@ -3660,7 +3660,7 @@ SOFTWARE.
             entry.running ? /* @__PURE__ */ jsx("span", { class: "spin" }) : /* @__PURE__ */ jsx(Glyph, { path: entry.stack, className: "" }),
             /* @__PURE__ */ jsx("span", { class: "tt" + (entry.background ? " bgsum" : ""), children: entry.summary.map((part, i) => part.className ? /* @__PURE__ */ jsx("span", { class: part.className, children: screenText(part.text) }, i) : part.text) }),
             entry.failed > 0 && /* @__PURE__ */ jsx("span", { class: "tf", children: screenText("\xB7 " + entry.failed + " failed") }),
-            entry.running && /* @__PURE__ */ jsx("span", { class: "tl tick", children: screenText("\xB7 running " + entry.running) }),
+            entry.running && /* @__PURE__ */ jsx("span", { class: "tl tick", children: "\xB7 running " + entry.running }),
             /* @__PURE__ */ jsx(Glyph, { path: entry.chevron, className: "chev" })
           ] }),
           steps
