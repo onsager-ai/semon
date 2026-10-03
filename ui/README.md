@@ -1,8 +1,8 @@
 # Shared viewer UI
 
-Native Preact/TSX sources and a deterministic production esbuild tail. Rust embeds
-`crates/semon-sessions/src/viewer.generated.js` with the existing tooltip/Select
-prefixes; cargo builds and installations need no JavaScript tooling.
+Native Preact/TSX sources and deterministic production esbuild bundles. Rust embeds
+`crates/semon-sessions/src/viewer.generated.js`, which includes the shared runtime,
+Select and tooltip prefix. Cargo builds and installations need no JavaScript tooling.
 
 ```sh
 npm --prefix ui ci --no-audit --no-fund
@@ -79,11 +79,21 @@ root)` before removal. Full viewer and sidebar-only navigation remain equivalent
 One Preact instance resolves per production bundle; no router, fetch or poller is
 added. The Rust shell API and shell.js remain available for existing consumers.
 
-Account, shell frame/navigation, shared Recent and consumer builds are implemented;
-Hub adopted stage 3 at source `26da6ef`. Sheets/screens are next. See [the current design](../docs/design/tsx.md)
-and [consumer plan](../docs/design/ui-library.md) for remaining stages, runtime sink
-review and actual Hub pin/embedding contracts. Legacy sources remain in the
-crate during the bounded migration to avoid interfering with parallel work.
+All viewer screens, top-bar modes, sheets, Markdown, attachments and transcript
+entries now render through typed native Preact components. Keyed turns preserve
+unchanged nodes; dirty-turn updates synchronously commit before host scroll
+restoration. Components own expansion state, clamps, controls and cleanup.
+Typed controllers own validated model/delta snapshots, routing, cache admission,
+held ordering, polling/backoff and paging. `viewer.js` remains the browser host
+adapter for domain calculations, history, scroll capture/restore and embedding
+callbacks; it contains no legacy screen renderer or DOM factory.
+
+The shared prefix initializes once when shell and viewer assets coexist. Consumer
+bundles already include it: **do not prepend `shell::COMPONENT_JS`** to output from
+`ui/build.mjs`. The Rust constant remains available for custom hosts. Application
+HTML sinks and inline styles remain banned; measured geometry is finite numeric
+CSSOM data, with stylesheet cleanup on disposal. External log links require HTTP(S),
+`target="_blank"` and `rel="noopener noreferrer"`.
 
 External consumers: `node ui/build.mjs --entry /absolute/consumer.ts --output /absolute/consumer.generated.js`
 (typecheck, source security and one pinned Preact runtime). Repeat with `--check`
@@ -101,4 +111,5 @@ history, live holds and focus return. Destroy is idempotent; stale controls cann
 revive a disposed panel. Destroying an unused panel emits no callbacks. Destroy
 an active panel before disposing its host; a detached active dialog also releases
 guards on the next wheel/touch event. Session menu, full tool details and Analytics
-work items consume this API; other sheets remain legacy.
+work items consume this API. Filters, child runs, image dialogs and search sheets
+have typed lifecycle controllers and independently owned body roots.

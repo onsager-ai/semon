@@ -1,5 +1,21 @@
 # Shared UI changes
 
+## 2026-10-03 — complete screen and controller migration
+
+Typed native Preact owns every viewer screen, transcript entry, sheet body and
+Find/error mode. Shared typed model/delta, routes, cache, ordering, polling and
+paging controllers replace corresponding global orchestration. Browser history,
+scroll transactions and domain calculations remain in the JavaScript host adapter.
+Typed Select and tooltip preserve native shell APIs and dismissal/cleanup behavior.
+Measured geometry uses finite numeric stylesheet rules; application HTML/style
+sink restrictions remain in force.
+
+**Consumer build contract:** generated viewer and external consumer bundles now
+include the shared production prefix. Remove any extra `shell::COMPONENT_JS`
+prepend when serving them. The constant remains for custom script hosts. Viewer
+and shell assets loaded together share one runtime/control instance. Rust builds
+still require no Node; asset URLs, embedding events and native form APIs persist.
+
 ## 2026-10-03 — shared top-bar panel pilot
 
 Added `createPanelChrome`, `PanelChrome`, `PanelHost` and `PanelOptions`.

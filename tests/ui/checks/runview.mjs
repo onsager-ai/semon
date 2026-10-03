@@ -36,7 +36,7 @@ export default async function runView(browser) {
     await page.locator(".agent-more").click();
     r.expect(await page.locator(".agent-row[data-agent-id]").count() === 15, tag + ": all 15 participating agents can be opened");
     if (size === "phone") r.expect(await page.locator(".agent-row").evaluateAll((rows) => rows.every((n) => n.getBoundingClientRect().height >= 44)), tag + ": agent rows have 44px targets");
-    const dimensions = await page.evaluate(() => ({ sideways: document.documentElement.scrollWidth - innerWidth, badBars: [...document.querySelectorAll(".agent-segment")].filter((b) => !Number.isFinite(parseFloat(b.style.left)) || !Number.isFinite(parseFloat(b.style.width))).length }));
+    const dimensions = await page.evaluate(() => ({ sideways: document.documentElement.scrollWidth - innerWidth, badBars: [...document.querySelectorAll(".agent-segment")].filter((b) => !Number.isFinite(parseFloat(getComputedStyle(b).left)) || !Number.isFinite(parseFloat(getComputedStyle(b).width))).length }));
     r.expect(dimensions.sideways <= 0 && dimensions.badBars === 0, tag + ": shared axis fits the viewport with finite positions");
     await page.screenshot({ path: path.join(ENV.out, "runview-" + tag + ".png") });
     if (size === "desktop") {

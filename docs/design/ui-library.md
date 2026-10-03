@@ -2,6 +2,32 @@
 
 ## Current library decision — 2026-10-02
 
+### Remaining migration implemented — 2026-10-03
+
+All screens, sheet bodies, top-bar Find/error modes, rich text, attachments and
+transcript entries now use native typed Preact roots. Keyed dirty-turn commits
+retain expansion and unchanged node identity; measurement commits before browser
+scroll restoration. Shared typed controllers provide validated model/delta data,
+routes, bounded transcript caching, held ordering, polling/backoff and paging.
+The JavaScript browser host adapter retains domain calculations, history and
+scroll transactions, and embedding integration. It no longer constructs screen
+markup or morphs transcript DOM. This is component/controller migration, not a
+claim that every host integration line is TypeScript.
+
+Typed Select and tooltip replace the legacy shared scripts. One guarded production
+prefix supplies the same Preact/control instance to viewer, native shell and Hub
+consumer entries. `ui/build.mjs` consumer output includes the prefix: consumers
+must stop prepending `shell::COMPONENT_JS`. The constant remains public for custom
+hosts. No compat/router dependency, asset URL or event contract changes. Numeric
+measurement uses finite CSSOM rules; application HTML sinks and inline styles
+remain banned. HTTP(S) log anchors require explicit new-tab isolation.
+
+Visual references and performance limits are unchanged. Tests formerly requiring
+replaced nodes now require retained keyed identity and the same user behavior;
+explicit tooltip target replacement remains covered. Integration and rollout
+status belongs to #224 and the source/Hub PRs; this source record does not claim
+merged pins or production acceptance.
+
 ### Stage 4 panel pilot — 2026-10-03
 
 Stage 3 is merged/adopted: Semon `26da6ef`, Hub `eb45207`, both Hub pins

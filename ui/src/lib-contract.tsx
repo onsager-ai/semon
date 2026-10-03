@@ -36,3 +36,5 @@ export function mountRecentExample(container: HTMLElement, host: RecentHost, sna
 }
 
 export { createPanelChrome } from './lib';
+export { createFacetChrome, renderSessionsScreen, releaseScreen, createMarkdown, renderSessionMenu, createImageViewer } from './lib';
+export { createMeasuredLayout } from './lib';
