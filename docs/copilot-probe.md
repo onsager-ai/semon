@@ -1,6 +1,8 @@
-# Copilot CLI persistence probe (in progress)
+# Copilot CLI persistence capability contract
 
-Tracking: #238 under #235. The capability contract is not yet accepted.
+Tracking: #238 under #235. Probe result: **go for the bounded version-1 adapter
+contract below**. Production work remains gated on acceptance of #237 and #238;
+this document does not claim an implemented adapter.
 
 Pinned runtime: npm `@github/copilot` / `@github/copilot-linux-x64` 1.0.91,
 package build `216810c5`, Linux x86_64. The same offline probe also passes
@@ -40,7 +42,7 @@ codes, and exclusion of ephemeral events from the saved log.
 | Messages | `data.messageId`, assistant `originatingMessageId` | Exact IDs; no text-similarity linking |
 | Tools | start `toolCallId`, `toolName`, `arguments`; complete same `toolCallId`, `result.content`, `shellExecution.exitCode` | Two overlapping same-name calls, completion order reversed in recording |
 | Error semantics | `success = true` alongside `shellExecution.exitCode = 1` | Tool protocol success differs from command success |
-| Shutdown | `session.shutdown`, per-model `modelMetrics` | Mock sent no token counts; native token/billing accounting unverified |
+| Shutdown | `session.shutdown`, per-model `modelMetrics` | Later lifecycle/task probes establish cumulative mock counts; no native billing claim |
 | Other storage | workspace YAML, SQLite session store plus WAL/SHM, logs, rewind snapshots | Not approved mirror inputs; no DB/WAL copying |
 | Ephemeral stream | stdout model calls, deltas, idle and background changes absent in saved log | Live observations cannot be prerequisites for historical browsing |
 
@@ -49,15 +51,14 @@ with `/fixture/probe`. Its manifest distinguishes the original raw hash from the
 transformed fixture hash. It is a transformed runtime recording, not an exact
 copy of retained native evidence. It contains no real user session.
 
-## Remaining gate
+## Supported boundary and unknown capabilities
 
 Releases before 1.0.90, logical forks, unprobed subagent execution modes,
 native billing, explicit approval identities, native truncation, mutable records,
 retention/deletion and non-Linux platforms remain unverified.
 The parent event chain and `parentAgentTaskId` must not be interpreted as a
-logical parent session without additional source evidence. No supported-version
-or complete-trajectory promise is made yet. Follow-up probes must establish
-what is authoritative before discovery, cursor or mirror code is implemented.
+logical parent session without additional source evidence. The supported subset is pinned below. A missing tool completion remains
+unmatched: cancellation does not justify a complete-trajectory promise.
 
 Repeat with the prior binary and `--expected-version 1.0.90` to reproduce the
 prior release; its manifest is in `copilot-1.0.90/`. No compatibility claim is
@@ -156,4 +157,61 @@ native bill. The synthetic summary increases the measured post-compaction token
 count in this short probe; no compression-quality promise follows.
 
 Native file truncation, automatic deletion/retention, logical forks and other
-platforms remain unknown. These observations advance #238 without accepting it.
+platforms remain unknown. These observations support the bounded go decision below. Issue acceptance
+still requires the baseline and contract review; no production adapter is implied.
+
+
+## Go decision and implementation boundary
+
+Exact persisted call IDs join both overlapping same-name tool requests to their
+starts and reversed results on releases 1.0.90 (`ccf052b4`) and 1.0.91
+(`216810c5`). This meets the tool-trajectory viability gate. Proceed with a
+focused adapter for these pinned Linux x86_64 version-1 records after the baseline
+repairs are accepted. Do not require stdout events, hooks, a running CLI, the SDK
+or private SQLite files to browse historical sessions.
+
+| Capability | Supported evidence and adapter rule | Unsupported or unknown |
+| --- | --- | --- |
+| Discovery and versions | Read `COPILOT_HOME/session-state/<sessionId>/events.jsonl`; default home is `~/.copilot`. Check saved `session.start.data.version` and `copilotVersion`. Explicit configured input roots take precedence. | Older/newer releases and future schemas have no compatibility claim; diagnose unsupported formats without migrating native storage or launching the CLI. |
+| Session, event and message identity | Scope native IDs by machine, harness, session and source generation. Preserve event `id`/`parentId`, message IDs and explicit originating-message joins. | An event-chain parent, `parentAgentTaskId`, cwd or timestamp does not establish logical session lineage. |
+| Tools and outcomes | Exact `toolCallId` request/start/result joins; retain arguments, outputs, explicit protocol errors and shell exit codes. Interpret protocol success separately from shell exit status. | Never join by tool name/order. Absent completion, exit code or error stays unknown. |
+| Resume and mutation | Same-session resume appends to an unchanged prefix. Manual compaction also appends; retain prior events and structural checkpoint references. Verify complete consumed prefixes on every changed-file resume and reconcile explicitly source-owned projections. | Native truncation, in-place mutation, automatic rotation and retention policy were not observed. Collector replacement handling is a Semon requirement verified with source-shaped inputs, not a native-runtime claim. |
+| Cancellation and denial | Retain observed abort reason tags and denied tool results. A denial start is not proof of shell execution; an abort without a call ID cannot complete a pending call. | No persisted folder-trust or standalone approval identity is established; no per-call cancellation result may be invented. |
+| Task and child messages | Preserve `subagent.started/completed` and message `parentToolCallId`, `originatingMessageId`, interaction and turn IDs as explicit task relationships within the physical session. | No `agentId`, separate child-session identity or logical fork parent was observed. Other subagent modes remain unverified. |
+| Usage and cost | Present per-model shutdown metrics are cumulative snapshots. Resume selects the latest snapshot rather than summing snapshots. Child totals are already included. Keep compaction usage in its separately reported category. Preserve missing fields as absent. | Per-message usage, complete billing units, prices and native invoice totals are not established. A price-table estimate must be labelled separately from reported cost. |
+| Interactive versus headless | Both modes persist their tested user/assistant turns. Historical behavior uses only saved records. | PTY trust acceptance and mock-provider input checks are live observations; ephemeral stdout events cannot supply historical facts. |
+| Platform and source lifetime | Pinned Linux x86_64 native executions use private, fresh roots. Semon must read native homes without writes and preserve retained native/raw evidence privately. | Other platforms and native retention/deletion defaults are unknown. No automatic pruning or live DB/WAL mirroring. |
+
+The authoritative historical input is the saved JSONL. Workspace YAML, SQLite
+and WAL/SHM, debug logs, rewind snapshots and checkpoint Markdown are outside the
+initial discovery/mirror allowlist. Public fixtures remove prompt-rich harness
+payloads and private paths; native records captured by Semon remain private raw
+evidence. A remote viewing copy follows the existing redaction contract and
+cannot be used as a recovery source. Unknown or malformed complete records must
+remain retained without inventing transferable semantics.
+
+## Provenance, confidence and remaining work
+
+All four probe families (`copilot-offline.py`, `copilot-lifecycle.py`,
+`copilot-subagent.py`, `copilot-boundaries.py`) ran against both pinned binaries
+with localhost synthetic model responses and minimal child environments. Their
+versioned manifests bind executable hashes, probe/source hashes, native source
+hashes, transformed fixture hashes and declared transformations. Runtime/mock
+confidence establishes persistence shape and exact joins; it does not establish
+real model quality or billing. Help establishes the default home; non-observed
+retention and platforms remain unknown. The offline fixture validator checks
+these saved artifacts and never launches a native harness.
+
+Re-estimate after the probe: historical discovery/indexing/paging and CLI/viewer
+integration (#239) 4–6 engineer-days; durable continuous collection and
+replacement parity (#240) 2–3; redacted mirror/allowlist/ACK parity (#241) 2–3;
+release matrix, security checks and documentation (#242) 1–2. Combined adapter
+work is 9–14 engineer-days, excluding remaining Claude/Codex baseline repairs.
+Reuse existing source custody, marker/link support and mirror transport; do not
+introduce a universal adapter framework or rewrite trace storage. These are
+planning estimates, not elapsed execution promises.
+
+No-go applies to claims of arbitrary-version/platform support, inferred logical
+forks or approvals, automatic native retention semantics, complete trajectories
+with missing results, or billing accuracy. Those claims require additional native
+evidence and are not prerequisites for the explicitly limited adapter above.

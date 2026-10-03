@@ -66,9 +66,10 @@ from saved events. Pinned 1.0.90 and 1.0.91 probes now cover concurrent tool
 completion, same-session resume and explicit shell denial. Saved shutdown
 metrics accumulate across resume under synthetic mock usage; their native billing
 units remain unknown. See [the detailed probe](copilot-probe.md) for fixture
-provenance and observed boundaries. Interactive execution, logical forks,
-approval identities, compaction and mutation behavior remain unverified. #238
-is not yet accepted and the adapter implementation gate remains open.
+provenance, interactive persistence, cancellation, manual compaction and the
+bounded go/no-go capability contract. Logical forks, persisted approval IDs,
+native mutation/retention and billing remain unknown. #238 is not yet accepted;
+production adapter work still depends on acceptance of #237 and #238.
 
 ## Versioned Claude and Codex native baselines
 
