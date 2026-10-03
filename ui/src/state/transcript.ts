@@ -17,6 +17,7 @@ export class TranscriptStore {
   readonly cache = new TranscriptCache<Entry, TranscriptMeta>();
   readonly paging = createPagingStore();
   private readonly requests = new Set<AbortController>();
+  private readonly replacements = new Map<string, AbortController>();
   private disposed = false;
   constructor(private readonly host: TranscriptHost) {}
   spread(sid: string) {
@@ -29,11 +30,13 @@ export class TranscriptStore {
     }
   }
   clearPaging(sid: string) { this.paging.clear(sid); this.host.cleared(sid); }
-  drop(sid: string) { this.clearPaging(sid); delete this.entries[sid]; delete this.meta[sid]; }
+  private cancelReplacement(sid: string) { this.replacements.get(sid)?.abort(); this.replacements.delete(sid); }
+  drop(sid: string) { this.cancelReplacement(sid); this.clearPaging(sid); delete this.entries[sid]; delete this.meta[sid]; }
   async fetch(sid: string, query = '', direction?: PageDirection, signal?: AbortSignal, onPage?: () => void) {
     if (this.disposed || signal?.aborted) return;
     const controller = new AbortController(), abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true }); this.requests.add(controller);
+    if (!direction) { this.cancelReplacement(sid); this.replacements.set(sid, controller); }
     const mark = this.marks[sid], range = this.meta[sid], boundary = direction === 'before' ? range?.from : range?.to;
     try {
       const response = await this.host.request('/api/tx?sid=' + encodeURIComponent(sid) + (query ? '&' + query : ''), controller.signal);
@@ -45,7 +48,8 @@ export class TranscriptStore {
       Object.assign(this.meta[sid], { total: page.total, calls: page.calls, errors: page.errors, watchTok: mark });
       if (direction !== 'before' && page.to >= page.total) { this.meta[sid].tok = mark; this.meta[sid].newer = 0; }
       this.spread(sid); onPage?.();
-    } finally { this.requests.delete(controller); signal?.removeEventListener('abort', abort); }
+    } catch (error) { if (!this.disposed && !controller.signal.aborted) throw error; }
+    finally { this.requests.delete(controller); signal?.removeEventListener('abort', abort); if (this.replacements.get(sid) === controller) this.replacements.delete(sid); }
   }
   keep(sid: string, entries: Entry[] | undefined, meta: TranscriptMeta | undefined, origin: boolean) {
     if (!entries || !meta || meta.to < meta.total || meta.tok == null || this.staleBriefs.has(sid) || meta.origin !== origin) return;
@@ -53,6 +57,7 @@ export class TranscriptStore {
   }
   adoptCached(sid: string, turn?: string): boolean {
     const cached = this.cache.get(sid); if (!cached) return false;
+    this.cancelReplacement(sid);
     this.cache.delete(sid); this.entries[sid] = cached.entries; this.meta[sid] = cached.meta;
     if (!turn) return true;
     this.spread(sid); const target = this.host.turn(turn);
@@ -62,6 +67,7 @@ export class TranscriptStore {
   destroy() {
     if (this.disposed) return; this.disposed = true;
     for (const request of this.requests) request.abort(); this.requests.clear();
+    this.replacements.clear();
     this.paging.destroy(); this.cache.clear(); this.staleBriefs.clear();
     for (const id of Object.keys(this.entries)) delete this.entries[id]; for (const id of Object.keys(this.meta)) delete this.meta[id];
   }

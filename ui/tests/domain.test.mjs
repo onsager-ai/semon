@@ -20,6 +20,10 @@ test('hostile optional values fail before domain normalization can commit',()=>{
  }
  const model=fixture();model.handoffs[0].kind='unknown';assert.throws(()=>normalizeModel(model),/Invalid handoff/);
 });
+test('handoff briefs are required strings before renderable state is adopted',()=>{
+ for(const brief of [undefined,null,{},42]) {const model=fixture();model.handoffs[0].brief=brief;assert.throws(()=>normalizeModel(model),/Invalid/);}
+ const model=fixture();model.handoffs[0].brief='';assert.equal(normalizeModel(model).handoffs[0].brief,'');
+});
 test('cyclic ancestry and traces stop; totals preserve unknown prices and zero figures',()=>{
  const model=fixture(); model.sessions.s.parent='c';const {domain:d}=domain(model);
  assert.deepEqual(d.lineageOf('s').map(s=>s.id),['c','s']);assert.deepEqual(d.descendantsOf('s',d.sessionChildren()).map(s=>s.id),['c']);
