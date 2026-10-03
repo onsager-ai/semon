@@ -62,3 +62,23 @@ what is authoritative before discovery, cursor or mirror code is implemented.
 Repeat with the prior binary and `--expected-version 1.0.90` to reproduce the
 prior release; its manifest is in `copilot-1.0.90/`. No compatibility claim is
 made for older releases or future schemas.
+
+## Native task and subagent persistence
+
+`tests/spikes/copilot-subagent.py` reproduces a synthetic `task` invocation with
+pinned 1.0.90 or 1.0.91 using the same private-root, offline environment policy.
+All root and child model responses come from the localhost mock. Each version's
+`subagent/task.events.jsonl` records one physical session containing
+`subagent.started`, `subagent.completed` and child messages whose explicit
+`parentToolCallId` joins the task's request and result. Child assistant
+`originatingMessageId` also joins its user message. Manifests retain executable
+and source hashes and declare every transformation.
+
+This is a native tool relationship. No explicit logical parent session was
+observed, and `parentAgentTaskId` also appears on root user messages, so it does
+not establish session lineage. No separate child session file was observed.
+
+The mock child reports 14 total tokens. Session shutdown reports three requests
+with 33 input, 9 output and 6 cache-read tokens, already including that child.
+Adding the child total again would double count. These synthetic measurements
+establish persisted accounting shape; native billing units remain unknown.

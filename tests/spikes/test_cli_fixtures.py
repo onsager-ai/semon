@@ -29,6 +29,47 @@ class CompatibilityFixtures(unittest.TestCase):
             self.assertEqual(environment['TMPDIR'], str(output / 'tmp'))
             self.assertEqual(ambient, original, 'parent settings must remain intact')
 
+    def test_copilot_exact_subagent_edges_and_inclusive_mock_usage(self):
+        for version in ('1.0.90', '1.0.91'):
+            with self.subTest(version=version):
+                directory = ROOT / f'copilot-{version}' / 'subagent'
+                manifest = json.loads((directory / 'manifest.json').read_text())
+                data = (directory / manifest['fixture_path']).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), manifest['fixture_sha256'])
+                self.assertNotIn(b'/workspace/', data)
+                self.assertRegex(manifest['binary_sha256'], r'^[a-f0-9]{64}$')
+                rows = list(map(json.loads, data.splitlines()))
+                starts = [r['data'] for r in rows if r['type'] == 'subagent.started']
+                completed = [r['data'] for r in rows if r['type'] == 'subagent.completed']
+                self.assertEqual(len(starts), 1)
+                self.assertEqual(len(completed), 1)
+                call = starts[0]['toolCallId']
+                self.assertEqual(call, completed[0]['toolCallId'])
+                requests = [c for r in rows if r['type'] == 'assistant.message'
+                            for c in r['data'].get('toolRequests', [])]
+                self.assertEqual([c['toolCallId'] for c in requests], [call])
+                results = [r['data'] for r in rows if r['type'] == 'tool.execution_complete']
+                self.assertEqual([r['toolCallId'] for r in results], [call])
+                child = [r['data'] for r in rows if r['type'] == 'assistant.message'
+                         and r['data'].get('parentToolCallId') == call]
+                self.assertEqual(len(child), 1)
+                users = {r['data']['messageId'] for r in rows if r['type'] == 'user.message'}
+                self.assertIn(child[0]['originatingMessageId'], users)
+                metrics = [r['data']['modelMetrics']['gpt-4'] for r in rows
+                           if r['type'] == 'session.shutdown']
+                self.assertEqual(len(metrics), 1)
+                self.assertEqual(metrics[0]['requests']['count'], 3)
+                self.assertEqual((metrics[0]['usage']['inputTokens'],
+                                  metrics[0]['usage']['outputTokens'],
+                                  metrics[0]['usage']['cacheReadTokens']), (33, 9, 6))
+                self.assertEqual(completed[0]['totalTokens'], 14)
+                self.assertEqual(completed[0]['totalToolCalls'], 0)
+                for r in rows:
+                    if r['type'] == 'session.start':
+                        self.assertEqual(r['data']['copilotVersion'], version)
+                    if r['type'] == 'system.message':
+                        self.assertEqual(r['data'], {'content': '[fixture: native system prompt removed]'})
+
     def test_native_baseline_provenance_and_hashes(self):
         for fixture in ('claude-2.1.288', 'codex-0.159.0-alpha.3'):
             with self.subTest(fixture=fixture):

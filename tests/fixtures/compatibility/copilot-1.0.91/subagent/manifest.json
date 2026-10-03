@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "harness": "GitHub Copilot CLI",
+  "harness_version": "1.0.91",
+  "build": "216810c5",
+  "binary_sha256": "5ba1d69542af6fd91702d4dbf4845f41c0a29efa3e9bc56fcc308347ff70ff3e",
+  "os": "Linux x86_64",
+  "execution_mode": "headless -p, offline localhost mock; synthetic native task runtime",
+  "storage_schema": {
+    "session.start.version": 1
+  },
+  "home_override": "COPILOT_HOME=/workspace/scratch/235-subagent-repro-final-91/home (new private disposable root)",
+  "evidence_origin": "native CLI persistence with deterministic mock model",
+  "original_source_sha256": "2934648f9310b66c41460b1ee6fc49d014cd69014a246ebf3550336711c2120b",
+  "fixture_path": "task.events.jsonl",
+  "fixture_sha256": "6c68c91fe7654a2f54924f114b37ea135ca7f8b1ee0c2cfe3acacfef5fe5b72d",
+  "transformations": [
+    "Removed native system.message payload",
+    "Replaced disposable absolute root with /fixture/copilot-subagent",
+    "Replaced session UUID consistently; all event/message/call/agent identifiers retained"
+  ],
+  "observed": [
+    "One persisted physical session file includes root and child messages",
+    "Exact task toolCallId joins subagent.started/completed and child parentToolCallId",
+    "Three cumulative mock requests include child usage; child totalTokens must not be added again"
+  ],
+  "limitations": [
+    "Mock tokens, no native billing claim",
+    "Exact native task edge does not establish logical parent session lineage",
+    "parentAgentTaskId appears on root and child user records; no session lineage inferred",
+    "No independent child session file observed; interactive/cancellation/compaction and retention unknown"
+  ]
+}
