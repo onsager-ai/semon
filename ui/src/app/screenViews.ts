@@ -1,3 +1,4 @@
+import type { createDomain } from "../domain/calculations";
 import { compactCount,machineShorts,preview } from "../domain/format";
 import { createTraceCalculations } from "../domain/trace";
 import type { Entry,Handoff,Session,TokenKind,Turn } from '../domain/types';
@@ -5,6 +6,7 @@ import type { HarnessMark,InboxRow,LiveRow,MenuRun,SentencePart,SessionMenuSnaps
 import { renderHomeScreen,renderMachineScreen,renderMachinesScreen,renderSessionScreen,renderTraceScreen } from "../lib";
 import type { Hop } from '../lib/trace';
 type ToolEntry = Extract<Entry, {k: 'tool'}> & {full?: boolean; scriptLoaded?: boolean};
+type Domain = ReturnType<typeof createDomain>;
 interface ScreenViewsHost {
   costForSession: (sid: string, includeRuns?: boolean) => Required<import("../domain/types").Cost>;
   costMissing: (cost: import("../domain/types").Cost) => string[];
@@ -52,18 +54,18 @@ interface ScreenViewsHost {
   go: (r: import("../navigation/routes").ApplicationRoute, fromHistory?: boolean, prepared?: boolean, nextContent?: import("../viewer-host").ViewerContent | null) => void;
   byState: (a: import("../domain/types").Session, b: import("../domain/types").Session) => number;
   STARTS: Map<string, import("../domain/types").Turn>;
-  domain: { invalidate: () => void; nameOf: (id: string) => string; hcls: (id: string) => string; where: (s: import("../domain/types").Session) => string; hostOf: (s: import("../domain/types").Session) => string; machineLabels: (scope?: Iterable<string | import("../domain/types").Session>) => Map<any, any>; machineLabel: (s: import("../domain/types").Session | null | undefined, scope?: Iterable<string | import("../domain/types").Session> | undefined) => any; branchOf: (s: import("../domain/types").Session) => string; shortHost: (s: import("../domain/types").Session) => string; parentOf: (sid: string) => string | undefined; originHandoff: (sid: string) => import("../domain/types").Handoff | undefined; RANK: Partial<Record<import("../domain/types").SessionState, number>>; isResult: (h: import("../domain/types").Handoff) => boolean; inbox: () => import("../domain/types").Handoff[]; working: () => import("../domain/types").Session[]; answersOf: (h: import("../domain/types").Handoff) => string[] | null; statWord: (h: import("../domain/types").Handoff) => string | undefined; hasTurn: (t: import("../domain/types").Turn) => boolean; oneLine: (s: string) => string; TOYOU: Record<string, string>; turnEnd: (t: import("../domain/types").Turn) => { st: import("../domain/types").SessionState; text: string; } | null; traceRoot: (t: import("../domain/types").Turn) => import("../domain/types").Turn; countOf: (s: import("../domain/types").Session, key: "calls" | "errors") => number | null; callsText: (calls: number | null | undefined) => string; sessionChildren: () => Map<string, import("../domain/types").Session[]>; childSessions: (sid: string) => import("../domain/types").Session[]; descendantsOf: (sid: string, children: ReadonlyMap<string, import("../domain/types").Session[]>, out?: import("../domain/types").Session[], seen?: Set<string>) => import("../domain/types").Session[]; TOTAL_TOKEN_KINDS: import("../domain/types").TokenKind[]; TOKEN_KINDS: [import("../domain/types").TokenKind, string][]; asMoney: (usd: number) => string; usageTotal: (s: import("../domain/types").Session) => number; costForSessions: (sessions: Iterable<import("../domain/types").Session>) => Required<import("../domain/types").Cost>; costForSession: (sid: string, includeRuns?: boolean) => Required<import("../domain/types").Cost>; costText: (cost: import("../domain/types").Cost) => string; costMissing: (cost: import("../domain/types").Cost) => string[]; TREE_RANK: Record<import("../domain/types").SessionState, number>; urgentDescendant: (sid: string, children: ReadonlyMap<string, import("../domain/types").Session[]>) => import("../domain/types").SessionState; childParts: (all: import("../domain/types").Session[]) => (string | 0)[]; defaultTreeOpen: (sid: string, children: ReadonlyMap<string, import("../domain/types").Session[]>) => boolean; kidRank: (c: import("../domain/types").Session, children: ReadonlyMap<string, import("../domain/types").Session[]>) => number; lineageOf: (sid: string) => import("../domain/types").Session[]; byState: (a: import("../domain/types").Session, b: import("../domain/types").Session) => number; onMachine: (m: string) => import("../domain/types").Session[]; movedOff: (m: string) => import("../domain/types").Session[]; movesOf: (m: string) => import("../domain/types").Handoff[]; shortMoney: (usd: number) => string; };
+  domain: Domain;
   NOW: number;
   TURN: Map<string, import("../domain/types").Turn>;
   sentenceHost: import("../lib/sentence").SentenceHost;
-  machineLabel: (s: import("../domain/types").Session | null | undefined, scope?: Iterable<string | import("../domain/types").Session> | undefined) => any;
+  machineLabel: Domain['machineLabel'];
   hcls: (id: string) => string;
   hostOf: (s: import("../domain/types").Session) => string;
   sentenceSnapshot: (h: import("../domain/types").Handoff, viewer: string | null | undefined, links?: boolean) => import("../lib/sentence").SentenceSnapshot;
   turnEnd: (t: import("../domain/types").Turn) => { st: import("../domain/types").SessionState; text: string; } | null;
   statWord: (h: import("../domain/types").Handoff) => string | undefined;
   SEEN_RESULTS: Set<string>;
-  machineLabels: (scope?: Iterable<string | import("../domain/types").Session>) => Map<any, any>;
+  machineLabels: Domain['machineLabels'];
   transcriptEntries: (entries: import("../domain/types").Entry[], sid: string) => import("../domain/types").Entry[];
   TX: Record<string, import("../domain/types").Entry[]>;
   transcriptSnapshot: (sid: string, opts?: { only?: ReadonlySet<string> | undefined; }) => import("../lib/transcript").SessionSnapshot;
