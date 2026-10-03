@@ -1,4 +1,4 @@
-import { parseAccount, createAccountChrome, createShellChrome, renderShellNavigation, createRecentRenderer } from "../../../ui/src/account-adapter";
+import { parseAccount, createAccountChrome, createShellChrome, renderShellNavigation, createRecentRenderer, createPanelChrome } from "../../../ui/src/account-adapter";
 import { getViewerHost } from "../../../ui/src/viewer-host";
 queueMicrotask(() => {
   // ====================================================================================
@@ -1504,16 +1504,11 @@ queueMicrotask(() => {
   // A phone gets a bottom sheet; a desktop a dialog, or for the session menu a panel that hangs from its button. Each is a
   // history entry, so back closes it without leaving the page, and a live update waits until it closes.
   function panel(title, opts = {}) {
-    const d = el("dialog", "panel" + (opts.cls ? " " + opts.cls : "")); d.setAttribute("aria-label", opts.label ?? title);
-    const head = el("div", "panel-h"); head.append(el("div", "panel-t", title)); if (opts.sub) head.append(el("div", "panel-sub", opts.sub));
-    const close = btn("ibtn", null, "Close"); close.append(icon(I.x)); close.addEventListener("click", () => d.close()); head.append(close);
-    const body = el("div", "panel-b"); body.tabIndex = -1; d.append(head, body); document.body.append(d);
-    d.addEventListener("click", (ev) => { if (ev.target === d) d.close(); });
-    d.addEventListener("close", () => { d.remove(); document.documentElement.classList.remove("panel-open"); opts.onClose?.(); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } if (LIVE.pending) refresh(); });
-    const hold = (e) => { if (!d.open || !d.isConnected) return; if (!body.contains(e.target) || body.scrollHeight <= body.clientHeight + 1) e.preventDefault(); };
-    d.addEventListener("close", () => { for (const type of ["wheel", "touchmove"]) document.removeEventListener(type, hold, { capture: true }); });
-    const open = () => { viewerEl = d; for (const type of ["wheel", "touchmove"]) document.addEventListener(type, hold, { capture: true, passive: false }); document.documentElement.classList.add("panel-open"); d.showModal(); body.focus({ preventScroll: true }); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} };
-    return { d, body, show: open };
+    const chrome = createPanelChrome({ title, className: opts.cls, label: opts.label, sub: opts.sub }, {
+      opened() { viewerEl = chrome.dialog; document.documentElement.classList.add("panel-open"); try { history.pushState({ ...route, sheet: 1, scrollTop: currentScroll() }, ""); } catch {} },
+      closed() { const d = chrome.dialog; document.documentElement.classList.remove("panel-open"); opts.onClose?.(); if (viewerEl === d) { viewerEl = null; if (history.state?.sheet) { skipPop = true; history.back(); } else if (pendingSessionOpen) { const id = pendingSessionOpen; pendingSessionOpen = null; goSession(id); } } if (LIVE.pending) refresh(); },
+    });
+    return { d: chrome.dialog, body: chrome.body, show: () => chrome.show() };
   }
 
   // The session menu: actions, then details, then cost. It is the one place for all three.

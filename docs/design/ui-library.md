@@ -2,6 +2,23 @@
 
 ## Current library decision — 2026-10-02
 
+### Stage 4 panel pilot — 2026-10-03
+
+Stage 3 is merged/adopted: Semon `26da6ef`, Hub `eb45207`, both Hub pins
+`26da6ef`; all exact-main workflows pass. The next bounded source slice exports
+`createPanelChrome`, `PanelOptions`, `PanelHost` and `PanelChrome`. Session menu,
+full tool details and Analytics work items consume its Preact header/native dialog
+lifecycle. `.panel-b` is host-owned; screen bodies, history, pending navigation,
+focus return and live refresh stay outside the library. Synchronous show commits
+focus before the opened callback; close unmounts/removes listeners before the
+one-shot closed callback. Destroy is idempotent and stale controls are inert.
+The independent consumer covers phone/desktop × light/dark, hostile strings,
+native dismissal, scroll guards and cleanup. No shared screen/model global,
+router or poller is introduced. Other sheets/screens remain future bounded work;
+transcript/paging/live orchestration stays last. Hub pin and rollout are separate.
+
+### Account and shell contract record
+
 [#224](https://github.com/onsager-ai/semon/issues/224) selects native **Preact + TypeScript/TSX + esbuild**, superseding the custom `h()` factory in the historical plan below. See [tsx.md](tsx.md#current-decision--2026-10-02) for the current baseline, build, scheduling, security and measured bundle costs. Source stays in Semon's top-level `ui/`; Hub consumes a pinned submodule rather than maintaining a second framework implementation.
 
 The source library exports `AccountMenu`, `AccountMenuProps`, `Account`,

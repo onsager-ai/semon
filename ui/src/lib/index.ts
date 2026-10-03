@@ -10,3 +10,5 @@ export { createShellChrome, renderShellNavigation } from './shell';
 export type { ShellChrome, ShellHost, ShellDestination, ShellSlots, ShellBar } from './shell';
 export { createRecentRenderer } from './recent';
 export type { RecentRenderer, RecentHost, RecentSnapshot, RecentItem } from './recent';
+export { createPanelChrome } from './panel';
+export type { PanelChrome, PanelHost, PanelOptions } from './panel';
