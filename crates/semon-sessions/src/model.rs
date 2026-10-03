@@ -1524,11 +1524,13 @@ struct Builder<'a> {
     sessions: Vec<Sess>,
     of_file: Vec<usize>,
     by_key: HashMap<String, usize>,
+    by_native: HashMap<(&'static str, String), usize>,
+    native_harnesses: HashMap<String, BTreeSet<&'static str>>,
     handoffs: Vec<H>,
     placed: HashMap<Ref, Vec<(usize, Place)>>,
     head: HashMap<usize, usize>,
     after: HashMap<Ref, usize>,
-    tools: HashMap<String, Ref>,
+    tools: HashMap<(usize, String), Ref>,
     /// Background Bash calls and their first terminal notification, scoped to a session.
     backgrounds: HashMap<Ref, Option<Ref>>,
     bg_ends: HashMap<Ref, Ref>,
@@ -1594,6 +1596,13 @@ impl<'a> Builder<'a> {
             sessions: Vec::new(),
             of_file: vec![usize::MAX; files.len()],
             by_key: HashMap::new(),
+            by_native: HashMap::new(),
+            native_harnesses: files.iter().fold(HashMap::new(), |mut ids, file| {
+                ids.entry(file.id.clone())
+                    .or_default()
+                    .insert(file.harness());
+                ids
+            }),
             handoffs: Vec::new(),
             placed: HashMap::new(),
             head: HashMap::new(),
@@ -1648,14 +1657,29 @@ impl<'a> Builder<'a> {
 
     fn add_session(
         &mut self,
-        key: String,
+        mut key: String,
         kind: SessKind,
         files: Vec<usize>,
         out: Session,
     ) -> usize {
         let index = self.sessions.len();
+        // Native IDs belong to a harness. Keep the established viewer key when
+        // unambiguous, and qualify only collisions without changing source IDs.
+        let harness = out.harness;
+        if self
+            .native_harnesses
+            .get(&key)
+            .is_some_and(|harnesses| harnesses.iter().any(|other| *other != harness))
+        {
+            key = format!("{harness}:{key}");
+            while self.native_harnesses.contains_key(&key) || self.by_key.contains_key(&key) {
+                key.insert(0, ':');
+            }
+        }
         for file in &files {
             self.of_file[*file] = index;
+            self.by_native
+                .insert((harness, self.files[*file].id.clone()), index);
         }
         self.by_key.insert(key.clone(), index);
         self.sessions.push(Sess {
@@ -2308,17 +2332,16 @@ impl<'a> Builder<'a> {
                 if event.k == Kind::Tool
                     && let Some(id) = &event.id
                 {
-                    self.tools.entry(id.clone()).or_insert((position, at));
+                    self.tools
+                        .entry((self.of_file[position], id.clone()))
+                        .or_insert((position, at));
                 }
             }
         }
     }
 
     fn find_in(&self, session: usize, id: &str) -> Option<Ref> {
-        self.tools
-            .get(id)
-            .copied()
-            .filter(|at| self.of_file[at.0] == session)
+        self.tools.get(&(session, id.to_owned())).copied()
     }
 
     /// Whether a background call's shell can still be running: only while a
@@ -2410,10 +2433,18 @@ impl<'a> Builder<'a> {
                 continue;
             };
             let child = self.of_file[position];
-            let call = meta
-                .tool_use_id
-                .as_deref()
-                .and_then(|id| self.tools.get(id).copied());
+            let call = meta.tool_use_id.as_deref().and_then(|id| {
+                if let Some(&parent) = self.by_native.get(&("claude", meta.parent.clone())) {
+                    return self.find_in(parent, id);
+                }
+                // An absent parent can be resolved only by a unique exact
+                // Claude call ID. Repeated IDs across sessions are ambiguous.
+                let mut matches = self.tools.iter().filter_map(|((session, call), at)| {
+                    (call == id && self.sessions[*session].out.harness == "claude").then_some(*at)
+                });
+                let first = matches.next()?;
+                matches.next().is_none().then_some(first)
+            });
             let spawner = call.map(|at| self.of_file[at.0]).or_else(|| {
                 self.files
                     .iter()
@@ -2554,7 +2585,7 @@ impl<'a> Builder<'a> {
             return (None, None, false);
         };
         if let Some(parent) = &meta.parent_thread {
-            let Some(&spawner) = self.by_key.get(parent) else {
+            let Some(&spawner) = self.by_native.get(&("codex", parent.clone())) else {
                 return (None, None, false);
             };
             let names: Vec<String> = [
@@ -2917,7 +2948,7 @@ impl<'a> Builder<'a> {
             let from = peer
                 .sock
                 .as_deref()
-                .and_then(|from| self.by_key.get(from).copied())
+                .and_then(|from| self.by_native.get(&("claude", from.to_owned())).copied())
                 .filter(|from| self.sessions[*from].kind == SessKind::Agent);
             let from = from.unwrap_or_else(|| {
                 let identity = match (peer.pid, &peer.start, &peer.sock) {
@@ -3207,7 +3238,7 @@ impl<'a> Builder<'a> {
             }
         }
         for (id, pid) in locks {
-            if let Some(&index) = self.by_key.get(id) {
+            if let Some(&index) = self.by_native.get(&("codex", id.clone())) {
                 processes.insert(
                     key(index),
                     Process {
