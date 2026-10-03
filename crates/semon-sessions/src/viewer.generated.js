@@ -4945,7 +4945,7 @@ globalThis.__semonUIShared = __semonUIShared;
     return typeof value === "string" ? value : strings2(value);
   }
   function parseHandoff(value) {
-    const v = object2(value), common = { id: text(v.id), from: text(v.from), to: v.to == null ? "" : text(v.to), at: number(v.at), status: status(v.status), brief: optional(v.brief, text), done: optional(v.done, number), result: optional(v.result, text), target: optional(v.target, text), declined: optional(v.declined, boolean) };
+    const v = object2(value), common = { id: text(v.id), from: text(v.from), to: v.to == null ? "" : text(v.to), at: number(v.at), status: status(v.status), brief: text(v.brief), done: optional(v.done, number), result: optional(v.result, text), target: optional(v.target, text), declined: optional(v.declined, boolean) };
     switch (v.kind) {
       case "ask":
       case "spawn":
@@ -5122,6 +5122,7 @@ globalThis.__semonUIShared = __semonUIShared;
     cache = new TranscriptCache();
     paging = createPagingStore();
     requests = /* @__PURE__ */ new Set();
+    replacements = /* @__PURE__ */ new Map();
     disposed = false;
     spread(sid) {
       for (const turn2 of this.host.turns(sid)) turn2.entries = [];
@@ -5138,7 +5139,12 @@ globalThis.__semonUIShared = __semonUIShared;
       this.paging.clear(sid);
       this.host.cleared(sid);
     }
+    cancelReplacement(sid) {
+      this.replacements.get(sid)?.abort();
+      this.replacements.delete(sid);
+    }
     drop(sid) {
+      this.cancelReplacement(sid);
       this.clearPaging(sid);
       delete this.entries[sid];
       delete this.meta[sid];
@@ -5148,6 +5154,10 @@ globalThis.__semonUIShared = __semonUIShared;
       const controller = new AbortController(), abort = () => controller.abort();
       signal?.addEventListener("abort", abort, { once: true });
       this.requests.add(controller);
+      if (!direction) {
+        this.cancelReplacement(sid);
+        this.replacements.set(sid, controller);
+      }
       const mark = this.marks[sid], range = this.meta[sid], boundary = direction === "before" ? range?.from : range?.to;
       try {
         const response = await this.host.request("/api/tx?sid=" + encodeURIComponent(sid) + (query ? "&" + query : ""), controller.signal);
@@ -5172,9 +5182,12 @@ globalThis.__semonUIShared = __semonUIShared;
         }
         this.spread(sid);
         onPage?.();
+      } catch (error) {
+        if (!this.disposed && !controller.signal.aborted) throw error;
       } finally {
         this.requests.delete(controller);
         signal?.removeEventListener("abort", abort);
+        if (this.replacements.get(sid) === controller) this.replacements.delete(sid);
       }
     }
     keep(sid, entries, meta, origin) {
@@ -5184,6 +5197,7 @@ globalThis.__semonUIShared = __semonUIShared;
     adoptCached(sid, turn) {
       const cached = this.cache.get(sid);
       if (!cached) return false;
+      this.cancelReplacement(sid);
       this.cache.delete(sid);
       this.entries[sid] = cached.entries;
       this.meta[sid] = cached.meta;
@@ -5201,6 +5215,7 @@ globalThis.__semonUIShared = __semonUIShared;
       this.disposed = true;
       for (const request of this.requests) request.abort();
       this.requests.clear();
+      this.replacements.clear();
       this.paging.destroy();
       this.cache.clear();
       this.staleBriefs.clear();
@@ -6317,14 +6332,18 @@ globalThis.__semonUIShared = __semonUIShared;
         controller.abort();
         return controller;
       }
-      const cleanup = this.own(() => controller.abort());
-      this.requests.set(controller, cleanup);
+      const aborted = () => this.releaseRequest(controller), cleanup = this.own(() => controller.abort());
+      const release = () => {
+        controller.signal.removeEventListener("abort", aborted);
+        this.cleanups.delete(cleanup);
+        this.requests.delete(controller);
+      };
+      this.requests.set(controller, release);
+      controller.signal.addEventListener("abort", aborted, { once: true });
       return controller;
     }
     releaseRequest(controller) {
-      const cleanup = this.requests.get(controller);
-      if (cleanup) this.cleanups.delete(cleanup);
-      this.requests.delete(controller);
+      this.requests.get(controller)?.();
     }
     destroy() {
       if (this.disposed) return;
@@ -7488,7 +7507,7 @@ globalThis.__semonUIShared = __semonUIShared;
           name: s?.name
         };
       };
-      const start = root.start, text2 = start ? start.brief : root.u?.text, initial = start ? host2.sentenceSnapshot(start, null) : root.u ? host2.sentenceSnapshot({ kind: "ask", id: root.id, from: "you", to: root.sid, at: root.at ?? host2.NOW, status: "done" }, null) : { icon: host2.I.more, parts: [{ className: "who", text: host2.SESS[root.sid].name }, { className: "verb", text: " \xB7 a turn whose start isn't in these logs" }] };
+      const start = root.start, text2 = start ? start.brief : root.u?.text, initial = start ? host2.sentenceSnapshot(start, null) : root.u ? host2.sentenceSnapshot({ kind: "ask", id: root.id, from: "you", to: root.sid, at: root.at ?? host2.NOW, status: "done", brief: "" }, null) : { icon: host2.I.more, parts: [{ className: "who", text: host2.SESS[root.sid].name }, { className: "verb", text: " \xB7 a turn whose start isn't in these logs" }] };
       const outcome = host2.turnEnd(root), hops = [{ key: "root:" + root.id, className: "k-root", icon: initial.icon, parts: initial.parts, nodeClass: host2.hcls(start ? start.from : root.u ? "you" : root.sid), turn: root.id, handoff: start?.id, time: start ? host2.clock(start.at) : void 0, brief: text2 || void 0, meta: meta(outcome?.st ?? "idle", outcome?.text ?? "Nothing recorded", root.sid, root) }];
       const walk = (turn) => {
         for (const h2 of turn.sent) {
@@ -7745,6 +7764,8 @@ globalThis.__semonUIShared = __semonUIShared;
           ERR.k = at >= 0 ? at : !ERR.slots.length ? -1 : after >= 0 ? after : ERR.slots.length - 1;
           if (at < 0) ERR.slot = ERR.k >= 0 ? ERR.slots[ERR.k] : null;
         }
+      }).catch((error) => {
+        if (!request.signal.aborted && pending === request && ERR.gen === gen && errOn(sid)) throw error;
       }).finally(() => {
         scope.releaseRequest(request);
         if (pending === request) pending = null;

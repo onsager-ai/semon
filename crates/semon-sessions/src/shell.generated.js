@@ -76,14 +76,18 @@
         controller.abort();
         return controller;
       }
-      const cleanup = this.own(() => controller.abort());
-      this.requests.set(controller, cleanup);
+      const aborted = () => this.releaseRequest(controller), cleanup = this.own(() => controller.abort());
+      const release = () => {
+        controller.signal.removeEventListener("abort", aborted);
+        this.cleanups.delete(cleanup);
+        this.requests.delete(controller);
+      };
+      this.requests.set(controller, release);
+      controller.signal.addEventListener("abort", aborted, { once: true });
       return controller;
     }
     releaseRequest(controller) {
-      const cleanup = this.requests.get(controller);
-      if (cleanup) this.cleanups.delete(cleanup);
-      this.requests.delete(controller);
+      this.requests.get(controller)?.();
     }
     destroy() {
       if (this.disposed) return;

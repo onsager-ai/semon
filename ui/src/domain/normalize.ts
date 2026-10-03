@@ -31,7 +31,7 @@ export function parseSession(id: string, value: unknown): Session {
 }
 function answer(value: unknown) { return typeof value === 'string' ? value : strings(value); }
 export function parseHandoff(value: unknown): Handoff {
-  const v = object(value), common = { id: text(v.id), from: text(v.from), to: v.to == null ? '' : text(v.to), at: number(v.at), status: status(v.status), brief: optional(v.brief, text), done: optional(v.done, number), result: optional(v.result, text), target: optional(v.target, text), declined: optional(v.declined, boolean) };
+  const v = object(value), common = { id: text(v.id), from: text(v.from), to: v.to == null ? '' : text(v.to), at: number(v.at), status: status(v.status), brief: text(v.brief), done: optional(v.done, number), result: optional(v.result, text), target: optional(v.target, text), declined: optional(v.declined, boolean) };
   switch (v.kind) {
     case 'ask': case 'spawn': case 'relay': return { ...common, kind: v.kind };
     case 'move': return { ...common, kind: 'move', fromMachine: text(v.fromMachine), toMachine: text(v.toMachine) };

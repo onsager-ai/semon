@@ -33,7 +33,12 @@ export class EffectScope {
     this.frames.set(id, this.own(() => { this.retire(this.frames, id); cancelAnimationFrame(id); })); return id;
   }
   cancelFrame(id: number | undefined) { if (id !== undefined) this.frames.get(id)?.(); }
-  request(): AbortController { const controller = new AbortController(); if (this.disposed) { controller.abort(); return controller; } const cleanup = this.own(() => controller.abort()); this.requests.set(controller, cleanup); return controller; }
-  releaseRequest(controller: AbortController) { const cleanup = this.requests.get(controller); if (cleanup) this.cleanups.delete(cleanup); this.requests.delete(controller); }
+  request(): AbortController {
+    const controller = new AbortController(); if (this.disposed) { controller.abort(); return controller; }
+    const aborted = () => this.releaseRequest(controller), cleanup = this.own(() => controller.abort());
+    const release = () => { controller.signal.removeEventListener('abort', aborted); this.cleanups.delete(cleanup); this.requests.delete(controller); };
+    this.requests.set(controller, release); controller.signal.addEventListener('abort', aborted, { once: true }); return controller;
+  }
+  releaseRequest(controller: AbortController) { this.requests.get(controller)?.(); }
   destroy() { if (this.disposed) return; this.disposed = true; for (const cleanup of this.cleanups) cleanup(); this.cleanups.clear(); this.requests.clear(); }
 }
