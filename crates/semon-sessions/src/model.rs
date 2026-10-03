@@ -1076,7 +1076,14 @@ pub(crate) fn working_dirs(
     dirty: &mut bool,
 ) -> io::Result<BTreeSet<String>> {
     let cutoff = scan_cutoff(options, now_ms());
-    let (files, _, _) = scan(options, cache, dirty, &mut Texts::default(), cutoff)?;
+    let (files, _, _) = scan(
+        options,
+        cache,
+        dirty,
+        &mut Texts::default(),
+        cutoff,
+        &MachineFacts::Local,
+    )?;
     let mut cwds = BTreeSet::new();
     for file in &files {
         cwds.extend(file.summary.cwd.clone());
@@ -1112,6 +1119,7 @@ fn scan(
     dirty: &mut bool,
     texts: &mut Texts,
     cutoff: Option<i64>,
+    machine: &MachineFacts,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
     cache.begin_scan();
     let projects = options.claude_home.join("projects");
@@ -1206,7 +1214,10 @@ fn scan(
         });
     }
     let mut paths = Vec::new();
-    file_list(&options.codex_home.join("sessions"), &mut paths, "jsonl")?;
+    for root in crate::inputs::codex_rollout_dirs(options) {
+        file_list(&root, &mut paths, "jsonl")?;
+    }
+    paths.retain(|path| machine.codex_rollout_is_current(options, path));
     for path in paths {
         if outside(&path) {
             seen.insert(path.to_string_lossy().into_owned());
@@ -5413,9 +5424,12 @@ pub(crate) fn build(
         }};
     }
 
+    let facts = MachineFacts::of(options);
     let window_start = scan_cutoff(options, now);
-    let (files, skipped, index_clone) =
-        timed!("scan", scan(options, cache, dirty, texts, window_start)?);
+    let (files, skipped, index_clone) = timed!(
+        "scan",
+        scan(options, cache, dirty, texts, window_start, &facts)?
+    );
     timings.push((
         "index_clone",
         u32::try_from(index_clone.as_millis()).unwrap_or(u32::MAX),
@@ -5425,7 +5439,6 @@ pub(crate) fn build(
         BUILDS.with(|builds| builds.set(builds.get() + 1));
         AFTER_SCAN.with(|hook| hook.borrow_mut().take().map(|hook| hook()));
     }
-    let facts;
     let pids;
     let lock_pids;
     let held;
@@ -5434,7 +5447,6 @@ pub(crate) fn build(
     let offline_since;
     let groups;
     timed!("facts", {
-        facts = MachineFacts::of(options);
         pids = pid_files(options, &facts);
         lock_pids = facts.codex_lock_pids(options);
         held = lock_pids
