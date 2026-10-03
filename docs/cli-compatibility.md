@@ -45,8 +45,7 @@ unknown complete lines. The fixtures cover reversed results for overlapping
 same-name calls; this structural-store oracle does not establish full viewer
 transcript or usage correctness.
 
-The remaining acceptance corpus must cover item-stream arrival after early
-legacy mirror ingestion, replacement/interior rewrites, archived discovery,
+The remaining acceptance corpus must cover archived discovery,
 continuation/fork/copied prefixes, compaction, denial/cancellation, concurrent
 sessions and machine namespaces. Existing truncation tests compare surviving
 occurrences only; they do not establish final-generation deletion semantics.
@@ -63,12 +62,13 @@ The home also contains workspace YAML and a SQLite session store with WAL/SHM.
 Do not copy live database/WAL files into mirrors.
 
 The headless stdout stream contains ephemeral model/delta/idle events absent
-from the saved events. The saved file includes `session.shutdown` and per-model
-metrics, but this single no-token mock response cannot establish native usage
-accounting. This is native CLI persistence with a mock model, not a paid/native
-model validation. Interactive, prior releases, concurrent tools, resume/fork,
-approvals, compaction and mutation behavior remain unverified. #238 is not yet
-accepted and the adapter implementation gate remains open.
+from saved events. Pinned 1.0.90 and 1.0.91 probes now cover concurrent tool
+completion, same-session resume and explicit shell denial. Saved shutdown
+metrics accumulate across resume under synthetic mock usage; their native billing
+units remain unknown. See [the detailed probe](copilot-probe.md) for fixture
+provenance and observed boundaries. Interactive execution, logical forks,
+approval identities, compaction and mutation behavior remain unverified. #238
+is not yet accepted and the adapter implementation gate remains open.
 
 ## Versioned Claude and Codex native baselines
 
@@ -82,8 +82,8 @@ usage counts do not establish billing correctness or stable-version support.
 Claude's baseline passes the full cold/restarted/retained-byte occurrence oracle.
 Its attachment and prompt-state content is removed while retaining record types
 and structural relationships. Codex's baseline establishes native paginated
-history and mixed legacy/item records. It is a provenance/schema fixture only:
-the early legacy-to-item transition still requires reconciliation under #237.
+history and mixed legacy/item records. It now passes the same full occurrence
+and retained-byte oracle, including early mirror ingestion before item arrival.
 Neither recording establishes tools, approvals, cancellation, compaction or
 fork semantics. The offline Python validator checks provenance and file hashes;
 CI does not launch either harness or access personal native homes.
@@ -101,8 +101,8 @@ record is deleted.
 This deliberately reads the consumed prefix on each capture invocation, including
 idle invocations. It prioritizes verified replacement handling over the former
 size-only shortcut; an idle-read optimization needs equally strong source-change
-evidence. It does not establish rebuild selection across retained generations or early
-legacy-to-item reconciliation. Those remain #237 work, so this bounded repair
+evidence. It does not establish rebuild selection across retained generations.
+Those remain #237 work, so this bounded repair
 does not establish the complete historical/incremental/retained-evidence oracle.
 
 Capture records local source ownership of projected occurrence rows alongside
@@ -120,6 +120,15 @@ from session name, timing or text. A replay claims only rows actually projected
 by that source. Full parity for arbitrary pre-upgrade stale rows and generation
 selection when rebuilding from all retained raw bytes remain unresolved release
 gates, not a native support claim.
+
+When the first complete Codex `item_completed` record arrives after an earlier
+legacy `response_item` message was captured, dispatch now resets that source's
+owned projection and replays with the item stream selected for the whole file.
+An incomplete item frame does not switch dispatch. The source-shaped early-item
+fixture and native paginated alpha fixture both pass full cold/restarted/rebuilt
+occurrence comparisons and exact retention at every half-frame and complete-line
+boundary. This does not retire unowned pre-upgrade observations or establish
+native billing, tools, approval or fork support for the alpha release.
 
 The sessions viewer ledger also verifies the complete consumed prefix when file
 stat changes, replacing its former two-window shortcut. Its versioned, text-free

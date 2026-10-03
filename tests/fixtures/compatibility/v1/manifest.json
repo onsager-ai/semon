@@ -34,6 +34,23 @@
         "Not a native harness capture",
         "No runtime lifecycle, approvals, fork or usage completeness claim"
       ]
+    },
+    {
+      "path": "codex-early-item.jsonl",
+      "sha256": "aac960201b75c6d6eae1bc97af622036d2ed35265c453f9105131bf204bb52c2",
+      "origin": "source-shaped synthetic",
+      "harness_version": null,
+      "build": null,
+      "os": "synthetic POSIX paths; no native OS claim",
+      "execution_mode": "saved-state parser only",
+      "storage_schema": "Codex legacy message followed by item_completed UserMessage",
+      "home_override": "isolated temporary directory passed directly to process_file",
+      "source_reference": "semon f48820677e8acf7f0951e526ccb77ec01c316764: tests/fixtures/compatibility/codex-0.159.0-alpha.3/initial-rollout.jsonl SHA256 3716b2bb79c26d60315f821e37014c3f4b50cfd15a4368bbad126556ab88916c; synthetic arrival boundary",
+      "expected": "legacy message projects initially; after item arrival only sequence 2 projects; full cold/restart/retained-byte replay parity",
+      "limitations": [
+        "Not a native harness capture",
+        "No runtime lifecycle, approvals, fork or usage completeness claim"
+      ]
     }
   ]
 }

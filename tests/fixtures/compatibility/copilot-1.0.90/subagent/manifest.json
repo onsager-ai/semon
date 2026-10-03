@@ -28,6 +28,12 @@
     "Mock tokens, no native billing claim",
     "Exact native task edge does not establish logical parent session lineage",
     "parentAgentTaskId appears on root and child user records; no session lineage inferred",
-    "No independent child session file observed; interactive/cancellation/compaction and retention unknown"
-  ]
+    "No independent child session file observed; interactive/cancellation/compaction and retention unknown",
+    "Lifecycle and child message data have no agentId field; absent identity remains unknown"
+  ],
+  "source_reference": {
+    "semon_commit": "c6287dbbd09afc05cc7bdff44a7e456c17148214",
+    "probe_path": "tests/spikes/copilot-subagent.py",
+    "probe_sha256": "7e890d408961abecbf1d28ea2b3aee86cab77d95c151817b350a460c47f4c65c"
+  }
 }
