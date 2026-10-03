@@ -5,7 +5,7 @@ const strings = (value: unknown) => array(value, text);
 function background(value: unknown): Background {
   const v = object(value), state = v.state;
   if (state !== 'running' && state !== 'unknown' && state !== 'failed' && state !== 'killed' && state !== 'done') throw new Error('Invalid background state');
-  return { state, secs: optional(v.secs, text), since: optional(v.since, number), exit: optional(v.exit, number), summary: optional(v.summary, text) };
+  return { state, secs: optional(v.secs, value => typeof value === 'number' ? String(number(value)) : text(value)), since: optional(v.since, number), exit: optional(v.exit, number), summary: optional(v.summary, text) };
 }
 function image(value: unknown): Image {
   const v = object(value), base = { o: number(v.o), b: number(v.b), w: optional(v.w, number), h: optional(v.h, number), type: optional(v.type, text), size: optional(v.size, number) };
@@ -23,7 +23,7 @@ export function parseEntry(value: unknown): Entry {
     case 'harness': return { ...base, k: 'harness', label: text(v.label) };
     case 'signal': return { ...base, k: 'signal', signal: (() => { const s = object(v.signal); return { kind: text(s.kind), tag: optional(s.tag, text), tool: optional(s.tool, text), value: optional(s.value, number), previous: optional(s.previous, text) }; })() };
     case 'bgend': return { ...base, k: 'bgend', call: text(v.call), state: text(v.state), label: optional(v.label, text) };
-    case 'tool': return { ...base, k: 'tool', name: text(v.name), arg: text(v.arg), title: optional(v.title, text), secs: optional(v.secs, text), since: optional(v.since, number), exit: optional(v.exit, number), ok: v.ok == null ? v.ok : boolean(v.ok), in: optional(v.in, text), out: optional(v.out, text), cwd: optional(v.cwd, text), diff: optional(v.diff, diff), changes: optional(v.changes, v => array(v, v => { const c = object(v); return { path: text(c.path), move: optional(c.move, text), diff: optional(c.diff, diff) }; })), more: optional(v.more, strings), script: v.script, cut: optional(v.cut, cut) };
+    case 'tool': return { ...base, k: 'tool', name: text(v.name), arg: text(v.arg), title: optional(v.title, text), secs: optional(v.secs, value => typeof value === 'number' ? String(number(value)) : text(value)), since: optional(v.since, number), exit: optional(v.exit, number), ok: v.ok == null ? v.ok : boolean(v.ok), in: optional(v.in, text), out: optional(v.out, text), cwd: optional(v.cwd, text), diff: optional(v.diff, diff), changes: optional(v.changes, v => array(v, v => { const c = object(v); return { path: text(c.path), move: optional(c.move, text), diff: optional(c.diff, diff) }; })), more: optional(v.more, strings), script: v.script, cut: optional(v.cut, cut) };
     default: throw new Error('Invalid transcript entry');
   }
 }
