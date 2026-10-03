@@ -1,15 +1,15 @@
 # The viewer in TSX components: bundler and runtime compared
 
-## Legacy-host removal in progress — 2026-10-03
+## Typed application and native ownership — 2026-10-03
 
-The merged component/controller migration does not complete application ownership.
-Issue #224 retains five legacy-host cleanup stages. Domain normalization,
-relationships, outcomes, trace calculations, costs and formatting now live in
-strict typed modules under `ui/src/domain`; callers switch and their superseded
-functions are deleted together. Application boot, transcript orchestration,
-navigation/scroll and native shell cleanup remain subsequent work. See
-[viewer ownership](viewer-ownership.md) for transaction boundaries and owners.
-No integrated pin or production acceptance is claimed by this source record.
+The handwritten viewer, native shell and internal application bridge are removed.
+Typed domain modules, owned model/transcript stores and navigation/scroll owners
+provide the application state. The public application and native-shell entries
+return explicit mount/destroy owners; teardown aborts requests and releases roots,
+listeners, timers and observers. Rust embeds deterministic generated assets with
+no Node dependency. See [viewer ownership](viewer-ownership.md) for the current
+controller boundaries and [UI README](../../ui/README.md) for consumer APIs.
+Integration and production acceptance are recorded in issue #224.
 
 ## Current decision — 2026-10-02
 
@@ -17,7 +17,7 @@ Marvin selected **Preact + TypeScript/TSX + esbuild** in [#224](https://github.c
 
 The top-level `ui/` stays in Semon. Use native Preact; `preact/compat` needs a demonstrated dependency requirement. CSS, URLs, CSP, embedding prelude, `window.semonEmbed` and `semon:refresh` / `semon:polled` / `semon:ended` stay unchanged. Rust embeds checked-in production assets and requires no Node or build script.
 
-### Remaining migration implemented — 2026-10-03
+### Historical component/controller checkpoint — 2026-10-03
 
 All screens, sheet bodies, top-bar Find/error modes, rich text, attachments and
 transcript entries now use native typed Preact roots. Keyed dirty-turn commits

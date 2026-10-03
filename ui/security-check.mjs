@@ -5,7 +5,9 @@ const sinks = ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'cssText', 'dange
 export function checkSource(source, name) {
   const ast = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true, name.endsWith('.tsx') ? ts.ScriptKind.TSX : name.endsWith('.ts') ? ts.ScriptKind.TS : ts.ScriptKind.JS);
   const fail = text => { throw new Error(`${name}: forbidden application boundary ${text}`); };
+  if (/(?:\/\/|\/\*)\s*@ts-(?:ignore|nocheck|expect-error)\b/.test(source)) fail('type-check suppression');
   function visit(node) {
+    if (node.kind === ts.SyntaxKind.AnyKeyword) fail('unchecked any type');
     if ((ts.isIdentifier(node) || ts.isStringLiteral(node)) && sinks.includes(node.text) && !(name.endsWith('/lib/security.ts') && ts.isStringLiteral(node) && ts.isArrayLiteralExpression(node.parent))) fail(node.text);
     if (ts.isPropertyAccessExpression(node) && node.name.text === 'style') fail('inline DOM style');
     if (ts.isElementAccessExpression(node) && node.argumentExpression?.text === 'style') fail('inline DOM style');

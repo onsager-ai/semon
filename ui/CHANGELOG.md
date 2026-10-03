@@ -1,5 +1,17 @@
 # Shared UI changes
 
+## 2026-10-03 — final ownership review
+
+The mount entry is now a small typed service composition; transport, boot, layout,
+history, paging, screen commits, document events and tool/dialog behavior have
+focused owners. Completed error-list requests and closed mode controllers leave
+their effect scope. Native teardown clears scroll chrome and detached clipboard
+failures cannot change selection. Browser coverage checks confirmation resubmission
+and bounded request ownership. Explicit `any` and type-check suppression directives
+are rejected by the source checker; embedding and architecture records now describe
+the actual generated assets and public lifecycle entries.
+
+
 ## 2026-10-03 — typed native shell and final source assets
 
 The fallback shell enhancements now have a typed `mountNativeShell` owner for
