@@ -45,9 +45,10 @@ suspension is refused until #253 implements actual verification. Independent
 storage/deletion eligibility remains #255. A stored reference alone never
 qualifies an action.
 
-The first implementation stores the aggregate as one versioned, owner-scoped
-PostgreSQL row in semon-hub. This gives an atomic boundary without a distributed
-transaction across record kinds. JSON contains sensitive manual input, so it
+The planned semon-hub persistence companion (PR #76) stores the aggregate as
+one versioned, owner-scoped PostgreSQL row. That companion supplies an atomic
+boundary without a distributed transaction across record kinds; this crate
+provides only the storage contract. JSON contains sensitive manual input, so it
 must stay in the authorized coordinator storage, not normal trace/model APIs or
 logs. Raw recovery file bytes belong in qualified recovery storage. No Push WAL,
 replication redesign, or semon-control in-memory inbox is introduced.

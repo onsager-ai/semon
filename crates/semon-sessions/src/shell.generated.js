@@ -5,6 +5,8 @@
   var EffectScope = class {
     cleanups = /* @__PURE__ */ new Set();
     requests = /* @__PURE__ */ new Map();
+    timers = /* @__PURE__ */ new Map();
+    frames = /* @__PURE__ */ new Map();
     disposed = false;
     own(cleanup) {
       if (this.disposed) cleanup();
@@ -19,44 +21,82 @@
       target.addEventListener(type, guarded, options);
       this.own(() => target.removeEventListener(type, guarded, options));
     }
+    retire(collection, id) {
+      const cleanup = collection.get(id);
+      if (cleanup) this.cleanups.delete(cleanup);
+      collection.delete(id);
+    }
     timeout(callback, delay = 0) {
       if (this.disposed) return 0;
-      let cleanup;
       const id = window.setTimeout(() => {
-        this.cleanups.delete(cleanup);
+        this.retire(this.timers, id);
         if (!this.disposed) callback();
       }, delay);
-      cleanup = this.own(() => clearTimeout(id));
+      this.timers.set(
+        id,
+        this.own(() => {
+          this.retire(this.timers, id);
+          window.clearTimeout(id);
+        })
+      );
       return id;
+    }
+    clearTimeout(id) {
+      if (id !== void 0) this.timers.get(id)?.();
     }
     interval(callback, delay) {
       if (this.disposed) return 0;
       const id = window.setInterval(() => {
         if (!this.disposed) callback();
       }, delay);
-      this.own(() => clearInterval(id));
+      this.timers.set(
+        id,
+        this.own(() => {
+          this.retire(this.timers, id);
+          window.clearInterval(id);
+        })
+      );
       return id;
+    }
+    clearInterval(id) {
+      if (id !== void 0) this.timers.get(id)?.();
     }
     frame(callback) {
       if (this.disposed) return 0;
-      let cleanup;
       const id = requestAnimationFrame((time) => {
-        this.cleanups.delete(cleanup);
+        this.retire(this.frames, id);
         if (!this.disposed) callback(time);
       });
-      cleanup = this.own(() => cancelAnimationFrame(id));
+      this.frames.set(
+        id,
+        this.own(() => {
+          this.retire(this.frames, id);
+          cancelAnimationFrame(id);
+        })
+      );
       return id;
+    }
+    cancelFrame(id) {
+      if (id !== void 0) this.frames.get(id)?.();
     }
     request() {
       const controller = new AbortController();
-      const cleanup = this.own(() => controller.abort());
-      this.requests.set(controller, cleanup);
+      if (this.disposed) {
+        controller.abort();
+        return controller;
+      }
+      const aborted = () => this.releaseRequest(controller), cleanup = this.own(() => controller.abort());
+      const release = () => {
+        controller.signal.removeEventListener("abort", aborted);
+        this.cleanups.delete(cleanup);
+        this.requests.delete(controller);
+      };
+      this.requests.set(controller, release);
+      controller.signal.addEventListener("abort", aborted, { once: true });
       return controller;
     }
     releaseRequest(controller) {
-      const cleanup = this.requests.get(controller);
-      if (cleanup) this.cleanups.delete(cleanup);
-      this.requests.delete(controller);
+      this.requests.get(controller)?.();
     }
     destroy() {
       if (this.disposed) return;
@@ -113,26 +153,40 @@
         }
       };
       effects.listen(document, "keydown", (event) => {
-        if (event.key === "Escape" && !popoverOpen() && !document.querySelector("dialog[open]")) closeDrawer2();
+        if (event.key === "Escape" && !popoverOpen() && !document.querySelector("dialog[open]"))
+          closeDrawer2();
       });
       let touchStart = null;
-      sidebar && effects.listen(sidebar, "touchstart", (event) => {
-        touchStart = event.touches[0]?.clientX ?? null;
-      }, { passive: true });
-      sidebar && effects.listen(sidebar, "touchmove", (event) => {
-        const x = event.touches[0]?.clientX;
-        if (phone.matches && touchStart !== null && x !== void 0 && x - touchStart < -50) {
-          touchStart = null;
-          closeDrawer2();
-        }
-      }, { passive: true });
+      sidebar && effects.listen(
+        sidebar,
+        "touchstart",
+        (event) => {
+          touchStart = event.touches[0]?.clientX ?? null;
+        },
+        { passive: true }
+      );
+      sidebar && effects.listen(
+        sidebar,
+        "touchmove",
+        (event) => {
+          const x = event.touches[0]?.clientX;
+          if (phone.matches && touchStart !== null && x !== void 0 && x - touchStart < -50) {
+            touchStart = null;
+            closeDrawer2();
+          }
+        },
+        { passive: true }
+      );
       effects.listen(phone, "change", () => closeDrawer2(false));
       const topbar = document.getElementById("topbar");
       const main = document.getElementById("main");
       effects.listen(window, "scroll", syncBarLine2, { passive: true });
       main && effects.listen(main, "scroll", syncBarLine2, { passive: true });
       syncBarLine2();
-      releaseChrome = () => closeDrawer2(false);
+      releaseChrome = () => {
+        closeDrawer2(false);
+        topbar?.classList.remove("scrolled");
+      };
     }
     const copyTimers = /* @__PURE__ */ new Map();
     function selectText(element) {
@@ -149,12 +203,15 @@
       }
       button.setAttribute("aria-label", "Copied");
       button.classList.add("copied");
-      window.clearTimeout(copyTimers.get(button));
-      copyTimers.set(button, effects.timeout(() => {
-        button.setAttribute("aria-label", button.dataset.copyLabel ?? "Copy");
-        button.classList.remove("copied");
-        copyTimers.delete(button);
-      }, 1500));
+      effects.clearTimeout(copyTimers.get(button));
+      copyTimers.set(
+        button,
+        effects.timeout(() => {
+          button.setAttribute("aria-label", button.dataset.copyLabel ?? "Copy");
+          button.classList.remove("copied");
+          copyTimers.delete(button);
+        }, 1500)
+      );
     }
     effects.listen(document, "click", async (event) => {
       const button = event.target instanceof Element ? event.target.closest("[data-copy]") : null;
@@ -166,7 +223,7 @@
         try {
           await navigator.clipboard.writeText(value);
         } catch {
-          if (!disposed && source.isConnected) selectText(source);
+          if (!disposed && button.isConnected && source.isConnected) selectText(source);
         }
       } else {
         selectText(source);
@@ -218,12 +275,14 @@
       if (dialog instanceof HTMLDialogElement && target === dialog) {
         if (event.clientX === 0 && event.clientY === 0) return;
         const box = dialog.getBoundingClientRect();
-        if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) dialog.close();
+        if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom)
+          dialog.close();
         return;
       }
       const button = target?.closest?.("button");
       const parentDialog = button?.closest?.("dialog");
-      if (!button || !(parentDialog instanceof HTMLDialogElement) || !waitingForms.has(parentDialog)) return;
+      if (!button || !(parentDialog instanceof HTMLDialogElement) || !waitingForms.has(parentDialog))
+        return;
       const form = waitingForms.get(parentDialog);
       waitingForms.delete(parentDialog);
       if (button.value === "confirm") {
@@ -235,12 +294,17 @@
         parentDialog.close("cancel");
       }
     });
-    effects.listen(document, "close", (event) => {
-      if (event.target instanceof HTMLDialogElement) {
-        waitingForms.delete(event.target);
-        dialogs.delete(event.target);
-      }
-    }, true);
+    effects.listen(
+      document,
+      "close",
+      (event) => {
+        if (event.target instanceof HTMLDialogElement) {
+          waitingForms.delete(event.target);
+          dialogs.delete(event.target);
+        }
+      },
+      true
+    );
     document.querySelectorAll("[data-poll]").forEach((element) => {
       const url = element.dataset.poll;
       if (!url) return;
@@ -249,15 +313,19 @@
       const request = effects.request();
       const interval = effects.interval(async () => {
         if (!element.isConnected || Date.now() >= deadline) {
-          window.clearInterval(interval);
+          effects.clearInterval(interval);
           return;
         }
         if (pending) return;
         pending = true;
         try {
-          const response = await fetch(url, { signal: request.signal, credentials: "same-origin", cache: "no-store" });
+          const response = await fetch(url, {
+            signal: request.signal,
+            credentials: "same-origin",
+            cache: "no-store"
+          });
           if (!disposed && element.isConnected && Date.now() < deadline && response.status === 200) {
-            window.clearInterval(interval);
+            effects.clearInterval(interval);
             window.location.assign(element.dataset.pollGo || "/");
           }
         } catch {
@@ -265,25 +333,27 @@
           pending = false;
         }
       }, 3e3);
-      effects.timeout(() => window.clearInterval(interval), 30 * 60 * 1e3);
+      effects.timeout(() => effects.clearInterval(interval), 30 * 60 * 1e3);
     });
-    const controller = { destroy() {
-      if (disposed) return;
-      disposed = true;
-      effects.destroy();
-      for (const button of copyTimers.keys()) {
-        button.setAttribute("aria-label", button.dataset.copyLabel ?? "Copy");
-        button.classList.remove("copied");
+    const controller = {
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        effects.destroy();
+        for (const button of copyTimers.keys()) {
+          button.setAttribute("aria-label", button.dataset.copyLabel ?? "Copy");
+          button.classList.remove("copied");
+        }
+        copyTimers.clear();
+        releaseChrome();
+        for (const dialog of dialogs) {
+          waitingForms.delete(dialog);
+          if (dialog.open) dialog.close();
+        }
+        dialogs.clear();
+        if (current === controller) current = null;
       }
-      copyTimers.clear();
-      releaseChrome();
-      for (const dialog of dialogs) {
-        waitingForms.delete(dialog);
-        if (dialog.open) dialog.close();
-      }
-      dialogs.clear();
-      if (current === controller) current = null;
-    } };
+    };
     current = controller;
     return controller;
   }

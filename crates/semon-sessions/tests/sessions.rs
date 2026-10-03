@@ -15,6 +15,48 @@ use serde_json::{Value, json};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn native_codex_fork_tree_reports_child_request_usage_without_inherited_counters() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "codex/sessions/parent.jsonl",
+        include_str!(
+            "../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/initial-rollout.jsonl"
+        ),
+    );
+    fixture.write("codex/sessions/child.jsonl", include_str!("../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/child-turn-rollout.jsonl"));
+    let nodes = collect(&fixture.options).unwrap();
+    let child = nodes
+        .iter()
+        .find(|node| node.id == "native-codex-fork-child")
+        .unwrap();
+    assert_eq!(child.tokens.input, 5);
+    assert_eq!(child.tokens.output, 3);
+    assert_eq!(child.tokens.total, 8);
+    let mut old: Value =
+        serde_json::from_slice(&fs::read(&fixture.options.cache).unwrap()).unwrap();
+    old["version"] = json!(3);
+    for entry in old["files"].as_object_mut().unwrap().values_mut() {
+        entry["summary"]
+            .as_object_mut()
+            .unwrap()
+            .remove("codex_native_usage");
+    }
+    fs::write(&fixture.options.cache, serde_json::to_vec(&old).unwrap()).unwrap();
+    let reread = collect(&fixture.options).unwrap();
+    assert_eq!(
+        reread
+            .iter()
+            .find(|node| node.id == child.id)
+            .unwrap()
+            .tokens,
+        child.tokens
+    );
+    let current: Value =
+        serde_json::from_slice(&fs::read(&fixture.options.cache).unwrap()).unwrap();
+    assert_eq!(current["version"], 4);
+}
+
 struct Fixture {
     root: PathBuf,
     options: Options,

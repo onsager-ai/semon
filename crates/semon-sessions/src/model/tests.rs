@@ -531,6 +531,138 @@ fn claude_dated_model_ids_strip_only_the_trailing_date_for_price_matching() {
 }
 
 #[test]
+fn native_codex_fork_reports_only_child_owned_usage() {
+    let home = Home::new();
+    home.write(
+        "codex/sessions/parent.jsonl",
+        include_str!("../../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/initial-rollout.jsonl"),
+    );
+    home.write(
+        "codex/sessions/child.jsonl",
+        include_str!("../../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/forked-rollout.jsonl"),
+    );
+    let empty_child = home.build();
+    assert!(
+        empty_child.sessions["native-codex-fork-child"]
+            .tokens_by_model
+            .is_empty()
+    );
+    home.write(
+        "codex/sessions/child.jsonl",
+        include_str!("../../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/child-turn-rollout.jsonl"),
+    );
+    let built = home.build();
+    let child = &built.sessions["native-codex-fork-child"];
+    assert_eq!(child.tokens_by_model["mock-model"].input, 5);
+    assert_eq!(child.tokens_by_model["mock-model"].output, 3);
+    assert_eq!(
+        built.sessions["native-codex-fork-parent"].tokens_by_model["mock-model"].input,
+        5
+    );
+    assert!(child.parent.is_none(), "a fork is not a spawned subagent");
+    let metadata = serde_json::to_value(child.codex_history.as_ref().unwrap()).unwrap();
+    assert_eq!(metadata["forked_from_id"], "native-codex-fork-parent");
+    assert_eq!(metadata["forked_from_ordinal_exclusive"], 13);
+    assert_eq!(
+        metadata["history_base"]["thread_id"],
+        "native-codex-fork-parent"
+    );
+    let restarted = home.build();
+    assert_eq!(
+        restarted.sessions["native-codex-fork-child"].tokens_by_model,
+        child.tokens_by_model
+    );
+    // Repeated exact source identities do not turn replay into fresh requests.
+    let path = home.options.codex_home.join("sessions/child.jsonl");
+    let records: Vec<Value> = fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let repeated = records
+        .iter()
+        .find(|row| row["type"] == "token_usage_record")
+        .unwrap();
+    writeln!(
+        fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{repeated}"
+    )
+    .unwrap();
+    assert_eq!(
+        home.build().sessions["native-codex-fork-child"].tokens_by_model,
+        child.tokens_by_model
+    );
+}
+
+#[test]
+fn codex_fork_cumulative_or_incomplete_reports_are_not_fresh_usage() {
+    let home = Home::new();
+    home.codex(
+        "child",
+        json!({"forked_from_id":"absent-parent"}),
+        &[
+            codex_line(ts(1, 0), "turn_context", json!({"model":"gpt-test"})),
+            codex_line(
+                ts(1, 1),
+                "event_msg",
+                json!({"type":"token_count",
+            "info":{"total_token_usage":{"input_tokens":10,"output_tokens":6,"total_tokens":16}}}),
+            ),
+            codex_line(
+                ts(1, 2),
+                "token_usage_record",
+                json!({
+                    "thread_id":"child","session_id":"child","turn_id":"t1","response_id":"r1",
+                    "usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}
+                }),
+            ),
+        ],
+    );
+    let built = home.build();
+    assert!(built.sessions["child"].tokens_by_model.is_empty());
+    assert!(built.sessions["child"].parent.is_none());
+    assert!(home.build().sessions["child"].tokens_by_model.is_empty());
+}
+
+#[test]
+fn codex_logical_fork_and_physical_history_are_independent_native_fields() {
+    let home = Home::new();
+    home.codex("logical", json!({}), &[]);
+    home.codex("physical", json!({}), &[]);
+    home.codex(
+        "child",
+        json!({
+            "session_id":"child", "forked_from_id":"logical",
+            "forked_from_ordinal_exclusive":0,
+            "history_base":{"thread_id":"physical","end_ordinal_exclusive":7,"end_byte_offset":99}
+        }),
+        &[],
+    );
+    home.codex(
+        "physical-only",
+        json!({"history_base":{"thread_id":"physical"}}),
+        &[],
+    );
+    let built = home.build();
+    let history = serde_json::to_value(&built.sessions["child"].codex_history).unwrap();
+    assert_eq!(history["forked_from_id"], "logical");
+    assert_eq!(history["forked_from_ordinal_exclusive"], 0);
+    assert_eq!(history["history_base"]["thread_id"], "physical");
+    assert_eq!(history["history_base"]["end_ordinal_exclusive"], 7);
+    let partial = serde_json::to_value(&built.sessions["physical-only"].codex_history).unwrap();
+    assert!(partial.get("forked_from_id").is_none());
+    assert!(
+        partial["history_base"]
+            .get("end_ordinal_exclusive")
+            .is_none()
+    );
+    for id in ["child", "physical-only"] {
+        assert!(built.sessions[id].parent.is_none());
+    }
+    assert!(built.sessions["logical"].codex_history.is_none());
+}
+
+#[test]
 fn codex_model_switch_attributes_cumulative_token_deltas_to_the_current_model() {
     let home = Home::new();
     home.codex(
@@ -3060,6 +3192,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         home: Some("/home/fake-user".into()),
         proc_starts: BTreeMap::from([(40, 777)]),
         codex_locks: BTreeMap::new(),
+        codex_rollouts: None,
         repos: BTreeMap::new(),
         offline_since: None,
         runs: BTreeMap::new(),
@@ -3199,6 +3332,93 @@ fn reported_cost_checks_keep_overwritten_runs_and_drop_account_values() {
 }
 
 #[test]
+fn recorded_codex_selection_distinguishes_absent_and_empty_without_pruning() {
+    let home = Home::new();
+    home.codex(
+        "retained",
+        json!({}),
+        &[codex_user(ts(18, 0), "retained fixture")],
+    );
+    let source = home
+        .root
+        .join("codex/sessions/2026/09/24/rollout-retained.jsonl");
+    let bytes = fs::read(&source).unwrap();
+    let path = home.root.join("facts.json");
+    let mut facts = crate::local_facts(&home.options).unwrap();
+    facts.codex_rollouts = None;
+    crate::write_facts(&path, &facts).unwrap();
+    let mut options = home.options.clone();
+    options.facts = Some(path.clone());
+    assert!(
+        home.build_at(&options, NOW)
+            .sessions
+            .contains_key("retained")
+    );
+    facts.codex_rollouts = Some(BTreeSet::new());
+    crate::write_facts(&path, &facts).unwrap();
+    assert!(
+        !home
+            .build_at(&options, NOW)
+            .sessions
+            .contains_key("retained")
+    );
+    assert_eq!(fs::read(source).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn archived_codex_root_links_are_not_viewing_inputs() {
+    let home = Home::new();
+    let outside = Home::new();
+    outside.codex(
+        "outside-archive",
+        json!({}),
+        &[codex_user(ts(18, 0), "private fixture")],
+    );
+    fs::create_dir_all(&home.options.codex_home).unwrap();
+    std::os::unix::fs::symlink(
+        outside.options.codex_home.join("sessions"),
+        home.options.codex_home.join("archived_sessions"),
+    )
+    .unwrap();
+    assert!(crate::inputs(&home.options).unwrap().is_empty());
+    assert!(!home.build().sessions.contains_key("outside-archive"));
+}
+
+#[test]
+fn archived_codex_rollouts_keep_history_and_input_copy_parity() {
+    let home = Home::new();
+    home.codex(
+        "archived-root",
+        json!({}),
+        &[codex_user(ts(18, 0), "archive fixture")],
+    );
+    let active = home
+        .root
+        .join("codex/sessions/2026/09/24/rollout-archived-root.jsonl");
+    let before = home.build();
+    let before_pages = pages(&before);
+    let archived = home
+        .root
+        .join("codex/archived_sessions/rollout-archived-root.jsonl");
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    fs::rename(&active, &archived).unwrap();
+    let bytes = fs::read(&archived).unwrap();
+    let after = home.build();
+    assert!(after.sessions.contains_key("archived-root"));
+    assert_eq!(before_pages, pages(&after));
+    assert!(
+        crate::inputs(&home.options)
+            .unwrap()
+            .iter()
+            .any(|input| input.path == "archived_sessions/rollout-archived-root.jsonl")
+    );
+    assert_mirrors(&home);
+    assert_eq!(fs::read(&archived).unwrap(), bytes);
+    assert!(!active.exists());
+}
+
+#[test]
 fn input_paths_are_the_builders_and_nothing_else() {
     for (root, path) in [
         ("claude", "projects/-work-proj/abc.jsonl"),
@@ -3209,6 +3429,7 @@ fn input_paths_are_the_builders_and_nothing_else() {
         ),
         ("claude", "sessions/1234.json"),
         ("codex", "sessions/2026/09/24/rollout-x.jsonl"),
+        ("codex", "archived_sessions/rollout-x.jsonl"),
     ] {
         assert!(crate::is_input_path(root, path), "{root}/{path}");
     }
@@ -3232,6 +3453,10 @@ fn input_paths_are_the_builders_and_nothing_else() {
         ("codex", "auth.json"),
         ("codex", "thread-writer-locks/x.lock"),
         ("codex", "sessions/.jsonl"),
+        ("codex", "archived_sessions/.jsonl"),
+        ("codex", "archived_sessions/auth.json"),
+        ("codex", "archived_sessions/r.jsonl.zst"),
+        ("codex", "archived_sessions/r.jsonl.seal/r.jsonl"),
         ("claude", "projects/p/x.jsonl.seal/y.jsonl"),
         (
             "claude",

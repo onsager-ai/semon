@@ -115,13 +115,15 @@ mod tests {
     #[test]
     fn javascript_registry_mirrors_rust_registry() {
         let js = include_str!("../../../ui/src/app/registry.ts");
-        let registry_lines: Vec<&str> = js
-            .lines()
-            .filter(|line| line.starts_with("export const HARNESSES:"))
-            .collect();
-        assert_eq!(registry_lines.len(), 1);
-        let line = registry_lines[0];
-        assert_eq!(line.matches(": { name: \"").count(), HARNESSES.len());
+        assert_eq!(js.matches("export const HARNESSES:").count(), 1);
+        let line = js
+            .split("= {")
+            .nth(1)
+            .expect("harness object initializer")
+            .split("export const HARNESS ")
+            .next()
+            .expect("harness registry body");
+        assert_eq!(line.matches("name: '").count(), HARNESSES.len());
 
         for (index, definition) in HARNESSES.iter().enumerate() {
             let start_marker = format!("{}: {{", definition.id);
@@ -136,10 +138,10 @@ mod tests {
             let mut cursor = 0;
             for needle in [
                 start_marker,
-                format!("name: \"{}\"", definition.name),
-                format!("short: \"{}\"", definition.short),
-                format!("light: \"{}\"", definition.icon_light),
-                format!("dark: \"{}\"", definition.icon_dark),
+                format!("name: '{}'", definition.name),
+                format!("short: '{}'", definition.short),
+                format!("light: '{}'", definition.icon_light),
+                format!("dark: '{}'", definition.icon_dark),
             ] {
                 let offset = entry[cursor..].find(&needle).unwrap_or_else(|| {
                     panic!(

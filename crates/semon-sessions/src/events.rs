@@ -61,7 +61,7 @@ thread_local! {
 /// v18: background Claude Bash calls retain their launch flag and terminal
 /// notifications retain their failure outcome.
 /// v19: ledgers verify the full consumed prefix instead of just two windows.
-const CACHE_VERSION: u32 = 19;
+const CACHE_VERSION: u32 = 20;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +115,84 @@ pub(crate) struct CodexUsageEvent {
     pub(crate) model: String,
     pub(crate) tokens: ModelTokens,
     pub(crate) timestamp: Option<i64>,
+}
+
+/// Explicit per-response usage, kept separate from legacy cumulative counters.
+/// Native thread counters can include a fork's inherited context.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct CodexNativeUsage {
+    seen: BTreeSet<String>,
+    tokens: Tokens,
+    by_model: BTreeMap<String, ModelTokens>,
+    events: Vec<CodexUsageEvent>,
+}
+
+impl CodexNativeUsage {
+    pub(crate) fn tokens(&self) -> Tokens {
+        self.tokens.clone()
+    }
+
+    pub(crate) fn observe(
+        slot: &mut Option<Self>,
+        payload: &Value,
+        model: String,
+        time: Option<i64>,
+    ) {
+        let Some(usage) = payload.get("usage") else {
+            return;
+        };
+        let identity =
+            ["thread_id", "session_id", "turn_id", "response_id"].map(|key| field(payload, key));
+        if identity.iter().any(|id| id.is_none_or(str::is_empty)) {
+            return;
+        }
+        let [
+            Some(input),
+            Some(output),
+            Some(total),
+            Some(cache_read),
+            Some(cache_write),
+            Some(reasoning),
+        ] = [
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_input_tokens",
+            "cache_write_input_tokens",
+            "reasoning_output_tokens",
+        ]
+        .map(|key| usage.get(key).and_then(Value::as_u64))
+        else {
+            return;
+        };
+        let native = slot.get_or_insert_with(Default::default);
+        // Serialize the exact tuple, avoiding delimiter collisions or timing joins.
+        let key = serde_json::to_string(&identity).expect("string tuple serializes");
+        if !native.seen.insert(key) {
+            return;
+        }
+        let counts = ModelTokens {
+            input: input.saturating_sub(cache_read),
+            output,
+            cache_read,
+            cache_write,
+        };
+        native.tokens.input += input;
+        native.tokens.cached_input += cache_read;
+        native.tokens.output += output;
+        native.tokens.total += total;
+        native.tokens.reasoning_output += reasoning;
+        native
+            .by_model
+            .entry(model.clone())
+            .or_default()
+            .add(&counts);
+        native.events.push(CodexUsageEvent {
+            model,
+            tokens: counts,
+            timestamp: time,
+        });
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -222,6 +300,7 @@ pub(crate) struct FileIndex {
     codex_tokens: Tokens,
     codex_tokens_by_model: BTreeMap<String, ModelTokens>,
     codex_usage_events: Vec<CodexUsageEvent>,
+    codex_native_usage: Option<CodexNativeUsage>,
     pub(crate) rate_limits: Option<RateLimits>,
 }
 
@@ -606,16 +685,23 @@ impl FileIndex {
     }
 
     pub(crate) fn codex_usage(&self) -> &BTreeMap<String, ModelTokens> {
-        &self.codex_tokens_by_model
+        self.codex_native_usage
+            .as_ref()
+            .map_or(&self.codex_tokens_by_model, |usage| &usage.by_model)
     }
 
     pub(crate) fn codex_usage_events(&self) -> &[CodexUsageEvent] {
-        &self.codex_usage_events
+        self.codex_native_usage
+            .as_ref()
+            .map_or(&self.codex_usage_events, |usage| &usage.events)
     }
 
     pub(crate) fn tokens(&self, harness: &str) -> Tokens {
         if harness == "codex" {
-            return self.codex_tokens.clone();
+            return self
+                .codex_native_usage
+                .as_ref()
+                .map_or_else(|| self.codex_tokens.clone(), |usage| usage.tokens.clone());
         }
         let mut total = Tokens::default();
         for usage in self.usage_by_id.values() {
@@ -3065,6 +3151,13 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
     match field(record, "type") {
         Some("compacted") => signal(summary, SignalKind::Compact, offset, time, None, None),
         Some("session_meta") => {
+            if field(payload, "forked_from_id").is_some() {
+                // A fork's cumulative counters include inherited history. Until
+                // a valid per-response report arrives its fresh usage is unknown.
+                summary
+                    .codex_native_usage
+                    .get_or_insert_with(Default::default);
+            }
             summary.entrypoint = field(payload, "originator").map(str::to_owned);
             summary.cwd = field(payload, "cwd").map(str::to_owned);
             summary.branch = payload
@@ -3115,6 +3208,11 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                 {
                     summary.rate_limits = Some(latest);
                 }
+            }
+        }
+        Some("token_usage_record") => {
+            if let Some(model) = summary.last_model.clone() {
+                CodexNativeUsage::observe(&mut summary.codex_native_usage, payload, model, time);
             }
         }
         Some("event_msg") if field(payload, "type") == Some("context_compacted") => {

@@ -45,7 +45,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -90,7 +90,8 @@ CREATE TABLE IF NOT EXISTS files (
     links TEXT NOT NULL,
     codex_tokens TEXT NOT NULL,
     codex_tokens_by_model TEXT NOT NULL,
-    rate_limits TEXT
+    rate_limits TEXT,
+    codex_native_usage TEXT
 ) STRICT;
 CREATE TABLE IF NOT EXISTS events (
     file_id INTEGER NOT NULL,
@@ -200,14 +201,14 @@ DELETE FROM files;
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
      tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, last_ms, cwd, \
      branch, pending, tool_ids, yields, busy, links, codex_tokens, codex_tokens_by_model, \
-     rate_limits";
+     rate_limits, codex_native_usage";
 
 const PUT_FILE: &str = "INSERT INTO files (path, dev, ino, size, mtime_ns, resume_at, \
      head_sha256, tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, \
      last_ms, cwd, branch, pending, tool_ids, yields, busy, links, codex_tokens, \
-     codex_tokens_by_model, rate_limits) \
+     codex_tokens_by_model, rate_limits, codex_native_usage) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-     ?19, ?20, ?21, ?22, ?23, ?24, ?25) \
+     ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26) \
      ON CONFLICT (path) DO UPDATE SET dev = excluded.dev, ino = excluded.ino, \
      size = excluded.size, mtime_ns = excluded.mtime_ns, resume_at = excluded.resume_at, \
      head_sha256 = excluded.head_sha256, tail_sha256 = excluded.tail_sha256, \
@@ -218,7 +219,7 @@ const PUT_FILE: &str = "INSERT INTO files (path, dev, ino, size, mtime_ns, resum
      tool_ids = excluded.tool_ids, yields = excluded.yields, busy = excluded.busy, \
      links = excluded.links, codex_tokens = excluded.codex_tokens, \
      codex_tokens_by_model = excluded.codex_tokens_by_model, \
-     rate_limits = excluded.rate_limits \
+     rate_limits = excluded.rate_limits, codex_native_usage = excluded.codex_native_usage \
      RETURNING file_id";
 
 const EVENT_COLUMNS: &str = "extra, seq, k, o, b, t, id, n, code_mode, code_mode_open, parent, \
@@ -1190,6 +1191,9 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     }
     if schema < SCHEMA_VERSION {
         transaction.execute_batch(SCHEMA)?;
+        if schema == 1 {
+            transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_native_usage TEXT")?;
+        }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     let wiped = parser_version(&transaction)? != Some(CACHE_VERSION);
@@ -1453,6 +1457,10 @@ fn read_file(
         codex_tokens: from_json(23, &row.get::<_, String>(23)?)?,
         codex_tokens_by_model: from_json(24, &row.get::<_, String>(24)?)?,
         codex_usage_events,
+        codex_native_usage: row
+            .get::<_, Option<String>>(26)?
+            .map(|text| from_json(26, &text))
+            .transpose()?,
         rate_limits: row
             .get::<_, Option<String>>(25)?
             .map(|text| from_json(25, &text))
@@ -1633,6 +1641,7 @@ fn write_file(
         codex_tokens,
         codex_tokens_by_model,
         codex_usage_events,
+        codex_native_usage,
         rate_limits,
     } = index;
     let Ledger {
@@ -1676,6 +1685,7 @@ fn write_file(
             json(codex_tokens)?,
             json(codex_tokens_by_model)?,
             rate_limits,
+            codex_native_usage.as_ref().map(json).transpose()?,
         ],
         |row| row.get(0),
     )?;
@@ -2184,6 +2194,7 @@ mod tests {
                 ),
                 ("msg-2".to_owned(), MessageUsage::default()),
             ]),
+            codex_native_usage: None,
             codex_tokens: Tokens {
                 input: 17,
                 cached_input: 18,
@@ -2401,6 +2412,38 @@ mod tests {
             assert_eq!(rows, 0, "{table}");
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn schema_one_migrates_native_usage_without_losing_reported_runs() {
+        let root = scratch("native-usage-migration");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        store.write_runs(&[run()], &stamp()).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "ALTER TABLE files DROP COLUMN codex_native_usage;
+             PRAGMA user_version = 1;
+             UPDATE meta SET value = '19' WHERE key = 'cache_version';",
+            )
+            .unwrap();
+        drop(store);
+        let (store, loaded) = opened(&path);
+        assert_eq!(
+            format!("{:?}", loaded.reported_runs),
+            format!("{:?}", [run()])
+        );
+        assert_eq!(loaded.stamp, Some(stamp()));
+        assert!(loaded.files.is_empty());
+        assert_eq!(
+            versions(&store.connection).unwrap(),
+            (SCHEMA_VERSION, Some(CACHE_VERSION))
+        );
+        store
+            .connection
+            .prepare("SELECT codex_native_usage FROM files")
+            .unwrap();
     }
 
     #[test]

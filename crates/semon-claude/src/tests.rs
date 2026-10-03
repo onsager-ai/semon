@@ -31,6 +31,198 @@ fn compatibility_native_claude_2_1_288_cold_restart_and_retained_raw_parity() {
     compatibility_capture_parity(source, "native-claude-compat", 2);
 }
 
+#[test]
+fn native_tools_and_model_switch_have_cold_restart_and_retained_raw_parity() {
+    for (source, session, count) in [
+        (include_bytes!("../../../tests/fixtures/compatibility/claude-2.1.288/tools/initial-transcript.jsonl").as_slice(), "native-claude-tools-parent", 6),
+        (include_bytes!("../../../tests/fixtures/compatibility/claude-2.1.288/tools/resumed-transcript.jsonl").as_slice(), "native-claude-tools-parent", 8),
+        (include_bytes!("../../../tests/fixtures/compatibility/claude-2.1.288/tools/forked-transcript.jsonl").as_slice(), "native-claude-tools-child", 10),
+    ] {
+        compatibility_capture_parity(source, session, count);
+    }
+}
+
+#[test]
+fn native_resume_and_fork_snapshots_have_restart_and_raw_parity() {
+    for (source, session, count) in [
+        (include_bytes!("../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/initial-transcript.jsonl").as_slice(), "native-claude-parent", 2),
+        (include_bytes!("../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/resumed-transcript.jsonl").as_slice(), "native-claude-parent", 4),
+        (include_bytes!("../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/forked-transcript.jsonl").as_slice(), "native-claude-child", 6),
+    ] {
+        compatibility_capture_parity(source, session, count);
+    }
+}
+
+#[test]
+fn native_copied_prefix_keeps_distinct_physical_session_occurrences() {
+    let root = TestDir::new();
+    let cursor = root.path().join("cursor.json");
+    let database = root.path().join("incremental.sqlite3");
+    let parent = root.path().join("native-claude-parent.jsonl");
+    let child = root.path().join("native-claude-child.jsonl");
+    let initial = include_bytes!(
+        "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/initial-transcript.jsonl"
+    );
+    let resumed = include_bytes!(
+        "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/resumed-transcript.jsonl"
+    );
+    let forked = include_bytes!(
+        "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/forked-transcript.jsonl"
+    );
+    fs::write(&parent, initial).unwrap();
+    {
+        let mut store = TraceStore::open(&database).unwrap();
+        process_file(
+            &parent,
+            &mut CursorState::default(),
+            &mut store,
+            &options(&cursor),
+        )
+        .unwrap();
+    }
+    fs::write(&parent, resumed).unwrap();
+    fs::write(&child, forked).unwrap();
+    let mut incremental = TraceStore::open(&database).unwrap();
+    let mut state = load_state(&cursor).unwrap();
+    for path in [&parent, &child] {
+        process_file(path, &mut state, &mut incremental, &options(&cursor)).unwrap();
+    }
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    let mut cold_state = CursorState::default();
+    for path in [&parent, &child] {
+        process_file(path, &mut cold_state, &mut cold, &options(&cursor)).unwrap();
+    }
+    let records = incremental.log(&LogFilter::default()).unwrap();
+    assert_eq!(records, cold.log(&LogFilter::default()).unwrap());
+    let parent_rows: Vec<_> = records
+        .iter()
+        .filter(|row| row.session() == "native-claude-parent")
+        .collect();
+    let child_rows: Vec<_> = records
+        .iter()
+        .filter(|row| row.session() == "native-claude-child")
+        .collect();
+    assert_eq!(parent_rows.len(), 4);
+    assert_eq!(child_rows.len(), 6);
+    for (original, inherited) in parent_rows.iter().zip(child_rows.iter()) {
+        assert_eq!(original.trace_id(), inherited.trace_id());
+        assert_ne!(original.session(), inherited.session());
+        let parent_index = original.parent_sequence().map(|sequence| {
+            parent_rows
+                .iter()
+                .position(|row| row.sequence() == sequence)
+                .expect("parent edge within the parent session")
+        });
+        let child_index = inherited.parent_sequence().map(|sequence| {
+            child_rows
+                .iter()
+                .position(|row| row.sequence() == sequence)
+                .expect("parent edge within the child session")
+        });
+        assert_eq!(parent_index, child_index);
+    }
+    let mut rebuilt = TraceStore::open_in_memory().unwrap();
+    let mut rebuilt_state = CursorState::default();
+    for (session, path, expected) in [
+        ("native-claude-parent", &parent, resumed.as_slice()),
+        ("native-claude-child", &child, forked.as_slice()),
+    ] {
+        let retained: Vec<u8> = incremental
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(session))
+            .unwrap()
+            .iter()
+            .flat_map(|row| row.bytes().iter().copied())
+            .collect();
+        assert_eq!(retained, expected);
+        fs::write(path, retained).unwrap();
+        process_file(path, &mut rebuilt_state, &mut rebuilt, &options(&cursor)).unwrap();
+    }
+    assert_eq!(records, rebuilt.log(&LogFilter::default()).unwrap());
+}
+
+#[test]
+fn retained_custody_rebuilds_restored_source_without_guessing_raw_order() {
+    let root = TestDir::new();
+    let path = root.path().join("native-claude-compat.jsonl");
+    let cursor = root.path().join("cursor.json");
+    let database = root.path().join("custody.sqlite");
+    let original = include_bytes!(
+        "../../../tests/fixtures/compatibility/claude-2.1.288/initial-transcript.jsonl"
+    );
+    let replacement = String::from_utf8(original.to_vec())
+        .unwrap()
+        .replace("SYNTHETIC_CLAUDE_ACK", "SYNTHETIC_CHANGED_ACK")
+        .into_bytes();
+    for source in [
+        original.as_slice(),
+        replacement.as_slice(),
+        original.as_slice(),
+    ] {
+        fs::write(&path, source).unwrap();
+        let mut store = TraceStore::open(&database).unwrap();
+        let mut state = load_state(&cursor).unwrap();
+        process_file(&path, &mut state, &mut store, &options(&cursor)).unwrap();
+    }
+    let store = TraceStore::open(&database).unwrap();
+    let key = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let retained = store
+        .fetch_current_capture_source_raw(CARRIER, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained, original);
+    assert!(
+        store
+            .fetch_raw_carrier_records_for_occurrences(OccurrenceSelector::Session(
+                "native-claude-compat"
+            ))
+            .unwrap()
+            .len()
+            > original.split_inclusive(|byte| *byte == b'\n').count()
+    );
+    fs::write(&path, retained).unwrap();
+    let mut rebuilt = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut rebuilt,
+        &options(&cursor),
+    )
+    .unwrap();
+    assert_eq!(
+        store.log(&LogFilter::default()).unwrap(),
+        rebuilt.log(&LogFilter::default()).unwrap()
+    );
+    // A lost cursor must replay even a legacy source with no item-stream switch.
+    fs::remove_file(&cursor).unwrap();
+    fs::write(&path, &replacement).unwrap();
+    let mut warm = TraceStore::open(&database).unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut warm,
+        &options(&cursor),
+    )
+    .unwrap();
+    let mut cold = TraceStore::open_in_memory().unwrap();
+    process_file(
+        &path,
+        &mut CursorState::default(),
+        &mut cold,
+        &options(&cursor),
+    )
+    .unwrap();
+    assert_eq!(
+        warm.log(&LogFilter::default()).unwrap(),
+        cold.log(&LogFilter::default()).unwrap()
+    );
+    assert_eq!(
+        warm.fetch_current_capture_source_raw(CARRIER, &key)
+            .unwrap()
+            .unwrap(),
+        replacement
+    );
+}
+
 fn compatibility_capture_parity(source: &[u8], session: &str, expected_occurrences: usize) {
     let root = TestDir::new();
     let path = root.path().join(format!("{session}.jsonl"));

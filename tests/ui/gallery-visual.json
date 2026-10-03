@@ -1,0 +1,7 @@
+{
+  "states": ["primitives", "select", "account", "sheet", "panel"],
+  "widths": [390, 820, 1280],
+  "schemes": ["light", "dark"],
+  "threshold": 0.1,
+  "maxRatio": 0.001
+}

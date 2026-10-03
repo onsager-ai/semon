@@ -51,3 +51,6 @@ were repeated touch auditing across every session and running independent suites
 one after another. This layout targets the longest suite's runtime plus binary
 build/setup, rather than their sum. Measure GitHub runner timings before treating
 that estimate as an achieved CI duration.
+
+Shared design rules, consumer auditing and deliberate gallery baseline updates are
+documented in [the design contract](../../docs/design/design-contract.md).

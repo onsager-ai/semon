@@ -29,6 +29,7 @@ macro_rules! identifier {
             type Error = Error;
             fn try_from(value: String) -> Result<Self, Error> {
                 if value.is_empty()
+                    || matches!(value.as_str(), "." | "..")
                     || value.len() > 128
                     || !value
                         .bytes()
@@ -132,7 +133,7 @@ pub enum Progress {
     Failed,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
     pub id: OperationId,
@@ -141,6 +142,22 @@ pub struct Operation {
     pub progress: Progress,
     /// Sensitive manual input retained before any provisioning. No dispatch yet.
     pub launch_input: Option<String>,
+}
+
+// Session Debug delegates here; durable manual input must not enter diagnostics.
+impl std::fmt::Debug for Operation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Operation")
+            .field("id", &self.id)
+            .field("epoch", &self.epoch)
+            .field("action", &self.action)
+            .field("progress", &self.progress)
+            .field(
+                "launch_input",
+                &self.launch_input.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
