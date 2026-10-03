@@ -1428,6 +1428,557 @@ globalThis.__semonUIShared = __semonUIShared;
     return response.json();
   }
 
+  // src/domain/validate.ts
+  function object2(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid object");
+    return Object.fromEntries(Object.entries(value));
+  }
+  function text(value) {
+    if (typeof value !== "string") throw new Error("Invalid string");
+    return value;
+  }
+  function number(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("Invalid number");
+    return value;
+  }
+  function boolean(value) {
+    if (typeof value !== "boolean") throw new Error("Invalid boolean");
+    return value;
+  }
+  function optional(value, parse) {
+    return value == null ? void 0 : parse(value);
+  }
+  function array(value, parse) {
+    if (!Array.isArray(value)) throw new Error("Invalid array");
+    return value.map(parse);
+  }
+  function dictionary(value, parse) {
+    return Object.fromEntries(Object.entries(object2(value)).map(([id, row]) => [id, parse(row)]));
+  }
+  function state(value) {
+    switch (value) {
+      case "work":
+      case "wait":
+      case "idle":
+      case "done":
+      case "err":
+        return value;
+      default:
+        throw new Error("Invalid session state");
+    }
+  }
+  function status(value) {
+    switch (value) {
+      case "work":
+      case "wait":
+      case "done":
+      case "err":
+      case "new":
+        return value;
+      default:
+        throw new Error("Invalid handoff status");
+    }
+  }
+
+  // src/domain/normalize.ts
+  var strings2 = (v) => array(v, text);
+  var numbers = (v) => dictionary(v, number);
+  function usage(value) {
+    const v = object2(value);
+    return { input: optional(v.input, number), output: optional(v.output, number), cache_write: optional(v.cache_write, number), cache_write_5m: optional(v.cache_write_5m, number), cache_write_1h: optional(v.cache_write_1h, number), cache_read: optional(v.cache_read, number), web_search: optional(v.web_search, number) };
+  }
+  function modelCost(value) {
+    const v = object2(value);
+    return { usd: v.usd == null ? null : number(v.usd), tokens: optional(v.tokens, usage), usd_by_kind: optional(v.usd_by_kind, usage) };
+  }
+  function cost(value) {
+    const v = object2(value);
+    return { usd: v.usd == null ? null : number(v.usd), unpriced_models: optional(v.unpriced_models, strings2), split_unknown_messages: optional(v.split_unknown_messages, number), by_model: optional(v.by_model, (v2) => dictionary(v2, modelCost)), by_day: optional(v.by_day, numbers) };
+  }
+  function activity(value) {
+    if (!Array.isArray(value) || value.length < 3 || value.length > 4) throw new Error("Invalid activity");
+    return [text(value[0]), text(value[1]), number(value[2]), optional(value[3], number)];
+  }
+  function parseSession(id, value) {
+    const v = object2(value);
+    return {
+      id,
+      name: text(v.name),
+      harness: text(v.harness),
+      state: state(v.state),
+      machine: text(v.machine),
+      start: number(v.start),
+      last: number(v.last),
+      effort: optional(v.effort, text),
+      cwd: optional(v.cwd, text),
+      dir: optional(v.dir, text),
+      directory: optional(v.directory, text),
+      sessionId: optional(v.sessionId, text),
+      pid: optional(v.pid, number),
+      wait_edges_truncated: optional(v.wait_edges_truncated, boolean),
+      busy: optional(v.busy, (v2) => array(v2, (v3) => {
+        if (!Array.isArray(v3) || v3.length !== 2) throw new Error("Invalid interval");
+        return [number(v3[0]), number(v3[1])];
+      })),
+      wait_edges: optional(v.wait_edges, (v2) => array(v2, (v3) => {
+        const w = object2(v3);
+        return { call: text(w.call), tool: text(w.tool), targets: strings2(w.targets), start: number(w.start), end: optional(w.end, number), turn: optional(w.turn, text) };
+      })),
+      reported_runs: optional(v.reported_runs, (v2) => array(v2, (v3) => {
+        const r = object2(v3);
+        return { start: number(r.start), cost_usd: optional(r.cost_usd, number) };
+      })),
+      cost_check: optional(v.cost_check, (v2) => array(v2, (v3) => {
+        const c = object2(v3);
+        return { start: number(c.start), computed_usd: optional(c.computed_usd, number), reported_usd: optional(c.reported_usd, number), ok: optional(c.ok, boolean) };
+      })),
+      kind: optional(v.kind, text),
+      host: optional(v.host, text),
+      repo: optional(v.repo, text),
+      branch: optional(v.branch, text),
+      worktree: optional(v.worktree, text),
+      parent: optional(v.parent, text),
+      lane: optional(v.lane, boolean),
+      model: optional(v.model, text),
+      modelId: optional(v.modelId, text),
+      role: optional(v.role, boolean),
+      stub: optional(v.stub, boolean),
+      movedFrom: optional(v.movedFrom, text),
+      calls: optional(v.calls, number),
+      errors: optional(v.errors, number),
+      waiting_since: optional(v.waiting_since, number),
+      waiting_for: optional(v.waiting_for, text),
+      tokens: optional(v.tokens, (v2) => array(v2, number)),
+      tokens_by_model: optional(v.tokens_by_model, (v2) => dictionary(v2, usage)),
+      cost: optional(v.cost, cost),
+      activity: optional(v.activity, activity),
+      tool_calls: optional(v.tool_calls, numbers),
+      signals: optional(v.signals, numbers)
+    };
+  }
+  function answer(value) {
+    return typeof value === "string" ? value : strings2(value);
+  }
+  function parseHandoff(value) {
+    const v = object2(value), common = { id: text(v.id), from: text(v.from), to: v.to == null ? "" : text(v.to), at: number(v.at), status: status(v.status), brief: optional(v.brief, text), done: optional(v.done, number), result: optional(v.result, text), target: optional(v.target, text), declined: optional(v.declined, boolean) };
+    switch (v.kind) {
+      case "ask":
+      case "spawn":
+      case "relay":
+        return { ...common, kind: v.kind };
+      case "move":
+        return { ...common, kind: "move", fromMachine: text(v.fromMachine), toMachine: text(v.toMachine) };
+      case "toyou": {
+        if (v.ask !== "question" && v.ask !== "decision" && v.ask !== "result") throw new Error("Invalid ask");
+        return { ...common, kind: "toyou", ask: v.ask, answer: optional(v.answer, answer), answers: optional(v.answers, (v2) => array(v2, (v3) => ({ values: optional(object2(v3).values, strings2) }))) };
+      }
+      default:
+        throw new Error("Invalid handoff kind");
+    }
+  }
+  function turnEnd(value) {
+    const v = object2(value);
+    return { st: optional(v.st, state), why: text(v.why), h: optional(v.h, text), at: optional(v.at, number) };
+  }
+  function normalizeModel(model) {
+    const sessions = Object.fromEntries(Object.entries(model.sessions).map(([id, v]) => [id, parseSession(id, v)]));
+    const handoffs = model.handoffs.map(parseHandoff);
+    for (const h2 of handoffs) if (!h2.to) {
+      const machine2 = sessions[h2.from]?.machine ?? model.machine.id, id = "unsent:" + (h2.target ?? "") + (model.machines ? "@" + machine2 : "");
+      const s = sessions[id] ??= { id, name: h2.target || "unknown", harness: "claude", stub: true, machine: machine2, state: "err", model: "\u2014", tokens: [0, 0, 0], start: h2.at, last: h2.at };
+      s.start = Math.min(s.start, h2.at);
+      s.last = Math.max(s.last, h2.at);
+      h2.to = id;
+    }
+    const handoff = new Map(handoffs.map((h2) => [h2.id, h2])), turns = /* @__PURE__ */ Object.create(null), turn = /* @__PURE__ */ new Map(), starts = /* @__PURE__ */ new Map(), holds = /* @__PURE__ */ new Map();
+    for (const row of model.turns) {
+      const x = object2(row), id = text(x.id), sid = text(x.sid), start = optional(x.start, text), sent = array(x.sent, text).flatMap((id2) => {
+        const h2 = handoff.get(id2);
+        return h2 ? [h2] : [];
+      });
+      const t = { id, sid, start: start ? handoff.get(start) ?? null : null, at: optional(x.at, number), u: x.u ? { k: "u", text: optional(x.text, text) ?? "" } : null, entries: [], sent, out: sent.filter((h2) => h2.kind !== "move"), end: optional(x.end, turnEnd), last: optional(x.last, boolean) };
+      (turns[sid] ??= []).push(t);
+      turn.set(id, t);
+      if (t.start) starts.set(t.start.id, t);
+      for (const h2 of t.sent) holds.set(h2.id, t);
+    }
+    return { sessions, handoffs, handoff, turns, turn, starts, holds };
+  }
+
+  // src/state/model.ts
+  function replaceRecord(target, next) {
+    for (const id of Object.keys(target)) delete target[id];
+    Object.assign(target, next);
+  }
+  function replaceMap(target, next) {
+    target.clear();
+    for (const [id, row] of next) target.set(id, row);
+  }
+  var ViewerModelStore = class {
+    raw = new ModelStore();
+    sessions = /* @__PURE__ */ Object.create(null);
+    machines = /* @__PURE__ */ Object.create(null);
+    machineUp = /* @__PURE__ */ Object.create(null);
+    machineLast = /* @__PURE__ */ Object.create(null);
+    handoffs = [];
+    turns = /* @__PURE__ */ Object.create(null);
+    turn = /* @__PURE__ */ new Map();
+    starts = /* @__PURE__ */ new Map();
+    holds = /* @__PURE__ */ new Map();
+    handoff = /* @__PURE__ */ new Map();
+    apply(value) {
+      return this.raw.apply(value);
+    }
+    adopt(value) {
+      const model = parseModel(value), normalized = normalizeModel(model);
+      const machines = model.machines == null ? [parseModelMachine(model.machine)] : array(model.machines, parseModelMachine);
+      this.raw.adopt(model);
+      replaceRecord(this.sessions, normalized.sessions);
+      replaceRecord(this.turns, normalized.turns);
+      this.handoffs.splice(0, this.handoffs.length, ...normalized.handoffs);
+      replaceMap(this.turn, normalized.turn);
+      replaceMap(this.starts, normalized.starts);
+      replaceMap(this.holds, normalized.holds);
+      replaceMap(this.handoff, normalized.handoff);
+      for (const table of [this.machines, this.machineUp, this.machineLast]) for (const id of Object.keys(table)) delete table[id];
+      for (const row of machines) {
+        this.machines[row.id] = row.name;
+        this.machineUp[row.id] = row.up;
+        if (row.last !== void 0) this.machineLast[row.id] = row.last;
+      }
+      return model;
+    }
+    domain(transcriptMeta) {
+      return { sessions: this.sessions, machines: this.machines, handoffs: this.handoffs, turns: this.turns, turn: this.turn, starts: this.starts, holds: this.holds, handoff: this.handoff, transcriptMeta };
+    }
+  };
+  function parseModelMachine(value) {
+    const v = object2(value);
+    return { id: text(v.id), name: text(v.name), up: boolean(v.up), last: optional(v.last, number) };
+  }
+
+  // src/lib/routes.ts
+  function routeUrl(route, model) {
+    const enc = encodeURIComponent, harness = (id) => model.session(id)?.harness ?? "claude";
+    switch (route.v) {
+      case "home":
+        return "/";
+      case "analytics":
+        return "/analytics";
+      case "sessions":
+        return "/sessions";
+      case "machines":
+        return model.machinesPath ?? "/machines";
+      case "machine":
+        return "/machines/" + enc(route.id);
+      case "session":
+        return "/s/" + harness(route.id) + "/" + enc(route.id) + (route.turn ? "?turn=" + enc(route.turn) : "");
+      case "trace":
+        return "/trace/" + harness(route.sid) + "/" + enc(route.sid) + "/" + enc(route.turn);
+    }
+  }
+  function parseRoute(location2, model) {
+    if (model.machinesPath && location2.pathname === model.machinesPath) return { v: "machines" };
+    const decode = (text2) => {
+      try {
+        return decodeURIComponent(text2);
+      } catch {
+        return text2;
+      }
+    }, parts = location2.pathname.split("/").filter(Boolean).map(decode), sid = parts[2], turn = new URLSearchParams(location2.search).get("turn");
+    if (parts[0] === "timeline" || parts[0] === "analytics") return { v: "analytics" };
+    if (parts[0] === "sessions") return { v: "sessions" };
+    if (parts[0] === "machines") return parts[1] && model.machine(parts[1]) ? { v: "machine", id: parts[1] } : { v: "machines" };
+    if (parts[0] === "s" && sid && model.session(sid)) {
+      const candidate = model.turn(turn ?? (decode(location2.hash.slice(1)).split("#")[0] ?? "")), target = candidate?.sid === sid ? candidate.id : null;
+      return target ? { v: "session", id: sid, turn: target } : { v: "session", id: sid };
+    }
+    if (parts[0] === "trace" && sid && model.session(sid) && parts[3] && model.turn(parts[3])?.sid === sid) return { v: "trace", sid, turn: parts[3] };
+    return { v: "home" };
+  }
+  var TranscriptCache = class extends Map {
+    constructor(maxEntries = 5, maxBytes = 2 * 1024 * 1024) {
+      super();
+      this.maxEntries = maxEntries;
+      this.maxBytes = maxBytes;
+    }
+    maxEntries;
+    maxBytes;
+    keep(sid, entries, meta) {
+      this.delete(sid);
+      let weight = 0;
+      for (const entry of entries) for (const value of Object.values(entry)) weight += typeof value === "string" ? value.length : value && typeof value === "object" ? JSON.stringify(value).length : 4;
+      const bytes = weight * 2;
+      if (bytes > this.maxBytes) return;
+      this.set(sid, { entries, meta, bytes });
+      let sum = 0;
+      for (const record2 of this.values()) sum += record2.bytes;
+      for (const [id, record2] of this) {
+        if (this.size <= this.maxEntries && sum <= this.maxBytes) break;
+        this.delete(id);
+        sum -= record2.bytes;
+      }
+    }
+  };
+
+  // src/lib/live.ts
+  function createLiveController(host2) {
+    const state2 = { late: null, lateTries: 0, retry: false, version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2e3, ended: false, again: false, pending: false, fresh: 0, turns: /* @__PURE__ */ new Map() };
+    let disposed = false;
+    const visible = () => document.visibilityState === "visible", floorWait = () => Math.max(0, state2.started + 1e3 - performance.now());
+    function cancel() {
+      if (state2.timer !== null) clearTimeout(state2.timer);
+      state2.timer = null;
+    }
+    function schedule(ms) {
+      cancel();
+      if (!disposed && !state2.ended && visible()) {
+        state2.due = performance.now() + ms;
+        state2.timer = window.setTimeout(poll, ms);
+      }
+    }
+    function refresh() {
+      if (disposed || !state2.version || state2.ended) return;
+      if (state2.busy) {
+        state2.again = true;
+        return;
+      }
+      const wait = floorWait();
+      if (!state2.timer || performance.now() + wait < state2.due) schedule(wait);
+    }
+    async function poll() {
+      state2.timer = null;
+      if (disposed || state2.busy || state2.ended || !visible()) return;
+      state2.busy = true;
+      state2.started = performance.now();
+      state2.retry = false;
+      let ok = false;
+      try {
+        await host2.poll();
+        state2.delay = state2.retry ? Math.min(3e4, state2.delay * 2) : 2e3;
+        ok = true;
+      } catch (error) {
+        const status2 = typeof error === "object" && error !== null && "status" in error ? error.status : void 0;
+        if (host2.failed(error)) {
+          state2.ended = true;
+          cancel();
+        } else if (status2 === 403) host2.ended(403);
+        else {
+          state2.delay = Math.min(3e4, state2.delay * 2);
+          if (status2 === void 0) window.setTimeout(() => {
+            throw error;
+          });
+        }
+      } finally {
+        state2.busy = false;
+        if (!disposed) {
+          schedule(state2.again ? floorWait() : state2.delay);
+          state2.again = false;
+          window.dispatchEvent(new CustomEvent("semon:polled", { detail: { ok } }));
+        }
+      }
+    }
+    function visibility() {
+      if (!visible()) cancel();
+      else if (state2.version && !state2.busy && !state2.timer) schedule(state2.delay > 2e3 ? state2.delay : 0);
+    }
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("semon:refresh", refresh);
+    return { state: state2, schedule, stop() {
+      state2.ended = true;
+      cancel();
+    }, destroy() {
+      if (disposed) return;
+      disposed = true;
+      cancel();
+      document.removeEventListener("visibilitychange", visibility);
+      window.removeEventListener("semon:refresh", refresh);
+    } };
+  }
+  function createPagingStore() {
+    const states3 = /* @__PURE__ */ new Map();
+    return { states: states3, get(sid, direction) {
+      let pair = states3.get(sid);
+      if (!pair) {
+        pair = { before: { busy: false, failed: false }, after: { busy: false, failed: false } };
+        states3.set(sid, pair);
+      }
+      return pair[direction];
+    }, clear(sid) {
+      for (const state2 of Object.values(states3.get(sid) ?? {})) state2.controller?.abort();
+      states3.delete(sid);
+    }, destroy() {
+      for (const sid of states3.keys()) this.clear(sid);
+    } };
+  }
+
+  // src/state/transcript-wire.ts
+  var strings3 = (value) => array(value, text);
+  function background(value) {
+    const v = object2(value), state2 = v.state;
+    if (state2 !== "running" && state2 !== "unknown" && state2 !== "failed" && state2 !== "killed" && state2 !== "done") throw new Error("Invalid background state");
+    return { state: state2, secs: optional(v.secs, (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)), since: optional(v.since, number), exit: optional(v.exit, number), summary: optional(v.summary, text) };
+  }
+  function image(value) {
+    const v = object2(value), base = { o: number(v.o), b: number(v.b), w: optional(v.w, number), h: optional(v.h, number), type: optional(v.type, text), size: optional(v.size, number) };
+    return v.na === true ? { ...base, na: true, v: optional(v.v, text) } : { ...base, na: optional(v.na, (value2) => {
+      if (value2 !== false) throw new Error("Invalid image availability");
+      return false;
+    }), v: text(v.v) };
+  }
+  var diff = (value) => array(value, (value2) => {
+    if (!Array.isArray(value2) || value2.length !== 2) throw new Error("Invalid diff");
+    return [text(value2[0]), text(value2[1])];
+  });
+  function cut(value) {
+    const v = object2(value);
+    return { original_tokens: optional(v.original_tokens, number), parts: optional(v.parts, (v2) => array(v2, (v3) => {
+      const p = object2(v3);
+      return { text: optional(p.text, text), gap: optional(p.gap, (v4) => {
+        const g = object2(v4);
+        return { unit: text(g.unit), n: number(g.n), of: optional(g.of, number) };
+      }) };
+    })) };
+  }
+  function parseEntry(value) {
+    const v = object2(value), base = { img: optional(v.img, (v2) => array(v2, image)), turn: optional(v.turn, text), slot: optional(v.slot, number), live: optional(v.live, boolean), unfinished: optional(v.unfinished, boolean), tid: optional(v.tid, text), bg: optional(v.bg, background) };
+    switch (v.k) {
+      case "u":
+      case "a":
+        return { ...base, k: v.k, text: text(v.text), img: optional(v.img, (v2) => array(v2, image)) };
+      case "think":
+        return { ...base, k: "think", text: optional(v.text, text), pending: optional(v.pending, boolean), status: optional(v.status, text), secs: optional(v.secs, (v2) => typeof v2 === "string" ? v2 : number(v2)) };
+      case "h":
+        return { ...base, k: "h", id: text(v.id) };
+      case "end":
+        return { ...base, k: "end", text: optional(v.text, text), ret: optional(v.ret, (v2) => {
+          const r = object2(v2);
+          return { to: text(r.to), failed: optional(r.failed, boolean), at: optional(r.at, number) };
+        }) };
+      case "harness":
+        return { ...base, k: "harness", label: text(v.label) };
+      case "signal":
+        return { ...base, k: "signal", signal: (() => {
+          const s = object2(v.signal);
+          return { kind: text(s.kind), tag: optional(s.tag, text), tool: optional(s.tool, text), value: optional(s.value, number), previous: optional(s.previous, text) };
+        })() };
+      case "bgend":
+        return { ...base, k: "bgend", call: text(v.call), state: text(v.state), label: optional(v.label, text) };
+      case "tool":
+        return { ...base, k: "tool", name: text(v.name), arg: text(v.arg), title: optional(v.title, text), secs: optional(v.secs, (value2) => typeof value2 === "number" ? String(number(value2)) : text(value2)), since: optional(v.since, number), exit: optional(v.exit, number), ok: v.ok == null ? v.ok : boolean(v.ok), in: optional(v.in, text), out: optional(v.out, text), cwd: optional(v.cwd, text), diff: optional(v.diff, diff), changes: optional(v.changes, (v2) => array(v2, (v3) => {
+          const c = object2(v3);
+          return { path: text(c.path), move: optional(c.move, text), diff: optional(c.diff, diff) };
+        })), more: optional(v.more, strings3), script: v.script, cut: optional(v.cut, cut) };
+      default:
+        throw new Error("Invalid transcript entry");
+    }
+  }
+  function parseTranscriptPage(value) {
+    const v = object2(value), from = number(v.from), to = number(v.to), total = number(v.total);
+    if (![from, to, total].every(Number.isInteger) || from < 0 || to < from || total < to) throw new Error("Invalid transcript range");
+    return { entries: array(v.entries, parseEntry), from, to, total, calls: optional(v.calls, number), errors: optional(v.errors, number), bg_running: optional(v.bg_running, strings3) };
+  }
+
+  // src/state/transcript.ts
+  var TranscriptStore = class {
+    constructor(host2) {
+      this.host = host2;
+    }
+    host;
+    entries = /* @__PURE__ */ Object.create(null);
+    meta = /* @__PURE__ */ Object.create(null);
+    marks = /* @__PURE__ */ Object.create(null);
+    staleBriefs = /* @__PURE__ */ new Set();
+    cache = new TranscriptCache();
+    paging = createPagingStore();
+    requests = /* @__PURE__ */ new Set();
+    disposed = false;
+    spread(sid) {
+      for (const turn2 of this.host.turns(sid)) turn2.entries = [];
+      let turn, pre = 0;
+      for (const entry of this.entries[sid] ?? []) {
+        if (entry.turn) turn = this.host.turn(entry.turn);
+        if (turn && turn.sid === sid) {
+          entry.key = turn.id + "#" + turn.entries.length;
+          turn.entries.push(entry);
+        } else entry.key = sid + "#" + pre++;
+      }
+    }
+    clearPaging(sid) {
+      this.paging.clear(sid);
+      this.host.cleared(sid);
+    }
+    drop(sid) {
+      this.clearPaging(sid);
+      delete this.entries[sid];
+      delete this.meta[sid];
+    }
+    async fetch(sid, query = "", direction, signal, onPage) {
+      if (this.disposed || signal?.aborted) return;
+      const controller = new AbortController(), abort = () => controller.abort();
+      signal?.addEventListener("abort", abort, { once: true });
+      this.requests.add(controller);
+      const mark = this.marks[sid], range = this.meta[sid], boundary = direction === "before" ? range?.from : range?.to;
+      try {
+        const response = await this.host.request("/api/tx?sid=" + encodeURIComponent(sid) + (query ? "&" + query : ""), controller.signal);
+        if (this.disposed || controller.signal.aborted || direction && (this.meta[sid] !== range || (direction === "before" ? this.meta[sid]?.from : this.meta[sid]?.to) !== boundary)) return;
+        const page = parseTranscriptPage(response), entries = page.entries.map((entry) => this.host.entry({ ...entry, sid })), meta = this.meta[sid];
+        if (direction === "before" && meta) {
+          this.entries[sid] = entries.concat(this.entries[sid]);
+          meta.from = page.from;
+        } else if (direction === "after" && meta) {
+          this.entries[sid] = this.entries[sid].concat(entries);
+          meta.to = page.to;
+        } else {
+          this.clearPaging(sid);
+          this.entries[sid] = entries;
+          this.meta[sid] = { from: page.from, to: page.to, total: page.total };
+          this.staleBriefs.delete(sid);
+        }
+        Object.assign(this.meta[sid], { total: page.total, calls: page.calls, errors: page.errors, watchTok: mark });
+        if (direction !== "before" && page.to >= page.total) {
+          this.meta[sid].tok = mark;
+          this.meta[sid].newer = 0;
+        }
+        this.spread(sid);
+        onPage?.();
+      } finally {
+        this.requests.delete(controller);
+        signal?.removeEventListener("abort", abort);
+      }
+    }
+    keep(sid, entries, meta, origin) {
+      if (!entries || !meta || meta.to < meta.total || meta.tok == null || this.staleBriefs.has(sid) || meta.origin !== origin) return;
+      this.cache.keep(sid, entries, meta);
+    }
+    adoptCached(sid, turn) {
+      const cached = this.cache.get(sid);
+      if (!cached) return false;
+      this.cache.delete(sid);
+      this.entries[sid] = cached.entries;
+      this.meta[sid] = cached.meta;
+      if (!turn) return true;
+      this.spread(sid);
+      const target = this.host.turn(turn);
+      if (target && target.sid === sid && !target.entries.length) {
+        this.drop(sid);
+        return false;
+      }
+      return true;
+    }
+    destroy() {
+      if (this.disposed) return;
+      this.disposed = true;
+      for (const request of this.requests) request.abort();
+      this.requests.clear();
+      this.paging.destroy();
+      this.cache.clear();
+      this.staleBriefs.clear();
+      for (const id of Object.keys(this.entries)) delete this.entries[id];
+      for (const id of Object.keys(this.meta)) delete this.meta[id];
+    }
+  };
+
   // src/domain/format.ts
   var clock = (t, NOW) => {
     const d = new Date(t), n = new Date(NOW);
@@ -1637,183 +2188,6 @@ globalThis.__semonUIShared = __semonUIShared;
       };
     }
     return { traceAgentTree, agentSnapshot };
-  }
-
-  // src/domain/validate.ts
-  function object2(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid object");
-    return Object.fromEntries(Object.entries(value));
-  }
-  function text(value) {
-    if (typeof value !== "string") throw new Error("Invalid string");
-    return value;
-  }
-  function number(value) {
-    if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("Invalid number");
-    return value;
-  }
-  function boolean(value) {
-    if (typeof value !== "boolean") throw new Error("Invalid boolean");
-    return value;
-  }
-  function optional(value, parse) {
-    return value == null ? void 0 : parse(value);
-  }
-  function array(value, parse) {
-    if (!Array.isArray(value)) throw new Error("Invalid array");
-    return value.map(parse);
-  }
-  function dictionary(value, parse) {
-    return Object.fromEntries(Object.entries(object2(value)).map(([id, row]) => [id, parse(row)]));
-  }
-  function state(value) {
-    switch (value) {
-      case "work":
-      case "wait":
-      case "idle":
-      case "done":
-      case "err":
-        return value;
-      default:
-        throw new Error("Invalid session state");
-    }
-  }
-  function status(value) {
-    switch (value) {
-      case "work":
-      case "wait":
-      case "done":
-      case "err":
-      case "new":
-        return value;
-      default:
-        throw new Error("Invalid handoff status");
-    }
-  }
-
-  // src/domain/normalize.ts
-  var strings2 = (v) => array(v, text);
-  var numbers = (v) => dictionary(v, number);
-  function usage(value) {
-    const v = object2(value);
-    return { input: optional(v.input, number), output: optional(v.output, number), cache_write: optional(v.cache_write, number), cache_write_5m: optional(v.cache_write_5m, number), cache_write_1h: optional(v.cache_write_1h, number), cache_read: optional(v.cache_read, number), web_search: optional(v.web_search, number) };
-  }
-  function modelCost(value) {
-    const v = object2(value);
-    return { usd: v.usd == null ? null : number(v.usd), tokens: optional(v.tokens, usage), usd_by_kind: optional(v.usd_by_kind, usage) };
-  }
-  function cost(value) {
-    const v = object2(value);
-    return { usd: v.usd == null ? null : number(v.usd), unpriced_models: optional(v.unpriced_models, strings2), split_unknown_messages: optional(v.split_unknown_messages, number), by_model: optional(v.by_model, (v2) => dictionary(v2, modelCost)), by_day: optional(v.by_day, numbers) };
-  }
-  function activity(value) {
-    if (!Array.isArray(value) || value.length < 3 || value.length > 4) throw new Error("Invalid activity");
-    return [text(value[0]), text(value[1]), number(value[2]), optional(value[3], number)];
-  }
-  function parseSession(id, value) {
-    const v = object2(value);
-    return {
-      id,
-      name: text(v.name),
-      harness: text(v.harness),
-      state: state(v.state),
-      machine: text(v.machine),
-      start: number(v.start),
-      last: number(v.last),
-      effort: optional(v.effort, text),
-      cwd: optional(v.cwd, text),
-      dir: optional(v.dir, text),
-      directory: optional(v.directory, text),
-      sessionId: optional(v.sessionId, text),
-      pid: optional(v.pid, number),
-      wait_edges_truncated: optional(v.wait_edges_truncated, boolean),
-      busy: optional(v.busy, (v2) => array(v2, (v3) => {
-        if (!Array.isArray(v3) || v3.length !== 2) throw new Error("Invalid interval");
-        return [number(v3[0]), number(v3[1])];
-      })),
-      wait_edges: optional(v.wait_edges, (v2) => array(v2, (v3) => {
-        const w = object2(v3);
-        return { call: text(w.call), tool: text(w.tool), targets: strings2(w.targets), start: number(w.start), end: optional(w.end, number), turn: optional(w.turn, text) };
-      })),
-      reported_runs: optional(v.reported_runs, (v2) => array(v2, (v3) => {
-        const r = object2(v3);
-        return { start: number(r.start), cost_usd: optional(r.cost_usd, number) };
-      })),
-      cost_check: optional(v.cost_check, (v2) => array(v2, (v3) => {
-        const c = object2(v3);
-        return { start: number(c.start), computed_usd: optional(c.computed_usd, number), reported_usd: optional(c.reported_usd, number), ok: optional(c.ok, boolean) };
-      })),
-      kind: optional(v.kind, text),
-      host: optional(v.host, text),
-      repo: optional(v.repo, text),
-      branch: optional(v.branch, text),
-      worktree: optional(v.worktree, text),
-      parent: optional(v.parent, text),
-      lane: optional(v.lane, boolean),
-      model: optional(v.model, text),
-      modelId: optional(v.modelId, text),
-      role: optional(v.role, boolean),
-      stub: optional(v.stub, boolean),
-      movedFrom: optional(v.movedFrom, text),
-      calls: optional(v.calls, number),
-      errors: optional(v.errors, number),
-      waiting_since: optional(v.waiting_since, number),
-      waiting_for: optional(v.waiting_for, text),
-      tokens: optional(v.tokens, (v2) => array(v2, number)),
-      tokens_by_model: optional(v.tokens_by_model, (v2) => dictionary(v2, usage)),
-      cost: optional(v.cost, cost),
-      activity: optional(v.activity, activity),
-      tool_calls: optional(v.tool_calls, numbers),
-      signals: optional(v.signals, numbers)
-    };
-  }
-  function answer(value) {
-    return typeof value === "string" ? value : strings2(value);
-  }
-  function parseHandoff(value) {
-    const v = object2(value), common = { id: text(v.id), from: text(v.from), to: v.to == null ? "" : text(v.to), at: number(v.at), status: status(v.status), brief: optional(v.brief, text), done: optional(v.done, number), result: optional(v.result, text), target: optional(v.target, text), declined: optional(v.declined, boolean) };
-    switch (v.kind) {
-      case "ask":
-      case "spawn":
-      case "relay":
-        return { ...common, kind: v.kind };
-      case "move":
-        return { ...common, kind: "move", fromMachine: text(v.fromMachine), toMachine: text(v.toMachine) };
-      case "toyou": {
-        if (v.ask !== "question" && v.ask !== "decision" && v.ask !== "result") throw new Error("Invalid ask");
-        return { ...common, kind: "toyou", ask: v.ask, answer: optional(v.answer, answer), answers: optional(v.answers, (v2) => array(v2, (v3) => ({ values: optional(object2(v3).values, strings2) }))) };
-      }
-      default:
-        throw new Error("Invalid handoff kind");
-    }
-  }
-  function turnEnd(value) {
-    const v = object2(value);
-    return { st: optional(v.st, state), why: text(v.why), h: optional(v.h, text), at: optional(v.at, number) };
-  }
-  function normalizeModel(model) {
-    const sessions = Object.fromEntries(Object.entries(model.sessions).map(([id, v]) => [id, parseSession(id, v)]));
-    const handoffs = model.handoffs.map(parseHandoff);
-    for (const h2 of handoffs) if (!h2.to) {
-      const machine2 = sessions[h2.from]?.machine ?? model.machine.id, id = "unsent:" + (h2.target ?? "") + (model.machines ? "@" + machine2 : "");
-      const s = sessions[id] ??= { id, name: h2.target || "unknown", harness: "claude", stub: true, machine: machine2, state: "err", model: "\u2014", tokens: [0, 0, 0], start: h2.at, last: h2.at };
-      s.start = Math.min(s.start, h2.at);
-      s.last = Math.max(s.last, h2.at);
-      h2.to = id;
-    }
-    const handoff = new Map(handoffs.map((h2) => [h2.id, h2])), turns = /* @__PURE__ */ Object.create(null), turn = /* @__PURE__ */ new Map(), starts = /* @__PURE__ */ new Map(), holds = /* @__PURE__ */ new Map();
-    for (const row of model.turns) {
-      const x = object2(row), id = text(x.id), sid = text(x.sid), start = optional(x.start, text), sent = array(x.sent, text).flatMap((id2) => {
-        const h2 = handoff.get(id2);
-        return h2 ? [h2] : [];
-      });
-      const t = { id, sid, start: start ? handoff.get(start) ?? null : null, at: optional(x.at, number), u: x.u ? { k: "u", text: optional(x.text, text) ?? "" } : null, entries: [], sent, out: sent.filter((h2) => h2.kind !== "move"), end: optional(x.end, turnEnd), last: optional(x.last, boolean) };
-      (turns[sid] ??= []).push(t);
-      turn.set(id, t);
-      if (t.start) starts.set(t.start.id, t);
-      for (const h2 of t.sent) holds.set(h2.id, t);
-    }
-    return { sessions, handoffs, handoff, turns, turn, starts, holds };
   }
 
   // src/domain/calculations.ts
@@ -3395,7 +3769,7 @@ globalThis.__semonUIShared = __semonUIShared;
   // src/lib/tool-details.tsx
   var isCommand = (name) => /^(Bash|shell|exec_command|local_shell)$/.test(name);
   var gapText = (gap) => (gap.unit === "tokens" ? "About " : "") + (gap.unit === "lines" && gap.of != null ? gap.n.toLocaleString("en-US") + " of " + gap.of.toLocaleString("en-US") + " lines" : gap.n.toLocaleString("en-US") + " " + (gap.unit === "chars" ? "characters" : gap.unit)) + " cut here by Codex";
-  var cutNoteText = (cut) => "Codex cut this output before the model saw it" + (cut.original_tokens ? " (about " + cut.original_tokens.toLocaleString("en-US") + " tokens in all)" : "") + ".";
+  var cutNoteText = (cut2) => "Codex cut this output before the model saw it" + (cut2.original_tokens ? " (about " + cut2.original_tokens.toLocaleString("en-US") + " tokens in all)" : "") + ".";
   function Icon4({ path }) {
     return /* @__PURE__ */ jsx("svg", { class: "icon", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: path }) });
   }
@@ -3439,8 +3813,8 @@ globalThis.__semonUIShared = __semonUIShared;
   function ToolPreview({ data, waiting, host: host2 }) {
     const command = data.in ?? (isCommand(data.name) ? data.arg : null), inCut = typeof command === "string" && command.split("\n").length > 12;
     const inputLabel = command && isCommand(data.name) ? "Command" : "Input";
-    const lines = (data.out ?? "").split("\n"), cut = lines.length > 12, tail = data.ok === false, parts = !!data.cut?.parts?.length, more = !!data.more?.length;
-    const shown = !cut || parts ? lines : tail ? lines.slice(-12) : lines.slice(0, 12);
+    const lines = (data.out ?? "").split("\n"), cut2 = lines.length > 12, tail = data.ok === false, parts = !!data.cut?.parts?.length, more = !!data.more?.length;
+    const shown = !cut2 || parts ? lines : tail ? lines.slice(-12) : lines.slice(0, 12);
     const changed = !!data.changes || !!data.diff;
     const all = () => host2.all(inputLabel);
     return /* @__PURE__ */ jsxs(Fragment2, { children: [
@@ -3465,11 +3839,11 @@ globalThis.__semonUIShared = __semonUIShared;
         /* @__PURE__ */ jsx(Header, { label: "Output" }),
         /* @__PURE__ */ jsx("div", { class: "noout", children: screenText(data.live ? waiting ? "Waiting for your input or permission \xB7 no output yet" : "Running \xB7 no output yet" : data.unfinished ? "No result recorded: the machine stopped responding while this ran." : "No output") })
       ] }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
-        /* @__PURE__ */ jsx(Header, { label: parts || !cut ? "Output" : (tail ? "Output \xB7 last " : "Output \xB7 first ") + "12" + (more ? "" : " of " + lines.length) + " lines" }),
+        /* @__PURE__ */ jsx(Header, { label: parts || !cut2 ? "Output" : (tail ? "Output \xB7 last " : "Output \xB7 first ") + "12" + (more ? "" : " of " + lines.length) + " lines" }),
         parts ? /* @__PURE__ */ jsx(Output, { data }) : /* @__PURE__ */ jsx("pre", { children: shown.join("\n") }),
         data.cut ? /* @__PURE__ */ jsx("div", { class: "cutnote", children: screenText(cutNoteText(data.cut)) }) : [data.in, data.out].some((text2) => /…(\(truncated\))?\s*$/.test(text2 ?? "")) && /* @__PURE__ */ jsx("div", { class: "cutnote", children: "Cut short in this copy of the logs" })
       ] }),
-      (inCut || !changed && !!data.out && (cut && !parts || more)) && /* @__PURE__ */ jsx(ViewAll, { label: changed || more || parts || inCut ? "View all" : "View all " + lines.length + " lines", action: all }),
+      (inCut || !changed && !!data.out && (cut2 && !parts || more)) && /* @__PURE__ */ jsx(ViewAll, { label: changed || more || parts || inCut ? "View all" : "View all " + lines.length + " lines", action: all }),
       data.script != null && /* @__PURE__ */ jsxs("button", { class: "viewall viewscript", type: "button", onClick: (event) => {
         if (event.currentTarget.isConnected) host2.script();
       }, children: [
@@ -4244,10 +4618,10 @@ globalThis.__semonUIShared = __semonUIShared;
     switch (entry.kind) {
       case "message":
         return /* @__PURE__ */ jsxs("div", { class: entry.flavor === "incoming" ? "bubble in" : "msg " + entry.flavor, "data-e": entry.key, "data-entry-key": entry.entryKey, "data-h": entry.handoff, children: [
-          entry.images?.length ? /* @__PURE__ */ jsx("div", { class: "attach-row", children: entry.images.map((image, i) => image.unavailable || owner.failedImages.has(key + ":" + image.url) ? /* @__PURE__ */ jsx("span", { class: "attach-na", children: "Image not available" }, i) : /* @__PURE__ */ jsx("button", { class: "attach", type: "button", "aria-haspopup": "dialog", onClick: (event) => {
-            if (event.currentTarget.isConnected) active(() => owner.host.image(image.url, image.label, event.currentTarget));
-          }, children: /* @__PURE__ */ jsx("img", { class: "attach-img" + (image.width ? "" : " unsized"), alt: image.label, loading: "lazy", decoding: "async", width: image.width, height: image.height, src: image.url, onError: () => active(() => {
-            owner.failedImages.add(key + ":" + image.url);
+          entry.images?.length ? /* @__PURE__ */ jsx("div", { class: "attach-row", children: entry.images.map((image2, i) => image2.unavailable || owner.failedImages.has(key + ":" + image2.url) ? /* @__PURE__ */ jsx("span", { class: "attach-na", children: "Image not available" }, i) : /* @__PURE__ */ jsx("button", { class: "attach", type: "button", "aria-haspopup": "dialog", onClick: (event) => {
+            if (event.currentTarget.isConnected) active(() => owner.host.image(image2.url, image2.label, event.currentTarget));
+          }, children: /* @__PURE__ */ jsx("img", { class: "attach-img" + (image2.width ? "" : " unsized"), alt: image2.label, loading: "lazy", decoding: "async", width: image2.width, height: image2.height, src: image2.url, onError: () => active(() => {
+            owner.failedImages.add(key + ":" + image2.url);
             owner.change(key);
           }) }) }, i)) }) : null,
           (!entry.images?.length || entry.text) && /* @__PURE__ */ jsx(Markdown, { text: entry.text })
@@ -4695,97 +5069,6 @@ globalThis.__semonUIShared = __semonUIShared;
     return root;
   }
 
-  // src/lib/live.ts
-  function createLiveController(host2) {
-    const state2 = { late: null, lateTries: 0, retry: false, version: null, timer: null, due: 0, busy: false, started: -Infinity, delay: 2e3, ended: false, again: false, pending: false, fresh: 0, turns: /* @__PURE__ */ new Map() };
-    let disposed = false;
-    const visible = () => document.visibilityState === "visible", floorWait = () => Math.max(0, state2.started + 1e3 - performance.now());
-    function cancel() {
-      if (state2.timer !== null) clearTimeout(state2.timer);
-      state2.timer = null;
-    }
-    function schedule(ms) {
-      cancel();
-      if (!disposed && !state2.ended && visible()) {
-        state2.due = performance.now() + ms;
-        state2.timer = window.setTimeout(poll, ms);
-      }
-    }
-    function refresh() {
-      if (disposed || !state2.version || state2.ended) return;
-      if (state2.busy) {
-        state2.again = true;
-        return;
-      }
-      const wait = floorWait();
-      if (!state2.timer || performance.now() + wait < state2.due) schedule(wait);
-    }
-    async function poll() {
-      state2.timer = null;
-      if (disposed || state2.busy || state2.ended || !visible()) return;
-      state2.busy = true;
-      state2.started = performance.now();
-      state2.retry = false;
-      let ok = false;
-      try {
-        await host2.poll();
-        state2.delay = state2.retry ? Math.min(3e4, state2.delay * 2) : 2e3;
-        ok = true;
-      } catch (error) {
-        const status2 = typeof error === "object" && error !== null && "status" in error ? error.status : void 0;
-        if (host2.failed(error)) {
-          state2.ended = true;
-          cancel();
-        } else if (status2 === 403) host2.ended(403);
-        else {
-          state2.delay = Math.min(3e4, state2.delay * 2);
-          if (status2 === void 0) window.setTimeout(() => {
-            throw error;
-          });
-        }
-      } finally {
-        state2.busy = false;
-        if (!disposed) {
-          schedule(state2.again ? floorWait() : state2.delay);
-          state2.again = false;
-          window.dispatchEvent(new CustomEvent("semon:polled", { detail: { ok } }));
-        }
-      }
-    }
-    function visibility() {
-      if (!visible()) cancel();
-      else if (state2.version && !state2.busy && !state2.timer) schedule(state2.delay > 2e3 ? state2.delay : 0);
-    }
-    document.addEventListener("visibilitychange", visibility);
-    window.addEventListener("semon:refresh", refresh);
-    return { state: state2, schedule, stop() {
-      state2.ended = true;
-      cancel();
-    }, destroy() {
-      if (disposed) return;
-      disposed = true;
-      cancel();
-      document.removeEventListener("visibilitychange", visibility);
-      window.removeEventListener("semon:refresh", refresh);
-    } };
-  }
-  function createPagingStore() {
-    const states3 = /* @__PURE__ */ new Map();
-    return { states: states3, get(sid, direction) {
-      let pair = states3.get(sid);
-      if (!pair) {
-        pair = { before: { busy: false, failed: false }, after: { busy: false, failed: false } };
-        states3.set(sid, pair);
-      }
-      return pair[direction];
-    }, clear(sid) {
-      for (const state2 of Object.values(states3.get(sid) ?? {})) state2.controller?.abort();
-      states3.delete(sid);
-    }, destroy() {
-      for (const sid of states3.keys()) this.clear(sid);
-    } };
-  }
-
   // src/lib/geometry.ts
   var properties2 = { paddingBottom: "padding-bottom", scrollPaddingTop: "scroll-padding-top", barHeight: "--barh", accountLeft: "--account-left", accountWidth: "--account-width", accountBottom: "--account-bottom", intrinsicHeight: "contain-intrinsic-block-size" };
   var sheet = null;
@@ -4828,70 +5111,6 @@ globalThis.__semonUIShared = __semonUIShared;
   function revealMeasuredTurn(node, visible) {
     node.classList.toggle("semon-measuring-turn", visible);
   }
-
-  // src/lib/routes.ts
-  function routeUrl(route, model) {
-    const enc = encodeURIComponent, harness = (id) => model.session(id)?.harness ?? "claude";
-    switch (route.v) {
-      case "home":
-        return "/";
-      case "analytics":
-        return "/analytics";
-      case "sessions":
-        return "/sessions";
-      case "machines":
-        return model.machinesPath ?? "/machines";
-      case "machine":
-        return "/machines/" + enc(route.id);
-      case "session":
-        return "/s/" + harness(route.id) + "/" + enc(route.id) + (route.turn ? "?turn=" + enc(route.turn) : "");
-      case "trace":
-        return "/trace/" + harness(route.sid) + "/" + enc(route.sid) + "/" + enc(route.turn);
-    }
-  }
-  function parseRoute(location2, model) {
-    if (model.machinesPath && location2.pathname === model.machinesPath) return { v: "machines" };
-    const decode = (text2) => {
-      try {
-        return decodeURIComponent(text2);
-      } catch {
-        return text2;
-      }
-    }, parts = location2.pathname.split("/").filter(Boolean).map(decode), sid = parts[2], turn = new URLSearchParams(location2.search).get("turn");
-    if (parts[0] === "timeline" || parts[0] === "analytics") return { v: "analytics" };
-    if (parts[0] === "sessions") return { v: "sessions" };
-    if (parts[0] === "machines") return parts[1] && model.machine(parts[1]) ? { v: "machine", id: parts[1] } : { v: "machines" };
-    if (parts[0] === "s" && sid && model.session(sid)) {
-      const candidate = model.turn(turn ?? (decode(location2.hash.slice(1)).split("#")[0] ?? "")), target = candidate?.sid === sid ? candidate.id : null;
-      return target ? { v: "session", id: sid, turn: target } : { v: "session", id: sid };
-    }
-    if (parts[0] === "trace" && sid && model.session(sid) && parts[3] && model.turn(parts[3])?.sid === sid) return { v: "trace", sid, turn: parts[3] };
-    return { v: "home" };
-  }
-  var TranscriptCache = class extends Map {
-    constructor(maxEntries = 5, maxBytes = 2 * 1024 * 1024) {
-      super();
-      this.maxEntries = maxEntries;
-      this.maxBytes = maxBytes;
-    }
-    maxEntries;
-    maxBytes;
-    keep(sid, entries, meta) {
-      this.delete(sid);
-      let weight = 0;
-      for (const entry of entries) for (const value of Object.values(entry)) weight += typeof value === "string" ? value.length : value && typeof value === "object" ? JSON.stringify(value).length : 4;
-      const bytes = weight * 2;
-      if (bytes > this.maxBytes) return;
-      this.set(sid, { entries, meta, bytes });
-      let sum = 0;
-      for (const record2 of this.values()) sum += record2.bytes;
-      for (const [id, record2] of this) {
-        if (this.size <= this.maxEntries && sum <= this.maxBytes) break;
-        this.delete(id);
-        sum -= record2.bytes;
-      }
-    }
-  };
 
   // src/lib/paging.ts
   function createPagerController(host2) {
@@ -5016,9 +5235,10 @@ globalThis.__semonUIShared = __semonUIShared;
   // ../crates/semon-sessions/src/viewer.js
   queueMicrotask(() => {
     let NOW = Date.now();
-    const MACHINE = {};
-    const MACHINE_UP = {};
-    const MACHINE_LAST = {};
+    const modelStore = new ViewerModelStore();
+    const MACHINE = modelStore.machines;
+    const MACHINE_UP = modelStore.machineUp;
+    const MACHINE_LAST = modelStore.machineLast;
     let ADMIN = null;
     let ACCOUNT = null;
     const viewerHost = getViewerHost();
@@ -5029,9 +5249,12 @@ globalThis.__semonUIShared = __semonUIShared;
     const HARNESSES = { claude: { name: "Claude Code", short: "Claude", icon: { light: "/harness/claude-code.svg", dark: "/harness/claude-code.svg" } }, codex: { name: "Codex", short: "Codex", icon: { light: "/harness/codex-black.svg", dark: "/harness/codex.svg" } }, opencode: { name: "OpenCode", short: "OpenCode", icon: { light: "/harness/opencode-light.svg", dark: "/harness/opencode-dark.svg" } } };
     const HARNESS = Object.fromEntries(Object.entries(HARNESSES).map(([id, h2]) => [id, h2.name]));
     const HARNESS_SHORT = Object.fromEntries(Object.entries(HARNESSES).map(([id, h2]) => [id, h2.short]));
-    const SESS = {};
-    const H = [];
-    const TX = {};
+    const SESS = modelStore.sessions;
+    const H = modelStore.handoffs;
+    const transcripts = new TranscriptStore({ request: (path, signal) => api(path, signal), turns: (sid) => modelStore.turns[sid] ?? [], turn: (id) => modelStore.turn.get(id), entry: (e) => txEntry(e), cleared(sid) {
+      if (route.v === "session" && route.id === sid) resetPagerInput();
+    } });
+    const TX = transcripts.entries;
     const SEEN_KEY = "semon.seen", SEEN_LIMIT = 2e3;
     const SEEN_RESULTS = (() => {
       try {
@@ -5047,9 +5270,9 @@ globalThis.__semonUIShared = __semonUIShared;
         return /* @__PURE__ */ new Set();
       }
     })();
-    const HID = /* @__PURE__ */ new Map();
-    const TURNS = {}, TURN = /* @__PURE__ */ new Map(), STARTS = /* @__PURE__ */ new Map(), HOLDS = /* @__PURE__ */ new Map();
-    const TXM = {};
+    const HID = modelStore.handoff;
+    const TURNS = modelStore.turns, TURN = modelStore.turn, STARTS = modelStore.starts, HOLDS = modelStore.holds;
+    const TXM = transcripts.meta;
     const domain = createDomain({ sessions: SESS, machines: MACHINE, handoffs: H, turns: TURNS, turn: TURN, starts: STARTS, holds: HOLDS, handoff: HID, transcriptMeta: TXM }, () => NOW, SEEN_RESULTS);
     const { nameOf, hcls, where, hostOf, machineLabels, machineLabel, branchOf, shortHost, parentOf, originHandoff, RANK, isResult, inbox, working, answersOf, statWord, hasTurn, oneLine, TOYOU, turnEnd: turnEnd2, traceRoot, countOf, callsText, sessionChildren, childSessions, descendantsOf, TOTAL_TOKEN_KINDS, TOKEN_KINDS, asMoney, usageTotal, costForSessions, costForSession, costText, costMissing, TREE_RANK, urgentDescendant, childParts, defaultTreeOpen, kidRank, lineageOf, byState, onMachine, movedOff, movesOf, shortMoney } = domain;
     const clock2 = (t) => clock(t, NOW), ago2 = (t) => ago(t, NOW), dur2 = (a, b) => dur(a, b, NOW);
@@ -5197,78 +5420,22 @@ globalThis.__semonUIShared = __semonUIShared;
       NOW = serverNow + (Date.now() - fetchedAt);
       for (const s of Object.values(SESS)) if (s.activity && s.activity[3] != null) s.activity[2] = Math.floor((NOW - s.activity[3]) / 1e3);
     }
-    const modelStore = new ModelStore();
     function adopt(m) {
-      const normalized = normalizeModel(parseModel(m));
       m = modelStore.adopt(m);
       domain.invalidate();
       serverNow = m.now;
       fetchedAt = Date.now();
       TOK = m.tx ?? {};
-      for (const k of Object.keys(MACHINE)) {
-        delete MACHINE[k];
-        delete MACHINE_UP[k];
-        delete MACHINE_LAST[k];
-      }
-      for (const x of m.machines ?? [m.machine]) {
-        MACHINE[x.id] = x.name;
-        MACHINE_UP[x.id] = x.up;
-        if (x.last != null) MACHINE_LAST[x.id] = x.last;
-      }
+      transcripts.marks = TOK;
       ADMIN = m.admin && safePath2(m.admin.href) ? m.admin : null;
       ACCOUNT = accountOf(m.account) ?? accountOf(viewerHost?.account) ?? embeddedAccount();
       viewerHost?.modelAccount?.(ACCOUNT);
       NAV_MACHINES = viewerHost?.machinesPath ?? (m.nav && safePath2(m.nav.machines) ? m.nav.machines : null);
-      for (const k of Object.keys(SESS)) delete SESS[k];
-      Object.assign(SESS, normalized.sessions);
-      H.length = 0;
-      H.push(...normalized.handoffs);
-      for (const k of Object.keys(TURNS)) delete TURNS[k];
-      Object.assign(TURNS, normalized.turns);
-      for (const [target, source] of [[HID, normalized.handoff], [TURN, normalized.turn], [STARTS, normalized.starts], [HOLDS, normalized.holds]]) {
-        target.clear();
-        for (const [id, row] of source) target.set(id, row);
-      }
       tick();
     }
-    function spread(sid) {
-      for (const t2 of TURNS[sid] ?? []) t2.entries = [];
-      let t = null, pre = 0;
-      for (const e of TX[sid] ?? []) {
-        if (e.turn) t = TURN.get(e.turn) ?? null;
-        if (t) {
-          e.key = t.id + "#" + t.entries.length;
-          t.entries.push(e);
-        } else e.key = sid + "#" + pre++;
-      }
-    }
+    const spread = (sid) => transcripts.spread(sid);
     const txEntry = (e) => e.k === "end" && e.ret ? { k: "end", text: "Returned to " + nameOf(e.ret.to) + (e.ret.failed ? " \xB7 failed" : "") + (e.ret.at != null ? " \xB7 " + clock2(e.ret.at) : ""), turn: e.turn } : e;
-    function fetchTx(sid, q, where2, signal, onPage) {
-      const tok2 = TOK[sid], range = TXM[sid], boundary = where2 === "before" ? range?.from : range?.to;
-      return api("/api/tx?sid=" + enc(sid) + (q ? "&" + q : ""), signal).then((p) => {
-        if (signal?.aborted || where2 && (TXM[sid] !== range || (where2 === "before" ? TXM[sid]?.from : TXM[sid]?.to) !== boundary)) return;
-        const es = p.entries.map((e) => txEntry({ ...e, sid })), m = TXM[sid];
-        if (where2 === "before" && m) {
-          TX[sid] = es.concat(TX[sid]);
-          m.from = p.from;
-        } else if (where2 === "after" && m) {
-          TX[sid] = TX[sid].concat(es);
-          m.to = p.to;
-        } else {
-          clearPaging(sid);
-          TX[sid] = es;
-          TXM[sid] = { from: p.from, to: p.to };
-          STALE_BRIEFS.delete(sid);
-        }
-        Object.assign(TXM[sid], { total: p.total, calls: p.calls, errors: p.errors, watchTok: tok2 });
-        if (where2 !== "before" && p.to >= p.total) {
-          TXM[sid].tok = tok2;
-          TXM[sid].newer = 0;
-        }
-        spread(sid);
-        onPage?.();
-      });
-    }
+    const fetchTx = (sid, q, where2, signal, onPage) => transcripts.fetch(sid, q, where2, signal, onPage);
     function load(r, signal) {
       if (r.v === "analytics") return fetchAnalytics().then(() => {
         scheduleAnalytics();
@@ -5278,27 +5445,10 @@ globalThis.__semonUIShared = __semonUIShared;
       if (TX[r.id] && !deep) return null;
       return fetchTx(r.id, deep ? "turn=" + enc(t.id) : "", void 0, signal);
     }
-    const STALE_BRIEFS = /* @__PURE__ */ new Set();
-    const TXCACHE = new TranscriptCache();
-    function cacheTx(sid, entries, meta) {
-      if (!entries || !meta || meta.to < meta.total || meta.tok == null || STALE_BRIEFS.has(sid) || meta.origin !== !!originHandoff(sid)) return;
-      TXCACHE.keep(sid, entries, meta);
-    }
-    function adoptCached(r) {
-      const c = TXCACHE.get(r.id);
-      if (!c) return false;
-      TXCACHE.delete(r.id);
-      TX[r.id] = c.entries;
-      TXM[r.id] = c.meta;
-      if (!r.turn) return true;
-      spread(r.id);
-      const t = TURN.get(r.turn);
-      if (t && t.sid === r.id && !t.entries.length) {
-        dropTx(r.id);
-        return false;
-      }
-      return true;
-    }
+    const STALE_BRIEFS = transcripts.staleBriefs;
+    const TXCACHE = transcripts.cache;
+    const cacheTx = (sid, entries, meta) => transcripts.keep(sid, entries, meta, !!originHandoff(sid));
+    const adoptCached = (r) => transcripts.adoptCached(r.id, r.turn);
     function shrank(a, b) {
       const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number);
       return s1 < s0 || b1 < b0;
@@ -5311,17 +5461,10 @@ globalThis.__semonUIShared = __semonUIShared;
       }, () => {
       });
     }
-    const pagingStore = createPagingStore(), PAGING = pagingStore.states;
+    const pagingStore = transcripts.paging, PAGING = pagingStore.states;
     let pagerArmed = false, automaticLoads = 0, scrollRevision = 0, programmaticScrollPending = false, programmaticScrollTimer = null;
-    function clearPaging(sid) {
-      pagingStore.clear(sid);
-      if (route.v === "session" && route.id === sid) resetPagerInput();
-    }
-    function dropTx(sid) {
-      clearPaging(sid);
-      delete TX[sid];
-      delete TXM[sid];
-    }
+    const clearPaging = (sid) => transcripts.clearPaging(sid);
+    const dropTx = (sid) => transcripts.drop(sid);
     function resetPagerInput() {
       pagerArmed = false;
       automaticLoads = 0;
@@ -7298,7 +7441,7 @@ globalThis.__semonUIShared = __semonUIShared;
       return images;
     }
     function openImage(url, label, from) {
-      const image = createImageViewer(url, label, {
+      const image2 = createImageViewer(url, label, {
         opened(d) {
           viewerEl = d;
           document.documentElement.classList.add("viewer-open");
@@ -7320,7 +7463,7 @@ globalThis.__semonUIShared = __semonUIShared;
           (from.isConnected ? from : [...document.querySelectorAll("button.attach")].find((x) => x.querySelector("img")?.getAttribute("src") === url))?.focus();
         }
       });
-      image.show();
+      image2.show();
     }
     function openScript(e) {
       const done = (fields) => openStepViewer({ ...e, ...fields, full: true }, "View script", "run", "Script");
@@ -8112,10 +8255,10 @@ globalThis.__semonUIShared = __semonUIShared;
     }
     function tail(sid) {
       const es = TX[sid], m = TXM[sid], tok2 = TOK[sid];
-      let cut = es.findIndex((e) => e.live && e.slot != null);
-      if (cut < 0) cut = es.length;
+      let cut2 = es.findIndex((e) => e.live && e.slot != null);
+      if (cut2 < 0) cut2 = es.length;
       for (let i = es.length - 1; i >= 0; i--) {
-        if (es[i].unfinished && es[i].slot != null) cut = Math.min(cut, i);
+        if (es[i].unfinished && es[i].slot != null) cut2 = Math.min(cut2, i);
         if (es[i].turn) break;
       }
       let got = [], last = null, n = 0;
@@ -8124,21 +8267,21 @@ globalThis.__semonUIShared = __semonUIShared;
         last = p;
         if (p.to < p.total && p.entries.length && ++n < 5) return page(p.to);
       });
-      return page(cut < es.length ? es[cut].slot : m.to).then(() => {
+      return page(cut2 < es.length ? es[cut2].slot : m.to).then(() => {
         if (TX[sid] !== es) return { cut: null };
-        if (last.total < m.total || last.to < last.total || cut < es.length && got[0]?.slot !== es[cut].slot) return reload(sid);
+        if (last.total < m.total || last.to < last.total || cut2 < es.length && got[0]?.slot !== es[cut2].slot) return reload(sid);
         const ends = new Map(got.filter((e) => e.k === "bgend" && e.bg).map((e) => [e.call, e.bg])), still = new Set(last.bg_running ?? []), patched = [];
-        for (const e of es.slice(0, cut)) if (e.bg) {
+        for (const e of es.slice(0, cut2)) if (e.bg) {
           const next = ends.get(e.tid) ?? (still.has(e.tid) ? { ...e.bg, state: "running", secs: e.bg.secs ?? "\u2014" } : e.bg.state === "running" ? { state: "unknown" } : e.bg);
           if (JSON.stringify(next) !== JSON.stringify(e.bg)) {
             e.bg = next;
             patched.push(e);
           }
         }
-        TX[sid] = es.slice(0, cut).concat(got);
+        TX[sid] = es.slice(0, cut2).concat(got);
         Object.assign(m, { to: last.to, total: last.total, calls: last.calls, errors: last.errors, tok: tok2 });
         spread(sid);
-        return { cut, patched };
+        return { cut: cut2, patched };
       });
     }
     function reload(sid) {

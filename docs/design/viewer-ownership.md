@@ -26,3 +26,13 @@ All newly extracted TypeScript is included in strict type checking and the
 application security scan. Generated production assets remain checked in; Cargo
 requires no Node. Browser reference images, layout, URLs, event contracts, CSP
 and performance thresholds remain unchanged.
+
+The model owner is `ViewerModelStore`. It validates a prepared normalized graph
+before committing the raw delta baseline, then updates its stable table/index
+objects. `TranscriptStore` owns entries, ranges, the existing bounded cache and
+paging store. Every request has an owned abort controller; destroying the store
+aborts all requests and rejects late page commits. Each directional load checks
+the range object's identity and requested boundary before applying its page.
+Loaded entries are distributed into the latest model's turns, including when a
+model update arrives during loading. An explicit transcript-wire parser validates
+entry variants and ranges at the response boundary.

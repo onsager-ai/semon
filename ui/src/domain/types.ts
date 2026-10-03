@@ -23,12 +23,15 @@ export type Handoff = HandoffBase & (
   { kind: 'toyou'; ask: 'question' | 'decision' | 'result'; answers?: { values?: string[] }[]; answer?: string | string[] }
 );
 export interface TurnEnd { st?: SessionState; why: string; h?: string; at?: number }
-interface EntryBase { key?: string; turn?: string; sid?: string; slot?: number }
+export interface Background { state: 'running' | 'unknown' | 'failed' | 'killed' | 'done'; secs?: string; since?: number; exit?: number; summary?: string }
+export type Image = { o: number; b: number; w?: number; h?: number; type?: string; size?: number } & ({ na: true; v?: string } | { na?: false; v: string });
+interface EntryBase { img?: Image[]; key?: string; turn?: string; sid?: string; slot?: number; live?: boolean; unfinished?: boolean; bg?: Background; tid?: string }
 export type Entry = EntryBase & (
-  { k: 'u' | 'a'; text: string } | { k: 'think'; text?: string; pending?: boolean; status?: string; secs?: number | string; displaySecs?: number | null } |
+  { k: 'u' | 'a'; text: string; img?: Image[] } | { k: 'think'; text?: string; pending?: boolean; status?: string; secs?: number | string; displaySecs?: number | null } |
   { k: 'h'; id: string } | { k: 'end'; text?: string; ret?: { to: string; failed?: boolean; at?: number } } |
-  { k: 'tool'; name: string; ok?: boolean; live?: boolean; unfinished?: boolean } |
-  { k: 'signal' | 'bgend' }
+  ({ k: 'tool'; title?: string; secs?: string; since?: number; exit?: number } & import('../lib/tool-details').ToolData) |
+  { k: 'signal'; signal: { kind: string; tag?: string; tool?: string; value?: number; previous?: string } } |
+  { k: 'bgend'; call: string; state: string; label?: string } | { k: 'harness'; label: string }
 );
 export interface Turn { id: string; sid: string; start: Handoff | null; at?: number; u: { k: 'u'; text: string } | null; entries: Entry[]; out: Handoff[]; sent: Handoff[]; end?: TurnEnd; last?: boolean }
 export interface TranscriptMeta { from: number; to: number; total: number; calls?: number; errors?: number; tok?: string; watchTok?: string; newer?: number; origin?: boolean }

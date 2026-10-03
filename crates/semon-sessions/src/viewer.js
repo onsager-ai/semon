@@ -1,6 +1,6 @@
-import { parseModel } from "../../../ui/src/lib/model";
+import { ViewerModelStore } from "../../../ui/src/state/model";
+import { TranscriptStore } from "../../../ui/src/state/transcript";
 import { createTraceCalculations } from "../../../ui/src/domain/trace";
-import { normalizeModel } from "../../../ui/src/domain/normalize";
 import { createDomain } from "../../../ui/src/domain/calculations";
 import { clock as formatClock, ago as formatAgo, dur as formatDuration, tok, shortName, machineShorts, shortModel, clean, liveUrl, preview, compactCount, niceStep, timeText, countText, hLabel } from "../../../ui/src/domain/format";
 import { measureSessionScreen, measureTraceScreen, measureViewerBar, createOrdering, orderRows, createPagerController, routeUrl, parseRoute, TranscriptCache, setGeometry, revealMeasuredTurn, createLiveRegion, requestJson, ModelStore, createLiveController, createPagingStore, renderPlaceholder, createStatusNote, createSelect, createViewerBar, renderSessionScreen, updateSessionPager, updateSessionJump, updateSessionClock, renderTraceScreen, renderSliceBody, renderModelItems, renderAnalyticsScreen, createKidsSheet, createNativeSheet, renderSessionMenu, renderFullTool, createImageViewer, parseAccount, createAccountChrome, createShellChrome, renderShellNavigation, createRecentRenderer, createPanelChrome, createFacetChrome, renderSessionsScreen, renderMachinesScreen, renderHomeScreen, renderMachineScreen, ownsScreen, screenKind, releaseScreen } from "../../../ui/src/account-adapter";
@@ -16,10 +16,11 @@ queueMicrotask(() => {
   // ====================================================================================
   // Data: /api/model fills these when the page loads (boot), and /api/tx fills TX a page at a time.
   let NOW = Date.now();
-  const MACHINE = {};
-  const MACHINE_UP = {};
+  const modelStore = new ViewerModelStore();
+  const MACHINE = modelStore.machines;
+  const MACHINE_UP = modelStore.machineUp;
   // An offline machine's last-seen time (epoch ms), and the embedding server's machine-management link, when served.
-  const MACHINE_LAST = {};
+  const MACHINE_LAST = modelStore.machineLast;
   let ADMIN = null;
   let ACCOUNT = null;
   const viewerHost = getViewerHost();
@@ -33,9 +34,10 @@ queueMicrotask(() => {
   const HARNESSES = { claude: { name: "Claude Code", short: "Claude", icon: { light: "/harness/claude-code.svg", dark: "/harness/claude-code.svg" } }, codex: { name: "Codex", short: "Codex", icon: { light: "/harness/codex-black.svg", dark: "/harness/codex.svg" } }, opencode: { name: "OpenCode", short: "OpenCode", icon: { light: "/harness/opencode-light.svg", dark: "/harness/opencode-dark.svg" } } };
   const HARNESS = Object.fromEntries(Object.entries(HARNESSES).map(([id, h]) => [id, h.name]));
   const HARNESS_SHORT = Object.fromEntries(Object.entries(HARNESSES).map(([id, h]) => [id, h.short]));
-  const SESS = {};
-  const H = [];
-  const TX = {};
+  const SESS = modelStore.sessions;
+  const H = modelStore.handoffs;
+  const transcripts = new TranscriptStore({ request: (path, signal) => api(path, signal), turns: sid => modelStore.turns[sid] ?? [], turn: id => modelStore.turn.get(id), entry: e => txEntry(e), cleared(sid) { if (route.v === "session" && route.id === sid) resetPagerInput(); } });
+  const TX = transcripts.entries;
   const SEEN_KEY = "semon.seen", SEEN_LIMIT = 2000;
   const SEEN_RESULTS = (() => {
     try {
@@ -48,9 +50,9 @@ queueMicrotask(() => {
   })();
 
   // ====================================================================================
-  const HID = new Map();
-  const TURNS = {}, TURN = new Map(), STARTS = new Map(), HOLDS = new Map();
-  const TXM = {}; // per session: the loaded range of its transcript { from, to, total } and its totals { calls, errors }
+  const HID = modelStore.handoff;
+  const TURNS = modelStore.turns, TURN = modelStore.turn, STARTS = modelStore.starts, HOLDS = modelStore.holds;
+  const TXM = transcripts.meta; // per session: the loaded range of its transcript { from, to, total } and its totals { calls, errors }
   const domain = createDomain({ sessions: SESS, machines: MACHINE, handoffs: H, turns: TURNS, turn: TURN, starts: STARTS, holds: HOLDS, handoff: HID, transcriptMeta: TXM }, () => NOW, SEEN_RESULTS);
   const { nameOf, hcls, where, hostOf, machineLabels, machineLabel, branchOf, shortHost, parentOf, originHandoff, RANK, isResult, inbox, working, answersOf, statWord, hasTurn, oneLine, TOYOU, turnEnd, traceRoot, countOf, callsText, sessionChildren, childSessions, descendantsOf, TOTAL_TOKEN_KINDS, TOKEN_KINDS, asMoney, usageTotal, costForSessions, costForSession, costText, costMissing, TREE_RANK, urgentDescendant, childParts, defaultTreeOpen, kidRank, lineageOf, byState, onMachine, movedOff, movesOf, shortMoney } = domain;
   const clock = t => formatClock(t, NOW), ago = t => formatAgo(t, NOW), dur = (a, b) => formatDuration(a, b, NOW);
@@ -149,49 +151,24 @@ queueMicrotask(() => {
     NOW = serverNow + (Date.now() - fetchedAt);
     for (const s of Object.values(SESS)) if (s.activity && s.activity[3] != null) s.activity[2] = Math.floor((NOW - s.activity[3]) / 1000);
   }
-  const modelStore = new ModelStore();
   function adopt(m) {
-    const normalized = normalizeModel(parseModel(m));
     m = modelStore.adopt(m);
     domain.invalidate();
-    serverNow = m.now; fetchedAt = Date.now(); TOK = m.tx ?? {};
-    for (const k of Object.keys(MACHINE)) { delete MACHINE[k]; delete MACHINE_UP[k]; delete MACHINE_LAST[k]; }
-    // Several machines come as `machines`; one comes as `machine` alone.
-    for (const x of m.machines ?? [m.machine]) { MACHINE[x.id] = x.name; MACHINE_UP[x.id] = x.up; if (x.last != null) MACHINE_LAST[x.id] = x.last; }
+    serverNow = m.now; fetchedAt = Date.now(); TOK = m.tx ?? {}; transcripts.marks = TOK;
     ADMIN = m.admin && safePath(m.admin.href) ? m.admin : null;
     // A server-provided menu wins; otherwise an embedding page may set `window.semonEmbed.account`, held to the same rules.
     ACCOUNT = accountOf(m.account) ?? accountOf(viewerHost?.account) ?? embeddedAccount();
     viewerHost?.modelAccount?.(ACCOUNT);
     NAV_MACHINES = viewerHost?.machinesPath ?? (m.nav && safePath(m.nav.machines) ? m.nav.machines : null);
-    for (const k of Object.keys(SESS)) delete SESS[k]; Object.assign(SESS, normalized.sessions);
-    H.length = 0; H.push(...normalized.handoffs);
-    for (const k of Object.keys(TURNS)) delete TURNS[k]; Object.assign(TURNS, normalized.turns);
-    for (const [target, source] of [[HID, normalized.handoff], [TURN, normalized.turn], [STARTS, normalized.starts], [HOLDS, normalized.holds]]) { target.clear(); for (const [id, row] of source) target.set(id, row); }
     tick();
   }
   // Each loaded entry goes to its turn: an entry that starts a turn (or a page) names it. Its key, its turn and place in
   // it, stays the same while the transcript only grows: live updates find what was open and where the reader was by it.
-  function spread(sid) {
-    for (const t of TURNS[sid] ?? []) t.entries = [];
-    let t = null, pre = 0;
-    for (const e of TX[sid] ?? []) { if (e.turn) t = TURN.get(e.turn) ?? null; if (t) { e.key = t.id + "#" + t.entries.length; t.entries.push(e); } else e.key = sid + "#" + pre++; }
-  }
+  const spread = sid => transcripts.spread(sid);
   // A return line arrives as data; it reads as the mockup's "Returned to … · HH:MM".
   const txEntry = (e) => e.k === "end" && e.ret ? { k: "end", text: "Returned to " + nameOf(e.ret.to) + (e.ret.failed ? " · failed" : "") + (e.ret.at != null ? " · " + clock(e.ret.at) : ""), turn: e.turn } : e;
   // where: "before" and "after" extend the loaded range; otherwise the page replaces it.
-  function fetchTx(sid, q, where, signal, onPage) {
-    const tok = TOK[sid], range = TXM[sid], boundary = where === "before" ? range?.from : range?.to;
-    return api("/api/tx?sid=" + enc(sid) + (q ? "&" + q : ""), signal).then((p) => {
-      // An error jump or a reload may replace the range while a pager request is out. Its page no longer adjoins ours.
-      if (signal?.aborted || (where && (TXM[sid] !== range || (where === "before" ? TXM[sid]?.from : TXM[sid]?.to) !== boundary))) return;
-      const es = p.entries.map((e) => txEntry({ ...e, sid })), m = TXM[sid];
-      if (where === "before" && m) { TX[sid] = es.concat(TX[sid]); m.from = p.from; }
-      else if (where === "after" && m) { TX[sid] = TX[sid].concat(es); m.to = p.to; }
-      else { clearPaging(sid); TX[sid] = es; TXM[sid] = { from: p.from, to: p.to }; STALE_BRIEFS.delete(sid); }
-      Object.assign(TXM[sid], { total: p.total, calls: p.calls, errors: p.errors, watchTok: tok }); if (where !== "before" && p.to >= p.total) { TXM[sid].tok = tok; TXM[sid].newer = 0; } spread(sid);
-      onPage?.(); // optional notification for a pager; the promise still resolves without a value
-    });
-  }
+  const fetchTx = (sid, q, where, signal, onPage) => transcripts.fetch(sid, q, where, signal, onPage);
   // What a route needs before it can draw: a session's page (the one holding a deep-linked turn).
   // `signal` cancels what a navigation asked for when the reader goes elsewhere first.
   function load(r, signal) {
@@ -205,23 +182,10 @@ queueMicrotask(() => {
   // still in TX, which only a model update prunes, draws from there just the same.) A transcript is kept only when it was
   // loaded to its end, and the cache is bounded by entries and by estimated memory: two bytes for each character of an entry's
   // text, since JavaScript strings are UTF-16. Opening one takes it out of the cache; leaving it puts it back at the newest end.
-  const STALE_BRIEFS = new Set();
-  const TXCACHE = new TranscriptCache();
-  function cacheTx(sid, entries, meta) {
-    if (!entries || !meta || meta.to < meta.total || meta.tok == null || STALE_BRIEFS.has(sid) || meta.origin !== !!originHandoff(sid)) return;
-    TXCACHE.keep(sid, entries, meta);
-  }
-  // A kept transcript becomes the session's loaded one; the caller spreads its entries over the turns before drawing (that walks
-  // every entry, so it is not done in the click's task, except to check a deep link). False when there is none, or when the
-  // route deep-links to a turn it lacks.
-  function adoptCached(r) {
-    const c = TXCACHE.get(r.id); if (!c) return false;
-    TXCACHE.delete(r.id); TX[r.id] = c.entries; TXM[r.id] = c.meta;
-    if (!r.turn) return true;
-    spread(r.id); const t = TURN.get(r.turn);
-    if (t && t.sid === r.id && !t.entries.length) { dropTx(r.id); return false; }
-    return true;
-  }
+  const STALE_BRIEFS = transcripts.staleBriefs;
+  const TXCACHE = transcripts.cache;
+  const cacheTx = (sid, entries, meta) => transcripts.keep(sid, entries, meta, !!originHandoff(sid));
+  const adoptCached = r => transcripts.adoptCached(r.id, r.turn);
   // A mark with fewer entries or bytes than the one loaded means the file was cut or rewritten: load it again.
   function shrank(a, b) { const [s0, b0] = String(a).split(".").map(Number), [s1, b1] = String(b).split(".").map(Number); return s1 < s0 || b1 < b0; }
   // A transcript drawn from the cache is brought up to date the way a live update does it: when the model's mark for it moved
@@ -234,13 +198,10 @@ queueMicrotask(() => {
   }
   // Paging state survives redraws: a click and an observer share one request per session and direction, and a failed
   // page stays manual until Retry succeeds. Observers belong only to the buttons currently drawn.
-  const pagingStore = createPagingStore(), PAGING = pagingStore.states;
+  const pagingStore = transcripts.paging, PAGING = pagingStore.states;
   let pagerArmed = false, automaticLoads = 0, scrollRevision = 0, programmaticScrollPending = false, programmaticScrollTimer = null;
-  function clearPaging(sid) {
-    pagingStore.clear(sid);
-    if (route.v === "session" && route.id === sid) resetPagerInput();
-  }
-  function dropTx(sid) { clearPaging(sid); delete TX[sid]; delete TXM[sid]; }
+  const clearPaging = sid => transcripts.clearPaging(sid);
+  const dropTx = sid => transcripts.drop(sid);
   function resetPagerInput() { pagerArmed = false; automaticLoads = 0; scrollRevision++; disconnectPagerObservers(); }
   function holdProgrammaticScroll() {
     programmaticScrollPending = true;
