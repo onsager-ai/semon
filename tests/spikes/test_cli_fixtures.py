@@ -12,6 +12,39 @@ ROOT = Path(__file__).resolve().parents[1] / 'fixtures/compatibility'
 
 
 class CompatibilityFixtures(unittest.TestCase):
+    def test_codex_native_fork_owns_only_its_new_turn_and_fresh_usage(self):
+        directory = ROOT / 'codex-0.159.0-alpha.3/fork'
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        fixtures = {}
+        for entry in manifest['fixtures']:
+            data = (directory / entry['path']).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+            self.assertNotIn(b'/workspace/', data)
+            fixtures[entry['path']] = data
+        parent = fixtures['initial-rollout.jsonl']
+        fork = fixtures['forked-rollout.jsonl']
+        child = fixtures['child-turn-rollout.jsonl']
+        self.assertTrue(child.startswith(fork))
+        rows = list(map(json.loads, child.splitlines()))
+        meta = rows[0]['payload']
+        self.assertEqual(meta['id'], 'native-codex-fork-child')
+        self.assertEqual(meta['forked_from_id'], 'native-codex-fork-parent')
+        self.assertEqual(meta['forked_from_ordinal_exclusive'], 13)
+        self.assertEqual(meta['history_base']['end_byte_offset'], len(parent))
+        self.assertEqual(len(fork.splitlines()), 2)
+        self.assertNotIn(b'token_usage_record', fork)
+        usage = [r['payload'] for r in rows if r['type'] == 'token_usage_record']
+        self.assertEqual(len(usage), 1)
+        self.assertEqual((usage[0]['usage']['input_tokens'],
+                          usage[0]['usage']['output_tokens']), (5, 3))
+        self.assertEqual((usage[0]['thread_token_usage']['input_tokens'],
+                          usage[0]['thread_token_usage']['output_tokens']), (10, 6))
+        self.assertIn(b'SEMON_SYNTHETIC_FORK_CHILD', child)
+        self.assertNotIn(b'SEMON_SYNTHETIC_FORK_PARENT', child)
+        probe = Path(__file__).with_name('codex-fork.py').read_bytes()
+        self.assertEqual(hashlib.sha256(probe).hexdigest(),
+                         manifest['source_reference']['probe_sha256'])
+
     def test_claude_native_tools_model_switch_and_shared_api_ids(self):
         directory = ROOT / 'claude-2.1.288' / 'tools'
         manifest = json.loads((directory / 'manifest.json').read_text())
