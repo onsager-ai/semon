@@ -18,36 +18,81 @@
 //  - every "more" opened on a trace hop fully un-clips its text (hopMoreStillClipped === 0).
 //  - the walk actually visited screens and at least one trace (T.screens > 0, T.traces > 0), so a broken lane list
 //    or a missing Trace button would fail loudly instead of reporting an all-zero pass.
-import path from "node:path";
-import { ENV, served, data, goto, reporter, overflow } from "../lib.mjs";
+import path from 'node:path';
+import { ENV, served, data, goto, reporter, overflow } from '../lib.mjs';
 
 // The title is in the bar as soon as a session is clicked; the page is ready once it is no longer aria-busy.
-const afterTitle = (page, text) => page.waitForFunction((t) => document.querySelector("#topbar .t")?.textContent === t && !document.querySelector("#page").hasAttribute("aria-busy"), text);
+const afterTitle = (page, text) =>
+  page.waitForFunction(
+    (t) =>
+      document.querySelector('#topbar .t')?.textContent === t &&
+      !document.querySelector('#page').hasAttribute('aria-busy'),
+    text,
+  );
 
 export default async function full(browser) {
   const D = await data();
-  const r = reporter("full");
-  const page = await served(browser, { size: "phone", dark: true });
+  const r = reporter('full');
+  const page = await served(browser, { size: 'phone', dark: true });
   const over = () => overflow(page);
 
-  const openAll = () => page.evaluate(() => {
-    const r = { steps: 0, withInput: 0, cutNoInput: 0, more: 0, moreFull: 0, moreStillClipped: 0, navigatedByMore: 0 };
-    for (let k = 0; k < 3; k++) document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click());
-    document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => { x.click(); r.steps++;
-      const box = x.parentElement, arg = x.querySelector('.sa')?.textContent ?? '';
-      if (box.querySelector('.out .io')) r.withInput++; else if (arg.endsWith('…')) r.cutNoInput++; });
-    const before = location.href;
-    document.querySelectorAll('.event .ev-more').forEach((m) => { if (m.hidden) return; r.more++; m.click();
-      const br = m.parentElement.querySelector('.ev-text'); if (br.scrollHeight <= br.clientHeight + 1) r.moreFull++; else r.moreStillClipped++; });
-    if (location.href !== before) r.navigatedByMore++;
-    return r;
-  });
+  const openAll = () =>
+    page.evaluate(() => {
+      const r = {
+        steps: 0,
+        withInput: 0,
+        cutNoInput: 0,
+        more: 0,
+        moreFull: 0,
+        moreStillClipped: 0,
+        navigatedByMore: 0,
+      };
+      for (let k = 0; k < 3; k++)
+        document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click());
+      document.querySelectorAll('.step > button[aria-expanded="false"]').forEach((x) => {
+        x.click();
+        r.steps++;
+        const box = x.parentElement,
+          arg = x.querySelector('.sa')?.textContent ?? '';
+        if (box.querySelector('.out .io')) r.withInput++;
+        else if (arg.endsWith('…')) r.cutNoInput++;
+      });
+      const before = location.href;
+      document.querySelectorAll('.event .ev-more').forEach((m) => {
+        if (m.hidden) return;
+        r.more++;
+        m.click();
+        const br = m.parentElement.querySelector('.ev-text');
+        if (br.scrollHeight <= br.clientHeight + 1) r.moreFull++;
+        else r.moreStillClipped++;
+      });
+      if (location.href !== before) r.navigatedByMore++;
+      return r;
+    });
 
-  const T = { screens: 0, overflowScreens: 0, steps: 0, withInput: 0, cutNoInput: 0, more: 0, moreFull: 0, moreStillClipped: 0, navigatedByMore: 0, traces: 0, hopMore: 0, hopMoreStillClipped: 0 };
-  const add = (rr) => { for (const k in rr) T[k] += rr[k]; };
+  const T = {
+    screens: 0,
+    overflowScreens: 0,
+    steps: 0,
+    withInput: 0,
+    cutNoInput: 0,
+    more: 0,
+    moreFull: 0,
+    moreStillClipped: 0,
+    navigatedByMore: 0,
+    traces: 0,
+    hopMore: 0,
+    hopMoreStillClipped: 0,
+  };
+  const add = (rr) => {
+    for (const k in rr) T[k] += rr[k];
+  };
   const openLane = async (id) => {
-    await goto(page, { v: "session", id }, D);
-    await afterTitle(page, D.SESS[id].name); await page.waitForFunction(() => !!document.querySelector("#page section[aria-label='Transcript']"));
+    await goto(page, { v: 'session', id }, D);
+    await afterTitle(page, D.SESS[id].name);
+    await page.waitForFunction(
+      () => !!document.querySelector("#page section[aria-label='Transcript']"),
+    );
     await page.waitForTimeout(150);
   };
 
@@ -55,24 +100,59 @@ export default async function full(browser) {
 
   for (const id of lanes) {
     await openLane(id);
-    add(await openAll()); await page.waitForTimeout(60); T.screens++; if (await over()) T.overflowScreens++;
-    const tt = await page.evaluate(() => [...document.querySelectorAll(".turn-end .link")].map((b) => b.closest(".turn").dataset.turn));
+    add(await openAll());
+    await page.waitForTimeout(60);
+    T.screens++;
+    if (await over()) T.overflowScreens++;
+    const tt = await page.evaluate(() =>
+      [...document.querySelectorAll('.turn-end .link')].map((b) => b.closest('.turn').dataset.turn),
+    );
     for (const t of tt) {
       await openLane(id);
       await page.click('.turn[data-turn="' + t + '"] > .turn-end .link');
-      await afterTitle(page, "Trace"); await page.waitForTimeout(150); T.traces++;
-      const rr = await page.evaluate(() => { let n = 0, c = 0; document.querySelectorAll(".hop .more:not([hidden])").forEach((m) => { n++; m.click(); const br = m.parentElement.querySelector(".brief"); if (br.scrollHeight > br.clientHeight + 1) c++; }); return [n, c]; });
-      T.hopMore += rr[0]; T.hopMoreStillClipped += rr[1]; await page.waitForTimeout(60); T.screens++; if (await over()) T.overflowScreens++;
+      await afterTitle(page, 'Trace');
+      await page.waitForTimeout(150);
+      T.traces++;
+      const rr = await page.evaluate(() => {
+        let n = 0,
+          c = 0;
+        document.querySelectorAll('.hop .more:not([hidden])').forEach((m) => {
+          n++;
+          m.click();
+          const br = m.parentElement.querySelector('.brief');
+          if (br.scrollHeight > br.clientHeight + 1) c++;
+        });
+        return [n, c];
+      });
+      T.hopMore += rr[0];
+      T.hopMoreStillClipped += rr[1];
+      await page.waitForTimeout(60);
+      T.screens++;
+      if (await over()) T.overflowScreens++;
     }
   }
 
   // One screenshot of an expanded Bash step and an expanded relay, for the record.
   await openLane(lanes[0]);
-  await page.evaluate(() => { document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click()); });
+  await page.evaluate(() => {
+    document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((x) => x.click());
+  });
   const st = page.locator('.step > button:has(.sa:text-matches("…$"))').first();
-  if (await st.count()) { await st.click(); await st.scrollIntoViewIfNeeded(); await page.evaluate(() => window.scrollBy(0, -120)); await page.waitForTimeout(400); await page.screenshot({ path: path.join(ENV.out, "full-step.png") }); }
-  const mo = page.locator(".event .ev-more:visible").first();
-  if (await mo.count()) { await mo.click(); await mo.scrollIntoViewIfNeeded(); await page.evaluate(() => window.scrollBy(0, -300)); await page.waitForTimeout(400); await page.screenshot({ path: path.join(ENV.out, "full-relay.png") }); }
+  if (await st.count()) {
+    await st.click();
+    await st.scrollIntoViewIfNeeded();
+    await page.evaluate(() => window.scrollBy(0, -120));
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(ENV.out, 'full-step.png') });
+  }
+  const mo = page.locator('.event .ev-more:visible').first();
+  if (await mo.count()) {
+    await mo.click();
+    await mo.scrollIntoViewIfNeeded();
+    await page.evaluate(() => window.scrollBy(0, -300));
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(ENV.out, 'full-relay.png') });
+  }
 
   // A spawn card's brief is clamped to two lines whatever its length (the card opens the session; there is no "Show more"), and the
   // card keeps its own box: what follows it starts below it.
@@ -81,32 +161,62 @@ export default async function full(browser) {
     for (const id of lanes) {
       await openLane(id);
       probe = await page.evaluate(() => {
-        const c = document.querySelector(".child-card"); if (!c) return null;
-        const br = c.querySelector(".cc-brief");
-        br.replaceChildren(document.createTextNode(Array.from({ length: 14 }, (_, i) => "Paragraph " + i + " of a long brief. " + "It wraps over several lines on a phone. ".repeat(3)).join(" ")));
-        const b = br.getBoundingClientRect(), card = c.getBoundingClientRect(), next = c.nextElementSibling?.getBoundingClientRect();
+        const c = document.querySelector('.child-card');
+        if (!c) return null;
+        const br = c.querySelector('.cc-brief');
+        br.replaceChildren(
+          document.createTextNode(
+            Array.from(
+              { length: 14 },
+              (_, i) =>
+                'Paragraph ' +
+                i +
+                ' of a long brief. ' +
+                'It wraps over several lines on a phone. '.repeat(3),
+            ).join(' '),
+          ),
+        );
+        const b = br.getBoundingClientRect(),
+          card = c.getBoundingClientRect(),
+          next = c.nextElementSibling?.getBoundingClientRect();
         const line = parseFloat(getComputedStyle(br).lineHeight);
-        return { clamp: getComputedStyle(br).webkitLineClamp, client: br.clientHeight, scroll: br.scrollHeight, line, cardInside: b.bottom <= card.bottom + 1, nextBelow: !next || next.top >= card.bottom - 1, sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+        return {
+          clamp: getComputedStyle(br).webkitLineClamp,
+          client: br.clientHeight,
+          scroll: br.scrollHeight,
+          line,
+          cardInside: b.bottom <= card.bottom + 1,
+          nextBelow: !next || next.top >= card.bottom - 1,
+          sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        };
       });
       if (probe) break;
     }
     r.results.spawnBrief = probe;
-    r.expect(!!probe, "the fixture needs a spawn card on some session");
+    r.expect(!!probe, 'the fixture needs a spawn card on some session');
     if (probe) {
-      r.expect(probe.clamp === "2" && probe.scroll > probe.client + 1 && probe.client <= probe.line * 2 + 2, "the spawn brief is clamped to two lines: " + JSON.stringify(probe));
-      r.expect(probe.cardInside && probe.nextBelow && probe.sideways <= 0, "a long brief stays inside its card, with what follows below it: " + JSON.stringify(probe));
+      r.expect(
+        probe.clamp === '2' &&
+          probe.scroll > probe.client + 1 &&
+          probe.client <= probe.line * 2 + 2,
+        'the spawn brief is clamped to two lines: ' + JSON.stringify(probe),
+      );
+      r.expect(
+        probe.cardInside && probe.nextBelow && probe.sideways <= 0,
+        'a long brief stays inside its card, with what follows below it: ' + JSON.stringify(probe),
+      );
     }
   }
 
   r.results.tally = T;
   r.results.errors = page.errors;
-  r.expect(page.errors.length === 0, "page errors: " + page.errors.join(" | "));
-  r.expect(T.overflowScreens === 0, "overflowScreens=" + T.overflowScreens);
-  r.expect(T.moreStillClipped === 0, "moreStillClipped=" + T.moreStillClipped);
-  r.expect(T.navigatedByMore === 0, "navigatedByMore=" + T.navigatedByMore);
-  r.expect(T.hopMoreStillClipped === 0, "hopMoreStillClipped=" + T.hopMoreStillClipped);
-  r.expect(T.screens > 0, "no screens visited");
-  r.expect(T.traces > 0, "no traces opened");
+  r.expect(page.errors.length === 0, 'page errors: ' + page.errors.join(' | '));
+  r.expect(T.overflowScreens === 0, 'overflowScreens=' + T.overflowScreens);
+  r.expect(T.moreStillClipped === 0, 'moreStillClipped=' + T.moreStillClipped);
+  r.expect(T.navigatedByMore === 0, 'navigatedByMore=' + T.navigatedByMore);
+  r.expect(T.hopMoreStillClipped === 0, 'hopMoreStillClipped=' + T.hopMoreStillClipped);
+  r.expect(T.screens > 0, 'no screens visited');
+  r.expect(T.traces > 0, 'no traces opened');
 
   await page.context().close();
   return r.done();
