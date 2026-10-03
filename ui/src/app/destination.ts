@@ -75,7 +75,7 @@ export function createDestination(host: DestinationHost) {
     lanesFor = { r, version: host.LIVE.version };
     if (hadFocus) host.$("#lanes .srow[data-id='" + CSS.escape(r.id) + "']")?.focus({ preventScroll: true });
     page.setAttribute("aria-busy", "true"); page.inert = true; page.classList.add("loading");
-    clearTimeout(skeletonTimer);
+    host.scope.clearTimeout(skeletonTimer);
     skeletonTimer = host.scope.timeout(() => {
       if (host.navigation.route !== r || !page.classList.contains("loading")) return;
       page.classList.remove("loading"); page.classList.remove("child-page"); setGeometry(page, "paddingBottom", null);
@@ -83,7 +83,7 @@ export function createDestination(host: DestinationHost) {
     }, SKELETON_MS);
   }
   function endLoading() {
-    clearTimeout(skeletonTimer); skeletonTimer = undefined;
+    host.scope.clearTimeout(skeletonTimer); skeletonTimer = undefined;
     const page = host.$("#page"); page.removeAttribute("aria-busy"); page.inert = false; page.classList.remove("loading");
   }
   // Once the transcript is in, a reader who hasn't put focus anywhere else on the page moves to the session's title.

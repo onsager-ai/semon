@@ -223,7 +223,13 @@ room.setValue("kitchen"); // without calling onChange
 room.value; room.options; room.isOpen; room.open(); room.close(); room.focus();
 ```
 
-`SemonShell.enhance(select)` is what the `data-select` markup calls. Everything is built with `createElement` and `textContent`; nothing is written as HTML. The Select's source is `select.js` and `select.css`. `semon_sessions::shell::JS` is `select.js` followed by `shell.js`, `VIEWER_CSS` is `viewer.css` followed by `select.css`, and the viewer's own `VIEWER_JS` is `select.js` followed by `viewer.js`, so each page loads the Select through the files it already loads.
+`SemonShell.enhance(select)` is what the `data-select` markup calls. Select lives
+in `ui/src/lib/select.tsx`; markup uses safe nodes and text. The guarded shared
+Preact/Select/tooltip prefix is `shared.generated.js`. `shell::JS` combines that
+prefix with `shell.generated.js`; `shell::VIEWER_JS` is the complete
+`viewer.generated.js` bundle. `VIEWER_CSS` combines `viewer.css` and `select.css`.
+Generated consumer bundles already contain the prefix and must be served directly.
+
 
 ## Script contract
 
@@ -323,16 +329,17 @@ Classes prefixed `sh-` are renamed from a shorter name because `viewer.css` alre
 
 Everything else in `viewer.css` is private to the viewer and may change.
 
-## Preact source pilot
+## Typed application source
 
-The viewer now embeds a checked-in production esbuild tail,
-`viewer.generated.js`, after the existing tooltip and Select prefixes. Its
-account popover contents come from `ui/src/lib/index.ts`; the legacy viewer
-retains trigger/history/focus behavior through one synchronous adapter. The
-served paths, prelude, `window.semonEmbed` and events above are unchanged. The
-shell page script remains the existing shared imperative bundle. Cargo builds
-require no Node. See [the current migration decision](design/tsx.md) for tooling,
-security boundaries and later consumer adoption.
+`ui/src/application.ts` exports `mountViewerApplication` and `mountNativeShell`.
+Each returns an idempotent destroy owner and replaces its previous document owner.
+The application owns model/transcript state, navigation, roots and document effects;
+the native shell owns Rust-page enhancements. A host using viewer chrome mounts
+native controls with `{ chrome: false }` to avoid duplicate drawer/bar handlers.
+The handwritten application scripts and internal bridge are removed. Served paths,
+embedding prelude, `window.semonEmbed` and events above remain supported. Checked-in
+generated production assets keep Cargo builds independent of Node. See
+[the current source decision](design/tsx.md) and [UI README](../ui/README.md).
 
 ### Persistent document host
 

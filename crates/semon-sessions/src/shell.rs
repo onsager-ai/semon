@@ -339,12 +339,12 @@ mod tests {
     /// with the icon path `NAV` gives it.
     #[test]
     fn the_viewer_script_draws_the_exported_nav() {
-        let js = include_str!("../../../ui/src/app/viewer.ts");
+        let js = include_str!("../../../ui/src/app/navigationView.ts");
         let registry = include_str!("../../../ui/src/app/registry.ts");
         let render = js
             .split("function renderNav()")
             .nth(1)
-            .expect("viewer.js has renderNav")
+            .expect("typed navigation owner has renderNav")
             .split("\n  }\n")
             .next()
             .expect("renderNav's body");

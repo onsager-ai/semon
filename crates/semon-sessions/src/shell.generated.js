@@ -5,6 +5,8 @@
   var EffectScope = class {
     cleanups = /* @__PURE__ */ new Set();
     requests = /* @__PURE__ */ new Map();
+    timers = /* @__PURE__ */ new Map();
+    frames = /* @__PURE__ */ new Map();
     disposed = false;
     own(cleanup) {
       if (this.disposed) cleanup();
@@ -19,36 +21,61 @@
       target.addEventListener(type, guarded, options);
       this.own(() => target.removeEventListener(type, guarded, options));
     }
+    retire(collection, id) {
+      const cleanup = collection.get(id);
+      if (cleanup) this.cleanups.delete(cleanup);
+      collection.delete(id);
+    }
     timeout(callback, delay = 0) {
       if (this.disposed) return 0;
-      let cleanup;
       const id = window.setTimeout(() => {
-        this.cleanups.delete(cleanup);
+        this.retire(this.timers, id);
         if (!this.disposed) callback();
       }, delay);
-      cleanup = this.own(() => clearTimeout(id));
+      this.timers.set(id, this.own(() => {
+        this.retire(this.timers, id);
+        window.clearTimeout(id);
+      }));
       return id;
+    }
+    clearTimeout(id) {
+      if (id !== void 0) this.timers.get(id)?.();
     }
     interval(callback, delay) {
       if (this.disposed) return 0;
       const id = window.setInterval(() => {
         if (!this.disposed) callback();
       }, delay);
-      this.own(() => clearInterval(id));
+      this.timers.set(id, this.own(() => {
+        this.retire(this.timers, id);
+        window.clearInterval(id);
+      }));
       return id;
+    }
+    clearInterval(id) {
+      if (id !== void 0) this.timers.get(id)?.();
     }
     frame(callback) {
       if (this.disposed) return 0;
-      let cleanup;
       const id = requestAnimationFrame((time) => {
-        this.cleanups.delete(cleanup);
+        this.retire(this.frames, id);
         if (!this.disposed) callback(time);
       });
-      cleanup = this.own(() => cancelAnimationFrame(id));
+      this.frames.set(id, this.own(() => {
+        this.retire(this.frames, id);
+        cancelAnimationFrame(id);
+      }));
       return id;
+    }
+    cancelFrame(id) {
+      if (id !== void 0) this.frames.get(id)?.();
     }
     request() {
       const controller = new AbortController();
+      if (this.disposed) {
+        controller.abort();
+        return controller;
+      }
       const cleanup = this.own(() => controller.abort());
       this.requests.set(controller, cleanup);
       return controller;
@@ -132,7 +159,10 @@
       effects.listen(window, "scroll", syncBarLine2, { passive: true });
       main && effects.listen(main, "scroll", syncBarLine2, { passive: true });
       syncBarLine2();
-      releaseChrome = () => closeDrawer2(false);
+      releaseChrome = () => {
+        closeDrawer2(false);
+        topbar?.classList.remove("scrolled");
+      };
     }
     const copyTimers = /* @__PURE__ */ new Map();
     function selectText(element) {
@@ -149,7 +179,7 @@
       }
       button.setAttribute("aria-label", "Copied");
       button.classList.add("copied");
-      window.clearTimeout(copyTimers.get(button));
+      effects.clearTimeout(copyTimers.get(button));
       copyTimers.set(button, effects.timeout(() => {
         button.setAttribute("aria-label", button.dataset.copyLabel ?? "Copy");
         button.classList.remove("copied");
@@ -166,7 +196,7 @@
         try {
           await navigator.clipboard.writeText(value);
         } catch {
-          if (!disposed && source.isConnected) selectText(source);
+          if (!disposed && button.isConnected && source.isConnected) selectText(source);
         }
       } else {
         selectText(source);
@@ -249,7 +279,7 @@
       const request = effects.request();
       const interval = effects.interval(async () => {
         if (!element.isConnected || Date.now() >= deadline) {
-          window.clearInterval(interval);
+          effects.clearInterval(interval);
           return;
         }
         if (pending) return;
@@ -257,7 +287,7 @@
         try {
           const response = await fetch(url, { signal: request.signal, credentials: "same-origin", cache: "no-store" });
           if (!disposed && element.isConnected && Date.now() < deadline && response.status === 200) {
-            window.clearInterval(interval);
+            effects.clearInterval(interval);
             window.location.assign(element.dataset.pollGo || "/");
           }
         } catch {
@@ -265,7 +295,7 @@
           pending = false;
         }
       }, 3e3);
-      effects.timeout(() => window.clearInterval(interval), 30 * 60 * 1e3);
+      effects.timeout(() => effects.clearInterval(interval), 30 * 60 * 1e3);
     });
     const controller = { destroy() {
       if (disposed) return;

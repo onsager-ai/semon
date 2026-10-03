@@ -82,3 +82,46 @@ for (const width of [390, 1280]) for (const mode of ['full', 'sidebar', 'native'
     } finally {await browser.close();server.kill();await rm(scratch,{recursive:true,force:true});}
   });
 }
+
+
+test('error-navigation request owners stay bounded across polls and mode changes', async () => {
+  const contract=await build({absWorkingDir:join(root,'ui'),stdin:{contents:"export { createErrorNavigation } from './src/navigation/errors'; export { EffectScope } from './src/app/effects';",resolveDir:join(root,'ui'),loader:'ts'},bundle:true,write:false,format:'iife',globalName:'ErrorOwnership',platform:'browser',tsconfig:'tsconfig.json'});
+  const browser=await chromium.launch();
+  try {
+    const page=await browser.newPage();
+    await page.route('http://errors.test/**',route=>route.fulfill({contentType:route.request().url().endsWith('.js')?'text/javascript':'text/html',body:route.request().url().endsWith('.js')?contract.outputFiles[0].text:'<!doctype html><main id="page"></main><script src="/contract.js"></script>'}));
+    await page.goto('http://errors.test/');
+    await page.evaluate(async()=>{
+      const check=(ok,message)=>{if(!ok)throw Error(message)};
+      const retired=new ErrorOwnership.EffectScope();retired.destroy();check(retired.request().signal.aborted,'disposed scope admitted a live request');
+      const scopes=new Map(), prototype=ErrorOwnership.EffectScope.prototype;
+      const request=prototype.request,release=prototype.releaseRequest,destroy=prototype.destroy;
+      prototype.request=function(){const controller=request.call(this);let owned=scopes.get(this);if(!owned)scopes.set(this,owned=new Set());owned.add(controller);return controller};
+      prototype.releaseRequest=function(controller){scopes.get(this)?.delete(controller);return release.call(this,controller)};
+      prototype.destroy=function(){scopes.delete(this);return destroy.call(this)};
+      const timerOwner=new ErrorOwnership.EffectScope(),clear0=window.clearTimeout;
+      let canceled=0;window.clearTimeout=id=>{canceled++;clear0.call(window,id)};
+      const timer=timerOwner.timeout(()=>{throw Error('canceled callback ran')},60000);
+      timerOwner.clearTimeout(timer);timerOwner.destroy();window.clearTimeout=clear0;
+      check(canceled===1,'a canceled timer retained its teardown cleanup');
+      const retained=()=>[...scopes.values()].reduce((count,items)=>count+items.size,0);
+      let resolvePending,signal,hold=false,draws=0,tails=0;
+      const fetch0=window.fetch;
+      window.fetch=(_url,options)=>hold?new Promise(resolve=>{signal=options.signal;resolvePending=resolve}):Promise.resolve(new Response(JSON.stringify({slots:[],errors:0,version:'stable'}),{headers:{'Content-Type':'application/json'}}));
+      const host={navigation:{route:{v:'session',id:'s'}},TX:{s:[]},TXM:{s:{from:0,to:0,total:0,tok:'a'}},TOK:{},SESS:{s:{signals:{}}},show:{tools:true},sidebarOnly:false,page:()=>document.getElementById('page'),drawSessionBar(){draws++},render(){draws++},keepFocus:fn=>fn(),countOf:()=>0,capture:()=>({}),restore(){},opener:()=>null,resetPagerInput(){},stopOpeningEndPin(){},clearFind(){},centre(){},fetchTx:async()=>null,dropTx(){},spread(){},tail:async()=>{tails++;return null}};
+      const owner=ErrorOwnership.createErrorNavigation(host);
+      try {
+        for(let mode=0;mode<3;mode++){
+          host.show={tools:false};host.TOK={s:'a'};
+          owner.open('s');check(host.show.tools,'error mode used a stale replaced view state');await owner.live();check(retained()===1,'completed error-list request remained owned');
+          for(let poll=0;poll<10;poll++){await owner.live();check(retained()===1,'polls accumulated completed request controllers')}
+          host.TXM.s={from:1,to:1,total:1};owner.close();await Promise.resolve();
+          check(!host.show.tools&&tails===0,'error close used stale view/growth state');check(retained()===0,'closed error mode retained its request owner');
+        }
+        owner.open('s');await owner.live();hold=true;const pending=owner.live();
+        check(signal&&!signal.aborted,'pending error-list request lacks a live owner');owner.destroy();check(signal.aborted&&retained()===0,'error-navigation destroy leaked a pending request');
+        const before=draws;resolvePending(new Response(JSON.stringify({slots:[1],errors:1,version:'late'}),{headers:{'Content-Type':'application/json'}}));await pending;check(draws===before,'late error-list response drew after destroy');
+      }finally{owner.destroy();window.fetch=fetch0;prototype.request=request;prototype.releaseRequest=release;prototype.destroy=destroy}
+    });
+  }finally{await browser.close()}
+});
