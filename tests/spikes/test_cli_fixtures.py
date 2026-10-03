@@ -5,6 +5,8 @@ from pathlib import Path
 import unittest
 import importlib.util
 import tempfile
+import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1] / 'fixtures/compatibility'
 
@@ -28,6 +30,41 @@ class CompatibilityFixtures(unittest.TestCase):
             self.assertEqual(environment['COPILOT_HOME'], str(output / 'home'))
             self.assertEqual(environment['TMPDIR'], str(output / 'tmp'))
             self.assertEqual(ambient, original, 'parent settings must remain intact')
+
+    def test_lifecycle_validation_survives_python_optimization(self):
+        # Only a disposable fake executable is launched, never a native harness.
+        script = Path(__file__).with_name('copilot-lifecycle.py')
+        for failure in ('changed-prefix', 'executed-denial'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fake = root / 'fake-copilot'
+                fake.write_text('#!' + sys.executable + '\n' + """
+import os, pathlib, sys
+if '--version' in sys.argv:
+    print('GitHub Copilot CLI 1.0.91.')
+    sys.exit(0)
+root = pathlib.Path.cwd()
+state = pathlib.Path(os.environ['COPILOT_HOME']) / 'session-state'
+initial = state / 'synthetic-session' / 'events.jsonl'
+initial.parent.mkdir(parents=True, exist_ok=True)
+if any(arg.startswith('--resume=') for arg in sys.argv):
+    initial.write_bytes(b'changed\\n' if FAILURE == 'changed-prefix' else b'{}\\n{}\\n')
+elif '--deny-tool=shell' in sys.argv:
+    denied = state / 'synthetic-denied' / 'events.jsonl'
+    denied.parent.mkdir(parents=True)
+    denied.write_bytes(b'{}\\n')
+    (root / 'SHOULD-NOT-EXIST').touch()
+else:
+    initial.write_bytes(b'{}\\n')
+""".replace('FAILURE', repr(failure)))
+                fake.chmod(0o700)
+                output = root / 'probe'
+                result = subprocess.run([sys.executable, '-O', str(script), '--copilot',
+                                         str(fake), '--output', str(output)],
+                                        capture_output=True, text=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('RuntimeError: Probe validation failed:', result.stderr)
+                self.assertFalse((output / 'report.json').exists())
 
     def test_native_baseline_provenance_and_hashes(self):
         for fixture in ('claude-2.1.288', 'codex-0.159.0-alpha.3'):
@@ -56,6 +93,54 @@ class CompatibilityFixtures(unittest.TestCase):
                         skills = row.get('payload', {}).get('state', {}).get('host_skills', {})
                         if isinstance(skills, dict) and 'body' in skills:
                             self.assertEqual(skills['body'], '[fixture: native host skill instructions removed]')
+
+    def test_copilot_resume_denial_and_cumulative_mock_usage(self):
+        for version in ('1.0.90', '1.0.91'):
+            directory = ROOT / f'copilot-{version}' / 'lifecycle'
+            manifest = json.loads((directory / 'manifest.json').read_text())
+            self.assertEqual(manifest['harness_version'], version)
+            self.assertEqual(manifest['evidence_origin'],
+                             'native CLI persistence with deterministic mock model')
+            fixtures = {}
+            for entry in manifest['fixtures']:
+                data = (directory / entry['path']).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+                self.assertNotEqual(entry['original_source_sha256'], entry['fixture_sha256'])
+                self.assertNotIn(b'/workspace/scratch/', data)
+                fixtures[entry['path']] = data
+                for row in map(json.loads, data.splitlines()):
+                    if row['type'] == 'session.start':
+                        self.assertEqual(row['data']['copilotVersion'], version)
+                        self.assertEqual(row['data']['version'], 1)
+                    if row['type'] == 'system.message':
+                        self.assertEqual(row['data'], {'content': '[fixture: native system prompt removed]'})
+            initial = fixtures['initial.events.jsonl']
+            resumed = fixtures['resumed.events.jsonl']
+            self.assertTrue(resumed.startswith(initial))
+            records = list(map(json.loads, resumed.splitlines()))
+            self.assertEqual(sum(row['type'] == 'session.resume' for row in records), 1)
+            snapshots = [row['data']['modelMetrics']['gpt-4'] for row in records
+                         if row['type'] == 'session.shutdown']
+            self.assertEqual([(row['usage']['inputTokens'], row['usage']['outputTokens'],
+                               row['usage']['cacheReadTokens']) for row in snapshots],
+                             [(11, 3, 2), (22, 6, 4)])
+            self.assertEqual([row['requests']['count'] for row in snapshots], [1, 2])
+            denial = list(map(json.loads, fixtures['denied.events.jsonl'].splitlines()))
+            starts = [row['data'] for row in denial if row['type'] == 'tool.execution_start']
+            results = [row['data'] for row in denial if row['type'] == 'tool.execution_complete']
+            requested = [call for row in denial if row['type'] == 'assistant.message'
+                         for call in row['data'].get('toolRequests', [])]
+            self.assertEqual(len(starts), 1)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(len(requested), 1)
+            self.assertEqual(starts[0]['toolCallId'], results[0]['toolCallId'])
+            self.assertEqual(starts[0]['toolCallId'], requested[0]['toolCallId'])
+            self.assertEqual(starts[0]['arguments'], requested[0]['arguments'])
+            self.assertFalse(results[0]['success'])
+            self.assertEqual(results[0]['error']['code'], 'denied')
+            self.assertNotIn('shellExecution', results[0])
+            self.assertFalse(any('approval' in row['type'] for row in denial),
+                             'no explicit approval record is established by this probe')
 
     def test_source_shaped_hashes_and_explicit_unknown_version(self):
         manifest = json.loads((ROOT / 'v1/manifest.json').read_text())

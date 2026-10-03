@@ -51,8 +51,8 @@ copy of retained native evidence. It contains no real user session.
 
 ## Remaining gate
 
-Interactive behavior, releases before 1.0.90, resume/fork/subagent metadata,
-model-attributed usage, approvals, denial/cancellation, compaction, truncation,
+Interactive behavior, releases before 1.0.90, fork/subagent metadata,
+native model billing, explicit approval records, cancellation, compaction, truncation,
 mutable records, retention/deletion and non-Linux platforms remain unverified.
 The parent event chain and `parentAgentTaskId` must not be interpreted as a
 logical parent session without additional source evidence. No supported-version
@@ -62,3 +62,44 @@ what is authoritative before discovery, cursor or mirror code is implemented.
 Repeat with the prior binary and `--expected-version 1.0.90` to reproduce the
 prior release; its manifest is in `copilot-1.0.90/`. No compatibility claim is
 made for older releases or future schemas.
+
+## Resume, denial and cumulative usage observations
+
+The second isolated probe passes on both pinned releases:
+
+```sh
+python tests/spikes/copilot-lifecycle.py \
+  --copilot /path/to/disposable/node_modules/@github/copilot-linux-x64/copilot \
+  --expected-version 1.0.91 --output /path/to/new/private-probe
+```
+
+Repeat with the prior executable and `--expected-version 1.0.90`. The script
+uses the original probe's minimal environment allowlist. It verifies the binary
+version before serving synthetic model responses, uses a new mode-700 native
+root, and disables updates, custom instructions, builtin MCP and remote controls.
+No native CLI is launched by the offline CI validator.
+
+Initial execution followed by `--resume=<sessionId>` preserves the entire saved
+prefix byte for byte and appends `session.resume`, a second user/assistant turn
+and another shutdown. Both shutdown records remain in the same events file.
+The supplied provider counts produce `modelMetrics.gpt-4.usage` snapshots of
+11/3/2 then 22/6/4 input/output/cache-read tokens, with request counts 1 then 2.
+These are cumulative session snapshots, so adding both would double-count the
+initial turn. Presence and model attribution are established for these mock
+records; real billing and the meaning of every category remain unverified.
+
+A fresh run with `--deny-tool=shell` still persists the assistant tool request,
+`tool.execution_start` and `tool.execution_complete`, joined by the exact
+`toolCallId`. Completion has `success: false`, `error.code: "denied"` and a
+permission-rule message. The forbidden fixture marker is absent. An execution
+start therefore does not establish that the shell operation actually ran.
+There is no shell exit status or separate approval event in this recording;
+`interactionId` is not asserted to be an approval identity.
+
+The `lifecycle/` subdirectories under each version contain transformed initial,
+resumed and denied recordings. Manifests retain original/transformed hashes and
+binary provenance, and declare removed system-prompt payloads, replaced private
+paths and stable session UUIDs. Offline tests check exact prefix preservation,
+usage snapshots, explicit denied results and requested/start/result identity.
+This increment does not accept #238 or establish fork, cancellation, compaction,
+subagent, interactive or native retention behavior.
