@@ -531,6 +531,138 @@ fn claude_dated_model_ids_strip_only_the_trailing_date_for_price_matching() {
 }
 
 #[test]
+fn native_codex_fork_reports_only_child_owned_usage() {
+    let home = Home::new();
+    home.write(
+        "codex/sessions/parent.jsonl",
+        include_str!("../../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/initial-rollout.jsonl"),
+    );
+    home.write(
+        "codex/sessions/child.jsonl",
+        include_str!("../../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/forked-rollout.jsonl"),
+    );
+    let empty_child = home.build();
+    assert!(
+        empty_child.sessions["native-codex-fork-child"]
+            .tokens_by_model
+            .is_empty()
+    );
+    home.write(
+        "codex/sessions/child.jsonl",
+        include_str!("../../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/child-turn-rollout.jsonl"),
+    );
+    let built = home.build();
+    let child = &built.sessions["native-codex-fork-child"];
+    assert_eq!(child.tokens_by_model["mock-model"].input, 5);
+    assert_eq!(child.tokens_by_model["mock-model"].output, 3);
+    assert_eq!(
+        built.sessions["native-codex-fork-parent"].tokens_by_model["mock-model"].input,
+        5
+    );
+    assert!(child.parent.is_none(), "a fork is not a spawned subagent");
+    let metadata = serde_json::to_value(child.codex_history.as_ref().unwrap()).unwrap();
+    assert_eq!(metadata["forked_from_id"], "native-codex-fork-parent");
+    assert_eq!(metadata["forked_from_ordinal_exclusive"], 13);
+    assert_eq!(
+        metadata["history_base"]["thread_id"],
+        "native-codex-fork-parent"
+    );
+    let restarted = home.build();
+    assert_eq!(
+        restarted.sessions["native-codex-fork-child"].tokens_by_model,
+        child.tokens_by_model
+    );
+    // Repeated exact source identities do not turn replay into fresh requests.
+    let path = home.options.codex_home.join("sessions/child.jsonl");
+    let records: Vec<Value> = fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let repeated = records
+        .iter()
+        .find(|row| row["type"] == "token_usage_record")
+        .unwrap();
+    writeln!(
+        fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{repeated}"
+    )
+    .unwrap();
+    assert_eq!(
+        home.build().sessions["native-codex-fork-child"].tokens_by_model,
+        child.tokens_by_model
+    );
+}
+
+#[test]
+fn codex_fork_cumulative_or_incomplete_reports_are_not_fresh_usage() {
+    let home = Home::new();
+    home.codex(
+        "child",
+        json!({"forked_from_id":"absent-parent"}),
+        &[
+            codex_line(ts(1, 0), "turn_context", json!({"model":"gpt-test"})),
+            codex_line(
+                ts(1, 1),
+                "event_msg",
+                json!({"type":"token_count",
+            "info":{"total_token_usage":{"input_tokens":10,"output_tokens":6,"total_tokens":16}}}),
+            ),
+            codex_line(
+                ts(1, 2),
+                "token_usage_record",
+                json!({
+                    "thread_id":"child","session_id":"child","turn_id":"t1","response_id":"r1",
+                    "usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}
+                }),
+            ),
+        ],
+    );
+    let built = home.build();
+    assert!(built.sessions["child"].tokens_by_model.is_empty());
+    assert!(built.sessions["child"].parent.is_none());
+    assert!(home.build().sessions["child"].tokens_by_model.is_empty());
+}
+
+#[test]
+fn codex_logical_fork_and_physical_history_are_independent_native_fields() {
+    let home = Home::new();
+    home.codex("logical", json!({}), &[]);
+    home.codex("physical", json!({}), &[]);
+    home.codex(
+        "child",
+        json!({
+            "session_id":"child", "forked_from_id":"logical",
+            "forked_from_ordinal_exclusive":0,
+            "history_base":{"thread_id":"physical","end_ordinal_exclusive":7,"end_byte_offset":99}
+        }),
+        &[],
+    );
+    home.codex(
+        "physical-only",
+        json!({"history_base":{"thread_id":"physical"}}),
+        &[],
+    );
+    let built = home.build();
+    let history = serde_json::to_value(&built.sessions["child"].codex_history).unwrap();
+    assert_eq!(history["forked_from_id"], "logical");
+    assert_eq!(history["forked_from_ordinal_exclusive"], 0);
+    assert_eq!(history["history_base"]["thread_id"], "physical");
+    assert_eq!(history["history_base"]["end_ordinal_exclusive"], 7);
+    let partial = serde_json::to_value(&built.sessions["physical-only"].codex_history).unwrap();
+    assert!(partial.get("forked_from_id").is_none());
+    assert!(
+        partial["history_base"]
+            .get("end_ordinal_exclusive")
+            .is_none()
+    );
+    for id in ["child", "physical-only"] {
+        assert!(built.sessions[id].parent.is_none());
+    }
+    assert!(built.sessions["logical"].codex_history.is_none());
+}
+
+#[test]
 fn codex_model_switch_attributes_cumulative_token_deltas_to_the_current_model() {
     let home = Home::new();
     home.codex(

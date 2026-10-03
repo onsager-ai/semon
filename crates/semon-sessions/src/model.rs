@@ -76,6 +76,9 @@ pub(crate) struct Session {
     pub(crate) parent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) parent_source: Option<String>,
+    /// Native IDs are scoped by this session's machine, not viewer session keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) codex_history: Option<CodexHistory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,6 +115,55 @@ pub(crate) struct Session {
     pub(crate) wait_edges: Vec<WaitEdge>,
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) wait_edges_truncated: bool,
+}
+
+/// Native ancestry and inherited storage are independent observations. Neither
+/// creates a spawn edge or merges a fork's owned turns into its parent's work.
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct CodexHistory {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_root_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forked_from_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forked_from_ordinal_exclusive: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_base: Option<CodexHistoryBase>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct CodexHistoryBase {
+    thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_ordinal_exclusive: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_byte_offset: Option<u64>,
+}
+
+impl CodexHistory {
+    fn from_meta(meta: &Value) -> Option<Self> {
+        let history = Self {
+            native_root_session_id: field(meta, "session_id").map(str::to_owned),
+            forked_from_id: field(meta, "forked_from_id").map(str::to_owned),
+            forked_from_ordinal_exclusive: meta
+                .get("forked_from_ordinal_exclusive")
+                .and_then(Value::as_u64),
+            history_base: meta.get("history_base").and_then(|base| {
+                Some(CodexHistoryBase {
+                    thread_id: field(base, "thread_id")?.to_owned(),
+                    end_ordinal_exclusive: base
+                        .get("end_ordinal_exclusive")
+                        .and_then(Value::as_u64),
+                    end_byte_offset: base.get("end_byte_offset").and_then(Value::as_u64),
+                })
+            }),
+        };
+        (history.native_root_session_id.is_some()
+            || history.forked_from_id.is_some()
+            || history.forked_from_ordinal_exclusive.is_some()
+            || history.history_base.is_some())
+        .then_some(history)
+    }
 }
 
 /// A recorded wait tool's interval, with only exact uniquely resolved targets.
@@ -928,6 +980,7 @@ struct AgentMeta {
 
 #[derive(Default, Debug)]
 struct CodexMeta {
+    history: Option<CodexHistory>,
     parent_thread: Option<String>,
     nickname: Option<String>,
     path: Option<String>,
@@ -1254,6 +1307,7 @@ fn scan(
             first: summary.first,
             last: summary.last,
             role: Role::Codex(CodexMeta {
+                history: CodexHistory::from_meta(&meta),
                 parent_thread: field(&meta, "parent_thread_id").map(str::to_owned),
                 nickname: field(&meta, "agent_nickname").map(str::to_owned),
                 path: field(&meta, "agent_path").map(str::to_owned),
@@ -1574,6 +1628,7 @@ impl<'a> Builder<'a> {
             rate_limits: None,
             parent: None,
             parent_source: None,
+            codex_history: None,
             repo: None,
             branch: None,
             start: 0,
@@ -2206,6 +2261,10 @@ impl<'a> Builder<'a> {
         session.first = (start != i64::MAX).then_some(start);
         session.last = (last != 0).then_some(last);
         let out = &mut session.out;
+        out.codex_history = match &last_file.role {
+            Role::Codex(meta) => meta.history.clone(),
+            _ => None,
+        };
         out.tokens_by_model = tokens_by_model;
         out.cost = cost;
         out.reported_runs = reported_runs;
