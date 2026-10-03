@@ -807,7 +807,7 @@ queueMicrotask(() => {
     const d = (r.top + r.bottom) / 2 - (edge() + bottom) / 2; scrollProgrammatically(() => { if (Math.abs(d) >= 1) sc.scrollTop += d; });
     syncBarLine(); syncJump(); saveHistoryScroll();
   }
-  const errorNavigation = createErrorNavigation({ navigation, TX, TXM, TOK, SESS, show, sidebarOnly: SIDEBAR_ONLY, page: () => $("#page"), drawSessionBar, render, keepFocus, countOf, capture, restore, opener, resetPagerInput, stopOpeningEndPin, clearFind() { find = ""; }, centre, fetchTx, dropTx, spread, tail });
+  const errorNavigation = createErrorNavigation({ navigation, TX, TXM, TOK, SESS, show, sidebarOnly: SIDEBAR_ONLY, page: () => $("#page"), drawSessionBar, render, keepFocus, countOf, capture: () => capture(), restore: saved => restore(saved), opener: node => opener(node), resetPagerInput, stopOpeningEndPin, clearFind() { find = ""; }, centre, fetchTx, dropTx, spread, tail });
   const { state: ERR, text: errText, on: errOn, open: openErrors, step: stepErrors, mark: markError, drop: dropErrors, close: closeErrors, live: errorsLive } = errorNavigation;
   const signalCount = (s) => Object.values(s?.signals ?? {}).reduce((n, x) => n + x, 0);
   // A label is information; one that leads somewhere (`act`) is a button that looks the same, with its hit area padded to the tap size.
